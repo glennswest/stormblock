@@ -1,0 +1,67 @@
+[package]
+name = "stormblock"
+version = "0.1.0"
+edition = "2021"
+authors = ["Glenn West"]
+description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"
+repository = "https://github.com/glennswest/stormblock"
+license = "TBD"
+rust-version = "1.75"
+
+[[bin]]
+name = "stormblock"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+io-uring = "0.7"
+
+# Consensus (cluster mode)
+openraft = { version = "0.10", features = ["serde"], optional = true }
+
+# Management API
+axum = "0.8"
+hyper = "1"
+tower = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "2"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = "0.3"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Data integrity
+crc32c = "0.6"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# System
+nix = "0.29"
+libc = "0.2"
+bitvec = "1"
+uuid = { version = "1", features = ["v4"] }
+
+# Async utilities
+futures = "0.3"
+pin-project-lite = "0.2"
+
+[features]
+default = ["nvmeof", "iscsi", "cluster"]
+nvmeof = []
+iscsi = []
+cluster = ["dep:openraft"]
+arm64 = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
