@@ -16,6 +16,7 @@ use clap::Parser;
 use drive::BlockDevice;
 use raid::{RaidArray, RaidLevel};
 use volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
+use target::reactor::{ReactorConfig, ReactorPool};
 
 #[derive(Parser)]
 #[command(name = "stormblock", version, about = "Pure Rust block storage engine")]
@@ -39,6 +40,50 @@ struct Cli {
     /// Create thin volumes (format: name:size, e.g. data:100G)
     #[arg(long = "volume", value_parser = parse_volume_spec)]
     volumes: Vec<VolumeSpec>,
+
+    /// iSCSI listen address (default: 0.0.0.0:3260)
+    #[cfg(feature = "iscsi")]
+    #[arg(long, default_value = "0.0.0.0:3260")]
+    iscsi_addr: String,
+
+    /// iSCSI target name (IQN)
+    #[cfg(feature = "iscsi")]
+    #[arg(long, default_value = "iqn.2024.io.stormblock:default")]
+    iscsi_target_name: String,
+
+    /// CHAP username for iSCSI authentication
+    #[cfg(feature = "iscsi")]
+    #[arg(long)]
+    chap_user: Option<String>,
+
+    /// CHAP secret for iSCSI authentication
+    #[cfg(feature = "iscsi")]
+    #[arg(long)]
+    chap_secret: Option<String>,
+
+    /// Disable iSCSI target
+    #[cfg(feature = "iscsi")]
+    #[arg(long)]
+    no_iscsi: bool,
+
+    /// NVMe-oF/TCP listen address (default: 0.0.0.0:4420)
+    #[cfg(feature = "nvmeof")]
+    #[arg(long, default_value = "0.0.0.0:4420")]
+    nvmeof_addr: String,
+
+    /// NVMe-oF subsystem NQN
+    #[cfg(feature = "nvmeof")]
+    #[arg(long, default_value = "nqn.2024.io.stormblock:default")]
+    nvmeof_nqn: String,
+
+    /// Disable NVMe-oF/TCP target
+    #[cfg(feature = "nvmeof")]
+    #[arg(long)]
+    no_nvmeof: bool,
+
+    /// Number of reactor cores (0 = auto-detect)
+    #[arg(long, default_value = "0")]
+    reactor_cores: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +135,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
     tracing::info!("StormBlock starting, config: {}", cli.config);
+
+    // Collect the first volume device for target export
+    let mut export_device: Option<Arc<dyn BlockDevice>> = None;
 
     // Phase 1: Open drives
     if !cli.device.is_empty() {
@@ -154,6 +202,10 @@ async fn main() -> anyhow::Result<()> {
                                         spec.name, vol_id, spec.size,
                                         spec.size as f64 / (1024.0 * 1024.0 * 1024.0),
                                     );
+                                    // Export the first volume via target protocols
+                                    if export_device.is_none() {
+                                        export_device = mgr.get_volume(&vol_id);
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to create volume '{}': {e}", spec.name);
@@ -171,6 +223,9 @@ async fn main() -> anyhow::Result<()> {
                                 *allocated as f64 / (1024.0 * 1024.0),
                             );
                         }
+                    } else {
+                        // No volumes specified — export the raw array
+                        export_device = Some(Arc::new(array));
                     }
                 }
                 Err(e) => {
@@ -178,16 +233,84 @@ async fn main() -> anyhow::Result<()> {
                     return Err(e.into());
                 }
             }
+        } else if drives.len() == 1 {
+            // Single drive, no RAID — export directly
+            export_device = Some(drives.into_iter().next().unwrap());
         }
     } else {
         tracing::info!("No devices specified (use -d /path/to/device)");
     }
 
-    // TODO: Phase 4+ implementation
-    // 1. Parse config
-    // 2. Start NVMe-oF/TCP target (:4420)
-    // 3. Start iSCSI target (:3260)
-    // 4. Start management API (:8443)
+    // Phase 4: Start target protocols
+    if let Some(device) = export_device {
+        let reactor_config = ReactorConfig {
+            core_count: cli.reactor_cores,
+            pin_cores: cfg!(target_os = "linux"),
+        };
+        let reactor = ReactorPool::new(&reactor_config);
+
+        // Start iSCSI target
+        #[cfg(feature = "iscsi")]
+        if !cli.no_iscsi {
+            let chap = match (&cli.chap_user, &cli.chap_secret) {
+                (Some(user), Some(secret)) => Some(target::iscsi::chap::ChapConfig {
+                    username: user.clone(),
+                    secret: secret.clone(),
+                }),
+                _ => None,
+            };
+
+            let iscsi_config = target::iscsi::IscsiConfig {
+                listen_addr: cli.iscsi_addr.parse()
+                    .expect("invalid iSCSI listen address"),
+                target_name: cli.iscsi_target_name.clone(),
+                chap,
+                max_sessions: 64,
+            };
+            let mut iscsi = target::iscsi::IscsiTarget::new(iscsi_config);
+            iscsi.add_lun(0, device.clone());
+            let iscsi = Arc::new(iscsi);
+            let iscsi_reactor = &reactor;
+            tokio::spawn({
+                let iscsi = iscsi.clone();
+                let _reactor_cores = iscsi_reactor.core_count();
+                async move {
+                    if let Err(e) = iscsi.run(&ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false })).await {
+                        tracing::error!("iSCSI target error: {e}");
+                    }
+                }
+            });
+        }
+
+        // Start NVMe-oF/TCP target
+        #[cfg(feature = "nvmeof")]
+        if !cli.no_nvmeof {
+            let nvmeof_config = target::nvmeof::NvmeofConfig {
+                listen_addr: cli.nvmeof_addr.parse()
+                    .expect("invalid NVMe-oF listen address"),
+                nqn: cli.nvmeof_nqn.clone(),
+                ..Default::default()
+            };
+            let mut nvmeof = target::nvmeof::NvmeofTarget::new(nvmeof_config);
+            nvmeof.add_namespace(1, device.clone());
+            let nvmeof = Arc::new(nvmeof);
+            tokio::spawn({
+                let nvmeof = nvmeof.clone();
+                async move {
+                    if let Err(e) = nvmeof.run(&ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false })).await {
+                        tracing::error!("NVMe-oF target error: {e}");
+                    }
+                }
+            });
+        }
+
+        tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Shutting down...");
+        drop(reactor);
+    } else {
+        tracing::info!("No device to export — target protocols not started");
+    }
 
     Ok(())
 }

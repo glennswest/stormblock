@@ -55,6 +55,11 @@ async-trait = "0.1"
 futures = "0.3"
 pin-project-lite = "0.2"
 
+# Target protocols (iSCSI CHAP, PDU buffers)
+bytes = "1"
+md-5 = "0.10"
+rand = "0.8"
+
 # Linux-only dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
