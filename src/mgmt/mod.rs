@@ -74,6 +74,8 @@ pub struct AppState {
     pub volume_manager: tokio::sync::Mutex<VolumeManager>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
     pub config: StormBlockConfig,
+    #[cfg(feature = "cluster")]
+    pub cluster: Option<Arc<crate::cluster::ClusterManager>>,
 }
 
 impl AppState {
@@ -84,6 +86,8 @@ impl AppState {
             volume_manager: tokio::sync::Mutex::new(volume_manager),
             exports: tokio::sync::RwLock::new(Vec::new()),
             config,
+            #[cfg(feature = "cluster")]
+            cluster: None,
         }
     }
 }

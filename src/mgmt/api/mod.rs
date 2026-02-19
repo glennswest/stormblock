@@ -4,6 +4,8 @@ pub mod drives;
 pub mod arrays;
 pub mod volumes;
 pub mod exports;
+#[cfg(feature = "cluster")]
+pub mod cluster;
 
 use std::sync::Arc;
 
@@ -19,11 +21,23 @@ use super::AppState;
 
 /// Build the complete API router.
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let r = Router::new()
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/volumes", volumes::router(state.clone()))
-        .nest("/api/v1/exports", exports::router(state))
+        .nest("/api/v1/exports", exports::router(state.clone()));
+
+    #[cfg(feature = "cluster")]
+    let r = r.merge(cluster::router(state.clone()));
+
+    #[cfg(feature = "cluster")]
+    let r = if let Some(ref cluster_mgr) = state.cluster {
+        r.merge(cluster_mgr.rpc_router())
+    } else {
+        r
+    };
+
+    r
 }
 
 /// Standard error response.

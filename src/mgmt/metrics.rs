@@ -32,6 +32,24 @@ pub fn register_metrics() {
         "stormblock_api_requests_total",
         "Total REST API requests"
     );
+
+    // Cluster metrics (registered unconditionally, only emitted when cluster is enabled)
+    metrics::describe_gauge!(
+        "stormblock_cluster_nodes_total",
+        "Total known cluster nodes"
+    );
+    metrics::describe_gauge!(
+        "stormblock_cluster_nodes_online",
+        "Number of online cluster nodes"
+    );
+    metrics::describe_counter!(
+        "stormblock_cluster_heartbeat_success_total",
+        "Total successful heartbeats sent"
+    );
+    metrics::describe_counter!(
+        "stormblock_cluster_heartbeat_failures_total",
+        "Total failed heartbeats"
+    );
 }
 
 async fn handle_metrics() -> impl IntoResponse {

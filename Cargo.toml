@@ -1,6 +1,6 @@
 [package]
 name = "stormblock"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"
@@ -18,6 +18,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Consensus (cluster mode)
 openraft = { version = "0.9", features = ["serde"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 
 # Management API
 axum = "0.8"
@@ -60,6 +61,7 @@ pin-project-lite = "0.2"
 bytes = "1"
 md-5 = "0.10"
 rand = "0.8"
+base64 = "0.22"
 
 # Linux-only dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -70,7 +72,7 @@ nix = { version = "0.29", features = ["fs", "ioctl"] }
 default = ["nvmeof", "iscsi", "cluster"]
 nvmeof = []
 iscsi = []
-cluster = ["dep:openraft"]
+cluster = ["dep:openraft", "dep:reqwest"]
 arm64 = []
 mikrotik = []
 

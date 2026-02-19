@@ -23,6 +23,9 @@ pub struct StormBlockConfig {
     #[cfg(feature = "nvmeof")]
     pub nvmeof: Option<NvmeofExportConfig>,
     pub reactor: ReactorCfg,
+    #[cfg(feature = "cluster")]
+    #[serde(default)]
+    pub cluster: crate::cluster::config::ClusterConfig,
 }
 
 impl Default for StormBlockConfig {
@@ -37,6 +40,8 @@ impl Default for StormBlockConfig {
             #[cfg(feature = "nvmeof")]
             nvmeof: None,
             reactor: ReactorCfg::default(),
+            #[cfg(feature = "cluster")]
+            cluster: crate::cluster::config::ClusterConfig::default(),
         }
     }
 }

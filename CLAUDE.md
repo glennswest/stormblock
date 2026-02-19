@@ -40,11 +40,12 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/raid/` — Software RAID 1/5/6/10: SIMD parity (`parity.rs`), write journal (`journal.rs`), rebuild (`rebuild.rs`)
 - `src/volume/` — Thin provisioning (`thin.rs`), extent allocator (`extent.rs`), COW snapshots (`snapshot.rs`)
 - `src/target/` — NVMe-oF/TCP :4420 (`nvmeof/`), iSCSI :3260 (`iscsi/`), per-core reactor (`reactor.rs`)
-- `src/mgmt/` — REST API via axum (`api.rs`), TOML config parsing (`config.rs`)
+- `src/mgmt/` — REST API via axum (`api/`), TOML config parsing (`config.rs`), Prometheus metrics
+- `src/cluster/` — Optional multi-node: Raft consensus (`raft/`), membership (`membership.rs`), heartbeat (`heartbeat.rs`), replication (`replication.rs`), migration (`migration.rs`)
 - `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with Ctrl+C shutdown
 
 ## Current State
-Phases 1–4 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, and extent allocator. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. 92 tests pass on macOS and Linux (devx.gw.lo). Remaining modules (mgmt) are still scaffolding.
+Phases 1–6 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, and extent allocator. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, metrics). Cluster scaling via openraft 0.9 with HTTP-based Raft RPCs, node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. 111 tests pass on macOS and Linux (devx.gw.lo).
 
 ---
 
@@ -129,16 +130,16 @@ Phases 1–4 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] `main.rs` — Config loading, CLI merge, AppState wiring, mgmt server spawn
 - [ ] TLS for management API (rustls)
 
-### Phase 6: Cluster scaling (optional — single-node must work without any of this)
-- [ ] Node discovery: new node announces itself via REST to an existing node or seed list
-- [ ] Cluster membership store: track known nodes, health, capacity (local JSON or embedded DB)
-- [ ] `api.rs` — REST routes: `GET/POST/DELETE /api/v1/cluster/nodes` (list, join, remove)
-- [ ] Node health heartbeat (periodic ping between peers, mark unreachable)
-- [ ] Raft consensus via openraft (leader election, log replication) for metadata coordination
-- [ ] Synchronous replication (write to N replicas before ack)
-- [ ] Asynchronous replication (background catchup)
-- [ ] Volume migration/rebalance: move volumes between nodes when capacity added
-- [ ] Online node addition: join a running cluster, receive replicated volumes without downtime
+### Phase 6: Cluster scaling (optional — single-node must work without any of this) — DONE
+- [x] Node discovery: new node announces itself via REST to an existing node or seed list
+- [x] Cluster membership store: track known nodes, health, capacity (local JSON or embedded DB)
+- [x] `api/cluster.rs` — REST routes: `GET/POST/DELETE /api/v1/cluster/nodes` (list, join, remove)
+- [x] Node health heartbeat (periodic ping between peers, mark unreachable)
+- [x] Raft consensus via openraft (leader election, log replication) for metadata coordination
+- [x] Synchronous replication (write to N replicas before ack)
+- [x] Asynchronous replication (background catchup)
+- [x] Volume migration/rebalance: move volumes between nodes when capacity added
+- [x] Online node addition: join a running cluster, receive replicated volumes without downtime
 
 ### Phase 7: Integration & hardening
 - [ ] End-to-end test: create array → create volume → export via iSCSI → mount on initiator

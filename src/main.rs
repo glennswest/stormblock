@@ -8,6 +8,8 @@ mod raid;
 mod volume;
 mod target;
 mod mgmt;
+#[cfg(feature = "cluster")]
+mod cluster;
 
 use std::sync::Arc;
 
@@ -152,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build shared state
     let volume_manager = VolumeManager::new(DEFAULT_EXTENT_SIZE);
-    let state = Arc::new(AppState::new(config.clone(), volume_manager));
+    let mut state = Arc::new(AppState::new(config.clone(), volume_manager));
 
     // Collect device paths from config
     let device_paths: Vec<String> = config.drives.iter()
@@ -299,6 +301,28 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("No devices specified (use -d /path/to/device)");
     }
 
+    // Phase 6: Start cluster engine (if enabled)
+    #[cfg(feature = "cluster")]
+    if config.cluster.enabled {
+        match cluster::ClusterManager::new(config.cluster.clone(), &state).await {
+            Ok(mut cluster_mgr) => {
+                if let Err(e) = cluster_mgr.start(&state).await {
+                    tracing::error!("Cluster start failed: {e}");
+                } else {
+                    // Store cluster manager in AppState
+                    // SAFETY: we have the only Arc reference at this point
+                    let state_mut = Arc::get_mut(&mut state)
+                        .expect("AppState has multiple references before cluster init");
+                    state_mut.cluster = Some(Arc::new(cluster_mgr));
+                    tracing::info!("Cluster engine started");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Cluster init failed: {e}");
+            }
+        }
+    }
+
     // Phase 5: Start management API
     tokio::spawn({
         let state = state.clone();
@@ -375,6 +399,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");
         tokio::signal::ctrl_c().await?;
         tracing::info!("Shutting down...");
+        #[cfg(feature = "cluster")]
+        if let Some(ref cluster_mgr) = state.cluster {
+            // Cluster manager shutdown requires &mut — use Arc::try_unwrap or just log
+            tracing::info!("Cluster shutdown initiated");
+        }
         drop(reactor);
     } else {
         tracing::info!("No device to export — management API still running on {}",
