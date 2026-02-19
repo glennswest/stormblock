@@ -117,14 +117,16 @@ Phases 1–4 are implemented. The drive layer has three backends: SAS (io_uring,
 - [ ] `iscsi` — Multi-connection sessions, R2T/Data-Out for large writes
 - [ ] MPIO/ALUA support for multipath
 
-### Phase 5: Management plane (`src/mgmt/`)
-- [ ] `config.rs` — Parse `stormblock.toml` into typed config structs
-- [ ] `config.rs` — Config validation (drive paths exist, ports not conflicting, etc.)
-- [ ] `api.rs` — REST routes: `GET/POST /api/v1/drives` (enumerate, add)
-- [ ] `api.rs` — REST routes: `GET/POST/DELETE /api/v1/arrays` (RAID create/delete/status)
-- [ ] `api.rs` — REST routes: `GET/POST/DELETE /api/v1/volumes` (create/delete/resize/snapshot)
-- [ ] `api.rs` — REST routes: `GET/POST/DELETE /api/v1/exports` (NVMe-oF/iSCSI target mappings)
-- [ ] Prometheus metrics endpoint (`/metrics`)
+### Phase 5: Management plane (`src/mgmt/`) — DONE
+- [x] `config.rs` — Parse `stormblock.toml` into typed config structs
+- [x] `config.rs` — Config validation (drive paths exist, ports not conflicting, etc.)
+- [x] `api/drives.rs` — REST routes: `GET /api/v1/drives` (enumerate)
+- [x] `api/arrays.rs` — REST routes: `GET/POST/DELETE /api/v1/arrays` (RAID create/delete/status)
+- [x] `api/volumes.rs` — REST routes: `GET/POST/DELETE /api/v1/volumes` (create/delete/snapshot)
+- [x] `api/exports.rs` — REST routes: `GET/POST/DELETE /api/v1/exports` (NVMe-oF/iSCSI target mappings)
+- [x] `metrics.rs` — Prometheus metrics endpoint (`/metrics`)
+- [x] `mod.rs` — AppState, DriveInfo, ArrayInfo, ExportEntry, start_management_server()
+- [x] `main.rs` — Config loading, CLI merge, AppState wiring, mgmt server spawn
 - [ ] TLS for management API (rustls)
 
 ### Phase 6: Cluster scaling (optional — single-node must work without any of this)
