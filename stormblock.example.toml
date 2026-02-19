@@ -1,0 +1,38 @@
+# StormBlock configuration
+# Copy to /etc/stormblock/stormblock.toml and adjust for your environment.
+
+[management]
+listen_addr = "0.0.0.0:9090"
+# tls_cert = "/etc/stormblock/cert.pem"
+# tls_key = "/etc/stormblock/key.pem"
+
+[[drives]]
+path = "/dev/sda"
+
+[[drives]]
+path = "/dev/sdb"
+
+[[arrays]]
+name = "data"
+level = "Raid1"
+drives = ["/dev/sda", "/dev/sdb"]
+stripe_kb = 64
+
+[[volumes]]
+name = "vol0"
+size = "100G"
+array = "data"
+
+[iscsi]
+listen_addr = "0.0.0.0:3260"
+target_name = "iqn.2024.io.stormblock:default"
+# chap_user = "admin"
+# chap_secret = "secret123"
+
+[nvmeof]
+listen_addr = "0.0.0.0:4420"
+nqn = "nqn.2024.io.stormblock:default"
+
+[reactor]
+cores = 0       # 0 = auto-detect
+pin_cores = true

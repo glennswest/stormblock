@@ -557,6 +557,13 @@ impl RaidArray {
             .collect()
     }
 
+    /// Set the state of a member drive (for testing degraded mode).
+    pub fn set_member_state(&mut self, idx: usize, state: RaidMemberState) {
+        if idx < self.members.len() {
+            self.members[idx].state = state;
+        }
+    }
+
     /// Number of failed members.
     fn failed_count(&self) -> usize {
         self.members.iter()

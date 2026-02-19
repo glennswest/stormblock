@@ -45,7 +45,7 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with Ctrl+C shutdown
 
 ## Current State
-Phases 1–6 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, and extent allocator. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, metrics). Cluster scaling via openraft 0.9 with HTTP-based Raft RPCs, node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. 111 tests pass on macOS and Linux (devx.gw.lo).
+Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, and extent allocator. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, metrics). Cluster scaling via openraft 0.9 with HTTP-based Raft RPCs, node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Integration tests exercise the full stack (FileDevice → RAID → Volume → iSCSI/NVMe-oF target → TCP client), crash recovery (journal, superblock, extent allocator), and all REST API endpoints. Criterion micro-benchmarks cover parity compute, extent allocation, and PDU parsing. Container images via Dockerfile for deployment under StormBase. 143 tests pass on macOS and Linux (devx.gw.lo).
 
 ---
 
@@ -141,9 +141,13 @@ Phases 1–6 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] Volume migration/rebalance: move volumes between nodes when capacity added
 - [x] Online node addition: join a running cluster, receive replicated volumes without downtime
 
-### Phase 7: Integration & hardening
-- [ ] End-to-end test: create array → create volume → export via iSCSI → mount on initiator
-- [ ] Crash recovery testing (power-cut simulation)
-- [ ] Performance benchmarks (fio via iSCSI/NVMe-oF, compare to kernel LIO)
-- [ ] Buildroot image generation (kernel config, initramfs with stormblock binary)
+### Phase 7: Integration & hardening — DONE
+- [x] End-to-end test: FileDevice → RAID 1 → ThinVolume → iSCSI/NVMe-oF target → TCP initiator → read/write/verify
+- [x] Crash recovery testing (journal persist/recovery, superblock validation, extent allocator consistency)
+- [x] RAID degraded mode tests (RAID 1 + RAID 5 with failed members)
+- [x] Management REST API tests (drives, arrays, volumes, exports, metrics endpoints)
+- [x] Volume lifecycle tests (create, snapshot COW, delete, multi-extent writes)
+- [x] Criterion micro-benchmarks (parity throughput, extent allocation, PDU parsing)
+- [x] fio macro-benchmark scripts (iSCSI + NVMe-oF, 4K random + sequential)
+- [x] Container images (Dockerfile x86_64 + aarch64, deployed via StormBase)
 - [ ] StormFS registration (announce volumes to StormFS metadata cluster)

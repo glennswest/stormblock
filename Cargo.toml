@@ -1,12 +1,16 @@
 [package]
 name = "stormblock"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
 authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"
 repository = "https://github.com/glennswest/stormblock"
 license = "TBD"
 rust-version = "1.75"
+
+[lib]
+name = "stormblock"
+path = "src/lib.rs"
 
 [[bin]]
 name = "stormblock"
@@ -75,6 +79,20 @@ iscsi = []
 cluster = ["dep:openraft", "dep:reqwest"]
 arm64 = []
 mikrotik = []
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "parity"
+harness = false
+[[bench]]
+name = "extent"
+harness = false
+[[bench]]
+name = "pdu_parsing"
+harness = false
 
 [profile.release]
 opt-level = 3

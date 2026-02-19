@@ -3,24 +3,18 @@
 //! Single binary serving NVMe-oF/TCP and iSCSI targets from
 //! NVMe SSDs (VFIO userspace) and SAS drives (io_uring).
 
-mod drive;
-mod raid;
-mod volume;
-mod target;
-mod mgmt;
-#[cfg(feature = "cluster")]
-mod cluster;
-
 use std::sync::Arc;
 
 use clap::Parser;
 
-use drive::BlockDevice;
-use raid::{RaidArray, RaidLevel};
-use volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
-use target::reactor::{ReactorConfig, ReactorPool};
-use mgmt::{AppState, ArrayInfo, DriveInfo};
-use mgmt::config::{StormBlockConfig, parse_size};
+use stormblock::drive::{self, BlockDevice};
+use stormblock::raid::{RaidArray, RaidLevel};
+use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
+use stormblock::target::{self, reactor::{ReactorConfig, ReactorPool}};
+use stormblock::mgmt::{self, AppState, ArrayInfo, DriveInfo};
+use stormblock::mgmt::config::{StormBlockConfig, parse_size};
+#[cfg(feature = "cluster")]
+use stormblock::cluster;
 
 #[derive(Parser)]
 #[command(name = "stormblock", version, about = "Pure Rust block storage engine")]

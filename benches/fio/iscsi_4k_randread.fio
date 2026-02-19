@@ -1,0 +1,14 @@
+[global]
+ioengine=libaio
+direct=1
+bs=4k
+iodepth=32
+numjobs=4
+group_reporting
+time_based
+runtime=60
+ramp_time=5
+
+[iscsi-4k-randread]
+rw=randread
+filename=/dev/sda

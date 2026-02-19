@@ -71,10 +71,14 @@ impl IscsiTarget {
     }
 
     /// Start accepting connections. Runs until the listener is dropped.
-    pub async fn run(self: Arc<Self>, _reactor: &ReactorPool) -> std::io::Result<()> {
+    pub async fn run(self: Arc<Self>, reactor: &ReactorPool) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.config.listen_addr).await?;
         tracing::info!("iSCSI target listening on {} ({})", self.config.listen_addr, self.config.target_name);
+        self.run_with_listener(listener, reactor).await
+    }
 
+    /// Accept connections on a pre-bound listener. Useful for tests with ephemeral ports.
+    pub async fn run_with_listener(self: Arc<Self>, listener: TcpListener, _reactor: &ReactorPool) -> std::io::Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
             stream.set_nodelay(true)?;
