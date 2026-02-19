@@ -71,18 +71,18 @@ Phase 1 (drive layer) is implemented. The drive layer has three backends: SAS (i
 - [x] `main.rs` — Wired up drive init with `--device` CLI flag
 - [ ] Drive health monitoring (SMART via NVMe admin commands / SG_IO)
 
-### Phase 2: RAID engine (`src/raid/`)
-- [ ] RAID superblock format (on-disk metadata: member drives, layout, state)
-- [ ] RAID 1 (mirror) — read balancing, write duplication
-- [ ] RAID 5 — stripe layout, XOR parity compute
-- [ ] RAID 6 — dual parity (P + Q, GF(2^8) multiplication)
-- [ ] RAID 10 — striped mirrors
-- [ ] `parity.rs` — SIMD XOR: AVX2 (x86_64), NEON (aarch64), scalar fallback
-- [ ] `parity.rs` — GF multiply for RAID 6 Q syndrome (AVX2 shuffle, NEON vtbl)
-- [ ] `journal.rs` — Write-intent bitmap: mark dirty stripes before write, clear after
+### Phase 2: RAID engine (`src/raid/`) — DONE
+- [x] RAID superblock format (on-disk metadata: member drives, layout, state)
+- [x] RAID 1 (mirror) — read balancing, write duplication
+- [x] RAID 5 — stripe layout, XOR parity compute
+- [x] RAID 6 — dual parity (P + Q, GF(2^8) multiplication)
+- [x] RAID 10 — striped mirrors
+- [x] `parity.rs` — SIMD XOR: AVX2 (x86_64), NEON (aarch64), scalar fallback
+- [x] `parity.rs` — GF multiply for RAID 6 Q syndrome (AVX2 shuffle, NEON vtbl)
+- [x] `journal.rs` — Write-intent bitmap: mark dirty stripes before write, clear after
 - [ ] `journal.rs` — Journal recovery on startup (partial stripe detection)
-- [ ] `rebuild.rs` — Background rebuild: read surviving members, recompute parity/mirror
-- [ ] `rebuild.rs` — Rate limiting (don't starve foreground I/O)
+- [x] `rebuild.rs` — Background rebuild: read surviving members, recompute parity/mirror
+- [x] `rebuild.rs` — Rate limiting (don't starve foreground I/O)
 - [ ] Scrub/verify (background read + parity check)
 
 ### Phase 3: Volume manager (`src/volume/`)
