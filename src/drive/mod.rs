@@ -10,13 +10,14 @@ pub mod filedev;
 use std::fmt;
 
 use async_trait::async_trait;
+use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
 // Re-export the DMA buffer type
 pub use dma::DmaBuf;
 
 /// Unique identifier for a physical drive.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeviceId {
     pub uuid: Uuid,
     pub serial: String,
@@ -31,7 +32,7 @@ impl fmt::Display for DeviceId {
 }
 
 /// Type of physical drive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DriveType {
     NVMe,
     SasSsd,
@@ -93,7 +94,7 @@ impl From<std::io::Error> for DriveError {
 pub type DriveResult<T> = Result<T, DriveError>;
 
 /// SMART health data (placeholder — will be expanded per drive type).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SmartData {
     pub temperature_celsius: Option<u16>,
     pub power_on_hours: Option<u64>,

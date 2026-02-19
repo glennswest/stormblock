@@ -17,6 +17,8 @@ use drive::BlockDevice;
 use raid::{RaidArray, RaidLevel};
 use volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 use target::reactor::{ReactorConfig, ReactorPool};
+use mgmt::{AppState, ArrayInfo, DriveInfo};
+use mgmt::config::{StormBlockConfig, parse_size};
 
 #[derive(Parser)]
 #[command(name = "stormblock", version, about = "Pure Rust block storage engine")]
@@ -102,24 +104,6 @@ fn parse_volume_spec(s: &str) -> Result<VolumeSpec, String> {
     Ok(VolumeSpec { name, size })
 }
 
-fn parse_size(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('T') {
-        (n, 1024u64 * 1024 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix('G') {
-        (n, 1024u64 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix('M') {
-        (n, 1024u64 * 1024)
-    } else if let Some(n) = s.strip_suffix('K') {
-        (n, 1024u64)
-    } else {
-        (s, 1u64)
-    };
-    let num: u64 = num_str.parse()
-        .map_err(|_| format!("invalid size number: '{num_str}'"))?;
-    Ok(num * multiplier)
-}
-
 fn parse_raid_level(s: &str) -> Result<RaidLevel, String> {
     match s {
         "1" | "raid1" | "mirror" => Ok(RaidLevel::Raid1),
@@ -136,12 +120,51 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     tracing::info!("StormBlock starting, config: {}", cli.config);
 
+    // Load and merge configuration
+    let mut config = StormBlockConfig::load(&cli.config)?;
+    let cli_volumes: Vec<(String, u64)> = cli.volumes.iter()
+        .map(|v| (v.name.clone(), v.size))
+        .collect();
+    config.merge_cli(
+        &cli.device,
+        cli.raid,
+        cli.stripe_kb,
+        &cli_volumes,
+        #[cfg(feature = "iscsi")]
+        Some(&cli.iscsi_addr),
+        #[cfg(feature = "iscsi")]
+        Some(&cli.iscsi_target_name),
+        #[cfg(feature = "iscsi")]
+        cli.chap_user.as_deref(),
+        #[cfg(feature = "iscsi")]
+        cli.chap_secret.as_deref(),
+        #[cfg(feature = "nvmeof")]
+        Some(&cli.nvmeof_addr),
+        #[cfg(feature = "nvmeof")]
+        Some(&cli.nvmeof_nqn),
+        cli.reactor_cores,
+    );
+    config.validate()?;
+
+    // Initialize metrics
+    mgmt::metrics::init_metrics();
+    mgmt::metrics::register_metrics();
+
+    // Build shared state
+    let volume_manager = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let state = Arc::new(AppState::new(config.clone(), volume_manager));
+
+    // Collect device paths from config
+    let device_paths: Vec<String> = config.drives.iter()
+        .map(|d| d.path.clone())
+        .collect();
+
     // Collect the first volume device for target export
     let mut export_device: Option<Arc<dyn BlockDevice>> = None;
 
     // Phase 1: Open drives
-    if !cli.device.is_empty() {
-        let results = drive::open_drives(&cli.device).await;
+    if !device_paths.is_empty() {
+        let results = drive::open_drives(&device_paths).await;
         let mut drives: Vec<Arc<dyn BlockDevice>> = Vec::new();
         for (path, result) in results {
             match result {
@@ -154,7 +177,16 @@ async fn main() -> anyhow::Result<()> {
                         dev.block_size(),
                         dev.device_type(),
                     );
-                    drives.push(Arc::from(dev));
+                    let arc_dev: Arc<dyn BlockDevice> = Arc::from(dev);
+                    // Register in state
+                    {
+                        let mut state_drives = state.drives.write().await;
+                        state_drives.push(DriveInfo {
+                            device: arc_dev.clone(),
+                            path: path.clone(),
+                        });
+                    }
+                    drives.push(arc_dev);
                 }
                 Err(e) => {
                     tracing::error!("Failed to open {}: {}", path, e);
@@ -162,6 +194,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         tracing::info!("{} drive(s) ready", drives.len());
+        metrics::gauge!("stormblock_drives_total").set(drives.len() as f64);
+        metrics::gauge!("stormblock_capacity_bytes").set(
+            drives.iter().map(|d| d.capacity_bytes() as f64).sum::<f64>()
+        );
 
         // Phase 2: Create RAID array if requested
         if let Some(level) = cli.raid {
@@ -182,20 +218,40 @@ async fn main() -> anyhow::Result<()> {
                         array.member_count(),
                         array.stripe_size() / 1024,
                     );
-                    for (idx, state) in array.member_states() {
-                        tracing::info!("  member {idx}: {state}");
+                    for (idx, member_state) in array.member_states() {
+                        tracing::info!("  member {idx}: {member_state}");
                     }
+
+                    let array_id = array.array_id();
+                    let array_level = array.level();
+                    let array_member_count = array.member_count();
+                    let array_capacity = array.capacity_bytes();
+                    let array_stripe = array.stripe_size();
 
                     // Phase 3: Create volumes if requested
                     if !cli.volumes.is_empty() {
-                        let array_id = array.array_id();
-                        let backing: Arc<dyn BlockDevice> = Arc::new(array);
+                        let arc_array = Arc::new(array);
+                        let backing: Arc<dyn BlockDevice> = arc_array.clone();
 
-                        let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
-                        mgr.add_backing_device(array_id, backing).await;
+                        // Register array in state + volume manager
+                        {
+                            let mut vm = state.volume_manager.lock().await;
+                            vm.add_backing_device(array_id, backing).await;
+                        }
+                        {
+                            let mut state_arrays = state.arrays.write().await;
+                            state_arrays.insert(array_id, ArrayInfo {
+                                array: arc_array,
+                                level: array_level,
+                                member_count: array_member_count,
+                                capacity_bytes: array_capacity,
+                                stripe_size: array_stripe,
+                            });
+                        }
 
                         for spec in &cli.volumes {
-                            match mgr.create_volume(&spec.name, spec.size, array_id) {
+                            let mut vm = state.volume_manager.lock().await;
+                            match vm.create_volume(&spec.name, spec.size, array_id) {
                                 Ok(vol_id) => {
                                     tracing::info!(
                                         "Volume '{}' ({}) created — virtual={} bytes ({:.1} GB)",
@@ -204,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                     // Export the first volume via target protocols
                                     if export_device.is_none() {
-                                        export_device = mgr.get_volume(&vol_id);
+                                        export_device = vm.get_volume(&vol_id);
                                     }
                                 }
                                 Err(e) => {
@@ -213,7 +269,8 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
 
-                        let vols = mgr.list_volumes().await;
+                        let vm = state.volume_manager.lock().await;
+                        let vols = vm.list_volumes().await;
                         tracing::info!("{} volume(s) ready:", vols.len());
                         for (id, name, vsize, allocated) in &vols {
                             tracing::info!(
@@ -223,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
                                 *allocated as f64 / (1024.0 * 1024.0),
                             );
                         }
+                        metrics::gauge!("stormblock_volumes_total").set(vols.len() as f64);
                     } else {
                         // No volumes specified — export the raw array
                         export_device = Some(Arc::new(array));
@@ -240,6 +298,16 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("No devices specified (use -d /path/to/device)");
     }
+
+    // Phase 5: Start management API
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            if let Err(e) = mgmt::start_management_server(state).await {
+                tracing::error!("Management API error: {e}");
+            }
+        }
+    });
 
     // Phase 4: Start target protocols
     if let Some(device) = export_device {
@@ -309,7 +377,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Shutting down...");
         drop(reactor);
     } else {
-        tracing::info!("No device to export — target protocols not started");
+        tracing::info!("No device to export — management API still running on {}",
+            config.management.listen_addr);
+        tracing::info!("Press Ctrl+C to stop");
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Shutting down...");
     }
 
     Ok(())
