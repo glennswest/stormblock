@@ -39,12 +39,12 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/drive/` — BlockDevice trait: NVMe via VFIO (`nvme.rs`), SAS via io_uring (`sas.rs`), DMA buffers (`dma.rs`)
 - `src/raid/` — Software RAID 1/5/6/10: SIMD parity (`parity.rs`), write journal (`journal.rs`), rebuild (`rebuild.rs`)
 - `src/volume/` — Thin provisioning (`thin.rs`), extent allocator (`extent.rs`), COW snapshots (`snapshot.rs`)
-- `src/target/` — NVMe-oF/TCP :4420 (`nvmeof.rs`), iSCSI :3260 (`iscsi.rs`), per-core reactor (`reactor.rs`)
+- `src/target/` — NVMe-oF/TCP :4420 (`nvmeof/`), iSCSI :3260 (`iscsi/`), per-core reactor (`reactor.rs`)
 - `src/mgmt/` — REST API via axum (`api.rs`), TOML config parsing (`config.rs`)
-- `src/main.rs` — CLI entry point, startup sequence (currently just scaffolding)
+- `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with Ctrl+C shutdown
 
 ## Current State
-Phase 1 (drive layer) is implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). Builds and tests pass on macOS and Linux (devx.gw.lo). Remaining modules (raid, volume, target, mgmt) are still scaffolding.
+Phases 1–4 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, and extent allocator. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. 92 tests pass on macOS and Linux (devx.gw.lo). Remaining modules (mgmt) are still scaffolding.
 
 ---
 
@@ -97,18 +97,24 @@ Phase 1 (drive layer) is implemented. The drive layer has three backends: SAS (i
 - [x] `snapshot.rs` — Snapshot diff (for incremental backup)
 - [ ] Volume resize (grow/shrink)
 
-### Phase 4: Target protocols (`src/target/`)
-- [ ] `reactor.rs` — Per-core event loop: epoll/io_uring for network + drive completions
-- [ ] `reactor.rs` — Core affinity, CPU isolation integration
-- [ ] `nvmeof.rs` — NVMe-oF/TCP PDU parsing (ICReq, ICResp, CapsuleCmd, CapsuleResp, C2HData, H2CData)
-- [ ] `nvmeof.rs` — NVMe-oF discovery subsystem (log pages)
-- [ ] `nvmeof.rs` — NVMe-oF I/O subsystem (connect, read, write, flush, dsm)
-- [ ] `nvmeof.rs` — io_uring zero-copy send for C2H data
-- [ ] `iscsi.rs` — iSCSI PDU parsing (login, text, SCSI command, data-out, data-in)
-- [ ] `iscsi.rs` — iSCSI login negotiation (discovery, normal sessions)
-- [ ] `iscsi.rs` — CHAP authentication
-- [ ] `iscsi.rs` — SCSI command dispatch (READ_10/16, WRITE_10/16, INQUIRY, READ_CAPACITY, etc.)
-- [ ] `iscsi.rs` — Multi-connection sessions, task management
+### Phase 4: Target protocols (`src/target/`) — DONE
+- [x] `reactor.rs` — Per-core single-threaded tokio runtimes, round-robin dispatch
+- [x] `reactor.rs` — Core affinity via sched_setaffinity (Linux), no-op on macOS
+- [x] `nvmeof/pdu.rs` — NVMe-oF/TCP PDU parsing (ICReq, ICResp, CapsuleCmd, CapsuleResp, C2HData, H2CData, R2T)
+- [x] `nvmeof/discovery.rs` — NVMe-oF discovery subsystem (discovery log page)
+- [x] `nvmeof/fabric.rs` — Fabric Connect, Property Get/Set, controller register emulation
+- [x] `nvmeof/admin.rs` — Identify Controller/Namespace, Active NS List, Get Log Page
+- [x] `nvmeof/io.rs` — NVMe I/O: Read, Write, Flush, Dataset Management (TRIM)
+- [x] `nvmeof/mod.rs` — NVMe-oF target server (ICReq/ICResp handshake, command loop)
+- [ ] `nvmeof` — io_uring zero-copy send for C2H data
+- [x] `iscsi/pdu.rs` — iSCSI PDU parsing (48-byte BHS, CRC32C digests, text params)
+- [x] `iscsi/login.rs` — iSCSI login state machine (security + operational negotiation)
+- [x] `iscsi/chap.rs` — CHAP MD5 authentication (constant-time verify)
+- [x] `iscsi/scsi.rs` — SCSI command dispatch (INQUIRY, READ/WRITE 10/16, READ_CAPACITY, MODE_SENSE, UNMAP, REPORT_LUNS, VPD pages)
+- [x] `iscsi/session.rs` — Session registry, TSIH allocation, CmdSN/StatSN tracking
+- [x] `iscsi/mod.rs` — iSCSI target server (login phase, full-feature phase, Data-In chunking)
+- [x] `main.rs` — CLI flags for target config, startup with Ctrl+C graceful shutdown
+- [ ] `iscsi` — Multi-connection sessions, R2T/Data-Out for large writes
 - [ ] MPIO/ALUA support for multipath
 
 ### Phase 5: Management plane (`src/mgmt/`)
