@@ -15,6 +15,7 @@ use clap::Parser;
 
 use drive::BlockDevice;
 use raid::{RaidArray, RaidLevel};
+use volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 
 #[derive(Parser)]
 #[command(name = "stormblock", version, about = "Pure Rust block storage engine")]
@@ -34,6 +35,44 @@ struct Cli {
     /// Stripe size in KB for RAID 5/6/10 (default: 64)
     #[arg(long, default_value = "64")]
     stripe_kb: u64,
+
+    /// Create thin volumes (format: name:size, e.g. data:100G)
+    #[arg(long = "volume", value_parser = parse_volume_spec)]
+    volumes: Vec<VolumeSpec>,
+}
+
+#[derive(Debug, Clone)]
+struct VolumeSpec {
+    name: String,
+    size: u64,
+}
+
+fn parse_volume_spec(s: &str) -> Result<VolumeSpec, String> {
+    let parts: Vec<&str> = s.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err("format: name:size (e.g. data:100G)".into());
+    }
+    let name = parts[0].to_string();
+    let size = parse_size(parts[1])?;
+    Ok(VolumeSpec { name, size })
+}
+
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('T') {
+        (n, 1024u64 * 1024 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix('G') {
+        (n, 1024u64 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix('M') {
+        (n, 1024u64 * 1024)
+    } else if let Some(n) = s.strip_suffix('K') {
+        (n, 1024u64)
+    } else {
+        (s, 1u64)
+    };
+    let num: u64 = num_str.parse()
+        .map_err(|_| format!("invalid size number: '{num_str}'"))?;
+    Ok(num * multiplier)
 }
 
 fn parse_raid_level(s: &str) -> Result<RaidLevel, String> {
@@ -98,6 +137,41 @@ async fn main() -> anyhow::Result<()> {
                     for (idx, state) in array.member_states() {
                         tracing::info!("  member {idx}: {state}");
                     }
+
+                    // Phase 3: Create volumes if requested
+                    if !cli.volumes.is_empty() {
+                        let array_id = array.array_id();
+                        let backing: Arc<dyn BlockDevice> = Arc::new(array);
+
+                        let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+                        mgr.add_backing_device(array_id, backing).await;
+
+                        for spec in &cli.volumes {
+                            match mgr.create_volume(&spec.name, spec.size, array_id) {
+                                Ok(vol_id) => {
+                                    tracing::info!(
+                                        "Volume '{}' ({}) created — virtual={} bytes ({:.1} GB)",
+                                        spec.name, vol_id, spec.size,
+                                        spec.size as f64 / (1024.0 * 1024.0 * 1024.0),
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to create volume '{}': {e}", spec.name);
+                                }
+                            }
+                        }
+
+                        let vols = mgr.list_volumes().await;
+                        tracing::info!("{} volume(s) ready:", vols.len());
+                        for (id, name, vsize, allocated) in &vols {
+                            tracing::info!(
+                                "  {} ({}) — virtual={:.1} GB, allocated={:.1} MB",
+                                name, id,
+                                *vsize as f64 / (1024.0 * 1024.0 * 1024.0),
+                                *allocated as f64 / (1024.0 * 1024.0),
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to create RAID array: {e}");
@@ -109,12 +183,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("No devices specified (use -d /path/to/device)");
     }
 
-    // TODO: Phase 3+ implementation
+    // TODO: Phase 4+ implementation
     // 1. Parse config
-    // 2. Load/create volume manager metadata
-    // 3. Start NVMe-oF/TCP target (:4420)
-    // 4. Start iSCSI target (:3260)
-    // 5. Start management API (:8443)
+    // 2. Start NVMe-oF/TCP target (:4420)
+    // 3. Start iSCSI target (:3260)
+    // 4. Start management API (:8443)
 
     Ok(())
 }
