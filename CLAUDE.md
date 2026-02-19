@@ -85,16 +85,16 @@ Phase 1 (drive layer) is implemented. The drive layer has three backends: SAS (i
 - [x] `rebuild.rs` — Rate limiting (don't starve foreground I/O)
 - [ ] Scrub/verify (background read + parity check)
 
-### Phase 3: Volume manager (`src/volume/`)
-- [ ] On-disk metadata format (extent tree, volume table, snapshot DAG)
-- [ ] `extent.rs` — Free-space bitmap, extent allocation (first-fit or best-fit)
-- [ ] `extent.rs` — Extent deallocation, coalescing
-- [ ] `thin.rs` — Thin volume: virtual-to-physical extent mapping
-- [ ] `thin.rs` — On-demand allocation on first write (allocate-on-write)
-- [ ] `thin.rs` — Discard/TRIM handling (return extents to free pool)
-- [ ] `snapshot.rs` — COW snapshot creation (clone extent map, bump refcounts)
-- [ ] `snapshot.rs` — Snapshot deletion (decrement refcounts, free unreferenced extents)
-- [ ] `snapshot.rs` — Snapshot diff (for incremental backup)
+### Phase 3: Volume manager (`src/volume/`) — DONE
+- [ ] On-disk metadata format (extent tree, volume table, snapshot DAG) — deferred to Phase 5
+- [x] `extent.rs` — Free-space bitmap, extent allocation (first-fit or best-fit)
+- [x] `extent.rs` — Extent deallocation, coalescing
+- [x] `thin.rs` — Thin volume: virtual-to-physical extent mapping
+- [x] `thin.rs` — On-demand allocation on first write (allocate-on-write)
+- [x] `thin.rs` — Discard/TRIM handling (return extents to free pool)
+- [x] `snapshot.rs` — COW snapshot creation (clone extent map, bump refcounts)
+- [x] `snapshot.rs` — Snapshot deletion (decrement refcounts, free unreferenced extents)
+- [x] `snapshot.rs` — Snapshot diff (for incremental backup)
 - [ ] Volume resize (grow/shrink)
 
 ### Phase 4: Target protocols (`src/target/`)
