@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Drives — StormBlock{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Drives</h1>
+    <span class="htmx-indicator" id="drives-loading">refreshing...</span>
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Path</th>
+                <th>Model</th>
+                <th>Serial</th>
+                <th>Type</th>
+                <th>Capacity</th>
+                <th>Block Size</th>
+            </tr>
+        </thead>
+        <tbody id="drives-table-body" hx-get="/ui/drives/table" hx-trigger="every 10s" hx-indicator="#drives-loading">
+            {% include "drives_table.html" %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

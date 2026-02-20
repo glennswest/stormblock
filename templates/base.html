@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}StormBlock{% endblock %}</title>
+    <link rel="stylesheet" href="/ui/static/style.css">
+    <script src="/ui/static/htmx.min.js"></script>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">StormBlock</div>
+        <div class="nav-links">
+            <a href="/ui/"{% if active == "dashboard" %} class="active"{% endif %}>Dashboard</a>
+            <a href="/ui/drives"{% if active == "drives" %} class="active"{% endif %}>Drives</a>
+            <a href="/ui/arrays"{% if active == "arrays" %} class="active"{% endif %}>Arrays</a>
+            <a href="/ui/volumes"{% if active == "volumes" %} class="active"{% endif %}>Volumes</a>
+            <a href="/ui/exports"{% if active == "exports" %} class="active"{% endif %}>Exports</a>
+            <a href="/ui/cluster"{% if active == "cluster" %} class="active"{% endif %}>Cluster</a>
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <div id="toast-container"></div>
+</body>
+</html>

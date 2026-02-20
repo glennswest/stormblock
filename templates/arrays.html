@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Arrays — StormBlock{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Arrays</h1>
+</div>
+
+<div class="form-section">
+    <h3>Create Array</h3>
+    <form hx-post="/ui/arrays" hx-target="#arrays-table-body" hx-swap="innerHTML">
+        <div class="form-row">
+            <div class="form-group">
+                <label>RAID Level</label>
+                <select name="level" required>
+                    <option value="1">RAID 1 (Mirror)</option>
+                    <option value="5">RAID 5 (Parity)</option>
+                    <option value="6">RAID 6 (Dual Parity)</option>
+                    <option value="10">RAID 10 (Striped Mirror)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Drives (UUIDs, comma-separated)</label>
+                <input type="text" name="drive_uuids" placeholder="uuid1,uuid2,..." required>
+            </div>
+            <div class="form-group">
+                <label>Stripe (KB)</label>
+                <input type="number" name="stripe_kb" value="64" min="4" max="4096">
+            </div>
+            <div class="form-group" style="flex: 0;">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">Create</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Level</th>
+                <th>Members</th>
+                <th>Capacity</th>
+                <th>Stripe</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="arrays-table-body" hx-get="/ui/arrays/table" hx-trigger="every 10s">
+            {% include "arrays_table.html" %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

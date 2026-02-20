@@ -18,6 +18,8 @@ cargo build --release --target aarch64-unknown-linux-musl --features "arm64,iscs
 cargo build --release --target aarch64-unknown-linux-musl --no-default-features --features "mikrotik,iscsi"
 ```
 
+**Musl static build** produces an 8.8 MB statically linked, stripped PIE binary (x86_64). Uses rustls-tls (no OpenSSL dependency). Requires `musl-tools` and `musl-dev` packages on the build host. Build and test on Linux: `root@devx.gw.lo:/root/stormblock`.
+
 ## Target Platforms
 
 | Platform | Arch | Drive I/O | Targets | Notes |

@@ -1,0 +1,14 @@
+{% if drives.is_empty() %}
+<tr class="empty-row"><td colspan="6">No drives detected</td></tr>
+{% else %}
+{% for d in drives %}
+<tr>
+    <td class="mono">{{ d.path }}</td>
+    <td>{{ d.model }}</td>
+    <td class="mono">{{ d.serial }}</td>
+    <td><span class="badge badge-info">{{ d.device_type }}</span></td>
+    <td class="mono">{{ d.capacity_human }}</td>
+    <td class="mono">{{ d.block_size }}</td>
+</tr>
+{% endfor %}
+{% endif %}

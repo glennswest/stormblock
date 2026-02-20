@@ -1,0 +1,28 @@
+{% if exports.is_empty() %}
+<tr class="empty-row"><td colspan="6">No exports configured</td></tr>
+{% else %}
+{% for e in exports %}
+<tr>
+    <td class="mono">{{ e.id|truncate_uuid }}</td>
+    <td class="mono">{{ e.volume_id|truncate_uuid }}</td>
+    <td><span class="badge badge-info">{{ e.protocol }}</span></td>
+    <td class="mono" style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">{{ e.target_id }}</td>
+    <td>
+        {% if e.status == "active" %}
+        <span class="badge badge-success">Active</span>
+        {% else %}
+        <span class="badge badge-warning">Pending</span>
+        {% endif %}
+    </td>
+    <td>
+        <button class="btn btn-danger btn-sm"
+                hx-delete="/ui/exports/{{ e.id }}"
+                hx-target="#exports-table-body"
+                hx-swap="innerHTML"
+                hx-confirm="Delete export {{ e.id|truncate_uuid }}?">
+            Delete
+        </button>
+    </td>
+</tr>
+{% endfor %}
+{% endif %}

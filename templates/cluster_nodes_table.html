@@ -1,0 +1,24 @@
+{% if nodes.is_empty() %}
+<tr class="empty-row"><td colspan="8">No nodes in cluster</td></tr>
+{% else %}
+{% for n in nodes %}
+<tr>
+    <td class="mono">{{ n.node_id }}</td>
+    <td>{{ n.hostname }}</td>
+    <td class="mono">{{ n.mgmt_addr }}</td>
+    <td>
+        {% if n.status == "online" %}
+        <span class="badge badge-success">Online</span>
+        {% else if n.status == "offline" %}
+        <span class="badge badge-danger">Offline</span>
+        {% else %}
+        <span class="badge badge-warning">{{ n.status }}</span>
+        {% endif %}
+    </td>
+    <td class="mono">{{ n.capacity_human }}</td>
+    <td>{{ n.drives_count }}</td>
+    <td>{{ n.arrays_count }}</td>
+    <td>{{ n.volumes_count }}</td>
+</tr>
+{% endfor %}
+{% endif %}

@@ -1,0 +1,22 @@
+{% if arrays.is_empty() %}
+<tr class="empty-row"><td colspan="6">No arrays configured</td></tr>
+{% else %}
+{% for a in arrays %}
+<tr>
+    <td class="mono">{{ a.id|truncate_uuid }}</td>
+    <td><span class="badge badge-info">{{ a.level }}</span></td>
+    <td>{{ a.member_count }}</td>
+    <td class="mono">{{ a.capacity_human }}</td>
+    <td class="mono">{{ a.stripe_human }}</td>
+    <td>
+        <button class="btn btn-danger btn-sm"
+                hx-delete="/ui/arrays/{{ a.id }}"
+                hx-target="#arrays-table-body"
+                hx-swap="innerHTML"
+                hx-confirm="Delete array {{ a.id|truncate_uuid }}?">
+            Delete
+        </button>
+    </td>
+</tr>
+{% endfor %}
+{% endif %}

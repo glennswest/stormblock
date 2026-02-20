@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — StormBlock{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <span class="htmx-indicator" id="dash-loading">refreshing...</span>
+</div>
+
+<div class="card-grid" hx-get="/ui/" hx-trigger="every 10s" hx-select=".card-grid" hx-target="this" hx-swap="outerHTML" hx-indicator="#dash-loading">
+    <div class="card">
+        <div class="card-label">Drives</div>
+        <div class="card-value">{{ drive_count }}</div>
+        <div class="card-sub">{{ total_drive_capacity }}</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Arrays</div>
+        <div class="card-value">{{ array_count }}</div>
+        <div class="card-sub">{{ total_array_capacity }}</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Volumes</div>
+        <div class="card-value">{{ volume_count }}</div>
+        <div class="card-sub">{{ total_volume_size }}</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Exports</div>
+        <div class="card-value">{{ export_count }}</div>
+        <div class="card-sub">{{ export_summary }}</div>
+    </div>
+</div>
+
+{% if array_count > 0 %}
+<div class="card">
+    <div class="card-label">Total Array Capacity</div>
+    <div style="display: flex; justify-content: space-between; margin-bottom: 0.35rem;">
+        <span>{{ allocated_human }} used</span>
+        <span>{{ total_array_capacity }}</span>
+    </div>
+    <div class="capacity-bar">
+        <div class="capacity-fill{% if capacity_pct > 90 %} critical{% else if capacity_pct > 75 %} high{% endif %}" style="width: {{ capacity_pct }}%"></div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

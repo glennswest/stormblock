@@ -3,6 +3,8 @@
 pub mod api;
 pub mod config;
 pub mod metrics;
+#[cfg(feature = "ui")]
+pub mod ui;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -95,8 +97,18 @@ impl AppState {
 /// Start the management REST API server.
 pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()> {
     let listen_addr = &state.config.management.listen_addr;
-    let router = api::router(state.clone())
+    let mut router = api::router(state.clone())
         .merge(metrics::metrics_router());
+
+    // Mount web UI at /ui when the ui feature is enabled
+    #[cfg(feature = "ui")]
+    {
+        router = router
+            .nest("/ui", ui::ui_router(state.clone()))
+            .route("/", axum::routing::get(|| async {
+                axum::response::Redirect::permanent("/ui/")
+            }));
+    }
 
     let listener = TcpListener::bind(listen_addr).await?;
     tracing::info!("Management API listening on {listen_addr}");

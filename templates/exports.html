@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Exports — StormBlock{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Exports</h1>
+</div>
+
+<div class="form-section">
+    <h3>Create Export</h3>
+    <form hx-post="/ui/exports" hx-target="#exports-table-body" hx-swap="innerHTML">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Volume</label>
+                <select name="volume_id" required>
+                    {% for v in volumes %}
+                    <option value="{{ v.id }}">{{ v.name }} ({{ v.virtual_size_human }})</option>
+                    {% endfor %}
+                    {% if volumes.is_empty() %}
+                    <option value="" disabled selected>No volumes available</option>
+                    {% endif %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Protocol</label>
+                <select name="protocol" required>
+                    <option value="iscsi">iSCSI</option>
+                    <option value="nvmeof">NVMe-oF</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Target ID (optional)</label>
+                <input type="text" name="target_id" placeholder="auto-generated">
+            </div>
+            <div class="form-group" style="flex: 0;">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">Create</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Volume</th>
+                <th>Protocol</th>
+                <th>Target</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="exports-table-body" hx-get="/ui/exports/table" hx-trigger="every 10s">
+            {% include "exports_table.html" %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

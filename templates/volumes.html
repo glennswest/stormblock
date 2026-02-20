@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Volumes — StormBlock{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Volumes</h1>
+</div>
+
+<div class="form-section">
+    <h3>Create Volume</h3>
+    <form hx-post="/ui/volumes" hx-target="#volumes-table-body" hx-swap="innerHTML">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Name</label>
+                <input type="text" name="name" placeholder="my-volume" required>
+            </div>
+            <div class="form-group">
+                <label>Size</label>
+                <input type="text" name="size" placeholder="100G" required>
+            </div>
+            <div class="form-group">
+                <label>Array ID</label>
+                <select name="array_id" required>
+                    {% for a in arrays %}
+                    <option value="{{ a.id }}">{{ a.id|truncate_uuid }} ({{ a.level }}, {{ a.capacity_human }})</option>
+                    {% endfor %}
+                    {% if arrays.is_empty() %}
+                    <option value="" disabled selected>No arrays available</option>
+                    {% endif %}
+                </select>
+            </div>
+            <div class="form-group" style="flex: 0;">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">Create</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="form-section">
+    <h3>Create Snapshot</h3>
+    <form hx-post="/ui/volumes/snapshot" hx-target="#volumes-table-body" hx-swap="innerHTML">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Snapshot Name</label>
+                <input type="text" name="name" placeholder="snap-01" required>
+            </div>
+            <div class="form-group">
+                <label>Source Volume</label>
+                <select name="source_volume_id" required>
+                    {% for v in volumes %}
+                    <option value="{{ v.id }}">{{ v.name }} ({{ v.virtual_size_human }})</option>
+                    {% endfor %}
+                    {% if volumes.is_empty() %}
+                    <option value="" disabled selected>No volumes available</option>
+                    {% endif %}
+                </select>
+            </div>
+            <div class="form-group" style="flex: 0;">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">Snapshot</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Virtual Size</th>
+                <th>Allocated</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="volumes-table-body" hx-get="/ui/volumes/table" hx-trigger="every 10s">
+            {% include "volumes_table.html" %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

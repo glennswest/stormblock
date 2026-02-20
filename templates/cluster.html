@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Cluster — StormBlock{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Cluster</h1>
+    <span class="htmx-indicator" id="cluster-loading">refreshing...</span>
+</div>
+
+{% if enabled %}
+<div class="card-grid">
+    <div class="card">
+        <div class="card-label">Local Node</div>
+        <div class="card-value" style="font-size: 1.2rem;">{{ local_node_id }}</div>
+        <div class="card-sub">{% if is_leader %}Leader{% else %}Follower{% endif %}</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Nodes</div>
+        <div class="card-value">{{ node_count }}</div>
+        <div class="card-sub">{{ online_count }} online</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Leader</div>
+        <div class="card-value" style="font-size: 1.2rem;">{{ leader_display }}</div>
+    </div>
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Node ID</th>
+                <th>Hostname</th>
+                <th>Address</th>
+                <th>Status</th>
+                <th>Capacity</th>
+                <th>Drives</th>
+                <th>Arrays</th>
+                <th>Volumes</th>
+            </tr>
+        </thead>
+        <tbody id="cluster-nodes-body" hx-get="/ui/cluster/nodes/table" hx-trigger="every 10s" hx-indicator="#cluster-loading">
+            {% include "cluster_nodes_table.html" %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card" style="text-align: center; padding: 3rem;">
+    <div class="card-label">Cluster Not Enabled</div>
+    <p class="text-muted mt-1">Start stormblock with the cluster feature to enable multi-node management.</p>
+</div>
+{% endif %}
+{% endblock %}

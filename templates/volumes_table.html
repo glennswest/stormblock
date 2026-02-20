@@ -1,0 +1,21 @@
+{% if volumes.is_empty() %}
+<tr class="empty-row"><td colspan="5">No volumes created</td></tr>
+{% else %}
+{% for v in volumes %}
+<tr>
+    <td>{{ v.name }}</td>
+    <td class="mono">{{ v.id|truncate_uuid }}</td>
+    <td class="mono">{{ v.virtual_size_human }}</td>
+    <td class="mono">{{ v.allocated_human }}</td>
+    <td>
+        <button class="btn btn-danger btn-sm"
+                hx-delete="/ui/volumes/{{ v.id }}"
+                hx-target="#volumes-table-body"
+                hx-swap="innerHTML"
+                hx-confirm="Delete volume '{{ v.name }}'?">
+            Delete
+        </button>
+    </td>
+</tr>
+{% endfor %}
+{% endif %}
