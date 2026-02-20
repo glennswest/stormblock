@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Consensus (cluster mode)
 openraft = { version = "0.9", features = ["serde"], optional = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 # Management API
 axum = "0.8"
