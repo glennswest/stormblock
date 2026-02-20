@@ -116,7 +116,7 @@ async fn create_volume(
     }
 
     let mut vm = state.volume_manager.lock().await;
-    match vm.create_volume(&req.name, size, array_id) {
+    match vm.create_volume(&req.name, size, array_id).await {
         Ok(vol_id) => {
             let resp = VolumeResponse {
                 id: vol_id.0,

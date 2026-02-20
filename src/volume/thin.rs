@@ -106,6 +106,37 @@ impl ThinVolume {
         }
     }
 
+    /// Rebuild a volume from persisted metadata (recovery path).
+    pub fn restore(
+        id: VolumeId,
+        name: String,
+        virtual_size: u64,
+        array_id: RaidArrayId,
+        extent_map: BTreeMap<u64, PhysicalExtent>,
+        backing_device: Arc<dyn BlockDevice>,
+        allocator: Arc<tokio::sync::Mutex<ExtentAllocator>>,
+    ) -> Self {
+        let allocated: u64 = extent_map.values().map(|e| e.length).sum();
+        let device_id = DeviceId {
+            uuid: id.0,
+            serial: format!("vol-{}", &id.0.simple().to_string()[..8]),
+            model: "ThinVolume".to_string(),
+            path: format!("volume:{id}"),
+        };
+
+        ThinVolume {
+            id,
+            name,
+            virtual_size,
+            allocated,
+            extent_map,
+            array_id,
+            backing_device,
+            allocator,
+            device_id,
+        }
+    }
+
     pub fn id(&self) -> VolumeId {
         self.id
     }

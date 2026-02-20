@@ -46,7 +46,7 @@ pub async fn setup_raid1_volume(
 
     let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
     vm.add_backing_device(array_id, backing).await;
-    let vol_id = vm.create_volume("test-vol", volume_size, array_id)
+    let vol_id = vm.create_volume("test-vol", volume_size, array_id).await
         .expect("failed to create volume");
     let vol = vm.get_volume(&vol_id).expect("volume not found");
 

@@ -52,6 +52,7 @@ pub struct ManagementConfig {
     pub listen_addr: String,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    pub data_dir: Option<String>,
 }
 
 impl Default for ManagementConfig {
@@ -60,6 +61,7 @@ impl Default for ManagementConfig {
             listen_addr: "0.0.0.0:9090".to_string(),
             tls_cert: None,
             tls_key: None,
+            data_dir: None,
         }
     }
 }

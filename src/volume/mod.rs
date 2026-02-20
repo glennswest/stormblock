@@ -5,16 +5,19 @@
 //! (NVMe-oF, iSCSI) see volumes as plain block devices.
 
 pub mod extent;
+pub mod metadata;
 pub mod thin;
 pub mod snapshot;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::drive::BlockDevice;
 use crate::raid::RaidArrayId;
 
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
+pub use metadata::MetadataStore;
 pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError};
 
 /// Manages volumes, extent allocation, and snapshots across RAID arrays.
@@ -22,6 +25,7 @@ pub struct VolumeManager {
     volumes: HashMap<VolumeId, Arc<ThinVolumeHandle>>,
     allocator: Arc<tokio::sync::Mutex<ExtentAllocator>>,
     backing_devices: HashMap<RaidArrayId, Arc<dyn BlockDevice>>,
+    metadata_store: Option<MetadataStore>,
 }
 
 impl VolumeManager {
@@ -31,7 +35,19 @@ impl VolumeManager {
             volumes: HashMap::new(),
             allocator: Arc::new(tokio::sync::Mutex::new(ExtentAllocator::new(extent_size))),
             backing_devices: HashMap::new(),
+            metadata_store: None,
         }
+    }
+
+    /// Create a VolumeManager with on-disk metadata persistence.
+    pub fn with_data_dir(extent_size: u64, data_dir: PathBuf) -> std::io::Result<Self> {
+        let store = MetadataStore::new(data_dir)?;
+        Ok(VolumeManager {
+            volumes: HashMap::new(),
+            allocator: Arc::new(tokio::sync::Mutex::new(ExtentAllocator::new(extent_size))),
+            backing_devices: HashMap::new(),
+            metadata_store: Some(store),
+        })
     }
 
     /// Register a RAID array as a backing device for volumes.
@@ -45,7 +61,7 @@ impl VolumeManager {
     }
 
     /// Create a new thin volume on a specific RAID array.
-    pub fn create_volume(
+    pub async fn create_volume(
         &mut self,
         name: &str,
         virtual_size: u64,
@@ -67,6 +83,7 @@ impl VolumeManager {
         let id = vol.id();
         let handle = Arc::new(ThinVolumeHandle::new(vol));
         self.volumes.insert(id, handle);
+        self.persist().await;
         Ok(id)
     }
 
@@ -99,6 +116,10 @@ impl VolumeManager {
                 alloc.free(&ext);
             }
         }
+        drop(alloc);
+        drop(vol);
+        drop(other_guards);
+        self.persist().await;
         Ok(())
     }
 
@@ -129,6 +150,7 @@ impl VolumeManager {
         let snap_id = snap.id();
         let snap_handle = Arc::new(ThinVolumeHandle::new(snap));
         self.volumes.insert(snap_id, snap_handle);
+        self.persist().await;
         Ok(snap_id)
     }
 
@@ -146,6 +168,112 @@ impl VolumeManager {
     /// Get the allocator for direct inspection.
     pub fn allocator(&self) -> &Arc<tokio::sync::Mutex<ExtentAllocator>> {
         &self.allocator
+    }
+
+    /// Persist all volume metadata to disk. No-op if no data_dir configured.
+    pub async fn persist(&self) {
+        let store = match &self.metadata_store {
+            Some(s) => s,
+            None => return,
+        };
+
+        let alloc = self.allocator.lock().await;
+        let extent_size = alloc.extent_size();
+
+        let mut arrays = Vec::new();
+        for (array_id, device) in &self.backing_devices {
+            arrays.push(metadata::ArrayRecord {
+                array_id: *array_id,
+                total_capacity: device.capacity_bytes(),
+            });
+        }
+
+        let mut volumes = Vec::new();
+        for (_id, handle) in &self.volumes {
+            let vol = handle.lock().await;
+            volumes.push(metadata::VolumeRecord {
+                id: vol.id,
+                name: vol.name.clone(),
+                virtual_size: vol.virtual_size,
+                array_id: vol.array_id,
+                extent_map: vol.extent_map.clone(),
+            });
+        }
+        drop(alloc);
+
+        let meta = metadata::VolumeMetadata {
+            extent_size,
+            arrays,
+            volumes,
+        };
+
+        if let Err(e) = store.save(&meta) {
+            tracing::error!("Failed to persist volume metadata: {e}");
+        }
+    }
+
+    /// Restore volumes from persisted metadata. No-op if no data_dir or no metadata file.
+    pub async fn restore(&mut self) -> anyhow::Result<()> {
+        let store = match &self.metadata_store {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        if !store.exists() {
+            tracing::info!("No persisted metadata found, starting fresh");
+            return Ok(());
+        }
+
+        let meta = store.load()?;
+
+        // Verify arrays exist
+        for arec in &meta.arrays {
+            if !self.backing_devices.contains_key(&arec.array_id) {
+                tracing::warn!(
+                    "Persisted array {} not found in current backing devices, skipping its volumes",
+                    arec.array_id
+                );
+            }
+        }
+
+        let mut restored = 0u32;
+        for vrec in meta.volumes {
+            let backing = match self.backing_devices.get(&vrec.array_id) {
+                Some(dev) => dev.clone(),
+                None => {
+                    tracing::warn!(
+                        "Skipping volume '{}' ({}): array {} not available",
+                        vrec.name, vrec.id, vrec.array_id
+                    );
+                    continue;
+                }
+            };
+
+            // Mark extents as allocated in the bitmap
+            {
+                let mut alloc = self.allocator.lock().await;
+                for pext in vrec.extent_map.values() {
+                    alloc.mark_allocated(pext.array_id, pext.offset);
+                }
+            }
+
+            let vol = ThinVolume::restore(
+                vrec.id,
+                vrec.name.clone(),
+                vrec.virtual_size,
+                vrec.array_id,
+                vrec.extent_map,
+                backing,
+                self.allocator.clone(),
+            );
+            let handle = Arc::new(ThinVolumeHandle::new(vol));
+            self.volumes.insert(vrec.id, handle);
+            restored += 1;
+            tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
+        }
+
+        tracing::info!("Restored {restored} volume(s) from metadata");
+        Ok(())
     }
 }
 
@@ -190,7 +318,7 @@ mod tests {
         let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
         mgr.add_backing_device(array_id, backing).await;
 
-        let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).unwrap();
+        let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).await.unwrap();
         let list = mgr.list_volumes().await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, vol_id);
@@ -208,7 +336,7 @@ mod tests {
         let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
         mgr.add_backing_device(array_id, backing).await;
 
-        let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).unwrap();
+        let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).await.unwrap();
         let vol = mgr.get_volume(&vol_id).unwrap();
 
         // Write
@@ -230,7 +358,7 @@ mod tests {
         let mut mgr = VolumeManager::new(4096); // Small extents
         mgr.add_backing_device(array_id, backing).await;
 
-        let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).unwrap();
+        let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).await.unwrap();
 
         // Write data
         let vol = mgr.get_volume(&vol_id).unwrap();
@@ -263,7 +391,7 @@ mod tests {
         let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
         mgr.add_backing_device(array_id, backing).await;
 
-        let vol_id = mgr.create_volume("to-delete", 50 * 1024 * 1024, array_id).unwrap();
+        let vol_id = mgr.create_volume("to-delete", 50 * 1024 * 1024, array_id).await.unwrap();
 
         // Write something to allocate extents
         let vol = mgr.get_volume(&vol_id).unwrap();

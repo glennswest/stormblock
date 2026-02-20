@@ -1,6 +1,6 @@
 [package]
 name = "stormblock"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"
@@ -31,7 +31,7 @@ tower = "0.5"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-bincode = "2"
+bincode = { version = "2", features = ["serde"] }
 toml = "0.8"
 serde_json = "1"
 

@@ -173,6 +173,16 @@ impl ExtentBitmap {
     pub fn allocated_count(&self) -> u64 {
         self.total_extents - self.free_extents
     }
+
+    /// Mark a specific extent as allocated (for recovery).
+    /// No-op if already allocated.
+    pub fn mark_allocated(&mut self, index: u64) {
+        debug_assert!(index < self.total_extents);
+        if self.bitmap[index as usize] {
+            self.bitmap.set(index as usize, false);
+            self.free_extents -= 1;
+        }
+    }
 }
 
 /// Manages extent allocation across multiple RAID arrays.
@@ -228,6 +238,14 @@ impl ExtentAllocator {
     /// Extent size in bytes.
     pub fn extent_size(&self) -> u64 {
         self.extent_size
+    }
+
+    /// Mark a specific physical offset as allocated on an array (for recovery).
+    pub fn mark_allocated(&mut self, array_id: RaidArrayId, offset: u64) {
+        if let Some(bitmap) = self.bitmaps.get_mut(&array_id) {
+            let index = offset / self.extent_size;
+            bitmap.mark_allocated(index);
+        }
     }
 }
 
@@ -326,5 +344,36 @@ mod tests {
         assert_eq!(extents[2].offset, 2 * DEFAULT_EXTENT_SIZE);
         assert!(extents.iter().all(|e| e.length == DEFAULT_EXTENT_SIZE));
         assert!(extents.iter().all(|e| e.array_id == a));
+    }
+
+    #[test]
+    fn bitmap_mark_allocated() {
+        let mut bm = ExtentBitmap::new(10);
+        assert_eq!(bm.free_count(), 10);
+
+        bm.mark_allocated(3);
+        assert_eq!(bm.free_count(), 9);
+
+        // Marking again is a no-op
+        bm.mark_allocated(3);
+        assert_eq!(bm.free_count(), 9);
+
+        bm.mark_allocated(7);
+        assert_eq!(bm.free_count(), 8);
+    }
+
+    #[test]
+    fn allocator_mark_allocated() {
+        let a = test_array_id();
+        let mut alloc = ExtentAllocator::new(DEFAULT_EXTENT_SIZE);
+        alloc.add_array(a, 10 * DEFAULT_EXTENT_SIZE);
+        assert_eq!(alloc.free_count(&a), 10);
+
+        alloc.mark_allocated(a, 2 * DEFAULT_EXTENT_SIZE);
+        assert_eq!(alloc.free_count(&a), 9);
+
+        // Allocate should skip the already-allocated extent
+        let extents = alloc.allocate(a, 3).unwrap();
+        assert!(extents.iter().all(|e| e.offset != 2 * DEFAULT_EXTENT_SIZE));
     }
 }

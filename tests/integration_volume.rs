@@ -31,7 +31,7 @@ async fn volume_create_write_read() {
     let dir = TempDir::new().unwrap();
     let (mut vm, array_id) = setup_volume_manager(&dir).await;
 
-    let vol_id = vm.create_volume("test-vol", 32 * 1024 * 1024, array_id).unwrap();
+    let vol_id = vm.create_volume("test-vol", 32 * 1024 * 1024, array_id).await.unwrap();
     let vol = vm.get_volume(&vol_id).unwrap();
 
     let data = vec![0xAB_u8; 4096];
@@ -47,7 +47,7 @@ async fn volume_snapshot_cow() {
     let dir = TempDir::new().unwrap();
     let (mut vm, array_id) = setup_volume_manager(&dir).await;
 
-    let vol_id = vm.create_volume("data", 32 * 1024 * 1024, array_id).unwrap();
+    let vol_id = vm.create_volume("data", 32 * 1024 * 1024, array_id).await.unwrap();
     let vol = vm.get_volume(&vol_id).unwrap();
 
     // Write initial data
@@ -76,7 +76,7 @@ async fn volume_delete_frees_extents() {
     let dir = TempDir::new().unwrap();
     let (mut vm, array_id) = setup_volume_manager(&dir).await;
 
-    let vol_id = vm.create_volume("to-delete", 16 * 1024 * 1024, array_id).unwrap();
+    let vol_id = vm.create_volume("to-delete", 16 * 1024 * 1024, array_id).await.unwrap();
     let vol = vm.get_volume(&vol_id).unwrap();
     vol.write(0, &vec![0xFF_u8; 4096]).await.unwrap();
     drop(vol);
@@ -85,7 +85,7 @@ async fn volume_delete_frees_extents() {
     assert!(vm.get_volume(&vol_id).is_none());
 
     // Should be able to create a new volume with freed space
-    let new_vol_id = vm.create_volume("new-vol", 16 * 1024 * 1024, array_id).unwrap();
+    let new_vol_id = vm.create_volume("new-vol", 16 * 1024 * 1024, array_id).await.unwrap();
     let new_vol = vm.get_volume(&new_vol_id).unwrap();
     new_vol.write(0, &vec![0x11_u8; 4096]).await.unwrap();
 
@@ -99,8 +99,8 @@ async fn volume_list() {
     let dir = TempDir::new().unwrap();
     let (mut vm, array_id) = setup_volume_manager(&dir).await;
 
-    vm.create_volume("vol-a", 10 * 1024 * 1024, array_id).unwrap();
-    vm.create_volume("vol-b", 20 * 1024 * 1024, array_id).unwrap();
+    vm.create_volume("vol-a", 10 * 1024 * 1024, array_id).await.unwrap();
+    vm.create_volume("vol-b", 20 * 1024 * 1024, array_id).await.unwrap();
 
     let list = vm.list_volumes().await;
     assert_eq!(list.len(), 2);
@@ -116,7 +116,7 @@ async fn volume_multiple_extent_writes() {
     let (mut vm, array_id) = setup_volume_manager(&dir).await;
 
     // Use small extent size to trigger multiple extent allocations
-    let vol_id = vm.create_volume("multi", 32 * 1024 * 1024, array_id).unwrap();
+    let vol_id = vm.create_volume("multi", 32 * 1024 * 1024, array_id).await.unwrap();
     let vol = vm.get_volume(&vol_id).unwrap();
 
     // Write at different offsets spanning multiple extents

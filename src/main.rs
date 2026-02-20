@@ -82,6 +82,10 @@ struct Cli {
     /// Number of reactor cores (0 = auto-detect)
     #[arg(long, default_value = "0")]
     reactor_cores: usize,
+
+    /// Directory for persisting volume metadata (enables restart recovery)
+    #[arg(long)]
+    data_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +151,15 @@ async fn main() -> anyhow::Result<()> {
     mgmt::metrics::register_metrics();
 
     // Build shared state
-    let volume_manager = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let data_dir = cli.data_dir.as_deref()
+        .or(config.management.data_dir.as_deref());
+    let volume_manager = match data_dir {
+        Some(dir) => {
+            tracing::info!("Volume metadata persistence enabled: {dir}");
+            VolumeManager::with_data_dir(DEFAULT_EXTENT_SIZE, dir.into())?
+        }
+        None => VolumeManager::new(DEFAULT_EXTENT_SIZE),
+    };
     let mut state = Arc::new(AppState::new(config.clone(), volume_manager));
 
     // Collect device paths from config
@@ -245,22 +257,48 @@ async fn main() -> anyhow::Result<()> {
                             });
                         }
 
-                        for spec in &cli.volumes {
+                        // Try restoring persisted volumes first
+                        let mut restored = false;
+                        {
                             let mut vm = state.volume_manager.lock().await;
-                            match vm.create_volume(&spec.name, spec.size, array_id) {
-                                Ok(vol_id) => {
-                                    tracing::info!(
-                                        "Volume '{}' ({}) created — virtual={} bytes ({:.1} GB)",
-                                        spec.name, vol_id, spec.size,
-                                        spec.size as f64 / (1024.0 * 1024.0 * 1024.0),
-                                    );
-                                    // Export the first volume via target protocols
-                                    if export_device.is_none() {
-                                        export_device = vm.get_volume(&vol_id);
+                            match vm.restore().await {
+                                Ok(()) => {
+                                    let existing = vm.list_volumes().await;
+                                    if !existing.is_empty() {
+                                        restored = true;
+                                        tracing::info!("Restored {} volume(s) from metadata", existing.len());
+                                        for (id, name, vsize, allocated) in &existing {
+                                            if export_device.is_none() {
+                                                export_device = vm.get_volume(id);
+                                            }
+                                            let _ = (name, vsize, allocated); // logged by restore()
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::error!("Failed to create volume '{}': {e}", spec.name);
+                                    tracing::warn!("Volume restore failed: {e}, creating from config");
+                                }
+                            }
+                        }
+
+                        if !restored {
+                            for spec in &cli.volumes {
+                                let mut vm = state.volume_manager.lock().await;
+                                match vm.create_volume(&spec.name, spec.size, array_id).await {
+                                    Ok(vol_id) => {
+                                        tracing::info!(
+                                            "Volume '{}' ({}) created — virtual={} bytes ({:.1} GB)",
+                                            spec.name, vol_id, spec.size,
+                                            spec.size as f64 / (1024.0 * 1024.0 * 1024.0),
+                                        );
+                                        // Export the first volume via target protocols
+                                        if export_device.is_none() {
+                                            export_device = vm.get_volume(&vol_id);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to create volume '{}': {e}", spec.name);
+                                    }
                                 }
                             }
                         }
@@ -393,6 +431,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");
         tokio::signal::ctrl_c().await?;
         tracing::info!("Shutting down...");
+        {
+            let vm = state.volume_manager.lock().await;
+            vm.persist().await;
+        }
         #[cfg(feature = "cluster")]
         if let Some(ref cluster_mgr) = state.cluster {
             // Cluster manager shutdown requires &mut — use Arc::try_unwrap or just log
@@ -405,6 +447,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Press Ctrl+C to stop");
         tokio::signal::ctrl_c().await?;
         tracing::info!("Shutting down...");
+        {
+            let vm = state.volume_manager.lock().await;
+            vm.persist().await;
+        }
     }
 
     Ok(())
