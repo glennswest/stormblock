@@ -215,7 +215,7 @@ impl Drop for SasDevice {
 fn ioctl_blkgetsize64(fd: RawFd) -> DriveResult<u64> {
     let mut size: u64 = 0;
     // BLKGETSIZE64 = 0x80081272
-    let ret = unsafe { libc::ioctl(fd, 0x80081272u64 as libc::c_ulong, &mut size) };
+    let ret = unsafe { libc::ioctl(fd, 0x80081272u64 as libc::Ioctl, &mut size) };
     if ret < 0 {
         return Err(DriveError::Io(std::io::Error::last_os_error()));
     }
@@ -225,7 +225,7 @@ fn ioctl_blkgetsize64(fd: RawFd) -> DriveResult<u64> {
 fn ioctl_blksszget(fd: RawFd) -> DriveResult<u32> {
     let mut size: libc::c_int = 0;
     // BLKSSZGET = 0x1268
-    let ret = unsafe { libc::ioctl(fd, 0x1268u64 as libc::c_ulong, &mut size) };
+    let ret = unsafe { libc::ioctl(fd, 0x1268u64 as libc::Ioctl, &mut size) };
     if ret < 0 {
         return Err(DriveError::Io(std::io::Error::last_os_error()));
     }
@@ -235,7 +235,7 @@ fn ioctl_blksszget(fd: RawFd) -> DriveResult<u32> {
 fn ioctl_blkdiscard(fd: RawFd, offset: u64, len: u64) -> DriveResult<()> {
     let range: [u64; 2] = [offset, len];
     // BLKDISCARD = 0x1277
-    let ret = unsafe { libc::ioctl(fd, 0x1277u64 as libc::c_ulong, &range) };
+    let ret = unsafe { libc::ioctl(fd, 0x1277u64 as libc::Ioctl, &range) };
     if ret < 0 {
         return Err(DriveError::Io(std::io::Error::last_os_error()));
     }
