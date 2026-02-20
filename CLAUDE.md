@@ -45,7 +45,7 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with Ctrl+C shutdown
 
 ## Current State
-Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, and extent allocator. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, metrics). Cluster scaling via openraft 0.9 with HTTP-based Raft RPCs, node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Integration tests exercise the full stack (FileDevice → RAID → Volume → iSCSI/NVMe-oF target → TCP client), crash recovery (journal, superblock, extent allocator), and all REST API endpoints. Criterion micro-benchmarks cover parity compute, extent allocation, and PDU parsing. Container images via Dockerfile for deployment under StormBase. 143 tests pass on macOS and Linux (devx.gw.lo).
+Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, metrics). Cluster scaling via openraft 0.9 with HTTP-based Raft RPCs, node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Integration tests exercise the full stack (FileDevice → RAID → Volume → iSCSI/NVMe-oF target → TCP client), crash recovery (journal, superblock, extent allocator), and all REST API endpoints. Criterion micro-benchmarks cover parity compute, extent allocation, and PDU parsing. Container images via Dockerfile for deployment under StormBase. 152 tests pass on macOS and Linux (root@devx.gw.lo:/root/stormblock).
 
 ---
 
@@ -87,7 +87,7 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 - [ ] Scrub/verify (background read + parity check)
 
 ### Phase 3: Volume manager (`src/volume/`) — DONE
-- [ ] On-disk metadata format (extent tree, volume table, snapshot DAG) — deferred to Phase 5
+- [x] On-disk metadata persistence (`metadata.rs` — binary envelope, atomic writes, CRC32C, restart recovery)
 - [x] `extent.rs` — Free-space bitmap, extent allocation (first-fit or best-fit)
 - [x] `extent.rs` — Extent deallocation, coalescing
 - [x] `thin.rs` — Thin volume: virtual-to-physical extent mapping
