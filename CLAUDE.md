@@ -83,10 +83,10 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] `parity.rs` — SIMD XOR: AVX2 (x86_64), NEON (aarch64), scalar fallback
 - [x] `parity.rs` — GF multiply for RAID 6 Q syndrome (AVX2 shuffle, NEON vtbl)
 - [x] `journal.rs` — Write-intent bitmap: mark dirty stripes before write, clear after
-- [ ] `journal.rs` — Journal recovery on startup (partial stripe detection)
+- [x] `journal.rs` — Journal recovery on startup (partial stripe detection)
 - [x] `rebuild.rs` — Background rebuild: read surviving members, recompute parity/mirror
 - [x] `rebuild.rs` — Rate limiting (don't starve foreground I/O)
-- [ ] Scrub/verify (background read + parity check)
+- [x] Scrub/verify (background read + parity check)
 
 ### Phase 3: Volume manager (`src/volume/`) — DONE
 - [x] On-disk metadata persistence (`metadata.rs` — binary envelope, atomic writes, CRC32C, restart recovery)

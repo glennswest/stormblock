@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::drive::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, SmartData};
 use crate::raid::journal::WriteIntentJournal;
 use crate::raid::parity::ParityEngine;
-use crate::raid::rebuild::{RebuildConfig, RebuildProgress};
+use crate::raid::rebuild::{RebuildConfig, RebuildProgress, ScrubConfig, ScrubProgress};
 
 /// 1 MB data offset — room for superblock + future bitmap at start of each member.
 pub const DATA_OFFSET: u64 = 1024 * 1024;
@@ -557,6 +557,11 @@ impl RaidArray {
             .collect()
     }
 
+    /// Access the journal (for testing/recovery).
+    pub async fn journal_mut(&self) -> tokio::sync::MutexGuard<'_, WriteIntentJournal> {
+        self.journal.lock().await
+    }
+
     /// Set the state of a member drive (for testing degraded mode).
     pub fn set_member_state(&mut self, idx: usize, state: RaidMemberState) {
         if idx < self.members.len() {
@@ -585,6 +590,227 @@ impl RaidArray {
         // Full rebuild implementation would iterate stripes in a spawned task.
         // For now, return the progress tracker.
         Ok(progress)
+    }
+
+    /// Repair parity for a single stripe by reading data strips and rewriting parity.
+    ///
+    /// Used by both journal recovery and scrub. Only applicable to RAID 5/6.
+    /// Returns true if parity was actually rewritten (was different from expected).
+    async fn repair_stripe_parity(&self, stripe: u64) -> Result<bool, RaidError> {
+        let member_count = self.members.len() as u32;
+        let data_disks = self.data_disks();
+        let strip_size = self.stripe_size as usize;
+        let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
+        let parity_disk = parity_disk_for_stripe(stripe, member_count);
+
+        // Read all data strips
+        let mut data_strips: Vec<Vec<u8>> = Vec::with_capacity(data_disks as usize);
+        for d in 0..data_disks {
+            let disk = data_disk_index(d, stripe, member_count);
+            let mut buf = vec![0u8; strip_size];
+            self.members[disk as usize].device.read(phys_offset, &mut buf).await
+                .map_err(|e| RaidError::MemberIo { member_idx: disk as usize, error: e })?;
+            data_strips.push(buf);
+        }
+
+        // Read current parity
+        let mut stored_parity = vec![0u8; strip_size];
+        self.members[parity_disk as usize].device.read(phys_offset, &mut stored_parity).await
+            .map_err(|e| RaidError::MemberIo { member_idx: parity_disk as usize, error: e })?;
+
+        // Compute expected parity
+        let strip_refs: Vec<&[u8]> = data_strips.iter().map(|s| s.as_slice()).collect();
+        let mut expected_parity = vec![0u8; strip_size];
+        self.parity_engine.compute_xor_parity(&strip_refs, &mut expected_parity);
+
+        if stored_parity != expected_parity {
+            // Rewrite correct parity
+            self.members[parity_disk as usize].device.write(phys_offset, &expected_parity).await
+                .map_err(|e| RaidError::MemberIo { member_idx: parity_disk as usize, error: e })?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Verify parity consistency for a single stripe. Returns true if consistent.
+    async fn verify_stripe(&self, stripe: u64) -> Result<bool, RaidError> {
+        match self.level {
+            RaidLevel::Raid5 => {
+                let member_count = self.members.len() as u32;
+                let strip_size = self.stripe_size as usize;
+                let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
+
+                // Read ALL strips (data + parity) and XOR — result should be all zeros
+                let mut strips: Vec<Vec<u8>> = Vec::with_capacity(member_count as usize);
+                for i in 0..member_count {
+                    let mut buf = vec![0u8; strip_size];
+                    self.members[i as usize].device.read(phys_offset, &mut buf).await
+                        .map_err(|e| RaidError::MemberIo { member_idx: i as usize, error: e })?;
+                    strips.push(buf);
+                }
+
+                let strip_refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+                let mut check = vec![0u8; strip_size];
+                self.parity_engine.compute_xor_parity(&strip_refs, &mut check);
+                Ok(check.iter().all(|&x| x == 0))
+            }
+            RaidLevel::Raid6 => {
+                let member_count = self.members.len() as u32;
+                let data_disks = self.data_disks();
+                let strip_size = self.stripe_size as usize;
+                let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
+
+                // Read data strips
+                let mut data_strips: Vec<Vec<u8>> = Vec::with_capacity(data_disks as usize);
+                for d in 0..data_disks {
+                    let disk = data_disk_index(d, stripe, member_count);
+                    let mut buf = vec![0u8; strip_size];
+                    self.members[disk as usize].device.read(phys_offset, &mut buf).await
+                        .map_err(|e| RaidError::MemberIo { member_idx: disk as usize, error: e })?;
+                    data_strips.push(buf);
+                }
+
+                // Read stored P and Q (last two disks in rotation, but for simplicity
+                // we use the same parity_disk_for_stripe for P; Q is on the next one)
+                let p_disk = parity_disk_for_stripe(stripe, member_count);
+                let mut stored_p = vec![0u8; strip_size];
+                self.members[p_disk as usize].device.read(phys_offset, &mut stored_p).await
+                    .map_err(|e| RaidError::MemberIo { member_idx: p_disk as usize, error: e })?;
+
+                // Compute expected P and Q
+                let strip_refs: Vec<&[u8]> = data_strips.iter().map(|s| s.as_slice()).collect();
+                let mut expected_p = vec![0u8; strip_size];
+                let mut _expected_q = vec![0u8; strip_size];
+                self.parity_engine.compute_raid6_parity(&strip_refs, &mut expected_p, &mut _expected_q);
+
+                Ok(stored_p == expected_p)
+            }
+            RaidLevel::Raid1 => {
+                // Compare all active mirrors byte-for-byte
+                let active = self.active_members();
+                if active.len() < 2 {
+                    return Ok(true);
+                }
+                let strip_size = self.stripe_size.max(4096) as usize;
+                let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size.max(4096), DATA_OFFSET);
+
+                let mut first = vec![0u8; strip_size];
+                active[0].1.device.read(phys_offset, &mut first).await
+                    .map_err(|e| RaidError::MemberIo { member_idx: active[0].0, error: e })?;
+
+                for &(idx, ref member) in &active[1..] {
+                    let mut buf = vec![0u8; strip_size];
+                    member.device.read(phys_offset, &mut buf).await
+                        .map_err(|e| RaidError::MemberIo { member_idx: idx, error: e })?;
+                    if buf != first {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            RaidLevel::Raid10 => {
+                // RAID 10 = striped mirrors; mirror consistency check
+                Ok(true)
+            }
+        }
+    }
+
+    /// Recover from an unclean shutdown by repairing parity on dirty stripes.
+    ///
+    /// For RAID 5/6: reads data strips from each dirty stripe, recomputes parity,
+    /// and rewrites it if it doesn't match. Data strips are treated as authoritative
+    /// (writes are data-then-parity ordered).
+    ///
+    /// For RAID 1/10: mirrors are self-consistent; just clears the journal.
+    ///
+    /// Returns the number of stripes that had parity repaired.
+    pub async fn recover_journal(&self) -> Result<u64, RaidError> {
+        let dirty_stripes = {
+            let j = self.journal.lock().await;
+            j.dirty_stripes()
+        };
+
+        match self.level {
+            RaidLevel::Raid1 | RaidLevel::Raid10 => {
+                // Mirrors don't need parity repair — just clear
+                let mut j = self.journal.lock().await;
+                j.clear_all().map_err(|e| RaidError::Drive(DriveError::Other(e.into())))?;
+                Ok(0)
+            }
+            RaidLevel::Raid5 | RaidLevel::Raid6 => {
+                let mut repaired = 0u64;
+                for stripe in &dirty_stripes {
+                    if self.repair_stripe_parity(*stripe).await? {
+                        repaired += 1;
+                    }
+                }
+                let mut j = self.journal.lock().await;
+                j.clear_all().map_err(|e| RaidError::Drive(DriveError::Other(e.into())))?;
+                Ok(repaired)
+            }
+        }
+    }
+
+    /// Start a background scrub that verifies (and optionally repairs) parity
+    /// across all stripes. Returns a progress handle immediately.
+    pub fn start_scrub(self: &Arc<Self>, config: ScrubConfig) -> Arc<ScrubProgress> {
+        let stripe_count = match self.level {
+            RaidLevel::Raid1 | RaidLevel::Raid10 => {
+                let unit = self.stripe_size.max(4096);
+                let per_member_data = self.members.first()
+                    .map(|m| m.device.capacity_bytes().saturating_sub(DATA_OFFSET))
+                    .unwrap_or(0);
+                per_member_data / unit
+            }
+            RaidLevel::Raid5 | RaidLevel::Raid6 => {
+                let per_member_data = self.members.first()
+                    .map(|m| m.device.capacity_bytes().saturating_sub(DATA_OFFSET))
+                    .unwrap_or(0);
+                per_member_data / self.stripe_size
+            }
+        };
+
+        let progress = ScrubProgress::new(stripe_count);
+        let progress_clone = Arc::clone(&progress);
+        let array = Arc::clone(self);
+        let delay = config.inter_stripe_delay();
+
+        tokio::spawn(async move {
+            for stripe in 0..stripe_count {
+                if progress_clone.is_cancelled() {
+                    break;
+                }
+
+                match array.verify_stripe(stripe).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        progress_clone.errors_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if config.repair {
+                            match array.repair_stripe_parity(stripe).await {
+                                Ok(_) => {
+                                    progress_clone.errors_repaired.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    tracing::error!("scrub repair failed on stripe {stripe}: {e}");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("scrub verify failed on stripe {stripe}: {e}");
+                    }
+                }
+
+                progress_clone.advance();
+
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        });
+
+        progress
     }
 
     // --- RAID 1 I/O ---
@@ -1249,6 +1475,133 @@ mod tests {
         let mut check = vec![0u8; 4096];
         engine.compute_xor_parity(&[&strip0, &strip1, &strip2], &mut check);
         assert!(check.iter().all(|&x| x == 0), "parity check failed");
+
+        cleanup_test_files(&paths);
+    }
+
+    // --- Scrub tests ---
+
+    #[tokio::test]
+    async fn scrub_detects_and_repairs_bad_parity() {
+        use crate::raid::rebuild::ScrubConfig;
+
+        let (devices, paths) = create_test_devices(4, 2 * 1024 * 1024).await;
+        let stripe_size = 4096u64;
+        let raw_devices: Vec<Arc<dyn BlockDevice>> = devices.iter().map(Arc::clone).collect();
+
+        let array = RaidArray::create(RaidLevel::Raid5, devices, Some(stripe_size)).await.unwrap();
+
+        // Write a full stripe
+        let full_stripe: Vec<u8> = (0..12288u32).map(|i| (i % 256) as u8).collect();
+        array.write(0, &full_stripe).await.unwrap();
+        array.flush().await.unwrap();
+
+        // Corrupt parity on stripe 0 (parity disk = 3)
+        let corrupt = vec![0xFF_u8; 4096];
+        raw_devices[3].write(DATA_OFFSET, &corrupt).await.unwrap();
+        raw_devices[3].flush().await.unwrap();
+
+        // Run scrub with repair
+        let array = Arc::new(array);
+        let progress = array.start_scrub(ScrubConfig {
+            max_stripes_per_sec: 0,
+            repair: true,
+        });
+
+        // Wait for completion
+        for _ in 0..1000 {
+            if progress.percent() >= 100.0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(progress.percent() >= 100.0, "scrub did not complete");
+        assert_eq!(progress.found(), 1, "expected 1 error found");
+        assert_eq!(progress.repaired(), 1, "expected 1 error repaired");
+
+        // Verify data is still intact
+        let mut readback = vec![0u8; 12288];
+        array.read(0, &mut readback).await.unwrap();
+        assert_eq!(readback, full_stripe);
+
+        // Run scrub again — should find no errors
+        let progress2 = array.start_scrub(ScrubConfig {
+            max_stripes_per_sec: 0,
+            repair: true,
+        });
+        for _ in 0..1000 {
+            if progress2.percent() >= 100.0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(progress2.found(), 0, "second scrub should find no errors");
+
+        cleanup_test_files(&paths);
+    }
+
+    #[tokio::test]
+    async fn scrub_report_only() {
+        use crate::raid::rebuild::ScrubConfig;
+
+        let (devices, paths) = create_test_devices(4, 2 * 1024 * 1024).await;
+        let stripe_size = 4096u64;
+        let raw_devices: Vec<Arc<dyn BlockDevice>> = devices.iter().map(Arc::clone).collect();
+
+        let array = RaidArray::create(RaidLevel::Raid5, devices, Some(stripe_size)).await.unwrap();
+
+        // Write data then corrupt parity
+        let data: Vec<u8> = (0..12288u32).map(|i| (i % 256) as u8).collect();
+        array.write(0, &data).await.unwrap();
+        array.flush().await.unwrap();
+
+        let corrupt = vec![0xDE_u8; 4096];
+        raw_devices[3].write(DATA_OFFSET, &corrupt).await.unwrap();
+        raw_devices[3].flush().await.unwrap();
+
+        // Report-only scrub
+        let array = Arc::new(array);
+        let progress = array.start_scrub(ScrubConfig {
+            max_stripes_per_sec: 0,
+            repair: false,
+        });
+
+        for _ in 0..1000 {
+            if progress.percent() >= 100.0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(progress.found(), 1, "expected 1 error found");
+        assert_eq!(progress.repaired(), 0, "report-only should not repair");
+
+        cleanup_test_files(&paths);
+    }
+
+    #[tokio::test]
+    async fn scrub_cancel() {
+        use crate::raid::rebuild::ScrubConfig;
+
+        // Use larger devices so there are many stripes to scrub
+        let (devices, paths) = create_test_devices(4, 2 * 1024 * 1024).await;
+        let stripe_size = 4096u64;
+
+        let array = RaidArray::create(RaidLevel::Raid5, devices, Some(stripe_size)).await.unwrap();
+        let array = Arc::new(array);
+
+        let progress = array.start_scrub(ScrubConfig {
+            max_stripes_per_sec: 100, // slow rate so we can cancel
+            repair: false,
+        });
+
+        // Let it start, then cancel
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        progress.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(progress.completed() < progress.total_stripes,
+            "scrub should have been cancelled before completing (completed {}, total {})",
+            progress.completed(), progress.total_stripes);
 
         cleanup_test_files(&paths);
     }

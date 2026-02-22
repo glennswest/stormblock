@@ -57,6 +57,92 @@ impl RebuildProgress {
     }
 }
 
+/// Progress tracking for an ongoing scrub/verify operation.
+#[derive(Debug)]
+pub struct ScrubProgress {
+    /// Total number of stripes to verify.
+    pub total_stripes: u64,
+    /// Number of stripes checked so far.
+    pub completed_stripes: AtomicU64,
+    /// Number of parity mismatches detected.
+    pub errors_found: AtomicU64,
+    /// Number of parity mismatches repaired (only when repair=true).
+    pub errors_repaired: AtomicU64,
+    /// Set to true to cancel the scrub.
+    pub cancelled: AtomicBool,
+}
+
+impl ScrubProgress {
+    pub fn new(total_stripes: u64) -> Arc<Self> {
+        Arc::new(ScrubProgress {
+            total_stripes,
+            completed_stripes: AtomicU64::new(0),
+            errors_found: AtomicU64::new(0),
+            errors_repaired: AtomicU64::new(0),
+            cancelled: AtomicBool::new(false),
+        })
+    }
+
+    pub fn percent(&self) -> f64 {
+        if self.total_stripes == 0 {
+            return 100.0;
+        }
+        let done = self.completed_stripes.load(Ordering::Relaxed);
+        (done as f64 / self.total_stripes as f64) * 100.0
+    }
+
+    pub fn completed(&self) -> u64 {
+        self.completed_stripes.load(Ordering::Relaxed)
+    }
+
+    pub fn found(&self) -> u64 {
+        self.errors_found.load(Ordering::Relaxed)
+    }
+
+    pub fn repaired(&self) -> u64 {
+        self.errors_repaired.load(Ordering::Relaxed)
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub fn advance(&self) {
+        self.completed_stripes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Configuration for a background scrub operation.
+#[derive(Debug, Clone)]
+pub struct ScrubConfig {
+    /// Maximum stripes to verify per second (0 = unlimited).
+    pub max_stripes_per_sec: u64,
+    /// If true, rewrite corrected parity on mismatch. If false, report only.
+    pub repair: bool,
+}
+
+impl Default for ScrubConfig {
+    fn default() -> Self {
+        ScrubConfig {
+            max_stripes_per_sec: 1000,
+            repair: true,
+        }
+    }
+}
+
+impl ScrubConfig {
+    pub fn inter_stripe_delay(&self) -> std::time::Duration {
+        if self.max_stripes_per_sec == 0 {
+            return std::time::Duration::ZERO;
+        }
+        std::time::Duration::from_micros(1_000_000 / self.max_stripes_per_sec)
+    }
+}
+
 /// Configuration for the rebuild rate limiter.
 #[derive(Debug, Clone)]
 pub struct RebuildConfig {

@@ -10,7 +10,8 @@ use tempfile::TempDir;
 use stormblock::drive::BlockDevice;
 use stormblock::drive::filedev::FileDevice;
 use stormblock::raid::journal::WriteIntentJournal;
-use stormblock::raid::{RaidArray, RaidLevel, RaidSuperblock, RaidArrayId};
+use stormblock::raid::parity::ParityEngine;
+use stormblock::raid::{RaidArray, RaidLevel, RaidSuperblock, RaidArrayId, DATA_OFFSET};
 use stormblock::volume::extent::{ExtentAllocator, Extent};
 
 #[test]
@@ -220,4 +221,61 @@ async fn raid_superblock_written_to_members() {
 
     // Both should have the same array UUID
     assert_eq!(sb0.array_uuid, sb1.array_uuid);
+}
+
+#[tokio::test]
+async fn journal_recovery_repairs_parity() {
+    let dir = TempDir::new().unwrap();
+    let devices = common::create_file_devices(&dir, 4, 2 * 1024 * 1024).await;
+    let stripe_size = 4096u64;
+
+    // Keep raw device references for direct manipulation
+    let raw_devices: Vec<Arc<dyn BlockDevice>> = devices.iter().map(Arc::clone).collect();
+
+    let array = RaidArray::create(RaidLevel::Raid5, devices, Some(stripe_size))
+        .await
+        .unwrap();
+
+    // Write a full stripe of known data (3 data disks x 4096 = 12288 bytes)
+    let full_stripe: Vec<u8> = (0..12288u32).map(|i| (i % 256) as u8).collect();
+    array.write(0, &full_stripe).await.unwrap();
+    array.flush().await.unwrap();
+
+    // Read back to verify data is correct
+    let mut readback = vec![0u8; 12288];
+    array.read(0, &mut readback).await.unwrap();
+    assert_eq!(readback, full_stripe);
+
+    // Corrupt parity: stripe 0, parity is on disk 3 (parity_disk_for_stripe(0, 4) = 3)
+    let corrupt = vec![0xFF_u8; 4096];
+    raw_devices[3].write(DATA_OFFSET, &corrupt).await.unwrap();
+    raw_devices[3].flush().await.unwrap();
+
+    // Simulate crash state: manually mark stripe 0 dirty in the journal
+    {
+        let mut j = array.journal_mut().await;
+        j.mark_dirty(0);
+        let _ = j.flush();
+    }
+
+    // Run journal recovery
+    let repaired = array.recover_journal().await.unwrap();
+    assert_eq!(repaired, 1, "expected 1 stripe repaired");
+
+    // Verify parity is now correct: read all 4 strips at stripe 0 and XOR should be zero
+    let engine = ParityEngine::detect();
+    let mut strips: Vec<Vec<u8>> = Vec::new();
+    for i in 0..4 {
+        let mut buf = vec![0u8; 4096];
+        raw_devices[i].read(DATA_OFFSET, &mut buf).await.unwrap();
+        strips.push(buf);
+    }
+    let strip_refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+    let mut check = vec![0u8; 4096];
+    engine.compute_xor_parity(&strip_refs, &mut check);
+    assert!(check.iter().all(|&x| x == 0), "parity check failed after recovery");
+
+    // Verify journal is clean
+    let dirty = array.journal_mut().await.dirty_count();
+    assert_eq!(dirty, 0, "journal should be clean after recovery");
 }
