@@ -134,3 +134,41 @@ async fn volume_multiple_extent_writes() {
             "offset {offset} should have byte {:#x}", 0x10 + i as u8);
     }
 }
+
+#[tokio::test]
+async fn volume_resize_grow_and_shrink() {
+    let dir = TempDir::new().unwrap();
+    let (mut vm, array_id) = setup_volume_manager(&dir).await;
+
+    let vol_id = vm.create_volume("resize-test", 32 * 1024 * 1024, array_id).await.unwrap();
+    let vol = vm.get_volume(&vol_id).unwrap();
+
+    // Write 4 KB at offset 0
+    let data = vec![0xDE_u8; 4096];
+    vol.write(0, &data).await.unwrap();
+
+    // Grow to 64 MB
+    vm.resize_volume(vol_id, 64 * 1024 * 1024).await.unwrap();
+    assert_eq!(vol.capacity_bytes(), 64 * 1024 * 1024);
+
+    // Data at offset 0 still correct after grow
+    let mut buf = vec![0u8; 4096];
+    vol.read(0, &mut buf).await.unwrap();
+    assert_eq!(buf, data);
+
+    // Write beyond original 32 MB boundary
+    let data_high = vec![0xEF_u8; 4096];
+    vol.write(40 * 1024 * 1024, &data_high).await.unwrap();
+
+    let mut buf2 = vec![0u8; 4096];
+    vol.read(40 * 1024 * 1024, &mut buf2).await.unwrap();
+    assert_eq!(buf2, data_high);
+
+    // Shrink back to 32 MB — data at offset 0 still intact
+    vm.resize_volume(vol_id, 32 * 1024 * 1024).await.unwrap();
+    assert_eq!(vol.capacity_bytes(), 32 * 1024 * 1024);
+
+    let mut buf3 = vec![0u8; 4096];
+    vol.read(0, &mut buf3).await.unwrap();
+    assert_eq!(buf3, data);
+}

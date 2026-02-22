@@ -43,6 +43,11 @@ pub struct CreateSnapshotRequest {
     pub source_volume_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ResizeVolumeRequest {
+    pub new_size: String,
+}
+
 async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "list").increment(1);
     let vm = state.volume_manager.lock().await;
@@ -194,10 +199,62 @@ async fn create_snapshot(
     }
 }
 
+async fn resize_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ResizeVolumeRequest>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "resize").increment(1);
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+
+    let new_size = match parse_size(&req.new_size) {
+        Ok(s) => s,
+        Err(e) => return ApiError::bad_request(format!("invalid size '{}': {e}", req.new_size)),
+    };
+
+    let vol_id = VolumeId(uuid);
+
+    // Check if volume is exported
+    {
+        let exports = state.exports.read().await;
+        if exports.iter().any(|e| e.volume_id == uuid) {
+            return ApiError::conflict("cannot resize volume with active exports".to_string());
+        }
+    }
+
+    let mut vm = state.volume_manager.lock().await;
+    match vm.resize_volume(vol_id, new_size).await {
+        Ok(()) => {
+            let handle = match vm.get_volume_handle(&vol_id) {
+                Some(h) => h,
+                None => return ApiError::not_found(format!("volume {uuid} not found")),
+            };
+            let name = handle.name().await;
+            let allocated = handle.allocated().await;
+            let vsize = handle.capacity_bytes();
+            let resp = VolumeResponse {
+                id: uuid,
+                name,
+                virtual_size_bytes: vsize,
+                virtual_size_human: human_size(vsize),
+                allocated_bytes: allocated,
+                allocated_human: human_size(allocated),
+                array_id: None,
+            };
+            Json(resp).into_response()
+        }
+        Err(e) => ApiError::bad_request(format!("failed to resize volume: {e}")),
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_volumes).post(create_volume))
         .route("/{id}", get(get_volume).delete(delete_volume))
+        .route("/{id}/resize", axum::routing::patch(resize_volume))
         .route("/snapshots", axum::routing::post(create_snapshot))
         .with_state(state)
 }

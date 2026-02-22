@@ -98,7 +98,7 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] `snapshot.rs` — COW snapshot creation (clone extent map, bump refcounts)
 - [x] `snapshot.rs` — Snapshot deletion (decrement refcounts, free unreferenced extents)
 - [x] `snapshot.rs` — Snapshot diff (for incremental backup)
-- [ ] Volume resize (grow/shrink)
+- [x] Volume resize (grow/shrink)
 
 ### Phase 4: Target protocols (`src/target/`) — DONE
 - [x] `reactor.rs` — Per-core single-threaded tokio runtimes, round-robin dispatch

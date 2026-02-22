@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
@@ -243,18 +244,68 @@ impl ThinVolume {
 pub struct ThinVolumeHandle {
     inner: tokio::sync::Mutex<ThinVolume>,
     device_id: DeviceId,
-    virtual_size: u64,
+    virtual_size: AtomicU64,
 }
 
 impl ThinVolumeHandle {
     pub fn new(vol: ThinVolume) -> Self {
         let device_id = vol.device_id.clone();
-        let virtual_size = vol.virtual_size;
+        let virtual_size = AtomicU64::new(vol.virtual_size);
         ThinVolumeHandle {
             inner: tokio::sync::Mutex::new(vol),
             device_id,
             virtual_size,
         }
+    }
+
+    /// Resize the volume to `new_size` bytes.
+    ///
+    /// Growing is instant — allocate-on-write handles new space.
+    /// Shrinking frees extents beyond the new boundary.
+    pub async fn resize(&self, new_size: u64) -> Result<(), VolumeError> {
+        if new_size == 0 {
+            return Err(VolumeError::InvalidSize("size must be > 0".to_string()));
+        }
+
+        let current = self.virtual_size.load(Ordering::Relaxed);
+        if new_size == current {
+            return Ok(());
+        }
+
+        let mut vol = self.inner.lock().await;
+
+        if new_size < current {
+            // Shrink: free extents beyond new boundary
+            let extent_size = {
+                let alloc = vol.allocator.lock().await;
+                alloc.extent_size()
+            };
+            let max_vext_idx = new_size / extent_size;
+
+            // Collect indices to remove (at or beyond boundary)
+            let to_remove: Vec<u64> = vol.extent_map.range(max_vext_idx..)
+                .map(|(&idx, _)| idx)
+                .collect();
+
+            for idx in to_remove {
+                if let Some(pext) = vol.extent_map.remove(&idx) {
+                    vol.allocated -= pext.length;
+                    if pext.ref_count <= 1 {
+                        let mut alloc = vol.allocator.lock().await;
+                        let ext = super::extent::Extent {
+                            array_id: pext.array_id,
+                            offset: pext.offset,
+                            length: pext.length,
+                        };
+                        alloc.free(&ext);
+                    }
+                }
+            }
+        }
+
+        vol.virtual_size = new_size;
+        self.virtual_size.store(new_size, Ordering::Relaxed);
+        Ok(())
     }
 
     pub async fn volume_id(&self) -> VolumeId {
@@ -286,7 +337,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     fn capacity_bytes(&self) -> u64 {
-        self.virtual_size
+        self.virtual_size.load(Ordering::Relaxed)
     }
 
     fn block_size(&self) -> u32 {
