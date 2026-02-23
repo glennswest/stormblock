@@ -169,7 +169,7 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
                         use tower::Service;
                         let mut svc = app;
                         let req = req.map(axum::body::Body::new);
-                        svc.call(req).await.map_err(|err| match err {})
+                        Ok::<_, std::convert::Infallible>(svc.call(req).await.unwrap())
                     }
                 });
                 let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
