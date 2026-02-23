@@ -1,0 +1,66 @@
+# Changelog
+
+## [Unreleased]
+
+### 2026-02-21
+- **feat:** Add journal recovery and background scrub/verify for RAID engine
+- **feat:** Add volume resize (grow/shrink) support
+
+## [v3.2.0] — 2026-02-19
+
+### Added
+- HTMX + Askama web UI for storage management (dashboard, drives, arrays, volumes, exports)
+
+### Changed
+- Switch reqwest to rustls-tls for fully static musl builds (no OpenSSL dependency)
+
+### Fixed
+- Fix ioctl calls to use `libc::Ioctl` for musl compatibility
+
+## [v3.1.0] — 2026-02-19
+
+### Added
+- On-disk metadata persistence for volume state recovery (`--data-dir` flag)
+- Binary envelope format with atomic writes and CRC32C checksums
+- Restart recovery for extent allocator, thin volumes, and snapshots
+
+## [v3.0.0] — 2026-02-19
+
+### Added
+- End-to-end integration tests (FileDevice → RAID 1 → ThinVolume → iSCSI/NVMe-oF target → TCP client)
+- Crash recovery tests (journal persist/recovery, superblock validation, extent allocator consistency)
+- RAID degraded mode tests (RAID 1 + RAID 5 with failed members)
+- Management REST API tests (drives, arrays, volumes, exports, metrics endpoints)
+- Volume lifecycle tests (create, snapshot COW, delete, multi-extent writes)
+- Criterion micro-benchmarks (parity throughput, extent allocation, PDU parsing)
+- fio macro-benchmark scripts (iSCSI + NVMe-oF, 4K random + sequential)
+- Container images via Dockerfile for x86_64 and aarch64
+
+### Breaking
+- Major version bump for stabilized test/benchmark infrastructure
+
+## [v2.0.0] — 2026-02-19
+
+### Added
+- **Phase 3 — Volume manager:** thin provisioning, COW snapshots, extent allocator with free-space bitmap, discard/TRIM handling, snapshot diff for incremental backup
+- **Phase 4 — Target protocols:** iSCSI target (RFC 7143, CHAP MD5 auth, full SCSI command set including INQUIRY, READ/WRITE 10/16, READ_CAPACITY, MODE_SENSE, UNMAP, REPORT_LUNS, VPD pages), NVMe-oF/TCP target (fabric connect, discovery subsystem, admin + I/O commands, PDU parsing), per-core reactor pool with CPU pinning
+- **Phase 5 — Management plane:** REST API via axum (drives, arrays, volumes, exports endpoints), TOML config parsing with validation, Prometheus metrics endpoint
+- **Phase 6 — Cluster scaling:** Raft consensus via openraft 0.9, node discovery and membership, health heartbeat, synchronous and asynchronous replication, volume migration/rebalance, online node addition — all behind `#[cfg(feature = "cluster")]`
+
+### Breaking
+- Major version bump for new network protocol subsystems and cluster architecture
+
+## [v1.0.0] — 2026-02-19
+
+### Added
+- **Phase 1 — Drive layer:** `BlockDevice` trait (async read/write/flush/discard), page-aligned DMA buffer allocator, SAS backend via io_uring (O_DIRECT, SSD/HDD detection, sysfs metadata), NVMe struct definitions (stub — needs bare metal), FileDevice portable fallback (tokio file I/O for MikroTik/dev/testing), drive enumeration and auto-detection
+- **Phase 2 — RAID engine:** RAID 1 (mirror with read balancing), RAID 5 (XOR parity), RAID 6 (dual parity with GF(2^8) multiplication), RAID 10 (striped mirrors), SIMD parity compute (AVX2 x86_64, NEON aarch64, scalar fallback), write-intent bitmap journal with recovery, background rebuild with rate limiting, on-disk superblock format
+- CLI entry point with `--device` flag, Ctrl+C graceful shutdown
+
+## [v0.1.0] — 2026-02-17
+
+### Added
+- Initial project structure and module layout
+- Specification document (`docs/stormblock-spec.md`)
+- Source stubs for all planned modules
+- Cargo.toml with dependency declarations (openraft 0.9, tokio, axum, io-uring, etc.)
