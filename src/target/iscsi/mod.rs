@@ -8,6 +8,7 @@ pub mod login;
 pub mod chap;
 pub mod scsi;
 pub mod session;
+pub mod alua;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

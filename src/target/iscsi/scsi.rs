@@ -23,6 +23,8 @@ pub const SYNCHRONIZE_CACHE_16: u8 = 0x91;
 pub const UNMAP: u8 = 0x42;
 pub const REPORT_LUNS: u8 = 0xA0;
 pub const REQUEST_SENSE: u8 = 0x03;
+pub const MAINTENANCE_IN: u8 = 0xA3;
+pub const MAINTENANCE_OUT: u8 = 0xA4;
 
 /// SCSI status codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,30 @@ pub async fn handle_scsi_command(
 
         REPORT_LUNS => handle_report_luns(),
 
+        MAINTENANCE_IN => {
+            let service_action = cdb[1] & 0x1F;
+            if service_action == super::alua::SA_REPORT_TPG {
+                let alloc_len = u32::from_be_bytes([cdb[6], cdb[7], cdb[8], cdb[9]]) as usize;
+                let ctrl = super::alua::AluaController::new_single(vec![1]);
+                let mut data = ctrl.report_target_port_groups();
+                data.truncate(alloc_len);
+                ScsiResult::good(data)
+            } else {
+                ScsiResult::check_condition(SenseData::illegal_request())
+            }
+        }
+
+        MAINTENANCE_OUT => {
+            let service_action = cdb[1] & 0x1F;
+            if service_action == super::alua::SA_SET_TPG {
+                let ctrl = super::alua::AluaController::new_single(vec![1]);
+                ctrl.set_target_port_groups(data_out);
+                ScsiResult::good_empty()
+            } else {
+                ScsiResult::check_condition(SenseData::illegal_request())
+            }
+        }
+
         _ => {
             tracing::debug!("unsupported SCSI opcode: {opcode:#04x}");
             ScsiResult::check_condition(SenseData::illegal_request())
@@ -180,7 +206,7 @@ fn handle_inquiry(cdb: &[u8], device: &Arc<dyn BlockDevice>) -> ScsiResult {
     data[2] = 0x06; // SPC-4 version
     data[3] = 0x02; // Response data format = 2
     data[4] = 91;   // Additional length (96 - 5)
-    data[5] = 0x00; // No special features
+    data[5] = 0x10; // TPGS=01 (implicit ALUA)
     data[6] = 0x00;
     data[7] = 0x02; // CmdQue=1 (tagged command queuing)
 
