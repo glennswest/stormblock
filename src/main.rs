@@ -365,6 +365,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // StormFS registration (announce volumes to StormFS metadata cluster)
+    let _stormfs_handle = if config.stormfs.enabled {
+        tracing::info!(
+            "StormFS registration enabled — metadata: {}, interval: {}s",
+            config.stormfs.metadata_url,
+            config.stormfs.heartbeat_secs,
+        );
+        let reg = stormblock::stormfs::StormFsRegistration::new(config.stormfs.clone());
+        Some(reg.start(state.clone()))
+    } else {
+        None
+    };
+
     // Phase 4: Start target protocols
     if let Some(device) = export_device {
         let reactor_config = ReactorConfig {

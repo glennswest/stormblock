@@ -26,6 +26,8 @@ pub struct StormBlockConfig {
     #[cfg(feature = "cluster")]
     #[serde(default)]
     pub cluster: crate::cluster::config::ClusterConfig,
+    #[serde(default)]
+    pub stormfs: crate::stormfs::StormFsConfig,
 }
 
 impl Default for StormBlockConfig {
@@ -42,6 +44,7 @@ impl Default for StormBlockConfig {
             reactor: ReactorCfg::default(),
             #[cfg(feature = "cluster")]
             cluster: crate::cluster::config::ClusterConfig::default(),
+            stormfs: crate::stormfs::StormFsConfig::default(),
         }
     }
 }
@@ -294,6 +297,16 @@ impl StormBlockConfig {
         for vol in &self.volumes {
             parse_size(&vol.size)
                 .map_err(|e| anyhow::anyhow!("invalid volume size '{}': {e}", vol.size))?;
+        }
+
+        // Validate StormFS config
+        if self.stormfs.enabled {
+            if self.stormfs.metadata_url.is_empty() {
+                anyhow::bail!("stormfs.metadata_url is required when stormfs.enabled = true");
+            }
+            if self.stormfs.advertise_addr.is_empty() {
+                anyhow::bail!("stormfs.advertise_addr is required when stormfs.enabled = true");
+            }
         }
 
         // Array stripe sizes should be reasonable

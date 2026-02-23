@@ -22,7 +22,9 @@ tokio = { version = "1", features = ["full"] }
 
 # Consensus (cluster mode)
 openraft = { version = "0.9", features = ["serde"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
+# HTTP client (StormFS registration, cluster join)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Management API
 axum = "0.8"
@@ -87,7 +89,7 @@ nix = { version = "0.29", features = ["fs", "ioctl"] }
 default = ["nvmeof", "iscsi", "cluster", "ui"]
 nvmeof = []
 iscsi = []
-cluster = ["dep:openraft", "dep:reqwest"]
+cluster = ["dep:openraft"]
 ui = ["dep:askama", "dep:rust-embed", "dep:mime_guess"]
 arm64 = []
 mikrotik = []
