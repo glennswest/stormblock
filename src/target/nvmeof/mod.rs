@@ -7,6 +7,8 @@ pub mod fabric;
 pub mod admin;
 pub mod io;
 pub mod discovery;
+#[cfg(target_os = "linux")]
+pub mod zerocopy;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
