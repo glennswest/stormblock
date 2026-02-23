@@ -1,7 +1,16 @@
 # Changelog
 
 ## [Unreleased]
-<!-- New unreleased changes go here -->
+
+### 2026-02-23
+- **feat:** TLS support for management API via rustls (cert/key config in stormblock.toml)
+- **feat:** Drive health monitoring — SMART data via sysfs with REST endpoint (`GET /api/v1/drives/{id}/smart`)
+- **feat:** iSCSI multi-connection sessions and R2T/Data-Out for large write commands
+- **feat:** NVMe-oF io_uring zero-copy send for C2H data PDUs (Linux, 16KB+ threshold)
+- **feat:** SCSI ALUA (Asymmetric Logical Unit Access) for multipath I/O — REPORT/SET TARGET PORT GROUPS
+- **feat:** VFIO hugepage DMA allocator (MAP_HUGETLB with fallback) and IOVA lookup via /proc/self/pagemap
+- **feat:** NVMe VFIO driver init — open container/group/device, map BAR0, admin queue pair, controller enable
+- **feat:** StormFS registration stub — periodic volume announcement to StormFS metadata cluster
 
 ## [v4.0.0] — 2026-02-23
 

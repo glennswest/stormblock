@@ -44,10 +44,11 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/target/` — NVMe-oF/TCP :4420 (`nvmeof/`), iSCSI :3260 (`iscsi/`), per-core reactor (`reactor.rs`)
 - `src/mgmt/` — REST API via axum (`api/`), TOML config parsing (`config.rs`), Prometheus metrics
 - `src/cluster/` — Optional multi-node: Raft consensus (`raft/`), membership (`membership.rs`), heartbeat (`heartbeat.rs`), replication (`replication.rs`), migration (`migration.rs`)
+- `src/stormfs.rs` — StormFS registration: periodic volume announcement to metadata cluster
 - `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with Ctrl+C shutdown
 
 ## Current State
-Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO, stub only), and FileDevice (tokio, portable). RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, metrics). Cluster scaling via openraft 0.9 with HTTP-based Raft RPCs, node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Integration tests exercise the full stack (FileDevice → RAID → Volume → iSCSI/NVMe-oF target → TCP client), crash recovery (journal, superblock, extent allocator), and all REST API endpoints. Criterion micro-benchmarks cover parity compute, extent allocation, and PDU parsing. Container images via Dockerfile for deployment under StormBase. 152 tests pass on macOS and Linux (root@devx.gw.lo:/root/stormblock).
+All phases (0–7) and all roadmap items are implemented. The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO with hugepage DMA and full init), and FileDevice (tokio, portable). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, and background rebuild. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP-based Raft RPCs, node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
 
 ---
 
@@ -64,15 +65,15 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 ### Phase 1: Drive layer (`src/drive/`) — DONE
 - [x] Define `BlockDevice` trait (async read/write/flush/discard)
 - [x] `dma.rs` — Page-aligned buffer allocator (DmaBuf with alloc/zeroed/pool)
-- [ ] `dma.rs` — Hugepage-backed slab allocator for VFIO (future, needs bare metal)
+- [x] `dma.rs` — Hugepage-backed slab allocator for VFIO
 - [x] `nvme.rs` — Struct definitions (NvmeDevice, IoQueuePair, SQ/CQ entries, registers)
-- [ ] `nvme.rs` — VFIO init, BAR0 mapping, queue pairs (needs bare metal hardware)
+- [x] `nvme.rs` — VFIO init, BAR0 mapping, queue pairs
 - [x] `sas.rs` — Open /dev/sdX with O_DIRECT, detect SSD/HDD, read serial/model from sysfs
 - [x] `sas.rs` — io_uring read/write/flush/discard
 - [x] `filedev.rs` — NEW: Portable tokio file I/O fallback (MikroTik, dev, testing)
 - [x] `mod.rs` — Drive enumeration: auto-detect block device vs file, open appropriate backend
 - [x] `main.rs` — Wired up drive init with `--device` CLI flag
-- [ ] Drive health monitoring (SMART via NVMe admin commands / SG_IO)
+- [x] Drive health monitoring (SMART via sysfs + REST endpoint)
 
 ### Phase 2: RAID engine (`src/raid/`) — DONE
 - [x] RAID superblock format (on-disk metadata: member drives, layout, state)
@@ -109,7 +110,7 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] `nvmeof/admin.rs` — Identify Controller/Namespace, Active NS List, Get Log Page
 - [x] `nvmeof/io.rs` — NVMe I/O: Read, Write, Flush, Dataset Management (TRIM)
 - [x] `nvmeof/mod.rs` — NVMe-oF target server (ICReq/ICResp handshake, command loop)
-- [ ] `nvmeof` — io_uring zero-copy send for C2H data
+- [x] `nvmeof` — io_uring zero-copy send for C2H data
 - [x] `iscsi/pdu.rs` — iSCSI PDU parsing (48-byte BHS, CRC32C digests, text params)
 - [x] `iscsi/login.rs` — iSCSI login state machine (security + operational negotiation)
 - [x] `iscsi/chap.rs` — CHAP MD5 authentication (constant-time verify)
@@ -117,8 +118,8 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] `iscsi/session.rs` — Session registry, TSIH allocation, CmdSN/StatSN tracking
 - [x] `iscsi/mod.rs` — iSCSI target server (login phase, full-feature phase, Data-In chunking)
 - [x] `main.rs` — CLI flags for target config, startup with Ctrl+C graceful shutdown
-- [ ] `iscsi` — Multi-connection sessions, R2T/Data-Out for large writes
-- [ ] MPIO/ALUA support for multipath
+- [x] `iscsi` — Multi-connection sessions, R2T/Data-Out for large writes
+- [x] MPIO/ALUA support for multipath
 
 ### Phase 5: Management plane (`src/mgmt/`) — DONE
 - [x] `config.rs` — Parse `stormblock.toml` into typed config structs
@@ -130,7 +131,7 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] `metrics.rs` — Prometheus metrics endpoint (`/metrics`)
 - [x] `mod.rs` — AppState, DriveInfo, ArrayInfo, ExportEntry, start_management_server()
 - [x] `main.rs` — Config loading, CLI merge, AppState wiring, mgmt server spawn
-- [ ] TLS for management API (rustls)
+- [x] TLS for management API (rustls)
 
 ### Phase 6: Cluster scaling (optional — single-node must work without any of this) — DONE
 - [x] Node discovery: new node announces itself via REST to an existing node or seed list
@@ -152,4 +153,4 @@ Phases 1–7 are implemented. The drive layer has three backends: SAS (io_uring,
 - [x] Criterion micro-benchmarks (parity throughput, extent allocation, PDU parsing)
 - [x] fio macro-benchmark scripts (iSCSI + NVMe-oF, 4K random + sequential)
 - [x] Container images (Dockerfile x86_64 + aarch64, deployed via StormBase)
-- [ ] StormFS registration (announce volumes to StormFS metadata cluster)
+- [x] StormFS registration (announce volumes to StormFS metadata cluster)
