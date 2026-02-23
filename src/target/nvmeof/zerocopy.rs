@@ -91,7 +91,7 @@ pub const ZC_MIN_SIZE: usize = 16384; // 16 KB
 /// Requires kernel >= 6.0 for IORING_OP_SEND_ZC.
 pub fn is_send_zc_available() -> bool {
     // Probe by creating a ring and checking if SendZc is supported
-    let ring = match IoUring::builder().build(4) {
+    let ring: IoUring = match IoUring::builder().build(4) {
         Ok(r) => r,
         Err(_) => return false,
     };
