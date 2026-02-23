@@ -32,6 +32,18 @@ pub fn register_metrics() {
         "stormblock_api_requests_total",
         "Total REST API requests"
     );
+    metrics::describe_gauge!(
+        "stormblock_drive_healthy",
+        "Drive health status (1 = healthy, 0 = unhealthy)"
+    );
+    metrics::describe_gauge!(
+        "stormblock_drive_temperature_celsius",
+        "Drive temperature in degrees Celsius"
+    );
+    metrics::describe_gauge!(
+        "stormblock_drive_media_errors",
+        "Drive media error count"
+    );
 
     // Cluster metrics (registered unconditionally, only emitted when cluster is enabled)
     metrics::describe_gauge!(

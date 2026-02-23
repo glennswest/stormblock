@@ -199,8 +199,7 @@ impl BlockDevice for SasDevice {
     }
 
     fn smart_status(&self) -> DriveResult<SmartData> {
-        // TODO: SG_IO passthrough for SMART data
-        Ok(SmartData { healthy: true, ..Default::default() })
+        read_smart_sysfs(&self.id.path)
     }
 }
 
@@ -258,6 +257,53 @@ fn read_device_identity(path: &str) -> (String, String) {
         if serial.is_empty() { "unknown".to_string() } else { serial },
         if model.is_empty() { "unknown".to_string() } else { model },
     )
+}
+
+/// Read SMART health data from sysfs for a SAS/SATA block device.
+fn read_smart_sysfs(path: &str) -> DriveResult<SmartData> {
+    let devname = path.rsplit('/').next().unwrap_or("");
+    let sysfs_base = format!("/sys/block/{devname}/device");
+
+    // Read SCSI device state — sysfs exposes "running" for healthy devices.
+    let state = std::fs::read_to_string(format!("{sysfs_base}/state"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let healthy = state.is_empty() || state == "running";
+
+    // Read I/O error count from /sys/block/<dev>/stat (field 10 is io_ticks, field 9 is I/O errors
+    // on some kernels). More reliably, read /sys/block/<dev>/device/ioerr_cnt if available.
+    let media_errors = std::fs::read_to_string(format!("{sysfs_base}/ioerr_cnt"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+
+    // Try reading hwmon temperature (some SCSI/SATA drives expose this).
+    let temperature_celsius = read_hwmon_temp(devname);
+
+    Ok(SmartData {
+        temperature_celsius,
+        power_on_hours: None,
+        media_errors,
+        available_spare_pct: None,
+        healthy,
+    })
+}
+
+/// Try to read drive temperature from hwmon sysfs entries.
+fn read_hwmon_temp(devname: &str) -> Option<u16> {
+    let hwmon_dir = format!("/sys/block/{devname}/device/hwmon");
+    let entries = std::fs::read_dir(&hwmon_dir).ok()?;
+    for entry in entries.flatten() {
+        let temp_path = entry.path().join("temp1_input");
+        if let Ok(val) = std::fs::read_to_string(&temp_path) {
+            // hwmon temp is in millidegrees Celsius
+            if let Ok(millideg) = val.trim().parse::<u64>() {
+                return Some((millideg / 1000) as u16);
+            }
+        }
+    }
+    None
 }
 
 /// Detect if a block device is SSD or HDD via the rotational flag.
