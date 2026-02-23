@@ -77,11 +77,31 @@ impl ConnectionState {
     }
 }
 
-/// An active iSCSI session.
+/// An active iSCSI session (may have multiple connections per RFC 7143 §7).
 pub struct Session {
     pub tsih: Tsih,
     pub isid: [u8; 6],
     pub params: SessionParams,
+    pub connections: RwLock<HashMap<u16, Arc<ConnectionState>>>,
+}
+
+impl Session {
+    /// Register a new connection for this session.
+    pub async fn add_connection(&self, cid: u16) -> Arc<ConnectionState> {
+        let conn = Arc::new(ConnectionState::new(cid));
+        self.connections.write().await.insert(cid, conn.clone());
+        conn
+    }
+
+    /// Remove a connection from this session.
+    pub async fn remove_connection(&self, cid: u16) {
+        self.connections.write().await.remove(&cid);
+    }
+
+    /// Get the connection count.
+    pub async fn connection_count(&self) -> usize {
+        self.connections.read().await.len()
+    }
 }
 
 /// Registry of active iSCSI sessions.
@@ -101,9 +121,20 @@ impl SessionRegistry {
     /// Allocate a TSIH and register a new session.
     pub async fn create_session(&self, isid: [u8; 6], params: SessionParams) -> Arc<Session> {
         let tsih = self.next_tsih.fetch_add(1, Ordering::Relaxed);
-        let session = Arc::new(Session { tsih, isid, params });
+        let session = Arc::new(Session {
+            tsih,
+            isid,
+            params,
+            connections: RwLock::new(HashMap::new()),
+        });
         self.sessions.write().await.insert(tsih, session.clone());
         session
+    }
+
+    /// Find an existing session by ISID for multi-connection login.
+    pub async fn find_by_isid(&self, isid: &[u8; 6]) -> Option<Arc<Session>> {
+        let sessions = self.sessions.read().await;
+        sessions.values().find(|s| &s.isid == isid).cloned()
     }
 
     /// Look up a session by TSIH.

@@ -194,7 +194,7 @@ impl IscsiTarget {
 
             match opcode {
                 Opcode::ScsiCommand => {
-                    self.handle_scsi_pdu(&req, writer, &conn, header_digest, data_digest, max_data_seg).await?;
+                    self.handle_scsi_pdu(&req, reader, writer, &conn, params, header_digest, data_digest, max_data_seg).await?;
                 }
                 Opcode::NopOut => {
                     self.handle_nop_out(&req, writer, &conn, header_digest, data_digest).await?;
@@ -213,11 +213,13 @@ impl IscsiTarget {
         }
     }
 
-    async fn handle_scsi_pdu<W: AsyncWriteExt + Unpin>(
+    async fn handle_scsi_pdu<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         &self,
         req: &IscsiPdu,
+        reader: &mut R,
         writer: &mut W,
         conn: &ConnectionState,
+        params: &SessionParams,
         header_digest: bool,
         data_digest: bool,
         max_data_seg: usize,
@@ -244,24 +246,25 @@ impl IscsiTarget {
         let expected_len = req.bhs.expected_data_transfer_length() as usize;
 
         let data_out = if is_write {
-            if !req.data.is_empty() {
-                // Immediate data provided
-                let mut write_data = req.data.clone();
+            let mut write_data = req.data.clone();
 
-                // If we need more data, send R2T
-                if write_data.len() < expected_len {
-                    let remaining = expected_len - write_data.len();
-                    let additional = self.receive_data_out(
-                        // We can't read from writer, so for now use immediate data only
-                        // Full R2T support would need the reader passed in
-                        remaining,
-                    );
-                    write_data.extend_from_slice(&additional);
-                }
-                write_data
-            } else {
-                vec![0u8; 0] // R2T would be needed — simplified for now
+            // If immediate data is insufficient, use R2T/Data-Out to get the rest
+            if write_data.len() < expected_len {
+                let remaining = expected_len - write_data.len();
+                let additional = self.receive_data_via_r2t(
+                    reader,
+                    writer,
+                    conn,
+                    itt,
+                    write_data.len() as u32,
+                    remaining as u32,
+                    params.max_burst_length,
+                    header_digest,
+                    data_digest,
+                ).await?;
+                write_data.extend_from_slice(&additional);
             }
+            write_data
         } else {
             Vec::new()
         };
@@ -347,9 +350,62 @@ impl IscsiTarget {
         }
     }
 
-    fn receive_data_out(&self, _remaining: usize) -> Vec<u8> {
-        // Simplified: full R2T/Data-Out would require reader access
-        Vec::new()
+    /// Send R2T (Ready To Transfer) and receive Data-Out PDUs for write commands.
+    async fn receive_data_via_r2t<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+        conn: &ConnectionState,
+        itt: u32,
+        buffer_offset: u32,
+        desired_length: u32,
+        max_burst: u32,
+        header_digest: bool,
+        data_digest: bool,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut collected = Vec::with_capacity(desired_length as usize);
+        let mut offset = buffer_offset;
+        let mut r2t_sn: u32 = 0;
+
+        while collected.len() < desired_length as usize {
+            let remaining = desired_length as usize - collected.len();
+            let transfer_len = remaining.min(max_burst as usize) as u32;
+
+            // Send R2T PDU
+            let mut r2t_bhs = Bhs::new();
+            r2t_bhs.set_opcode(Opcode::R2T);
+            r2t_bhs.set_final(true);
+            r2t_bhs.set_initiator_task_tag(itt);
+            r2t_bhs.set_target_transfer_tag(itt); // Use ITT as TTT for simplicity
+            r2t_bhs.set_stat_sn(conn.stat_sn.load(std::sync::atomic::Ordering::Relaxed));
+            r2t_bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+            r2t_bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+            r2t_bhs.set_r2t_sn(r2t_sn);
+            r2t_bhs.set_buffer_offset(offset);
+            r2t_bhs.set_desired_data_transfer_length(transfer_len);
+
+            let r2t_pdu = IscsiPdu::new(r2t_bhs);
+            write_pdu(writer, &r2t_pdu, header_digest, data_digest).await?;
+
+            // Receive Data-Out PDUs until this R2T is satisfied
+            let mut burst_received: u32 = 0;
+            while burst_received < transfer_len {
+                let data_out = read_pdu(reader, header_digest, data_digest).await?;
+                if data_out.bhs.opcode() != Some(Opcode::DataOut) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "expected Data-Out PDU",
+                    ));
+                }
+                collected.extend_from_slice(&data_out.data);
+                burst_received += data_out.data.len() as u32;
+            }
+
+            offset += transfer_len;
+            r2t_sn += 1;
+        }
+
+        Ok(collected)
     }
 
     async fn handle_nop_out<W: AsyncWriteExt + Unpin>(
