@@ -1,10 +1,13 @@
 # Changelog
 
 ## [Unreleased]
+<!-- New unreleased changes go here -->
 
-### 2026-02-21
-- **feat:** Add journal recovery and background scrub/verify for RAID engine
-- **feat:** Add volume resize (grow/shrink) support
+## [v4.0.0] — 2026-02-23
+
+### Added
+- Journal recovery and background scrub/verify for RAID engine
+- Volume resize (grow/shrink) support with REST API endpoint
 
 ## [v3.2.0] — 2026-02-19
 
