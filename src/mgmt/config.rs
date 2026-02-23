@@ -246,6 +246,21 @@ impl StormBlockConfig {
         self.management.listen_addr.parse::<SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid management listen_addr '{}': {e}", self.management.listen_addr))?;
 
+        // Validate TLS config: both cert and key must be provided together
+        match (&self.management.tls_cert, &self.management.tls_key) {
+            (Some(cert), Some(key)) => {
+                if !Path::new(cert).exists() {
+                    anyhow::bail!("TLS cert file not found: {cert}");
+                }
+                if !Path::new(key).exists() {
+                    anyhow::bail!("TLS key file not found: {key}");
+                }
+            }
+            (Some(_), None) => anyhow::bail!("tls_cert requires tls_key to also be set"),
+            (None, Some(_)) => anyhow::bail!("tls_key requires tls_cert to also be set"),
+            (None, None) => {} // No TLS, fine
+        }
+
         // Check for port conflicts
         let mgmt_port = self.management.listen_addr.parse::<SocketAddr>()
             .map(|a| a.port())

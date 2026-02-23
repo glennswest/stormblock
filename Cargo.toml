@@ -67,6 +67,12 @@ md-5 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 
+# TLS (management API)
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+hyper-util = { version = "0.1", features = ["tokio", "http1", "http2", "server-auto"] }
+
 # Web UI (optional)
 askama = { version = "0.12", optional = true }
 rust-embed = { version = "8", features = ["compression"], optional = true }
