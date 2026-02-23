@@ -1,7 +1,11 @@
 # Changelog
 
 ## [Unreleased]
-<!-- New unreleased changes go here -->
+
+### 2026-02-23
+- **fix:** TLS service error type for hyper-util compatibility
+- **fix:** IoUring type annotation for Linux build
+- **chore:** Verified musl static release build (11 MB stripped PIE, statically linked)
 
 ## [v5.0.0] — 2026-02-23
 
