@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-03-09
+- **build:** Dockerfile: replace scratch runtime with Alpine 3.21 + storage tools (nvme-cli, smartmontools, fio, iproute2, util-linux, lsblk, e2fsprogs, xfsprogs, jq, ca-certificates)
+- **build:** Dockerfile: install stormblock binary to /usr/bin/stormblock (was / in scratch image)
+- **feat:** Add scripts/build-stormbase-iso.sh — orchestration script to build StormBase ISO with StormBlock + StormFS baked in
+
 ### 2026-02-23
 - **fix:** TLS service error type for hyper-util compatibility
 - **fix:** IoUring type annotation for Linux build
@@ -24,6 +29,7 @@
 ### Added
 - Journal recovery and background scrub/verify for RAID engine
 - Volume resize (grow/shrink) support with REST API endpoint
+- HTMX + Askama web UI for storage management
 
 ## [v3.2.0] — 2026-02-19
 
