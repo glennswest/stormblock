@@ -449,7 +449,7 @@ async fn main() -> anyhow::Result<()> {
             vm.persist().await;
         }
         #[cfg(feature = "cluster")]
-        if let Some(ref cluster_mgr) = state.cluster {
+        if let Some(ref _cluster_mgr) = state.cluster {
             // Cluster manager shutdown requires &mut — use Arc::try_unwrap or just log
             tracing::info!("Cluster shutdown initiated");
         }

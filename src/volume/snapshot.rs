@@ -109,7 +109,7 @@ mod tests {
     use crate::drive::BlockDevice;
     use crate::drive::filedev::FileDevice;
     use crate::raid::{RaidArray, RaidLevel};
-    use crate::volume::extent::{ExtentAllocator, DEFAULT_EXTENT_SIZE};
+    use crate::volume::extent::ExtentAllocator;
     use crate::volume::thin::ThinVolumeHandle;
     use std::sync::Arc;
 

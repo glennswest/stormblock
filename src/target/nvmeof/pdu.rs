@@ -250,12 +250,12 @@ pub enum NvmeofPdu {
 }
 
 /// PDU header sizes.
-const ICREQ_HLEN: u8 = 128;
+const _ICREQ_HLEN: u8 = 128;
 const ICRESP_HLEN: u8 = 128;
-const CAPSULE_CMD_HLEN: u8 = 72;  // 8 (common) + 64 (SQE)
+const _CAPSULE_CMD_HLEN: u8 = 72;  // 8 (common) + 64 (SQE)
 const CAPSULE_RESP_HLEN: u8 = 24; // 8 (common) + 16 (CQE)
 const C2H_DATA_HLEN: u8 = 24;
-const H2C_DATA_HLEN: u8 = 24;
+const _H2C_DATA_HLEN: u8 = 24;
 const R2T_HLEN: u8 = 24;
 
 /// Read a complete NVMe-oF/TCP PDU from a stream.

@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 pub mod iscsi_initiator;
 pub mod nvmeof_initiator;
 
@@ -11,7 +13,7 @@ use tokio::task::JoinHandle;
 use stormblock::drive::BlockDevice;
 use stormblock::drive::filedev::FileDevice;
 use stormblock::raid::{RaidArray, RaidLevel};
-use stormblock::volume::{VolumeManager, ThinVolumeHandle, VolumeId, DEFAULT_EXTENT_SIZE};
+use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 use stormblock::target::iscsi::{IscsiConfig, IscsiTarget};
 use stormblock::target::nvmeof::{NvmeofConfig, NvmeofTarget};
 use stormblock::target::reactor::{ReactorConfig, ReactorPool};

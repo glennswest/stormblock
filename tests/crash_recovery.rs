@@ -12,7 +12,7 @@ use stormblock::drive::filedev::FileDevice;
 use stormblock::raid::journal::WriteIntentJournal;
 use stormblock::raid::parity::ParityEngine;
 use stormblock::raid::{RaidArray, RaidLevel, RaidSuperblock, RaidArrayId, DATA_OFFSET};
-use stormblock::volume::extent::{ExtentAllocator, Extent};
+use stormblock::volume::extent::ExtentAllocator;
 
 #[test]
 fn journal_persist_and_recovery() {

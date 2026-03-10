@@ -4,7 +4,6 @@
 
 mod common;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;
@@ -53,7 +52,7 @@ async fn setup_state_with_array(dir: &TempDir) -> Arc<AppState> {
 
     let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
     vm.add_backing_device(array_id, backing).await;
-    let vol_id = vm.create_volume("test-vol", 32 * 1024 * 1024, array_id).await.unwrap();
+    let _vol_id = vm.create_volume("test-vol", 32 * 1024 * 1024, array_id).await.unwrap();
 
     let config = StormBlockConfig::default();
     let state = Arc::new(AppState::new(config, vm));

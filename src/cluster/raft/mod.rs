@@ -56,9 +56,9 @@ pub async fn init_raft(
 
 use axum::{Router, routing::post, extract::State, Json, http::StatusCode, response::IntoResponse};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse,
-    VoteRequest, VoteResponse,
-    InstallSnapshotRequest, InstallSnapshotResponse,
+    AppendEntriesRequest,
+    VoteRequest,
+    InstallSnapshotRequest,
 };
 
 /// Shared state for Raft RPC handlers.

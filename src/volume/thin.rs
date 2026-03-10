@@ -158,26 +158,6 @@ impl ThinVolume {
         self.extent_map.len()
     }
 
-    /// Resolve a virtual byte offset to (extent_index, offset_within_extent).
-    fn resolve_extent(&self, offset: u64) -> (u64, u64) {
-        let extent_size = self.backing_device.optimal_io_size() as u64;
-        // We use the allocator's extent size, not optimal_io_size
-        // For now, get it from the extent_map entries or use a default
-        let es = self.extent_map.values().next()
-            .map(|e| e.length)
-            .unwrap_or(super::extent::DEFAULT_EXTENT_SIZE);
-        let idx = offset / es;
-        let off = offset % es;
-        let _ = extent_size; // suppress unused
-        (idx, off)
-    }
-
-    /// Get the extent size from the allocator.
-    async fn extent_size(&self) -> u64 {
-        let alloc = self.allocator.lock().await;
-        alloc.extent_size()
-    }
-
     /// Allocate a new physical extent for the given virtual extent index.
     async fn allocate_extent(&mut self, vext_idx: u64) -> Result<&PhysicalExtent, VolumeError> {
         let mut alloc = self.allocator.lock().await;
@@ -493,7 +473,7 @@ impl BlockDevice for ThinVolumeHandle {
 mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
-    use crate::raid::{RaidArray, RaidLevel, RaidArrayId};
+    use crate::raid::{RaidArray, RaidLevel};
     use crate::volume::extent::{ExtentAllocator, DEFAULT_EXTENT_SIZE};
 
     async fn setup_test_volume(extent_size: u64) -> (ThinVolumeHandle, Vec<String>) {

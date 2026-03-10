@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Router, routing::{get, post, delete},
+    Router, routing::{get, post},
     extract::{State, Path},
     Json, http::StatusCode,
     response::{IntoResponse, Response},
@@ -11,7 +11,6 @@ use axum::{
 use serde::{Serialize, Deserialize};
 
 use crate::mgmt::AppState;
-use crate::cluster::membership::NodeStatus;
 use crate::cluster::heartbeat::{HeartbeatRequest, HeartbeatResponse};
 use crate::cluster::raft::state::ClusterCommand;
 

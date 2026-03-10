@@ -14,7 +14,7 @@ use openraft::{
 };
 
 use super::StormTypeConfig;
-use super::state::{ClusterCommand, ClusterResponse, ClusterState};
+use super::state::{ClusterResponse, ClusterState};
 
 /// Helper to build a StorageError::IO from an std::io::Error.
 fn io_err(e: std::io::Error) -> StorageError<u64> {
