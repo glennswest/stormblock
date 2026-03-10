@@ -37,8 +37,8 @@ impl ClusterManager {
         let node_id = config.load_or_create_node_id()?;
         tracing::info!("cluster: node_id = {node_id}");
 
-        // Initialize Raft
-        let raft_instance = init_raft(node_id, &config.data_dir).await?;
+        // Initialize Raft (with TLS if configured)
+        let raft_instance = init_raft(node_id, &config).await?;
 
         // Load or create membership store
         let suspect_threshold = (config.heartbeat_timeout_ms / config.heartbeat_interval_ms) as u32;
@@ -68,12 +68,16 @@ impl ClusterManager {
             store.add_node(local_info.clone());
         }
 
-        // Start heartbeat
+        // Start heartbeat (with TLS-aware HTTP client)
+        let hb_client = self.config.build_http_client()?;
+        let hb_scheme = self.config.url_scheme().to_string();
         let hb_handle = heartbeat::start_heartbeat(
             local_info.clone(),
             self.membership.clone(),
             Duration::from_millis(self.config.heartbeat_interval_ms),
             self.config.membership_path(),
+            hb_client,
+            hb_scheme,
         );
         self.heartbeat_handle = Some(hb_handle);
 
@@ -121,8 +125,9 @@ impl ClusterManager {
 
     /// Join an existing cluster via a seed node.
     async fn join_cluster(&self, seed_addr: &str, local_info: &NodeInfo) -> anyhow::Result<()> {
-        let client = reqwest::Client::new();
-        let url = format!("http://{}/api/v1/cluster/nodes", seed_addr);
+        let client = self.config.build_http_client()?;
+        let scheme = self.config.url_scheme();
+        let url = format!("{scheme}://{seed_addr}/api/v1/cluster/nodes");
 
         #[derive(serde::Serialize)]
         struct JoinRequest {

@@ -13,12 +13,25 @@ use openraft::{
 
 use super::StormTypeConfig;
 
-/// Factory that creates HTTP network connections to peer nodes.
-pub struct HttpNetworkFactory;
+/// Factory that creates HTTP(S) network connections to peer nodes.
+pub struct HttpNetworkFactory {
+    client: reqwest::Client,
+    scheme: String,
+}
 
 impl HttpNetworkFactory {
     pub fn new() -> Self {
-        HttpNetworkFactory
+        HttpNetworkFactory {
+            client: reqwest::Client::new(),
+            scheme: "http".to_string(),
+        }
+    }
+
+    pub fn with_tls(client: reqwest::Client) -> Self {
+        HttpNetworkFactory {
+            client,
+            scheme: "https".to_string(),
+        }
     }
 }
 
@@ -28,20 +41,22 @@ impl RaftNetworkFactory<StormTypeConfig> for HttpNetworkFactory {
     async fn new_client(&mut self, _target: u64, node: &BasicNode) -> Self::Network {
         HttpNetwork {
             addr: node.addr.clone(),
-            client: reqwest::Client::new(),
+            client: self.client.clone(),
+            scheme: self.scheme.clone(),
         }
     }
 }
 
-/// HTTP network connection to a single peer node.
+/// HTTP(S) network connection to a single peer node.
 pub struct HttpNetwork {
     addr: String,
     client: reqwest::Client,
+    scheme: String,
 }
 
 impl HttpNetwork {
     fn url(&self, path: &str) -> String {
-        format!("http://{}{}", self.addr, path)
+        format!("{}://{}{}", self.scheme, self.addr, path)
     }
 }
 

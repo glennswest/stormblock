@@ -35,11 +35,9 @@ pub fn start_heartbeat(
     membership: Arc<RwLock<MembershipStore>>,
     interval: Duration,
     membership_path: std::path::PathBuf,
+    client: reqwest::Client,
+    url_scheme: String,
 ) -> tokio::task::JoinHandle<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
 
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
@@ -71,7 +69,7 @@ pub fn start_heartbeat(
             };
 
             for (peer_id, peer_addr) in &peers {
-                let url = format!("http://{}/api/v1/cluster/heartbeat", peer_addr);
+                let url = format!("{url_scheme}://{peer_addr}/api/v1/cluster/heartbeat");
                 match client.post(&url).json(&req).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         // Parse response to get peer info

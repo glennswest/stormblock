@@ -31,7 +31,7 @@ pub type StormRaft = openraft::Raft<StormTypeConfig>;
 /// Initialize a Raft node.
 pub async fn init_raft(
     node_id: u64,
-    data_dir: &str,
+    cluster_config: &crate::cluster::config::ClusterConfig,
 ) -> anyhow::Result<StormRaft> {
     let config = Config {
         heartbeat_interval: 500,
@@ -43,9 +43,16 @@ pub async fn init_raft(
     };
     let config = Arc::new(config.validate().map_err(|e| anyhow::anyhow!("raft config: {e}"))?);
 
-    let store = StormStore::new(data_dir).await?;
+    let store = StormStore::new(&cluster_config.data_dir).await?;
     let (log_store, state_machine) = openraft::storage::Adaptor::new(store);
-    let network = HttpNetworkFactory::new();
+
+    let network = if cluster_config.tls_enabled {
+        let client = cluster_config.build_http_client()?;
+        tracing::info!("cluster: Raft RPCs using HTTPS");
+        HttpNetworkFactory::with_tls(client)
+    } else {
+        HttpNetworkFactory::new()
+    };
 
     let raft = StormRaft::new(node_id, config, network, log_store, state_machine).await?;
 

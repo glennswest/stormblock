@@ -299,6 +299,24 @@ impl StormBlockConfig {
                 .map_err(|e| anyhow::anyhow!("invalid volume size '{}': {e}", vol.size))?;
         }
 
+        // Validate cluster TLS config
+        #[cfg(feature = "cluster")]
+        if self.cluster.enabled && self.cluster.tls_enabled {
+            // Cluster TLS requires management TLS (they share the same server)
+            if self.management.tls_cert.is_none() || self.management.tls_key.is_none() {
+                anyhow::bail!(
+                    "cluster.tls_enabled requires management TLS (tls_cert + tls_key) \
+                     since cluster RPCs share the management API server"
+                );
+            }
+            // Validate CA cert path if specified
+            if let Some(ca_path) = &self.cluster.tls_ca_cert {
+                if !Path::new(ca_path).exists() {
+                    anyhow::bail!("cluster TLS CA cert file not found: {ca_path}");
+                }
+            }
+        }
+
         // Validate StormFS config
         if self.stormfs.enabled {
             if self.stormfs.metadata_url.is_empty() {

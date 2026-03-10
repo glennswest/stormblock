@@ -22,6 +22,13 @@ pub struct ClusterConfig {
     pub replication_mode: String,
     /// Number of replicas for each volume (including the primary).
     pub replication_factor: usize,
+    /// Enable TLS for inter-node cluster RPCs (Raft, heartbeat, join).
+    /// When true, all cluster HTTP clients use HTTPS.
+    /// The server side shares the management API's TLS cert/key.
+    pub tls_enabled: bool,
+    /// Path to CA certificate PEM file for verifying peer node certificates.
+    /// Required when tls_enabled is true. If not set, system roots are used.
+    pub tls_ca_cert: Option<String>,
 }
 
 impl Default for ClusterConfig {
@@ -34,6 +41,8 @@ impl Default for ClusterConfig {
             heartbeat_timeout_ms: 5000,
             replication_mode: "async".to_string(),
             replication_factor: 2,
+            tls_enabled: false,
+            tls_ca_cert: None,
         }
     }
 }
@@ -81,6 +90,31 @@ impl ClusterConfig {
         std::fs::create_dir_all(&self.data_dir)?;
         std::fs::write(&path, id.to_string())?;
         Ok(id)
+    }
+
+    /// URL scheme for cluster HTTP calls ("https" if TLS enabled, "http" otherwise).
+    pub fn url_scheme(&self) -> &str {
+        if self.tls_enabled { "https" } else { "http" }
+    }
+
+    /// Build a reqwest HTTP client configured for cluster TLS (if enabled).
+    pub fn build_http_client(&self) -> anyhow::Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10));
+
+        if self.tls_enabled {
+            if let Some(ca_path) = &self.tls_ca_cert {
+                let ca_pem = std::fs::read(ca_path)
+                    .map_err(|e| anyhow::anyhow!("failed to read cluster CA cert '{}': {e}", ca_path))?;
+                let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
+                    .map_err(|e| anyhow::anyhow!("failed to parse cluster CA cert: {e}"))?;
+                builder = builder.add_root_certificate(ca_cert);
+            }
+            builder = builder.use_rustls_tls();
+        }
+
+        builder.build()
+            .map_err(|e| anyhow::anyhow!("failed to build cluster HTTP client: {e}"))
     }
 
     /// Whether this is a sync replication cluster.
@@ -152,5 +186,66 @@ replication_factor = 3
         assert_eq!(cfg.heartbeat_interval_ms, 500);
         assert!(cfg.is_sync_replication());
         assert_eq!(cfg.replication_factor, 3);
+    }
+
+    #[test]
+    fn tls_defaults_disabled() {
+        let cfg = ClusterConfig::default();
+        assert!(!cfg.tls_enabled);
+        assert!(cfg.tls_ca_cert.is_none());
+        assert_eq!(cfg.url_scheme(), "http");
+    }
+
+    #[test]
+    fn tls_url_scheme() {
+        let mut cfg = ClusterConfig::default();
+        assert_eq!(cfg.url_scheme(), "http");
+        cfg.tls_enabled = true;
+        assert_eq!(cfg.url_scheme(), "https");
+    }
+
+    #[test]
+    fn tls_build_client_no_tls() {
+        let cfg = ClusterConfig::default();
+        let client = cfg.build_http_client();
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn tls_build_client_with_tls_no_ca() {
+        let cfg = ClusterConfig {
+            tls_enabled: true,
+            tls_ca_cert: None,
+            ..Default::default()
+        };
+        // Should succeed — uses system root CAs
+        let client = cfg.build_http_client();
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn tls_build_client_with_missing_ca() {
+        let cfg = ClusterConfig {
+            tls_enabled: true,
+            tls_ca_cert: Some("/nonexistent/ca.pem".to_string()),
+            ..Default::default()
+        };
+        let client = cfg.build_http_client();
+        assert!(client.is_err());
+    }
+
+    #[test]
+    fn parse_toml_with_tls() {
+        let toml_str = r#"
+enabled = true
+data_dir = "/data/raft"
+seed_nodes = ["10.0.0.1:9090"]
+tls_enabled = true
+tls_ca_cert = "/etc/stormblock/ca.pem"
+"#;
+        let cfg: ClusterConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.tls_enabled);
+        assert_eq!(cfg.tls_ca_cert.as_deref(), Some("/etc/stormblock/ca.pem"));
+        assert_eq!(cfg.url_scheme(), "https");
     }
 }

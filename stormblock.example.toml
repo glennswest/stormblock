@@ -36,3 +36,14 @@ nqn = "nqn.2024.io.stormblock:default"
 [reactor]
 cores = 0       # 0 = auto-detect
 pin_cores = true
+
+# [cluster]
+# enabled = true
+# data_dir = "/var/lib/stormblock/raft"
+# seed_nodes = ["10.0.0.1:9090", "10.0.0.2:9090"]
+# heartbeat_interval_ms = 1000
+# heartbeat_timeout_ms = 5000
+# replication_mode = "async"
+# replication_factor = 2
+# tls_enabled = true                          # use HTTPS for inter-node RPCs
+# tls_ca_cert = "/etc/stormblock/ca.pem"      # CA cert for verifying peer nodes
