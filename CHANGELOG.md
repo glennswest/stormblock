@@ -7,6 +7,7 @@
 - **fix:** Clean up all compiler warnings (unused imports, dead code, unused variables)
 - **fix:** Resolve all 55 clippy warnings (Copy vs clone, redundant closures, derive Default, div_ceil, etc.)
 - **feat:** Async replication retry with exponential backoff — retry queue (max 10K entries), up to 8 retries per request, 100ms–30s backoff, Prometheus metrics for retry success/failure/exhausted/dropped
+- **test:** Fuzz testing for PDU parsers — 6 cargo-fuzz targets covering iSCSI BHS, iSCSI PDU read, iSCSI text params, NVMe-oF common header, NVMe-oF PDU read, NVMe-oF connect data
 - **build:** Dockerfile: replace scratch runtime with Alpine 3.21 + storage tools (nvme-cli, smartmontools, fio, iproute2, util-linux, lsblk, e2fsprogs, xfsprogs, jq, ca-certificates)
 - **build:** Dockerfile: install stormblock binary to /usr/bin/stormblock (was / in scratch image)
 - **feat:** Add scripts/build-stormbase-iso.sh — orchestration script to build StormBase ISO with StormBlock + StormFS baked in

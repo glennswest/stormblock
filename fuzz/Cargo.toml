@@ -1,0 +1,53 @@
+[package]
+name = "stormblock-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tokio = { version = "1", features = ["rt"] }
+
+[dependencies.stormblock]
+path = ".."
+features = ["iscsi", "nvmeof"]
+
+[workspace]
+members = ["."]
+
+# iSCSI fuzz targets
+
+[[bin]]
+name = "iscsi_bhs"
+path = "fuzz_targets/iscsi_bhs.rs"
+doc = false
+
+[[bin]]
+name = "iscsi_pdu"
+path = "fuzz_targets/iscsi_pdu.rs"
+doc = false
+
+[[bin]]
+name = "iscsi_text_params"
+path = "fuzz_targets/iscsi_text_params.rs"
+doc = false
+
+# NVMe-oF fuzz targets
+
+[[bin]]
+name = "nvmeof_common_header"
+path = "fuzz_targets/nvmeof_common_header.rs"
+doc = false
+
+[[bin]]
+name = "nvmeof_pdu"
+path = "fuzz_targets/nvmeof_pdu.rs"
+doc = false
+
+[[bin]]
+name = "nvmeof_connect_data"
+path = "fuzz_targets/nvmeof_connect_data.rs"
+doc = false
