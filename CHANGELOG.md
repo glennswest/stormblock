@@ -5,6 +5,7 @@
 ### 2026-03-09
 - **feat:** TLS for cluster RPCs — Raft, heartbeat, and join use HTTPS when `cluster.tls_enabled = true`
 - **fix:** Clean up all compiler warnings (unused imports, dead code, unused variables)
+- **fix:** Resolve all 55 clippy warnings (Copy vs clone, redundant closures, derive Default, div_ceil, etc.)
 - **build:** Dockerfile: replace scratch runtime with Alpine 3.21 + storage tools (nvme-cli, smartmontools, fio, iproute2, util-linux, lsblk, e2fsprogs, xfsprogs, jq, ca-certificates)
 - **build:** Dockerfile: install stormblock binary to /usr/bin/stormblock (was / in scratch image)
 - **feat:** Add scripts/build-stormbase-iso.sh — orchestration script to build StormBase ISO with StormBlock + StormFS baked in
