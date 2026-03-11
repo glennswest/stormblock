@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use stormblock::drive::BlockDevice;
-use stormblock::drive::filedev::FileDevice;
 use stormblock::raid::{RaidArray, RaidLevel};
 use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 
@@ -122,7 +121,7 @@ async fn volume_multiple_extent_writes() {
     // Write at different offsets spanning multiple extents
     let offsets = [0u64, DEFAULT_EXTENT_SIZE, DEFAULT_EXTENT_SIZE * 2];
     for (i, &offset) in offsets.iter().enumerate() {
-        let data = vec![(0x10 + i as u8); 4096];
+        let data = vec![0x10 + i as u8; 4096];
         vol.write(offset, &data).await.unwrap();
     }
 

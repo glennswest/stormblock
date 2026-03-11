@@ -4,7 +4,6 @@
 
 mod common;
 
-use std::sync::Arc;
 
 use stormblock::target::nvmeof::NvmeofConfig;
 use common::nvmeof_initiator::NvmeofInitiator;

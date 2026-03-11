@@ -135,7 +135,7 @@ impl NvmeSqe {
     }
 
     pub fn fuse(&self) -> u8 {
-        (self.raw[1] >> 0) & 0x03
+        self.raw[1] & 0x03
     }
 
     pub fn cid(&self) -> u16 {
@@ -173,14 +173,14 @@ impl NvmeSqe {
 }
 
 /// 16-byte NVMe Completion Queue Entry (CQE).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NvmeCqe {
     pub raw: [u8; 16],
 }
 
 impl NvmeCqe {
     pub fn new() -> Self {
-        NvmeCqe { raw: [0u8; 16] }
+        Self::default()
     }
 
     pub fn success(cid: u16, sq_id: u16, sq_head: u16) -> Self {
@@ -419,6 +419,7 @@ pub async fn write_capsule_resp<W: AsyncWriteExt + Unpin>(
 }
 
 /// Write C2HData PDU (controller-to-host data, for reads).
+#[allow(clippy::too_many_arguments)]
 pub async fn write_c2h_data<W: AsyncWriteExt + Unpin>(
     stream: &mut W,
     cccid: u16,

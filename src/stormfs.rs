@@ -101,11 +101,15 @@ impl StormFsRegistration {
         let vm = state.volume_manager.lock().await;
         let vol_list = vm.list_volumes().await;
         let volumes: Vec<VolumeInfo> = vol_list.iter().map(|(id, name, capacity, allocated)| {
-            let mut protocols = Vec::new();
-            #[cfg(feature = "iscsi")]
-            protocols.push("iscsi".to_string());
-            #[cfg(feature = "nvmeof")]
-            protocols.push("nvmeof".to_string());
+            #[allow(clippy::vec_init_then_push)]
+            let protocols = {
+                let mut p = Vec::new();
+                #[cfg(feature = "iscsi")]
+                p.push("iscsi".to_string());
+                #[cfg(feature = "nvmeof")]
+                p.push("nvmeof".to_string());
+                p
+            };
             VolumeInfo {
                 id: id.to_string(),
                 name: name.clone(),

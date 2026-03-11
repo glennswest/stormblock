@@ -196,6 +196,7 @@ impl NvmeofTarget {
         Ok((cntlid, qid))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn command_loop<R, W>(
         &self,
         reader: &mut R,
@@ -338,7 +339,7 @@ impl NvmeofTarget {
             }
             admin::ADMIN_GET_LOG_PAGE => {
                 let lid = (sqe.cdw10() & 0xFF) as u8;
-                let numd = ((sqe.cdw10() >> 16) as u32 | ((sqe.cdw11() & 0xFFFF) << 16)) + 1;
+                let numd = ((sqe.cdw10() >> 16) | ((sqe.cdw11() & 0xFFFF) << 16)) + 1;
                 let log_bytes = numd as usize * 4;
 
                 // Log page 0x70 = Discovery Log Page

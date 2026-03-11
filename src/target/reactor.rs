@@ -22,6 +22,7 @@ pub struct ReactorConfig {
     pub pin_cores: bool,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for ReactorConfig {
     fn default() -> Self {
         ReactorConfig {

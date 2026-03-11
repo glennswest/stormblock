@@ -94,6 +94,7 @@ impl FabricCmd {
 }
 
 /// Controller property values for a StormBlock target.
+#[derive(Default)]
 pub struct ControllerProperties {
     /// CC register value (set by host).
     pub cc: u32,
@@ -101,7 +102,7 @@ pub struct ControllerProperties {
 
 impl ControllerProperties {
     pub fn new() -> Self {
-        ControllerProperties { cc: 0 }
+        Self::default()
     }
 
     /// CAP register: MQES=1023, CQR=1, TO=40 (2s), MPSMIN=0(4K), MPSMAX=0, CSS=NVMe

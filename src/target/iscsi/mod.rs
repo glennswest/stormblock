@@ -214,6 +214,7 @@ impl IscsiTarget {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_scsi_pdu<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         &self,
         req: &IscsiPdu,
@@ -237,7 +238,7 @@ impl IscsiTarget {
             None => {
                 // LUN not found — send check condition
                 let result = scsi::ScsiResult::check_condition(scsi::SenseData::illegal_request());
-                let resp_pdu = self.build_scsi_response(&conn, itt, &result);
+                let resp_pdu = self.build_scsi_response(conn, itt, &result);
                 return write_pdu(writer, &resp_pdu, header_digest, data_digest).await;
             }
         };
@@ -274,9 +275,9 @@ impl IscsiTarget {
 
         // Send read data via Data-In PDUs if needed
         if !result.data.is_empty() && result.status == ScsiStatus::Good && !is_write {
-            self.send_data_in(writer, &conn, itt, &result.data, max_data_seg, header_digest, data_digest).await?;
+            self.send_data_in(writer, conn, itt, &result.data, max_data_seg, header_digest, data_digest).await?;
         } else {
-            let resp_pdu = self.build_scsi_response(&conn, itt, &result);
+            let resp_pdu = self.build_scsi_response(conn, itt, &result);
             write_pdu(writer, &resp_pdu, header_digest, data_digest).await?;
         }
 
@@ -284,6 +285,7 @@ impl IscsiTarget {
     }
 
     /// Send read data as Data-In PDUs, with status on the last one.
+    #[allow(clippy::too_many_arguments)]
     async fn send_data_in<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
@@ -339,8 +341,8 @@ impl IscsiTarget {
         bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
         bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
 
-        if result.status == ScsiStatus::CheckCondition && result.sense.is_some() {
-            let sense_data = result.sense.as_ref().unwrap().to_bytes();
+        if let (ScsiStatus::CheckCondition, Some(sense)) = (result.status, &result.sense) {
+            let sense_data = sense.to_bytes();
             // Sense data is prefixed with 2-byte sense length
             let mut data = Vec::with_capacity(2 + sense_data.len());
             data.extend_from_slice(&(sense_data.len() as u16).to_be_bytes());
@@ -352,6 +354,7 @@ impl IscsiTarget {
     }
 
     /// Send R2T (Ready To Transfer) and receive Data-Out PDUs for write commands.
+    #[allow(clippy::too_many_arguments)]
     async fn receive_data_via_r2t<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         &self,
         reader: &mut R,

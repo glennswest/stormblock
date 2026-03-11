@@ -19,12 +19,18 @@ pub struct HttpNetworkFactory {
     scheme: String,
 }
 
-impl HttpNetworkFactory {
-    pub fn new() -> Self {
+impl Default for HttpNetworkFactory {
+    fn default() -> Self {
         HttpNetworkFactory {
             client: reqwest::Client::new(),
             scheme: "http".to_string(),
         }
+    }
+}
+
+impl HttpNetworkFactory {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_tls(client: reqwest::Client) -> Self {

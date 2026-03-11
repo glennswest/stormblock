@@ -101,7 +101,7 @@ impl VolumeManager {
 
         let vol = handle.lock().await;
         let mut alloc = self.allocator.lock().await;
-        for (_vext_idx, pext) in &vol.extent_map {
+        for pext in vol.extent_map.values() {
             let still_referenced = other_refs.iter().any(|v| {
                 v.extent_map.values().any(|other| {
                     other.array_id == pext.array_id && other.offset == pext.offset
@@ -202,7 +202,7 @@ impl VolumeManager {
         }
 
         let mut volumes = Vec::new();
-        for (_id, handle) in &self.volumes {
+        for handle in self.volumes.values() {
             let vol = handle.lock().await;
             volumes.push(metadata::VolumeRecord {
                 id: vol.id,

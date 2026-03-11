@@ -282,7 +282,7 @@ fn handle_inquiry_vpd(page_code: u8, alloc_len: usize, device: &Arc<dyn BlockDev
             let max_xfer: u32 = 65536;
             data[8..12].copy_from_slice(&max_xfer.to_be_bytes());
             // Optimal transfer length
-            data[12..16].copy_from_slice(&(optimal as u32).to_be_bytes());
+            data[12..16].copy_from_slice(&optimal.to_be_bytes());
             // Maximum UNMAP LBA count
             data[20..24].copy_from_slice(&0xFFFFFFFFu32.to_be_bytes());
             // Maximum UNMAP block descriptor count

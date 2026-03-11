@@ -16,9 +16,15 @@ pub const DEFAULT_EXTENT_SIZE: u64 = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VolumeId(pub Uuid);
 
+impl Default for VolumeId {
+    fn default() -> Self {
+        VolumeId(Uuid::new_v4())
+    }
+}
+
 impl VolumeId {
     pub fn new() -> Self {
-        VolumeId(Uuid::new_v4())
+        Self::default()
     }
 }
 

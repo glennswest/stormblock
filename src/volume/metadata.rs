@@ -64,7 +64,7 @@ impl MetadataStore {
     /// Serialize metadata into the binary envelope format.
     fn encode(metadata: &VolumeMetadata) -> io::Result<Vec<u8>> {
         let payload = bincode::serde::encode_to_vec(metadata, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bincode encode: {e}")))?;
+            .map_err(|e| io::Error::other(format!("bincode encode: {e}")))?;
 
         let payload_len = payload.len() as u64;
         let timestamp = SystemTime::now()
@@ -132,7 +132,7 @@ impl MetadataStore {
         let payload = &data[28..28 + payload_len];
         let (metadata, _): (VolumeMetadata, _) =
             bincode::serde::decode_from_slice(payload, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bincode decode: {e}")))?;
+                .map_err(|e| io::Error::other(format!("bincode decode: {e}")))?;
 
         Ok(metadata)
     }

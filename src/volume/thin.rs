@@ -400,13 +400,13 @@ impl BlockDevice for ThinVolumeHandle {
             let has_extent = vol.extent_map.contains_key(&vext_idx);
             if has_extent {
                 // COW if shared
-                vol.cow_extent(vext_idx).await.map_err(VolumeError::from)?;
+                vol.cow_extent(vext_idx).await?;
                 let pext = &vol.extent_map[&vext_idx];
                 let phys_offset = pext.offset + off_in_extent;
                 vol.backing_device.write(phys_offset, &buf[buf_start..buf_end]).await?;
             } else {
                 // Allocate new extent
-                vol.allocate_extent(vext_idx).await.map_err(VolumeError::from)?;
+                vol.allocate_extent(vext_idx).await?;
                 let pext = &vol.extent_map[&vext_idx];
                 let phys_offset = pext.offset + off_in_extent;
                 vol.backing_device.write(phys_offset, &buf[buf_start..buf_end]).await?;

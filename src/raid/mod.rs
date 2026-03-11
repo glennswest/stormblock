@@ -699,10 +699,10 @@ impl RaidArray {
                 active[0].1.device.read(phys_offset, &mut first).await
                     .map_err(|e| RaidError::MemberIo { member_idx: active[0].0, error: e })?;
 
-                for &(idx, ref member) in &active[1..] {
+                for (idx, member) in &active[1..] {
                     let mut buf = vec![0u8; strip_size];
                     member.device.read(phys_offset, &mut buf).await
-                        .map_err(|e| RaidError::MemberIo { member_idx: idx, error: e })?;
+                        .map_err(|e| RaidError::MemberIo { member_idx: *idx, error: e })?;
                     if buf != first {
                         return Ok(false);
                     }

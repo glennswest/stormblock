@@ -65,9 +65,15 @@ pub struct Bhs {
     pub raw: [u8; 48],
 }
 
+impl Default for Bhs {
+    fn default() -> Self {
+        Bhs { raw: [0u8; 48] }
+    }
+}
+
 impl Bhs {
     pub fn new() -> Self {
-        Bhs { raw: [0u8; 48] }
+        Self::default()
     }
 
     pub fn from_bytes(bytes: &[u8; 48]) -> Self {

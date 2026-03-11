@@ -4,7 +4,6 @@
 
 mod common;
 
-use std::sync::Arc;
 
 use stormblock::target::iscsi::IscsiConfig;
 use stormblock::target::iscsi::chap::ChapConfig;

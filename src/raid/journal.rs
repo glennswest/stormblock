@@ -32,7 +32,7 @@ impl WriteIntentJournal {
         if path.exists() {
             // Load existing bitmap for recovery
             let data = std::fs::read(path)?;
-            let expected_bytes = (bit_count + 7) / 8;
+            let expected_bytes = bit_count.div_ceil(8);
             if data.len() >= expected_bytes {
                 let mut bitmap = BitVec::<u8, Lsb0>::from_vec(data);
                 bitmap.truncate(bit_count);

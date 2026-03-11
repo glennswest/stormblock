@@ -30,6 +30,7 @@ pub struct StormBlockConfig {
     pub stormfs: crate::stormfs::StormFsConfig,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for StormBlockConfig {
     fn default() -> Self {
         StormBlockConfig {
@@ -141,6 +142,7 @@ pub struct ReactorCfg {
     pub pin_cores: bool,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for ReactorCfg {
     fn default() -> Self {
         ReactorCfg {
@@ -163,6 +165,7 @@ impl StormBlockConfig {
     }
 
     /// Merge CLI arguments into this config (CLI takes precedence).
+    #[allow(clippy::too_many_arguments)]
     pub fn merge_cli(
         &mut self,
         devices: &[String],

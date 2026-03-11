@@ -1,4 +1,5 @@
 //! Raft log + state machine storage — file-backed, in-memory cache.
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -89,9 +90,9 @@ impl StormStore {
             let data = std::fs::read(&snap_path)?;
             if let Ok(snap) = serde_json::from_slice::<PersistedSnapshot>(&data) {
                 store.state = snap.state;
-                store.last_applied = snap.meta.last_log_id.clone();
+                store.last_applied = snap.meta.last_log_id;
                 store.last_membership = snap.meta.last_membership.clone();
-                store.last_purged_log_id = snap.meta.last_log_id.clone();
+                store.last_purged_log_id = store.last_applied;
                 store.snapshot = Some(StoredSnapshot {
                     meta: snap.meta,
                     data: serde_json::to_vec(&store.state)?,
@@ -117,7 +118,7 @@ impl StormStore {
     /// Persist vote to disk.
     fn persist_vote(&self) -> Result<(), StorageError<u64>> {
         let path = self.data_dir.join("raft-vote");
-        let data = serde_json::to_string(&self.vote).map_err(|e| serde_err(e))?;
+        let data = serde_json::to_string(&self.vote).map_err(serde_err)?;
         std::fs::write(&path, data).map_err(io_err)?;
         Ok(())
     }
@@ -127,7 +128,7 @@ impl StormStore {
         let path = self.data_dir.join("raft-log");
         let mut content = String::new();
         for entry in self.log.values() {
-            let line = serde_json::to_string(entry).map_err(|e| serde_err(e))?;
+            let line = serde_json::to_string(entry).map_err(serde_err)?;
             content.push_str(&line);
             content.push('\n');
         }
@@ -142,7 +143,7 @@ impl StormStore {
             meta: meta.clone(),
             state: self.state.clone(),
         };
-        let data = serde_json::to_vec(&snap).map_err(|e| serde_err(e))?;
+        let data = serde_json::to_vec(&snap).map_err(serde_err)?;
         std::fs::write(&path, data).map_err(io_err)?;
         Ok(())
     }
@@ -177,11 +178,11 @@ impl RaftLogReader<StormTypeConfig> for StormStore {
 
 impl RaftSnapshotBuilder<StormTypeConfig> for StormStore {
     async fn build_snapshot(&mut self) -> Result<Snapshot<StormTypeConfig>, StorageError<u64>> {
-        let data = serde_json::to_vec(&self.state).map_err(|e| serde_err(e))?;
+        let data = serde_json::to_vec(&self.state).map_err(serde_err)?;
 
         let snapshot_id = format!("snap-{}", uuid::Uuid::new_v4().simple());
         let meta = SnapshotMeta {
-            last_log_id: self.last_applied.clone(),
+            last_log_id: self.last_applied,
             last_membership: self.last_membership.clone(),
             snapshot_id,
         };
@@ -208,12 +209,12 @@ impl RaftStorage<StormTypeConfig> for StormStore {
     type SnapshotBuilder = Self;
 
     async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
-        self.vote = Some(vote.clone());
+        self.vote = Some(*vote);
         self.persist_vote()
     }
 
     async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
-        Ok(self.vote.clone())
+        Ok(self.vote)
     }
 
     async fn save_committed(&mut self, committed: Option<LogId<u64>>) -> Result<(), StorageError<u64>> {
@@ -222,15 +223,15 @@ impl RaftStorage<StormTypeConfig> for StormStore {
     }
 
     async fn read_committed(&mut self) -> Result<Option<LogId<u64>>, StorageError<u64>> {
-        Ok(self.committed.clone())
+        Ok(self.committed)
     }
 
     async fn get_log_state(&mut self) -> Result<LogState<StormTypeConfig>, StorageError<u64>> {
         let last_log_id = self.log.values().last()
-            .map(|e| e.log_id.clone())
-            .or_else(|| self.last_purged_log_id.clone());
+            .map(|e| e.log_id)
+            .or(self.last_purged_log_id);
         Ok(LogState {
-            last_purged_log_id: self.last_purged_log_id.clone(),
+            last_purged_log_id: self.last_purged_log_id,
             last_log_id,
         })
     }
@@ -260,7 +261,7 @@ impl RaftStorage<StormTypeConfig> for StormStore {
     }
 
     async fn purge_logs_upto(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        self.last_purged_log_id = Some(log_id.clone());
+        self.last_purged_log_id = Some(log_id);
         let keys: Vec<u64> = self.log.range(..=log_id.index)
             .map(|(&k, _)| k)
             .collect();
@@ -273,7 +274,7 @@ impl RaftStorage<StormTypeConfig> for StormStore {
     async fn last_applied_state(
         &mut self,
     ) -> Result<(Option<LogId<u64>>, StoredMembership<u64, BasicNode>), StorageError<u64>> {
-        Ok((self.last_applied.clone(), self.last_membership.clone()))
+        Ok((self.last_applied, self.last_membership.clone()))
     }
 
     async fn apply_to_state_machine(
@@ -282,7 +283,7 @@ impl RaftStorage<StormTypeConfig> for StormStore {
     ) -> Result<Vec<ClusterResponse>, StorageError<u64>> {
         let mut responses = Vec::with_capacity(entries.len());
         for entry in entries {
-            self.last_applied = Some(entry.log_id.clone());
+            self.last_applied = Some(entry.log_id);
 
             match &entry.payload {
                 EntryPayload::Blank => {
@@ -294,7 +295,7 @@ impl RaftStorage<StormTypeConfig> for StormStore {
                 }
                 EntryPayload::Membership(mem) => {
                     self.last_membership = StoredMembership::new(
-                        Some(entry.log_id.clone()),
+                        Some(entry.log_id),
                         mem.clone(),
                     );
                     responses.push(ClusterResponse::Ok);
@@ -319,10 +320,10 @@ impl RaftStorage<StormTypeConfig> for StormStore {
     ) -> Result<(), StorageError<u64>> {
         let data = snapshot.into_inner();
         let state: ClusterState = serde_json::from_slice(&data)
-            .map_err(|e| serde_err(e))?;
+            .map_err(serde_err)?;
 
         self.state = state;
-        self.last_applied = meta.last_log_id.clone();
+        self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
 
         self.snapshot = Some(StoredSnapshot {
@@ -333,14 +334,14 @@ impl RaftStorage<StormTypeConfig> for StormStore {
         self.persist_snapshot(meta)?;
 
         // Purge logs up to snapshot
-        if let Some(ref log_id) = meta.last_log_id {
+        if let Some(log_id) = meta.last_log_id {
             let keys: Vec<u64> = self.log.range(..=log_id.index)
                 .map(|(&k, _)| k)
                 .collect();
             for key in keys {
                 self.log.remove(&key);
             }
-            self.last_purged_log_id = Some(log_id.clone());
+            self.last_purged_log_id = Some(log_id);
             self.persist_log()?;
         }
 

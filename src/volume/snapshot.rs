@@ -55,7 +55,7 @@ pub fn create_snapshot(source: &mut ThinVolume, name: &str) -> ThinVolume {
 /// a centralized ref_count store to avoid stale counts.
 pub async fn delete_snapshot(snap: ThinVolume, volumes: &[&ThinVolume]) {
     let mut alloc = snap.allocator.lock().await;
-    for (_vext_idx, pext) in &snap.extent_map {
+    for pext in snap.extent_map.values() {
         // Check if any other volume still references this physical extent
         let still_referenced = volumes.iter().any(|v| {
             v.extent_map.values().any(|other| {

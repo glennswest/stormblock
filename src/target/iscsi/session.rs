@@ -110,12 +110,18 @@ pub struct SessionRegistry {
     next_tsih: AtomicU16,
 }
 
-impl SessionRegistry {
-    pub fn new() -> Self {
+impl Default for SessionRegistry {
+    fn default() -> Self {
         SessionRegistry {
             sessions: RwLock::new(HashMap::new()),
             next_tsih: AtomicU16::new(1),
         }
+    }
+}
+
+impl SessionRegistry {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Allocate a TSIH and register a new session.
