@@ -1,6 +1,6 @@
 [package]
 name = "stormblock"
-version = "5.0.0"
+version = "5.1.0"
 edition = "2021"
 authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"

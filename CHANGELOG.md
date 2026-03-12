@@ -2,20 +2,24 @@
 
 ## [Unreleased]
 
-### 2026-03-09
-- **feat:** TLS for cluster RPCs — Raft, heartbeat, and join use HTTPS when `cluster.tls_enabled = true`
-- **fix:** Clean up all compiler warnings (unused imports, dead code, unused variables)
-- **fix:** Resolve all 55 clippy warnings (Copy vs clone, redundant closures, derive Default, div_ceil, etc.)
-- **feat:** Async replication retry with exponential backoff — retry queue (max 10K entries), up to 8 retries per request, 100ms–30s backoff, Prometheus metrics for retry success/failure/exhausted/dropped
-- **test:** Fuzz testing for PDU parsers — 6 cargo-fuzz targets covering iSCSI BHS, iSCSI PDU read, iSCSI text params, NVMe-oF common header, NVMe-oF PDU read, NVMe-oF connect data
-- **build:** Dockerfile: replace scratch runtime with Alpine 3.21 + storage tools (nvme-cli, smartmontools, fio, iproute2, util-linux, lsblk, e2fsprogs, xfsprogs, jq, ca-certificates)
-- **build:** Dockerfile: install stormblock binary to /usr/bin/stormblock (was / in scratch image)
-- **feat:** Add scripts/build-stormbase-iso.sh — orchestration script to build StormBase ISO with StormBlock + StormFS baked in
+## [v5.1.0] — 2026-03-09
 
-### 2026-02-23
-- **fix:** TLS service error type for hyper-util compatibility
-- **fix:** IoUring type annotation for Linux build
-- **chore:** Verified musl static release build (11 MB stripped PIE, statically linked)
+### Added
+- TLS for cluster RPCs — Raft, heartbeat, and join use HTTPS when `cluster.tls_enabled = true`
+- Async replication retry with exponential backoff — retry queue (max 10K entries), up to 8 retries per request, 100ms–30s backoff, Prometheus metrics for retry success/failure/exhausted/dropped
+- Fuzz testing for PDU parsers — 6 cargo-fuzz targets covering iSCSI BHS, iSCSI PDU read, iSCSI text params, NVMe-oF common header, NVMe-oF PDU read, NVMe-oF connect data
+- StormBase ISO build script (`scripts/build-stormbase-iso.sh`)
+
+### Fixed
+- All compiler warnings (unused imports, dead code, unused variables)
+- All 55 clippy warnings (Copy vs clone, redundant closures, derive Default, div_ceil, etc.)
+- `.gitignore` now covers `target/` everywhere (was only `/target`)
+
+### Changed
+- Dockerfile: Alpine 3.21 runtime with storage tools (nvme-cli, smartmontools, fio, iproute2, util-linux, lsblk, e2fsprogs, xfsprogs, jq, ca-certificates)
+- Dockerfile: stormblock binary installed to `/usr/bin/stormblock`
+- TLS service error type for hyper-util compatibility
+- IoUring type annotation for Linux build
 
 ## [v5.0.0] — 2026-02-23
 
