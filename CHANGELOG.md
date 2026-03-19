@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### 2026-03-19
+- **feat:** ublk server — exports BlockDevice as `/dev/ublkbN` via io_uring URING_CMD (replaces NBD)
+- **feat:** Direct Linux boot — kernel cmdline and initramfs config generation (replaces iPXE scripts)
+- **refactor:** Replace `stormblock nbd` CLI subcommand with `stormblock ublk`
+- **refactor:** Migration orchestrator docs updated for ublk (NBD → ublk)
+- **BREAKING:** NBD server removed (`src/drive/nbd.rs` deleted, `pub mod nbd` removed)
+
+## [v6.0.0] — 2026-03-19
+
+### Added
+- **DiskPool**: On-disk pool format with header, VDrive table, first-fit allocator (1 MB alignment), CRC32C checksums, free-space management
+- **VDrive**: Offset-translating BlockDevice wrapper over parent device region, with bounds checking
+- **NBD server**: Newstyle fixed negotiation protocol, exports any BlockDevice to kernel via `/dev/nbdN` (read/write/disc/flush/trim)
+- **RAID 1 dynamic members**: `add_member()` spawns background rebuild, `remove_member()` validates minimum active count — enables live migration
+- **DriveType::VDrive**: New variant for virtual drives backed by pool regions
+- **Pool REST API**: `GET/POST/DELETE /api/v1/pools` and `/api/v1/pools/{id}/vdrives` for pool and VDrive management
+- **RAID member API**: `POST /api/v1/arrays/{id}/members` and `DELETE /api/v1/arrays/{id}/members/{uuid}` for dynamic member management
+- **Boot volume manager**: Template creation, per-machine COW snapshot provisioning, iPXE script generation for iSCSI sanboot
+- **Migration orchestrator**: Live migrate from iSCSI to local disk via RAID 1 add/rebuild/remove — system never notices
+- **CLI subcommands**: `stormblock pool format/list/vdrives/create-vdrive`, `stormblock nbd`, `stormblock migrate`
+- **PoolConfig and BootConfig** in configuration parsing
+- Pools tracking in AppState for runtime pool management
+- 18 new tests (pool header roundtrip, VDrive offset translation, NBD handshake/IO, boot manager, migration)
+
+### Changed
+- RAID `members` field refactored from `Vec<MemberInfo>` to `std::sync::RwLock<Vec<MemberInfo>>` for concurrent access
+- RAID `capacity` field changed to `AtomicU64` for thread-safe dynamic updates
+- All RAID async I/O methods extract `Arc<dyn BlockDevice>` before `.await` (RwLock safety pattern)
+
 ## [v5.1.0] — 2026-03-09
 
 ### Added

@@ -88,7 +88,7 @@ struct Cli {
     #[arg(long)]
     data_dir: Option<String>,
 
-    /// Subcommand (pool, nbd, migrate)
+    /// Subcommand (pool, ublk, migrate)
     #[command(subcommand)]
     command: Option<SubCommand>,
 }
@@ -100,14 +100,14 @@ enum SubCommand {
         #[command(subcommand)]
         action: PoolAction,
     },
-    /// Export a volume via NBD to the local kernel
-    Nbd {
+    /// Export a volume via ublk to the local kernel (/dev/ublkbN)
+    Ublk {
         /// Volume UUID to export
         #[arg(long)]
         volume: String,
-        /// NBD listen address (default: 127.0.0.1:10809)
-        #[arg(long, default_value = "127.0.0.1:10809")]
-        listen: String,
+        /// Number of I/O queues (default: 1)
+        #[arg(long, default_value = "1")]
+        queues: u16,
     },
     /// Live migrate from iSCSI to local disk
     Migrate {
@@ -214,9 +214,10 @@ async fn main() -> anyhow::Result<()> {
             SubCommand::Pool { action } => {
                 return handle_pool_command(action).await;
             }
-            SubCommand::Nbd { volume: _, listen: _ } => {
-                tracing::info!("NBD export mode — requires running storage engine");
-                tracing::info!("Use the REST API POST /api/v1/exports to configure NBD exports");
+            SubCommand::Ublk { volume: _, queues: _ } => {
+                tracing::info!("ublk export mode — requires running storage engine");
+                tracing::info!("Use the REST API POST /api/v1/exports to configure ublk exports");
+                tracing::info!("Requires Linux 6.0+ with ublk_drv module loaded");
                 return Ok(());
             }
             SubCommand::Migrate { local_disk, label } => {

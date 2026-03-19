@@ -1,7 +1,8 @@
-//! Boot volume manager — templates, COW snapshots per machine, iPXE script generation.
+//! Boot volume manager — templates, COW snapshots per machine, direct Linux boot.
 //!
 //! Server-side management of boot volumes. Template volumes are created and imaged,
-//! then per-machine COW snapshots are provisioned for iSCSI sanboot.
+//! then per-machine COW snapshots are provisioned. StormBlock runs in initramfs,
+//! exports the volume via ublk (`/dev/ublkb0`), and the root filesystem mounts on it.
 
 use std::collections::HashMap;
 
@@ -141,13 +142,27 @@ impl BootManager {
         self.instances.get(machine_id)
     }
 
-    /// Generate an iPXE script for a machine.
-    pub fn ipxe_script(&self, machine_id: &str) -> Option<String> {
+    /// Generate kernel command line for StormBlock root boot via ublk.
+    ///
+    /// The kernel boots with this cmdline, StormBlock in initramfs creates
+    /// `/dev/ublkb0`, and the root filesystem mounts on it.
+    pub fn kernel_cmdline(&self, machine_id: &str) -> Option<String> {
         let instance = self.instances.get(machine_id)?;
-        let _ = instance; // used for IQN generation
         Some(format!(
-            "#!ipxe\nsanboot iscsi:{}:::1:iqn.2024.io.stormblock:{}\n",
-            self.server_addr, machine_id,
+            "root=/dev/ublkb0 stormblock.volume={} stormblock.server={}",
+            instance.volume_id.0, self.server_addr,
+        ))
+    }
+
+    /// Generate initramfs config for StormBlock boot.
+    ///
+    /// Dropped into `/etc/stormblock/boot.toml` in the initramfs. StormBlock
+    /// reads this at early boot to know which volume to open and export via ublk.
+    pub fn initramfs_config(&self, machine_id: &str) -> Option<String> {
+        let instance = self.instances.get(machine_id)?;
+        Some(format!(
+            "[boot]\nvolume = \"{}\"\nserver = \"{}\"\n",
+            instance.volume_id.0, self.server_addr,
         ))
     }
 
@@ -163,20 +178,37 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn ipxe_script_generation() {
+    fn kernel_cmdline_generation() {
         let mut bm = BootManager::new("192.168.1.50");
-        // Manually insert an instance for testing
+        let vol_id = VolumeId(Uuid::new_v4());
         bm.instances.insert("test-machine".to_string(), MachineInstance {
             machine_id: "test-machine".to_string(),
             template_name: "ubuntu".to_string(),
-            volume_id: VolumeId(Uuid::new_v4()),
+            volume_id: vol_id,
             created: 0,
         });
 
-        let script = bm.ipxe_script("test-machine").unwrap();
-        assert!(script.contains("#!ipxe"));
-        assert!(script.contains("sanboot iscsi:192.168.1.50"));
-        assert!(script.contains("iqn.2024.io.stormblock:test-machine"));
+        let cmdline = bm.kernel_cmdline("test-machine").unwrap();
+        assert!(cmdline.contains("root=/dev/ublkb0"));
+        assert!(cmdline.contains("stormblock.server=192.168.1.50"));
+        assert!(cmdline.contains(&format!("stormblock.volume={}", vol_id.0)));
+    }
+
+    #[test]
+    fn initramfs_config_generation() {
+        let mut bm = BootManager::new("192.168.1.50");
+        let vol_id = VolumeId(Uuid::new_v4());
+        bm.instances.insert("test-machine".to_string(), MachineInstance {
+            machine_id: "test-machine".to_string(),
+            template_name: "ubuntu".to_string(),
+            volume_id: vol_id,
+            created: 0,
+        });
+
+        let config = bm.initramfs_config("test-machine").unwrap();
+        assert!(config.contains("[boot]"));
+        assert!(config.contains(&format!("volume = \"{}\"", vol_id.0)));
+        assert!(config.contains("server = \"192.168.1.50\""));
     }
 
     #[test]
@@ -185,6 +217,7 @@ mod tests {
         assert!(bm.list_templates().is_empty());
         assert!(bm.list_machines().is_empty());
         assert!(bm.get_machine("nonexistent").is_none());
-        assert!(bm.ipxe_script("nonexistent").is_none());
+        assert!(bm.kernel_cmdline("nonexistent").is_none());
+        assert!(bm.initramfs_config("nonexistent").is_none());
     }
 }

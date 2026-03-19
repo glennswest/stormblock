@@ -1,8 +1,8 @@
-//! Live migration orchestrator — iSCSI → local disk via RAID 1 add/remove.
+//! Live migration orchestrator — remote → local disk via RAID 1 add/remove.
 //!
-//! Migrates a running root volume from a remote iSCSI device to a local disk
+//! Migrates a running root volume from a remote storage backend to a local disk
 //! by leveraging RAID 1 add_member/remove_member. The system never notices
-//! because all I/O flows through StormBlock's BlockDevice trait.
+//! because all I/O flows through StormBlock's BlockDevice trait (via ublk).
 
 use std::sync::Arc;
 
