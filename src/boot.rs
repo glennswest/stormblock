@@ -160,6 +160,7 @@ impl BootManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn ipxe_script_generation() {

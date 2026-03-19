@@ -303,7 +303,7 @@ mod tests {
             FileDevice::open_with_capacity(path_str, 4 * 1024 * 1024).await.unwrap()
         ) as Arc<dyn BlockDevice>;
 
-        let server = NbdServer::new(dev.clone(), "127.0.0.1:0");
+        let _server = NbdServer::new(dev.clone(), "127.0.0.1:0");
 
         // Bind to a random port for testing
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

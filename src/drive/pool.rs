@@ -557,13 +557,13 @@ mod tests {
     #[tokio::test]
     async fn pool_format_and_open() {
         let (dev, path) = create_pool_device(100 * 1024 * 1024).await;
-        let pool = DiskPool::format(dev.clone(), path_str).await.unwrap();
+        let pool = DiskPool::format(dev.clone(), &path).await.unwrap();
         let uuid = pool.pool_uuid();
         assert_eq!(pool.entries.len(), 0);
         assert!(pool.free_space() > 0);
 
         // Re-open
-        let pool2 = DiskPool::open(dev, path_str).await.unwrap();
+        let pool2 = DiskPool::open(dev, &path).await.unwrap();
         assert_eq!(pool2.pool_uuid(), uuid);
         assert_eq!(pool2.entries.len(), 0);
 
@@ -573,7 +573,7 @@ mod tests {
     #[tokio::test]
     async fn pool_create_and_delete_vdrive() {
         let (dev, path) = create_pool_device(100 * 1024 * 1024).await;
-        let mut pool = DiskPool::format(dev.clone(), path_str).await.unwrap();
+        let mut pool = DiskPool::format(dev.clone(), &path).await.unwrap();
 
         let entry = pool.create_vdrive(10 * 1024 * 1024, "data0").await.unwrap();
         assert_eq!(entry.label, "data0");
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(pool.entries.len(), 1);
 
         // Re-open and verify persistence
-        let pool2 = DiskPool::open(dev.clone(), path_str).await.unwrap();
+        let pool2 = DiskPool::open(dev.clone(), &path).await.unwrap();
         assert_eq!(pool2.entries.len(), 1);
         assert_eq!(pool2.entries[0].uuid, entry.uuid);
         assert_eq!(pool2.entries[0].label, "data0");
@@ -596,7 +596,7 @@ mod tests {
     #[tokio::test]
     async fn pool_multiple_vdrives() {
         let (dev, path) = create_pool_device(100 * 1024 * 1024).await;
-        let mut pool = DiskPool::format(dev, path_str).await.unwrap();
+        let mut pool = DiskPool::format(dev, &path).await.unwrap();
 
         let e1 = pool.create_vdrive(20 * 1024 * 1024, "v1").await.unwrap();
         let e2 = pool.create_vdrive(20 * 1024 * 1024, "v2").await.unwrap();
@@ -616,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn pool_vdrive_io() {
         let (dev, path) = create_pool_device(100 * 1024 * 1024).await;
-        let mut pool = DiskPool::format(dev, path_str).await.unwrap();
+        let mut pool = DiskPool::format(dev, &path).await.unwrap();
 
         let entry = pool.create_vdrive(10 * 1024 * 1024, "io-test").await.unwrap();
         let vdrive = pool.open_vdrive(&entry.uuid).unwrap();
@@ -634,7 +634,7 @@ mod tests {
     #[tokio::test]
     async fn pool_fragmentation() {
         let (dev, path) = create_pool_device(100 * 1024 * 1024).await;
-        let mut pool = DiskPool::format(dev, path_str).await.unwrap();
+        let mut pool = DiskPool::format(dev, &path).await.unwrap();
 
         // Create 3 VDrives, delete the middle one, allocate in the gap
         let e1 = pool.create_vdrive(10 * 1024 * 1024, "a").await.unwrap();
@@ -660,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn pool_in_array_prevents_delete() {
         let (dev, path) = create_pool_device(100 * 1024 * 1024).await;
-        let mut pool = DiskPool::format(dev, path_str).await.unwrap();
+        let mut pool = DiskPool::format(dev, &path).await.unwrap();
 
         let entry = pool.create_vdrive(10 * 1024 * 1024, "locked").await.unwrap();
         pool.set_vdrive_in_array(entry.uuid, Uuid::new_v4()).await.unwrap();
