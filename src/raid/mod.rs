@@ -107,6 +107,10 @@ pub enum RaidError {
     MemberIo { member_idx: usize, error: DriveError },
     /// Stripe geometry error.
     InvalidStripe(String),
+    /// Operation not supported for this RAID level.
+    NotSupported(String),
+    /// Cannot remove member (would leave array with insufficient members).
+    CannotRemoveMember(String),
 }
 
 impl fmt::Display for RaidError {
@@ -126,6 +130,10 @@ impl fmt::Display for RaidError {
                 write!(f, "member {member_idx} I/O error: {error}"),
             RaidError::InvalidStripe(msg) =>
                 write!(f, "invalid stripe: {msg}"),
+            RaidError::NotSupported(msg) =>
+                write!(f, "not supported: {msg}"),
+            RaidError::CannotRemoveMember(msg) =>
+                write!(f, "cannot remove member: {msg}"),
         }
     }
 }
@@ -372,10 +380,10 @@ pub fn stripe_to_disk_offset(stripe: u64, stripe_size: u64, data_offset: u64) ->
 
 // --- Member info ---
 
-struct MemberInfo {
-    device: Arc<dyn BlockDevice>,
-    state: RaidMemberState,
-    _member_uuid: Uuid,
+pub(crate) struct MemberInfo {
+    pub(crate) device: Arc<dyn BlockDevice>,
+    pub(crate) state: RaidMemberState,
+    pub(crate) member_uuid: Uuid,
 }
 
 // --- RaidArray ---
@@ -387,10 +395,10 @@ pub struct RaidArray {
     id: RaidArrayId,
     device_id: DeviceId,
     level: RaidLevel,
-    members: Vec<MemberInfo>,
+    members: std::sync::RwLock<Vec<MemberInfo>>,
     stripe_size: u64,
     /// Usable data capacity in bytes.
-    capacity: u64,
+    capacity: std::sync::atomic::AtomicU64,
     parity_engine: ParityEngine,
     journal: tokio::sync::Mutex<WriteIntentJournal>,
     _rebuild_config: RebuildConfig,
@@ -496,7 +504,7 @@ impl RaidArray {
             member_infos.push(MemberInfo {
                 device: Arc::clone(dev),
                 state: RaidMemberState::Active,
-                _member_uuid: member_uuid,
+                member_uuid,
             });
         }
 
@@ -520,9 +528,9 @@ impl RaidArray {
             id: array_id,
             device_id,
             level,
-            members: member_infos,
+            members: std::sync::RwLock::new(member_infos),
             stripe_size,
-            capacity,
+            capacity: std::sync::atomic::AtomicU64::new(capacity),
             parity_engine: ParityEngine::detect(),
             journal: tokio::sync::Mutex::new(journal),
             _rebuild_config: RebuildConfig::default(),
@@ -542,7 +550,7 @@ impl RaidArray {
 
     /// Number of member drives.
     pub fn member_count(&self) -> usize {
-        self.members.len()
+        self.members.read().unwrap().len()
     }
 
     /// Stripe size in bytes.
@@ -552,8 +560,17 @@ impl RaidArray {
 
     /// State of each member.
     pub fn member_states(&self) -> Vec<(usize, RaidMemberState)> {
-        self.members.iter().enumerate()
+        let members = self.members.read().unwrap();
+        members.iter().enumerate()
             .map(|(i, m)| (i, m.state))
+            .collect()
+    }
+
+    /// Get member UUIDs with their states.
+    pub fn member_uuids(&self) -> Vec<(Uuid, RaidMemberState)> {
+        let members = self.members.read().unwrap();
+        members.iter()
+            .map(|m| (m.member_uuid, m.state))
             .collect()
     }
 
@@ -563,32 +580,190 @@ impl RaidArray {
     }
 
     /// Set the state of a member drive (for testing degraded mode).
-    pub fn set_member_state(&mut self, idx: usize, state: RaidMemberState) {
-        if idx < self.members.len() {
-            self.members[idx].state = state;
+    pub fn set_member_state(&self, idx: usize, state: RaidMemberState) {
+        let mut members = self.members.write().unwrap();
+        if idx < members.len() {
+            members[idx].state = state;
         }
     }
 
     /// Number of failed members.
-    fn failed_count(&self) -> usize {
-        self.members.iter()
+    fn failed_count_locked(members: &[MemberInfo]) -> usize {
+        members.iter()
             .filter(|m| m.state == RaidMemberState::Failed)
             .count()
     }
 
-    /// Number of active members.
-    fn active_members(&self) -> Vec<(usize, &MemberInfo)> {
-        self.members.iter().enumerate()
+    /// Active members (Active or Rebuilding).
+    fn active_indices_locked(members: &[MemberInfo]) -> Vec<usize> {
+        members.iter().enumerate()
             .filter(|(_, m)| m.state == RaidMemberState::Active || m.state == RaidMemberState::Rebuilding)
+            .map(|(i, _)| i)
             .collect()
+    }
+
+    /// Add a new member to the array (RAID 1 only).
+    /// The new member starts in Rebuilding state. Returns the member UUID.
+    /// A background rebuild task is spawned to sync data from an active member.
+    pub async fn add_member(self: &Arc<Self>, device: Arc<dyn BlockDevice>) -> Result<Uuid, RaidError> {
+        if self.level != RaidLevel::Raid1 {
+            return Err(RaidError::NotSupported(
+                "add_member only supported for RAID 1 — create new array and migrate for RAID 5/6/10".into()
+            ));
+        }
+
+        let capacity = self.capacity.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Validate new member has sufficient capacity
+        let needed = capacity + DATA_OFFSET;
+        if device.capacity_bytes() < needed {
+            return Err(RaidError::Drive(DriveError::OutOfRange {
+                offset: 0,
+                len: needed,
+                capacity: device.capacity_bytes(),
+            }));
+        }
+
+        let member_uuid = Uuid::new_v4();
+
+        // Write superblock to new member
+        let member_count;
+        let member_index;
+        {
+            let members = self.members.read().unwrap();
+            member_count = members.len() as u32 + 1;
+            member_index = members.len() as u32;
+        }
+
+        let sb = RaidSuperblock::new(
+            self.id.0,
+            member_index,
+            member_uuid,
+            self.level,
+            member_count,
+            self.stripe_size,
+            capacity,
+        );
+        let sb_bytes = sb.to_bytes();
+        device.write(0, &sb_bytes).await.map_err(|e| {
+            RaidError::MemberIo { member_idx: member_index as usize, error: e }
+        })?;
+        device.flush().await.map_err(|e| {
+            RaidError::MemberIo { member_idx: member_index as usize, error: e }
+        })?;
+
+        // Add to members list as Rebuilding
+        {
+            let mut members = self.members.write().unwrap();
+            members.push(MemberInfo {
+                device: device.clone(),
+                state: RaidMemberState::Rebuilding,
+                member_uuid,
+            });
+        }
+
+        // Start background rebuild
+        let array = Arc::clone(self);
+        let new_idx = member_index as usize;
+        tokio::spawn(async move {
+            tracing::info!("RAID 1 rebuild started for new member {new_idx}");
+            let chunk_size = 1024 * 1024; // 1 MB chunks
+            let mut offset = 0u64;
+
+            while offset < capacity {
+                let read_len = chunk_size.min(capacity - offset) as usize;
+                let mut buf = vec![0u8; read_len];
+
+                // Read from any active member
+                let source_idx;
+                {
+                    let members = array.members.read().unwrap();
+                    let active = Self::active_indices_locked(&members);
+                    let active_non_new: Vec<_> = active.into_iter()
+                        .filter(|&i| i != new_idx)
+                        .collect();
+                    if active_non_new.is_empty() {
+                        tracing::error!("RAID 1 rebuild: no source members available");
+                        return;
+                    }
+                    source_idx = active_non_new[0];
+                }
+
+                // Extract device Arcs before async I/O (RwLock guard must not span .await)
+                let (source_dev, new_dev) = {
+                    let members = array.members.read().unwrap();
+                    (Arc::clone(&members[source_idx].device), Arc::clone(&members[new_idx].device))
+                };
+
+                if let Err(e) = source_dev.read(DATA_OFFSET + offset, &mut buf).await {
+                    tracing::error!("RAID 1 rebuild read error at {offset}: {e}");
+                    return;
+                }
+
+                // Write to new member
+                if let Err(e) = new_dev.write(DATA_OFFSET + offset, &buf).await {
+                    tracing::error!("RAID 1 rebuild write error at {offset}: {e}");
+                    return;
+                }
+
+                offset += read_len as u64;
+            }
+
+            // Flush new member
+            let new_dev = {
+                let members = array.members.read().unwrap();
+                Arc::clone(&members[new_idx].device)
+            };
+            let _ = new_dev.flush().await;
+
+            // Mark as Active
+            {
+                let mut members = array.members.write().unwrap();
+                if new_idx < members.len() {
+                    members[new_idx].state = RaidMemberState::Active;
+                }
+            }
+            tracing::info!("RAID 1 rebuild complete for member {new_idx}");
+        });
+
+        Ok(member_uuid)
+    }
+
+    /// Remove a member from the array by UUID.
+    /// Must have at least 1 active member remaining.
+    pub async fn remove_member(&self, member_uuid: Uuid) -> Result<(), RaidError> {
+        if self.level != RaidLevel::Raid1 {
+            return Err(RaidError::NotSupported(
+                "remove_member only supported for RAID 1".into()
+            ));
+        }
+
+        let mut members = self.members.write().unwrap();
+        let idx = members.iter().position(|m| m.member_uuid == member_uuid)
+            .ok_or_else(|| RaidError::CannotRemoveMember(
+                format!("member {} not found", member_uuid)
+            ))?;
+
+        // Count active members excluding the one being removed
+        let active_remaining = members.iter().enumerate()
+            .filter(|(i, m)| *i != idx && m.state == RaidMemberState::Active)
+            .count();
+
+        if active_remaining == 0 {
+            return Err(RaidError::CannotRemoveMember(
+                "cannot remove last active member".into()
+            ));
+        }
+
+        members.remove(idx);
+        Ok(())
     }
 
     /// Start a rebuild on a replacement drive.
     pub async fn start_rebuild(&self, _target_member: usize) -> Result<Arc<RebuildProgress>, RaidError> {
-        let stripe_count = self.capacity / self.stripe_size.max(1);
+        let capacity = self.capacity.load(std::sync::atomic::Ordering::Relaxed);
+        let stripe_count = capacity / self.stripe_size.max(1);
         let progress = RebuildProgress::new(stripe_count);
-        // Full rebuild implementation would iterate stripes in a spawned task.
-        // For now, return the progress tracker.
         Ok(progress)
     }
 
@@ -597,35 +772,38 @@ impl RaidArray {
     /// Used by both journal recovery and scrub. Only applicable to RAID 5/6.
     /// Returns true if parity was actually rewritten (was different from expected).
     async fn repair_stripe_parity(&self, stripe: u64) -> Result<bool, RaidError> {
-        let member_count = self.members.len() as u32;
-        let data_disks = self.data_disks();
+        // Extract device Arcs while holding lock briefly
+        let (member_count, data_disks, devices) = {
+            let members = self.members.read().unwrap();
+            let mc = members.len() as u32;
+            let dd = self.data_disks_with_count(mc);
+            let devs: Vec<Arc<dyn BlockDevice>> = members.iter().map(|m| Arc::clone(&m.device)).collect();
+            (mc, dd, devs)
+        };
+
         let strip_size = self.stripe_size as usize;
         let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
         let parity_disk = parity_disk_for_stripe(stripe, member_count);
 
-        // Read all data strips
         let mut data_strips: Vec<Vec<u8>> = Vec::with_capacity(data_disks as usize);
         for d in 0..data_disks {
             let disk = data_disk_index(d, stripe, member_count);
             let mut buf = vec![0u8; strip_size];
-            self.members[disk as usize].device.read(phys_offset, &mut buf).await
+            devices[disk as usize].read(phys_offset, &mut buf).await
                 .map_err(|e| RaidError::MemberIo { member_idx: disk as usize, error: e })?;
             data_strips.push(buf);
         }
 
-        // Read current parity
         let mut stored_parity = vec![0u8; strip_size];
-        self.members[parity_disk as usize].device.read(phys_offset, &mut stored_parity).await
+        devices[parity_disk as usize].read(phys_offset, &mut stored_parity).await
             .map_err(|e| RaidError::MemberIo { member_idx: parity_disk as usize, error: e })?;
 
-        // Compute expected parity
         let strip_refs: Vec<&[u8]> = data_strips.iter().map(|s| s.as_slice()).collect();
         let mut expected_parity = vec![0u8; strip_size];
         self.parity_engine.compute_xor_parity(&strip_refs, &mut expected_parity);
 
         if stored_parity != expected_parity {
-            // Rewrite correct parity
-            self.members[parity_disk as usize].device.write(phys_offset, &expected_parity).await
+            devices[parity_disk as usize].write(phys_offset, &expected_parity).await
                 .map_err(|e| RaidError::MemberIo { member_idx: parity_disk as usize, error: e })?;
             Ok(true)
         } else {
@@ -635,17 +813,26 @@ impl RaidArray {
 
     /// Verify parity consistency for a single stripe. Returns true if consistent.
     async fn verify_stripe(&self, stripe: u64) -> Result<bool, RaidError> {
+        let (devices, active_indices) = {
+            let members = self.members.read().unwrap();
+            let devs: Vec<(Arc<dyn BlockDevice>, RaidMemberState)> = members.iter()
+                .map(|m| (Arc::clone(&m.device), m.state))
+                .collect();
+            let active = Self::active_indices_locked(&members);
+            (devs, active)
+        };
+
+        let member_count = devices.len() as u32;
+
         match self.level {
             RaidLevel::Raid5 => {
-                let member_count = self.members.len() as u32;
                 let strip_size = self.stripe_size as usize;
                 let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
 
-                // Read ALL strips (data + parity) and XOR — result should be all zeros
                 let mut strips: Vec<Vec<u8>> = Vec::with_capacity(member_count as usize);
                 for i in 0..member_count {
                     let mut buf = vec![0u8; strip_size];
-                    self.members[i as usize].device.read(phys_offset, &mut buf).await
+                    devices[i as usize].0.read(phys_offset, &mut buf).await
                         .map_err(|e| RaidError::MemberIo { member_idx: i as usize, error: e })?;
                     strips.push(buf);
                 }
@@ -656,29 +843,24 @@ impl RaidArray {
                 Ok(check.iter().all(|&x| x == 0))
             }
             RaidLevel::Raid6 => {
-                let member_count = self.members.len() as u32;
-                let data_disks = self.data_disks();
+                let data_disks = self.data_disks_with_count(member_count);
                 let strip_size = self.stripe_size as usize;
                 let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
 
-                // Read data strips
                 let mut data_strips: Vec<Vec<u8>> = Vec::with_capacity(data_disks as usize);
                 for d in 0..data_disks {
                     let disk = data_disk_index(d, stripe, member_count);
                     let mut buf = vec![0u8; strip_size];
-                    self.members[disk as usize].device.read(phys_offset, &mut buf).await
+                    devices[disk as usize].0.read(phys_offset, &mut buf).await
                         .map_err(|e| RaidError::MemberIo { member_idx: disk as usize, error: e })?;
                     data_strips.push(buf);
                 }
 
-                // Read stored P and Q (last two disks in rotation, but for simplicity
-                // we use the same parity_disk_for_stripe for P; Q is on the next one)
                 let p_disk = parity_disk_for_stripe(stripe, member_count);
                 let mut stored_p = vec![0u8; strip_size];
-                self.members[p_disk as usize].device.read(phys_offset, &mut stored_p).await
+                devices[p_disk as usize].0.read(phys_offset, &mut stored_p).await
                     .map_err(|e| RaidError::MemberIo { member_idx: p_disk as usize, error: e })?;
 
-                // Compute expected P and Q
                 let strip_refs: Vec<&[u8]> = data_strips.iter().map(|s| s.as_slice()).collect();
                 let mut expected_p = vec![0u8; strip_size];
                 let mut _expected_q = vec![0u8; strip_size];
@@ -687,22 +869,20 @@ impl RaidArray {
                 Ok(stored_p == expected_p)
             }
             RaidLevel::Raid1 => {
-                // Compare all active mirrors byte-for-byte
-                let active = self.active_members();
-                if active.len() < 2 {
+                if active_indices.len() < 2 {
                     return Ok(true);
                 }
                 let strip_size = self.stripe_size.max(4096) as usize;
                 let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size.max(4096), DATA_OFFSET);
 
                 let mut first = vec![0u8; strip_size];
-                active[0].1.device.read(phys_offset, &mut first).await
-                    .map_err(|e| RaidError::MemberIo { member_idx: active[0].0, error: e })?;
+                devices[active_indices[0]].0.read(phys_offset, &mut first).await
+                    .map_err(|e| RaidError::MemberIo { member_idx: active_indices[0], error: e })?;
 
-                for (idx, member) in &active[1..] {
+                for &idx in &active_indices[1..] {
                     let mut buf = vec![0u8; strip_size];
-                    member.device.read(phys_offset, &mut buf).await
-                        .map_err(|e| RaidError::MemberIo { member_idx: *idx, error: e })?;
+                    devices[idx].0.read(phys_offset, &mut buf).await
+                        .map_err(|e| RaidError::MemberIo { member_idx: idx, error: e })?;
                     if buf != first {
                         return Ok(false);
                     }
@@ -710,7 +890,6 @@ impl RaidArray {
                 Ok(true)
             }
             RaidLevel::Raid10 => {
-                // RAID 10 = striped mirrors; mirror consistency check
                 Ok(true)
             }
         }
@@ -758,13 +937,15 @@ impl RaidArray {
         let stripe_count = match self.level {
             RaidLevel::Raid1 | RaidLevel::Raid10 => {
                 let unit = self.stripe_size.max(4096);
-                let per_member_data = self.members.first()
+                let members = self.members.read().unwrap();
+                let per_member_data = members.first()
                     .map(|m| m.device.capacity_bytes().saturating_sub(DATA_OFFSET))
                     .unwrap_or(0);
                 per_member_data / unit
             }
             RaidLevel::Raid5 | RaidLevel::Raid6 => {
-                let per_member_data = self.members.first()
+                let members = self.members.read().unwrap();
+                let per_member_data = members.first()
                     .map(|m| m.device.capacity_bytes().saturating_sub(DATA_OFFSET))
                     .unwrap_or(0);
                 per_member_data / self.stripe_size
@@ -816,41 +997,45 @@ impl RaidArray {
     // --- RAID 1 I/O ---
 
     async fn raid1_read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
-        let active = self.active_members();
-        if active.is_empty() {
-            return Err(RaidError::TooManyFailures {
-                failed: self.failed_count(),
-                max_tolerated: self.members.len() - 1,
-            }.into());
-        }
-
-        // Round-robin across active members
-        let idx = self.read_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (_, member) = active[(idx as usize) % active.len()];
+        let dev = {
+            let members = self.members.read().unwrap();
+            let active = Self::active_indices_locked(&members);
+            if active.is_empty() {
+                return Err(RaidError::TooManyFailures {
+                    failed: Self::failed_count_locked(&members),
+                    max_tolerated: members.len().saturating_sub(1),
+                }.into());
+            }
+            let idx = self.read_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let member_idx = active[(idx as usize) % active.len()];
+            Arc::clone(&members[member_idx].device)
+        };
 
         let phys_offset = DATA_OFFSET + offset;
-        member.device.read(phys_offset, buf).await
+        dev.read(phys_offset, buf).await
     }
 
     async fn raid1_write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
-        let active = self.active_members();
-        if active.is_empty() {
-            return Err(RaidError::TooManyFailures {
-                failed: self.failed_count(),
-                max_tolerated: self.members.len() - 1,
-            }.into());
-        }
+        let devices: Vec<(usize, Arc<dyn BlockDevice>)> = {
+            let members = self.members.read().unwrap();
+            let active = Self::active_indices_locked(&members);
+            if active.is_empty() {
+                return Err(RaidError::TooManyFailures {
+                    failed: Self::failed_count_locked(&members),
+                    max_tolerated: members.len().saturating_sub(1),
+                }.into());
+            }
+            active.iter().map(|&i| (i, Arc::clone(&members[i].device))).collect()
+        };
 
         let phys_offset = DATA_OFFSET + offset;
 
         // Write to all active members in parallel
-        let mut handles = Vec::with_capacity(active.len());
-        for (idx, member) in &active {
-            let dev = Arc::clone(&member.device);
+        let mut handles = Vec::with_capacity(devices.len());
+        for (idx, dev) in devices {
             let data = buf.to_vec();
-            let member_idx = *idx;
             handles.push(tokio::spawn(async move {
-                (member_idx, dev.write(phys_offset, &data).await)
+                (idx, dev.write(phys_offset, &data).await)
             }));
         }
 
@@ -860,7 +1045,6 @@ impl RaidArray {
                 Ok((_, Ok(n))) => last_result = Ok(n),
                 Ok((idx, Err(e))) => {
                     tracing::error!("RAID-1 write failed on member {idx}: {e}");
-                    // In production, would mark member as failed
                     last_result = Err(e);
                 }
                 Err(e) => {
@@ -873,13 +1057,16 @@ impl RaidArray {
     }
 
     async fn raid1_flush(&self) -> DriveResult<()> {
-        let active = self.active_members();
-        let mut handles = Vec::with_capacity(active.len());
-        for (idx, member) in &active {
-            let dev = Arc::clone(&member.device);
-            let member_idx = *idx;
+        let devices: Vec<(usize, Arc<dyn BlockDevice>)> = {
+            let members = self.members.read().unwrap();
+            let active = Self::active_indices_locked(&members);
+            active.iter().map(|&i| (i, Arc::clone(&members[i].device))).collect()
+        };
+
+        let mut handles = Vec::with_capacity(devices.len());
+        for (idx, dev) in devices {
             handles.push(tokio::spawn(async move {
-                (member_idx, dev.flush().await)
+                (idx, dev.flush().await)
             }));
         }
         for handle in handles {
@@ -898,19 +1085,30 @@ impl RaidArray {
     // --- RAID 5 I/O ---
 
     fn data_disks(&self) -> u32 {
+        let count = self.members.read().unwrap().len() as u32;
+        self.data_disks_with_count(count)
+    }
+
+    fn data_disks_with_count(&self, member_count: u32) -> u32 {
         match self.level {
-            RaidLevel::Raid5 => self.members.len() as u32 - 1,
-            RaidLevel::Raid6 => self.members.len() as u32 - 2,
-            _ => self.members.len() as u32,
+            RaidLevel::Raid5 => member_count - 1,
+            RaidLevel::Raid6 => member_count - 2,
+            _ => member_count,
         }
     }
 
     async fn raid5_read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
-        let data_disks = self.data_disks();
-        let member_count = self.members.len() as u32;
+        let (devices, states) = {
+            let members = self.members.read().unwrap();
+            let devs: Vec<Arc<dyn BlockDevice>> = members.iter().map(|m| Arc::clone(&m.device)).collect();
+            let sts: Vec<RaidMemberState> = members.iter().map(|m| m.state).collect();
+            (devs, sts)
+        };
+
+        let member_count = devices.len() as u32;
+        let data_disks = self.data_disks_with_count(member_count);
         let buf_len = buf.len() as u64;
 
-        // Process one stripe-unit at a time
         let mut bytes_read = 0u64;
         let mut pos = offset;
 
@@ -929,12 +1127,10 @@ impl RaidArray {
             let buf_start = bytes_read as usize;
             let buf_end = buf_start + to_read;
 
-            let member = &self.members[disk as usize];
-            if member.state == RaidMemberState::Failed {
-                // Degraded read: reconstruct from surviving members
-                self.raid5_degraded_read(stripe, data_idx, &mut buf[buf_start..buf_end]).await?;
+            if states[disk as usize] == RaidMemberState::Failed {
+                self.raid5_degraded_read_extracted(&devices, &states, stripe, data_idx, &mut buf[buf_start..buf_end]).await?;
             } else {
-                member.device.read(phys_offset, &mut buf[buf_start..buf_end]).await?;
+                devices[disk as usize].read(phys_offset, &mut buf[buf_start..buf_end]).await?;
             }
 
             bytes_read += to_read as u64;
@@ -944,31 +1140,36 @@ impl RaidArray {
         Ok(bytes_read as usize)
     }
 
-    async fn raid5_degraded_read(&self, stripe: u64, missing_data_idx: u32, output: &mut [u8]) -> DriveResult<()> {
-        let member_count = self.members.len() as u32;
+    async fn raid5_degraded_read_extracted(
+        &self,
+        devices: &[Arc<dyn BlockDevice>],
+        states: &[RaidMemberState],
+        stripe: u64,
+        missing_data_idx: u32,
+        output: &mut [u8],
+    ) -> DriveResult<()> {
+        let member_count = devices.len() as u32;
         let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
         let missing_disk = data_disk_index(missing_data_idx, stripe, member_count);
         let read_len = output.len();
 
-        // Read all surviving strips (including parity)
         let mut strips: Vec<Vec<u8>> = Vec::new();
         for i in 0..member_count {
             if i == missing_disk {
                 continue;
             }
-            let member = &self.members[i as usize];
-            if member.state == RaidMemberState::Failed {
+            if states[i as usize] == RaidMemberState::Failed {
+                let failed = states.iter().filter(|&&s| s == RaidMemberState::Failed).count();
                 return Err(RaidError::TooManyFailures {
-                    failed: self.failed_count(),
+                    failed,
                     max_tolerated: 1,
                 }.into());
             }
             let mut strip = vec![0u8; read_len];
-            member.device.read(phys_offset, &mut strip).await?;
+            devices[i as usize].read(phys_offset, &mut strip).await?;
             strips.push(strip);
         }
 
-        // XOR all surviving strips to reconstruct the missing one
         let strip_refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
         self.parity_engine.reconstruct_xor(&strip_refs, output);
         Ok(())
@@ -985,18 +1186,15 @@ impl RaidArray {
             let (stripe, offset_in_stripe) = offset_to_stripe(pos, self.stripe_size, data_disks);
             let offset_in_unit = offset_in_stripe % self.stripe_size;
 
-            // Check if this is a full-stripe write
             let remaining = buf_len - bytes_written;
             let full_stripe_bytes = self.stripe_size * data_disks as u64;
             let start_of_stripe = offset_in_stripe == 0;
 
             if start_of_stripe && remaining >= full_stripe_bytes {
-                // Full-stripe write: compute parity from all data strips, write everything
                 self.raid5_full_stripe_write(stripe, &buf[bytes_written as usize..(bytes_written + full_stripe_bytes) as usize]).await?;
                 bytes_written += full_stripe_bytes;
                 pos += full_stripe_bytes;
             } else {
-                // Partial-stripe write: read-modify-write
                 let data_idx = (offset_in_stripe / self.stripe_size) as u32;
                 let remaining_in_unit = self.stripe_size - offset_in_unit;
                 let to_write = remaining_in_unit.min(remaining) as usize;
@@ -1004,7 +1202,6 @@ impl RaidArray {
                 let buf_start = bytes_written as usize;
                 let buf_end = buf_start + to_write;
 
-                // Mark stripe dirty in journal
                 {
                     let mut j = self.journal.lock().await;
                     j.mark_dirty(stripe);
@@ -1026,17 +1223,19 @@ impl RaidArray {
     }
 
     async fn raid5_full_stripe_write(&self, stripe: u64, data: &[u8]) -> DriveResult<()> {
-        let data_disks = self.data_disks();
-        let member_count = self.members.len() as u32;
+        let devices: Vec<Arc<dyn BlockDevice>> = {
+            let members = self.members.read().unwrap();
+            members.iter().map(|m| Arc::clone(&m.device)).collect()
+        };
+        let member_count = devices.len() as u32;
+        let data_disks = self.data_disks_with_count(member_count);
         let strip_size = self.stripe_size as usize;
 
-        // Mark dirty
         {
             let mut j = self.journal.lock().await;
             j.mark_dirty(stripe);
         }
 
-        // Split data into per-disk strips
         let mut data_strips: Vec<&[u8]> = Vec::with_capacity(data_disks as usize);
         for i in 0..data_disks {
             let start = i as usize * strip_size;
@@ -1044,27 +1243,24 @@ impl RaidArray {
             data_strips.push(&data[start..end]);
         }
 
-        // Compute parity
         let mut parity = vec![0u8; strip_size];
         self.parity_engine.compute_xor_parity(&data_strips, &mut parity);
 
         let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
         let parity_disk = parity_disk_for_stripe(stripe, member_count);
 
-        // Write all strips + parity in parallel
         let mut handles = Vec::with_capacity(member_count as usize);
 
         for data_i in 0..data_disks {
             let disk = data_disk_index(data_i, stripe, member_count);
-            let dev = Arc::clone(&self.members[disk as usize].device);
+            let dev = Arc::clone(&devices[disk as usize]);
             let strip_data = data_strips[data_i as usize].to_vec();
             handles.push(tokio::spawn(async move {
                 dev.write(phys_offset, &strip_data).await
             }));
         }
 
-        // Write parity
-        let parity_dev = Arc::clone(&self.members[parity_disk as usize].device);
+        let parity_dev = Arc::clone(&devices[parity_disk as usize]);
         let parity_data = parity;
         handles.push(tokio::spawn(async move {
             parity_dev.write(phys_offset, &parity_data).await
@@ -1074,7 +1270,6 @@ impl RaidArray {
             handle.await.map_err(|e| DriveError::Other(e.into()))??;
         }
 
-        // Mark clean
         {
             let mut j = self.journal.lock().await;
             j.mark_clean(stripe);
@@ -1090,26 +1285,27 @@ impl RaidArray {
         _offset_in_unit: u64,
         new_data: &[u8],
     ) -> DriveResult<()> {
-        let member_count = self.members.len() as u32;
+        let devices: Vec<Arc<dyn BlockDevice>> = {
+            let members = self.members.read().unwrap();
+            members.iter().map(|m| Arc::clone(&m.device)).collect()
+        };
+        let member_count = devices.len() as u32;
         let disk = data_disk_index(data_idx, stripe, member_count);
         let parity_disk = parity_disk_for_stripe(stripe, member_count);
         let phys_offset = stripe_to_disk_offset(stripe, self.stripe_size, DATA_OFFSET);
 
-        // Read old data and old parity
         let mut old_data = vec![0u8; new_data.len()];
         let mut old_parity = vec![0u8; new_data.len()];
 
-        self.members[disk as usize].device.read(phys_offset, &mut old_data).await?;
-        self.members[parity_disk as usize].device.read(phys_offset, &mut old_parity).await?;
+        devices[disk as usize].read(phys_offset, &mut old_data).await?;
+        devices[parity_disk as usize].read(phys_offset, &mut old_parity).await?;
 
-        // new_parity = old_parity ^ old_data ^ new_data
         let mut new_parity = old_parity;
         self.parity_engine.xor_in_place(&mut new_parity, &old_data);
         self.parity_engine.xor_in_place(&mut new_parity, new_data);
 
-        // Write new data and new parity in parallel
-        let data_dev = Arc::clone(&self.members[disk as usize].device);
-        let parity_dev = Arc::clone(&self.members[parity_disk as usize].device);
+        let data_dev = Arc::clone(&devices[disk as usize]);
+        let parity_dev = Arc::clone(&devices[parity_disk as usize]);
         let data_buf = new_data.to_vec();
         let parity_buf = new_parity;
 
@@ -1123,14 +1319,19 @@ impl RaidArray {
     }
 
     async fn raid5_flush(&self) -> DriveResult<()> {
-        let mut handles = Vec::with_capacity(self.members.len());
-        for (i, member) in self.members.iter().enumerate() {
-            if member.state != RaidMemberState::Failed {
-                let dev = Arc::clone(&member.device);
-                handles.push(tokio::spawn(async move {
-                    (i, dev.flush().await)
-                }));
-            }
+        let devices: Vec<(usize, Arc<dyn BlockDevice>)> = {
+            let members = self.members.read().unwrap();
+            members.iter().enumerate()
+                .filter(|(_, m)| m.state != RaidMemberState::Failed)
+                .map(|(i, m)| (i, Arc::clone(&m.device)))
+                .collect()
+        };
+
+        let mut handles = Vec::with_capacity(devices.len());
+        for (i, dev) in devices {
+            handles.push(tokio::spawn(async move {
+                (i, dev.flush().await)
+            }));
         }
         for handle in handles {
             match handle.await {
@@ -1155,23 +1356,25 @@ impl BlockDevice for RaidArray {
     }
 
     fn capacity_bytes(&self) -> u64 {
-        self.capacity
+        self.capacity.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn block_size(&self) -> u32 {
-        // Use the block size of the first member
-        self.members.first()
+        let members = self.members.read().unwrap();
+        members.first()
             .map(|m| m.device.block_size())
             .unwrap_or(4096)
     }
 
     fn optimal_io_size(&self) -> u32 {
         match self.level {
-            RaidLevel::Raid1 => self.members.first()
-                .map(|m| m.device.optimal_io_size())
-                .unwrap_or(4096),
+            RaidLevel::Raid1 => {
+                let members = self.members.read().unwrap();
+                members.first()
+                    .map(|m| m.device.optimal_io_size())
+                    .unwrap_or(4096)
+            }
             RaidLevel::Raid5 | RaidLevel::Raid6 => {
-                // Full stripe is optimal
                 (self.stripe_size * self.data_disks() as u64) as u32
             }
             RaidLevel::Raid10 => self.stripe_size as u32,
@@ -1179,8 +1382,8 @@ impl BlockDevice for RaidArray {
     }
 
     fn device_type(&self) -> DriveType {
-        // Report as the type of the first member
-        self.members.first()
+        let members = self.members.read().unwrap();
+        members.first()
             .map(|m| m.device.device_type())
             .unwrap_or(DriveType::File)
     }
@@ -1219,28 +1422,33 @@ impl BlockDevice for RaidArray {
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
         match self.level {
             RaidLevel::Raid1 => {
-                // Discard on all active members
-                for member in &self.members {
-                    if member.state == RaidMemberState::Active {
-                        member.device.discard(DATA_OFFSET + offset, len).await?;
-                    }
+                let devices: Vec<Arc<dyn BlockDevice>> = {
+                    let members = self.members.read().unwrap();
+                    members.iter()
+                        .filter(|m| m.state == RaidMemberState::Active)
+                        .map(|m| Arc::clone(&m.device))
+                        .collect()
+                };
+                for dev in devices {
+                    dev.discard(DATA_OFFSET + offset, len).await?;
                 }
                 Ok(())
             }
-            _ => Ok(()), // Discard for striped levels is complex — skip for now
+            _ => Ok(()),
         }
     }
 
     fn smart_status(&self) -> DriveResult<SmartData> {
-        // Aggregate: healthy if all active members are healthy
-        let healthy = self.members.iter()
+        let members = self.members.read().unwrap();
+        let healthy = members.iter()
             .filter(|m| m.state == RaidMemberState::Active)
             .all(|m| m.device.smart_status().map(|s| s.healthy).unwrap_or(false));
         Ok(SmartData { healthy, ..Default::default() })
     }
 
     fn media_errors(&self) -> u64 {
-        self.members.iter().map(|m| m.device.media_errors()).sum()
+        let members = self.members.read().unwrap();
+        members.iter().map(|m| m.device.media_errors()).sum()
     }
 }
 
