@@ -193,9 +193,87 @@ async fn delete_array(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AddMemberRequest {
+    pub drive_uuid: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemberUuidResponse {
+    pub member_uuid: Uuid,
+}
+
+async fn add_member(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<AddMemberRequest>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "arrays", "method" => "add_member").increment(1);
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+
+    let array_id = RaidArrayId(uuid);
+
+    // Look up the array
+    let arrays = state.arrays.read().await;
+    let array = match arrays.get(&array_id) {
+        Some(info) => info.array.clone(),
+        None => return ApiError::not_found(format!("array {uuid} not found")),
+    };
+    drop(arrays);
+
+    // Look up the drive
+    let drives = state.drives.read().await;
+    let device = match drives.iter().find(|d| d.device.id().uuid == req.drive_uuid) {
+        Some(d) => d.device.clone(),
+        None => return ApiError::not_found(format!("drive {} not found", req.drive_uuid)),
+    };
+    drop(drives);
+
+    match array.add_member(device).await {
+        Ok(member_uuid) => {
+            (axum::http::StatusCode::CREATED, Json(MemberUuidResponse { member_uuid })).into_response()
+        }
+        Err(e) => ApiError::bad_request(format!("failed to add member: {e}")),
+    }
+}
+
+async fn remove_member(
+    State(state): State<Arc<AppState>>,
+    Path((id, member_id)): Path<(String, String)>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "arrays", "method" => "remove_member").increment(1);
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let member_uuid = match member_id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid member UUID: {member_id}")),
+    };
+
+    let array_id = RaidArrayId(uuid);
+
+    let arrays = state.arrays.read().await;
+    let array = match arrays.get(&array_id) {
+        Some(info) => info.array.clone(),
+        None => return ApiError::not_found(format!("array {uuid} not found")),
+    };
+    drop(arrays);
+
+    match array.remove_member(member_uuid).await {
+        Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+        Err(e) => ApiError::bad_request(format!("failed to remove member: {e}")),
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_arrays).post(create_array))
         .route("/{id}", get(get_array).delete(delete_array))
+        .route("/{id}/members", axum::routing::post(add_member))
+        .route("/{id}/members/{member_id}", axum::routing::delete(remove_member))
         .with_state(state)
 }

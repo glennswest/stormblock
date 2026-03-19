@@ -4,5 +4,7 @@ pub mod volume;
 pub mod target;
 pub mod mgmt;
 pub mod stormfs;
+pub mod boot;
+pub mod migrate;
 #[cfg(feature = "cluster")]
 pub mod cluster;

@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::drive::BlockDevice;
+use crate::drive::pool::DiskPool;
 use crate::raid::{RaidArray, RaidArrayId, RaidLevel};
 use crate::volume::VolumeManager;
 
@@ -78,6 +79,7 @@ pub struct AppState {
     pub arrays: tokio::sync::RwLock<HashMap<RaidArrayId, ArrayInfo>>,
     pub volume_manager: tokio::sync::Mutex<VolumeManager>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
+    pub pools: tokio::sync::RwLock<HashMap<Uuid, DiskPool>>,
     pub config: StormBlockConfig,
     #[cfg(feature = "cluster")]
     pub cluster: Option<Arc<crate::cluster::ClusterManager>>,
@@ -90,6 +92,7 @@ impl AppState {
             arrays: tokio::sync::RwLock::new(HashMap::new()),
             volume_manager: tokio::sync::Mutex::new(volume_manager),
             exports: tokio::sync::RwLock::new(Vec::new()),
+            pools: tokio::sync::RwLock::new(HashMap::new()),
             config,
             #[cfg(feature = "cluster")]
             cluster: None,

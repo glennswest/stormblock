@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use stormblock::drive::{self, BlockDevice};
+use stormblock::drive::pool::DiskPool;
 use stormblock::raid::{RaidArray, RaidLevel};
 use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 use stormblock::target::{self, reactor::{ReactorConfig, ReactorPool}};
@@ -86,6 +87,67 @@ struct Cli {
     /// Directory for persisting volume metadata (enables restart recovery)
     #[arg(long)]
     data_dir: Option<String>,
+
+    /// Subcommand (pool, nbd, migrate)
+    #[command(subcommand)]
+    command: Option<SubCommand>,
+}
+
+#[derive(clap::Subcommand)]
+enum SubCommand {
+    /// DiskPool management
+    Pool {
+        #[command(subcommand)]
+        action: PoolAction,
+    },
+    /// Export a volume via NBD to the local kernel
+    Nbd {
+        /// Volume UUID to export
+        #[arg(long)]
+        volume: String,
+        /// NBD listen address (default: 127.0.0.1:10809)
+        #[arg(long, default_value = "127.0.0.1:10809")]
+        listen: String,
+    },
+    /// Live migrate from iSCSI to local disk
+    Migrate {
+        /// Path to local disk for migration target
+        #[arg(long)]
+        local_disk: String,
+        /// VDrive label for the local copy
+        #[arg(long, default_value = "root")]
+        label: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum PoolAction {
+    /// Format a device as a DiskPool
+    Format {
+        /// Device path to format
+        device: String,
+    },
+    /// List pools on specified devices
+    List {
+        /// Device paths to scan
+        devices: Vec<String>,
+    },
+    /// List VDrives in a pool
+    Vdrives {
+        /// Device path of the pool
+        device: String,
+    },
+    /// Create a VDrive in a pool
+    CreateVdrive {
+        /// Device path of the pool
+        device: String,
+        /// Label for the VDrive
+        #[arg(long)]
+        label: String,
+        /// Size of the VDrive (e.g. 100G)
+        #[arg(long)]
+        size: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +207,26 @@ async fn main() -> anyhow::Result<()> {
         cli.reactor_cores,
     );
     config.validate()?;
+
+    // Handle subcommands
+    if let Some(cmd) = &cli.command {
+        match cmd {
+            SubCommand::Pool { action } => {
+                return handle_pool_command(action).await;
+            }
+            SubCommand::Nbd { volume: _, listen: _ } => {
+                tracing::info!("NBD export mode — requires running storage engine");
+                tracing::info!("Use the REST API POST /api/v1/exports to configure NBD exports");
+                return Ok(());
+            }
+            SubCommand::Migrate { local_disk, label } => {
+                tracing::info!("Migration mode: target={}, label={}", local_disk, label);
+                tracing::info!("Migration requires a running StormBlock instance with an active RAID 1 volume.");
+                tracing::info!("Use the REST API POST /api/v1/volumes/{{id}}/migrate to trigger migration.");
+                return Ok(());
+            }
+        }
+    }
 
     // Initialize metrics
     mgmt::metrics::init_metrics();
@@ -466,5 +548,73 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn handle_pool_command(action: &PoolAction) -> anyhow::Result<()> {
+    match action {
+        PoolAction::Format { device } => {
+            let dev = Arc::new(
+                stormblock::drive::filedev::FileDevice::open(device).await?
+            ) as Arc<dyn BlockDevice>;
+            let pool = DiskPool::format(dev, device).await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("Pool formatted: {}", pool.pool_uuid());
+            println!("  capacity: {} bytes", pool.total_capacity());
+            println!("  data offset: {} bytes", pool.data_offset());
+        }
+        PoolAction::List { devices } => {
+            for device in devices {
+                match stormblock::drive::filedev::FileDevice::open(device).await {
+                    Ok(dev) => {
+                        let dev = Arc::new(dev) as Arc<dyn BlockDevice>;
+                        match DiskPool::open(dev, device).await {
+                            Ok(pool) => {
+                                println!("{}: pool {} ({} VDrives, {} free)",
+                                    device, pool.pool_uuid(), pool.vdrive_count(),
+                                    stormblock::mgmt::config::human_size(pool.free_space()));
+                            }
+                            Err(e) => {
+                                println!("{}: not a pool ({e})", device);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("{}: cannot open ({e})", device);
+                    }
+                }
+            }
+        }
+        PoolAction::Vdrives { device } => {
+            let dev = Arc::new(
+                stormblock::drive::filedev::FileDevice::open(device).await?
+            ) as Arc<dyn BlockDevice>;
+            let pool = DiskPool::open(dev, device).await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("Pool {} — {} VDrives:", pool.pool_uuid(), pool.vdrive_count());
+            for entry in pool.list_vdrives() {
+                println!("  {} [{}] {} — {} ({:?})",
+                    entry.uuid, entry.label,
+                    stormblock::mgmt::config::human_size(entry.size),
+                    stormblock::mgmt::config::human_size(entry.start_offset),
+                    entry.state);
+            }
+        }
+        PoolAction::CreateVdrive { device, label, size } => {
+            let sz = parse_size(size)
+                .map_err(|e| anyhow::anyhow!("invalid size: {e}"))?;
+            let dev = Arc::new(
+                stormblock::drive::filedev::FileDevice::open(device).await?
+            ) as Arc<dyn BlockDevice>;
+            let mut pool = DiskPool::open(dev, device).await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let entry = pool.create_vdrive(sz, label).await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("VDrive created: {}", entry.uuid);
+            println!("  label: {}", entry.label);
+            println!("  size: {} bytes", entry.size);
+            println!("  offset: {}", entry.start_offset);
+        }
+    }
     Ok(())
 }
