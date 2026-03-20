@@ -5,6 +5,7 @@
 //! (NVMe-oF, iSCSI) see volumes as plain block devices.
 
 pub mod extent;
+pub mod gem;
 pub mod metadata;
 pub mod thin;
 pub mod snapshot;

@@ -8,6 +8,8 @@ pub mod dma;
 pub mod filedev;
 pub mod pool;
 pub mod vdrive;
+pub mod container;
+pub mod container_registry;
 #[cfg(target_os = "linux")]
 pub mod ublk;
 

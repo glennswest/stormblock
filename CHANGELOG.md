@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-03-20
+- **feat:** Container extent store — organic data placement with fixed-size 1 MB slots per device (`src/drive/container.rs`)
+- **feat:** Container registry — tier-indexed container lookup with best-fit allocation (`src/drive/container_registry.rs`)
+- **feat:** Global Extent Map (GEM) — cross-container extent tracking with reverse index, COW snapshot cloning, rebuild-from-containers recovery (`src/volume/gem.rs`)
+
 ### 2026-03-19
 - **feat:** ublk server — exports BlockDevice as `/dev/ublkbN` via io_uring URING_CMD (replaces NBD)
 - **feat:** Direct Linux boot — kernel cmdline and initramfs config generation (replaces iPXE scripts)
