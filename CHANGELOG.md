@@ -8,6 +8,10 @@
 - **refactor:** Replace `stormblock nbd` CLI subcommand with `stormblock ublk`
 - **refactor:** Migration orchestrator docs updated for ublk (NBD → ublk)
 - **BREAKING:** NBD server removed (`src/drive/nbd.rs` deleted, `pub mod nbd` removed)
+- **feat:** Placement engine with snapshot-fenced cold copies (`src/placement/`) — extent-level data replication across storage domains
+- **feat:** Storage topology types — `StorageTier` (Hot/Warm/Cool/Cold), `Locality` (Local/Remote), `StorageDevice` wrapper
+- **feat:** `ColdCopy` — snapshot-fenced replica with per-extent sync bitmap (bitvec), incremental update via `snapshot_diff()`
+- **feat:** `PlacementEngine` — cold copy lifecycle management, device registry, async replication with rate limiting
 
 ## [v6.0.0] — 2026-03-19
 

@@ -6,5 +6,6 @@ pub mod mgmt;
 pub mod stormfs;
 pub mod boot;
 pub mod migrate;
+pub mod placement;
 #[cfg(feature = "cluster")]
 pub mod cluster;
