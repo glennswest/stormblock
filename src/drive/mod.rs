@@ -12,6 +12,8 @@ pub mod container;
 pub mod container_registry;
 #[cfg(target_os = "linux")]
 pub mod ublk;
+pub mod uring_channel;
+pub mod uring_server;
 
 use std::fmt;
 

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-03-21
+- **feat:** Shared io_uring-style ring buffer IPC — zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd (`src/drive/uring_channel.rs`, `src/drive/uring_server.rs`)
+
 ### 2026-03-20
 - **feat:** Container extent store — organic data placement with fixed-size 1 MB slots per device (`src/drive/container.rs`)
 - **feat:** Container registry — tier-indexed container lookup with best-fit allocation (`src/drive/container_registry.rs`)
