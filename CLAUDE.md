@@ -38,7 +38,7 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - Binary must be small — strip, LTO, minimal features
 
 ## Architecture (bottom-up)
-- `src/drive/` — BlockDevice trait: NVMe via VFIO (`nvme.rs`), SAS via io_uring (`sas.rs`), DMA buffers (`dma.rs`), DiskPool (`pool.rs`), VDrive (`vdrive.rs`), Container extent store (`container.rs`), Container registry (`container_registry.rs`), ublk server (`ublk.rs`, Linux-only)
+- `src/drive/` — BlockDevice trait: NVMe via VFIO (`nvme.rs`), SAS via io_uring (`sas.rs`), DMA buffers (`dma.rs`), DiskPool (`pool.rs`), VDrive (`vdrive.rs`), Container extent store (`container.rs`), Container registry (`container_registry.rs`), ublk server (`ublk.rs`, Linux-only), shared ring IPC (`uring_channel.rs`, `uring_server.rs`)
 - `src/raid/` — Software RAID 1/5/6/10: SIMD parity (`parity.rs`), write journal (`journal.rs`), rebuild (`rebuild.rs`), dynamic add/remove members (RAID 1)
 - `src/volume/` — Thin provisioning (`thin.rs`), extent allocator (`extent.rs`), COW snapshots (`snapshot.rs`), Global Extent Map (`gem.rs`)
 - `src/target/` — NVMe-oF/TCP :4420 (`nvmeof/`), iSCSI :3260 (`iscsi/`), per-core reactor (`reactor.rs`)
@@ -51,7 +51,7 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with subcommands (pool, ublk, migrate)
 
 ## Current State
-All phases (0–7) and all roadmap items are implemented. 222 tests pass on macOS. Musl static release build produces an 11 MB stripped PIE binary (x86_64). The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO with hugepage DMA and full init), and FileDevice (tokio, portable). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, background rebuild, and dynamic add_member/remove_member for RAID 1. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). DiskPool on-disk format with VDrive allocation and ublk server for kernel block device export (Linux 6.0+, io_uring URING_CMD). Boot volume manager with templates, COW clones, and direct Linux boot (kernel cmdline + initramfs config for ublk root). Live migration orchestrator for remote → local disk via RAID 1. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, pools, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP/HTTPS Raft RPCs (TLS via rustls, shares management cert/key), node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Placement engine with snapshot-fenced cold copies — extent-level data replication across storage domains with per-extent sync bitmaps, incremental snapshot-to-snapshot delta replication, and storage topology classification (tier/locality). Container extent store — organic data placement with fixed-size 1 MB slots per device, tier-indexed container registry, and Global Extent Map (GEM) for cross-container extent tracking with reverse index and COW snapshot cloning. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
+All phases (0–7) and all roadmap items are implemented. 229 tests pass on macOS. Musl static release build produces an 11 MB stripped PIE binary (x86_64). The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO with hugepage DMA and full init), and FileDevice (tokio, portable). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, background rebuild, and dynamic add_member/remove_member for RAID 1. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). DiskPool on-disk format with VDrive allocation and ublk server for kernel block device export (Linux 6.0+, io_uring URING_CMD). Boot volume manager with templates, COW clones, and direct Linux boot (kernel cmdline + initramfs config for ublk root). Live migration orchestrator for remote → local disk via RAID 1. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, pools, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP/HTTPS Raft RPCs (TLS via rustls, shares management cert/key), node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Placement engine with snapshot-fenced cold copies — extent-level data replication across storage domains with per-extent sync bitmaps, incremental snapshot-to-snapshot delta replication, and storage topology classification (tier/locality). Container extent store — organic data placement with fixed-size 1 MB slots per device, tier-indexed container registry, and Global Extent Map (GEM) for cross-container extent tracking with reverse index and COW snapshot cloning. Shared ring IPC — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
 
 Build host: root@devx.gw.lo (192.168.1.53), CT 102 on pvex.gw.lo (192.168.1.160). 40GB /build disk for cargo target directory. DNS: 192.168.1.199, 192.168.1.154 (dns.gw.lo).
 
@@ -160,3 +160,35 @@ Build host: root@devx.gw.lo (192.168.1.53), CT 102 on pvex.gw.lo (192.168.1.160)
 - [x] fio macro-benchmark scripts (iSCSI + NVMe-oF, 4K random + sequential)
 - [x] Container images (Dockerfile x86_64 + aarch64, deployed via StormBase)
 - [x] StormFS registration (announce volumes to StormFS metadata cluster)
+
+### Container Extent Store — Organic Data Placement
+
+Replaces rigid DiskPool/VDrive/ExtentAllocator with organic, cellular storage. Each device is a Container (flat array of 1 MB slots). Volumes spread across any device on any tier. GEM is the single source of truth for extent placement.
+
+**Phase 1: Foundation (additive, non-breaking) — DONE**
+- [x] `src/drive/container.rs` — Container extent store with on-disk format, slot table, free bitmap, CRC32C (~550 lines, 11 tests)
+- [x] `src/drive/container_registry.rs` — Tier-indexed container lookup with best-fit allocation (~150 lines, 3 tests)
+- [x] `src/volume/gem.rs` — Global Extent Map with forward+reverse index, COW snapshot cloning, rebuild-from-containers (~300 lines, 10 tests)
+- [x] Module declarations in `src/drive/mod.rs` and `src/volume/mod.rs`
+
+**Phase 2: Volume layer rewrite — TODO**
+- [ ] Rewrite `src/volume/thin.rs` — ThinVolume backed by GEM + ContainerRegistry instead of array_id + ExtentAllocator
+- [ ] Add VolumePurpose (Partition, StormFS, ObjectStore, KeyValue, Boot) and PlacementPolicy
+- [ ] Rewrite `src/volume/snapshot.rs` — COW via GEM clone + container inc_ref
+- [ ] Update `src/volume/mod.rs` — VolumeManager uses GEM + ContainerRegistry
+- [ ] Update `src/volume/metadata.rs` — V2 format with container refs
+- [ ] Update external references: boot.rs, mgmt/api/volumes.rs, mgmt/mod.rs, main.rs, placement/mod.rs, tests/
+
+**Phase 3: Placement integration — TODO**
+- [ ] `src/placement/mod.rs` — Add migrate_extent(), evacuate_container(), rebalance()
+- [ ] `src/migrate.rs` — Container-based extent migration (replace RAID-add pattern)
+
+**Phase 4: API + cleanup — TODO**
+- [ ] Rename `src/mgmt/api/pools.rs` → `containers.rs`, new REST endpoints
+- [ ] Update AppState: containers + GEM instead of pools
+- [ ] Delete `src/drive/pool.rs` and `src/drive/vdrive.rs`
+- [ ] Update CLI subcommands in `src/main.rs`
+
+### Shared Ring IPC — DONE
+- [x] `src/drive/uring_channel.rs` — Ring buffer protocol, SQE/CQE types, shared memory layout
+- [x] `src/drive/uring_server.rs` — Unix socket server, per-client memfd+eventfd, I/O dispatch
