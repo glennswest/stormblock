@@ -62,7 +62,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
 - **REST API** — axum-based management (drives, arrays, volumes, exports, slabs) with optional TLS.
 - **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
-- **229 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, PDU fuzz testing.
+- **242 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, PDU fuzz testing.
 
 ## Data Placement Model
 
