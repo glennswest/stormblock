@@ -10,6 +10,8 @@ pub mod pool;
 pub mod vdrive;
 pub mod container;
 pub mod container_registry;
+pub mod slab;
+pub mod slab_registry;
 #[cfg(target_os = "linux")]
 pub mod ublk;
 pub mod uring_channel;

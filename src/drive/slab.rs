@@ -1,8 +1,8 @@
-//! Container — extent store with fixed-size slots on a block device.
+//! Slab — extent store with fixed-size slots on a block device.
 //!
-//! Each device (or device region) is formatted as a Container with a header,
+//! Each device (or device region) is formatted as a Slab with a header,
 //! a slot table, and a data region of 1 MB slots. Any volume can allocate
-//! slots in any container. This replaces the monolithic DiskPool/VDrive model
+//! slots in any slab. This replaces the monolithic DiskPool/VDrive model
 //! with organic, per-extent data placement.
 
 use std::collections::HashMap;
@@ -16,44 +16,44 @@ use super::{BlockDevice, DriveError, DriveResult};
 use crate::placement::topology::StorageTier;
 use crate::volume::extent::VolumeId;
 
-/// Container header magic: "STRMCONT"
-pub const CONTAINER_MAGIC: [u8; 8] = *b"STRMCONT";
+/// Slab header magic: "STRMSLAB"
+pub const SLAB_MAGIC: [u8; 8] = *b"STRMSLAB";
 
-/// Current container header version.
-pub const CONTAINER_VERSION: u32 = 1;
+/// Current slab header version.
+pub const SLAB_VERSION: u32 = 1;
 
 /// Default slot size: 1 MB.
 pub const DEFAULT_SLOT_SIZE: u64 = 1024 * 1024;
 
-/// Container header size on disk (4 KB).
+/// Slab header size on disk (4 KB).
 const HEADER_SIZE: u64 = 4096;
 
 /// Slot entry size on disk (64 bytes).
 const SLOT_ENTRY_SIZE: u64 = 64;
 
-/// Unique identifier for a container.
+/// Unique identifier for a slab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ContainerId(pub Uuid);
+pub struct SlabId(pub Uuid);
 
-impl ContainerId {
+impl SlabId {
     pub fn new() -> Self {
-        ContainerId(Uuid::new_v4())
+        SlabId(Uuid::new_v4())
     }
 }
 
-impl Default for ContainerId {
+impl Default for SlabId {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl std::fmt::Display for ContainerId {
+impl std::fmt::Display for SlabId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-/// State of a slot in the container.
+/// State of a slot in the slab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SlotState {
@@ -135,10 +135,10 @@ impl Slot {
     }
 }
 
-/// On-disk container header (128 bytes used of 4096).
+/// On-disk slab header (128 bytes used of 4096).
 #[derive(Debug, Clone)]
-struct ContainerHeader {
-    container_uuid: Uuid,
+struct SlabHeader {
+    slab_uuid: Uuid,
     device_uuid: Uuid,
     slot_size: u64,
     total_slots: u64,
@@ -153,12 +153,12 @@ struct ContainerHeader {
     checksum: u32,
 }
 
-impl ContainerHeader {
+impl SlabHeader {
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; HEADER_SIZE as usize];
-        buf[0..8].copy_from_slice(&CONTAINER_MAGIC);
-        buf[8..12].copy_from_slice(&CONTAINER_VERSION.to_le_bytes());
-        buf[12..28].copy_from_slice(self.container_uuid.as_bytes());
+        buf[0..8].copy_from_slice(&SLAB_MAGIC);
+        buf[8..12].copy_from_slice(&SLAB_VERSION.to_le_bytes());
+        buf[12..28].copy_from_slice(self.slab_uuid.as_bytes());
         buf[28..44].copy_from_slice(self.device_uuid.as_bytes());
         buf[44..52].copy_from_slice(&self.slot_size.to_le_bytes());
         buf[52..60].copy_from_slice(&self.total_slots.to_le_bytes());
@@ -177,27 +177,27 @@ impl ContainerHeader {
 
     fn from_bytes(data: &[u8]) -> Result<Self, DriveError> {
         if data.len() < 128 {
-            return Err(DriveError::Other(anyhow::anyhow!("container header too short")));
+            return Err(DriveError::Other(anyhow::anyhow!("slab header too short")));
         }
-        if &data[0..8] != CONTAINER_MAGIC {
-            return Err(DriveError::Other(anyhow::anyhow!("bad container magic")));
+        if &data[0..8] != SLAB_MAGIC {
+            return Err(DriveError::Other(anyhow::anyhow!("bad slab magic")));
         }
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != CONTAINER_VERSION {
+        if version != SLAB_VERSION {
             return Err(DriveError::Other(anyhow::anyhow!(
-                "container version {version}, expected {CONTAINER_VERSION}"
+                "slab version {version}, expected {SLAB_VERSION}"
             )));
         }
 
         let stored_crc = u32::from_le_bytes(data[124..128].try_into().unwrap());
         let computed = crc32c::crc32c(&data[..124]);
         if stored_crc != computed {
-            return Err(DriveError::Other(anyhow::anyhow!("container header CRC mismatch")));
+            return Err(DriveError::Other(anyhow::anyhow!("slab header CRC mismatch")));
         }
 
         let mut uuid_bytes = [0u8; 16];
         uuid_bytes.copy_from_slice(&data[12..28]);
-        let container_uuid = Uuid::from_bytes(uuid_bytes);
+        let slab_uuid = Uuid::from_bytes(uuid_bytes);
 
         let mut dev_bytes = [0u8; 16];
         dev_bytes.copy_from_slice(&data[28..44]);
@@ -218,8 +218,8 @@ impl ContainerHeader {
         };
         let flags = data[101];
 
-        Ok(ContainerHeader {
-            container_uuid,
+        Ok(SlabHeader {
+            slab_uuid,
             device_uuid,
             slot_size,
             total_slots,
@@ -235,13 +235,13 @@ impl ContainerHeader {
     }
 }
 
-/// A container manages a device as an extent store with fixed-size slots.
+/// A slab manages a device as an extent store with fixed-size slots.
 ///
-/// Any volume can allocate slots in any container. The container tracks
+/// Any volume can allocate slots in any slab. The slab tracks
 /// which volume owns each slot, enabling many-to-many volume-device mapping.
-pub struct Container {
-    pub id: ContainerId,
-    header: ContainerHeader,
+pub struct Slab {
+    pub id: SlabId,
+    header: SlabHeader,
     device: Arc<dyn BlockDevice>,
     tier: StorageTier,
     free_bitmap: BitVec<u8, Lsb0>,
@@ -250,8 +250,8 @@ pub struct Container {
     free_count: u64,
 }
 
-impl Container {
-    /// Format a device as a new container.
+impl Slab {
+    /// Format a device as a new slab.
     pub async fn format(
         device: Arc<dyn BlockDevice>,
         slot_size: u64,
@@ -269,7 +269,7 @@ impl Container {
         let per_slot = SLOT_ENTRY_SIZE + slot_size;
         if per_slot == 0 || usable < per_slot {
             return Err(DriveError::Other(anyhow::anyhow!(
-                "device too small for container ({capacity} bytes)"
+                "device too small for slab ({capacity} bytes)"
             )));
         }
         let total_slots = usable / per_slot;
@@ -289,15 +289,15 @@ impl Container {
             )));
         }
 
-        let container_uuid = Uuid::new_v4();
+        let slab_uuid = Uuid::new_v4();
         let device_uuid = device.id().uuid;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let header = ContainerHeader {
-            container_uuid,
+        let header = SlabHeader {
+            slab_uuid,
             device_uuid,
             slot_size,
             total_slots,
@@ -321,11 +321,11 @@ impl Container {
         device.write(table_offset, &zero_table).await?;
         device.flush().await?;
 
-        let id = ContainerId(container_uuid);
+        let id = SlabId(slab_uuid);
         let free_bitmap = BitVec::repeat(true, total_slots as usize);
         let slots = vec![Slot::free(); total_slots as usize];
 
-        Ok(Container {
+        Ok(Slab {
             id,
             header,
             device,
@@ -337,12 +337,12 @@ impl Container {
         })
     }
 
-    /// Open an existing container from a device.
+    /// Open an existing slab from a device.
     pub async fn open(device: Arc<dyn BlockDevice>) -> DriveResult<Self> {
         // Read header
         let mut header_buf = vec![0u8; HEADER_SIZE as usize];
         device.read(0, &mut header_buf).await?;
-        let header = ContainerHeader::from_bytes(&header_buf)?;
+        let header = SlabHeader::from_bytes(&header_buf)?;
 
         let total_slots = header.total_slots as usize;
         let table_size = total_slots * SLOT_ENTRY_SIZE as usize;
@@ -373,10 +373,10 @@ impl Container {
             slots.push(slot);
         }
 
-        let id = ContainerId(header.container_uuid);
+        let id = SlabId(header.slab_uuid);
         let tier = header.tier;
 
-        Ok(Container {
+        Ok(Slab {
             id,
             header,
             device,
@@ -395,7 +395,7 @@ impl Container {
         vext_idx: u64,
     ) -> DriveResult<u32> {
         if self.free_count == 0 {
-            return Err(DriveError::Other(anyhow::anyhow!("container full")));
+            return Err(DriveError::Other(anyhow::anyhow!("slab full")));
         }
 
         // Find first free slot
@@ -439,7 +439,7 @@ impl Container {
 
         // Only remove from extent index if it still points to this slot.
         // After COW, a new slot may have been allocated for the same (vol, vext)
-        // in this container, so the index may already point elsewhere.
+        // in this slab, so the index may already point elsewhere.
         let key = (slot.volume_id, slot.virtual_extent_idx);
         if self.extent_index.get(&key) == Some(&slot_idx) {
             self.extent_index.remove(&key);
@@ -543,8 +543,8 @@ impl Container {
         self.slots.get(slot_idx as usize)
     }
 
-    /// Container UUID.
-    pub fn container_id(&self) -> ContainerId {
+    /// Slab UUID.
+    pub fn slab_id(&self) -> SlabId {
         self.id
     }
 
@@ -571,6 +571,30 @@ impl Container {
     /// Number of allocated slots.
     pub fn allocated_slots(&self) -> u64 {
         self.header.total_slots - self.free_count
+    }
+
+    /// Get a reference to the underlying device.
+    pub fn device(&self) -> &Arc<dyn BlockDevice> {
+        &self.device
+    }
+
+    /// Get the device and physical offset for a slot + offset within slot.
+    /// Useful for extracting I/O target before dropping registry lock.
+    pub fn slot_device_and_offset(
+        &self,
+        slot_idx: u32,
+        offset_in_slot: u64,
+    ) -> DriveResult<(Arc<dyn BlockDevice>, u64)> {
+        let idx = slot_idx as usize;
+        if idx >= self.slots.len() {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "slot index {slot_idx} out of range"
+            )));
+        }
+        let phys_offset = self.header.data_offset
+            + (slot_idx as u64) * self.header.slot_size
+            + offset_in_slot;
+        Ok((Arc::clone(&self.device), phys_offset))
     }
 
     /// Persist a single slot entry to disk.
@@ -613,8 +637,8 @@ mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
 
-    async fn create_container_device(size: u64) -> (Arc<dyn BlockDevice>, String) {
-        let dir = std::env::temp_dir().join("stormblock-container-test");
+    async fn create_slab_device(size: u64) -> (Arc<dyn BlockDevice>, String) {
+        let dir = std::env::temp_dir().join("stormblock-slab-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("cont-{}.bin", Uuid::new_v4().simple()));
         let path_str = path.to_str().unwrap().to_string();
@@ -629,8 +653,8 @@ mod tests {
 
     #[tokio::test]
     async fn format_and_open_roundtrip() {
-        let (dev, path) = create_container_device(100 * 1024 * 1024).await;
-        let cont = Container::format(dev.clone(), DEFAULT_SLOT_SIZE, StorageTier::Hot)
+        let (dev, path) = create_slab_device(100 * 1024 * 1024).await;
+        let cont = Slab::format(dev.clone(), DEFAULT_SLOT_SIZE, StorageTier::Hot)
             .await
             .unwrap();
         let id = cont.id;
@@ -640,7 +664,7 @@ mod tests {
         assert_eq!(total, free);
 
         // Re-open
-        let cont2 = Container::open(dev).await.unwrap();
+        let cont2 = Slab::open(dev).await.unwrap();
         assert_eq!(cont2.id, id);
         assert_eq!(cont2.total_slots(), total);
         assert_eq!(cont2.free_slots(), free);
@@ -651,8 +675,8 @@ mod tests {
 
     #[tokio::test]
     async fn allocate_and_free() {
-        let (dev, path) = create_container_device(10 * 1024 * 1024).await;
-        let mut cont = Container::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Warm)
+        let (dev, path) = create_slab_device(10 * 1024 * 1024).await;
+        let mut cont = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Warm)
             .await
             .unwrap();
         let total = cont.total_slots();
@@ -681,8 +705,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_write_slot() {
-        let (dev, path) = create_container_device(10 * 1024 * 1024).await;
-        let mut cont = Container::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Hot)
+        let (dev, path) = create_slab_device(10 * 1024 * 1024).await;
+        let mut cont = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Hot)
             .await
             .unwrap();
         let vol = VolumeId::new();
@@ -710,8 +734,8 @@ mod tests {
 
     #[tokio::test]
     async fn ref_count_inc_dec() {
-        let (dev, path) = create_container_device(10 * 1024 * 1024).await;
-        let mut cont = Container::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Hot)
+        let (dev, path) = create_slab_device(10 * 1024 * 1024).await;
+        let mut cont = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Hot)
             .await
             .unwrap();
         let vol = VolumeId::new();
@@ -748,8 +772,8 @@ mod tests {
         // Small device: only fits a few slots
         let slot_size = DEFAULT_SLOT_SIZE;
         // 3 MB = header + table + ~2 data slots
-        let (dev, path) = create_container_device(3 * 1024 * 1024).await;
-        let mut cont = Container::format(dev, slot_size, StorageTier::Cold)
+        let (dev, path) = create_slab_device(3 * 1024 * 1024).await;
+        let mut cont = Slab::format(dev, slot_size, StorageTier::Cold)
             .await
             .unwrap();
         let total = cont.total_slots();
@@ -770,8 +794,8 @@ mod tests {
 
     #[tokio::test]
     async fn multi_volume_slots() {
-        let (dev, path) = create_container_device(10 * 1024 * 1024).await;
-        let mut cont = Container::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Warm)
+        let (dev, path) = create_slab_device(10 * 1024 * 1024).await;
+        let mut cont = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Warm)
             .await
             .unwrap();
 
@@ -798,13 +822,13 @@ mod tests {
 
     #[tokio::test]
     async fn persistence_across_reopen() {
-        let (dev, path) = create_container_device(10 * 1024 * 1024).await;
+        let (dev, path) = create_slab_device(10 * 1024 * 1024).await;
         let vol = VolumeId::new();
 
         // Format and allocate
         let slot_idx;
         {
-            let mut cont = Container::format(dev.clone(), DEFAULT_SLOT_SIZE, StorageTier::Hot)
+            let mut cont = Slab::format(dev.clone(), DEFAULT_SLOT_SIZE, StorageTier::Hot)
                 .await
                 .unwrap();
             slot_idx = cont.allocate(vol, 42).await.unwrap();
@@ -813,7 +837,7 @@ mod tests {
         }
 
         // Re-open and verify
-        let cont2 = Container::open(dev).await.unwrap();
+        let cont2 = Slab::open(dev).await.unwrap();
         assert_eq!(cont2.find_slot(vol, 42), Some(slot_idx));
         let slot = cont2.get_slot(slot_idx).unwrap();
         assert_eq!(slot.state, SlotState::Allocated);
@@ -862,8 +886,8 @@ mod tests {
 
     #[test]
     fn header_roundtrip() {
-        let header = ContainerHeader {
-            container_uuid: Uuid::new_v4(),
+        let header = SlabHeader {
+            slab_uuid: Uuid::new_v4(),
             device_uuid: Uuid::new_v4(),
             slot_size: DEFAULT_SLOT_SIZE,
             total_slots: 100,
@@ -877,8 +901,8 @@ mod tests {
             checksum: 0,
         };
         let bytes = header.to_bytes();
-        let decoded = ContainerHeader::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded.container_uuid, header.container_uuid);
+        let decoded = SlabHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.slab_uuid, header.slab_uuid);
         assert_eq!(decoded.device_uuid, header.device_uuid);
         assert_eq!(decoded.slot_size, DEFAULT_SLOT_SIZE);
         assert_eq!(decoded.total_slots, 100);

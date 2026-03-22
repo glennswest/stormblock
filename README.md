@@ -27,7 +27,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 │  │  Placement Engine          │  │
 │  │  Cold copies + tiered data │  │
 │  ├────────────────────────────┤  │
-│  │  Container Extent Store    │  │
+│  │  Slab Extent Store         │  │
 │  │  1 MB slots, multi-device  │  │
 │  ├────────────────────────────┤  │
 │  │  RAID Engine               │  │
@@ -51,8 +51,8 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **SAS via io_uring** — Kernel SAS drivers (mpt3sas) with O_DIRECT and registered buffers.
 - **ublk server** — Exports volumes as `/dev/ublkbN` via io_uring URING_CMD (Linux 6.0+).
 - **Software RAID** — RAID 1/5/6/10 with AVX2/AVX-512/NEON SIMD parity computation.
-- **Container extent store** — Organic data placement with fixed-size 1 MB slots per device. Volumes spread across any device on any tier.
-- **Global Extent Map (GEM)** — Cross-container extent tracking with reverse index, COW snapshot cloning, and rebuild-from-containers recovery.
+- **Slab extent store** — Organic data placement with fixed-size 1 MB slots per device. Volumes spread across any device on any tier.
+- **Global Extent Map (GEM)** — Cross-slab extent tracking with reverse index, COW snapshot cloning, and rebuild-from-slabs recovery.
 - **Thin provisioning** — Extent-based allocator, volumes grow on write.
 - **COW snapshots** — Instant snapshots via extent map cloning with reference counting.
 - **Placement engine** — Snapshot-fenced cold copies, tiered data placement (Hot/Warm/Cool/Cold), extent-level replication.
@@ -60,29 +60,29 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model.
 - **iSCSI target** — RFC 7143, CHAP authentication, MPIO/ALUA.
 - **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
-- **REST API** — axum-based management (drives, arrays, volumes, exports, containers) with optional TLS.
+- **REST API** — axum-based management (drives, arrays, volumes, exports, slabs) with optional TLS.
 - **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
 - **229 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, PDU fuzz testing.
 
 ## Data Placement Model
 
-StormBlock uses an **organic, cellular storage model**. Each physical device is formatted as a Container — a flat array of 1 MB slots. Any volume can allocate slots in any container on any device. A volume's data starts as a single 1 MB chunk and grows/shrinks/spreads across devices as needed.
+StormBlock uses an **organic, cellular storage model**. Each physical device is formatted as a Slab — a flat array of 1 MB slots. Any volume can allocate slots in any slab on any device. A volume's data starts as a single 1 MB chunk and grows/shrinks/spreads across devices as needed.
 
 ```
 Volume Z (virtual_size: 100 GB)
-  ├── extent 0  ──→  Container A (local NVMe, Hot), slot 42
-  ├── extent 1  ──→  Container A (local NVMe, Hot), slot 43
-  ├── extent 2  ──→  Container B (remote SAS, Warm), slot 7
-  └── extent 3  ──→  Container A (local NVMe, Hot), slot 100
+  ├── extent 0  ──→  Slab A (local NVMe, Hot), slot 42
+  ├── extent 1  ──→  Slab A (local NVMe, Hot), slot 43
+  ├── extent 2  ──→  Slab B (remote SAS, Warm), slot 7
+  └── extent 3  ──→  Slab A (local NVMe, Hot), slot 100
 
-Container A (NVMe, tier=Hot, 10K slots)
+Slab A (NVMe, tier=Hot, 10K slots)
   ├── slot 42: Volume Z, extent 0
   ├── slot 43: Volume Z, extent 1
   ├── slot 100: Volume Z, extent 3
   └── slot 200: Volume Y, extent 5
 ```
 
-The **Global Extent Map (GEM)** tracks all extent→slot mappings and is reconstructable from container slot tables on recovery.
+The **Global Extent Map (GEM)** tracks all extent→slot mappings and is reconstructable from slab slot tables on recovery.
 
 ## Hardware Targets
 
@@ -137,7 +137,7 @@ See [stormblock-spec.md](docs/stormblock-spec.md) for the full specification.
 ## Module Structure
 
 ```
-src/drive/       BlockDevice trait, NVMe/SAS/FileDevice, Container extent store, ublk, ring IPC
+src/drive/       BlockDevice trait, NVMe/SAS/FileDevice, Slab extent store, ublk, ring IPC
 src/raid/        RAID 1/5/6/10, SIMD parity, write journal, rebuild, scrub
 src/volume/      Thin provisioning, COW snapshots, GEM, extent allocator, metadata
 src/placement/   Cold copies, storage topology, tiered replication

@@ -1,23 +1,23 @@
 //! Global Extent Map (GEM) — single source of truth for extent placement.
 //!
-//! The GEM tracks which container slot holds each volume's virtual extent.
+//! The GEM tracks which slab slot holds each volume's virtual extent.
 //! It replaces both the ExtentAllocator's per-array bitmap and ThinVolume's
-//! local extent_map with a unified, cross-container index.
+//! local extent_map with a unified, cross-slab index.
 //!
-//! Recovery invariant: the GEM is reconstructable from container slot tables.
-//! Each container's extent table is authoritative for its slots.
+//! Recovery invariant: the GEM is reconstructable from slab slot tables.
+//! Each slab's extent table is authoritative for its slots.
 
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::drive::container::ContainerId;
+use crate::drive::slab::SlabId;
 use crate::volume::extent::VolumeId;
 
-/// Location of a single extent in the container mesh.
+/// Location of a single extent in the slab mesh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtentLocation {
-    pub container_id: ContainerId,
+    pub slab_id: SlabId,
     pub slot_idx: u32,
     pub ref_count: u32,
     pub generation: u64,
@@ -50,7 +50,7 @@ impl VolumeExtentMap {
 /// Global Extent Map — tracks all extent locations across all volumes.
 pub struct GlobalExtentMap {
     volumes: HashMap<VolumeId, VolumeExtentMap>,
-    reverse: HashMap<(ContainerId, u32), (VolumeId, u64)>,
+    reverse: HashMap<(SlabId, u32), (VolumeId, u64)>,
 }
 
 impl GlobalExtentMap {
@@ -68,12 +68,12 @@ impl GlobalExtentMap {
         vext_idx: u64,
         location: ExtentLocation,
     ) {
-        let key = (location.container_id, location.slot_idx);
+        let key = (location.slab_id, location.slot_idx);
 
         // Remove old reverse entry if this virtual extent was already mapped
         if let Some(vmap) = self.volumes.get(&volume_id) {
             if let Some(old_loc) = vmap.extents.get(&vext_idx) {
-                let old_key = (old_loc.container_id, old_loc.slot_idx);
+                let old_key = (old_loc.slab_id, old_loc.slot_idx);
                 self.reverse.remove(&old_key);
             }
         }
@@ -101,7 +101,7 @@ impl GlobalExtentMap {
     pub fn remove(&mut self, volume_id: VolumeId, vext_idx: u64) -> Option<ExtentLocation> {
         let vmap = self.volumes.get_mut(&volume_id)?;
         let loc = vmap.extents.remove(&vext_idx)?;
-        let key = (loc.container_id, loc.slot_idx);
+        let key = (loc.slab_id, loc.slot_idx);
         self.reverse.remove(&key);
 
         // Clean up empty volume map
@@ -115,7 +115,7 @@ impl GlobalExtentMap {
     pub fn remove_volume(&mut self, volume_id: VolumeId) -> Option<VolumeExtentMap> {
         let vmap = self.volumes.remove(&volume_id)?;
         for loc in vmap.extents.values() {
-            let key = (loc.container_id, loc.slot_idx);
+            let key = (loc.slab_id, loc.slot_idx);
             self.reverse.remove(&key);
         }
         Some(vmap)
@@ -126,13 +126,13 @@ impl GlobalExtentMap {
         self.volumes.get(volume_id)
     }
 
-    /// Reverse lookup: given a container+slot, find which volume+extent owns it.
+    /// Reverse lookup: given a slab+slot, find which volume+extent owns it.
     pub fn reverse_lookup(
         &self,
-        container_id: ContainerId,
+        slab_id: SlabId,
         slot_idx: u32,
     ) -> Option<(VolumeId, u64)> {
-        self.reverse.get(&(container_id, slot_idx)).copied()
+        self.reverse.get(&(slab_id, slot_idx)).copied()
     }
 
     /// Clone a volume's extent map for snapshot (bumps ref_count in the clone).
@@ -144,11 +144,11 @@ impl GlobalExtentMap {
         let source_map = self.volumes.get(&source_id)?.clone();
 
         // Insert cloned mappings for the destination volume.
-        // Note: ref_count updates in the actual containers happen separately.
+        // Note: ref_count updates in the actual slabs happen separately.
         let mut dest_map = VolumeExtentMap::new();
         for (&vext_idx, loc) in &source_map.extents {
             let new_loc = ExtentLocation {
-                container_id: loc.container_id,
+                slab_id: loc.slab_id,
                 slot_idx: loc.slot_idx,
                 ref_count: loc.ref_count + 1,
                 generation: loc.generation,
@@ -156,7 +156,7 @@ impl GlobalExtentMap {
             dest_map.extents.insert(vext_idx, new_loc.clone());
 
             // Note: reverse map still points to source — that's correct because
-            // the container slot is shared. The reverse map tracks the primary
+            // the slab slot is shared. The reverse map tracks the primary
             // owner. For COW, we track sharing via ref_count.
         }
 
@@ -199,20 +199,20 @@ impl GlobalExtentMap {
         self.volumes.get(volume_id).map(|v| v.extents.iter())
     }
 
-    /// Rebuild the GEM from container slot tables. This is the recovery path:
-    /// scan all containers, reconstruct the full extent map.
-    pub fn rebuild_from_containers<'a>(
-        containers: impl Iterator<Item = (&'a ContainerId, &'a super::super::drive::container::Container)>,
+    /// Rebuild the GEM from slab slot tables. This is the recovery path:
+    /// scan all slabs, reconstruct the full extent map.
+    pub fn rebuild_from_slabs<'a>(
+        slabs: impl Iterator<Item = (&'a SlabId, &'a super::super::drive::slab::Slab)>,
     ) -> Self {
         let mut gem = GlobalExtentMap::new();
 
-        for (_, container) in containers {
-            let cid = container.container_id();
-            for slot_idx in 0..container.total_slots() as u32 {
-                if let Some(slot) = container.get_slot(slot_idx) {
-                    if slot.state != super::super::drive::container::SlotState::Free {
+        for (_, slab) in slabs {
+            let cid = slab.slab_id();
+            for slot_idx in 0..slab.total_slots() as u32 {
+                if let Some(slot) = slab.get_slot(slot_idx) {
+                    if slot.state != super::super::drive::slab::SlotState::Free {
                         let loc = ExtentLocation {
-                            container_id: cid,
+                            slab_id: cid,
                             slot_idx,
                             ref_count: slot.ref_count,
                             generation: slot.generation,
@@ -238,13 +238,13 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    fn cid() -> ContainerId {
-        ContainerId(Uuid::new_v4())
+    fn cid() -> SlabId {
+        SlabId(Uuid::new_v4())
     }
 
-    fn loc(container_id: ContainerId, slot_idx: u32) -> ExtentLocation {
+    fn loc(slab_id: SlabId, slot_idx: u32) -> ExtentLocation {
         ExtentLocation {
-            container_id,
+            slab_id,
             slot_idx,
             ref_count: 1,
             generation: 1,
@@ -261,7 +261,7 @@ mod tests {
         gem.insert(vol, 1, loc(c, 43));
 
         let l0 = gem.lookup(vol, 0).unwrap();
-        assert_eq!(l0.container_id, c);
+        assert_eq!(l0.slab_id, c);
         assert_eq!(l0.slot_idx, 42);
 
         let l1 = gem.lookup(vol, 1).unwrap();
@@ -328,7 +328,7 @@ mod tests {
         gem.insert(vol, 0, loc(c1, 0));
         assert!(gem.reverse_lookup(c1, 0).is_some());
 
-        // Move extent to different container
+        // Move extent to different slab
         gem.insert(vol, 0, loc(c2, 5));
         assert!(gem.reverse_lookup(c1, 0).is_none());
         assert_eq!(gem.reverse_lookup(c2, 5).unwrap(), (vol, 0));
@@ -354,20 +354,20 @@ mod tests {
     }
 
     #[test]
-    fn multi_container_volume() {
+    fn multi_slab_volume() {
         let mut gem = GlobalExtentMap::new();
         let vol = VolumeId::new();
         let c1 = cid();
         let c2 = cid();
 
-        // Volume spreads across two containers
+        // Volume spreads across two slabs
         gem.insert(vol, 0, loc(c1, 0));
         gem.insert(vol, 1, loc(c2, 0));
         gem.insert(vol, 2, loc(c1, 1));
 
-        assert_eq!(gem.lookup(vol, 0).unwrap().container_id, c1);
-        assert_eq!(gem.lookup(vol, 1).unwrap().container_id, c2);
-        assert_eq!(gem.lookup(vol, 2).unwrap().container_id, c1);
+        assert_eq!(gem.lookup(vol, 0).unwrap().slab_id, c1);
+        assert_eq!(gem.lookup(vol, 1).unwrap().slab_id, c2);
+        assert_eq!(gem.lookup(vol, 2).unwrap().slab_id, c1);
     }
 
     #[test]
