@@ -1,10 +1,10 @@
-//! Thin volume — virtual size, on-demand extent allocation.
+//! Thin volume — virtual size, on-demand extent allocation via slabs.
 //!
 //! `ThinVolume` implements `BlockDevice`, so target protocols see volumes
 //! as plain block devices. Physical storage is allocated on first write
-//! (allocate-on-write) from the extent allocator.
+//! (allocate-on-write) from slab slots via the Global Extent Map (GEM).
 
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,16 +13,64 @@ use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
 use crate::drive::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, SmartData};
-use crate::raid::RaidArrayId;
-use super::extent::{ExtentAllocator, VolumeId};
+use crate::drive::slab::SlabId;
+use crate::drive::slab_registry::SlabRegistry;
+use crate::placement::topology::StorageTier;
+use super::extent::VolumeId;
+use super::gem::{ExtentLocation, GlobalExtentMap};
 
 /// A physical extent with reference counting for COW snapshots.
+/// Legacy type — kept for metadata V1 compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhysicalExtent {
-    pub array_id: RaidArrayId,
+    pub array_id: crate::raid::RaidArrayId,
     pub offset: u64,
     pub length: u64,
     pub ref_count: u32,
+}
+
+/// Volume purpose — how the volume will be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VolumePurpose {
+    Partition,
+    StormFS,
+    ObjectStore,
+    KeyValue,
+    Boot,
+}
+
+impl Default for VolumePurpose {
+    fn default() -> Self {
+        VolumePurpose::Partition
+    }
+}
+
+impl fmt::Display for VolumePurpose {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VolumePurpose::Partition => write!(f, "partition"),
+            VolumePurpose::StormFS => write!(f, "stormfs"),
+            VolumePurpose::ObjectStore => write!(f, "objstore"),
+            VolumePurpose::KeyValue => write!(f, "kv"),
+            VolumePurpose::Boot => write!(f, "boot"),
+        }
+    }
+}
+
+/// Placement policy for a volume — controls which slab tiers are preferred.
+#[derive(Debug, Clone)]
+pub struct PlacementPolicy {
+    pub preferred_tier: StorageTier,
+    pub tier_fallback: Vec<StorageTier>,
+}
+
+impl Default for PlacementPolicy {
+    fn default() -> Self {
+        PlacementPolicy {
+            preferred_tier: StorageTier::Hot,
+            tier_fallback: vec![StorageTier::Warm, StorageTier::Cool, StorageTier::Cold],
+        }
+    }
 }
 
 /// Volume manager errors.
@@ -38,7 +86,7 @@ pub enum VolumeError {
 impl fmt::Display for VolumeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VolumeError::NoSpace => write!(f, "no free extents available"),
+            VolumeError::NoSpace => write!(f, "no free slots available"),
             VolumeError::VolumeNotFound(id) => write!(f, "volume {id} not found"),
             VolumeError::InvalidSize(msg) => write!(f, "invalid size: {msg}"),
             VolumeError::Drive(e) => write!(f, "drive error: {e}"),
@@ -61,20 +109,17 @@ impl From<VolumeError> for DriveError {
     }
 }
 
-/// A thin-provisioned volume backed by a RAID array.
+/// A thin-provisioned volume backed by slabs via the Global Extent Map.
 ///
-/// Virtual blocks are mapped to physical extents on demand.
-/// Implements `BlockDevice` for use by target protocols.
+/// Virtual blocks are mapped to slab slots on demand. Implements `BlockDevice`
+/// for use by target protocols (NVMe-oF, iSCSI). Storage is allocated from
+/// any slab in the registry according to the placement policy.
 pub struct ThinVolume {
     pub(crate) id: VolumeId,
     pub(crate) name: String,
     pub(crate) virtual_size: u64,
-    pub(crate) allocated: u64,
-    /// Virtual extent index → physical extent mapping.
-    pub(crate) extent_map: BTreeMap<u64, PhysicalExtent>,
-    pub(crate) array_id: RaidArrayId,
-    pub(crate) backing_device: Arc<dyn BlockDevice>,
-    pub(crate) allocator: Arc<tokio::sync::Mutex<ExtentAllocator>>,
+    pub(crate) slot_size: u64,
+    pub(crate) purpose: VolumePurpose,
     pub(crate) device_id: DeviceId,
 }
 
@@ -82,9 +127,7 @@ impl ThinVolume {
     pub fn new(
         name: String,
         virtual_size: u64,
-        array_id: RaidArrayId,
-        backing_device: Arc<dyn BlockDevice>,
-        allocator: Arc<tokio::sync::Mutex<ExtentAllocator>>,
+        slot_size: u64,
     ) -> Self {
         let id = VolumeId::new();
         let device_id = DeviceId {
@@ -98,26 +141,19 @@ impl ThinVolume {
             id,
             name,
             virtual_size,
-            allocated: 0,
-            extent_map: BTreeMap::new(),
-            array_id,
-            backing_device,
-            allocator,
+            slot_size,
+            purpose: VolumePurpose::Partition,
             device_id,
         }
     }
 
-    /// Rebuild a volume from persisted metadata (recovery path).
+    /// Restore a volume from persisted config (recovery path).
     pub fn restore(
         id: VolumeId,
         name: String,
         virtual_size: u64,
-        array_id: RaidArrayId,
-        extent_map: BTreeMap<u64, PhysicalExtent>,
-        backing_device: Arc<dyn BlockDevice>,
-        allocator: Arc<tokio::sync::Mutex<ExtentAllocator>>,
+        slot_size: u64,
     ) -> Self {
-        let allocated: u64 = extent_map.values().map(|e| e.length).sum();
         let device_id = DeviceId {
             uuid: id.0,
             serial: format!("vol-{}", &id.0.simple().to_string()[..8]),
@@ -129,11 +165,8 @@ impl ThinVolume {
             id,
             name,
             virtual_size,
-            allocated,
-            extent_map,
-            array_id,
-            backing_device,
-            allocator,
+            slot_size,
+            purpose: VolumePurpose::Partition,
             device_id,
         }
     }
@@ -150,98 +183,53 @@ impl ThinVolume {
         self.virtual_size
     }
 
-    pub fn allocated(&self) -> u64 {
-        self.allocated
-    }
-
-    pub fn extent_count(&self) -> usize {
-        self.extent_map.len()
-    }
-
-    /// Allocate a new physical extent for the given virtual extent index.
-    async fn allocate_extent(&mut self, vext_idx: u64) -> Result<&PhysicalExtent, VolumeError> {
-        let mut alloc = self.allocator.lock().await;
-        let extents = alloc.allocate(self.array_id, 1)
-            .ok_or(VolumeError::NoSpace)?;
-        let ext = &extents[0];
-        let pext = PhysicalExtent {
-            array_id: ext.array_id,
-            offset: ext.offset,
-            length: ext.length,
-            ref_count: 1,
-        };
-        drop(alloc);
-
-        self.allocated += pext.length;
-        self.extent_map.insert(vext_idx, pext);
-        Ok(&self.extent_map[&vext_idx])
-    }
-
-    /// COW: if extent is shared, copy to a new extent and return it.
-    async fn cow_extent(&mut self, vext_idx: u64) -> Result<&PhysicalExtent, VolumeError> {
-        let needs_cow = self.extent_map.get(&vext_idx)
-            .map(|e| e.ref_count > 1)
-            .unwrap_or(false);
-
-        if needs_cow {
-            let old = self.extent_map[&vext_idx].clone();
-            let extent_size = old.length;
-
-            // Allocate new extent
-            let mut alloc = self.allocator.lock().await;
-            let new_extents = alloc.allocate(self.array_id, 1)
-                .ok_or(VolumeError::NoSpace)?;
-            drop(alloc);
-
-            let new_ext = &new_extents[0];
-
-            // Copy data from old to new
-            let mut buf = vec![0u8; extent_size as usize];
-            self.backing_device.read(old.offset, &mut buf).await?;
-            self.backing_device.write(new_ext.offset, &buf).await?;
-
-            // Decrement old ref_count
-            let old_entry = self.extent_map.get_mut(&vext_idx).unwrap();
-            old_entry.ref_count -= 1;
-
-            // If old ref_count hit 0, free it (shouldn't happen since we checked > 1)
-            // Insert new extent
-            let pext = PhysicalExtent {
-                array_id: new_ext.array_id,
-                offset: new_ext.offset,
-                length: new_ext.length,
-                ref_count: 1,
-            };
-            self.allocated += pext.length;
-            self.extent_map.insert(vext_idx, pext);
-        }
-
-        Ok(&self.extent_map[&vext_idx])
+    pub fn slot_size(&self) -> u64 {
+        self.slot_size
     }
 }
 
-/// `ThinVolume` wrapped in a Mutex for interior mutability needed by `BlockDevice`.
+/// `ThinVolume` wrapped with shared GEM and SlabRegistry references.
+///
+/// The handle owns Arc references to the GEM and registry, allowing
+/// lock-free reads and serialized writes. Implements `BlockDevice`.
 pub struct ThinVolumeHandle {
     inner: tokio::sync::Mutex<ThinVolume>,
     device_id: DeviceId,
     virtual_size: AtomicU64,
+    id: VolumeId,
+    slot_size: u64,
+    gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
+    registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
+    placement: PlacementPolicy,
 }
 
 impl ThinVolumeHandle {
-    pub fn new(vol: ThinVolume) -> Self {
+    pub fn new(
+        vol: ThinVolume,
+        gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
+        registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
+        placement: PlacementPolicy,
+    ) -> Self {
         let device_id = vol.device_id.clone();
         let virtual_size = AtomicU64::new(vol.virtual_size);
+        let id = vol.id;
+        let slot_size = vol.slot_size;
         ThinVolumeHandle {
             inner: tokio::sync::Mutex::new(vol),
             device_id,
             virtual_size,
+            id,
+            slot_size,
+            gem,
+            registry,
+            placement,
         }
     }
 
-    /// Resize the volume to `new_size` bytes.
+    /// Resize the volume.
     ///
     /// Growing is instant — allocate-on-write handles new space.
-    /// Shrinking frees extents beyond the new boundary.
+    /// Shrinking frees slab slots beyond the new boundary.
     pub async fn resize(&self, new_size: u64) -> Result<(), VolumeError> {
         if new_size == 0 {
             return Err(VolumeError::InvalidSize("size must be > 0".to_string()));
@@ -255,29 +243,32 @@ impl ThinVolumeHandle {
         let mut vol = self.inner.lock().await;
 
         if new_size < current {
-            // Shrink: free extents beyond new boundary
-            let extent_size = {
-                let alloc = vol.allocator.lock().await;
-                alloc.extent_size()
+            // Shrink: free slots beyond new boundary
+            let max_vext_idx = new_size / self.slot_size;
+
+            // Collect extents to remove
+            let to_remove: Vec<(u64, ExtentLocation)> = {
+                let gem = self.gem.lock().await;
+                gem.volume_extents(&self.id)
+                    .map(|iter| {
+                        iter.filter(|(&idx, _)| idx >= max_vext_idx)
+                            .map(|(&idx, loc)| (idx, loc.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
             };
-            let max_vext_idx = new_size / extent_size;
 
-            // Collect indices to remove (at or beyond boundary)
-            let to_remove: Vec<u64> = vol.extent_map.range(max_vext_idx..)
-                .map(|(&idx, _)| idx)
-                .collect();
-
-            for idx in to_remove {
-                if let Some(pext) = vol.extent_map.remove(&idx) {
-                    vol.allocated -= pext.length;
-                    if pext.ref_count <= 1 {
-                        let mut alloc = vol.allocator.lock().await;
-                        let ext = super::extent::Extent {
-                            array_id: pext.array_id,
-                            offset: pext.offset,
-                            length: pext.length,
-                        };
-                        alloc.free(&ext);
+            for (vext_idx, loc) in to_remove {
+                // Remove from GEM
+                {
+                    let mut gem = self.gem.lock().await;
+                    gem.remove(self.id, vext_idx);
+                }
+                // Dec ref on slab
+                {
+                    let mut reg = self.registry.lock().await;
+                    if let Some(slab) = reg.get_mut(&loc.slab_id) {
+                        let _ = slab.dec_ref(loc.slot_idx).await;
                     }
                 }
             }
@@ -288,8 +279,8 @@ impl ThinVolumeHandle {
         Ok(())
     }
 
-    pub async fn volume_id(&self) -> VolumeId {
-        self.inner.lock().await.id
+    pub fn volume_id(&self) -> VolumeId {
+        self.id
     }
 
     pub async fn name(&self) -> String {
@@ -297,16 +288,153 @@ impl ThinVolumeHandle {
     }
 
     pub async fn allocated(&self) -> u64 {
-        self.inner.lock().await.allocated
+        let gem = self.gem.lock().await;
+        gem.get_volume_map(&self.id)
+            .map(|m| m.len() as u64 * self.slot_size)
+            .unwrap_or(0)
     }
 
     pub async fn extent_count(&self) -> usize {
-        self.inner.lock().await.extent_count()
+        let gem = self.gem.lock().await;
+        gem.get_volume_map(&self.id).map(|m| m.len()).unwrap_or(0)
     }
 
-    /// Access the inner ThinVolume for snapshot operations.
+    /// Access the inner ThinVolume.
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ThinVolume> {
         self.inner.lock().await
+    }
+
+    /// Get the shared GEM reference.
+    pub fn gem(&self) -> &Arc<tokio::sync::Mutex<GlobalExtentMap>> {
+        &self.gem
+    }
+
+    /// Get the shared SlabRegistry reference.
+    pub fn registry(&self) -> &Arc<tokio::sync::Mutex<SlabRegistry>> {
+        &self.registry
+    }
+
+    /// Allocate a slot from the best available slab according to placement policy.
+    async fn allocate_slot(
+        &self,
+        registry: &mut SlabRegistry,
+        vext_idx: u64,
+    ) -> DriveResult<(SlabId, u32)> {
+        // Try preferred tier first
+        if let Some(slab_id) = registry.best_slab_for_tier(self.placement.preferred_tier) {
+            if let Some(slab) = registry.get_mut(&slab_id) {
+                match slab.allocate(self.id, vext_idx).await {
+                    Ok(slot_idx) => return Ok((slab_id, slot_idx)),
+                    Err(_) => {} // full, try fallback
+                }
+            }
+        }
+
+        // Try fallback tiers
+        for &tier in &self.placement.tier_fallback {
+            if let Some(slab_id) = registry.best_slab_for_tier(tier) {
+                if let Some(slab) = registry.get_mut(&slab_id) {
+                    match slab.allocate(self.id, vext_idx).await {
+                        Ok(slot_idx) => return Ok((slab_id, slot_idx)),
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+
+        Err(DriveError::Other(anyhow::anyhow!("no space: all slabs exhausted")))
+    }
+
+    /// Allocate a new slot and write data (allocate-on-write path).
+    async fn allocate_and_write(
+        &self,
+        vext_idx: u64,
+        off_in_slot: u64,
+        buf: &[u8],
+    ) -> DriveResult<()> {
+        // Allocate slot
+        let (slab_id, slot_idx) = {
+            let mut reg = self.registry.lock().await;
+            self.allocate_slot(&mut reg, vext_idx).await?
+        };
+
+        // Insert into GEM
+        {
+            let mut gem = self.gem.lock().await;
+            gem.insert(self.id, vext_idx, ExtentLocation {
+                slab_id,
+                slot_idx,
+                ref_count: 1,
+                generation: 1,
+            });
+        }
+
+        // Write data
+        let (device, phys_offset) = {
+            let reg = self.registry.lock().await;
+            let slab = reg.get(&slab_id).ok_or_else(|| {
+                DriveError::Other(anyhow::anyhow!("slab {} not found", slab_id.0))
+            })?;
+            slab.slot_device_and_offset(slot_idx, off_in_slot)?
+        };
+        device.write(phys_offset, buf).await?;
+        Ok(())
+    }
+
+    /// COW: copy old slot data to new slot, write new data, update GEM, dec_ref old.
+    async fn cow_write(
+        &self,
+        vext_idx: u64,
+        off_in_slot: u64,
+        buf: &[u8],
+        old_loc: &ExtentLocation,
+    ) -> DriveResult<()> {
+        // Read old slot data
+        let mut old_data = vec![0u8; self.slot_size as usize];
+        {
+            let reg = self.registry.lock().await;
+            let slab = reg.get(&old_loc.slab_id).ok_or_else(|| {
+                DriveError::Other(anyhow::anyhow!("slab {} not found", old_loc.slab_id.0))
+            })?;
+            slab.read_slot(old_loc.slot_idx, 0, &mut old_data).await?;
+        }
+
+        // Allocate new slot
+        let (new_slab_id, new_slot_idx) = {
+            let mut reg = self.registry.lock().await;
+            self.allocate_slot(&mut reg, vext_idx).await?
+        };
+
+        // Write old data to new slot, then overlay new data
+        {
+            let reg = self.registry.lock().await;
+            let slab = reg.get(&new_slab_id).ok_or_else(|| {
+                DriveError::Other(anyhow::anyhow!("slab {} not found", new_slab_id.0))
+            })?;
+            slab.write_slot(new_slot_idx, 0, &old_data).await?;
+            slab.write_slot(new_slot_idx, off_in_slot, buf).await?;
+        }
+
+        // Update GEM
+        {
+            let mut gem = self.gem.lock().await;
+            gem.insert(self.id, vext_idx, ExtentLocation {
+                slab_id: new_slab_id,
+                slot_idx: new_slot_idx,
+                ref_count: 1,
+                generation: old_loc.generation + 1,
+            });
+        }
+
+        // Dec ref on old slot
+        {
+            let mut reg = self.registry.lock().await;
+            if let Some(slab) = reg.get_mut(&old_loc.slab_id) {
+                let _ = slab.dec_ref(old_loc.slot_idx).await;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -329,36 +457,43 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     fn device_type(&self) -> DriveType {
-        DriveType::File // Logical volume
+        DriveType::VDrive
     }
 
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
-        let vol = self.inner.lock().await;
-        let extent_size = vol.extent_map.values().next()
-            .map(|e| e.length)
-            .unwrap_or({
-                let alloc = vol.allocator.lock().await;
-                alloc.extent_size()
-            });
-
         let buf_len = buf.len() as u64;
         let mut bytes_read = 0u64;
         let mut pos = offset;
 
         while bytes_read < buf_len {
-            let vext_idx = pos / extent_size;
-            let off_in_extent = pos % extent_size;
-            let remaining_in_extent = extent_size - off_in_extent;
+            let vext_idx = pos / self.slot_size;
+            let off_in_slot = pos % self.slot_size;
+            let remaining_in_slot = self.slot_size - off_in_slot;
             let remaining_in_buf = buf_len - bytes_read;
-            let to_read = remaining_in_extent.min(remaining_in_buf) as usize;
+            let to_read = remaining_in_slot.min(remaining_in_buf) as usize;
 
             let buf_start = bytes_read as usize;
             let buf_end = buf_start + to_read;
 
-            match vol.extent_map.get(&vext_idx) {
-                Some(pext) => {
-                    let phys_offset = pext.offset + off_in_extent;
-                    vol.backing_device.read(phys_offset, &mut buf[buf_start..buf_end]).await?;
+            // Look up extent in GEM
+            let location = {
+                let gem = self.gem.lock().await;
+                gem.lookup(self.id, vext_idx).cloned()
+            };
+
+            match location {
+                Some(loc) => {
+                    // Get device + physical offset from slab
+                    let (device, phys_offset) = {
+                        let reg = self.registry.lock().await;
+                        let slab = reg.get(&loc.slab_id).ok_or_else(|| {
+                            DriveError::Other(anyhow::anyhow!(
+                                "slab {} not found", loc.slab_id.0
+                            ))
+                        })?;
+                        slab.slot_device_and_offset(loc.slot_idx, off_in_slot)?
+                    };
+                    device.read(phys_offset, &mut buf[buf_start..buf_end]).await?;
                 }
                 None => {
                     // Unallocated — return zeros
@@ -374,42 +509,51 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
-        let mut vol = self.inner.lock().await;
-        let extent_size = vol.extent_map.values().next()
-            .map(|e| e.length)
-            .unwrap_or({
-                let alloc = vol.allocator.lock().await;
-                alloc.extent_size()
-            });
+        // Serialize writes per-volume for COW/allocate-on-write correctness
+        let _vol = self.inner.lock().await;
 
         let buf_len = buf.len() as u64;
         let mut bytes_written = 0u64;
         let mut pos = offset;
 
         while bytes_written < buf_len {
-            let vext_idx = pos / extent_size;
-            let off_in_extent = pos % extent_size;
-            let remaining_in_extent = extent_size - off_in_extent;
+            let vext_idx = pos / self.slot_size;
+            let off_in_slot = pos % self.slot_size;
+            let remaining_in_slot = self.slot_size - off_in_slot;
             let remaining_in_buf = buf_len - bytes_written;
-            let to_write = remaining_in_extent.min(remaining_in_buf) as usize;
+            let to_write = remaining_in_slot.min(remaining_in_buf) as usize;
 
             let buf_start = bytes_written as usize;
             let buf_end = buf_start + to_write;
 
-            // Check if extent exists
-            let has_extent = vol.extent_map.contains_key(&vext_idx);
-            if has_extent {
-                // COW if shared
-                vol.cow_extent(vext_idx).await?;
-                let pext = &vol.extent_map[&vext_idx];
-                let phys_offset = pext.offset + off_in_extent;
-                vol.backing_device.write(phys_offset, &buf[buf_start..buf_end]).await?;
-            } else {
-                // Allocate new extent
-                vol.allocate_extent(vext_idx).await?;
-                let pext = &vol.extent_map[&vext_idx];
-                let phys_offset = pext.offset + off_in_extent;
-                vol.backing_device.write(phys_offset, &buf[buf_start..buf_end]).await?;
+            // Look up existing extent in GEM
+            let location = {
+                let gem = self.gem.lock().await;
+                gem.lookup(self.id, vext_idx).cloned()
+            };
+
+            match location {
+                Some(loc) if loc.ref_count > 1 => {
+                    // COW: shared extent, must copy before writing
+                    self.cow_write(vext_idx, off_in_slot, &buf[buf_start..buf_end], &loc).await?;
+                }
+                Some(loc) => {
+                    // Write in place — exclusive ownership
+                    let (device, phys_offset) = {
+                        let reg = self.registry.lock().await;
+                        let slab = reg.get(&loc.slab_id).ok_or_else(|| {
+                            DriveError::Other(anyhow::anyhow!(
+                                "slab {} not found", loc.slab_id.0
+                            ))
+                        })?;
+                        slab.slot_device_and_offset(loc.slot_idx, off_in_slot)?
+                    };
+                    device.write(phys_offset, &buf[buf_start..buf_end]).await?;
+                }
+                None => {
+                    // Allocate on write
+                    self.allocate_and_write(vext_idx, off_in_slot, &buf[buf_start..buf_end]).await?;
+                }
             }
 
             bytes_written += to_write as u64;
@@ -420,44 +564,59 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn flush(&self) -> DriveResult<()> {
-        let vol = self.inner.lock().await;
-        vol.backing_device.flush().await
+        // Collect unique slab IDs for this volume, then flush their devices
+        let slab_ids: Vec<SlabId> = {
+            let gem = self.gem.lock().await;
+            gem.volume_extents(&self.id)
+                .map(|iter| {
+                    iter.map(|(_, loc)| loc.slab_id)
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let reg = self.registry.lock().await;
+        for slab_id in slab_ids {
+            if let Some(slab) = reg.get(&slab_id) {
+                slab.device().flush().await?;
+            }
+        }
+        Ok(())
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
-        let mut vol = self.inner.lock().await;
-        let extent_size = vol.extent_map.values().next()
-            .map(|e| e.length)
-            .unwrap_or({
-                let alloc = vol.allocator.lock().await;
-                alloc.extent_size()
-            });
-
+        let _vol = self.inner.lock().await;
         let mut pos = offset;
         let end = offset + len;
 
         while pos < end {
-            let vext_idx = pos / extent_size;
-            let off_in_extent = pos % extent_size;
+            let vext_idx = pos / self.slot_size;
+            let off_in_slot = pos % self.slot_size;
 
-            // Only discard full extents
-            if off_in_extent == 0 && (end - pos) >= extent_size {
-                if let Some(pext) = vol.extent_map.remove(&vext_idx) {
-                    vol.allocated -= pext.length;
-                    if pext.ref_count <= 1 {
-                        let mut alloc = vol.allocator.lock().await;
-                        let ext = super::extent::Extent {
-                            array_id: pext.array_id,
-                            offset: pext.offset,
-                            length: pext.length,
-                        };
-                        alloc.free(&ext);
+            // Only discard full slots
+            if off_in_slot == 0 && (end - pos) >= self.slot_size {
+                let location = {
+                    let gem = self.gem.lock().await;
+                    gem.lookup(self.id, vext_idx).cloned()
+                };
+
+                if let Some(loc) = location {
+                    {
+                        let mut gem = self.gem.lock().await;
+                        gem.remove(self.id, vext_idx);
                     }
-                    // If shared, just remove our mapping, don't free the physical extent
+                    {
+                        let mut reg = self.registry.lock().await;
+                        if let Some(slab) = reg.get_mut(&loc.slab_id) {
+                            let _ = slab.dec_ref(loc.slot_idx).await;
+                        }
+                    }
                 }
             }
 
-            let remaining = extent_size - off_in_extent;
+            let remaining = self.slot_size - off_in_slot;
             pos += remaining;
         }
 
@@ -473,10 +632,12 @@ impl BlockDevice for ThinVolumeHandle {
 mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::{Slab, DEFAULT_SLOT_SIZE};
     use crate::raid::{RaidArray, RaidLevel};
-    use crate::volume::extent::{ExtentAllocator, DEFAULT_EXTENT_SIZE};
 
-    async fn setup_test_volume(extent_size: u64) -> (ThinVolumeHandle, Vec<String>) {
+    async fn setup_test_volume(
+        slot_size: u64,
+    ) -> (Arc<ThinVolumeHandle>, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-volume-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -488,29 +649,37 @@ mod tests {
             let path = dir.join(format!("{test_id}-member-{i}.bin"));
             let path_str = path.to_str().unwrap().to_string();
             let _ = std::fs::remove_file(&path);
-            let dev = FileDevice::open_with_capacity(&path_str, 64 * 1024 * 1024).await.unwrap();
+            let dev = FileDevice::open_with_capacity(&path_str, 64 * 1024 * 1024)
+                .await
+                .unwrap();
             devices.push(Arc::new(dev));
             paths.push(path_str);
         }
 
-        let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.unwrap();
-        let array_id = array.array_id();
-        let capacity = array.capacity_bytes();
+        let array = RaidArray::create(RaidLevel::Raid1, devices, None)
+            .await
+            .unwrap();
         let backing: Arc<dyn BlockDevice> = Arc::new(array);
 
-        let mut allocator = ExtentAllocator::new(extent_size);
-        allocator.add_array(array_id, capacity);
-        let allocator = Arc::new(tokio::sync::Mutex::new(allocator));
+        // Format a slab on the RAID array
+        let slab = Slab::format(backing, slot_size, StorageTier::Hot)
+            .await
+            .unwrap();
 
-        let vol = ThinVolume::new(
-            "test-vol".to_string(),
-            128 * 1024 * 1024, // 128 MB virtual
-            array_id,
-            backing,
-            allocator,
-        );
+        let mut registry = SlabRegistry::new();
+        registry.add(slab);
+        let registry = Arc::new(tokio::sync::Mutex::new(registry));
+        let gem = Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new()));
 
-        (ThinVolumeHandle::new(vol), paths)
+        let vol = ThinVolume::new("test-vol".to_string(), 128 * 1024 * 1024, slot_size);
+        let handle = Arc::new(ThinVolumeHandle::new(
+            vol,
+            gem,
+            registry,
+            PlacementPolicy::default(),
+        ));
+
+        (handle, paths)
     }
 
     fn cleanup(paths: &[String]) {
@@ -521,20 +690,17 @@ mod tests {
 
     #[tokio::test]
     async fn write_allocates_and_read_returns_data() {
-        let (handle, paths) = setup_test_volume(DEFAULT_EXTENT_SIZE).await;
+        let (handle, paths) = setup_test_volume(4096).await;
 
-        // Write data
         let data = vec![0xAB_u8; 4096];
         let written = handle.write(0, &data).await.unwrap();
         assert_eq!(written, 4096);
 
-        // Read back
         let mut buf = vec![0u8; 4096];
         let read = handle.read(0, &mut buf).await.unwrap();
         assert_eq!(read, 4096);
         assert_eq!(buf, data);
 
-        // Verify extent was allocated
         assert_eq!(handle.extent_count().await, 1);
         assert!(handle.allocated().await > 0);
 
@@ -543,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_unallocated_returns_zeros() {
-        let (handle, paths) = setup_test_volume(DEFAULT_EXTENT_SIZE).await;
+        let (handle, paths) = setup_test_volume(4096).await;
 
         let mut buf = vec![0xFF_u8; 4096];
         let read = handle.read(0, &mut buf).await.unwrap();
@@ -555,8 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_at_different_extents() {
-        let extent_size = 4096u64; // Small extents for testing
-        let (handle, paths) = setup_test_volume(extent_size).await;
+        let (handle, paths) = setup_test_volume(4096).await;
 
         let data_a = vec![0xAA_u8; 4096];
         let data_b = vec![0xBB_u8; 4096];
@@ -577,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn flush_works() {
-        let (handle, paths) = setup_test_volume(DEFAULT_EXTENT_SIZE).await;
+        let (handle, paths) = setup_test_volume(4096).await;
         handle.write(0, &[0xCC_u8; 4096]).await.unwrap();
         handle.flush().await.unwrap();
         cleanup(&paths);

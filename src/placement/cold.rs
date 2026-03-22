@@ -343,16 +343,19 @@ mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
     use crate::drive::BlockDevice;
+    use crate::drive::slab::Slab;
+    use crate::drive::slab_registry::SlabRegistry;
     use crate::raid::{RaidArray, RaidLevel};
-    use crate::volume::extent::{ExtentAllocator, VolumeId};
+    use crate::volume::extent::VolumeId;
+    use crate::volume::gem::GlobalExtentMap;
     use crate::volume::snapshot::{create_snapshot, snapshot_diff};
-    use crate::volume::thin::{ThinVolume, ThinVolumeHandle};
+    use crate::volume::thin::{ThinVolume, ThinVolumeHandle, PlacementPolicy};
     use std::sync::Arc;
 
-    /// Set up a source volume on RAID 1 with small extents for testing.
+    /// Set up a source volume on RAID 1 with small slot sizes for testing.
     async fn setup_volume(
-        extent_size: u64,
-    ) -> (Arc<ThinVolumeHandle>, Vec<String>) {
+        slot_size: u64,
+    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::Mutex<GlobalExtentMap>>, Arc<tokio::sync::Mutex<SlabRegistry>>, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-cold-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -373,22 +376,25 @@ mod tests {
         let array = RaidArray::create(RaidLevel::Raid1, devices, None)
             .await
             .unwrap();
-        let array_id = array.array_id();
-        let capacity = array.capacity_bytes();
         let backing: Arc<dyn BlockDevice> = Arc::new(array);
 
-        let mut allocator = ExtentAllocator::new(extent_size);
-        allocator.add_array(array_id, capacity);
-        let allocator = Arc::new(tokio::sync::Mutex::new(allocator));
+        let slab = Slab::format(backing, slot_size, super::StorageTier::Hot)
+            .await
+            .unwrap();
 
-        let vol = ThinVolume::new(
-            "source".to_string(),
-            32 * 1024 * 1024, // 32 MB virtual
-            array_id,
-            backing,
-            allocator,
-        );
-        (Arc::new(ThinVolumeHandle::new(vol)), paths)
+        let mut registry = SlabRegistry::new();
+        registry.add(slab);
+        let registry = Arc::new(tokio::sync::Mutex::new(registry));
+        let gem = Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new()));
+
+        let vol = ThinVolume::new("source".to_string(), 32 * 1024 * 1024, slot_size);
+        let handle = Arc::new(ThinVolumeHandle::new(
+            vol,
+            gem.clone(),
+            registry.clone(),
+            PlacementPolicy::default(),
+        ));
+        (handle, gem, registry, paths)
     }
 
     /// Create a cold copy target (plain file device).
@@ -414,8 +420,8 @@ mod tests {
 
     #[tokio::test]
     async fn cold_copy_full_replication() {
-        let extent_size = 4096u64;
-        let (vol_handle, mut paths) = setup_volume(extent_size).await;
+        let slot_size = 4096u64;
+        let (vol_handle, gem, registry, mut paths) = setup_volume(slot_size).await;
 
         // Write data to 3 extents
         vol_handle.write(0, &vec![0xAA; 4096]).await.unwrap();
@@ -423,23 +429,32 @@ mod tests {
         vol_handle.write(8192, &vec![0xCC; 4096]).await.unwrap();
 
         // Take snapshot
+        let source_id = vol_handle.volume_id();
         let snap_handle = {
-            let mut vol = vol_handle.lock().await;
-            let snap = create_snapshot(&mut vol, "snap1");
-            Arc::new(ThinVolumeHandle::new(snap))
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            let snap_vol = create_snapshot(source_id, "snap1", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap();
+            Arc::new(ThinVolumeHandle::new(
+                snap_vol,
+                gem.clone(),
+                registry.clone(),
+                PlacementPolicy::default(),
+            ))
         };
-        let snap_id = snap_handle.lock().await.id();
+        let snap_id = snap_handle.volume_id();
 
         // Create cold copy target
         let cold_dev = create_cold_target(&mut paths, 32 * 1024 * 1024).await;
-        let total_extents = 32 * 1024 * 1024 / extent_size;
+        let total_extents = 32 * 1024 * 1024 / slot_size;
 
         let mut cold = ColdCopy::new(
-            vol_handle.lock().await.id(),
+            vol_handle.volume_id(),
             cold_dev.clone(),
             snap_id,
             total_extents,
-            extent_size,
+            slot_size,
             StorageTier::Cold,
             Locality::Local,
         );
@@ -474,8 +489,8 @@ mod tests {
 
     #[tokio::test]
     async fn cold_copy_incremental_update() {
-        let extent_size = 4096u64;
-        let (vol_handle, mut paths) = setup_volume(extent_size).await;
+        let slot_size = 4096u64;
+        let (vol_handle, gem, registry, mut paths) = setup_volume(slot_size).await;
 
         // Write initial data
         vol_handle.write(0, &vec![0xAA; 4096]).await.unwrap();
@@ -483,22 +498,32 @@ mod tests {
         vol_handle.write(8192, &vec![0xCC; 4096]).await.unwrap();
 
         // Snapshot 1
+        let source_id = vol_handle.volume_id();
         let snap1_handle = {
-            let mut vol = vol_handle.lock().await;
-            Arc::new(ThinVolumeHandle::new(create_snapshot(&mut vol, "snap1")))
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            let snap_vol = create_snapshot(source_id, "snap1", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap();
+            Arc::new(ThinVolumeHandle::new(
+                snap_vol,
+                gem.clone(),
+                registry.clone(),
+                PlacementPolicy::default(),
+            ))
         };
-        let snap1_id = snap1_handle.lock().await.id();
+        let snap1_id = snap1_handle.volume_id();
 
         // Full replication to cold copy
         let cold_dev = create_cold_target(&mut paths, 32 * 1024 * 1024).await;
-        let total_extents = 32 * 1024 * 1024 / extent_size;
+        let total_extents = 32 * 1024 * 1024 / slot_size;
 
         let mut cold = ColdCopy::new(
-            vol_handle.lock().await.id(),
+            vol_handle.volume_id(),
             cold_dev.clone(),
             snap1_id,
             total_extents,
-            extent_size,
+            slot_size,
             StorageTier::Cold,
             Locality::Local,
         );
@@ -514,16 +539,24 @@ mod tests {
 
         // Snapshot 2
         let snap2_handle = {
-            let mut vol = vol_handle.lock().await;
-            Arc::new(ThinVolumeHandle::new(create_snapshot(&mut vol, "snap2")))
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            let snap_vol = create_snapshot(source_id, "snap2", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap();
+            Arc::new(ThinVolumeHandle::new(
+                snap_vol,
+                gem.clone(),
+                registry.clone(),
+                PlacementPolicy::default(),
+            ))
         };
-        let snap2_id = snap2_handle.lock().await.id();
+        let snap2_id = snap2_handle.volume_id();
 
         // Compute diff
         let changed = {
-            let s1 = snap1_handle.lock().await;
-            let s2 = snap2_handle.lock().await;
-            snapshot_diff(&s1, &s2)
+            let gem_guard = gem.lock().await;
+            snapshot_diff(&gem_guard, snap1_id, snap2_id)
         };
 
         // Extent 0 should be in the diff (was rewritten via COW)
@@ -562,32 +595,42 @@ mod tests {
 
     #[tokio::test]
     async fn cold_copy_respects_shutdown() {
-        let extent_size = 4096u64;
-        let (vol_handle, mut paths) = setup_volume(extent_size).await;
+        let slot_size = 4096u64;
+        let (vol_handle, gem, registry, mut paths) = setup_volume(slot_size).await;
 
         // Write to many extents
         for i in 0..10u64 {
             vol_handle
-                .write(i * extent_size, &vec![(i as u8) + 1; extent_size as usize])
+                .write(i * slot_size, &vec![(i as u8) + 1; slot_size as usize])
                 .await
                 .unwrap();
         }
 
+        let source_id = vol_handle.volume_id();
         let snap_handle = {
-            let mut vol = vol_handle.lock().await;
-            Arc::new(ThinVolumeHandle::new(create_snapshot(&mut vol, "snap1")))
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            let snap_vol = create_snapshot(source_id, "snap1", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap();
+            Arc::new(ThinVolumeHandle::new(
+                snap_vol,
+                gem.clone(),
+                registry.clone(),
+                PlacementPolicy::default(),
+            ))
         };
-        let snap_id = snap_handle.lock().await.id();
+        let snap_id = snap_handle.volume_id();
 
         let cold_dev = create_cold_target(&mut paths, 32 * 1024 * 1024).await;
-        let total_extents = 32 * 1024 * 1024 / extent_size;
+        let total_extents = 32 * 1024 * 1024 / slot_size;
 
         let mut cold = ColdCopy::new(
-            vol_handle.lock().await.id(),
+            vol_handle.volume_id(),
             cold_dev,
             snap_id,
             total_extents,
-            extent_size,
+            slot_size,
             StorageTier::Cold,
             Locality::Local,
         );

@@ -1,100 +1,114 @@
-//! COW snapshots — extent map cloning with reference counting.
+//! COW snapshots — extent map cloning via the Global Extent Map.
 //!
-//! Snapshots share physical extents with their source volume via reference
+//! Snapshots share slab slots with their source volume via reference
 //! counting. Writes to either the source or snapshot trigger copy-on-write
-//! (handled by `ThinVolume::cow_extent`).
+//! (handled by `ThinVolumeHandle::cow_write`).
 
-use crate::volume::extent::{Extent, VolumeId};
-use crate::volume::thin::ThinVolume;
+use crate::drive::slab_registry::SlabRegistry;
+use crate::volume::extent::VolumeId;
+use crate::volume::gem::GlobalExtentMap;
+use crate::volume::thin::{ThinVolume, VolumeError};
 
 /// Create a snapshot of a source volume.
 ///
-/// Clones the extent map and increments ref_count on all shared extents.
-/// Returns a new `ThinVolume` that is an independent clone at the point-in-time
-/// of the snapshot. Subsequent writes to either volume trigger COW.
-pub fn create_snapshot(source: &mut ThinVolume, name: &str) -> ThinVolume {
-    // Increment ref_count on all extents in the source
-    for pext in source.extent_map.values_mut() {
-        pext.ref_count += 1;
-    }
+/// Clones the volume's extent map in the GEM and increments ref_count on
+/// all shared slab slots. Returns a new `ThinVolume` that is an independent
+/// clone at the point-in-time of the snapshot.
+pub async fn create_snapshot(
+    source_id: VolumeId,
+    name: &str,
+    virtual_size: u64,
+    slot_size: u64,
+    gem: &mut GlobalExtentMap,
+    registry: &mut SlabRegistry,
+) -> Result<ThinVolume, VolumeError> {
+    let snap_id = VolumeId::new();
 
-    // Clone the extent map for the snapshot
-    let snap_extent_map = source.extent_map.clone();
+    // Clone volume map in GEM (bumps ref_count in GEM entries)
+    let cloned = gem.clone_volume_map(source_id, snap_id)
+        .ok_or(VolumeError::VolumeNotFound(source_id))?;
 
-    let id = VolumeId::new();
-    let device_id = crate::drive::DeviceId {
-        uuid: id.0,
-        serial: format!("snap-{}", &id.0.simple().to_string()[..8]),
-        model: "ThinVolume".to_string(),
-        path: format!("volume:{id}"),
-    };
-
-    ThinVolume {
-        id,
-        name: name.to_string(),
-        virtual_size: source.virtual_size,
-        allocated: source.allocated,
-        extent_map: snap_extent_map,
-        array_id: source.array_id,
-        backing_device: source.backing_device.clone(),
-        allocator: source.allocator.clone(),
-        device_id,
-    }
-}
-
-/// Delete a snapshot, freeing physical extents that are no longer shared.
-///
-/// Each volume holds its own copy of the extent map with local ref_counts.
-/// When a COW write occurs on the source, it gets a new physical extent —
-/// the old extent becomes exclusively owned by the snapshot (but the snapshot's
-/// local ref_count is stale). So we check: if ref_count == 1, the extent was
-/// never shared or the other side already COW'd away. If ref_count > 1,
-/// the other volume still shares this exact physical extent — don't free.
-///
-/// Note: this is a simplified model for Phase 3. A production system would use
-/// a centralized ref_count store to avoid stale counts.
-pub async fn delete_snapshot(snap: ThinVolume, volumes: &[&ThinVolume]) {
-    let mut alloc = snap.allocator.lock().await;
-    for pext in snap.extent_map.values() {
-        // Check if any other volume still references this physical extent
-        let still_referenced = volumes.iter().any(|v| {
-            v.extent_map.values().any(|other| {
-                other.array_id == pext.array_id && other.offset == pext.offset
-            })
-        });
-        if !still_referenced {
-            let ext = Extent {
-                array_id: pext.array_id,
-                offset: pext.offset,
-                length: pext.length,
-            };
-            alloc.free(&ext);
+    // Increment ref_count on all slab slots (on-disk)
+    for loc in cloned.extents.values() {
+        if let Some(slab) = registry.get_mut(&loc.slab_id) {
+            slab.inc_ref(loc.slot_idx).await
+                .map_err(VolumeError::Drive)?;
         }
     }
+
+    // Create the snapshot volume
+    let snap = ThinVolume {
+        id: snap_id,
+        name: name.to_string(),
+        virtual_size,
+        slot_size,
+        purpose: crate::volume::thin::VolumePurpose::Partition,
+        device_id: crate::drive::DeviceId {
+            uuid: snap_id.0,
+            serial: format!("snap-{}", &snap_id.0.simple().to_string()[..8]),
+            model: "ThinVolume".to_string(),
+            path: format!("volume:{snap_id}"),
+        },
+    };
+
+    Ok(snap)
+}
+
+/// Delete a snapshot, freeing slab slots that are no longer shared.
+///
+/// Removes the volume from the GEM and decrements ref_count on all slab
+/// slots. Slots whose ref_count reaches 0 are freed back to the slab.
+pub async fn delete_snapshot(
+    snap_id: VolumeId,
+    gem: &mut GlobalExtentMap,
+    registry: &mut SlabRegistry,
+) -> Result<(), VolumeError> {
+    let vmap = gem.remove_volume(snap_id)
+        .ok_or(VolumeError::VolumeNotFound(snap_id))?;
+
+    for loc in vmap.extents.values() {
+        if let Some(slab) = registry.get_mut(&loc.slab_id) {
+            let _ = slab.dec_ref(loc.slot_idx).await;
+        }
+    }
+
+    Ok(())
 }
 
 /// Compute the diff between two volumes — returns virtual extent indices
 /// where the volumes have different physical mappings.
 ///
-/// Useful for incremental backup: only transfer blocks that changed since snapshot.
-pub fn snapshot_diff(a: &ThinVolume, b: &ThinVolume) -> Vec<u64> {
+/// Useful for incremental backup and cold copy advancement.
+pub fn snapshot_diff(
+    gem: &GlobalExtentMap,
+    a: VolumeId,
+    b: VolumeId,
+) -> Vec<u64> {
+    let a_map = gem.get_volume_map(&a);
+    let b_map = gem.get_volume_map(&b);
+
+    let a_keys: std::collections::BTreeSet<u64> = a_map
+        .map(|m| m.extents.keys().copied().collect())
+        .unwrap_or_default();
+    let b_keys: std::collections::BTreeSet<u64> = b_map
+        .map(|m| m.extents.keys().copied().collect())
+        .unwrap_or_default();
+
     let mut diff = Vec::new();
 
-    // Collect all virtual extent indices from both maps
-    let a_keys: std::collections::BTreeSet<u64> = a.extent_map.keys().copied().collect();
-    let b_keys: std::collections::BTreeSet<u64> = b.extent_map.keys().copied().collect();
-
-    // Union of all keys
     for &idx in a_keys.union(&b_keys) {
-        match (a.extent_map.get(&idx), b.extent_map.get(&idx)) {
-            (Some(ea), Some(eb)) => {
-                // Both have this extent — differs if pointing to different physical locations
-                if ea.offset != eb.offset || ea.array_id != eb.array_id {
+        let ea = a_map.and_then(|m| m.extents.get(&idx));
+        let eb = b_map.and_then(|m| m.extents.get(&idx));
+
+        match (ea, eb) {
+            (Some(la), Some(lb)) => {
+                // Both have this extent — differs if pointing to different slab slots
+                if la.slab_id != lb.slab_id || la.slot_idx != lb.slot_idx {
                     diff.push(idx);
                 }
             }
             _ => {
-                // One has it, the other doesn't — that's a difference
+                // One has it, the other doesn't
                 diff.push(idx);
             }
         }
@@ -108,12 +122,17 @@ mod tests {
     use super::*;
     use crate::drive::BlockDevice;
     use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::Slab;
+    use crate::drive::slab_registry::SlabRegistry;
+    use crate::placement::topology::StorageTier;
     use crate::raid::{RaidArray, RaidLevel};
-    use crate::volume::extent::ExtentAllocator;
-    use crate::volume::thin::ThinVolumeHandle;
+    use crate::volume::gem::GlobalExtentMap;
+    use crate::volume::thin::{ThinVolumeHandle, PlacementPolicy};
     use std::sync::Arc;
 
-    async fn setup_volume_for_snapshot(extent_size: u64) -> (ThinVolumeHandle, Vec<String>) {
+    async fn setup_volume_for_snapshot(
+        slot_size: u64,
+    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::Mutex<GlobalExtentMap>>, Arc<tokio::sync::Mutex<SlabRegistry>>, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-snap-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -124,29 +143,36 @@ mod tests {
             let path = dir.join(format!("{test_id}-member-{i}.bin"));
             let path_str = path.to_str().unwrap().to_string();
             let _ = std::fs::remove_file(&path);
-            let dev = FileDevice::open_with_capacity(&path_str, 64 * 1024 * 1024).await.unwrap();
+            let dev = FileDevice::open_with_capacity(&path_str, 64 * 1024 * 1024)
+                .await
+                .unwrap();
             devices.push(Arc::new(dev));
             paths.push(path_str);
         }
 
-        let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.unwrap();
-        let array_id = array.array_id();
-        let capacity = array.capacity_bytes();
+        let array = RaidArray::create(RaidLevel::Raid1, devices, None)
+            .await
+            .unwrap();
         let backing: Arc<dyn BlockDevice> = Arc::new(array);
 
-        let mut allocator = ExtentAllocator::new(extent_size);
-        allocator.add_array(array_id, capacity);
-        let allocator = Arc::new(tokio::sync::Mutex::new(allocator));
+        let slab = Slab::format(backing, slot_size, StorageTier::Hot)
+            .await
+            .unwrap();
 
-        let vol = ThinVolume::new(
-            "source".to_string(),
-            128 * 1024 * 1024,
-            array_id,
-            backing,
-            allocator,
-        );
+        let mut registry = SlabRegistry::new();
+        registry.add(slab);
+        let registry = Arc::new(tokio::sync::Mutex::new(registry));
+        let gem = Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new()));
 
-        (ThinVolumeHandle::new(vol), paths)
+        let vol = ThinVolume::new("source".to_string(), 128 * 1024 * 1024, slot_size);
+        let handle = Arc::new(ThinVolumeHandle::new(
+            vol,
+            gem.clone(),
+            registry.clone(),
+            PlacementPolicy::default(),
+        ));
+
+        (handle, gem, registry, paths)
     }
 
     fn cleanup(paths: &[String]) {
@@ -157,19 +183,28 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_preserves_data() {
-        let extent_size = 4096u64;
-        let (handle, paths) = setup_volume_for_snapshot(extent_size).await;
+        let slot_size = 4096u64;
+        let (handle, gem, registry, paths) = setup_volume_for_snapshot(slot_size).await;
 
         // Write data to source
         let data = vec![0xAA_u8; 4096];
         handle.write(0, &data).await.unwrap();
 
         // Take snapshot
-        let snap_handle = {
-            let mut vol = handle.lock().await;
-            let snap = create_snapshot(&mut vol, "snap1");
-            ThinVolumeHandle::new(snap)
+        let source_id = handle.volume_id();
+        let snap_vol = {
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            create_snapshot(source_id, "snap1", 128 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap()
         };
+        let snap_handle = Arc::new(ThinVolumeHandle::new(
+            snap_vol,
+            gem.clone(),
+            registry.clone(),
+            PlacementPolicy::default(),
+        ));
 
         // Verify snapshot reads same data
         let mut buf = vec![0u8; 4096];
@@ -195,75 +230,84 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_diff_detects_changes() {
-        let extent_size = 4096u64;
-        let (handle, paths) = setup_volume_for_snapshot(extent_size).await;
+        let slot_size = 4096u64;
+        let (handle, gem, registry, paths) = setup_volume_for_snapshot(slot_size).await;
 
         // Write initial data
         handle.write(0, &vec![0xAA_u8; 4096]).await.unwrap();
         handle.write(4096, &vec![0xBB_u8; 4096]).await.unwrap();
 
         // Take snapshot
-        let snap_handle = {
-            let mut vol = handle.lock().await;
-            let snap = create_snapshot(&mut vol, "snap1");
-            ThinVolumeHandle::new(snap)
+        let source_id = handle.volume_id();
+        let snap_vol = {
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            create_snapshot(source_id, "snap1", 128 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap()
         };
+        let snap_id = snap_vol.id();
+        let _snap_handle = Arc::new(ThinVolumeHandle::new(
+            snap_vol,
+            gem.clone(),
+            registry.clone(),
+            PlacementPolicy::default(),
+        ));
 
-        // No changes yet — but after COW, extent 0 should differ
+        // Modify source — triggers COW for extent 0
         handle.write(0, &vec![0xCC_u8; 4096]).await.unwrap();
 
         // Check diff
         let diff = {
-            let src = handle.lock().await;
-            let snap = snap_handle.lock().await;
-            snapshot_diff(&src, &snap)
+            let gem_guard = gem.lock().await;
+            snapshot_diff(&gem_guard, source_id, snap_id)
         };
 
-        // Extent 0 was modified (COW'd), so it should be in the diff
-        assert!(diff.contains(&0));
-        // Extent 1 was not modified, should not be in diff
-        assert!(!diff.contains(&1));
+        assert!(diff.contains(&0), "extent 0 should be in diff");
+        assert!(!diff.contains(&1), "extent 1 should not be in diff");
 
         cleanup(&paths);
     }
 
     #[tokio::test]
     async fn snapshot_delete_frees_unshared() {
-        let extent_size = 4096u64;
-        let (handle, paths) = setup_volume_for_snapshot(extent_size).await;
+        let slot_size = 4096u64;
+        let (handle, gem, registry, paths) = setup_volume_for_snapshot(slot_size).await;
 
         handle.write(0, &vec![0xAA_u8; 4096]).await.unwrap();
 
-        // Take snapshot, then COW source so they diverge
-        let snap = {
-            let mut vol = handle.lock().await;
-            create_snapshot(&mut vol, "snap1")
+        let source_id = handle.volume_id();
+        let snap_vol = {
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            create_snapshot(source_id, "snap1", 128 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap()
         };
+        let snap_id = snap_vol.id();
 
-        // Write to source to trigger COW — now source has a new extent for vext 0
+        // Write to source to trigger COW
         handle.write(0, &vec![0xBB_u8; 4096]).await.unwrap();
 
-        // Source COW'd: it now has a new physical extent for vext 0.
-        // The snapshot still points to the old physical extent.
-        // delete_snapshot should see that no other volume references the old extent and free it.
-        let alloc = snap.allocator.clone();
-        let array_id = snap.array_id;
+        // Get free slots before delete
         let free_before = {
-            let a = alloc.lock().await;
-            a.free_count(&array_id)
+            let reg = registry.lock().await;
+            reg.total_free_slots()
         };
 
-        // Pass the source volume so delete_snapshot can check for shared extents
+        // Delete snapshot
         {
-            let src_vol = handle.lock().await;
-            delete_snapshot(snap, &[&src_vol]).await;
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            delete_snapshot(snap_id, &mut gem_guard, &mut reg_guard).await.unwrap();
         }
 
         let free_after = {
-            let a = alloc.lock().await;
-            a.free_count(&array_id)
+            let reg = registry.lock().await;
+            reg.total_free_slots()
         };
 
+        // The old snapshot slot should have been freed (its ref_count dropped to 0)
         assert!(free_after > free_before);
         cleanup(&paths);
     }

@@ -1,6 +1,6 @@
-//! Volume manager — thin provisioning, COW snapshots, extent allocator.
+//! Volume manager — thin provisioning, COW snapshots, slab-based allocation.
 //!
-//! The `VolumeManager` coordinates thin volumes on top of RAID arrays.
+//! The `VolumeManager` coordinates thin volumes on top of slab-backed storage.
 //! Each `ThinVolume` implements `BlockDevice`, so target protocols
 //! (NVMe-oF, iSCSI) see volumes as plain block devices.
 
@@ -15,111 +15,135 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::drive::BlockDevice;
+use crate::drive::slab::{Slab, SlabId};
+use crate::drive::slab_registry::SlabRegistry;
+use crate::placement::topology::StorageTier;
 use crate::raid::RaidArrayId;
 
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
 pub use metadata::MetadataStore;
-pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError};
+pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy};
+pub use gem::GlobalExtentMap;
 
-/// Manages volumes, extent allocation, and snapshots across RAID arrays.
+/// Default slot size for slabs created via add_backing_device.
+pub const DEFAULT_SLOT_SIZE: u64 = crate::drive::slab::DEFAULT_SLOT_SIZE;
+
+/// Manages volumes, slab allocation, and snapshots.
 pub struct VolumeManager {
+    gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
+    registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
     volumes: HashMap<VolumeId, Arc<ThinVolumeHandle>>,
-    allocator: Arc<tokio::sync::Mutex<ExtentAllocator>>,
-    backing_devices: HashMap<RaidArrayId, Arc<dyn BlockDevice>>,
+    /// Legacy mapping: array_id → slab_id (for backward compat with callers
+    /// that pass array_id to create_volume).
+    array_slabs: HashMap<RaidArrayId, SlabId>,
+    slot_size: u64,
     metadata_store: Option<MetadataStore>,
 }
 
 impl VolumeManager {
     /// Create a new VolumeManager.
-    pub fn new(extent_size: u64) -> Self {
+    ///
+    /// `slot_size` is the slab slot size (typically 1 MB for production,
+    /// smaller values like 4096 for tests).
+    pub fn new(slot_size: u64) -> Self {
         VolumeManager {
+            gem: Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new())),
+            registry: Arc::new(tokio::sync::Mutex::new(SlabRegistry::new())),
             volumes: HashMap::new(),
-            allocator: Arc::new(tokio::sync::Mutex::new(ExtentAllocator::new(extent_size))),
-            backing_devices: HashMap::new(),
+            array_slabs: HashMap::new(),
+            slot_size,
             metadata_store: None,
         }
     }
 
     /// Create a VolumeManager with on-disk metadata persistence.
-    pub fn with_data_dir(extent_size: u64, data_dir: PathBuf) -> std::io::Result<Self> {
+    pub fn with_data_dir(slot_size: u64, data_dir: PathBuf) -> std::io::Result<Self> {
         let store = MetadataStore::new(data_dir)?;
         Ok(VolumeManager {
+            gem: Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new())),
+            registry: Arc::new(tokio::sync::Mutex::new(SlabRegistry::new())),
             volumes: HashMap::new(),
-            allocator: Arc::new(tokio::sync::Mutex::new(ExtentAllocator::new(extent_size))),
-            backing_devices: HashMap::new(),
+            array_slabs: HashMap::new(),
+            slot_size,
             metadata_store: Some(store),
         })
     }
 
     /// Register a RAID array as a backing device for volumes.
-    pub async fn add_backing_device(&mut self, array_id: RaidArrayId, device: Arc<dyn BlockDevice>) {
-        let capacity = device.capacity_bytes();
+    ///
+    /// Formats a slab on the device and registers it in the slab registry.
+    /// The `array_id` is kept for backward compatibility with callers that
+    /// reference arrays by ID.
+    pub async fn add_backing_device(
+        &mut self,
+        array_id: RaidArrayId,
+        device: Arc<dyn BlockDevice>,
+    ) {
+        let slab = match Slab::format(device, self.slot_size, StorageTier::Hot).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to format slab on array {array_id}: {e}");
+                return;
+            }
+        };
+        let slab_id = slab.slab_id();
         {
-            let mut alloc = self.allocator.lock().await;
-            alloc.add_array(array_id, capacity);
+            let mut reg = self.registry.lock().await;
+            reg.add(slab);
         }
-        self.backing_devices.insert(array_id, device);
+        self.array_slabs.insert(array_id, slab_id);
+        tracing::info!("Registered array {array_id} as slab {}", slab_id.0);
+    }
+
+    /// Register a pre-formatted slab directly.
+    pub async fn add_slab(&mut self, slab: Slab) {
+        let id = slab.slab_id();
+        let mut reg = self.registry.lock().await;
+        reg.add(slab);
+        tracing::info!("Registered slab {}", id.0);
     }
 
     /// Create a new thin volume on a specific RAID array.
+    ///
+    /// The `array_id` parameter maps to a slab for placement preference.
+    /// The volume can allocate from any slab if the preferred one is full.
     pub async fn create_volume(
         &mut self,
         name: &str,
         virtual_size: u64,
         array_id: RaidArrayId,
     ) -> Result<VolumeId, VolumeError> {
-        let backing = self.backing_devices.get(&array_id)
-            .ok_or_else(|| VolumeError::AllocatorError(
+        if !self.array_slabs.contains_key(&array_id) {
+            return Err(VolumeError::AllocatorError(
                 format!("no backing device for array {array_id}")
-            ))?
-            .clone();
+            ));
+        }
 
-        let vol = ThinVolume::new(
-            name.to_string(),
-            virtual_size,
-            array_id,
-            backing,
-            self.allocator.clone(),
-        );
+        let vol = ThinVolume::new(name.to_string(), virtual_size, self.slot_size);
         let id = vol.id();
-        let handle = Arc::new(ThinVolumeHandle::new(vol));
+        let handle = Arc::new(ThinVolumeHandle::new(
+            vol,
+            self.gem.clone(),
+            self.registry.clone(),
+            PlacementPolicy::default(),
+        ));
         self.volumes.insert(id, handle);
         self.persist().await;
         Ok(id)
     }
 
-    /// Delete a volume, freeing extents not shared with other volumes.
+    /// Delete a volume, freeing all slab slots.
     pub async fn delete_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
-        let handle = self.volumes.remove(&id)
+        let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
 
-        // Collect locks on all remaining volumes to check for shared extents
-        let mut other_guards = Vec::new();
-        for other_handle in self.volumes.values() {
-            other_guards.push(other_handle.lock().await);
-        }
-        let other_refs: Vec<&ThinVolume> = other_guards.iter().map(|g| &**g).collect();
+        // Remove all extents from GEM and dec_ref on slabs
+        let mut gem = self.gem.lock().await;
+        let mut reg = self.registry.lock().await;
+        snapshot::delete_snapshot(id, &mut gem, &mut reg).await?;
+        drop(gem);
+        drop(reg);
 
-        let vol = handle.lock().await;
-        let mut alloc = self.allocator.lock().await;
-        for pext in vol.extent_map.values() {
-            let still_referenced = other_refs.iter().any(|v| {
-                v.extent_map.values().any(|other| {
-                    other.array_id == pext.array_id && other.offset == pext.offset
-                })
-            });
-            if !still_referenced {
-                let ext = extent::Extent {
-                    array_id: pext.array_id,
-                    offset: pext.offset,
-                    length: pext.length,
-                };
-                alloc.free(&ext);
-            }
-        }
-        drop(alloc);
-        drop(vol);
-        drop(other_guards);
         self.persist().await;
         Ok(())
     }
@@ -156,13 +180,26 @@ impl VolumeManager {
         let source_handle = self.volumes.get(&source_id)
             .ok_or(VolumeError::VolumeNotFound(source_id))?
             .clone();
+        let source_vol = source_handle.lock().await;
+        let virtual_size = source_vol.virtual_size;
+        let slot_size = source_vol.slot_size;
+        drop(source_vol);
 
         let snap = {
-            let mut vol = source_handle.lock().await;
-            snapshot::create_snapshot(&mut vol, name)
+            let mut gem = self.gem.lock().await;
+            let mut reg = self.registry.lock().await;
+            snapshot::create_snapshot(
+                source_id, name, virtual_size, slot_size,
+                &mut gem, &mut reg,
+            ).await?
         };
         let snap_id = snap.id();
-        let snap_handle = Arc::new(ThinVolumeHandle::new(snap));
+        let snap_handle = Arc::new(ThinVolumeHandle::new(
+            snap,
+            self.gem.clone(),
+            self.registry.clone(),
+            PlacementPolicy::default(),
+        ));
         self.volumes.insert(snap_id, snap_handle);
         self.persist().await;
         Ok(snap_id)
@@ -179,51 +216,26 @@ impl VolumeManager {
         list
     }
 
-    /// Get the allocator for direct inspection.
-    pub fn allocator(&self) -> &Arc<tokio::sync::Mutex<ExtentAllocator>> {
-        &self.allocator
+    /// Get the shared GEM.
+    pub fn gem(&self) -> &Arc<tokio::sync::Mutex<GlobalExtentMap>> {
+        &self.gem
+    }
+
+    /// Get the shared SlabRegistry.
+    pub fn registry(&self) -> &Arc<tokio::sync::Mutex<SlabRegistry>> {
+        &self.registry
     }
 
     /// Persist all volume metadata to disk. No-op if no data_dir configured.
     pub async fn persist(&self) {
-        let store = match &self.metadata_store {
+        let _store = match &self.metadata_store {
             Some(s) => s,
             None => return,
         };
 
-        let alloc = self.allocator.lock().await;
-        let extent_size = alloc.extent_size();
-
-        let mut arrays = Vec::new();
-        for (array_id, device) in &self.backing_devices {
-            arrays.push(metadata::ArrayRecord {
-                array_id: *array_id,
-                total_capacity: device.capacity_bytes(),
-            });
-        }
-
-        let mut volumes = Vec::new();
-        for handle in self.volumes.values() {
-            let vol = handle.lock().await;
-            volumes.push(metadata::VolumeRecord {
-                id: vol.id,
-                name: vol.name.clone(),
-                virtual_size: vol.virtual_size,
-                array_id: vol.array_id,
-                extent_map: vol.extent_map.clone(),
-            });
-        }
-        drop(alloc);
-
-        let meta = metadata::VolumeMetadata {
-            extent_size,
-            arrays,
-            volumes,
-        };
-
-        if let Err(e) = store.save(&meta) {
-            tracing::error!("Failed to persist volume metadata: {e}");
-        }
+        // TODO: V2 metadata format. For now, GEM is reconstructable from slab
+        // slot tables on recovery. Volume configs (name, size) can be persisted
+        // separately.
     }
 
     /// Restore volumes from persisted metadata. No-op if no data_dir or no metadata file.
@@ -240,50 +252,40 @@ impl VolumeManager {
 
         let meta = store.load()?;
 
-        // Verify arrays exist
-        for arec in &meta.arrays {
-            if !self.backing_devices.contains_key(&arec.array_id) {
-                tracing::warn!(
-                    "Persisted array {} not found in current backing devices, skipping its volumes",
-                    arec.array_id
-                );
-            }
-        }
-
         let mut restored = 0u32;
         for vrec in meta.volumes {
-            let backing = match self.backing_devices.get(&vrec.array_id) {
-                Some(dev) => dev.clone(),
-                None => {
-                    tracing::warn!(
-                        "Skipping volume '{}' ({}): array {} not available",
-                        vrec.name, vrec.id, vrec.array_id
-                    );
-                    continue;
-                }
-            };
-
-            // Mark extents as allocated in the bitmap
-            {
-                let mut alloc = self.allocator.lock().await;
-                for pext in vrec.extent_map.values() {
-                    alloc.mark_allocated(pext.array_id, pext.offset);
-                }
+            // Check if array slab exists
+            if !self.array_slabs.contains_key(&vrec.array_id) {
+                tracing::warn!(
+                    "Skipping volume '{}' ({}): array {} not available",
+                    vrec.name, vrec.id, vrec.array_id
+                );
+                continue;
             }
 
             let vol = ThinVolume::restore(
                 vrec.id,
                 vrec.name.clone(),
                 vrec.virtual_size,
-                vrec.array_id,
-                vrec.extent_map,
-                backing,
-                self.allocator.clone(),
+                self.slot_size,
             );
-            let handle = Arc::new(ThinVolumeHandle::new(vol));
+            let handle = Arc::new(ThinVolumeHandle::new(
+                vol,
+                self.gem.clone(),
+                self.registry.clone(),
+                PlacementPolicy::default(),
+            ));
             self.volumes.insert(vrec.id, handle);
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
+        }
+
+        // Rebuild GEM from slab slot tables
+        {
+            let reg = self.registry.lock().await;
+            let rebuilt = GlobalExtentMap::rebuild_from_slabs(reg.iter());
+            let mut gem = self.gem.lock().await;
+            *gem = rebuilt;
         }
 
         tracing::info!("Restored {restored} volume(s) from metadata");
@@ -308,12 +310,16 @@ mod tests {
             let path = dir.join(format!("{test_id}-member-{i}.bin"));
             let path_str = path.to_str().unwrap().to_string();
             let _ = std::fs::remove_file(&path);
-            let dev = FileDevice::open_with_capacity(&path_str, 64 * 1024 * 1024).await.unwrap();
+            let dev = FileDevice::open_with_capacity(&path_str, 64 * 1024 * 1024)
+                .await
+                .unwrap();
             devices.push(Arc::new(dev));
             paths.push(path_str);
         }
 
-        let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.unwrap();
+        let array = RaidArray::create(RaidLevel::Raid1, devices, None)
+            .await
+            .unwrap();
         let array_id = array.array_id();
         let backing: Arc<dyn BlockDevice> = Arc::new(array);
         (array_id, backing, paths)
@@ -329,7 +335,7 @@ mod tests {
     async fn volume_manager_create_and_list() {
         let (array_id, backing, paths) = create_test_array().await;
 
-        let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+        let mut mgr = VolumeManager::new(4096);
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).await.unwrap();
@@ -347,17 +353,15 @@ mod tests {
     async fn volume_manager_write_read_roundtrip() {
         let (array_id, backing, paths) = create_test_array().await;
 
-        let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+        let mut mgr = VolumeManager::new(4096);
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).await.unwrap();
         let vol = mgr.get_volume(&vol_id).unwrap();
 
-        // Write
         let data = vec![0xDE_u8; 4096];
         vol.write(0, &data).await.unwrap();
 
-        // Read
         let mut buf = vec![0u8; 4096];
         vol.read(0, &mut buf).await.unwrap();
         assert_eq!(buf, data);
@@ -369,16 +373,13 @@ mod tests {
     async fn volume_manager_snapshot_roundtrip() {
         let (array_id, backing, paths) = create_test_array().await;
 
-        let mut mgr = VolumeManager::new(4096); // Small extents
+        let mut mgr = VolumeManager::new(4096);
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("data", 100 * 1024 * 1024, array_id).await.unwrap();
-
-        // Write data
         let vol = mgr.get_volume(&vol_id).unwrap();
         vol.write(0, &vec![0xAA_u8; 4096]).await.unwrap();
 
-        // Snapshot
         let snap_id = mgr.create_snapshot(vol_id, "snap1").await.unwrap();
 
         // Write new data to source
@@ -402,21 +403,16 @@ mod tests {
     async fn volume_manager_delete() {
         let (array_id, backing, paths) = create_test_array().await;
 
-        let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+        let mut mgr = VolumeManager::new(4096);
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("to-delete", 50 * 1024 * 1024, array_id).await.unwrap();
-
-        // Write something to allocate extents
         let vol = mgr.get_volume(&vol_id).unwrap();
         vol.write(0, &vec![0xFF_u8; 4096]).await.unwrap();
         drop(vol);
 
-        // Delete
         mgr.delete_volume(vol_id).await.unwrap();
         assert!(mgr.get_volume(&vol_id).is_none());
-
-        // Verify: deleting again should fail
         assert!(mgr.delete_volume(vol_id).await.is_err());
 
         cleanup(&paths);
@@ -426,18 +422,16 @@ mod tests {
     async fn volume_manager_resize_grow() {
         let (array_id, backing, paths) = create_test_array().await;
 
-        let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+        let mut mgr = VolumeManager::new(4096);
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("resize-grow", 50 * 1024 * 1024, array_id).await.unwrap();
         mgr.resize_volume(vol_id, 100 * 1024 * 1024).await.unwrap();
 
-        // Verify new size is reflected
         let list = mgr.list_volumes().await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].2, 100 * 1024 * 1024);
 
-        // Write at offset beyond old boundary
         let vol = mgr.get_volume(&vol_id).unwrap();
         let data = vec![0xCD_u8; 4096];
         vol.write(60 * 1024 * 1024, &data).await.unwrap();
@@ -453,31 +447,25 @@ mod tests {
     async fn volume_manager_resize_shrink() {
         let (array_id, backing, paths) = create_test_array().await;
 
-        let mut mgr = VolumeManager::new(4096); // Small extents
+        let mut mgr = VolumeManager::new(4096);
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("resize-shrink", 100 * 1024 * 1024, array_id).await.unwrap();
         let vol = mgr.get_volume(&vol_id).unwrap();
 
-        // Write data at offset 0 (within future boundary)
         let data_low = vec![0xAA_u8; 4096];
         vol.write(0, &data_low).await.unwrap();
-
-        // Write data beyond future boundary
         vol.write(60 * 1024 * 1024, &vec![0xBB_u8; 4096]).await.unwrap();
 
-        // Check extents allocated
         let handle = mgr.get_volume_handle(&vol_id).unwrap();
         let extents_before = handle.extent_count().await;
         assert_eq!(extents_before, 2);
 
-        // Resize down to 50 MB — extent at 60 MB should be freed
         mgr.resize_volume(vol_id, 50 * 1024 * 1024).await.unwrap();
 
         let extents_after = handle.extent_count().await;
-        assert_eq!(extents_after, 1); // Only the extent at offset 0 remains
+        assert_eq!(extents_after, 1);
 
-        // Data at offset 0 still intact
         let mut buf = vec![0u8; 4096];
         vol.read(0, &mut buf).await.unwrap();
         assert_eq!(buf, data_low);
@@ -489,11 +477,10 @@ mod tests {
     async fn volume_manager_resize_zero_rejected() {
         let (array_id, backing, paths) = create_test_array().await;
 
-        let mut mgr = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+        let mut mgr = VolumeManager::new(4096);
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("no-zero", 50 * 1024 * 1024, array_id).await.unwrap();
-
         let result = mgr.resize_volume(vol_id, 0).await;
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("size must be > 0"));

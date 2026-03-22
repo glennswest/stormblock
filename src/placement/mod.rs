@@ -187,13 +187,13 @@ impl PlacementEngine {
         rate_limit: Option<u64>,
         shutdown: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<ReplicationResult, ReplicationError> {
-        let new_snap_id = new_snapshot.lock().await.id();
+        let old_id = old_snapshot.volume_id();
+        let new_snap_id = new_snapshot.volume_id();
 
-        // Compute diff
+        // Compute diff via GEM
         let changed = {
-            let old = old_snapshot.lock().await;
-            let new = new_snapshot.lock().await;
-            snapshot_diff(&old, &new)
+            let gem = new_snapshot.gem().lock().await;
+            snapshot_diff(&gem, old_id, new_snap_id)
         };
 
         tracing::info!(
@@ -237,14 +237,16 @@ mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
     use crate::drive::BlockDevice;
+    use crate::drive::slab::Slab;
+    use crate::drive::slab_registry::SlabRegistry;
     use crate::raid::{RaidArray, RaidLevel};
-    use crate::volume::extent::ExtentAllocator;
+    use crate::volume::gem::GlobalExtentMap;
     use crate::volume::snapshot::create_snapshot;
-    use crate::volume::thin::ThinVolume;
+    use crate::volume::thin::{ThinVolume, PlacementPolicy};
 
     async fn setup_test_env(
-        extent_size: u64,
-    ) -> (Arc<ThinVolumeHandle>, PlacementEngine, Vec<String>) {
+        slot_size: u64,
+    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::Mutex<GlobalExtentMap>>, Arc<tokio::sync::Mutex<SlabRegistry>>, PlacementEngine, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-placement-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -265,24 +267,26 @@ mod tests {
         let array = RaidArray::create(RaidLevel::Raid1, devices, None)
             .await
             .unwrap();
-        let array_id = array.array_id();
-        let capacity = array.capacity_bytes();
         let backing: Arc<dyn BlockDevice> = Arc::new(array);
 
-        let mut allocator = ExtentAllocator::new(extent_size);
-        allocator.add_array(array_id, capacity);
-        let allocator = Arc::new(tokio::sync::Mutex::new(allocator));
+        let slab = Slab::format(backing, slot_size, StorageTier::Hot)
+            .await
+            .unwrap();
 
-        let vol = ThinVolume::new(
-            "source".to_string(),
-            32 * 1024 * 1024,
-            array_id,
-            backing,
-            allocator,
-        );
-        let vol_handle = Arc::new(ThinVolumeHandle::new(vol));
+        let mut registry = SlabRegistry::new();
+        registry.add(slab);
+        let registry = Arc::new(tokio::sync::Mutex::new(registry));
+        let gem = Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new()));
+
+        let vol = ThinVolume::new("source".to_string(), 32 * 1024 * 1024, slot_size);
+        let vol_handle = Arc::new(ThinVolumeHandle::new(
+            vol,
+            gem.clone(),
+            registry.clone(),
+            PlacementPolicy::default(),
+        ));
         let engine = PlacementEngine::new();
-        (vol_handle, engine, paths)
+        (vol_handle, gem, registry, engine, paths)
     }
 
     fn cleanup(paths: &[String]) {
@@ -293,19 +297,29 @@ mod tests {
 
     #[tokio::test]
     async fn engine_full_cold_copy_lifecycle() {
-        let extent_size = 4096u64;
-        let (vol_handle, mut engine, mut paths) = setup_test_env(extent_size).await;
+        let slot_size = 4096u64;
+        let (vol_handle, gem, registry, mut engine, mut paths) = setup_test_env(slot_size).await;
 
         // Write data
         vol_handle.write(0, &vec![0xAA; 4096]).await.unwrap();
         vol_handle.write(4096, &vec![0xBB; 4096]).await.unwrap();
 
         // Snapshot
+        let source_id = vol_handle.volume_id();
         let snap1 = {
-            let mut vol = vol_handle.lock().await;
-            Arc::new(ThinVolumeHandle::new(create_snapshot(&mut vol, "snap1")))
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            let snap_vol = create_snapshot(source_id, "snap1", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap();
+            Arc::new(ThinVolumeHandle::new(
+                snap_vol,
+                gem.clone(),
+                registry.clone(),
+                PlacementPolicy::default(),
+            ))
         };
-        let snap1_id = snap1.lock().await.id();
+        let snap1_id = snap1.volume_id();
 
         // Create cold copy target
         let cold_path = {
@@ -323,15 +337,15 @@ mod tests {
                 .unwrap(),
         ) as Arc<dyn BlockDevice>;
 
-        let total_extents = 32 * 1024 * 1024 / extent_size;
-        let vol_id = vol_handle.lock().await.id();
+        let total_extents = 32 * 1024 * 1024 / slot_size;
+        let vol_id = vol_handle.volume_id();
 
         let cold_id = engine.create_cold_copy(
             vol_id,
             cold_dev.clone(),
             snap1_id,
             total_extents,
-            extent_size,
+            slot_size,
             StorageTier::Cold,
             Locality::Local,
         );
@@ -356,8 +370,17 @@ mod tests {
 
         // Snapshot 2
         let snap2 = {
-            let mut vol = vol_handle.lock().await;
-            Arc::new(ThinVolumeHandle::new(create_snapshot(&mut vol, "snap2")))
+            let mut gem_guard = gem.lock().await;
+            let mut reg_guard = registry.lock().await;
+            let snap_vol = create_snapshot(source_id, "snap2", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
+                .await
+                .unwrap();
+            Arc::new(ThinVolumeHandle::new(
+                snap_vol,
+                gem.clone(),
+                registry.clone(),
+                PlacementPolicy::default(),
+            ))
         };
 
         // Advance cold copy
