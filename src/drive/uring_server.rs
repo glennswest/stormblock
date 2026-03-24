@@ -8,9 +8,18 @@
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
+#[allow(unused_imports)]
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Wrapper around a raw pointer to make it `Send`.
+/// Safety: the mmap'd shared memory is valid for the lifetime of the worker
+/// thread and is not accessed from other client workers.
+#[cfg(target_os = "linux")]
+struct SendShmPtr(*mut u8);
+#[cfg(target_os = "linux")]
+unsafe impl Send for SendShmPtr {}
 
 #[cfg(target_os = "linux")]
 use super::uring_channel::*;
@@ -158,10 +167,12 @@ impl UringServer {
         // Spawn worker thread
         let running = self.running.clone();
         let rt = tokio::runtime::Handle::current();
+        let shm_send = SendShmPtr(shm_ptr);
 
         let handle = std::thread::Builder::new()
             .name(format!("uring-{}", vol_name))
             .spawn(move || {
+                let shm_ptr = shm_send.0;
                 client_worker(
                     shm_ptr, shm_size, submit_efd, complete_efd,
                     device, running, rt,

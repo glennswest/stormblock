@@ -9,10 +9,16 @@
 //!
 //! Requires: `modprobe ublk_drv` on the host.
 
-use std::fs::{File, OpenOptions};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::fs::OpenOptions;
+use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+/// Wrapper around a raw pointer to make it `Send`.
+/// Safety: the mmap'd descriptor memory is valid for the lifetime of the worker
+/// and is not accessed from other threads for the same queue.
+struct SendPtr(*const UblkIoDesc);
+unsafe impl Send for SendPtr {}
 
 use io_uring::{IoUring, opcode, types, squeue};
 
@@ -389,7 +395,7 @@ impl UblkServer {
             let device = self.device.clone();
             let running = self.running.clone();
             let raw_char_fd = char_fd;
-            let desc_base = desc_ptrs[q as usize];
+            let desc_base = SendPtr(desc_ptrs[q as usize]);
             let depth = queue_depth;
             let max_io = DEFAULT_MAX_IO_BYTES as usize;
             let rt_handle = tokio::runtime::Handle::current();
@@ -400,7 +406,7 @@ impl UblkServer {
                 .name(format!("ublk-q{}", q))
                 .spawn(move || {
                     queue_worker(
-                        q, raw_char_fd, desc_base, depth, max_io,
+                        q, raw_char_fd, desc_base.0, depth, max_io,
                         device, running, rt_handle,
                     );
                 })
@@ -554,11 +560,12 @@ fn queue_worker(
             }
         }
 
-        // Process completions
-        while let Some(cqe) = ring.completion().next() {
-            let tag = cqe.user_data() as u16;
-            let res = cqe.result();
+        // Collect completions first (avoids double mutable borrow of ring)
+        let cqes: Vec<(u16, i32)> = ring.completion()
+            .map(|cqe| (cqe.user_data() as u16, cqe.result()))
+            .collect();
 
+        for (tag, res) in cqes {
             // Negative = device stopping or error
             if res < 0 {
                 if res != -(libc::ENODEV as i32) {
