@@ -172,9 +172,9 @@ impl UringServer {
         let handle = std::thread::Builder::new()
             .name(format!("uring-{}", vol_name))
             .spawn(move || {
-                let shm_ptr = shm_send.0;
+                let ptr = shm_send.0;
                 client_worker(
-                    shm_ptr, shm_size, submit_efd, complete_efd,
+                    ptr, shm_size, submit_efd, complete_efd,
                     device, running, rt,
                 );
                 // Cleanup: close our copies of the fds; client has its own via SCM_RIGHTS
@@ -182,7 +182,7 @@ impl UringServer {
                     libc::close(submit_efd);
                     libc::close(complete_efd);
                     libc::close(memfd);
-                    shm::unmap_shm(shm_ptr, shm_size);
+                    shm::unmap_shm(ptr, shm_size);
                 }
             })?;
 

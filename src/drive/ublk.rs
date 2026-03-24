@@ -10,7 +10,7 @@
 //! Requires: `modprobe ublk_drv` on the host.
 
 use std::fs::OpenOptions;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
