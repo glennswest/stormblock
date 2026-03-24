@@ -164,14 +164,18 @@ impl UringServer {
             memfd, submit_efd, complete_efd, shm_size
         );
 
-        // Spawn worker thread
+        // Spawn worker thread — wrap raw pointer in Send newtype before the
+        // move closure so the compiler doesn't capture the non-Send *mut u8.
         let running = self.running.clone();
         let rt = tokio::runtime::Handle::current();
         let shm_send = SendShmPtr(shm_ptr);
+        #[allow(unused_variables)]
+        let shm_ptr = ();  // shadow the raw pointer so it can't be captured
 
         let handle = std::thread::Builder::new()
             .name(format!("uring-{}", vol_name))
             .spawn(move || {
+                let _ = shm_ptr; // capture the () shadow, not the raw pointer
                 let ptr = shm_send.0;
                 client_worker(
                     ptr, shm_size, submit_efd, complete_efd,
