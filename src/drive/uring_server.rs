@@ -136,15 +136,17 @@ impl UringServer {
                 .ok_or_else(|| format!("volume '{}' not found", vol_name))?
         };
 
-        // Create shared memory
+        // Create shared memory — wrap the raw pointer in a Send newtype
+        // immediately so no naked *mut u8 binding exists for the move closure.
         let qd = DEFAULT_QUEUE_DEPTH;
         let bs = DEFAULT_BUF_SIZE;
-        let (memfd, shm_ptr, shm_size) = shm::create_shm(qd, bs)?;
+        let (memfd, shm_raw, shm_size) = shm::create_shm(qd, bs)?;
+        let shm_send = SendShmPtr(shm_raw);
 
         // Initialize ring header
         unsafe {
             ring_header_init(
-                shm_ptr as *mut RingHeader,
+                shm_send.0 as *mut RingHeader,
                 qd,
                 bs,
                 device.capacity_bytes(),
@@ -164,18 +166,13 @@ impl UringServer {
             memfd, submit_efd, complete_efd, shm_size
         );
 
-        // Spawn worker thread — wrap raw pointer in Send newtype before the
-        // move closure so the compiler doesn't capture the non-Send *mut u8.
+        // Spawn worker thread
         let running = self.running.clone();
         let rt = tokio::runtime::Handle::current();
-        let shm_send = SendShmPtr(shm_ptr);
-        #[allow(unused_variables)]
-        let shm_ptr = ();  // shadow the raw pointer so it can't be captured
 
         let handle = std::thread::Builder::new()
             .name(format!("uring-{}", vol_name))
             .spawn(move || {
-                let _ = shm_ptr; // capture the () shadow, not the raw pointer
                 let ptr = shm_send.0;
                 client_worker(
                     ptr, shm_size, submit_efd, complete_efd,
