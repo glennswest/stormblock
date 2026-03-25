@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-03-25
+- **feat:** `IscsiDevice` — production iSCSI initiator implementing `BlockDevice` trait (login, READ/WRITE(10), READ CAPACITY, UNMAP, NOP-Out keepalive)
+- **feat:** `DriveType::Iscsi` variant for iSCSI-backed block devices
+- **feat:** `boot_iscsi` module — iSCSI boot disk orchestrator with multi-volume partitioned layout
+- **feat:** `BootDiskLayout::parse()` — layout string parsing (e.g., `esp:256M,boot:512M,root:6G,swap:1G,home:rest`)
+- **feat:** `IscsiBootManager::provision()` — connect to iSCSI, format slab, create ThinVolumes per partition
+- **feat:** CLI `boot-iscsi` subcommand — provision partitioned boot disk on remote iSCSI target
+- **feat:** CLI `migrate-boot` subcommand — migrate boot volumes from iSCSI slab to local disk via placement engine
+- **test:** 11 boot-from-iSCSI integration tests (layout parsing, provisioning, slab migration)
+- **chore:** `boot-iscsi-test.sh` — CI script for mkube job runner (5 phases: build, test, iSCSI slab, clippy, migration)
 - **refactor:** Phase 4 API cleanup — replace DiskPool/VDrive with Slab REST API
 - **BREAKING:** REST endpoint `/api/v1/pools` removed, replaced by `/api/v1/slabs` (list, get, format, delete, list slots)
 - **BREAKING:** CLI subcommand `pool` removed, replaced by `slab` (format, list, info)
