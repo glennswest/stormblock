@@ -29,12 +29,12 @@ fail() { echo "  FAIL: $1"; ERRORS=$((ERRORS + 1)); }
 
 phase "Build"
 
-if [ -f /root/stormblock/target/debug/stormblock ]; then
+if [ -f /build/target/debug/stormblock ]; then
     echo "Using pre-built binary"
-    BINARY=/root/stormblock/target/debug/stormblock
+    BINARY=/build/target/debug/stormblock
 else
     echo "Building from source..."
-    cd /root/stormblock
+    cd /build
     cargo build 2>&1
     BINARY=target/debug/stormblock
 fi
@@ -50,7 +50,7 @@ fi
 
 phase "Unit tests"
 
-cd /root/stormblock
+cd /build
 cargo test --test boot_iscsi 2>&1
 if [ $? -eq 0 ]; then
     pass "boot_iscsi tests"
@@ -107,7 +107,7 @@ fi
 
 phase "Clippy"
 
-cd /root/stormblock
+cd /build
 cargo clippy -- -D warnings 2>&1
 if [ $? -eq 0 ]; then
     pass "clippy clean"
