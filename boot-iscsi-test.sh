@@ -69,10 +69,10 @@ fi
 
 phase "iSCSI slab operations"
 
-# Test with the test1 iSCSI disk (10 GB)
+# Dedicated boot-iscsi test disks (5 GB each)
 PORTAL="${ISCSI_PORTAL:-192.168.10.1}"
 PORT="${ISCSI_PORT:-3260}"
-IQN="${ISCSI_IQN:-iqn.2000-02.com.mikrotik:test1}"
+IQN="${ISCSI_IQN:-iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-raid1-disks-boot-iscsi-src-raw}"
 
 echo "Target: $PORTAL:$PORT $IQN"
 
@@ -83,7 +83,7 @@ timeout 30 $BINARY boot-iscsi \
     --portal "$PORTAL" \
     --port "$PORT" \
     --iqn "$IQN" \
-    --layout "esp:256M,boot:512M,root:6G,swap:1G,home:rest" \
+    --layout "esp:256M,boot:512M,root:3G,swap:512M,home:rest" \
     &
 BOOT_PID=$!
 
@@ -122,7 +122,7 @@ fi
 
 phase "Migration"
 
-IQN2="${ISCSI_IQN2:-iqn.2000-02.com.mikrotik:stormblock-test2}"
+IQN2="${ISCSI_IQN2:-iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-raid1-disks-boot-iscsi-dst-raw}"
 
 echo "Source: $PORTAL:$PORT $IQN"
 echo "Target: $PORTAL:$PORT $IQN2"
