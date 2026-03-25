@@ -11,7 +11,10 @@
 - **feat:** CLI `boot-iscsi` subcommand — provision partitioned boot disk on remote iSCSI target
 - **feat:** CLI `migrate-boot` subcommand — migrate boot volumes from iSCSI slab to local disk via placement engine
 - **test:** 11 boot-from-iSCSI integration tests (layout parsing, provisioning, slab migration)
-- **chore:** `boot-iscsi-test.sh` — CI script for mkube job runner (5 phases: build, test, iSCSI slab, clippy, migration)
+- **test:** 10 iSCSI hardware integration tests (`tests/iscsi_blockdev.rs`) — IscsiDevice connect/read/write/flush, slab format+allocate+reopen, ThinVolume I/O, multi-volume isolation, live migration between disks
+- **chore:** `boot-iscsi-test.sh` — CI script for mkube job runner (7 phases: build, test, IscsiDevice, slab+volume, migration, CLI, clippy)
+- **fix:** iSCSI NOP-In handling — distinguish solicited (flush response) vs unsolicited (target ping) per RFC 7143
+- **fix:** Slab slot table alignment for 512-byte sector devices — read-modify-write for sub-block slot entries
 - **refactor:** Phase 4 API cleanup — replace DiskPool/VDrive with Slab REST API
 - **BREAKING:** REST endpoint `/api/v1/pools` removed, replaced by `/api/v1/slabs` (list, get, format, delete, list slots)
 - **BREAKING:** CLI subcommand `pool` removed, replaced by `slab` (format, list, info)
