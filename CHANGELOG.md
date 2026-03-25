@@ -18,6 +18,9 @@
 - **feat:** `migrate_to_slab()` — format destination device as slab, register, and evacuate source slab
 - **feat:** `slab_extents()` helper on GlobalExtentMap — collect all extents on a given slab via reverse index
 - **feat:** `PlacementError` enum and result types for placement operations
+- **feat:** `ci-test.sh` — comprehensive CI orchestrator for mkube job runner (5-phase: build, test+clippy, single-disk iSCSI, multi-disk iSCSI, release build)
+- **test:** Multi-disk iSCSI tests — 3 disks (test1 10GB, stormblock-test2 5GB, stormblock-test3 5GB) exercised via job runner
+- **fix:** Resolve all compiler warnings and clippy lints for clean `clippy -- -D warnings` on Linux
 
 ### 2026-03-24
 - **fix:** iSCSI initiator — strict two-phase login (Security→Operational→FullFeature) for LIO Target compatibility
