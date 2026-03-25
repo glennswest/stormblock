@@ -400,7 +400,6 @@ impl IscsiInitiator {
         let itt = self.next_itt();
         let mut bhs = Bhs::new();
         bhs.set_opcode(Opcode::ScsiCommand);
-        bhs.set_immediate(true);
         bhs.set_final(true);
         // Write flag (bit 5 of byte 1)
         bhs.raw[1] |= 0x20;
