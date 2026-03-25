@@ -405,6 +405,9 @@ impl UblkServer {
             let handle = std::thread::Builder::new()
                 .name(format!("ublk-q{}", q))
                 .spawn(move || {
+                    // Bind the whole SendPtr to force Rust 2021 to capture the
+                    // Send wrapper, not just the inner raw pointer field.
+                    let desc_base = desc_base;
                     queue_worker(
                         q, raw_char_fd, desc_base.0, depth, max_io,
                         device, running, rt_handle,

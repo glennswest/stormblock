@@ -173,6 +173,9 @@ impl UringServer {
         let handle = std::thread::Builder::new()
             .name(format!("uring-{}", vol_name))
             .spawn(move || {
+                // Bind the whole SendShmPtr to force Rust 2021 to capture the
+                // Send wrapper, not just the inner raw pointer field.
+                let shm_send = shm_send;
                 let ptr = shm_send.0;
                 client_worker(
                     ptr, shm_size, submit_efd, complete_efd,
