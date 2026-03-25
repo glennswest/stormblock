@@ -403,7 +403,7 @@ impl IscsiConnection {
         let bs = self.block_size as usize;
         // Pad data to next block boundary if not aligned
         let padded = if data.len() % bs != 0 {
-            let padded_len = ((data.len() + bs - 1) / bs) * bs;
+            let padded_len = data.len().div_ceil(bs) * bs;
             let mut buf = vec![0u8; padded_len];
             buf[..data.len()].copy_from_slice(data);
             buf
