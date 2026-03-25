@@ -568,3 +568,462 @@ async fn iscsi_device_flush_nop_out() {
     eprintln!("PASS: flush (NOP-Out keepalive)");
     dev.disconnect().await.expect("disconnect failed");
 }
+
+// ── Full-slot and multi-extent tests ─────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn iscsi_slab_full_slot_write() {
+    let (portal, port, iqn) = match iscsi_src() {
+        Some(v) => v,
+        None => return,
+    };
+
+    let dev: Arc<dyn BlockDevice> = Arc::new(
+        IscsiDevice::connect(&portal, port, &iqn)
+            .await
+            .expect("connect failed"),
+    );
+
+    let mut slab = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Cool)
+        .await
+        .expect("slab format failed");
+
+    let vol = VolumeId::new();
+    let slot = slab.allocate(vol, 0).await.expect("allocate");
+
+    // Write a full 1 MB slot with a deterministic pattern
+    let slot_size = DEFAULT_SLOT_SIZE as usize; // 1 MB
+    let data: Vec<u8> = (0..slot_size)
+        .map(|i| ((i * 67 + i / 1024 + 0x3D) & 0xFF) as u8)
+        .collect();
+
+    eprintln!("Writing full 1 MB slot to iSCSI slab...");
+    slab.write_slot(slot, 0, &data).await.expect("full slot write");
+
+    // Read back and verify
+    let mut readback = vec![0u8; slot_size];
+    slab.read_slot(slot, 0, &mut readback).await.expect("full slot read");
+
+    assert_eq!(readback.len(), data.len());
+    let mismatches: Vec<usize> = readback
+        .iter()
+        .zip(data.iter())
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "full slot data mismatch at {} offsets (first: {})",
+        mismatches.len(),
+        mismatches.first().unwrap_or(&0)
+    );
+
+    eprintln!("PASS: full 1 MB slot write/read/verify");
+}
+
+#[tokio::test]
+#[ignore]
+async fn iscsi_multi_extent_volume() {
+    let (portal, port, iqn) = match iscsi_src() {
+        Some(v) => v,
+        None => return,
+    };
+
+    let dev: Arc<dyn BlockDevice> = Arc::new(
+        IscsiDevice::connect(&portal, port, &iqn)
+            .await
+            .expect("connect failed"),
+    );
+
+    let slab = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Cool)
+        .await
+        .expect("slab format failed");
+
+    let mut registry = SlabRegistry::new();
+    registry.add(slab);
+    let registry = Arc::new(Mutex::new(registry));
+    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+
+    let placement = PlacementPolicy {
+        preferred_tier: StorageTier::Cool,
+        tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+    };
+
+    // Create a volume that spans 4 extents (4 MB, slot_size=1MB)
+    let vol = ThinVolume::new("multi-extent".to_string(), 4 * 1024 * 1024, DEFAULT_SLOT_SIZE);
+    let handle = Arc::new(ThinVolumeHandle::new(
+        vol,
+        gem.clone(),
+        registry.clone(),
+        placement,
+    ));
+
+    // Write unique patterns to each extent
+    let slot_size = DEFAULT_SLOT_SIZE as usize;
+    for ext_idx in 0u64..4 {
+        let pattern = (ext_idx as u8).wrapping_mul(0x37).wrapping_add(0x11);
+        let data = vec![pattern; 4096];
+        let offset = ext_idx * slot_size as u64;
+        eprintln!("Writing 4 KB at extent {} (offset {}, pattern {:#x})...", ext_idx, offset, pattern);
+        handle.write(offset, &data).await.unwrap_or_else(|e| panic!("write extent {} failed: {}", ext_idx, e));
+    }
+
+    // Verify each extent has its unique pattern
+    for ext_idx in 0u64..4 {
+        let expected = (ext_idx as u8).wrapping_mul(0x37).wrapping_add(0x11);
+        let offset = ext_idx * slot_size as u64;
+        let mut buf = vec![0u8; 4096];
+        handle.read(offset, &mut buf).await.unwrap_or_else(|e| panic!("read extent {} failed: {}", ext_idx, e));
+        assert!(
+            buf.iter().all(|&b| b == expected),
+            "extent {} data mismatch (expected {:#x}, got {:#x})",
+            ext_idx,
+            expected,
+            buf[0]
+        );
+    }
+
+    // Verify GEM has 4 allocated extents
+    {
+        let g = gem.lock().await;
+        for ext_idx in 0u64..4 {
+            assert!(
+                g.lookup(handle.volume_id(), ext_idx).is_some(),
+                "extent {} not in GEM",
+                ext_idx
+            );
+        }
+    }
+
+    eprintln!("PASS: multi-extent volume (4 extents on iSCSI slab)");
+}
+
+// ── Snapshot COW on iSCSI ────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn iscsi_snapshot_cow() {
+    let (portal, port, iqn) = match iscsi_src() {
+        Some(v) => v,
+        None => return,
+    };
+
+    let dev: Arc<dyn BlockDevice> = Arc::new(
+        IscsiDevice::connect(&portal, port, &iqn)
+            .await
+            .expect("connect failed"),
+    );
+
+    let slab = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Cool)
+        .await
+        .expect("slab format failed");
+
+    let mut registry = SlabRegistry::new();
+    registry.add(slab);
+    let registry = Arc::new(Mutex::new(registry));
+    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+
+    let placement = PlacementPolicy {
+        preferred_tier: StorageTier::Cool,
+        tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+    };
+
+    // Create original volume and write data
+    let orig_vol = ThinVolume::new("original".to_string(), 2 * 1024 * 1024, DEFAULT_SLOT_SIZE);
+    let orig_id = orig_vol.id();
+    let orig_handle = Arc::new(ThinVolumeHandle::new(
+        orig_vol,
+        gem.clone(),
+        registry.clone(),
+        placement.clone(),
+    ));
+
+    let orig_data = vec![0xAA; 4096];
+    orig_handle.write(0, &orig_data).await.expect("write original");
+    eprintln!("Wrote 0xAA to original volume");
+
+    // Snapshot: clone the volume map in GEM and bump ref counts in slab
+    let snap_vol = ThinVolume::new("snapshot".to_string(), 2 * 1024 * 1024, DEFAULT_SLOT_SIZE);
+    let snap_id = snap_vol.id();
+    {
+        let mut g = gem.lock().await;
+        let cloned = g.clone_volume_map(orig_id, snap_id);
+        assert!(cloned.is_some(), "clone_volume_map returned None");
+
+        // Bump ref_count in the slab
+        let loc = g.lookup(orig_id, 0).expect("original extent not in GEM");
+        let slab_id = loc.slab_id;
+        let slot_idx = loc.slot_idx;
+        let mut reg = registry.lock().await;
+        let slab = reg.get_mut(&slab_id).expect("slab not found");
+        slab.inc_ref(slot_idx).await.expect("inc_ref failed");
+    }
+
+    let snap_handle = Arc::new(ThinVolumeHandle::new(
+        snap_vol,
+        gem.clone(),
+        registry.clone(),
+        placement,
+    ));
+
+    // Verify snapshot reads the same data
+    let mut snap_buf = vec![0u8; 4096];
+    snap_handle.read(0, &mut snap_buf).await.expect("read snapshot");
+    assert_eq!(snap_buf, orig_data, "snapshot data should match original");
+    eprintln!("Snapshot reads 0xAA (matches original)");
+
+    // Write different data to original (should trigger COW)
+    let new_data = vec![0xBB; 4096];
+    orig_handle.write(0, &new_data).await.expect("COW write to original");
+    eprintln!("Wrote 0xBB to original (COW)");
+
+    // Verify original now has new data
+    let mut orig_buf = vec![0u8; 4096];
+    orig_handle.read(0, &mut orig_buf).await.expect("read original after COW");
+    assert_eq!(orig_buf, new_data, "original should have new data after COW");
+
+    // Verify snapshot STILL has old data (isolation)
+    let mut snap_buf2 = vec![0u8; 4096];
+    snap_handle.read(0, &mut snap_buf2).await.expect("read snapshot after COW");
+    assert_eq!(snap_buf2, orig_data, "snapshot should still have old data after COW");
+
+    // Verify GEM now has different slots for original and snapshot
+    {
+        let g = gem.lock().await;
+        let orig_loc = g.lookup(orig_id, 0).expect("original not in GEM");
+        let snap_loc = g.lookup(snap_id, 0).expect("snapshot not in GEM");
+        assert_ne!(
+            orig_loc.slot_idx, snap_loc.slot_idx,
+            "after COW, original and snapshot should be on different slots"
+        );
+        eprintln!(
+            "Original on slot {}, snapshot on slot {} (isolated)",
+            orig_loc.slot_idx, snap_loc.slot_idx
+        );
+    }
+
+    eprintln!("PASS: snapshot COW on iSCSI slab");
+}
+
+// ── Stress: sequential writes across many extents ───────────────
+
+#[tokio::test]
+#[ignore]
+async fn iscsi_sequential_write_stress() {
+    let (portal, port, iqn) = match iscsi_src() {
+        Some(v) => v,
+        None => return,
+    };
+
+    let dev: Arc<dyn BlockDevice> = Arc::new(
+        IscsiDevice::connect(&portal, port, &iqn)
+            .await
+            .expect("connect failed"),
+    );
+
+    let slab = Slab::format(dev, DEFAULT_SLOT_SIZE, StorageTier::Cool)
+        .await
+        .expect("slab format failed");
+
+    let total_slots = slab.total_slots();
+    let mut registry = SlabRegistry::new();
+    registry.add(slab);
+    let registry = Arc::new(Mutex::new(registry));
+    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+
+    let placement = PlacementPolicy {
+        preferred_tier: StorageTier::Cool,
+        tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+    };
+
+    // Allocate 20 extents across a volume (20 MB)
+    let num_extents = 20u64.min(total_slots);
+    let vol = ThinVolume::new(
+        "stress".to_string(),
+        num_extents * DEFAULT_SLOT_SIZE,
+        DEFAULT_SLOT_SIZE,
+    );
+    let handle = Arc::new(ThinVolumeHandle::new(
+        vol,
+        gem.clone(),
+        registry.clone(),
+        placement,
+    ));
+
+    eprintln!("Writing {} extents (4 KB each) to iSCSI slab...", num_extents);
+    let start = std::time::Instant::now();
+
+    for i in 0..num_extents {
+        let pattern = ((i * 17 + 5) & 0xFF) as u8;
+        let data = vec![pattern; 4096];
+        let offset = i * DEFAULT_SLOT_SIZE;
+        handle
+            .write(offset, &data)
+            .await
+            .unwrap_or_else(|e| panic!("write extent {} failed: {}", i, e));
+    }
+
+    let write_elapsed = start.elapsed();
+    eprintln!(
+        "Wrote {} extents in {:?} ({:.1} extents/sec)",
+        num_extents,
+        write_elapsed,
+        num_extents as f64 / write_elapsed.as_secs_f64()
+    );
+
+    // Verify all extents
+    let start = std::time::Instant::now();
+    for i in 0..num_extents {
+        let expected = ((i * 17 + 5) & 0xFF) as u8;
+        let offset = i * DEFAULT_SLOT_SIZE;
+        let mut buf = vec![0u8; 4096];
+        handle
+            .read(offset, &mut buf)
+            .await
+            .unwrap_or_else(|e| panic!("read extent {} failed: {}", i, e));
+        assert!(
+            buf.iter().all(|&b| b == expected),
+            "extent {} mismatch (expected {:#x})",
+            i,
+            expected
+        );
+    }
+
+    let read_elapsed = start.elapsed();
+    eprintln!(
+        "Verified {} extents in {:?} ({:.1} extents/sec)",
+        num_extents,
+        read_elapsed,
+        num_extents as f64 / read_elapsed.as_secs_f64()
+    );
+
+    eprintln!("PASS: sequential write stress ({} extents)", num_extents);
+}
+
+// ── Large migration (many extents) ──────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn iscsi_large_migration() {
+    let (src_portal, src_port, src_iqn) = match iscsi_src() {
+        Some(v) => v,
+        None => return,
+    };
+    let (dst_portal, dst_port, dst_iqn) = match iscsi_dst() {
+        Some(v) => v,
+        None => {
+            eprintln!("ISCSI_IQN_DST not set, skipping");
+            return;
+        }
+    };
+
+    // Connect source, format, allocate 10 extents
+    let src_dev: Arc<dyn BlockDevice> = Arc::new(
+        IscsiDevice::connect(&src_portal, src_port, &src_iqn)
+            .await
+            .expect("connect src"),
+    );
+
+    let mut src_slab = Slab::format(src_dev, DEFAULT_SLOT_SIZE, StorageTier::Cool)
+        .await
+        .expect("format src");
+    let src_id = src_slab.slab_id();
+
+    let num_extents = 10u32;
+    let mut volumes = Vec::new();
+    let mut expected_data = Vec::new();
+
+    for i in 0..num_extents {
+        let vol = VolumeId::new();
+        let slot = src_slab.allocate(vol, 0).await.expect("allocate");
+        // Write 4KB with a unique pattern per extent
+        let data: Vec<u8> = (0..4096)
+            .map(|j| ((j * (i as usize + 3) + i as usize * 97) & 0xFF) as u8)
+            .collect();
+        src_slab.write_slot(slot, 0, &data).await.expect("write slot");
+        volumes.push((vol, slot));
+        expected_data.push(data);
+    }
+
+    eprintln!("Wrote {} extents to source slab", num_extents);
+
+    // Build GEM
+    let mut gem = GlobalExtentMap::new();
+    for (i, (vol, slot)) in volumes.iter().enumerate() {
+        gem.insert(
+            *vol,
+            0,
+            ExtentLocation {
+                slab_id: src_id,
+                slot_idx: *slot,
+                ref_count: 1,
+                generation: 1,
+            },
+        );
+        let _ = i;
+    }
+
+    let mut registry = SlabRegistry::new();
+    registry.add(src_slab);
+
+    // Connect destination
+    let dst_dev: Arc<dyn BlockDevice> = Arc::new(
+        IscsiDevice::connect(&dst_portal, dst_port, &dst_iqn)
+            .await
+            .expect("connect dst"),
+    );
+
+    // Migrate
+    let engine = stormblock::placement::PlacementEngine::new();
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+
+    let start = std::time::Instant::now();
+    eprintln!("Migrating {} extents...", num_extents);
+
+    let result = stormblock::migrate::migrate_to_slab(
+        &mut gem,
+        &mut registry,
+        &engine,
+        src_id,
+        dst_dev,
+        StorageTier::Hot,
+        DEFAULT_SLOT_SIZE,
+        &rx,
+    )
+    .await
+    .expect("migration failed");
+
+    let elapsed = start.elapsed();
+    eprintln!("Migration took {:?}", elapsed);
+
+    assert_eq!(result.migrated, num_extents as u64);
+    assert_eq!(result.failed, 0);
+
+    // Verify all data on destination
+    let dst_slab = registry.get(&result.dest_slab).expect("dst slab");
+    let mut buf = vec![0u8; 4096];
+
+    for (i, (vol, _)) in volumes.iter().enumerate() {
+        let loc = gem.lookup(*vol, 0).expect("vol not in GEM");
+        assert_eq!(loc.slab_id, result.dest_slab, "extent {} on wrong slab", i);
+
+        dst_slab
+            .read_slot(loc.slot_idx, 0, &mut buf)
+            .await
+            .expect("read migrated slot");
+        assert_eq!(
+            buf, expected_data[i],
+            "extent {} data mismatch after migration",
+            i
+        );
+    }
+
+    assert!(gem.slab_extents(src_id).is_empty());
+
+    eprintln!(
+        "PASS: large migration ({} extents, {:?})",
+        num_extents, elapsed
+    );
+}

@@ -117,9 +117,13 @@ phase "Slab + ThinVolume on iSCSI"
 
 for test_name in \
     iscsi_slab_format_allocate_readwrite \
+    iscsi_slab_full_slot_write \
     iscsi_slab_reopen \
     iscsi_thin_volume_io \
     iscsi_multi_volume_isolation \
+    iscsi_multi_extent_volume \
+    iscsi_snapshot_cow \
+    iscsi_sequential_write_stress \
 ; do
     echo ""
     echo "--- $test_name ---"
@@ -134,12 +138,18 @@ done
 
 phase "Migration (src → dst)"
 
-echo "--- iscsi_migrate_between_disks ---"
-if cargo test --test iscsi_blockdev iscsi_migrate_between_disks -- --ignored --nocapture 2>&1; then
-    pass "iscsi_migrate_between_disks"
-else
-    fail "iscsi_migrate_between_disks"
-fi
+for test_name in \
+    iscsi_migrate_between_disks \
+    iscsi_large_migration \
+; do
+    echo ""
+    echo "--- $test_name ---"
+    if cargo test --test iscsi_blockdev "$test_name" -- --ignored --nocapture 2>&1; then
+        pass "$test_name"
+    else
+        fail "$test_name"
+    fi
+done
 
 # ── Phase 6: boot-iscsi CLI subcommand ──────────────────────────
 
