@@ -59,8 +59,7 @@ impl IscsiInitiator {
         itt
     }
 
-    fn make_login_bhs(&mut self, csg: u8, nsg: u8) -> Bhs {
-        let itt = self.next_itt();
+    fn make_login_bhs(&self, itt: u32, csg: u8, nsg: u8) -> Bhs {
         let mut bhs = Bhs::new();
         bhs.set_opcode(Opcode::LoginRequest);
         bhs.set_immediate(true);
@@ -121,6 +120,9 @@ impl IscsiInitiator {
     /// Two-phase: Security → Operational → FullFeature.
     /// Security params in Phase 1, operational params in Phase 2.
     pub async fn login(&mut self, initiator_name: &str, target_name: &str) -> io::Result<()> {
+        // RFC 7143: all login PDUs in a login phase share the same ITT
+        let login_itt = self.next_itt();
+
         // Phase 1: Security negotiation only
         let security_params = encode_text_params(&[
             ("InitiatorName", initiator_name),
@@ -129,9 +131,9 @@ impl IscsiInitiator {
             ("AuthMethod", "None"),
         ]);
 
-        eprintln!("  login phase 1: Security→Operational ({} bytes)", security_params.len());
+        eprintln!("  login phase 1: Security→Operational (ITT={} {} bytes)", login_itt, security_params.len());
 
-        let bhs = self.make_login_bhs(STAGE_SECURITY, STAGE_OPERATIONAL);
+        let bhs = self.make_login_bhs(login_itt, STAGE_SECURITY, STAGE_OPERATIONAL);
         let pdu = IscsiPdu::with_data(bhs, security_params);
         write_pdu(&mut self.writer, &pdu, false, false).await?;
 
@@ -173,7 +175,7 @@ impl IscsiInitiator {
         );
 
         let op_data = encode_text_params(&Self::operational_params());
-        let bhs = self.make_login_bhs(STAGE_OPERATIONAL, STAGE_FULL_FEATURE);
+        let bhs = self.make_login_bhs(login_itt, STAGE_OPERATIONAL, STAGE_FULL_FEATURE);
         let pdu = IscsiPdu::with_data(bhs, op_data);
         write_pdu(&mut self.writer, &pdu, false, false).await?;
 
