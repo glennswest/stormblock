@@ -30,6 +30,7 @@ pub struct IscsiInitiator {
     writer: BufWriter<tokio::net::tcp::OwnedWriteHalf>,
     cmd_sn: u32,
     exp_stat_sn: u32,
+    tsih: u16,
     itt: u32,
     max_recv_data_seg: u32,
     block_size: u32,
@@ -45,6 +46,7 @@ impl IscsiInitiator {
             writer: BufWriter::new(writer),
             cmd_sn: 1,
             exp_stat_sn: 0,
+            tsih: 0,
             itt: 1,
             max_recv_data_seg: 8192,
             block_size: 4096, // default, updated by read_capacity
@@ -70,6 +72,7 @@ impl IscsiInitiator {
         // ExpStatSN from target's last StatSN
         bhs.set_stat_sn(self.exp_stat_sn);
         bhs.set_isid(&ISID);
+        bhs.set_tsih(self.tsih);
         bhs
     }
 
@@ -93,6 +96,12 @@ impl IscsiInitiator {
     fn parse_login_response(&mut self, resp: &IscsiPdu) -> io::Result<()> {
         // Update ExpStatSN from response's StatSN (bytes 24-27)
         self.exp_stat_sn = resp.bhs.cmd_sn(); // same byte offset, StatSN in response
+        // Update TSIH from response (target assigns session handle)
+        let tsih = resp.bhs.tsih();
+        if tsih != 0 {
+            self.tsih = tsih;
+        }
+        eprintln!("  StatSN={} TSIH={}", self.exp_stat_sn, self.tsih);
 
         // Parse negotiated params
         let resp_params = parse_text_params(&resp.data);
@@ -166,6 +175,10 @@ impl IscsiInitiator {
         eprintln!(
             "  login: target wants operational phase (CSG={} NSG={} T={})",
             resp.bhs.csg(), resp.bhs.nsg(), resp.bhs.transit()
+        );
+        eprintln!(
+            "  login phase 2: TSIH={} ExpStatSN={} CmdSN={}",
+            self.tsih, self.exp_stat_sn, self.cmd_sn
         );
 
         let op_data = encode_text_params(&Self::operational_params());
