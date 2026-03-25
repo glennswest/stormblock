@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### 2026-03-25
+- **feat:** Placement engine Phase 3 — extent-level migration, slab evacuation, and rebalancing
+- **feat:** `migrate_extent()` — move a single extent between slabs with data integrity, GEM update, and ref count management
+- **feat:** `evacuate_slab()` — move all extents off a slab for device removal/maintenance
+- **feat:** `rebalance()` — redistribute extents across slabs via EvenDistribution or TierAffinity strategy
+- **feat:** `migrate_to_slab()` — format destination device as slab, register, and evacuate source slab
+- **feat:** `slab_extents()` helper on GlobalExtentMap — collect all extents on a given slab via reverse index
+- **feat:** `PlacementError` enum and result types for placement operations
+
 ### 2026-03-24
 - **fix:** iSCSI initiator login — single-phase Security→FullFeature for MikroTik compatibility, proper ExpStatSN tracking across login phases, verbose error reporting with status class/detail/params
 - **fix:** iSCSI initiator read/write — use actual block_size from READ CAPACITY instead of hardcoded 4096

@@ -45,13 +45,13 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/mgmt/` — REST API via axum (`api/`), TOML config parsing (`config.rs`), Prometheus metrics, pool management (`api/pools.rs`)
 - `src/cluster/` — Optional multi-node: Raft consensus (`raft/`), membership (`membership.rs`), heartbeat (`heartbeat.rs`), replication (`replication.rs`), migration (`migration.rs`)
 - `src/boot.rs` — Boot volume manager: templates, COW snapshots per machine, direct Linux boot (kernel cmdline + initramfs config)
-- `src/migrate.rs` — Live migration orchestrator: remote → local via RAID 1 add/rebuild/remove
-- `src/placement/` — Placement engine: snapshot-fenced cold copies, storage topology (tier/locality), extent-level replication
+- `src/migrate.rs` — Live migration orchestrator: RAID 1 add/rebuild/remove + slab-based extent migration
+- `src/placement/` — Placement engine: cold copies, extent migration, slab evacuation, rebalancing (even distribution + tier affinity), storage topology
 - `src/stormfs.rs` — StormFS registration: periodic volume announcement to metadata cluster
 - `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with subcommands (pool, ublk, migrate)
 
 ## Current State
-All phases (0–7) and all roadmap items are implemented. 242 tests pass on macOS. Musl static release build produces an 11 MB stripped PIE binary (x86_64). The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO with hugepage DMA and full init), and FileDevice (tokio, portable). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, background rebuild, and dynamic add_member/remove_member for RAID 1. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). DiskPool on-disk format with VDrive allocation and ublk server for kernel block device export (Linux 6.0+, io_uring URING_CMD). Boot volume manager with templates, COW clones, and direct Linux boot (kernel cmdline + initramfs config for ublk root). Live migration orchestrator for remote → local disk via RAID 1. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, pools, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP/HTTPS Raft RPCs (TLS via rustls, shares management cert/key), node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Placement engine with snapshot-fenced cold copies — extent-level data replication across storage domains with per-extent sync bitmaps, incremental snapshot-to-snapshot delta replication, and storage topology classification (tier/locality). Slab extent store — organic data placement with fixed-size 1 MB slots per device, tier-indexed slab registry, and Global Extent Map (GEM) for cross-slab extent tracking with reverse index and COW snapshot cloning. Volume layer (Phase 2) rewritten: ThinVolume is config-only, ThinVolumeHandle routes I/O through GEM + SlabRegistry, allocate-on-write and COW via slab slot allocation. Shared ring IPC — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
+All phases (0–7) and all roadmap items are implemented. 249 tests pass on macOS. Musl static release build produces an 11 MB stripped PIE binary (x86_64). The drive layer has three backends: SAS (io_uring, Linux), NVMe (VFIO with hugepage DMA and full init), and FileDevice (tokio, portable). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, background rebuild, and dynamic add_member/remove_member for RAID 1. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). DiskPool on-disk format with VDrive allocation and ublk server for kernel block device export (Linux 6.0+, io_uring URING_CMD). Boot volume manager with templates, COW clones, and direct Linux boot (kernel cmdline + initramfs config for ublk root). Live migration orchestrator for remote → local disk via RAID 1. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, pools, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP/HTTPS Raft RPCs (TLS via rustls, shares management cert/key), node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Placement engine with snapshot-fenced cold copies, extent-level migration (migrate_extent, evacuate_slab, rebalance with EvenDistribution/TierAffinity strategies), storage topology classification (tier/locality), and slab-based migration orchestration. Slab extent store — organic data placement with fixed-size 1 MB slots per device, tier-indexed slab registry, and Global Extent Map (GEM) for cross-slab extent tracking with reverse index and COW snapshot cloning. Volume layer (Phase 2) rewritten: ThinVolume is config-only, ThinVolumeHandle routes I/O through GEM + SlabRegistry, allocate-on-write and COW via slab slot allocation. Shared ring IPC — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
 
 Build host: root@devx.gw.lo (192.168.1.53), CT 102 on pvex.gw.lo (192.168.1.160). 40GB /build disk for cargo target directory. DNS: 192.168.1.199, 192.168.1.154 (dns.gw.lo).
 
@@ -171,17 +171,19 @@ Replaces rigid DiskPool/VDrive/ExtentAllocator with organic, cellular storage. E
 - [x] `src/volume/gem.rs` — Global Extent Map with forward+reverse index, COW snapshot cloning, rebuild-from-containers (~300 lines, 10 tests)
 - [x] Module declarations in `src/drive/mod.rs` and `src/volume/mod.rs`
 
-**Phase 2: Volume layer rewrite — TODO**
-- [ ] Rewrite `src/volume/thin.rs` — ThinVolume backed by GEM + ContainerRegistry instead of array_id + ExtentAllocator
-- [ ] Add VolumePurpose (Partition, StormFS, ObjectStore, KeyValue, Boot) and PlacementPolicy
-- [ ] Rewrite `src/volume/snapshot.rs` — COW via GEM clone + container inc_ref
-- [ ] Update `src/volume/mod.rs` — VolumeManager uses GEM + ContainerRegistry
-- [ ] Update `src/volume/metadata.rs` — V2 format with container refs
-- [ ] Update external references: boot.rs, mgmt/api/volumes.rs, mgmt/mod.rs, main.rs, placement/mod.rs, tests/
+**Phase 2: Volume layer rewrite — DONE**
+- [x] Rewrite `src/volume/thin.rs` — ThinVolume backed by GEM + SlabRegistry instead of array_id + ExtentAllocator
+- [x] Add VolumePurpose (Partition, StormFS, ObjectStore, KeyValue, Boot) and PlacementPolicy
+- [x] Rewrite `src/volume/snapshot.rs` — COW via GEM clone + slab inc_ref
+- [x] Update `src/volume/mod.rs` — VolumeManager uses GEM + SlabRegistry
+- [x] Update `src/volume/metadata.rs` — V2 format with slab refs
+- [x] Update external references: boot.rs, mgmt/api/volumes.rs, mgmt/mod.rs, main.rs, placement/mod.rs, tests/
 
-**Phase 3: Placement integration — TODO**
-- [ ] `src/placement/mod.rs` — Add migrate_extent(), evacuate_container(), rebalance()
-- [ ] `src/migrate.rs` — Container-based extent migration (replace RAID-add pattern)
+**Phase 3: Placement integration — DONE**
+- [x] `src/placement/mod.rs` — PlacementError, migrate_extent(), evacuate_slab(), rebalance() (EvenDistribution + TierAffinity)
+- [x] `src/volume/gem.rs` — slab_extents() helper for reverse-index slab queries
+- [x] `src/migrate.rs` — Slab-based extent migration via migrate_to_slab() (alongside existing RAID-level migrate_to_local())
+- [x] 6 new tests: migrate_extent, evacuate_slab, rebalance_even, rebalance_tier_affinity, placement_error_display, migrate_to_slab
 
 **Phase 4: API + cleanup — TODO**
 - [ ] Rename `src/mgmt/api/pools.rs` → `containers.rs`, new REST endpoints

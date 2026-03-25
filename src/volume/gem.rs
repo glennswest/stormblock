@@ -191,6 +191,21 @@ impl GlobalExtentMap {
         self.volumes.keys().copied().collect()
     }
 
+    /// Collect all extents on a given slab (needed by evacuate_slab).
+    ///
+    /// Iterates the reverse index, filters by `slab_id`, returns
+    /// `(volume_id, vext_idx, location)` tuples.
+    pub fn slab_extents(&self, slab_id: SlabId) -> Vec<(VolumeId, u64, ExtentLocation)> {
+        self.reverse
+            .iter()
+            .filter(|((sid, _), _)| *sid == slab_id)
+            .map(|((_, _), &(volume_id, vext_idx))| {
+                let loc = self.volumes[&volume_id].extents[&vext_idx].clone();
+                (volume_id, vext_idx, loc)
+            })
+            .collect()
+    }
+
     /// Iterate over all extent locations for a volume.
     pub fn volume_extents(
         &self,
@@ -412,6 +427,34 @@ mod tests {
         assert_eq!(extents.len(), 2);
         assert_eq!(*extents[0].0, 0);
         assert_eq!(*extents[1].0, 5);
+    }
+
+    #[test]
+    fn slab_extents_filter() {
+        let mut gem = GlobalExtentMap::new();
+        let vol_a = VolumeId::new();
+        let vol_b = VolumeId::new();
+        let c1 = cid();
+        let c2 = cid();
+
+        gem.insert(vol_a, 0, loc(c1, 0));
+        gem.insert(vol_a, 1, loc(c2, 0));
+        gem.insert(vol_b, 0, loc(c1, 1));
+        gem.insert(vol_b, 1, loc(c1, 2));
+
+        let on_c1 = gem.slab_extents(c1);
+        assert_eq!(on_c1.len(), 3);
+        for (_, _, l) in &on_c1 {
+            assert_eq!(l.slab_id, c1);
+        }
+
+        let on_c2 = gem.slab_extents(c2);
+        assert_eq!(on_c2.len(), 1);
+        assert_eq!(on_c2[0].0, vol_a);
+        assert_eq!(on_c2[0].1, 1);
+
+        let c3 = cid();
+        assert!(gem.slab_extents(c3).is_empty());
     }
 
     #[test]
