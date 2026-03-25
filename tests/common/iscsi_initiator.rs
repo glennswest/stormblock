@@ -118,23 +118,21 @@ impl IscsiInitiator {
 
     /// Perform iSCSI login (no CHAP).
     ///
-    /// Tries single-phase (Security → FullFeature) first for maximum compatibility.
-    /// Falls back to two-phase (Security → Operational → FullFeature) if needed.
+    /// Two-phase: Security → Operational → FullFeature.
+    /// Security params in Phase 1, operational params in Phase 2.
     pub async fn login(&mut self, initiator_name: &str, target_name: &str) -> io::Result<()> {
-        // Build all parameters — security + operational in one PDU
-        let mut params: Vec<(&str, &str)> = vec![
+        // Phase 1: Security negotiation only
+        let security_params = encode_text_params(&[
             ("InitiatorName", initiator_name),
             ("TargetName", target_name),
             ("SessionType", "Normal"),
             ("AuthMethod", "None"),
-        ];
-        params.extend(Self::operational_params());
-        let data = encode_text_params(&params);
+        ]);
 
-        eprintln!("  login: single-phase Security→FullFeature ({} bytes params)", data.len());
+        eprintln!("  login phase 1: Security→Operational ({} bytes)", security_params.len());
 
-        let bhs = self.make_login_bhs(STAGE_SECURITY, STAGE_FULL_FEATURE);
-        let pdu = IscsiPdu::with_data(bhs, data);
+        let bhs = self.make_login_bhs(STAGE_SECURITY, STAGE_OPERATIONAL);
+        let pdu = IscsiPdu::with_data(bhs, security_params);
         write_pdu(&mut self.writer, &pdu, false, false).await?;
 
         let resp = read_pdu(&mut self.reader, false, false).await?;
@@ -145,7 +143,6 @@ impl IscsiInitiator {
             ));
         }
 
-        // Check status
         let status_class = resp.bhs.raw[36];
         let status_detail = resp.bhs.raw[37];
 
@@ -154,30 +151,24 @@ impl IscsiInitiator {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "login failed: class={} detail={:#x} CSG={} NSG={} T={} params={:?}",
-                    status_class, status_detail,
-                    resp.bhs.csg(), resp.bhs.nsg(), resp.bhs.transit(),
-                    resp_params
+                    "security login failed: class={} detail={:#x} params={:?}",
+                    status_class, status_detail, resp_params
                 ),
             ));
         }
 
         self.parse_login_response(&resp)?;
 
-        // Check where the target went
+        // If target went straight to FullFeature (some targets skip operational)
         if resp.bhs.transit() && resp.bhs.nsg() == STAGE_FULL_FEATURE {
-            eprintln!("  login: single-phase OK → FullFeature");
+            eprintln!("  login: Security→FullFeature (skipped operational)");
             self.cmd_sn += 1;
             return Ok(());
         }
 
-        // Target wants Operational phase — do Phase 2
+        // Phase 2: Operational negotiation
         eprintln!(
-            "  login: target wants operational phase (CSG={} NSG={} T={})",
-            resp.bhs.csg(), resp.bhs.nsg(), resp.bhs.transit()
-        );
-        eprintln!(
-            "  login phase 2: TSIH={} ExpStatSN={} CmdSN={}",
+            "  login phase 2: Operational→FullFeature (TSIH={} ExpStatSN={} CmdSN={})",
             self.tsih, self.exp_stat_sn, self.cmd_sn
         );
 
