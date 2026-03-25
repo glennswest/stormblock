@@ -52,8 +52,6 @@ impl UringServer {
     /// This is Linux-only; on other platforms it returns an error immediately.
     #[cfg(target_os = "linux")]
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use std::os::unix::io::AsRawFd;
-
         // Remove stale socket
         let _ = std::fs::remove_file(&self.socket_path);
 

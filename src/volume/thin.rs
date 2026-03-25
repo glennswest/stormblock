@@ -119,6 +119,7 @@ pub struct ThinVolume {
     pub(crate) name: String,
     pub(crate) virtual_size: u64,
     pub(crate) slot_size: u64,
+    #[allow(dead_code)]
     pub(crate) purpose: VolumePurpose,
     pub(crate) device_id: DeviceId,
 }

@@ -3,7 +3,7 @@
 //! Opens /dev/sdX block devices with O_DIRECT for aligned DMA I/O.
 //! Uses io_uring for async submission/completion.
 
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;

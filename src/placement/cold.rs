@@ -63,6 +63,7 @@ pub struct ColdCopy {
     /// Storage tier of the target device.
     tier: StorageTier,
     /// Locality of the target device.
+    #[allow(dead_code)]
     locality: Locality,
 }
 
