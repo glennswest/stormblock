@@ -169,6 +169,7 @@ impl PlacementEngine {
     ///
     /// The cold copy will converge to the given snapshot once `replicate()`
     /// is called. The target device must have enough capacity for the volume.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_cold_copy(
         &mut self,
         volume_id: VolumeId,

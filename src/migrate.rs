@@ -117,6 +117,7 @@ pub async fn migrate_to_local(
 ///
 /// The destination device can be on any tier. Extents from the source slab
 /// will flow to the new slab (and any other available slabs if needed).
+#[allow(clippy::too_many_arguments)]
 pub async fn migrate_to_slab(
     gem: &mut GlobalExtentMap,
     registry: &mut SlabRegistry,

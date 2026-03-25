@@ -179,7 +179,7 @@ impl SlabHeader {
         if data.len() < 128 {
             return Err(DriveError::Other(anyhow::anyhow!("slab header too short")));
         }
-        if &data[0..8] != SLAB_MAGIC {
+        if data[0..8] != SLAB_MAGIC {
             return Err(DriveError::Other(anyhow::anyhow!("bad slab magic")));
         }
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());

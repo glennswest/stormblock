@@ -480,6 +480,8 @@ pub mod shm {
     pub fn eventfd_wait(_fd: RawFd, _timeout_ms: i32) -> std::io::Result<u64> {
         Err(unsupported())
     }
+    /// # Safety
+    /// No-op on non-Linux platforms.
     pub unsafe fn unmap_shm(_ptr: *mut u8, _size: usize) {}
 }
 

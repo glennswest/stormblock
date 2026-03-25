@@ -30,8 +30,9 @@ pub struct PhysicalExtent {
 }
 
 /// Volume purpose — how the volume will be used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VolumePurpose {
+    #[default]
     Partition,
     StormFS,
     ObjectStore,
@@ -39,11 +40,6 @@ pub enum VolumePurpose {
     Boot,
 }
 
-impl Default for VolumePurpose {
-    fn default() -> Self {
-        VolumePurpose::Partition
-    }
-}
 
 impl fmt::Display for VolumePurpose {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -324,10 +320,9 @@ impl ThinVolumeHandle {
         // Try preferred tier first
         if let Some(slab_id) = registry.best_slab_for_tier(self.placement.preferred_tier) {
             if let Some(slab) = registry.get_mut(&slab_id) {
-                match slab.allocate(self.id, vext_idx).await {
-                    Ok(slot_idx) => return Ok((slab_id, slot_idx)),
-                    Err(_) => {} // full, try fallback
-                }
+                if let Ok(slot_idx) = slab.allocate(self.id, vext_idx).await {
+                    return Ok((slab_id, slot_idx));
+                } // full, try fallback
             }
         }
 
