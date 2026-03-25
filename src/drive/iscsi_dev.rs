@@ -212,6 +212,10 @@ impl IscsiConnection {
     ///
     /// Unsolicited NOP-In (target ping): ITT=0xFFFFFFFF, TTT=target-value → respond and skip.
     /// Solicited NOP-In (response to our NOP-Out): ITT=our-value, TTT=0xFFFFFFFF → return it.
+    ///
+    /// Tracks `ExpStatSN` from every response that advances the target's StatSN
+    /// (RFC 7143 §11.6.1). Without this, the target's CmdSN window eventually
+    /// closes and the session stalls after ~128-256 commands.
     async fn read_response(&mut self) -> Result<IscsiPdu, DriveError> {
         loop {
             let resp = read_pdu(&mut self.reader, false, false)
@@ -220,7 +224,8 @@ impl IscsiConnection {
             if resp.bhs.opcode() == Some(Opcode::NopIn) {
                 let itt = resp.bhs.initiator_task_tag();
                 if itt == 0xFFFF_FFFF {
-                    // Unsolicited NOP-In from target — respond if TTT is set
+                    // Unsolicited NOP-In from target — respond if TTT is set.
+                    // Does NOT advance target StatSN per RFC 7143.
                     let ttt = resp.bhs.target_transfer_tag();
                     if ttt != 0xFFFF_FFFF {
                         let mut bhs = Bhs::new();
@@ -238,10 +243,34 @@ impl IscsiConnection {
                     }
                     continue;
                 }
-                // Solicited NOP-In — response to our NOP-Out, return it
+                // Solicited NOP-In — response to our NOP-Out, advances StatSN
+                self.advance_stat_sn(&resp);
                 return Ok(resp);
             }
+            // Track StatSN for PDUs that advance the target's sequence number
+            self.advance_stat_sn(&resp);
             return Ok(resp);
+        }
+    }
+
+    /// Update `exp_stat_sn` from a response PDU's StatSN field (bytes 24-27).
+    ///
+    /// Per RFC 7143:
+    /// - ScsiResponse: always has valid StatSN
+    /// - DataIn with S-bit: valid StatSN (final data PDU with status)
+    /// - DataIn without S-bit: StatSN is NOT valid (intermediate data)
+    /// - Solicited NOP-In: valid StatSN
+    fn advance_stat_sn(&mut self, resp: &IscsiPdu) {
+        let valid = match resp.bhs.opcode() {
+            Some(Opcode::ScsiResponse) => true,
+            Some(Opcode::DataIn) => resp.bhs.has_status(),
+            Some(Opcode::NopIn) => resp.bhs.initiator_task_tag() != 0xFFFF_FFFF,
+            Some(Opcode::LogoutResponse) => true,
+            _ => false,
+        };
+        if valid {
+            let stat_sn = resp.bhs.cmd_sn(); // bytes 24-27 = StatSN in responses
+            self.exp_stat_sn = stat_sn.wrapping_add(1);
         }
     }
 
