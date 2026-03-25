@@ -505,7 +505,7 @@ impl IscsiConnection {
         bhs.set_opcode(Opcode::LogoutRequest);
         bhs.set_immediate(true);
         bhs.set_final(true);
-        bhs.raw[1] = (bhs.raw[1] & 0x80) | 0x00; // Reason: close session
+        bhs.raw[1] &= 0x80; // Reason code 0: close session
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
         bhs.set_stat_sn(self.exp_stat_sn);
