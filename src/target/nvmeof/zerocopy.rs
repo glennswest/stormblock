@@ -26,35 +26,35 @@ pub fn send_c2h_zerocopy(
 ) -> std::io::Result<()> {
     // Send header first (small, not worth zero-copy)
     let sqe = opcode::Send::new(types::Fd(fd), header.as_ptr(), header.len() as u32)
-        .flags(libc::MSG_MORE as i32) // signal more data coming
+        .flags(libc::MSG_MORE) // signal more data coming
         .build()
         .user_data(1);
     unsafe { ring.submission().push(&sqe).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::Other, "io_uring submission queue full")
+        std::io::Error::other("io_uring submission queue full")
     })?; }
 
-    ring.submit_and_wait(1).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    ring.submit_and_wait(1).map_err(std::io::Error::other)?;
     let cqe = ring.completion().next().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "no completion for header send")
+        std::io::Error::other("no completion for header send")
     })?;
     if cqe.result() < 0 {
         return Err(std::io::Error::from_raw_os_error(-cqe.result()));
     }
 
     // Send data with zero-copy (SEND_ZC) — this is the large payload
-    let msg_more = if data_digest.is_some() { libc::MSG_MORE as i32 } else { 0 };
+    let msg_more = if data_digest.is_some() { libc::MSG_MORE } else { 0 };
     let sqe = opcode::SendZc::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
         .flags(msg_more)
         .build()
         .user_data(2);
     unsafe { ring.submission().push(&sqe).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::Other, "io_uring submission queue full")
+        std::io::Error::other("io_uring submission queue full")
     })?; }
 
     // send_zc produces two CQEs: one for submission, one for completion (notification)
-    ring.submit_and_wait(1).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    ring.submit_and_wait(1).map_err(std::io::Error::other)?;
     let cqe = ring.completion().next().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "no completion for data send_zc")
+        std::io::Error::other("no completion for data send_zc")
     })?;
     if cqe.result() < 0 {
         return Err(std::io::Error::from_raw_os_error(-cqe.result()));
@@ -68,12 +68,12 @@ pub fn send_c2h_zerocopy(
             .build()
             .user_data(3);
         unsafe { ring.submission().push(&sqe).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::Other, "io_uring submission queue full")
+            std::io::Error::other("io_uring submission queue full")
         })?; }
 
-        ring.submit_and_wait(1).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        ring.submit_and_wait(1).map_err(std::io::Error::other)?;
         let cqe = ring.completion().next().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "no completion for digest send")
+            std::io::Error::other("no completion for digest send")
         })?;
         if cqe.result() < 0 {
             return Err(std::io::Error::from_raw_os_error(-cqe.result()));

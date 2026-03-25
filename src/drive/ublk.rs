@@ -511,6 +511,7 @@ fn submit_ctrl_cmd(
 ///
 /// Runs on its own OS thread with a dedicated io_uring ring. Uses
 /// `tokio::runtime::Handle::block_on()` to bridge async BlockDevice calls.
+#[allow(clippy::too_many_arguments)]
 fn queue_worker(
     queue_id: u16,
     char_fd: RawFd,
@@ -571,7 +572,7 @@ fn queue_worker(
         for (tag, res) in cqes {
             // Negative = device stopping or error
             if res < 0 {
-                if res != -(libc::ENODEV as i32) {
+                if res != -(libc::ENODEV) {
                     tracing::warn!(
                         "ublk queue {} tag {}: CQE error {}",
                         queue_id, tag, res,
@@ -594,7 +595,7 @@ fn queue_worker(
                         Ok(_) => length as i32,
                         Err(e) => {
                             tracing::error!("ublk read @{}+{}: {e}", offset, length);
-                            -(libc::EIO as i32)
+                            -(libc::EIO)
                         }
                     }
                 }
@@ -604,7 +605,7 @@ fn queue_worker(
                         Ok(_) => length as i32,
                         Err(e) => {
                             tracing::error!("ublk write @{}+{}: {e}", offset, length);
-                            -(libc::EIO as i32)
+                            -(libc::EIO)
                         }
                     }
                 }
@@ -613,7 +614,7 @@ fn queue_worker(
                         Ok(()) => 0,
                         Err(e) => {
                             tracing::error!("ublk flush: {e}");
-                            -(libc::EIO as i32)
+                            -(libc::EIO)
                         }
                     }
                 }
@@ -622,7 +623,7 @@ fn queue_worker(
                         Ok(()) => 0,
                         Err(e) => {
                             tracing::error!("ublk discard @{}+{}: {e}", offset, length);
-                            -(libc::EIO as i32)
+                            -(libc::EIO)
                         }
                     }
                 }
@@ -631,7 +632,7 @@ fn queue_worker(
                         "ublk queue {} tag {}: unknown op {}",
                         queue_id, tag, op,
                     );
-                    -(libc::ENOTSUP as i32)
+                    -(libc::ENOTSUP)
                 }
             };
 

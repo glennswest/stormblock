@@ -205,7 +205,7 @@ fn send_fds(sock_fd: RawFd, fds: &[RawFd]) -> std::io::Result<()> {
     };
 
     // Build cmsg buffer (use `as _` for musl/glibc portability — cmsg types differ)
-    let fd_bytes = fds.len() * mem::size_of::<RawFd>();
+    let fd_bytes = std::mem::size_of_val(fds);
     let cmsg_space = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
     let mut cmsg_buf = vec![0u8; cmsg_space];
 
@@ -330,7 +330,7 @@ fn client_worker(
                 None => break,
             };
 
-            let buf_ptr = unsafe { data_buf_ptr(shm_base as *mut u8, header, cmd.buf_idx) };
+            let buf_ptr = unsafe { data_buf_ptr(shm_base, header, cmd.buf_idx) };
 
             let (status, result) = match cmd.op {
                 OP_READ => {

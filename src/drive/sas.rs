@@ -56,7 +56,7 @@ impl SasDevice {
         // Create io_uring instance.
         let ring = IoUring::builder()
             .build(256)
-            .map_err(|e| DriveError::Io(e))?;
+            .map_err(DriveError::Io)?;
 
         let id = DeviceId {
             uuid: Uuid::new_v4(),
@@ -120,7 +120,7 @@ impl BlockDevice for SasDevice {
         unsafe { ring.submission().push(&sqe).map_err(|_| DriveError::DeviceNotReady)?; }
 
         ring.submit_and_wait(1)
-            .map_err(|e| DriveError::Io(e))?;
+            .map_err(DriveError::Io)?;
 
         let cqe = ring.completion().next()
             .ok_or(DriveError::DeviceNotReady)?;
@@ -148,7 +148,7 @@ impl BlockDevice for SasDevice {
         unsafe { ring.submission().push(&sqe).map_err(|_| DriveError::DeviceNotReady)?; }
 
         ring.submit_and_wait(1)
-            .map_err(|e| DriveError::Io(e))?;
+            .map_err(DriveError::Io)?;
 
         let cqe = ring.completion().next()
             .ok_or(DriveError::DeviceNotReady)?;
@@ -173,7 +173,7 @@ impl BlockDevice for SasDevice {
         unsafe { ring.submission().push(&sqe).map_err(|_| DriveError::DeviceNotReady)?; }
 
         ring.submit_and_wait(1)
-            .map_err(|e| DriveError::Io(e))?;
+            .map_err(DriveError::Io)?;
 
         let cqe = ring.completion().next()
             .ok_or(DriveError::DeviceNotReady)?;
