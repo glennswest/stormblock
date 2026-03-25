@@ -208,29 +208,38 @@ impl IscsiConnection {
         Ok(())
     }
 
-    /// Read a response PDU, handling NOP-In keep-alives transparently.
+    /// Read a response PDU, handling unsolicited NOP-In keep-alives transparently.
+    ///
+    /// Unsolicited NOP-In (target ping): ITT=0xFFFFFFFF, TTT=target-value → respond and skip.
+    /// Solicited NOP-In (response to our NOP-Out): ITT=our-value, TTT=0xFFFFFFFF → return it.
     async fn read_response(&mut self) -> Result<IscsiPdu, DriveError> {
         loop {
             let resp = read_pdu(&mut self.reader, false, false)
                 .await
                 .map_err(DriveError::Io)?;
             if resp.bhs.opcode() == Some(Opcode::NopIn) {
-                let ttt = resp.bhs.target_transfer_tag();
-                if ttt != 0xFFFF_FFFF {
-                    let mut bhs = Bhs::new();
-                    bhs.set_opcode(Opcode::NopOut);
-                    bhs.set_immediate(true);
-                    bhs.set_final(true);
-                    bhs.set_initiator_task_tag(0xFFFF_FFFF);
-                    bhs.set_target_transfer_tag(ttt);
-                    bhs.set_cmd_sn(self.cmd_sn);
-                    bhs.set_stat_sn(self.exp_stat_sn);
-                    let pdu = IscsiPdu::new(bhs);
-                    write_pdu(&mut self.writer, &pdu, false, false)
-                        .await
-                        .map_err(DriveError::Io)?;
+                let itt = resp.bhs.initiator_task_tag();
+                if itt == 0xFFFF_FFFF {
+                    // Unsolicited NOP-In from target — respond if TTT is set
+                    let ttt = resp.bhs.target_transfer_tag();
+                    if ttt != 0xFFFF_FFFF {
+                        let mut bhs = Bhs::new();
+                        bhs.set_opcode(Opcode::NopOut);
+                        bhs.set_immediate(true);
+                        bhs.set_final(true);
+                        bhs.set_initiator_task_tag(0xFFFF_FFFF);
+                        bhs.set_target_transfer_tag(ttt);
+                        bhs.set_cmd_sn(self.cmd_sn);
+                        bhs.set_stat_sn(self.exp_stat_sn);
+                        let pdu = IscsiPdu::new(bhs);
+                        write_pdu(&mut self.writer, &pdu, false, false)
+                            .await
+                            .map_err(DriveError::Io)?;
+                    }
+                    continue;
                 }
-                continue;
+                // Solicited NOP-In — response to our NOP-Out, return it
+                return Ok(resp);
             }
             return Ok(resp);
         }
