@@ -4,6 +4,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use tokio::io::{BufReader, BufWriter};
 use tokio::net::TcpStream;
@@ -23,7 +24,9 @@ const STAGE_SECURITY: u8 = 0;
 const STAGE_OPERATIONAL: u8 = 1;
 const STAGE_FULL_FEATURE: u8 = 3;
 
-const ISID: [u8; 6] = [0x40, 0x00, 0x00, 0x01, 0x00, 0x01];
+/// Atomic counter for unique ISID qualifier per connection.
+/// Prevents session collisions when multiple tests run in parallel.
+static ISID_COUNTER: AtomicU16 = AtomicU16::new(1);
 
 pub struct IscsiInitiator {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
@@ -34,6 +37,7 @@ pub struct IscsiInitiator {
     itt: u32,
     max_recv_data_seg: u32,
     block_size: u32,
+    isid: [u8; 6],
 }
 
 impl IscsiInitiator {
@@ -41,6 +45,9 @@ impl IscsiInitiator {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
         let (reader, writer) = stream.into_split();
+        // Each connection gets a unique ISID qualifier to avoid session collisions
+        let qualifier = ISID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let isid = [0x40, 0x00, 0x00, 0x01, (qualifier >> 8) as u8, qualifier as u8];
         Ok(IscsiInitiator {
             reader: BufReader::new(reader),
             writer: BufWriter::new(writer),
@@ -50,6 +57,7 @@ impl IscsiInitiator {
             itt: 1,
             max_recv_data_seg: 8192,
             block_size: 4096, // default, updated by read_capacity
+            isid,
         })
     }
 
@@ -70,7 +78,7 @@ impl IscsiInitiator {
         bhs.set_cmd_sn(self.cmd_sn);
         // ExpStatSN from target's last StatSN
         bhs.set_stat_sn(self.exp_stat_sn);
-        bhs.set_isid(&ISID);
+        bhs.set_isid(&self.isid);
         bhs.set_tsih(self.tsih);
         bhs
     }
