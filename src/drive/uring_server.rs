@@ -206,22 +206,22 @@ fn send_fds(sock_fd: RawFd, fds: &[RawFd]) -> std::io::Result<()> {
         iov_len: 1,
     };
 
-    // Build cmsg buffer
+    // Build cmsg buffer (use `as _` for musl/glibc portability — cmsg types differ)
     let fd_bytes = fds.len() * mem::size_of::<RawFd>();
-    let cmsg_len = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
-    let mut cmsg_buf = vec![0u8; cmsg_len];
+    let cmsg_space = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
+    let mut cmsg_buf = vec![0u8; cmsg_space];
 
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = &iov as *const libc::iovec as *mut libc::iovec;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_len;
+    msg.msg_controllen = cmsg_space as _;
 
     let cmsg: *mut libc::cmsghdr = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     unsafe {
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(fd_bytes as u32) as usize;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(fd_bytes as u32) as _;
         let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
         std::ptr::copy_nonoverlapping(fds.as_ptr(), data_ptr, fds.len());
     }
@@ -246,14 +246,14 @@ pub fn recv_fds(sock_fd: RawFd, max_fds: usize) -> std::io::Result<Vec<RawFd>> {
     };
 
     let fd_bytes = max_fds * mem::size_of::<RawFd>();
-    let cmsg_len = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
-    let mut cmsg_buf = vec![0u8; cmsg_len];
+    let cmsg_space = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
+    let mut cmsg_buf = vec![0u8; cmsg_space];
 
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_len;
+    msg.msg_controllen = cmsg_space as _;
 
     let ret = unsafe { libc::recvmsg(sock_fd, &mut msg, 0) };
     if ret < 0 {
@@ -266,7 +266,7 @@ pub fn recv_fds(sock_fd: RawFd, max_fds: usize) -> std::io::Result<Vec<RawFd>> {
         unsafe {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
                 let data_ptr = libc::CMSG_DATA(cmsg) as *const RawFd;
-                let payload_len = (*cmsg).cmsg_len - libc::CMSG_LEN(0) as usize;
+                let payload_len = ((*cmsg).cmsg_len as usize) - (libc::CMSG_LEN(0) as usize);
                 let num_fds = payload_len / mem::size_of::<RawFd>();
                 for i in 0..num_fds {
                     fds.push(*data_ptr.add(i));
