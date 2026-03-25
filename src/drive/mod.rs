@@ -6,6 +6,7 @@ pub mod nvme;
 pub mod sas;
 pub mod dma;
 pub mod filedev;
+pub mod iscsi_dev;
 pub mod slab;
 pub mod slab_registry;
 #[cfg(target_os = "linux")]
@@ -43,7 +44,8 @@ pub enum DriveType {
     NVMe,
     SasSsd,
     SasHdd,
-    File, // loopback / MikroTik / dev testing
+    File,  // loopback / MikroTik / dev testing
+    Iscsi, // remote iSCSI target
 }
 
 impl fmt::Display for DriveType {
@@ -53,6 +55,7 @@ impl fmt::Display for DriveType {
             DriveType::SasSsd => write!(f, "SAS-SSD"),
             DriveType::SasHdd => write!(f, "SAS-HDD"),
             DriveType::File => write!(f, "File"),
+            DriveType::Iscsi => write!(f, "iSCSI"),
         }
     }
 }
