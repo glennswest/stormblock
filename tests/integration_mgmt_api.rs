@@ -55,7 +55,9 @@ async fn setup_state_with_array(dir: &TempDir) -> Arc<AppState> {
     let _vol_id = vm.create_volume("test-vol", 32 * 1024 * 1024, array_id).await.unwrap();
 
     let config = StormBlockConfig::default();
-    let state = Arc::new(AppState::new(config, vm));
+    let slab_registry = vm.registry().clone();
+    let gem = vm.gem().clone();
+    let state = Arc::new(AppState::new(config, vm, slab_registry, gem));
 
     // Populate state
     {

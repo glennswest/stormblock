@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-03-25
+- **refactor:** Phase 4 API cleanup — replace DiskPool/VDrive with Slab REST API
+- **BREAKING:** REST endpoint `/api/v1/pools` removed, replaced by `/api/v1/slabs` (list, get, format, delete, list slots)
+- **BREAKING:** CLI subcommand `pool` removed, replaced by `slab` (format, list, info)
+- **BREAKING:** `DriveType::VDrive` variant removed from public API
+- **refactor:** AppState now holds `Arc<Mutex<SlabRegistry>>` + `Arc<Mutex<GlobalExtentMap>>` instead of `RwLock<HashMap<Uuid, DiskPool>>`
+- **refactor:** `migrate_to_local()` simplified — no longer creates DiskPool/VDrive, directly uses RAID 1 add/rebuild/remove
+- **chore:** Deleted dead code: `pool.rs` (714 lines), `vdrive.rs` (198 lines), `container.rs`, `container_registry.rs`
+- **chore:** Removed `PoolConfig`, `VDriveConfig` from config parser
 - **feat:** Placement engine Phase 3 — extent-level migration, slab evacuation, and rebalancing
 - **feat:** `migrate_extent()` — move a single extent between slabs with data integrity, GEM update, and ref count management
 - **feat:** `evacuate_slab()` — move all extents off a slab for device removal/maintenance

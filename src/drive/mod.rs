@@ -6,10 +6,6 @@ pub mod nvme;
 pub mod sas;
 pub mod dma;
 pub mod filedev;
-pub mod pool;
-pub mod vdrive;
-pub mod container;
-pub mod container_registry;
 pub mod slab;
 pub mod slab_registry;
 #[cfg(target_os = "linux")]
@@ -48,7 +44,6 @@ pub enum DriveType {
     SasSsd,
     SasHdd,
     File, // loopback / MikroTik / dev testing
-    VDrive, // Virtual drive from DiskPool
 }
 
 impl fmt::Display for DriveType {
@@ -58,7 +53,6 @@ impl fmt::Display for DriveType {
             DriveType::SasSsd => write!(f, "SAS-SSD"),
             DriveType::SasHdd => write!(f, "SAS-HDD"),
             DriveType::File => write!(f, "File"),
-            DriveType::VDrive => write!(f, "VDrive"),
         }
     }
 }

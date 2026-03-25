@@ -4,7 +4,7 @@ pub mod drives;
 pub mod arrays;
 pub mod volumes;
 pub mod exports;
-pub mod pools;
+pub mod slabs;
 #[cfg(feature = "cluster")]
 pub mod cluster;
 
@@ -27,7 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/volumes", volumes::router(state.clone()))
         .nest("/api/v1/exports", exports::router(state.clone()))
-        .nest("/api/v1/pools", pools::router(state.clone()));
+        .nest("/api/v1/slabs", slabs::router(state.clone()));
 
     #[cfg(feature = "cluster")]
     let r = r.merge(cluster::router(state.clone()));

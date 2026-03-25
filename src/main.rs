@@ -8,7 +8,8 @@ use std::sync::Arc;
 use clap::Parser;
 
 use stormblock::drive::{self, BlockDevice};
-use stormblock::drive::pool::DiskPool;
+use stormblock::drive::slab::{Slab, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZE};
+use stormblock::placement::topology::StorageTier;
 use stormblock::raid::{RaidArray, RaidLevel};
 use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 use stormblock::target::{self, reactor::{ReactorConfig, ReactorPool}};
@@ -88,17 +89,17 @@ struct Cli {
     #[arg(long)]
     data_dir: Option<String>,
 
-    /// Subcommand (pool, ublk, migrate)
+    /// Subcommand (slab, ublk, migrate)
     #[command(subcommand)]
     command: Option<SubCommand>,
 }
 
 #[derive(clap::Subcommand)]
 enum SubCommand {
-    /// DiskPool management
-    Pool {
+    /// Slab extent store management
+    Slab {
         #[command(subcommand)]
-        action: PoolAction,
+        action: SlabAction,
     },
     /// Export a volume via ublk to the local kernel (/dev/ublkbN)
     Ublk {
@@ -114,39 +115,31 @@ enum SubCommand {
         /// Path to local disk for migration target
         #[arg(long)]
         local_disk: String,
-        /// VDrive label for the local copy
-        #[arg(long, default_value = "root")]
-        label: String,
+        /// Slab tier for the local device
+        #[arg(long, default_value = "hot")]
+        tier: String,
     },
 }
 
 #[derive(clap::Subcommand)]
-enum PoolAction {
-    /// Format a device as a DiskPool
+enum SlabAction {
+    /// Format a device as a Slab
     Format {
         /// Device path to format
         device: String,
+        /// Storage tier (hot, warm, cool, cold)
+        #[arg(long, default_value = "hot")]
+        tier: String,
     },
-    /// List pools on specified devices
+    /// List slabs on specified devices
     List {
         /// Device paths to scan
         devices: Vec<String>,
     },
-    /// List VDrives in a pool
-    Vdrives {
-        /// Device path of the pool
+    /// Show slab details and slot usage
+    Info {
+        /// Device path of the slab
         device: String,
-    },
-    /// Create a VDrive in a pool
-    CreateVdrive {
-        /// Device path of the pool
-        device: String,
-        /// Label for the VDrive
-        #[arg(long)]
-        label: String,
-        /// Size of the VDrive (e.g. 100G)
-        #[arg(long)]
-        size: String,
     },
 }
 
@@ -211,8 +204,8 @@ async fn main() -> anyhow::Result<()> {
     // Handle subcommands
     if let Some(cmd) = &cli.command {
         match cmd {
-            SubCommand::Pool { action } => {
-                return handle_pool_command(action).await;
+            SubCommand::Slab { action } => {
+                return handle_slab_command(action).await;
             }
             SubCommand::Ublk { volume: _, queues: _ } => {
                 tracing::info!("ublk export mode — requires running storage engine");
@@ -220,9 +213,9 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Requires Linux 6.0+ with ublk_drv module loaded");
                 return Ok(());
             }
-            SubCommand::Migrate { local_disk, label } => {
-                tracing::info!("Migration mode: target={}, label={}", local_disk, label);
-                tracing::info!("Migration requires a running StormBlock instance with an active RAID 1 volume.");
+            SubCommand::Migrate { local_disk, tier } => {
+                tracing::info!("Migration mode: target={}, tier={}", local_disk, tier);
+                tracing::info!("Migration requires a running StormBlock instance.");
                 tracing::info!("Use the REST API POST /api/v1/volumes/{{id}}/migrate to trigger migration.");
                 return Ok(());
             }
@@ -243,7 +236,9 @@ async fn main() -> anyhow::Result<()> {
         }
         None => VolumeManager::new(DEFAULT_EXTENT_SIZE),
     };
-    let mut state = Arc::new(AppState::new(config.clone(), volume_manager));
+    let slab_registry = volume_manager.registry().clone();
+    let gem = volume_manager.gem().clone();
+    let mut state = Arc::new(AppState::new(config.clone(), volume_manager, slab_registry, gem));
 
     // Collect device paths from config
     let device_paths: Vec<String> = config.drives.iter()
@@ -552,31 +547,46 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_pool_command(action: &PoolAction) -> anyhow::Result<()> {
+fn parse_tier(s: &str) -> Result<StorageTier, String> {
+    match s.to_lowercase().as_str() {
+        "hot" => Ok(StorageTier::Hot),
+        "warm" => Ok(StorageTier::Warm),
+        "cool" => Ok(StorageTier::Cool),
+        "cold" => Ok(StorageTier::Cold),
+        _ => Err(format!("unknown tier '{s}' (use hot, warm, cool, cold)")),
+    }
+}
+
+async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
     match action {
-        PoolAction::Format { device } => {
+        SlabAction::Format { device, tier } => {
+            let tier = parse_tier(tier)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let dev = Arc::new(
                 stormblock::drive::filedev::FileDevice::open(device).await?
             ) as Arc<dyn BlockDevice>;
-            let pool = DiskPool::format(dev, device).await
+            let slab = Slab::format(dev, SLAB_SLOT_SIZE, tier).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("Pool formatted: {}", pool.pool_uuid());
-            println!("  capacity: {} bytes", pool.total_capacity());
-            println!("  data offset: {} bytes", pool.data_offset());
+            println!("Slab formatted: {}", slab.slab_id());
+            println!("  tier: {}", slab.tier());
+            println!("  slot size: {} bytes", slab.slot_size());
+            println!("  total slots: {}", slab.total_slots());
+            println!("  capacity: {}", stormblock::mgmt::config::human_size(
+                slab.total_slots() * slab.slot_size()));
         }
-        PoolAction::List { devices } => {
+        SlabAction::List { devices } => {
             for device in devices {
                 match stormblock::drive::filedev::FileDevice::open(device).await {
                     Ok(dev) => {
                         let dev = Arc::new(dev) as Arc<dyn BlockDevice>;
-                        match DiskPool::open(dev, device).await {
-                            Ok(pool) => {
-                                println!("{}: pool {} ({} VDrives, {} free)",
-                                    device, pool.pool_uuid(), pool.vdrive_count(),
-                                    stormblock::mgmt::config::human_size(pool.free_space()));
+                        match Slab::open(dev).await {
+                            Ok(slab) => {
+                                println!("{}: slab {} (tier={}, {} slots, {} free)",
+                                    device, slab.slab_id(), slab.tier(),
+                                    slab.total_slots(), slab.free_slots());
                             }
                             Err(e) => {
-                                println!("{}: not a pool ({e})", device);
+                                println!("{}: not a slab ({e})", device);
                             }
                         }
                     }
@@ -586,35 +596,22 @@ async fn handle_pool_command(action: &PoolAction) -> anyhow::Result<()> {
                 }
             }
         }
-        PoolAction::Vdrives { device } => {
+        SlabAction::Info { device } => {
             let dev = Arc::new(
                 stormblock::drive::filedev::FileDevice::open(device).await?
             ) as Arc<dyn BlockDevice>;
-            let pool = DiskPool::open(dev, device).await
+            let slab = Slab::open(dev).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("Pool {} — {} VDrives:", pool.pool_uuid(), pool.vdrive_count());
-            for entry in pool.list_vdrives() {
-                println!("  {} [{}] {} — {} ({:?})",
-                    entry.uuid, entry.label,
-                    stormblock::mgmt::config::human_size(entry.size),
-                    stormblock::mgmt::config::human_size(entry.start_offset),
-                    entry.state);
-            }
-        }
-        PoolAction::CreateVdrive { device, label, size } => {
-            let sz = parse_size(size)
-                .map_err(|e| anyhow::anyhow!("invalid size: {e}"))?;
-            let dev = Arc::new(
-                stormblock::drive::filedev::FileDevice::open(device).await?
-            ) as Arc<dyn BlockDevice>;
-            let mut pool = DiskPool::open(dev, device).await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let entry = pool.create_vdrive(sz, label).await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("VDrive created: {}", entry.uuid);
-            println!("  label: {}", entry.label);
-            println!("  size: {} bytes", entry.size);
-            println!("  offset: {}", entry.start_offset);
+            println!("Slab {}", slab.slab_id());
+            println!("  tier: {}", slab.tier());
+            println!("  slot size: {} bytes", slab.slot_size());
+            println!("  total slots: {}", slab.total_slots());
+            println!("  free slots: {}", slab.free_slots());
+            println!("  allocated slots: {}", slab.allocated_slots());
+            println!("  capacity: {}", stormblock::mgmt::config::human_size(
+                slab.total_slots() * slab.slot_size()));
+            println!("  free: {}", stormblock::mgmt::config::human_size(
+                slab.free_slots() * slab.slot_size()));
         }
     }
     Ok(())

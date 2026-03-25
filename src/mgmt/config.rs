@@ -24,8 +24,6 @@ pub struct StormBlockConfig {
     pub nvmeof: Option<NvmeofExportConfig>,
     pub reactor: ReactorCfg,
     #[serde(default)]
-    pub pools: Vec<PoolConfig>,
-    #[serde(default)]
     pub boot: Option<BootConfig>,
     #[cfg(feature = "cluster")]
     #[serde(default)]
@@ -47,7 +45,6 @@ impl Default for StormBlockConfig {
             #[cfg(feature = "nvmeof")]
             nvmeof: None,
             reactor: ReactorCfg::default(),
-            pools: Vec::new(),
             boot: None,
             #[cfg(feature = "cluster")]
             cluster: crate::cluster::config::ClusterConfig::default(),
@@ -348,30 +345,6 @@ impl StormBlockConfig {
 
         Ok(())
     }
-}
-
-/// Configuration for a DiskPool (on-disk format for VDrive allocation).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolConfig {
-    /// Path to the underlying block device or file.
-    pub device: String,
-    /// Alignment for VDrive allocations (default: 1M).
-    #[serde(default = "default_alignment")]
-    pub alignment: String,
-    /// Pre-defined VDrives to create on this pool.
-    #[serde(default)]
-    pub vdrives: Vec<VDriveConfig>,
-}
-
-/// Configuration for a pre-defined VDrive in a pool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VDriveConfig {
-    pub label: String,
-    pub size: String,
-}
-
-fn default_alignment() -> String {
-    "1M".to_string()
 }
 
 /// Configuration for the boot volume manager.

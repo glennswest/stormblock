@@ -457,7 +457,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     fn device_type(&self) -> DriveType {
-        DriveType::VDrive
+        DriveType::File
     }
 
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {

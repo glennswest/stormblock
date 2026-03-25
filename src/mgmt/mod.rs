@@ -14,9 +14,9 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::drive::BlockDevice;
-use crate::drive::pool::DiskPool;
+use crate::drive::slab_registry::SlabRegistry;
 use crate::raid::{RaidArray, RaidArrayId, RaidLevel};
-use crate::volume::VolumeManager;
+use crate::volume::{VolumeManager, GlobalExtentMap};
 
 use config::StormBlockConfig;
 
@@ -79,20 +79,27 @@ pub struct AppState {
     pub arrays: tokio::sync::RwLock<HashMap<RaidArrayId, ArrayInfo>>,
     pub volume_manager: tokio::sync::Mutex<VolumeManager>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
-    pub pools: tokio::sync::RwLock<HashMap<Uuid, DiskPool>>,
+    pub slab_registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
+    pub gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
     pub config: StormBlockConfig,
     #[cfg(feature = "cluster")]
     pub cluster: Option<Arc<crate::cluster::ClusterManager>>,
 }
 
 impl AppState {
-    pub fn new(config: StormBlockConfig, volume_manager: VolumeManager) -> Self {
+    pub fn new(
+        config: StormBlockConfig,
+        volume_manager: VolumeManager,
+        slab_registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
+        gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
+    ) -> Self {
         AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),
             arrays: tokio::sync::RwLock::new(HashMap::new()),
             volume_manager: tokio::sync::Mutex::new(volume_manager),
             exports: tokio::sync::RwLock::new(Vec::new()),
-            pools: tokio::sync::RwLock::new(HashMap::new()),
+            slab_registry,
+            gem,
             config,
             #[cfg(feature = "cluster")]
             cluster: None,
