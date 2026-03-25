@@ -9,6 +9,7 @@ use clap::Parser;
 
 use stormblock::drive::{self, BlockDevice};
 use stormblock::drive::slab::{Slab, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZE};
+use stormblock::boot_iscsi::{BootDiskLayout, IscsiBootManager};
 use stormblock::placement::topology::StorageTier;
 use stormblock::raid::{RaidArray, RaidLevel};
 use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
@@ -119,6 +120,39 @@ enum SubCommand {
         #[arg(long, default_value = "hot")]
         tier: String,
     },
+    /// Boot from iSCSI — create partitioned disk with ublk devices
+    BootIscsi {
+        /// iSCSI target portal (IP address)
+        #[arg(long)]
+        portal: String,
+        /// iSCSI target port (default: 3260)
+        #[arg(long, default_value = "3260")]
+        port: u16,
+        /// iSCSI target IQN
+        #[arg(long)]
+        iqn: String,
+        /// Partition layout (format: name:size,... e.g. esp:256M,boot:512M,root:6G,swap:1G,home:rest)
+        #[arg(long)]
+        layout: String,
+    },
+    /// Migrate boot volumes from iSCSI slab to local disk
+    MigrateBoot {
+        /// iSCSI target portal (IP address)
+        #[arg(long)]
+        source_portal: String,
+        /// iSCSI target port (default: 3260)
+        #[arg(long, default_value = "3260")]
+        source_port: u16,
+        /// iSCSI target IQN
+        #[arg(long)]
+        source_iqn: String,
+        /// Local device path to migrate to
+        #[arg(long)]
+        target_device: String,
+        /// Target device tier (default: hot)
+        #[arg(long, default_value = "hot")]
+        target_tier: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -218,6 +252,12 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Migration requires a running StormBlock instance.");
                 tracing::info!("Use the REST API POST /api/v1/volumes/{{id}}/migrate to trigger migration.");
                 return Ok(());
+            }
+            SubCommand::BootIscsi { portal, port, iqn, layout } => {
+                return handle_boot_iscsi(portal, *port, iqn, layout).await;
+            }
+            SubCommand::MigrateBoot { source_portal, source_port, source_iqn, target_device, target_tier } => {
+                return handle_migrate_boot(source_portal, *source_port, source_iqn, target_device, target_tier).await;
             }
         }
     }
@@ -614,5 +654,128 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 slab.free_slots() * slab.slot_size()));
         }
     }
+    Ok(())
+}
+
+async fn handle_boot_iscsi(
+    portal: &str,
+    port: u16,
+    iqn: &str,
+    layout_str: &str,
+) -> anyhow::Result<()> {
+    let layout = BootDiskLayout::parse(layout_str)
+        .map_err(|e| anyhow::anyhow!("layout parse error: {e}"))?;
+
+    println!("Boot-from-iSCSI: {}:{} target={}", portal, port, iqn);
+    println!("Partition layout:");
+    for part in &layout.partitions {
+        let size_str = if part.size == 0 { "rest".to_string() } else {
+            stormblock::mgmt::config::human_size(part.size)
+        };
+        println!("  {} ({}) — {} at {}", part.name, part.fs_type, size_str, part.mount_point);
+    }
+
+    let mgr = IscsiBootManager::new();
+    let result = mgr.provision(portal, port, iqn, layout).await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!("\nBoot disk provisioned on slab {}", result.slab_id);
+    println!("Backing: iSCSI {}:{}/{}", portal, port, iqn);
+    println!("\nPartitions:");
+    for part in &result.partitions {
+        println!(
+            "  {:6} {:>10}  {}  {} (vol={})",
+            part.name,
+            stormblock::mgmt::config::human_size(part.size),
+            part.fs_type,
+            part.mount_point,
+            part.volume_id,
+        );
+    }
+
+    println!("\nVolumes ready for ublk export.");
+    println!("On Linux, each volume can be exported as /dev/ublkbN:");
+    for (i, part) in result.partitions.iter().enumerate() {
+        println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
+            stormblock::mgmt::config::human_size(part.size), part.fs_type);
+    }
+
+    // Keep running until Ctrl+C
+    println!("\nPress Ctrl+C to stop");
+    tokio::signal::ctrl_c().await?;
+    println!("Shutting down...");
+
+    // Disconnect iSCSI
+    if let Err(e) = result.iscsi_device.disconnect().await {
+        tracing::warn!("iSCSI disconnect: {e}");
+    }
+
+    Ok(())
+}
+
+async fn handle_migrate_boot(
+    source_portal: &str,
+    source_port: u16,
+    source_iqn: &str,
+    target_device: &str,
+    target_tier: &str,
+) -> anyhow::Result<()> {
+    let tier = parse_tier(target_tier)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!("Boot migration: iSCSI {}:{}/{} → {}", source_portal, source_port, source_iqn, target_device);
+
+    // 1. Connect to iSCSI source and open the existing slab
+    let iscsi = stormblock::drive::iscsi_dev::IscsiDevice::connect(source_portal, source_port, source_iqn)
+        .await
+        .map_err(|e| anyhow::anyhow!("iSCSI connect failed: {e}"))?;
+    let iscsi_dev = Arc::new(iscsi) as Arc<dyn BlockDevice>;
+
+    // Open existing slab on iSCSI device
+    let source_slab = Slab::open(iscsi_dev).await
+        .map_err(|e| anyhow::anyhow!("failed to open slab on iSCSI device: {e}"))?;
+    let source_slab_id = source_slab.slab_id();
+
+    println!("Source slab: {} ({} slots, {} allocated)", source_slab_id,
+        source_slab.total_slots(), source_slab.allocated_slots());
+
+    // 2. Open local target device
+    let local_dev = Arc::new(
+        stormblock::drive::filedev::FileDevice::open(target_device).await?
+    ) as Arc<dyn BlockDevice>;
+
+    // 3. Build registry + GEM from source slab
+    let mut registry = stormblock::drive::slab_registry::SlabRegistry::new();
+    let gem = stormblock::volume::gem::GlobalExtentMap::rebuild_from_slabs(
+        std::iter::once((&source_slab_id, &source_slab))
+    );
+    registry.add(source_slab);
+
+    println!("GEM rebuilt: {} extents across {} volumes",
+        gem.total_extents(), gem.volume_count());
+
+    // 4. Migrate via placement engine
+    let engine = stormblock::placement::PlacementEngine::new();
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+
+    let mut gem = gem;
+    let result = stormblock::migrate::migrate_to_slab(
+        &mut gem, &mut registry, &engine,
+        source_slab_id, local_dev, tier, SLAB_SLOT_SIZE,
+        &rx,
+    ).await.map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+
+    println!("\nMigration complete:");
+    println!("  Source slab: {}", result.source_slab);
+    println!("  Dest slab:   {}", result.dest_slab);
+    println!("  Migrated:    {} extents", result.migrated);
+    println!("  Failed:      {} extents", result.failed);
+
+    if result.failed > 0 {
+        anyhow::bail!("{} extents failed to migrate", result.failed);
+    }
+
+    println!("\nAll data migrated to local device. Boot volumes now on {}", target_device);
+
     Ok(())
 }
