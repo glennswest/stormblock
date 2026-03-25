@@ -103,12 +103,14 @@ impl IscsiInitiator {
     fn parse_login_response(&mut self, resp: &IscsiPdu) -> io::Result<()> {
         // Update ExpStatSN from response's StatSN (bytes 24-27)
         self.exp_stat_sn = resp.bhs.cmd_sn(); // same byte offset, StatSN in response
+        // Update CmdSN from response's ExpCmdSN (bytes 28-31)
+        self.cmd_sn = u32::from_be_bytes(resp.bhs.raw[28..32].try_into().unwrap());
         // Update TSIH from response (target assigns session handle)
         let tsih = resp.bhs.tsih();
         if tsih != 0 {
             self.tsih = tsih;
         }
-        eprintln!("  StatSN={} TSIH={}", self.exp_stat_sn, self.tsih);
+        eprintln!("  StatSN={} ExpCmdSN={} TSIH={}", self.exp_stat_sn, self.cmd_sn, self.tsih);
 
         // Parse negotiated params
         let resp_params = parse_text_params(&resp.data);
@@ -172,7 +174,6 @@ impl IscsiInitiator {
         // If target went straight to FullFeature (some targets skip operational)
         if resp.bhs.transit() && resp.bhs.nsg() == STAGE_FULL_FEATURE {
             eprintln!("  login: Security→FullFeature (skipped operational)");
-            self.cmd_sn += 1;
             // Full-feature: ExpStatSN = last StatSN + 1
             self.exp_stat_sn += 1;
             return Ok(());
@@ -212,7 +213,6 @@ impl IscsiInitiator {
 
         self.parse_login_response(&resp)?;
         eprintln!("  login: two-phase OK → FullFeature");
-        self.cmd_sn += 1;
         // Full-feature: ExpStatSN = last StatSN + 1
         self.exp_stat_sn += 1;
         Ok(())
