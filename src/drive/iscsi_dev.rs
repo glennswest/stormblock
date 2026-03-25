@@ -392,12 +392,25 @@ impl IscsiConnection {
     }
 
     /// SCSI WRITE(10) — write data at the given LBA.
+    ///
+    /// Data is padded to a block_size boundary if necessary — SCSI requires
+    /// transfer lengths that are exact multiples of the device block size.
     async fn scsi_write(
         &mut self,
         lba: u64,
         data: &[u8],
     ) -> Result<(), DriveError> {
-        let block_count = (data.len() / self.block_size as usize) as u16;
+        let bs = self.block_size as usize;
+        // Pad data to next block boundary if not aligned
+        let padded = if data.len() % bs != 0 {
+            let padded_len = ((data.len() + bs - 1) / bs) * bs;
+            let mut buf = vec![0u8; padded_len];
+            buf[..data.len()].copy_from_slice(data);
+            buf
+        } else {
+            data.to_vec()
+        };
+        let block_count = (padded.len() / bs) as u16;
         let itt = self.next_itt();
         let mut bhs = Bhs::new();
         bhs.set_opcode(Opcode::ScsiCommand);
@@ -407,7 +420,7 @@ impl IscsiConnection {
         bhs.set_cmd_sn(self.cmd_sn);
         bhs.set_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
-        bhs.set_expected_data_transfer_length(data.len() as u32);
+        bhs.set_expected_data_transfer_length(padded.len() as u32);
 
         let mut cdb = [0u8; 16];
         cdb[0] = WRITE_10;
@@ -415,7 +428,7 @@ impl IscsiConnection {
         cdb[7..9].copy_from_slice(&block_count.to_be_bytes());
         bhs.set_cdb(&cdb);
 
-        let pdu = IscsiPdu::with_data(bhs, data.to_vec());
+        let pdu = IscsiPdu::with_data(bhs, padded);
         write_pdu(&mut self.writer, &pdu, false, false)
             .await
             .map_err(DriveError::Io)?;
@@ -697,8 +710,16 @@ impl BlockDevice for IscsiDevice {
 
         while bytes_written < buf.len() {
             let remaining = buf.len() - bytes_written;
-            // Cap at FirstBurstLength (65536) for immediate data
-            let chunk = remaining.min(65536);
+            // Cap at FirstBurstLength (65536) for immediate data,
+            // but also round down to block_size boundary unless this
+            // is the last chunk (scsi_write handles final padding).
+            let max_chunk = 65536usize;
+            let chunk = if remaining <= max_chunk {
+                remaining
+            } else {
+                // Round down to block boundary for mid-stream chunks
+                (max_chunk / bs as usize) * bs as usize
+            };
             let lba = (offset + bytes_written as u64) / bs;
             conn.scsi_write(lba, &buf[bytes_written..bytes_written + chunk])
                 .await?;
