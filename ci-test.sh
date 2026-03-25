@@ -5,7 +5,7 @@
 #   1: Build (debug)
 #   2: Unit tests + clippy
 #   3: External iSCSI tests (single disk — discovery, write/read, multi-block)
-#   4: Multi-disk iSCSI tests (slab format, cross-disk I/O, placement)
+#   4: Multi-disk iSCSI tests (3 disks — discovery, write/read, multi-block)
 #   5: Release build
 #
 # Environment (set by job runner or defaults):
@@ -26,12 +26,18 @@ ISCSI_IQN="${ISCSI_IQN:-iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-r
 ISCSI_IQN2="${ISCSI_IQN2:-iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-raid1-disks-stormblock-test2-raw}"
 ISCSI_IQN3="${ISCSI_IQN3:-iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-raid1-disks-stormblock-test3-raw}"
 
+# Save originals so we can restore after overriding ISCSI_IQN
+ORIG_IQN="$ISCSI_IQN"
+
 # Counters
-PHASE_FAILURES=0
 TOTAL_FAILURES=0
+
+# Phase result tracking
+declare -a PHASE_RESULTS=()
 
 # ── Colour output ────────────────────────────────────────────────────────────
 
+GREEN='' RED='' YELLOW='' CYAN='' BOLD='' RESET=''
 if [ -t 1 ]; then
     GREEN='\033[0;32m'
     RED='\033[0;31m'
@@ -39,23 +45,34 @@ if [ -t 1 ]; then
     CYAN='\033[0;36m'
     BOLD='\033[1m'
     RESET='\033[0m'
-else
-    GREEN='' RED='' YELLOW='' CYAN='' BOLD='' RESET=''
 fi
 
+CUR_PHASE=""
+CUR_PHASE_FAILS=0
+
 phase() {
+    # Record previous phase result
+    if [ -n "$CUR_PHASE" ]; then
+        if [ "$CUR_PHASE_FAILS" -eq 0 ]; then
+            PHASE_RESULTS+=("PASS: $CUR_PHASE")
+        else
+            PHASE_RESULTS+=("FAIL: $CUR_PHASE ($CUR_PHASE_FAILS failures)")
+        fi
+    fi
+    CUR_PHASE="Phase $1: $2"
+    CUR_PHASE_FAILS=0
+
     echo ""
     echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════════════════${RESET}"
     echo -e "${BOLD}${CYAN}  Phase $1: $2${RESET}"
     echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════════════════${RESET}"
     echo ""
-    PHASE_FAILURES=0
 }
 
 ok() { echo -e "  ${GREEN}OK${RESET}: $1"; }
 fail() {
     echo -e "  ${RED}FAIL${RESET}: $1"
-    ((PHASE_FAILURES++))
+    ((CUR_PHASE_FAILS++))
     ((TOTAL_FAILURES++))
 }
 skip() { echo -e "  ${YELLOW}SKIP${RESET}: $1"; }
@@ -118,9 +135,10 @@ fi
 
 # ── Phase 3: External iSCSI tests (single disk) ──
 
-phase 3 "External iSCSI Tests (single disk)"
+phase 3 "External iSCSI Tests (disk 1)"
 
-export ISCSI_PORTAL ISCSI_PORT ISCSI_IQN
+export ISCSI_PORTAL ISCSI_PORT
+export ISCSI_IQN="$ORIG_IQN"
 
 echo "Running external_iscsi tests against ${ISCSI_IQN}..."
 echo ""
@@ -134,10 +152,10 @@ fi
 
 phase 4 "Multi-Disk iSCSI Tests"
 
-echo "Testing iSCSI connectivity to all 3 disks..."
+echo "Testing iSCSI connectivity to disks 2 and 3..."
 echo ""
 
-# Test disk 2
+# Test disk 2 — discovery + write/read
 export ISCSI_IQN="$ISCSI_IQN2"
 echo "--- Disk 2: ${ISCSI_IQN2} ---"
 if cargo test --test external_iscsi external_iscsi_discovery -- --ignored --nocapture 2>&1; then
@@ -152,7 +170,13 @@ else
     fail "disk 2 write/read/verify"
 fi
 
-# Test disk 3
+if cargo test --test external_iscsi external_iscsi_multi_block_io -- --ignored --nocapture 2>&1; then
+    ok "disk 2 multi-block I/O"
+else
+    fail "disk 2 multi-block I/O"
+fi
+
+# Test disk 3 — discovery + write/read
 export ISCSI_IQN="$ISCSI_IQN3"
 echo ""
 echo "--- Disk 3: ${ISCSI_IQN3} ---"
@@ -168,25 +192,6 @@ else
     fail "disk 3 write/read/verify"
 fi
 
-# Cross-disk data isolation test: write distinct patterns to each disk, read back, verify
-echo ""
-echo "--- Cross-disk isolation test ---"
-# Reset to disk 1 for the isolation test suite
-export ISCSI_IQN="${ISCSI_IQN:-iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-raid1-disks-test1-raw}"
-if cargo test --test external_iscsi external_iscsi_multi_block_io -- --ignored --nocapture 2>&1; then
-    ok "disk 1 multi-block I/O"
-else
-    fail "disk 1 multi-block I/O"
-fi
-
-export ISCSI_IQN="$ISCSI_IQN2"
-if cargo test --test external_iscsi external_iscsi_multi_block_io -- --ignored --nocapture 2>&1; then
-    ok "disk 2 multi-block I/O"
-else
-    fail "disk 2 multi-block I/O"
-fi
-
-export ISCSI_IQN="$ISCSI_IQN3"
 if cargo test --test external_iscsi external_iscsi_multi_block_io -- --ignored --nocapture 2>&1; then
     ok "disk 3 multi-block I/O"
 else
@@ -207,16 +212,35 @@ fi
 
 # ── Final Summary ──
 
+# Record last phase
+if [ -n "$CUR_PHASE" ]; then
+    if [ "$CUR_PHASE_FAILS" -eq 0 ]; then
+        PHASE_RESULTS+=("PASS: $CUR_PHASE")
+    else
+        PHASE_RESULTS+=("FAIL: $CUR_PHASE ($CUR_PHASE_FAILS failures)")
+    fi
+fi
+
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
 echo -e "${BOLD}║                      Final Summary                          ║${RESET}"
 echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
 echo ""
 
+# Print per-phase results
+for result in "${PHASE_RESULTS[@]}"; do
+    if [[ "$result" == PASS:* ]]; then
+        echo -e "  ${GREEN}${result}${RESET}"
+    else
+        echo -e "  ${RED}${result}${RESET}"
+    fi
+done
+echo ""
+
 if [ "$TOTAL_FAILURES" -eq 0 ]; then
     echo -e "  ${GREEN}${BOLD}All phases passed${RESET}"
     exit 0
 else
-    echo -e "  ${RED}${BOLD}$TOTAL_FAILURES failure(s)${RESET}"
+    echo -e "  ${RED}${BOLD}$TOTAL_FAILURES failure(s) total${RESET}"
     exit 1
 fi
