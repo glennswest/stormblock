@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-03-24
+- **fix:** iSCSI initiator login — single-phase Security→FullFeature for MikroTik compatibility, proper ExpStatSN tracking across login phases, verbose error reporting with status class/detail/params
+- **fix:** iSCSI initiator read/write — use actual block_size from READ CAPACITY instead of hardcoded 4096
+- **feat:** Containerfile.iscsi-test — pre-built iSCSI test container for fast iteration
+- **feat:** run-iscsi-test.sh — unified runner for pre-built container or cargo build fallback
+
 ### 2026-03-21
 - **feat:** Shared io_uring-style ring buffer IPC — zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd (`src/drive/uring_channel.rs`, `src/drive/uring_server.rs`)
 - **refactor:** Rename Container → Slab throughout codebase — `container.rs` → `slab.rs`, `container_registry.rs` → `slab_registry.rs`, `ContainerId` → `SlabId`, magic `STRMCONT` → `STRMSLAB`

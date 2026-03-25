@@ -1,0 +1,28 @@
+# StormBlock iSCSI Test Container
+#
+# Pre-compiles the external iSCSI test binary for fast iteration.
+# Build: podman build -f Containerfile.iscsi-test -t registry.gt.lo:5000/stormblock-iscsi-test:latest .
+# Push:  podman push registry.gt.lo:5000/stormblock-iscsi-test:latest
+# Run:   podman run --rm -e ISCSI_PORTAL=192.168.10.1 registry.gt.lo:5000/stormblock-iscsi-test:latest
+#
+# Or via mkube job runner with run-iscsi-test.sh as buildScript.
+
+FROM registry.gt.lo:5000/rawhidedev:latest
+
+WORKDIR /build
+RUN git clone https://github.com/glennswest/stormblock.git
+WORKDIR /build/stormblock
+
+# Build library + test binary (cached in image layer)
+RUN cargo build 2>&1 && \
+    cargo test --test external_iscsi --no-run 2>&1
+
+# Copy test binary to a stable path
+RUN cp $(find target/debug/deps -name 'external_iscsi-*' -executable -type f | head -1) \
+    /usr/local/bin/iscsi-test
+
+ENV ISCSI_PORTAL=192.168.10.1
+ENV ISCSI_PORT=3260
+ENV ISCSI_IQN=iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-raid1-disks-test1-raw
+
+CMD ["/usr/local/bin/iscsi-test", "--ignored", "--nocapture"]

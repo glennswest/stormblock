@@ -23,6 +23,8 @@ const STAGE_SECURITY: u8 = 0;
 const STAGE_OPERATIONAL: u8 = 1;
 const STAGE_FULL_FEATURE: u8 = 3;
 
+const ISID: [u8; 6] = [0x40, 0x00, 0x00, 0x01, 0x00, 0x01];
+
 pub struct IscsiInitiator {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: BufWriter<tokio::net::tcp::OwnedWriteHalf>,
@@ -30,6 +32,7 @@ pub struct IscsiInitiator {
     exp_stat_sn: u32,
     itt: u32,
     max_recv_data_seg: u32,
+    block_size: u32,
 }
 
 impl IscsiInitiator {
@@ -44,6 +47,7 @@ impl IscsiInitiator {
             exp_stat_sn: 0,
             itt: 1,
             max_recv_data_seg: 8192,
+            block_size: 4096, // default, updated by read_capacity
         })
     }
 
@@ -53,56 +57,24 @@ impl IscsiInitiator {
         itt
     }
 
-    /// Perform iSCSI login (no CHAP). Two-phase: Security → Operational → FullFeature.
-    pub async fn login(&mut self, initiator_name: &str, target_name: &str) -> io::Result<()> {
-        // Phase 1: Security negotiation
-        let security_params = encode_text_params(&[
-            ("InitiatorName", initiator_name),
-            ("TargetName", target_name),
-            ("SessionType", "Normal"),
-            ("AuthMethod", "None"),
-        ]);
-
+    fn make_login_bhs(&mut self, csg: u8, nsg: u8) -> Bhs {
         let itt = self.next_itt();
         let mut bhs = Bhs::new();
         bhs.set_opcode(Opcode::LoginRequest);
         bhs.set_immediate(true);
-        bhs.set_csg(STAGE_SECURITY);
-        bhs.set_nsg(STAGE_OPERATIONAL);
+        bhs.set_csg(csg);
+        bhs.set_nsg(nsg);
         bhs.set_transit(true);
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        // Set ISID (6 bytes): type=random (0x80), random A + B
-        bhs.raw[8] = 0x40; // type qualifier
-        bhs.raw[9] = 0x00;
-        bhs.raw[10] = 0x00;
-        bhs.raw[11] = 0x01;
-        bhs.raw[12] = 0x00;
-        bhs.raw[13] = 0x01;
+        // ExpStatSN from target's last StatSN
+        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_isid(&ISID);
+        bhs
+    }
 
-        let pdu = IscsiPdu::with_data(bhs, security_params);
-        write_pdu(&mut self.writer, &pdu, false, false).await?;
-
-        let resp = read_pdu(&mut self.reader, false, false).await?;
-        if resp.bhs.opcode() != Some(Opcode::LoginResponse) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "expected LoginResponse"));
-        }
-        // Check status class (byte 36)
-        if resp.bhs.raw[36] != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("login failed: class={}, detail={}", resp.bhs.raw[36], resp.bhs.raw[37]),
-            ));
-        }
-
-        // Check if we went straight to full feature (transit+NSG=3)
-        if resp.bhs.transit() && resp.bhs.nsg() == STAGE_FULL_FEATURE {
-            self.cmd_sn += 1;
-            return Ok(());
-        }
-
-        // Phase 2: Operational negotiation
-        let op_params = encode_text_params(&[
+    fn operational_params() -> Vec<(&'static str, &'static str)> {
+        vec![
             ("HeaderDigest", "None"),
             ("DataDigest", "None"),
             ("MaxRecvDataSegmentLength", "65536"),
@@ -115,50 +87,115 @@ impl IscsiInitiator {
             ("ImmediateData", "Yes"),
             ("InitialR2T", "No"),
             ("ErrorRecoveryLevel", "0"),
-        ]);
+        ]
+    }
 
-        let itt = self.next_itt();
-        let mut bhs = Bhs::new();
-        bhs.set_opcode(Opcode::LoginRequest);
-        bhs.set_immediate(true);
-        bhs.set_csg(STAGE_OPERATIONAL);
-        bhs.set_nsg(STAGE_FULL_FEATURE);
-        bhs.set_transit(true);
-        bhs.set_initiator_task_tag(itt);
-        self.cmd_sn += 1;
-        bhs.set_cmd_sn(self.cmd_sn);
-        // Copy ISID from first request
-        bhs.raw[8] = 0x40;
-        bhs.raw[9] = 0x00;
-        bhs.raw[10] = 0x00;
-        bhs.raw[11] = 0x01;
-        bhs.raw[12] = 0x00;
-        bhs.raw[13] = 0x01;
-
-        let pdu = IscsiPdu::with_data(bhs, op_params);
-        write_pdu(&mut self.writer, &pdu, false, false).await?;
-
-        let resp = read_pdu(&mut self.reader, false, false).await?;
-        if resp.bhs.opcode() != Some(Opcode::LoginResponse) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "expected LoginResponse"));
-        }
-        if resp.bhs.raw[36] != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("operational login failed: class={}", resp.bhs.raw[36]),
-            ));
-        }
+    fn parse_login_response(&mut self, resp: &IscsiPdu) -> io::Result<()> {
+        // Update ExpStatSN from response's StatSN (bytes 24-27)
+        self.exp_stat_sn = resp.bhs.cmd_sn(); // same byte offset, StatSN in response
 
         // Parse negotiated params
         let resp_params = parse_text_params(&resp.data);
         for (key, val) in &resp_params {
+            eprintln!("  negotiated: {}={}", key, val);
             if key == "MaxRecvDataSegmentLength" {
                 if let Ok(v) = val.parse::<u32>() {
                     self.max_recv_data_seg = v;
                 }
             }
         }
+        Ok(())
+    }
 
+    /// Perform iSCSI login (no CHAP).
+    ///
+    /// Tries single-phase (Security → FullFeature) first for maximum compatibility.
+    /// Falls back to two-phase (Security → Operational → FullFeature) if needed.
+    pub async fn login(&mut self, initiator_name: &str, target_name: &str) -> io::Result<()> {
+        // Build all parameters — security + operational in one PDU
+        let mut params: Vec<(&str, &str)> = vec![
+            ("InitiatorName", initiator_name),
+            ("TargetName", target_name),
+            ("SessionType", "Normal"),
+            ("AuthMethod", "None"),
+        ];
+        params.extend(Self::operational_params());
+        let data = encode_text_params(&params);
+
+        eprintln!("  login: single-phase Security→FullFeature ({} bytes params)", data.len());
+
+        let bhs = self.make_login_bhs(STAGE_SECURITY, STAGE_FULL_FEATURE);
+        let pdu = IscsiPdu::with_data(bhs, data);
+        write_pdu(&mut self.writer, &pdu, false, false).await?;
+
+        let resp = read_pdu(&mut self.reader, false, false).await?;
+        if resp.bhs.opcode() != Some(Opcode::LoginResponse) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected LoginResponse, got {:?}", resp.bhs.opcode()),
+            ));
+        }
+
+        // Check status
+        let status_class = resp.bhs.raw[36];
+        let status_detail = resp.bhs.raw[37];
+
+        if status_class != 0 {
+            let resp_params = parse_text_params(&resp.data);
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "login failed: class={} detail={:#x} CSG={} NSG={} T={} params={:?}",
+                    status_class, status_detail,
+                    resp.bhs.csg(), resp.bhs.nsg(), resp.bhs.transit(),
+                    resp_params
+                ),
+            ));
+        }
+
+        self.parse_login_response(&resp)?;
+
+        // Check where the target went
+        if resp.bhs.transit() && resp.bhs.nsg() == STAGE_FULL_FEATURE {
+            eprintln!("  login: single-phase OK → FullFeature");
+            self.cmd_sn += 1;
+            return Ok(());
+        }
+
+        // Target wants Operational phase — do Phase 2
+        eprintln!(
+            "  login: target wants operational phase (CSG={} NSG={} T={})",
+            resp.bhs.csg(), resp.bhs.nsg(), resp.bhs.transit()
+        );
+
+        let op_data = encode_text_params(&Self::operational_params());
+        let bhs = self.make_login_bhs(STAGE_OPERATIONAL, STAGE_FULL_FEATURE);
+        let pdu = IscsiPdu::with_data(bhs, op_data);
+        write_pdu(&mut self.writer, &pdu, false, false).await?;
+
+        let resp = read_pdu(&mut self.reader, false, false).await?;
+        if resp.bhs.opcode() != Some(Opcode::LoginResponse) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected LoginResponse phase 2, got {:?}", resp.bhs.opcode()),
+            ));
+        }
+
+        let status_class = resp.bhs.raw[36];
+        let status_detail = resp.bhs.raw[37];
+        if status_class != 0 {
+            let resp_params = parse_text_params(&resp.data);
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "operational login failed: class={} detail={:#x} params={:?}",
+                    status_class, status_detail, resp_params
+                ),
+            ));
+        }
+
+        self.parse_login_response(&resp)?;
+        eprintln!("  login: two-phase OK → FullFeature");
         self.cmd_sn += 1;
         Ok(())
     }
@@ -173,6 +210,7 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x40;
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
+        bhs.set_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(96);
 
@@ -210,6 +248,7 @@ impl IscsiInitiator {
     }
 
     /// Send READ CAPACITY(10) and return (total_blocks, block_size).
+    /// Also stores the block_size for use by read()/write().
     pub async fn read_capacity(&mut self) -> io::Result<(u64, u32)> {
         let itt = self.next_itt();
         let mut bhs = Bhs::new();
@@ -218,6 +257,7 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x40; // Read
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
+        bhs.set_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(8);
 
@@ -254,10 +294,12 @@ impl IscsiInitiator {
 
         let last_lba = u32::from_be_bytes(data[0..4].try_into().unwrap()) as u64;
         let block_size = u32::from_be_bytes(data[4..8].try_into().unwrap());
+        self.block_size = block_size;
         Ok((last_lba + 1, block_size))
     }
 
-    /// Read `block_count` blocks starting at `lba` (4096-byte blocks).
+    /// Read `block_count` blocks starting at `lba`.
+    /// Uses block_size from the last read_capacity() call.
     pub async fn read(&mut self, lba: u64, block_count: u16) -> io::Result<Vec<u8>> {
         let itt = self.next_itt();
         let mut bhs = Bhs::new();
@@ -266,8 +308,9 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x40; // Read
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
+        bhs.set_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
-        let transfer_len = block_count as u32 * 4096;
+        let transfer_len = block_count as u32 * self.block_size;
         bhs.set_expected_data_transfer_length(transfer_len);
 
         // READ(10) CDB
@@ -303,9 +346,10 @@ impl IscsiInitiator {
         Ok(data)
     }
 
-    /// Write data at the given LBA. Data length must be a multiple of 4096.
+    /// Write data at the given LBA. Data length must be a multiple of block_size.
+    /// Uses block_size from the last read_capacity() call.
     pub async fn write(&mut self, lba: u64, data: &[u8]) -> io::Result<()> {
-        let block_count = (data.len() / 4096) as u16;
+        let block_count = (data.len() / self.block_size as usize) as u16;
         let itt = self.next_itt();
         let mut bhs = Bhs::new();
         bhs.set_opcode(Opcode::ScsiCommand);
@@ -315,6 +359,7 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x20;
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
+        bhs.set_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(data.len() as u32);
 
@@ -358,6 +403,7 @@ impl IscsiInitiator {
         bhs.raw[1] = (bhs.raw[1] & 0x80) | 0x00;
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
+        bhs.set_stat_sn(self.exp_stat_sn);
 
         let pdu = IscsiPdu::new(bhs);
         write_pdu(&mut self.writer, &pdu, false, false).await?;
