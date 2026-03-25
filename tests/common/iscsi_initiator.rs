@@ -173,6 +173,8 @@ impl IscsiInitiator {
         if resp.bhs.transit() && resp.bhs.nsg() == STAGE_FULL_FEATURE {
             eprintln!("  login: Security→FullFeature (skipped operational)");
             self.cmd_sn += 1;
+            // Full-feature: ExpStatSN = last StatSN + 1
+            self.exp_stat_sn += 1;
             return Ok(());
         }
 
@@ -211,7 +213,35 @@ impl IscsiInitiator {
         self.parse_login_response(&resp)?;
         eprintln!("  login: two-phase OK → FullFeature");
         self.cmd_sn += 1;
+        // Full-feature: ExpStatSN = last StatSN + 1
+        self.exp_stat_sn += 1;
         Ok(())
+    }
+
+    /// Read a response PDU, handling NOP-In keep-alives transparently.
+    async fn read_response(&mut self) -> io::Result<IscsiPdu> {
+        loop {
+            let resp = read_pdu(&mut self.reader, false, false).await?;
+            // Handle NOP-In (keep-alive) from target
+            if resp.bhs.opcode() == Some(Opcode::NopIn) {
+                let ttt = resp.bhs.target_transfer_tag();
+                if ttt != 0xFFFF_FFFF {
+                    // Target wants a NOP-Out response
+                    let mut bhs = Bhs::new();
+                    bhs.set_opcode(Opcode::NopOut);
+                    bhs.set_immediate(true);
+                    bhs.set_final(true);
+                    bhs.set_initiator_task_tag(0xFFFF_FFFF);
+                    bhs.set_target_transfer_tag(ttt);
+                    bhs.set_cmd_sn(self.cmd_sn);
+                    bhs.set_stat_sn(self.exp_stat_sn);
+                    let pdu = IscsiPdu::new(bhs);
+                    write_pdu(&mut self.writer, &pdu, false, false).await?;
+                }
+                continue;
+            }
+            return Ok(resp);
+        }
     }
 
     /// Send SCSI INQUIRY and return the inquiry data.
@@ -241,7 +271,7 @@ impl IscsiInitiator {
         // Read response — may be DataIn + ScsiResponse, or just ScsiResponse
         let mut data = Vec::new();
         loop {
-            let resp = read_pdu(&mut self.reader, false, false).await?;
+            let resp = self.read_response().await?;
             match resp.bhs.opcode() {
                 Some(Opcode::DataIn) => {
                     data.extend_from_slice(&resp.data);
@@ -252,8 +282,9 @@ impl IscsiInitiator {
                 Some(Opcode::ScsiResponse) => {
                     break;
                 }
-                _ => {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected opcode in inquiry response"));
+                other => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData,
+                        format!("unexpected opcode in inquiry: {:?} (raw={:#x})", other, resp.bhs.raw[0])));
                 }
             }
         }
@@ -285,7 +316,7 @@ impl IscsiInitiator {
 
         let mut data = Vec::new();
         loop {
-            let resp = read_pdu(&mut self.reader, false, false).await?;
+            let resp = self.read_response().await?;
             match resp.bhs.opcode() {
                 Some(Opcode::DataIn) => {
                     data.extend_from_slice(&resp.data);
@@ -296,8 +327,9 @@ impl IscsiInitiator {
                 Some(Opcode::ScsiResponse) => {
                     break;
                 }
-                _ => {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected opcode"));
+                other => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData,
+                        format!("unexpected opcode: {:?} (raw={:#x})", other, resp.bhs.raw[0])));
                 }
             }
         }
@@ -340,7 +372,7 @@ impl IscsiInitiator {
 
         let mut data = Vec::new();
         loop {
-            let resp = read_pdu(&mut self.reader, false, false).await?;
+            let resp = self.read_response().await?;
             match resp.bhs.opcode() {
                 Some(Opcode::DataIn) => {
                     data.extend_from_slice(&resp.data);
@@ -351,8 +383,9 @@ impl IscsiInitiator {
                 Some(Opcode::ScsiResponse) => {
                     break;
                 }
-                _ => {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected opcode in read response"));
+                other => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData,
+                        format!("unexpected opcode in read: {:?} (raw={:#x})", other, resp.bhs.raw[0])));
                 }
             }
         }
@@ -389,8 +422,8 @@ impl IscsiInitiator {
         write_pdu(&mut self.writer, &pdu, false, false).await?;
         self.cmd_sn += 1;
 
-        // Read SCSI response
-        let resp = read_pdu(&mut self.reader, false, false).await?;
+        // Read SCSI response (may get R2T first if target requires it)
+        let resp = self.read_response().await?;
         match resp.bhs.opcode() {
             Some(Opcode::ScsiResponse) => {
                 let status = resp.bhs.status();
@@ -402,7 +435,8 @@ impl IscsiInitiator {
                 }
                 Ok(())
             }
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected ScsiResponse after write")),
+            other => Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("expected ScsiResponse after write, got {:?} (raw={:#x})", other, resp.bhs.raw[0]))),
         }
     }
 
@@ -423,7 +457,7 @@ impl IscsiInitiator {
         write_pdu(&mut self.writer, &pdu, false, false).await?;
         self.cmd_sn += 1;
 
-        let resp = read_pdu(&mut self.reader, false, false).await?;
+        let resp = self.read_response().await?;
         if resp.bhs.opcode() != Some(Opcode::LogoutResponse) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "expected LogoutResponse"));
         }
