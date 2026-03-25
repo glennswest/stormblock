@@ -12,10 +12,18 @@
 - **feat:** `PlacementError` enum and result types for placement operations
 
 ### 2026-03-24
-- **fix:** iSCSI initiator login — single-phase Security→FullFeature for MikroTik compatibility, proper ExpStatSN tracking across login phases, verbose error reporting with status class/detail/params
-- **fix:** iSCSI initiator read/write — use actual block_size from READ CAPACITY instead of hardcoded 4096
+- **fix:** iSCSI initiator — strict two-phase login (Security→Operational→FullFeature) for LIO Target compatibility
+- **fix:** iSCSI initiator — same ITT across all login PDUs per RFC 7143
+- **fix:** iSCSI initiator — TSIH propagation from Phase 1 to Phase 2
+- **fix:** iSCSI initiator — unique ISID per connection (atomic counter) to prevent session collisions
+- **fix:** iSCSI initiator — ExpStatSN+1 after login for full-feature phase
+- **fix:** iSCSI initiator — use target's ExpCmdSN from login response for SCSI command sequencing
+- **fix:** iSCSI initiator — remove Immediate flag from SCSI write commands (LIO resets on Immediate writes)
+- **fix:** iSCSI initiator — NOP-In handling in read loop
+- **fix:** iSCSI initiator — use actual block_size from READ CAPACITY instead of hardcoded 4096
 - **feat:** Containerfile.iscsi-test — pre-built iSCSI test container for fast iteration
 - **feat:** run-iscsi-test.sh — unified runner for pre-built container or cargo build fallback
+- **test:** All 3 external iSCSI tests pass against real LIO Target (discovery, write/read/verify, multi-block I/O)
 
 ### 2026-03-21
 - **feat:** Shared io_uring-style ring buffer IPC — zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd (`src/drive/uring_channel.rs`, `src/drive/uring_server.rs`)
