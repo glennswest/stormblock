@@ -315,9 +315,15 @@ impl Slab {
         let header_bytes = header.to_bytes();
         device.write(0, &header_bytes).await?;
 
-        // Write zeroed slot table
+        // Write zeroed slot table (padded to device block_size for alignment)
         let table_bytes = total_slots as usize * SLOT_ENTRY_SIZE as usize;
-        let zero_table = vec![0u8; table_bytes];
+        let bs = device.block_size() as usize;
+        let padded_table = if bs > 1 && table_bytes % bs != 0 {
+            table_bytes.div_ceil(bs) * bs
+        } else {
+            table_bytes
+        };
+        let zero_table = vec![0u8; padded_table];
         device.write(table_offset, &zero_table).await?;
         device.flush().await?;
 
@@ -347,8 +353,14 @@ impl Slab {
         let total_slots = header.total_slots as usize;
         let table_size = total_slots * SLOT_ENTRY_SIZE as usize;
 
-        // Read slot table
-        let mut table_buf = vec![0u8; table_size];
+        // Read slot table (padded to block_size for alignment)
+        let bs = device.block_size() as usize;
+        let read_size = if bs > 1 && table_size % bs != 0 {
+            table_size.div_ceil(bs) * bs
+        } else {
+            table_size
+        };
+        let mut table_buf = vec![0u8; read_size];
         device.read(header.table_offset, &mut table_buf).await?;
 
         let mut free_bitmap = BitVec::repeat(true, total_slots);
@@ -598,11 +610,29 @@ impl Slab {
     }
 
     /// Persist a single slot entry to disk.
+    ///
+    /// Slot entries are 64 bytes, but the device may have a larger block size
+    /// (e.g., 512 bytes for iSCSI). We do a read-modify-write of the aligned
+    /// sector to handle devices that require block-aligned I/O.
     async fn persist_slot(&self, slot_idx: u32) -> DriveResult<()> {
         let slot = &self.slots[slot_idx as usize];
-        let bytes = slot.to_bytes();
-        let offset = self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
-        self.device.write(offset, &bytes).await?;
+        let entry_bytes = slot.to_bytes();
+        let entry_offset = self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
+        let bs = self.device.block_size() as u64;
+
+        if bs <= SLOT_ENTRY_SIZE {
+            // Block size <= entry size — direct write is fine
+            self.device.write(entry_offset, &entry_bytes).await?;
+        } else {
+            // Read-modify-write: read aligned sector, patch entry, write back
+            let sector_start = (entry_offset / bs) * bs;
+            let offset_in_sector = (entry_offset - sector_start) as usize;
+            let mut sector = vec![0u8; bs as usize];
+            self.device.read(sector_start, &mut sector).await?;
+            sector[offset_in_sector..offset_in_sector + SLOT_ENTRY_SIZE as usize]
+                .copy_from_slice(&entry_bytes);
+            self.device.write(sector_start, &sector).await?;
+        }
         Ok(())
     }
 
