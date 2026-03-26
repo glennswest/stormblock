@@ -152,9 +152,11 @@ mount /dev/ublkb4 "$MNT/home"
 echo "Filesystems mounted at $MNT"
 
 # Install Fedora base system + kernel (single dnf transaction)
+# noscripts: skip RPM scriptlets that fail in containers (kernel-install, hwdb)
 echo "Installing Fedora $FEDORA_RELEASE (this takes a few minutes)..."
 dnf5 --installroot="$MNT" --use-host-config --releasever="$FEDORA_RELEASE" -y \
     --setopt=install_weak_deps=False \
+    --setopt=tsflags=noscripts \
     install \
     basesystem \
     filesystem \
