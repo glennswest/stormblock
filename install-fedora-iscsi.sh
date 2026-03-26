@@ -151,27 +151,32 @@ mount /dev/ublkb0 "$MNT/boot/efi"
 mount /dev/ublkb4 "$MNT/home"
 echo "Filesystems mounted at $MNT"
 
-# Install Fedora minimal
+# Install Fedora base system + kernel (single dnf transaction)
 echo "Installing Fedora $FEDORA_RELEASE (this takes a few minutes)..."
 dnf5 --installroot="$MNT" --use-host-config --releasever="$FEDORA_RELEASE" -y \
     --setopt=install_weak_deps=False \
-    group install "Minimal Install" 2>&1 | tail -20
-
-# Install additional packages
-echo "Installing additional packages..."
-dnf5 --installroot="$MNT" --use-host-config --releasever="$FEDORA_RELEASE" -y \
-    --setopt=install_weak_deps=False \
     install \
+    basesystem \
+    filesystem \
+    setup \
+    fedora-release \
+    glibc \
+    bash \
+    coreutils \
+    util-linux \
     kernel \
     systemd \
+    systemd-udev \
     NetworkManager \
     passwd \
+    shadow-utils \
     rootfiles \
     vim-minimal \
     less \
     iproute \
     iputils \
-    2>&1 | tail -20
+    dnf5 \
+    2>&1 | tail -30
 
 # Copy stormblock binary
 echo "Installing stormblock binary..."
