@@ -364,15 +364,25 @@ impl UblkServer {
             capacity, block_size, sectors,
         );
 
-        // --- Open /dev/ublkcN and mmap I/O descriptor buffers ---
+        // --- Open /dev/ublkcN (wait for devtmpfs to create it) ---
         let char_path = format!("/dev/ublkc{}", assigned_id);
-        let char_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&char_path)
-            .map_err(|e| DriveError::Other(anyhow::anyhow!(
-                "failed to open {}: {e}", char_path
-            )))?;
+        let char_file = {
+            let mut retries = 50u32; // 5 seconds max (50 × 100ms)
+            loop {
+                match OpenOptions::new().read(true).write(true).open(&char_path) {
+                    Ok(f) => break f,
+                    Err(_) if retries > 0 => {
+                        retries -= 1;
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(e) => {
+                        return Err(DriveError::Other(anyhow::anyhow!(
+                            "failed to open {}: {e}", char_path
+                        )));
+                    }
+                }
+            }
+        };
         let char_fd = char_file.as_raw_fd();
 
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as libc::off_t;
