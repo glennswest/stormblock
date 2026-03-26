@@ -97,17 +97,28 @@ impl Default for UblkCtrlDevInfo {
 
 /// Control command payload — must match kernel `ublksrv_ctrl_cmd` exactly.
 /// Placed in the 80-byte SQE cmd area (remaining bytes zeroed).
+///
+/// Kernel layout (include/uapi/linux/ublk_cmd.h):
+///   __u32 dev_id;        // offset 0
+///   __u16 queue_id;      // offset 4
+///   __u16 len;           // offset 6 — buffer size
+///   __u64 addr;          // offset 8 — user-space pointer
+///   __u64 data[1];       // offset 16 — inline data
+///   __u16 dev_path_len;  // offset 24
+///   __u16 pad;           // offset 26
+///   __u32 reserved;      // offset 28
+/// Total: 32 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct UblkCtrlCmd {
     dev_id: u32,        // offset 0
     queue_id: u16,      // offset 4
-    _pad1: u16,         // offset 6
-    data: [u64; 2],     // offset 8 (16 bytes, unused for ADD_DEV)
-    addr: u64,          // offset 24 — user-space pointer to UblkCtrlDevInfo
-    len: u16,           // offset 32 — size of buffer at addr
-    dev_path_len: u16,  // offset 34
-    _pad2: u32,         // offset 36
+    len: u16,           // offset 6
+    addr: u64,          // offset 8
+    data: u64,          // offset 16
+    dev_path_len: u16,  // offset 24
+    _pad: u16,          // offset 26
+    _reserved: u32,     // offset 28
 }
 
 impl UblkCtrlCmd {
@@ -115,12 +126,12 @@ impl UblkCtrlCmd {
         Self {
             dev_id,
             queue_id: 0,
-            _pad1: 0,
-            data: [0; 2],
-            addr: 0,
             len: 0,
+            addr: 0,
+            data: 0,
             dev_path_len: 0,
-            _pad2: 0,
+            _pad: 0,
+            _reserved: 0,
         }
     }
 
@@ -709,7 +720,7 @@ mod tests {
     #[test]
     fn ublk_abi_struct_sizes() {
         assert_eq!(std::mem::size_of::<UblkCtrlDevInfo>(), 64);
-        assert_eq!(std::mem::size_of::<UblkCtrlCmd>(), 40);
+        assert_eq!(std::mem::size_of::<UblkCtrlCmd>(), 32);
         assert_eq!(std::mem::size_of::<UblkIoCmd>(), 16);
         assert_eq!(std::mem::size_of::<UblkIoDesc>(), 24);
         assert_eq!(std::mem::size_of::<UblkParamBasic>(), 32);
@@ -724,14 +735,14 @@ mod tests {
         assert_eq!(cmd.addr, 0);
         assert_eq!(cmd.len, 0);
         let bytes = cmd.as_bytes();
-        assert_eq!(bytes.len(), 40);
+        assert_eq!(bytes.len(), 32);
         // dev_id at offset 0, little-endian
         assert_eq!(bytes[0], 42);
         assert_eq!(bytes[1], 0);
-        // addr at offset 24
-        assert_eq!(bytes[24], 0);
-        // len at offset 32
-        assert_eq!(bytes[32], 0);
+        // addr at offset 8
+        assert_eq!(bytes[8], 0);
+        // len at offset 6
+        assert_eq!(bytes[6], 0);
     }
 
     #[test]
