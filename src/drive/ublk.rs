@@ -314,6 +314,7 @@ impl UblkServer {
             u32::MAX,
             &mut dev_info as *mut UblkCtrlDevInfo as u64,
             std::mem::size_of::<UblkCtrlDevInfo>() as u32,
+            0,
         )?;
 
         let assigned_id = dev_info.dev_id;
@@ -357,6 +358,7 @@ impl UblkServer {
             assigned_id,
             &mut params as *mut UblkParams as u64,
             std::mem::size_of::<UblkParams>() as u32,
+            0,
         )?;
 
         tracing::info!(
@@ -491,7 +493,12 @@ impl UblkServer {
         startup_barrier.wait();
 
         // --- START_DEV (all queues now registered with kernel) ---
-        submit_ctrl_cmd(&mut ctrl_ring, ctrl_fd, UBLK_U_CMD_START_DEV, assigned_id, 0, 0)?;
+        // START_DEV: data[0] must contain the server PID (kernel checks > 0)
+        submit_ctrl_cmd(
+            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_START_DEV,
+            assigned_id, 0, 0,
+            std::process::id() as u64,
+        )?;
         tracing::info!("ublk device started: /dev/ublkb{}", assigned_id);
 
         // --- Wait for shutdown signal ---
@@ -501,7 +508,7 @@ impl UblkServer {
 
         // --- STOP_DEV ---
         let _ = submit_ctrl_cmd(
-            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0,
+            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0, 0,
         );
 
         // Wait for all workers to exit
@@ -511,7 +518,7 @@ impl UblkServer {
 
         // --- DEL_DEV ---
         let _ = submit_ctrl_cmd(
-            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, assigned_id, 0, 0,
+            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, assigned_id, 0, 0, 0,
         );
 
         // Unmap descriptor buffers
@@ -539,10 +546,12 @@ fn submit_ctrl_cmd(
     dev_id: u32,
     addr: u64,
     len: u32,
+    data: u64,
 ) -> DriveResult<i32> {
     let mut ctrl_cmd = UblkCtrlCmd::new(dev_id);
     ctrl_cmd.addr = addr;
     ctrl_cmd.len = len as u16;
+    ctrl_cmd.data = data;
 
     // Copy struct bytes into the 80-byte cmd payload (zero-padded)
     let mut cmd_bytes = [0u8; 80];
