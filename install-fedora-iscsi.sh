@@ -59,42 +59,14 @@ echo "Fedora:  $FEDORA_RELEASE"
 echo ""
 
 # ============================================================
-# Phase 1: Get StormBlock binary
+# Phase 1: Build StormBlock
 # ============================================================
-echo "=== Phase 1: Get StormBlock binary ==="
+echo "=== Phase 1: Build StormBlock ==="
 
-GITEA="${GITEA_URL:-http://git.gt.lo}"
-GITEA_REPO="${GITEA_REPO:-gwest/stormblock}"
-
-# Try downloading pre-built binary from git.gt.lo release
-STORMBLOCK_BIN="/usr/local/bin/stormblock"
-if [ ! -f "$STORMBLOCK_BIN" ]; then
-    echo "Downloading pre-built binary from $GITEA..."
-    # Get latest release asset URL
-    ASSET_URL=$(curl -sf "$GITEA/api/repos/$GITEA_REPO/releases" \
-        | python3 -c "
-import sys,json
-releases = json.load(sys.stdin)
-for r in releases:
-    for a in r.get('assets',[]):
-        if a.get('name') == 'stormblock':
-            print(a.get('download_url','')); sys.exit(0)
-" 2>/dev/null)
-
-    if [ -n "$ASSET_URL" ]; then
-        curl -sLo "$STORMBLOCK_BIN" "$ASSET_URL"
-        chmod +x "$STORMBLOCK_BIN"
-        echo "Downloaded: $(du -h "$STORMBLOCK_BIN" | cut -f1)"
-    else
-        echo "No pre-built binary found, building from source..."
-        cd /build
-        cargo build --release 2>&1
-        STORMBLOCK_BIN="$(pwd)/target/release/stormblock"
-        echo "Build complete: $(du -h "$STORMBLOCK_BIN" | cut -f1)"
-    fi
-else
-    echo "Using existing binary: $(du -h "$STORMBLOCK_BIN" | cut -f1)"
-fi
+cd /build
+cargo build --release 2>&1
+STORMBLOCK_BIN="$(pwd)/target/release/stormblock"
+echo "Build complete: $(du -h "$STORMBLOCK_BIN" | cut -f1)"
 
 # ============================================================
 # Phase 2: Provision iSCSI + ublk
