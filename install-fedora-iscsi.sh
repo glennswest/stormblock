@@ -153,13 +153,13 @@ echo "Filesystems mounted at $MNT"
 
 # Install Fedora minimal
 echo "Installing Fedora $FEDORA_RELEASE (this takes a few minutes)..."
-dnf --installroot="$MNT" --releasever="$FEDORA_RELEASE" -y \
+dnf5 --installroot="$MNT" --releasever="$FEDORA_RELEASE" -y \
     --setopt=install_weak_deps=False \
-    groupinstall "Minimal Install" 2>&1 | tail -5
+    group install "Minimal Install" 2>&1 | tail -5
 
 # Install additional packages
 echo "Installing additional packages..."
-dnf --installroot="$MNT" --releasever="$FEDORA_RELEASE" -y \
+dnf5 --installroot="$MNT" --releasever="$FEDORA_RELEASE" -y \
     --setopt=install_weak_deps=False \
     install \
     kernel \

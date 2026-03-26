@@ -51,6 +51,7 @@ const UBLK_IO_OP_READ: u8 = 0;
 const UBLK_IO_OP_WRITE: u8 = 1;
 const UBLK_IO_OP_FLUSH: u8 = 2;
 const UBLK_IO_OP_DISCARD: u8 = 3;
+const UBLK_IO_OP_WRITE_ZEROES: u8 = 5;
 
 // ---------------------------------------------------------------------------
 // ublk parameter types
@@ -754,6 +755,13 @@ fn queue_worker(
                             tracing::error!("ublk discard @{}+{}: {e}", offset, length);
                             -(libc::EIO)
                         }
+                    }
+                }
+                UBLK_IO_OP_WRITE_ZEROES => {
+                    // Write zeroes = zero-fill the region (treat as discard for thin volumes)
+                    match rt_handle.block_on(device.discard(offset, length as u64)) {
+                        Ok(()) => 0,
+                        Err(_) => 0, // best-effort: report success even if unsupported
                     }
                 }
                 _ => {

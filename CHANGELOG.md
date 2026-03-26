@@ -12,6 +12,11 @@
 - **fix:** ublk `queue_id` must be `-1` (0xFFFF) for ADD_DEV — kernel validates this field
 - **fix:** ublk mknod fallback for `/dev/ublkcN` in containers (read major:minor from sysfs)
 - **fix:** ublk submit FETCH_REQ before START_DEV — kernel requires all queues registered first (use Barrier for sync)
+- **fix:** ublk START_DEV requires PID in `data[0]` — kernel validates `ublksrv_pid > 0`
+- **fix:** ublk mknod `/dev/ublkbN` block devices in containers (sysfs major:minor fallback)
+- **fix:** ublk orphan cleanup — STOP+DEL stale devices before ADD_DEV, request specific dev_id
+- **fix:** ublk WRITE_ZEROES (op 5) handler — treat as discard for thin volumes
+- **fix:** `install-fedora-iscsi.sh` — use `dnf5 group install` syntax (rawhide has dnf5, not dnf4)
 
 ### 2026-03-25
 - **feat:** `IscsiDevice` — production iSCSI initiator implementing `BlockDevice` trait (login, READ/WRITE(10), READ CAPACITY, UNMAP, NOP-Out keepalive)
