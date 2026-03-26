@@ -266,16 +266,30 @@ echo "=== Phase 6: Build stormblock-initramfs ==="
 
 # Find the installed kernel version
 KVER=$(ls "$MNT/lib/modules/" | sort -V | tail -1)
-VMLINUZ=$(find "$MNT/boot" -name "vmlinuz-*" | sort -V | tail -1)
+VMLINUZ=$(find "$MNT/boot" -name "vmlinuz-*" 2>/dev/null | sort -V | tail -1)
 
 if [ -z "$KVER" ]; then
     echo "WARNING: No kernel modules found, using host kernel version"
     KVER=$(uname -r)
 fi
 
+# With noscripts, kernel-install doesn't run — vmlinuz may be in lib/modules
 if [ -z "$VMLINUZ" ]; then
-    echo "WARNING: No vmlinuz found in $MNT/boot"
-    VMLINUZ=""
+    # Look in kernel module directory (kernel-core installs vmlinuz here)
+    if [ -f "$MNT/lib/modules/$KVER/vmlinuz" ]; then
+        cp "$MNT/lib/modules/$KVER/vmlinuz" "$MNT/boot/vmlinuz-$KVER"
+        VMLINUZ="$MNT/boot/vmlinuz-$KVER"
+        echo "Copied vmlinuz from lib/modules to /boot"
+    else
+        echo "WARNING: No vmlinuz found"
+        VMLINUZ=""
+    fi
+fi
+
+# Ensure busybox is available for initramfs build
+if ! command -v busybox >/dev/null 2>&1; then
+    echo "Installing busybox for initramfs build..."
+    dnf5 -y install busybox 2>&1 | tail -5 || true
 fi
 
 echo "Kernel version: $KVER"
