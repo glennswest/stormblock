@@ -25,7 +25,7 @@
 set -euo pipefail
 
 PORTAL="${1:-192.168.10.1}"
-IQN="${2:-iqn.2000-02.com.mikrotik:fedora-boot}"
+IQN="${2:-iqn.2000-02.com.mikrotik:file--raid1-images-kube-gt-lo-raid1-disks-fedora-boot-raw}"
 PORT="${3:-3260}"
 LAYOUT="esp:256M,boot:512M,root:7G,swap:1G,home:rest"
 FEDORA_RELEASE="${FEDORA_RELEASE:-41}"
