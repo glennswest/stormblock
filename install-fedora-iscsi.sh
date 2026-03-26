@@ -85,16 +85,22 @@ if ! lsmod | grep -q ublk_drv; then
     modprobe ublk_drv 2>/dev/null || {
         echo "modprobe failed — installing kernel modules for host kernel..."
         KVER=$(uname -r)
-        dnf install -y "kernel-modules-$KVER" 2>&1 | tail -5 || \
-            dnf install -y kernel-modules 2>&1 | tail -5 || true
-        depmod -a 2>/dev/null || true
+        # Extract Fedora release from kernel version (e.g., 6.19.7-300.fc44 → 44)
+        HOST_RELEASE=$(echo "$KVER" | grep -oP 'fc\K[0-9]+')
+        if [ -n "$HOST_RELEASE" ]; then
+            echo "Host kernel: $KVER (Fedora $HOST_RELEASE)"
+            dnf install -y --releasever="$HOST_RELEASE" "kernel-modules-$KVER" 2>&1 | tail -5 || true
+        else
+            dnf install -y "kernel-modules-$KVER" 2>&1 | tail -5 || true
+        fi
+        depmod -a "$KVER" 2>/dev/null || true
         modprobe ublk_drv || {
-            # Try direct insmod as last resort
-            UBLK_KO=$(find /lib/modules/ -name 'ublk_drv.ko*' 2>/dev/null | head -1)
+            # Try direct insmod with matching kernel version
+            UBLK_KO=$(find "/lib/modules/$KVER" -name 'ublk_drv.ko*' 2>/dev/null | head -1)
             if [ -n "$UBLK_KO" ]; then
-                insmod "$UBLK_KO" || { echo "FATAL: Failed to load ublk_drv module"; exit 1; }
+                insmod "$UBLK_KO" || { echo "FATAL: Failed to load ublk_drv"; exit 1; }
             else
-                echo "FATAL: ublk_drv.ko not found anywhere"; exit 1
+                echo "FATAL: ublk_drv.ko not found for kernel $KVER"; exit 1
             fi
         }
     }
