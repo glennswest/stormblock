@@ -1,0 +1,36 @@
+# StormBlock ublk block device server — safety net for post-switch_root boot.
+#
+# During LinuxBoot, the initramfs /init starts stormblock as a background process.
+# That process survives switch_root (PID is reparented). This systemd unit is a
+# safety net: if the original process dies, systemd restarts it.
+#
+# The ublk devices persist as long as the stormblock userspace server is alive.
+# If stormblock dies, all ublk devices become unresponsive. This unit ensures
+# the server is restarted immediately.
+#
+# Configuration is passed via /etc/stormblock/boot.env (written during install):
+#   PORTAL=192.168.10.1
+#   IQN=iqn.2000-02.com.mikrotik:boot
+#   LAYOUT=esp:256M,boot:512M,root:7G,swap:1G,home:rest
+#   PORT=3260
+
+[Unit]
+Description=StormBlock ublk block device server
+DefaultDependencies=no
+Before=local-fs-pre.target
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/sbin/stormblock
+ConditionPathExists=/etc/stormblock/boot.env
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/stormblock/boot.env
+ExecStart=/usr/sbin/stormblock boot-iscsi --portal ${PORTAL} --port ${PORT} --iqn ${IQN} --layout ${LAYOUT} --ublk
+Restart=on-failure
+RestartSec=2
+KillMode=process
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
