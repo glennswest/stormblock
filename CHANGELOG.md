@@ -8,6 +8,7 @@
 - **feat:** `install-fedora-iscsi.sh` — 8-phase mkube CI job: provision iSCSI disk, format filesystems, install Fedora via dnf --installroot, configure for LinuxBoot-style boot
 - **feat:** `systemd/stormblock-ublk.service` — safety net for post-switch_root (restarts stormblock if initramfs process dies)
 - **fix:** ublk `UblkCtrlCmd` struct layout — match kernel UAPI `ublksrv_ctrl_cmd` exactly (32 bytes, len@6, addr@8)
+- **fix:** ublk ioctl-encoded command numbers (`UBLK_U_CMD_*`) — required by kernel 6.1+ (was sending raw 0x04, now 0xC0207504)
 
 ### 2026-03-25
 - **feat:** `IscsiDevice` — production iSCSI initiator implementing `BlockDevice` trait (login, READ/WRITE(10), READ CAPACITY, UNMAP, NOP-Out keepalive)
