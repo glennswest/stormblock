@@ -80,32 +80,20 @@ STORMBLOCK_BIN="$(pwd)/target/release/stormblock"
 echo ""
 echo "=== Phase 2: Provision iSCSI + ublk ==="
 
-# Load ublk driver
-if ! lsmod | grep -q ublk_drv; then
+# Ensure ublk driver is loaded
+if [ -c /dev/ublk-control ]; then
+    echo "ublk_drv already loaded (/dev/ublk-control present)"
+elif lsmod 2>/dev/null | grep -q ublk_drv; then
+    echo "ublk_drv loaded (waiting for /dev/ublk-control...)"
+    sleep 2
+else
     modprobe ublk_drv 2>/dev/null || {
-        echo "modprobe failed — installing kernel modules for host kernel..."
-        KVER=$(uname -r)
-        # Extract Fedora release from kernel version (e.g., 6.19.7-300.fc44 → 44)
-        HOST_RELEASE=$(echo "$KVER" | grep -oP 'fc\K[0-9]+')
-        if [ -n "$HOST_RELEASE" ]; then
-            echo "Host kernel: $KVER (Fedora $HOST_RELEASE)"
-            dnf install -y --releasever="$HOST_RELEASE" "kernel-modules-$KVER" 2>&1 | tail -5 || true
-        else
-            dnf install -y "kernel-modules-$KVER" 2>&1 | tail -5 || true
-        fi
-        depmod -a "$KVER" 2>/dev/null || true
-        modprobe ublk_drv || {
-            # Try direct insmod with matching kernel version
-            UBLK_KO=$(find "/lib/modules/$KVER" -name 'ublk_drv.ko*' 2>/dev/null | head -1)
-            if [ -n "$UBLK_KO" ]; then
-                insmod "$UBLK_KO" || { echo "FATAL: Failed to load ublk_drv"; exit 1; }
-            else
-                echo "FATAL: ublk_drv.ko not found for kernel $KVER"; exit 1
-            fi
-        }
+        echo "FATAL: ublk_drv not loaded and modprobe failed."
+        echo "Load it on the host first: modprobe ublk_drv"
+        exit 1
     }
+    echo "ublk_drv loaded via modprobe"
 fi
-echo "ublk_drv module loaded"
 
 # Start stormblock in background
 echo "Starting StormBlock boot-iscsi with ublk export..."
