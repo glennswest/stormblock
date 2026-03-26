@@ -10,6 +10,8 @@
 - **fix:** ublk `UblkCtrlCmd` struct layout — match kernel UAPI `ublksrv_ctrl_cmd` exactly (32 bytes, len@6, addr@8)
 - **fix:** ublk ioctl-encoded command numbers (`UBLK_U_CMD_*`) — required by kernel 6.1+ (was sending raw 0x04, now 0xC0207504)
 - **fix:** ublk `queue_id` must be `-1` (0xFFFF) for ADD_DEV — kernel validates this field
+- **fix:** ublk mknod fallback for `/dev/ublkcN` in containers (read major:minor from sysfs)
+- **fix:** ublk submit FETCH_REQ before START_DEV — kernel requires all queues registered first (use Barrier for sync)
 
 ### 2026-03-25
 - **feat:** `IscsiDevice` — production iSCSI initiator implementing `BlockDevice` trait (login, READ/WRITE(10), READ CAPACITY, UNMAP, NOP-Out keepalive)
