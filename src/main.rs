@@ -134,6 +134,9 @@ enum SubCommand {
         /// Partition layout (format: name:size,... e.g. esp:256M,boot:512M,root:6G,swap:1G,home:rest)
         #[arg(long)]
         layout: String,
+        /// Export each partition as /dev/ublkbN (requires Linux 6.0+ with ublk_drv loaded)
+        #[arg(long)]
+        ublk: bool,
     },
     /// Migrate boot volumes from iSCSI slab to local disk
     MigrateBoot {
@@ -253,8 +256,8 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Use the REST API POST /api/v1/volumes/{{id}}/migrate to trigger migration.");
                 return Ok(());
             }
-            SubCommand::BootIscsi { portal, port, iqn, layout } => {
-                return handle_boot_iscsi(portal, *port, iqn, layout).await;
+            SubCommand::BootIscsi { portal, port, iqn, layout, ublk } => {
+                return handle_boot_iscsi(portal, *port, iqn, layout, *ublk).await;
             }
             SubCommand::MigrateBoot { source_portal, source_port, source_iqn, target_device, target_tier } => {
                 return handle_migrate_boot(source_portal, *source_port, source_iqn, target_device, target_tier).await;
@@ -662,6 +665,7 @@ async fn handle_boot_iscsi(
     port: u16,
     iqn: &str,
     layout_str: &str,
+    ublk: bool,
 ) -> anyhow::Result<()> {
     let layout = BootDiskLayout::parse(layout_str)
         .map_err(|e| anyhow::anyhow!("layout parse error: {e}"))?;
@@ -693,17 +697,60 @@ async fn handle_boot_iscsi(
         );
     }
 
-    println!("\nVolumes ready for ublk export.");
-    println!("On Linux, each volume can be exported as /dev/ublkbN:");
-    for (i, part) in result.partitions.iter().enumerate() {
-        println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
-            stormblock::mgmt::config::human_size(part.size), part.fs_type);
+    // Export partitions via ublk if requested (Linux only)
+    #[cfg(target_os = "linux")]
+    if ublk {
+        use stormblock::drive::ublk::UblkServer;
+
+        println!("\nStarting ublk export for {} partitions...", result.partitions.len());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut ublk_handles = Vec::new();
+
+        for (i, part) in result.partitions.iter().enumerate() {
+            let server = UblkServer::new(part.handle.clone() as Arc<dyn BlockDevice>);
+            let rx = shutdown_rx.clone();
+            let name = part.name.clone();
+            let handle = tokio::spawn(async move {
+                match server.run(rx).await {
+                    Ok(()) => tracing::info!("ublk#{i} ({name}) stopped"),
+                    Err(e) => tracing::error!("ublk#{i} ({name}) error: {e}"),
+                }
+            });
+            ublk_handles.push(handle);
+            println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
+                stormblock::mgmt::config::human_size(part.size), part.fs_type);
+        }
+
+        println!("\nublk devices ready. Press Ctrl+C to stop.");
+        tokio::signal::ctrl_c().await?;
+        println!("Shutting down...");
+
+        // Signal all ublk servers to stop
+        let _ = shutdown_tx.send(true);
+        for h in ublk_handles {
+            let _ = h.await;
+        }
     }
 
-    // Keep running until Ctrl+C
-    println!("\nPress Ctrl+C to stop");
-    tokio::signal::ctrl_c().await?;
-    println!("Shutting down...");
+    #[cfg(not(target_os = "linux"))]
+    if ublk {
+        eprintln!("Error: --ublk requires Linux 6.0+ with ublk_drv module loaded");
+        std::process::exit(1);
+    }
+
+    if !ublk {
+        println!("\nVolumes ready for ublk export.");
+        println!("On Linux, each volume can be exported as /dev/ublkbN:");
+        for (i, part) in result.partitions.iter().enumerate() {
+            println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
+                stormblock::mgmt::config::human_size(part.size), part.fs_type);
+        }
+
+        // Keep running until Ctrl+C
+        println!("\nPress Ctrl+C to stop");
+        tokio::signal::ctrl_c().await?;
+        println!("Shutting down...");
+    }
 
     // Disconnect iSCSI
     if let Err(e) = result.iscsi_device.disconnect().await {
