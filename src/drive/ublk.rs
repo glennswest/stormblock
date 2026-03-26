@@ -454,12 +454,12 @@ impl UblkServer {
             desc_ptrs.push(ptr as *const UblkIoDesc);
         }
 
-        // --- START_DEV ---
-        submit_ctrl_cmd(&mut ctrl_ring, ctrl_fd, UBLK_U_CMD_START_DEV, assigned_id, 0, 0)?;
-        self.running.store(true, Ordering::SeqCst);
-        tracing::info!("ublk device started: /dev/ublkb{}", assigned_id);
-
         // --- Spawn per-queue I/O worker threads ---
+        // Workers must submit FETCH_REQ before START_DEV (kernel checks
+        // nr_queues_ready == nr_hw_queues). Use a barrier for sync.
+        let startup_barrier = Arc::new(std::sync::Barrier::new(nr_queues as usize + 1));
+        self.running.store(true, Ordering::SeqCst);
+
         let mut workers = Vec::with_capacity(nr_queues as usize);
         for q in 0..nr_queues {
             let device = self.device.clone();
@@ -469,18 +469,15 @@ impl UblkServer {
             let depth = queue_depth;
             let max_io = DEFAULT_MAX_IO_BYTES as usize;
             let rt_handle = tokio::runtime::Handle::current();
+            let barrier = startup_barrier.clone();
 
-            // Safety: desc_base points to mmap'd memory that lives until after
-            // workers are joined. char_fd is owned by char_file on this stack.
             let handle = std::thread::Builder::new()
                 .name(format!("ublk-q{}", q))
                 .spawn(move || {
-                    // Bind the whole SendPtr to force Rust 2021 to capture the
-                    // Send wrapper, not just the inner raw pointer field.
                     let desc_base = desc_base;
                     queue_worker(
                         q, raw_char_fd, desc_base.0, depth, max_io,
-                        device, running, rt_handle,
+                        device, running, rt_handle, barrier,
                     );
                 })
                 .map_err(|e| DriveError::Other(anyhow::anyhow!(
@@ -489,6 +486,13 @@ impl UblkServer {
 
             workers.push(handle);
         }
+
+        // Wait for all workers to submit their initial FETCH_REQs
+        startup_barrier.wait();
+
+        // --- START_DEV (all queues now registered with kernel) ---
+        submit_ctrl_cmd(&mut ctrl_ring, ctrl_fd, UBLK_U_CMD_START_DEV, assigned_id, 0, 0)?;
+        tracing::info!("ublk device started: /dev/ublkb{}", assigned_id);
 
         // --- Wait for shutdown signal ---
         let _ = shutdown.changed().await;
@@ -591,6 +595,7 @@ fn queue_worker(
     device: Arc<dyn BlockDevice>,
     running: Arc<AtomicBool>,
     rt_handle: tokio::runtime::Handle,
+    startup_barrier: Arc<std::sync::Barrier>,
 ) {
     // Per-queue io_uring ring
     let mut ring: IoUring<squeue::Entry128> = match IoUring::builder()
@@ -599,6 +604,7 @@ fn queue_worker(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("ublk queue {}: io_uring create failed: {e}", queue_id);
+            startup_barrier.wait(); // unblock main even on failure
             return;
         }
     };
@@ -608,20 +614,25 @@ fn queue_worker(
         .map(|_| vec![0u8; max_io_bytes])
         .collect();
 
-    // Submit initial FETCH_REQ for all tags
+    // Submit initial FETCH_REQ for all tags — registers this queue with kernel
     for tag in 0..queue_depth {
         if submit_io_fetch(&mut ring, char_fd, queue_id, tag, &bufs[tag as usize]).is_err() {
             tracing::error!("ublk queue {}: initial FETCH_REQ failed for tag {}", queue_id, tag);
+            startup_barrier.wait();
             return;
         }
     }
 
     if let Err(e) = ring.submit() {
         tracing::error!("ublk queue {}: initial submit failed: {e}", queue_id);
+        startup_barrier.wait();
         return;
     }
 
-    // I/O loop
+    // Signal main thread: this queue's FETCH_REQs are submitted
+    startup_barrier.wait();
+
+    // I/O loop (START_DEV has been called by main thread after barrier)
     while running.load(Ordering::Relaxed) {
         match ring.submit_and_wait(1) {
             Ok(_) => {}
