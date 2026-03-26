@@ -431,7 +431,7 @@ impl UblkServer {
 
                     let c_path = std::ffi::CString::new(char_path.clone())
                         .map_err(|e| DriveError::Other(e.into()))?;
-                    let dev = unsafe { libc::makedev(major, minor) };
+                    let dev = libc::makedev(major, minor);
                     let rc = unsafe {
                         libc::mknod(c_path.as_ptr(), libc::S_IFCHR | 0o666, dev)
                     };
@@ -532,7 +532,7 @@ impl UblkServer {
                     parts.get(1).map(|s| s.parse::<u32>()),
                 ) {
                     let c_path = std::ffi::CString::new(blk_path.clone()).unwrap();
-                    let dev = unsafe { libc::makedev(maj, min) };
+                    let dev = libc::makedev(maj, min);
                     if unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFBLK | 0o666, dev) } == 0 {
                         tracing::info!("mknod {} ({}:{})", blk_path, maj, min);
                     }

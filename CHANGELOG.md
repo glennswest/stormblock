@@ -17,6 +17,8 @@
 - **fix:** ublk orphan cleanup — STOP+DEL stale devices before ADD_DEV, request specific dev_id
 - **fix:** ublk WRITE_ZEROES (op 5) handler — treat as discard for thin volumes
 - **fix:** `install-fedora-iscsi.sh` — use `dnf5 group install` syntax (rawhide has dnf5, not dnf4)
+- **fix:** `install-fedora-iscsi.sh` — `--use-host-config` for installroot repo access, explicit package list (no Minimal Install group), `tsflags=noscripts` for container scriptlet failures, vmlinuz copy from lib/modules, busybox install for initramfs build
+- **chore:** Full 8-phase Fedora iSCSI install verified: 163 packages installed, vmlinuz (18M) + initramfs (4.4M) staged, all verification checks passed
 
 ### 2026-03-25
 - **feat:** `IscsiDevice` — production iSCSI initiator implementing `BlockDevice` trait (login, READ/WRITE(10), READ CAPACITY, UNMAP, NOP-Out keepalive)
