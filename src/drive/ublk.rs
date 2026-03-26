@@ -364,22 +364,66 @@ impl UblkServer {
             capacity, block_size, sectors,
         );
 
-        // --- Open /dev/ublkcN (wait for devtmpfs to create it) ---
+        // --- Open /dev/ublkcN ---
+        // In containers, devtmpfs may not auto-create the char device node.
+        // If it doesn't exist, read major:minor from sysfs and mknod it.
         let char_path = format!("/dev/ublkc{}", assigned_id);
         let char_file = {
-            let mut retries = 50u32; // 5 seconds max (50 × 100ms)
-            loop {
+            // First try: direct open (works on hosts with devtmpfs)
+            let mut retries = 10u32;
+            let opened = loop {
                 match OpenOptions::new().read(true).write(true).open(&char_path) {
-                    Ok(f) => break f,
+                    Ok(f) => break Some(f),
                     Err(_) if retries > 0 => {
                         retries -= 1;
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
-                    Err(e) => {
+                    Err(_) => break None,
+                }
+            };
+
+            match opened {
+                Some(f) => f,
+                None => {
+                    // Fallback: create device node from sysfs major:minor
+                    let sysfs = format!("/sys/class/ublk-char/ublkc{}/dev", assigned_id);
+                    let dev_str = std::fs::read_to_string(&sysfs).map_err(|e| {
+                        DriveError::Other(anyhow::anyhow!(
+                            "{char_path} missing and sysfs {sysfs} unreadable: {e}"
+                        ))
+                    })?;
+                    let parts: Vec<&str> = dev_str.trim().split(':').collect();
+                    if parts.len() != 2 {
                         return Err(DriveError::Other(anyhow::anyhow!(
-                            "failed to open {}: {e}", char_path
+                            "bad sysfs dev format: {dev_str:?}"
                         )));
                     }
+                    let major: u32 = parts[0].parse().map_err(|_| {
+                        DriveError::Other(anyhow::anyhow!("bad major: {}", parts[0]))
+                    })?;
+                    let minor: u32 = parts[1].parse().map_err(|_| {
+                        DriveError::Other(anyhow::anyhow!("bad minor: {}", parts[1]))
+                    })?;
+
+                    let c_path = std::ffi::CString::new(char_path.clone())
+                        .map_err(|e| DriveError::Other(e.into()))?;
+                    let dev = unsafe { libc::makedev(major, minor) };
+                    let rc = unsafe {
+                        libc::mknod(c_path.as_ptr(), libc::S_IFCHR | 0o666, dev)
+                    };
+                    if rc != 0 {
+                        return Err(DriveError::Other(anyhow::anyhow!(
+                            "mknod {} ({}:{}) failed: {}",
+                            char_path, major, minor,
+                            std::io::Error::last_os_error(),
+                        )));
+                    }
+                    tracing::info!("mknod {} ({}:{})", char_path, major, minor);
+
+                    OpenOptions::new().read(true).write(true).open(&char_path)
+                        .map_err(|e| DriveError::Other(anyhow::anyhow!(
+                            "failed to open {} after mknod: {e}", char_path
+                        )))?
                 }
             }
         };
