@@ -231,6 +231,7 @@ struct UblkIoDesc {
 pub struct UblkServer {
     device: Arc<dyn BlockDevice>,
     dev_id: AtomicI32,
+    requested_dev_id: Option<u32>,
     nr_queues: u16,
     queue_depth: u16,
     running: Arc<AtomicBool>,
@@ -242,10 +243,18 @@ impl UblkServer {
         UblkServer {
             device,
             dev_id: AtomicI32::new(-1),
+            requested_dev_id: None,
             nr_queues: 1,
             queue_depth: DEFAULT_QUEUE_DEPTH,
             running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Request a specific device ID (e.g., 0 for `/dev/ublkb0`).
+    /// If an orphaned device exists at this ID, it will be deleted first.
+    pub fn with_dev_id(mut self, id: u32) -> Self {
+        self.requested_dev_id = Some(id);
+        self
     }
 
     /// Set the number of I/O queues (default: 1).
@@ -297,11 +306,23 @@ impl UblkServer {
             )))?;
 
         // --- ADD_DEV ---
+        let req_id = self.requested_dev_id.unwrap_or(u32::MAX);
+
+        // Clean up orphaned device at the requested ID (ignore errors)
+        if req_id != u32::MAX {
+            let _ = submit_ctrl_cmd(
+                &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, req_id, 0, 0, 0,
+            );
+            let _ = submit_ctrl_cmd(
+                &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, req_id, 0, 0, 0,
+            );
+        }
+
         let mut dev_info = UblkCtrlDevInfo {
             nr_hw_queues: nr_queues,
             queue_depth,
             max_io_buf_bytes: DEFAULT_MAX_IO_BYTES,
-            dev_id: u32::MAX, // auto-assign
+            dev_id: req_id,
             ublksrv_pid: std::process::id() as i32,
             flags: UBLK_F_URING_CMD_COMP_IN_TASK | UBLK_F_CMD_IOCTL_ENCODE,
             ..Default::default()
@@ -311,7 +332,7 @@ impl UblkServer {
             &mut ctrl_ring,
             ctrl_fd,
             UBLK_U_CMD_ADD_DEV,
-            u32::MAX,
+            req_id,
             &mut dev_info as *mut UblkCtrlDevInfo as u64,
             std::mem::size_of::<UblkCtrlDevInfo>() as u32,
             0,
@@ -499,7 +520,25 @@ impl UblkServer {
             assigned_id, 0, 0,
             std::process::id() as u64,
         )?;
-        tracing::info!("ublk device started: /dev/ublkb{}", assigned_id);
+        // mknod /dev/ublkbN block device if not present (container workaround)
+        let blk_path = format!("/dev/ublkb{}", assigned_id);
+        if !std::path::Path::new(&blk_path).exists() {
+            let sysfs = format!("/sys/block/ublkb{}/dev", assigned_id);
+            if let Ok(dev_str) = std::fs::read_to_string(&sysfs) {
+                let parts: Vec<&str> = dev_str.trim().split(':').collect();
+                if let (Some(Ok(maj)), Some(Ok(min))) = (
+                    parts.first().map(|s| s.parse::<u32>()),
+                    parts.get(1).map(|s| s.parse::<u32>()),
+                ) {
+                    let c_path = std::ffi::CString::new(blk_path.clone()).unwrap();
+                    let dev = unsafe { libc::makedev(maj, min) };
+                    if unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFBLK | 0o666, dev) } == 0 {
+                        tracing::info!("mknod {} ({}:{})", blk_path, maj, min);
+                    }
+                }
+            }
+        }
+        tracing::info!("ublk device started: {}", blk_path);
 
         // --- Wait for shutdown signal ---
         let _ = shutdown.changed().await;

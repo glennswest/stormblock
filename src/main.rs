@@ -707,7 +707,8 @@ async fn handle_boot_iscsi(
         let mut ublk_threads = Vec::new();
 
         for (i, part) in result.partitions.iter().enumerate() {
-            let server = UblkServer::new(part.handle.clone() as Arc<dyn BlockDevice>);
+            let server = UblkServer::new(part.handle.clone() as Arc<dyn BlockDevice>)
+                .with_dev_id(i as u32);
             let rx = shutdown_rx.clone();
             let name = part.name.clone();
             // UblkServer::run() holds raw pointers (not Send), so run on a
