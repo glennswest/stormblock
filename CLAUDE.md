@@ -215,3 +215,9 @@ Replaces rigid DiskPool/VDrive/ExtentAllocator with organic, cellular storage. E
 - [x] CLI `migrate-boot` subcommand — migrate boot volumes from iSCSI slab to local disk
 - [x] 11 integration tests (layout parsing, provisioning on file slab, slab migration with data verification)
 - [x] `boot-iscsi-test.sh` — CI script for mkube job runner
+
+### LinuxBoot-style Fedora on iSCSI — DONE
+- [x] `--ublk` flag on `boot-iscsi` CLI — UblkServer per partition (Linux 6.0+)
+- [x] `scripts/build-stormblock-initramfs.sh` — minimal initramfs (busybox + stormblock + ublk_drv + /init)
+- [x] `install-fedora-iscsi.sh` — 8-phase mkube CI job (provision, format, install Fedora, configure, verify)
+- [x] `systemd/stormblock-ublk.service` — post-switch_root safety net

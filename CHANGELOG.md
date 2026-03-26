@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-03-26
+- **feat:** `--ublk` flag on `boot-iscsi` CLI — exports each partition as `/dev/ublkbN` via UblkServer (Linux 6.0+)
+- **feat:** `scripts/build-stormblock-initramfs.sh` — LinuxBoot initramfs builder (busybox + stormblock + ublk_drv + /init script)
+- **feat:** `install-fedora-iscsi.sh` — 8-phase mkube CI job: provision iSCSI disk, format filesystems, install Fedora via dnf --installroot, configure for LinuxBoot-style boot
+- **feat:** `systemd/stormblock-ublk.service` — safety net for post-switch_root (restarts stormblock if initramfs process dies)
+
 ### 2026-03-25
 - **feat:** `IscsiDevice` — production iSCSI initiator implementing `BlockDevice` trait (login, READ/WRITE(10), READ CAPACITY, UNMAP, NOP-Out keepalive)
 - **feat:** `DriveType::Iscsi` variant for iSCSI-backed block devices
