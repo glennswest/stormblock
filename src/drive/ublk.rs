@@ -95,19 +95,19 @@ impl Default for UblkCtrlDevInfo {
     }
 }
 
-/// Control command payload (fits in 80-byte SQE cmd area, padded).
+/// Control command payload — must match kernel `ublksrv_ctrl_cmd` exactly.
+/// Placed in the 80-byte SQE cmd area (remaining bytes zeroed).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct UblkCtrlCmd {
-    dev_id: u32,
-    queue_id: u16,
-    _pad1: u16,
-    data: u64,
-    dev_path_len: u64,
-    _reserved: u64,
-    addr: u64,
-    len: u32,
-    _pad2: [u8; 20],
+    dev_id: u32,        // offset 0
+    queue_id: u16,      // offset 4
+    _pad1: u16,         // offset 6
+    data: [u64; 2],     // offset 8 (16 bytes, unused for ADD_DEV)
+    addr: u64,          // offset 24 — user-space pointer to UblkCtrlDevInfo
+    len: u16,           // offset 32 — size of buffer at addr
+    dev_path_len: u16,  // offset 34
+    _pad2: u32,         // offset 36
 }
 
 impl UblkCtrlCmd {
@@ -116,12 +116,11 @@ impl UblkCtrlCmd {
             dev_id,
             queue_id: 0,
             _pad1: 0,
-            data: 0,
-            dev_path_len: 0,
-            _reserved: 0,
+            data: [0; 2],
             addr: 0,
             len: 0,
-            _pad2: [0; 20],
+            dev_path_len: 0,
+            _pad2: 0,
         }
     }
 
@@ -468,7 +467,7 @@ fn submit_ctrl_cmd(
 ) -> DriveResult<i32> {
     let mut ctrl_cmd = UblkCtrlCmd::new(dev_id);
     ctrl_cmd.addr = addr;
-    ctrl_cmd.len = len;
+    ctrl_cmd.len = len as u16;
 
     // Copy struct bytes into the 80-byte cmd payload (zero-padded)
     let mut cmd_bytes = [0u8; 80];
@@ -710,7 +709,7 @@ mod tests {
     #[test]
     fn ublk_abi_struct_sizes() {
         assert_eq!(std::mem::size_of::<UblkCtrlDevInfo>(), 64);
-        assert_eq!(std::mem::size_of::<UblkCtrlCmd>(), 64);
+        assert_eq!(std::mem::size_of::<UblkCtrlCmd>(), 40);
         assert_eq!(std::mem::size_of::<UblkIoCmd>(), 16);
         assert_eq!(std::mem::size_of::<UblkIoDesc>(), 24);
         assert_eq!(std::mem::size_of::<UblkParamBasic>(), 32);
@@ -725,10 +724,14 @@ mod tests {
         assert_eq!(cmd.addr, 0);
         assert_eq!(cmd.len, 0);
         let bytes = cmd.as_bytes();
-        assert_eq!(bytes.len(), 64);
+        assert_eq!(bytes.len(), 40);
         // dev_id at offset 0, little-endian
         assert_eq!(bytes[0], 42);
         assert_eq!(bytes[1], 0);
+        // addr at offset 24
+        assert_eq!(bytes[24], 0);
+        // len at offset 32
+        assert_eq!(bytes[32], 0);
     }
 
     #[test]
