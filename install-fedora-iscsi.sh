@@ -82,7 +82,22 @@ echo "=== Phase 2: Provision iSCSI + ublk ==="
 
 # Load ublk driver
 if ! lsmod | grep -q ublk_drv; then
-    modprobe ublk_drv || { echo "FATAL: Failed to load ublk_drv module"; exit 1; }
+    modprobe ublk_drv 2>/dev/null || {
+        echo "modprobe failed — installing kernel modules for host kernel..."
+        KVER=$(uname -r)
+        dnf install -y "kernel-modules-$KVER" 2>&1 | tail -5 || \
+            dnf install -y kernel-modules 2>&1 | tail -5 || true
+        depmod -a 2>/dev/null || true
+        modprobe ublk_drv || {
+            # Try direct insmod as last resort
+            UBLK_KO=$(find /lib/modules/ -name 'ublk_drv.ko*' 2>/dev/null | head -1)
+            if [ -n "$UBLK_KO" ]; then
+                insmod "$UBLK_KO" || { echo "FATAL: Failed to load ublk_drv module"; exit 1; }
+            else
+                echo "FATAL: ublk_drv.ko not found anywhere"; exit 1
+            fi
+        }
+    }
 fi
 echo "ublk_drv module loaded"
 
