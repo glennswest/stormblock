@@ -704,19 +704,28 @@ async fn handle_boot_iscsi(
 
         println!("\nStarting ublk export for {} partitions...", result.partitions.len());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let mut ublk_handles = Vec::new();
+        let mut ublk_threads = Vec::new();
 
         for (i, part) in result.partitions.iter().enumerate() {
             let server = UblkServer::new(part.handle.clone() as Arc<dyn BlockDevice>);
             let rx = shutdown_rx.clone();
             let name = part.name.clone();
-            let handle = tokio::spawn(async move {
-                match server.run(rx).await {
-                    Ok(()) => tracing::info!("ublk#{i} ({name}) stopped"),
-                    Err(e) => tracing::error!("ublk#{i} ({name}) error: {e}"),
-                }
-            });
-            ublk_handles.push(handle);
+            // UblkServer::run() holds raw pointers (not Send), so run on a
+            // dedicated OS thread with its own tokio runtime.
+            let thread = std::thread::Builder::new()
+                .name(format!("ublk-boot-{i}"))
+                .spawn(move || {
+                    let rt = tokio::runtime::Runtime::new()
+                        .expect("failed to create ublk tokio runtime");
+                    rt.block_on(async move {
+                        match server.run(rx).await {
+                            Ok(()) => tracing::info!("ublk#{i} ({name}) stopped"),
+                            Err(e) => tracing::error!("ublk#{i} ({name}) error: {e}"),
+                        }
+                    });
+                })
+                .expect("failed to spawn ublk thread");
+            ublk_threads.push(thread);
             println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
                 stormblock::mgmt::config::human_size(part.size), part.fs_type);
         }
@@ -727,8 +736,8 @@ async fn handle_boot_iscsi(
 
         // Signal all ublk servers to stop
         let _ = shutdown_tx.send(true);
-        for h in ublk_handles {
-            let _ = h.await;
+        for t in ublk_threads {
+            let _ = t.join();
         }
     }
 
