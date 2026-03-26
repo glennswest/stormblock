@@ -131,7 +131,7 @@ impl UblkCtrlCmd {
     fn new(dev_id: u32) -> Self {
         Self {
             dev_id,
-            queue_id: 0,
+            queue_id: 0xFFFF, // -1: required by kernel for non-queue-specific cmds
             len: 0,
             addr: 0,
             data: 0,
@@ -738,6 +738,7 @@ mod tests {
     fn ublk_ctrl_cmd_layout() {
         let cmd = UblkCtrlCmd::new(42);
         assert_eq!(cmd.dev_id, 42);
+        assert_eq!(cmd.queue_id, 0xFFFF); // -1 required by kernel
         assert_eq!(cmd.addr, 0);
         assert_eq!(cmd.len, 0);
         let bytes = cmd.as_bytes();
@@ -745,10 +746,13 @@ mod tests {
         // dev_id at offset 0, little-endian
         assert_eq!(bytes[0], 42);
         assert_eq!(bytes[1], 0);
-        // addr at offset 8
-        assert_eq!(bytes[8], 0);
+        // queue_id at offset 4, should be 0xFFFF
+        assert_eq!(bytes[4], 0xFF);
+        assert_eq!(bytes[5], 0xFF);
         // len at offset 6
         assert_eq!(bytes[6], 0);
+        // addr at offset 8
+        assert_eq!(bytes[8], 0);
     }
 
     #[test]
