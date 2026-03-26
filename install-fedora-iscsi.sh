@@ -151,8 +151,10 @@ mount /dev/ublkb0 "$MNT/boot/efi"
 mount /dev/ublkb4 "$MNT/home"
 echo "Filesystems mounted at $MNT"
 
-# Install Fedora base system + kernel (single dnf transaction)
-# noscripts: skip RPM scriptlets that fail in containers (kernel-install, hwdb)
+# Install Fedora base system + kernel
+# noscripts+notriggers: skip RPM scriptlets/triggers that fail in containers
+# (kernel-install, hwdb, systemd catalog — all non-critical for LinuxBoot)
+# Allow "failure" — packages are installed, only scriptlets fail.
 echo "Installing Fedora $FEDORA_RELEASE (this takes a few minutes)..."
 dnf5 --installroot="$MNT" --use-host-config --releasever="$FEDORA_RELEASE" -y \
     --setopt=install_weak_deps=False \
@@ -178,7 +180,14 @@ dnf5 --installroot="$MNT" --use-host-config --releasever="$FEDORA_RELEASE" -y \
     iproute \
     iputils \
     dnf5 \
-    2>&1 | tail -30
+    2>&1 | tail -30 || echo "WARNING: dnf5 reported failure (likely scriptlet issues, checking files...)"
+
+# Verify critical packages were actually installed
+if [ ! -f "$MNT/usr/bin/bash" ]; then
+    echo "FATAL: bash not installed — dnf5 failed for real"
+    exit 1
+fi
+echo "Core packages installed ($(ls "$MNT/usr/bin/" | wc -l) binaries in /usr/bin)"
 
 # Copy stormblock binary
 echo "Installing stormblock binary..."
