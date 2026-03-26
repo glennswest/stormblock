@@ -25,19 +25,24 @@ use io_uring::{IoUring, opcode, types, squeue};
 use super::{BlockDevice, DriveError, DriveResult};
 
 // ---------------------------------------------------------------------------
-// ublk control commands (on /dev/ublk-control)
+// ublk control commands — ioctl-encoded (_IOWR('u', nr, ublksrv_ctrl_cmd))
+//
+// Modern kernels (6.1+) use ioctl-encoded cmd_op values for uring_cmd.
+// Encoding: (3 << 30) | (sizeof_ctrl_cmd << 16) | ('u' << 8) | nr
+// sizeof(ublksrv_ctrl_cmd) = 32, so base = 0xC0207500
 // ---------------------------------------------------------------------------
-const UBLK_CMD_ADD_DEV: u32 = 0x04;
-const UBLK_CMD_DEL_DEV: u32 = 0x05;
-const UBLK_CMD_START_DEV: u32 = 0x06;
-const UBLK_CMD_STOP_DEV: u32 = 0x07;
-const UBLK_CMD_SET_PARAMS: u32 = 0x08;
+const UBLK_U_CMD_ADD_DEV: u32 = 0xC020_7504;
+const UBLK_U_CMD_DEL_DEV: u32 = 0xC020_7505;
+const UBLK_U_CMD_START_DEV: u32 = 0xC020_7506;
+const UBLK_U_CMD_STOP_DEV: u32 = 0xC020_7507;
+const UBLK_U_CMD_SET_PARAMS: u32 = 0xC020_7508;
 
 // ---------------------------------------------------------------------------
-// ublk I/O commands (on /dev/ublkcN)
+// ublk I/O commands — ioctl-encoded (_IOWR('u', nr, ublksrv_io_cmd))
+// sizeof(ublksrv_io_cmd) = 16, so base = 0xC0107500
 // ---------------------------------------------------------------------------
-const UBLK_IO_FETCH_REQ: u32 = 0x20;
-const UBLK_IO_COMMIT_AND_FETCH_REQ: u32 = 0x21;
+const UBLK_U_IO_FETCH_REQ: u32 = 0xC010_7520;
+const UBLK_U_IO_COMMIT_AND_FETCH_REQ: u32 = 0xC010_7521;
 
 // ---------------------------------------------------------------------------
 // ublk I/O operations (in UblkIoDesc.op_flags bits 0-7)
@@ -57,6 +62,7 @@ const UBLK_PARAM_TYPE_DISCARD: u32 = 1 << 1;
 // ublk feature flags
 // ---------------------------------------------------------------------------
 const UBLK_F_URING_CMD_COMP_IN_TASK: u64 = 1 << 1;
+const UBLK_F_CMD_IOCTL_ENCODE: u64 = 1 << 6;
 
 /// Default max I/O buffer size (512 KB).
 const DEFAULT_MAX_IO_BYTES: u32 = 512 * 1024;
@@ -297,14 +303,14 @@ impl UblkServer {
             max_io_buf_bytes: DEFAULT_MAX_IO_BYTES,
             dev_id: u32::MAX, // auto-assign
             ublksrv_pid: std::process::id() as i32,
-            flags: UBLK_F_URING_CMD_COMP_IN_TASK,
+            flags: UBLK_F_URING_CMD_COMP_IN_TASK | UBLK_F_CMD_IOCTL_ENCODE,
             ..Default::default()
         };
 
         submit_ctrl_cmd(
             &mut ctrl_ring,
             ctrl_fd,
-            UBLK_CMD_ADD_DEV,
+            UBLK_U_CMD_ADD_DEV,
             u32::MAX,
             &mut dev_info as *mut UblkCtrlDevInfo as u64,
             std::mem::size_of::<UblkCtrlDevInfo>() as u32,
@@ -347,7 +353,7 @@ impl UblkServer {
         submit_ctrl_cmd(
             &mut ctrl_ring,
             ctrl_fd,
-            UBLK_CMD_SET_PARAMS,
+            UBLK_U_CMD_SET_PARAMS,
             assigned_id,
             &mut params as *mut UblkParams as u64,
             std::mem::size_of::<UblkParams>() as u32,
@@ -395,7 +401,7 @@ impl UblkServer {
         }
 
         // --- START_DEV ---
-        submit_ctrl_cmd(&mut ctrl_ring, ctrl_fd, UBLK_CMD_START_DEV, assigned_id, 0, 0)?;
+        submit_ctrl_cmd(&mut ctrl_ring, ctrl_fd, UBLK_U_CMD_START_DEV, assigned_id, 0, 0)?;
         self.running.store(true, Ordering::SeqCst);
         tracing::info!("ublk device started: /dev/ublkb{}", assigned_id);
 
@@ -437,7 +443,7 @@ impl UblkServer {
 
         // --- STOP_DEV ---
         let _ = submit_ctrl_cmd(
-            &mut ctrl_ring, ctrl_fd, UBLK_CMD_STOP_DEV, assigned_id, 0, 0,
+            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0,
         );
 
         // Wait for all workers to exit
@@ -447,7 +453,7 @@ impl UblkServer {
 
         // --- DEL_DEV ---
         let _ = submit_ctrl_cmd(
-            &mut ctrl_ring, ctrl_fd, UBLK_CMD_DEL_DEV, assigned_id, 0, 0,
+            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, assigned_id, 0, 0,
         );
 
         // Unmap descriptor buffers
@@ -660,7 +666,7 @@ fn queue_worker(
 
             let sqe = opcode::UringCmd80::new(
                 types::Fd(char_fd),
-                UBLK_IO_COMMIT_AND_FETCH_REQ,
+                UBLK_U_IO_COMMIT_AND_FETCH_REQ,
             )
             .cmd(cmd_bytes)
             .build()
@@ -696,7 +702,7 @@ fn submit_io_fetch(
     let src = io_cmd.as_bytes();
     cmd_bytes[..src.len()].copy_from_slice(src);
 
-    let sqe = opcode::UringCmd80::new(types::Fd(char_fd), UBLK_IO_FETCH_REQ)
+    let sqe = opcode::UringCmd80::new(types::Fd(char_fd), UBLK_U_IO_FETCH_REQ)
         .cmd(cmd_bytes)
         .build()
         .user_data(tag as u64);
