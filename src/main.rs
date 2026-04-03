@@ -500,49 +500,92 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Phase 4: Start target protocols
-    if let Some(device) = export_device {
-        let reactor_config = ReactorConfig {
-            core_count: cli.reactor_cores,
-            pin_cores: cfg!(target_os = "linux"),
+    let reactor_config = ReactorConfig {
+        core_count: cli.reactor_cores,
+        pin_cores: cfg!(target_os = "linux"),
+    };
+    let reactor = ReactorPool::new(&reactor_config);
+
+    // Start iSCSI target (always, even with no initial device — LUNs can be added via REST)
+    #[cfg(feature = "iscsi")]
+    if !cli.no_iscsi {
+        let chap = match (&cli.chap_user, &cli.chap_secret) {
+            (Some(user), Some(secret)) => Some(target::iscsi::chap::ChapConfig {
+                username: user.clone(),
+                secret: secret.clone(),
+            }),
+            _ => None,
         };
-        let reactor = ReactorPool::new(&reactor_config);
 
-        // Start iSCSI target
-        #[cfg(feature = "iscsi")]
-        if !cli.no_iscsi {
-            let chap = match (&cli.chap_user, &cli.chap_secret) {
-                (Some(user), Some(secret)) => Some(target::iscsi::chap::ChapConfig {
-                    username: user.clone(),
-                    secret: secret.clone(),
-                }),
-                _ => None,
-            };
+        let iscsi_config = target::iscsi::IscsiConfig {
+            listen_addr: cli.iscsi_addr.parse()
+                .expect("invalid iSCSI listen address"),
+            target_name: cli.iscsi_target_name.clone(),
+            chap,
+            max_sessions: 64,
+        };
+        let iscsi = target::iscsi::IscsiTarget::new(iscsi_config);
 
-            let iscsi_config = target::iscsi::IscsiConfig {
-                listen_addr: cli.iscsi_addr.parse()
-                    .expect("invalid iSCSI listen address"),
-                target_name: cli.iscsi_target_name.clone(),
-                chap,
-                max_sessions: 64,
-            };
-            let mut iscsi = target::iscsi::IscsiTarget::new(iscsi_config);
-            iscsi.add_lun(0, device.clone());
-            let iscsi = Arc::new(iscsi);
-            let iscsi_reactor = &reactor;
-            tokio::spawn({
-                let iscsi = iscsi.clone();
-                let _reactor_cores = iscsi_reactor.core_count();
-                async move {
-                    if let Err(e) = iscsi.run(&ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false })).await {
-                        tracing::error!("iSCSI target error: {e}");
-                    }
-                }
-            });
+        // If we have a device, add it as LUN 0 (preserves existing behavior)
+        if let Some(ref device) = export_device {
+            iscsi.add_lun(0, device.clone()).await;
         }
 
-        // Start NVMe-oF/TCP target
-        #[cfg(feature = "nvmeof")]
-        if !cli.no_nvmeof {
+        let iscsi = Arc::new(iscsi);
+
+        // Load declarative LUNs from config
+        for lun_cfg in &config.luns {
+            let dev: Arc<dyn BlockDevice> = if let Some(ref size_str) = lun_cfg.size {
+                match parse_size(size_str) {
+                    Ok(sz) => match drive::filedev::FileDevice::open_with_capacity(&lun_cfg.path, sz).await {
+                        Ok(d) => Arc::new(d),
+                        Err(e) => {
+                            tracing::error!("Failed to open LUN {} ({}): {e}", lun_cfg.id, lun_cfg.path);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("Invalid size for LUN {}: {e}", lun_cfg.id);
+                        continue;
+                    }
+                }
+            } else {
+                match drive::open_one_drive(&lun_cfg.path).await {
+                    Ok(d) => Arc::from(d),
+                    Err(e) => {
+                        tracing::error!("Failed to open LUN {} ({}): {e}", lun_cfg.id, lun_cfg.path);
+                        continue;
+                    }
+                }
+            };
+            iscsi.add_lun_dynamic(lun_cfg.id, dev.clone(), lun_cfg.readonly).await;
+            tracing::info!("LUN {} loaded from config: {} ({}{})",
+                lun_cfg.id, lun_cfg.path,
+                mgmt::config::human_size(dev.capacity_bytes()),
+                if lun_cfg.readonly { ", readonly" } else { "" },
+            );
+        }
+
+        // Store in AppState for REST API access
+        {
+            let mut target_guard = state.iscsi_target.write().await;
+            *target_guard = Some(iscsi.clone());
+        }
+
+        tokio::spawn({
+            let iscsi = iscsi.clone();
+            async move {
+                if let Err(e) = iscsi.run(&ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false })).await {
+                    tracing::error!("iSCSI target error: {e}");
+                }
+            }
+        });
+    }
+
+    // Start NVMe-oF/TCP target (only if we have a device to export)
+    #[cfg(feature = "nvmeof")]
+    if !cli.no_nvmeof {
+        if let Some(ref device) = export_device {
             let nvmeof_config = target::nvmeof::NvmeofConfig {
                 listen_addr: cli.nvmeof_addr.parse()
                     .expect("invalid NVMe-oF listen address"),
@@ -561,31 +604,26 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
         }
-
-        tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");
-        tokio::signal::ctrl_c().await?;
-        tracing::info!("Shutting down...");
-        {
-            let vm = state.volume_manager.lock().await;
-            vm.persist().await;
-        }
-        #[cfg(feature = "cluster")]
-        if let Some(ref _cluster_mgr) = state.cluster {
-            // Cluster manager shutdown requires &mut — use Arc::try_unwrap or just log
-            tracing::info!("Cluster shutdown initiated");
-        }
-        drop(reactor);
-    } else {
-        tracing::info!("No device to export — management API still running on {}",
-            config.management.listen_addr);
-        tracing::info!("Press Ctrl+C to stop");
-        tokio::signal::ctrl_c().await?;
-        tracing::info!("Shutting down...");
-        {
-            let vm = state.volume_manager.lock().await;
-            vm.persist().await;
-        }
     }
+
+    if export_device.is_some() {
+        tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");
+    } else {
+        tracing::info!("No device to export — LUNs can be added via REST API POST /api/v1/luns");
+        tracing::info!("Management API running on {}, press Ctrl+C to stop", config.management.listen_addr);
+    }
+
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("Shutting down...");
+    {
+        let vm = state.volume_manager.lock().await;
+        vm.persist().await;
+    }
+    #[cfg(feature = "cluster")]
+    if let Some(ref _cluster_mgr) = state.cluster {
+        tracing::info!("Cluster shutdown initiated");
+    }
+    drop(reactor);
 
     Ok(())
 }

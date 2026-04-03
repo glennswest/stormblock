@@ -188,7 +188,7 @@ pub async fn open_drives(paths: &[String]) -> Vec<(String, DriveResult<Box<dyn B
     results
 }
 
-async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
+pub async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
     // Check if it's a block device on Linux
     #[cfg(target_os = "linux")]
     {

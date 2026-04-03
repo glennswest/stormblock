@@ -70,6 +70,10 @@ impl SenseData {
         SenseData { key: SenseKey::IllegalRequest, asc: 0x21, ascq: 0x00 }
     }
 
+    pub fn write_protected() -> Self {
+        SenseData { key: SenseKey::IllegalRequest, asc: 0x27, ascq: 0x00 }
+    }
+
     /// Encode as fixed-format sense data (18 bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; 18];
@@ -109,10 +113,12 @@ impl ScsiResult {
 /// `cdb` — 16-byte CDB from the iSCSI SCSI Command PDU.
 /// `device` — the block device backing this LUN.
 /// `data_out` — data sent by initiator (for write commands).
+/// `lun_ids` — active LUN IDs for REPORT LUNS.
 pub async fn handle_scsi_command(
     cdb: &[u8],
     device: &Arc<dyn BlockDevice>,
     data_out: &[u8],
+    lun_ids: &[u64],
 ) -> ScsiResult {
     if cdb.is_empty() {
         return ScsiResult::check_condition(SenseData::illegal_request());
@@ -151,7 +157,7 @@ pub async fn handle_scsi_command(
 
         UNMAP => handle_unmap(device, data_out).await,
 
-        REPORT_LUNS => handle_report_luns(),
+        REPORT_LUNS => handle_report_luns(lun_ids),
 
         MAINTENANCE_IN => {
             let service_action = cdb[1] & 0x1F;
@@ -479,12 +485,24 @@ async fn handle_unmap(device: &Arc<dyn BlockDevice>, data: &[u8]) -> ScsiResult 
     ScsiResult::good_empty()
 }
 
-fn handle_report_luns() -> ScsiResult {
-    // Report a single LUN 0
-    let mut data = vec![0u8; 16];
-    // LUN list length (bytes 0-3) = 8 (one LUN entry)
-    data[0..4].copy_from_slice(&8u32.to_be_bytes());
-    // LUN 0 (bytes 8-15) = all zeros
+fn handle_report_luns(lun_ids: &[u64]) -> ScsiResult {
+    let lun_count = lun_ids.len().max(1); // always report at least LUN 0
+    let list_len = lun_count * 8;
+    let mut data = vec![0u8; 8 + list_len];
+    // LUN list length (bytes 0-3)
+    data[0..4].copy_from_slice(&(list_len as u32).to_be_bytes());
+    // Reserved bytes 4-7 = 0
+    if lun_ids.is_empty() {
+        // No LUNs — report LUN 0 (8 zero bytes already there)
+    } else {
+        for (i, &lun) in lun_ids.iter().enumerate() {
+            let offset = 8 + i * 8;
+            // iSCSI LUN encoding: peripheral device addressing (method 00)
+            // LUN number goes into byte 1 of the 8-byte LUN field
+            let encoded = (lun as u16) << 8;
+            data[offset..offset + 2].copy_from_slice(&encoded.to_be_bytes());
+        }
+    }
     ScsiResult::good(data)
 }
 
@@ -506,7 +524,7 @@ mod tests {
     async fn inquiry_response() {
         let (dev, path) = test_device().await;
         let cdb = [INQUIRY, 0, 0, 0, 96, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let result = handle_scsi_command(&cdb, &dev, &[]).await;
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
         assert_eq!(result.status, ScsiStatus::Good);
         assert!(result.data.len() >= 36);
         assert_eq!(&result.data[8..16], b"StrmBlk ");
@@ -517,7 +535,7 @@ mod tests {
     async fn test_unit_ready() {
         let (dev, path) = test_device().await;
         let cdb = [TEST_UNIT_READY, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let result = handle_scsi_command(&cdb, &dev, &[]).await;
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
         assert_eq!(result.status, ScsiStatus::Good);
         let _ = std::fs::remove_file(&path);
     }
@@ -526,7 +544,7 @@ mod tests {
     async fn read_capacity_10() {
         let (dev, path) = test_device().await;
         let cdb = [READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let result = handle_scsi_command(&cdb, &dev, &[]).await;
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
         assert_eq!(result.status, ScsiStatus::Good);
         assert_eq!(result.data.len(), 8);
         let last_lba = u32::from_be_bytes(result.data[0..4].try_into().unwrap());
@@ -543,12 +561,12 @@ mod tests {
         // Write 1 block at LBA 0
         let write_data = vec![0xABu8; 4096];
         let cdb_w = [WRITE_10, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
-        let result = handle_scsi_command(&cdb_w, &dev, &write_data).await;
+        let result = handle_scsi_command(&cdb_w, &dev, &write_data, &[0]).await;
         assert_eq!(result.status, ScsiStatus::Good);
 
         // Read it back
         let cdb_r = [READ_10, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
-        let result = handle_scsi_command(&cdb_r, &dev, &[]).await;
+        let result = handle_scsi_command(&cdb_r, &dev, &[], &[0]).await;
         assert_eq!(result.status, ScsiStatus::Good);
         assert_eq!(result.data.len(), 4096);
         assert!(result.data.iter().all(|&b| b == 0xAB));
@@ -561,7 +579,7 @@ mod tests {
         let (dev, path) = test_device().await;
         // LBA way past capacity
         let cdb = [READ_10, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
-        let result = handle_scsi_command(&cdb, &dev, &[]).await;
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
         assert_eq!(result.status, ScsiStatus::CheckCondition);
         let _ = std::fs::remove_file(&path);
     }
@@ -570,7 +588,7 @@ mod tests {
     async fn report_luns() {
         let (dev, path) = test_device().await;
         let cdb = [REPORT_LUNS, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0];
-        let result = handle_scsi_command(&cdb, &dev, &[]).await;
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
         assert_eq!(result.status, ScsiStatus::Good);
         assert_eq!(result.data.len(), 16);
         let _ = std::fs::remove_file(&path);

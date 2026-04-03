@@ -50,11 +50,17 @@ impl Default for IscsiConfig {
     }
 }
 
+/// A LUN entry with backing device and access mode.
+pub struct LunDevice {
+    pub device: Arc<dyn BlockDevice>,
+    pub readonly: bool,
+}
+
 /// iSCSI target server.
 pub struct IscsiTarget {
     config: IscsiConfig,
     sessions: Arc<SessionRegistry>,
-    luns: Arc<HashMap<u64, Arc<dyn BlockDevice>>>,
+    luns: Arc<tokio::sync::RwLock<HashMap<u64, LunDevice>>>,
 }
 
 impl IscsiTarget {
@@ -62,13 +68,28 @@ impl IscsiTarget {
         IscsiTarget {
             config,
             sessions: Arc::new(SessionRegistry::new()),
-            luns: Arc::new(HashMap::new()),
+            luns: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
-    /// Add a LUN mapping. Must be called before `run()`.
-    pub fn add_lun(&mut self, lun: u64, device: Arc<dyn BlockDevice>) {
-        Arc::get_mut(&mut self.luns).expect("add_lun after run").insert(lun, device);
+    /// Add a LUN mapping at startup (convenience, takes &self).
+    pub async fn add_lun(&self, lun: u64, device: Arc<dyn BlockDevice>) {
+        self.luns.write().await.insert(lun, LunDevice { device, readonly: false });
+    }
+
+    /// Add a LUN at runtime (no &mut self needed).
+    pub async fn add_lun_dynamic(&self, lun: u64, device: Arc<dyn BlockDevice>, readonly: bool) {
+        self.luns.write().await.insert(lun, LunDevice { device, readonly });
+    }
+
+    /// Remove a LUN at runtime. Returns true if the LUN existed.
+    pub async fn remove_lun(&self, lun: u64) -> bool {
+        self.luns.write().await.remove(&lun).is_some()
+    }
+
+    /// List active LUN IDs.
+    pub async fn list_luns(&self) -> Vec<u64> {
+        self.luns.read().await.keys().copied().collect()
     }
 
     /// Start accepting connections. Runs until the listener is dropped.
@@ -233,19 +254,29 @@ impl IscsiTarget {
 
         conn.advance_cmd_sn(cmd_sn);
 
-        let device = match self.luns.get(&lun_id) {
-            Some(dev) => dev,
-            None => {
-                // LUN not found — send check condition
-                let result = scsi::ScsiResult::check_condition(scsi::SenseData::illegal_request());
-                let resp_pdu = self.build_scsi_response(conn, itt, &result);
-                return write_pdu(writer, &resp_pdu, header_digest, data_digest).await;
+        let (device, readonly) = {
+            let luns = self.luns.read().await;
+            match luns.get(&lun_id) {
+                Some(entry) => (entry.device.clone(), entry.readonly),
+                None => {
+                    // LUN not found — send check condition
+                    let result = scsi::ScsiResult::check_condition(scsi::SenseData::illegal_request());
+                    let resp_pdu = self.build_scsi_response(conn, itt, &result);
+                    return write_pdu(writer, &resp_pdu, header_digest, data_digest).await;
+                }
             }
         };
 
         // For write commands, data may be inline (immediate data) or need R2T
         let is_write = matches!(cdb[0], scsi::WRITE_10 | scsi::WRITE_16);
         let expected_len = req.bhs.expected_data_transfer_length() as usize;
+
+        // Reject writes to readonly LUNs
+        if readonly && is_write {
+            let result = scsi::ScsiResult::check_condition(scsi::SenseData::write_protected());
+            let resp_pdu = self.build_scsi_response(conn, itt, &result);
+            return write_pdu(writer, &resp_pdu, header_digest, data_digest).await;
+        }
 
         let data_out = if is_write {
             let mut write_data = req.data.clone();
@@ -271,7 +302,8 @@ impl IscsiTarget {
             Vec::new()
         };
 
-        let result = handle_scsi_command(cdb, device, &data_out).await;
+        let lun_ids = self.list_luns().await;
+        let result = handle_scsi_command(cdb, &device, &data_out, &lun_ids).await;
 
         // Send read data via Data-In PDUs if needed
         if !result.data.is_empty() && result.status == ScsiStatus::Good && !is_write {
@@ -500,24 +532,62 @@ mod tests {
         assert!(config.chap.is_none());
     }
 
-    #[test]
-    fn iscsi_target_add_lun() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let config = IscsiConfig::default();
-            let mut target = IscsiTarget::new(config);
+    #[tokio::test]
+    async fn iscsi_target_add_lun() {
+        let config = IscsiConfig::default();
+        let target = IscsiTarget::new(config);
 
-            let dir = std::env::temp_dir().join("stormblock-iscsi-test");
-            std::fs::create_dir_all(&dir).unwrap();
-            let path = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
-            let dev = crate::drive::filedev::FileDevice::open_with_capacity(
-                path.to_str().unwrap(), 1024 * 1024
-            ).await.unwrap();
+        let dir = std::env::temp_dir().join("stormblock-iscsi-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
+        let dev = crate::drive::filedev::FileDevice::open_with_capacity(
+            path.to_str().unwrap(), 1024 * 1024
+        ).await.unwrap();
 
-            target.add_lun(0, Arc::new(dev));
-            assert_eq!(target.luns.len(), 1);
+        target.add_lun(0, Arc::new(dev)).await;
+        assert_eq!(target.luns.read().await.len(), 1);
 
-            let _ = std::fs::remove_file(&path);
-        });
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn iscsi_target_dynamic_lun_ops() {
+        let config = IscsiConfig::default();
+        let target = IscsiTarget::new(config);
+
+        let dir = std::env::temp_dir().join("stormblock-iscsi-dynlun");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path1 = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
+        let dev1 = crate::drive::filedev::FileDevice::open_with_capacity(
+            path1.to_str().unwrap(), 1024 * 1024
+        ).await.unwrap();
+
+        let path2 = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
+        let dev2 = crate::drive::filedev::FileDevice::open_with_capacity(
+            path2.to_str().unwrap(), 1024 * 1024
+        ).await.unwrap();
+
+        // Add two LUNs dynamically (one readonly)
+        target.add_lun_dynamic(0, Arc::new(dev1), false).await;
+        target.add_lun_dynamic(1, Arc::new(dev2), true).await;
+
+        let luns = target.list_luns().await;
+        assert_eq!(luns.len(), 2);
+
+        // Check readonly flag
+        {
+            let map = target.luns.read().await;
+            assert!(!map.get(&0).unwrap().readonly);
+            assert!(map.get(&1).unwrap().readonly);
+        }
+
+        // Remove LUN 0
+        assert!(target.remove_lun(0).await);
+        assert!(!target.remove_lun(99).await); // non-existent
+        assert_eq!(target.list_luns().await.len(), 1);
+
+        let _ = std::fs::remove_file(&path1);
+        let _ = std::fs::remove_file(&path2);
     }
 }

@@ -16,6 +16,8 @@ use uuid::Uuid;
 use crate::drive::BlockDevice;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::raid::{RaidArray, RaidArrayId, RaidLevel};
+#[cfg(feature = "iscsi")]
+use crate::target::iscsi::IscsiTarget;
 use crate::volume::{VolumeManager, GlobalExtentMap};
 
 use config::StormBlockConfig;
@@ -73,6 +75,23 @@ pub struct ExportEntry {
     pub status: ExportStatus,
 }
 
+/// Backing type for a dynamically-created LUN.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum LunBacking {
+    File { path: String, size: Option<String> },
+    Device { path: String },
+    Raid { array_id: RaidArrayId },
+}
+
+/// A LUN entry tracked by the management plane.
+pub struct LunEntry {
+    pub lun_id: u64,
+    pub backing: LunBacking,
+    pub readonly: bool,
+    pub device: Arc<dyn BlockDevice>,
+}
+
 /// Shared application state for the management API.
 pub struct AppState {
     pub drives: tokio::sync::RwLock<Vec<DriveInfo>>,
@@ -82,6 +101,10 @@ pub struct AppState {
     pub slab_registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
     pub gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
     pub config: StormBlockConfig,
+    #[cfg(feature = "iscsi")]
+    pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
+    #[cfg(feature = "iscsi")]
+    pub lun_entries: tokio::sync::RwLock<Vec<LunEntry>>,
     #[cfg(feature = "cluster")]
     pub cluster: Option<Arc<crate::cluster::ClusterManager>>,
 }
@@ -101,6 +124,10 @@ impl AppState {
             slab_registry,
             gem,
             config,
+            #[cfg(feature = "iscsi")]
+            iscsi_target: tokio::sync::RwLock::new(None),
+            #[cfg(feature = "iscsi")]
+            lun_entries: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(feature = "cluster")]
             cluster: None,
         }

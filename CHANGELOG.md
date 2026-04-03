@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-04-03
+- **feat:** Dynamic iSCSI LUN management REST API (`POST/GET/DELETE /api/v1/luns`)
+- **feat:** Readonly LUN support — `readonly` flag on LUN creation prevents SCSI writes (WRITE PROTECTED sense)
+- **feat:** iSCSI target starts unconditionally — LUNs can be added at runtime via REST API, even with no initial device
+- **feat:** `[[luns]]` TOML config section for declarative LUN provisioning at startup
+- **feat:** `REPORT_LUNS` SCSI command now reports actual active LUN IDs (was hardcoded to LUN 0)
+- **refactor:** iSCSI LUN map changed from `Arc<HashMap>` to `Arc<RwLock<HashMap>>` for runtime mutability
+- **refactor:** `IscsiTarget` stored in `AppState` for REST API access
+- **refactor:** `open_one_drive()` made public for runtime device opening
+
 ### 2026-03-26
 - **feat:** `--ublk` flag on `boot-iscsi` CLI — exports each partition as `/dev/ublkbN` via UblkServer (Linux 6.0+)
 - **feat:** `scripts/build-stormblock-initramfs.sh` — LinuxBoot initramfs builder (busybox + stormblock + ublk_drv + /init script)

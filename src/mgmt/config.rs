@@ -18,6 +18,8 @@ pub struct StormBlockConfig {
     pub arrays: Vec<ArrayConfig>,
     #[serde(default)]
     pub volumes: Vec<VolumeConfig>,
+    #[serde(default)]
+    pub luns: Vec<LunConfig>,
     #[cfg(feature = "iscsi")]
     pub iscsi: Option<IscsiExportConfig>,
     #[cfg(feature = "nvmeof")]
@@ -40,6 +42,7 @@ impl Default for StormBlockConfig {
             drives: Vec::new(),
             arrays: Vec::new(),
             volumes: Vec::new(),
+            luns: Vec::new(),
             #[cfg(feature = "iscsi")]
             iscsi: None,
             #[cfg(feature = "nvmeof")]
@@ -345,6 +348,20 @@ impl StormBlockConfig {
 
         Ok(())
     }
+}
+
+/// Configuration for a declarative LUN (loaded from stormblock.toml).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LunConfig {
+    /// LUN ID (0-255).
+    pub id: u64,
+    /// Path to backing file or block device.
+    pub path: String,
+    /// Size for file-backed LUNs (creates/extends file). Ignored for block devices.
+    pub size: Option<String>,
+    /// Read-only LUN (default: false).
+    #[serde(default)]
+    pub readonly: bool,
 }
 
 /// Configuration for the boot volume manager.
