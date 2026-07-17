@@ -103,6 +103,36 @@ impl VolumeManager {
         tracing::info!("Registered slab {}", id.0);
     }
 
+    /// Attach an **existing** slab-formatted device without reformatting.
+    ///
+    /// Counterpart to `add_backing_device` for the reboot / boot-artifact
+    /// path: opens the slab (header + slot table) from the device and
+    /// registers it under `array_id`, so `restore()` can resolve volumes
+    /// that reference that array. Errors instead of logging — the caller
+    /// (initramfs, artifact consumer) must know the attach failed.
+    pub async fn open_backing_device(
+        &mut self,
+        array_id: RaidArrayId,
+        device: Arc<dyn BlockDevice>,
+    ) -> Result<(), VolumeError> {
+        let slab = Slab::open(device).await.map_err(VolumeError::Drive)?;
+        if slab.slot_size() != self.slot_size {
+            return Err(VolumeError::InvalidSize(format!(
+                "slab slot size {} does not match manager slot size {}",
+                slab.slot_size(),
+                self.slot_size,
+            )));
+        }
+        let slab_id = slab.slab_id();
+        {
+            let mut reg = self.registry.lock().await;
+            reg.add(slab);
+        }
+        self.array_slabs.insert(array_id, slab_id);
+        tracing::info!("Opened array {array_id} as existing slab {}", slab_id.0);
+        Ok(())
+    }
+
     /// Create a new thin volume on a specific RAID array.
     ///
     /// The `array_id` parameter maps to a slab for placement preference.
@@ -486,5 +516,97 @@ mod tests {
         assert!(format!("{}", result.unwrap_err()).contains("size must be > 0"));
 
         cleanup(&paths);
+    }
+
+    /// The boot-artifact / reboot path: build a slab + volume in one manager,
+    /// reattach the same backing file in a fresh manager via
+    /// open_backing_device (no reformat), restore metadata, read data back.
+    #[tokio::test]
+    async fn open_backing_device_restores_existing_volume() {
+        use crate::volume::metadata::{ArrayRecord, VolumeMetadata, VolumeRecord};
+
+        let test_id = uuid::Uuid::new_v4().simple().to_string();
+        let dir = std::env::temp_dir().join("stormblock-volmgr-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let backing_path = dir.join(format!("{test_id}-reopen.bin"));
+        let backing_str = backing_path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&backing_path);
+        let meta_dir = dir.join(format!("{test_id}-meta"));
+
+        let array_id = RaidArrayId(uuid::Uuid::new_v4());
+        let data: Vec<u8> = (0..2 * 1024 * 1024 + 331).map(|i| (i % 249) as u8).collect();
+
+        // Phase 1: create, write, persist metadata.
+        let vol_id = {
+            let dev = FileDevice::open_with_capacity(&backing_str, 64 * 1024 * 1024)
+                .await
+                .unwrap();
+            let mut mgr = VolumeManager::with_data_dir(4096, meta_dir.clone()).unwrap();
+            mgr.add_backing_device(array_id, Arc::new(dev)).await;
+            let vol_id = mgr
+                .create_volume("reopen-me", data.len() as u64, array_id)
+                .await
+                .unwrap();
+            let vol = mgr.get_volume(&vol_id).unwrap();
+            let mut off = 0usize;
+            while off < data.len() {
+                let n = vol.write(off as u64, &data[off..]).await.unwrap();
+                assert!(n > 0);
+                off += n;
+            }
+            vol.flush().await.unwrap();
+
+            // persist() is a V1 stub — write volumes.dat directly.
+            let store = MetadataStore::new(meta_dir.clone()).unwrap();
+            store
+                .save(&VolumeMetadata {
+                    extent_size: 4096,
+                    arrays: vec![ArrayRecord {
+                        array_id,
+                        total_capacity: 64 * 1024 * 1024,
+                    }],
+                    volumes: vec![VolumeRecord {
+                        id: vol_id,
+                        name: "reopen-me".to_string(),
+                        virtual_size: data.len() as u64,
+                        array_id,
+                        extent_map: Default::default(),
+                    }],
+                })
+                .unwrap();
+            vol_id
+        };
+
+        // Phase 2: fresh manager, attach WITHOUT reformatting, restore, read.
+        let dev = FileDevice::open(&backing_str).await.unwrap();
+        let mut mgr = VolumeManager::with_data_dir(4096, meta_dir.clone()).unwrap();
+        mgr.open_backing_device(array_id, Arc::new(dev))
+            .await
+            .unwrap();
+        mgr.restore().await.unwrap();
+
+        let vol = mgr
+            .get_volume(&vol_id)
+            .expect("volume restored from metadata");
+        let mut got = vec![0u8; data.len()];
+        let mut off = 0usize;
+        while off < got.len() {
+            let end = got.len();
+            let n = vol.read(off as u64, &mut got[off..end]).await.unwrap();
+            assert!(n > 0);
+            off += n;
+        }
+        assert_eq!(got, data, "restored volume content differs");
+
+        // Slot-size mismatch must be rejected, not silently misread.
+        let dev = FileDevice::open(&backing_str).await.unwrap();
+        let mut wrong = VolumeManager::new(8192);
+        assert!(wrong
+            .open_backing_device(array_id, Arc::new(dev))
+            .await
+            .is_err());
+
+        let _ = std::fs::remove_file(&backing_path);
+        let _ = std::fs::remove_dir_all(&meta_dir);
     }
 }
