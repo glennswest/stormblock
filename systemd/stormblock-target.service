@@ -1,0 +1,44 @@
+# StormBlock storage-role target server — NVMe-oF/TCP (:4420) + iSCSI (:3260).
+#
+# A storage-role node *serves* volumes to the rest of the cluster over the
+# target protocols in src/target/. This unit launches the full engine in
+# serving mode: drives → RAID → volumes → targets → management API.
+#
+# Storage-role activation (vs a plain diskless/client node): install this unit
+# and provide /etc/stormblock/stormblock.toml. A diskless node ships neither —
+# it only runs stormblock-ublk.service (the local boot-device safety net) or a
+# client initiator. In stormcos the manifest ([stormblock] server = true)
+# installs + enables this unit.
+#
+# Configuration comes from /etc/stormblock/stormblock.toml:
+#   [management]  listen_addr, data_dir, tls, api_token, node_name, topology
+#   [[drives]]    device paths to open
+#   [[arrays]]    RAID arrays to assemble
+#   [iscsi]/[nvmeof]  target listen addresses + names
+#
+# Ordering: comes up after the local slab/ublk layer (so a node that boots
+# from its own slab has root before serving) and before remote-fs so nodes
+# that mount from this target can order against it.
+
+[Unit]
+Description=StormBlock NVMe-oF/TCP + iSCSI target server
+Documentation=https://github.com/glennswest/stormblock
+After=network-online.target stormblock-ublk.service
+Wants=network-online.target
+Before=remote-fs-pre.target
+ConditionPathExists=/usr/sbin/stormblock
+ConditionPathExists=/etc/stormblock/stormblock.toml
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/stormblock --config /etc/stormblock/stormblock.toml
+Restart=on-failure
+RestartSec=2
+# The engine tears down targets + flushes journals on SIGINT/SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

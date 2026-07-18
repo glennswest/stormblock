@@ -216,6 +216,20 @@ Replaces rigid DiskPool/VDrive/ExtentAllocator with organic, cellular storage. E
 - [x] 11 integration tests (layout parsing, provisioning on file slab, slab migration with data verification)
 - [x] `boot-iscsi-test.sh` — CI script for mkube job runner
 
+### /v1 CSI Contract API — DONE (issues #3, #8, #9, #10; API layer of #5/#6/#7)
+- [x] `src/mgmt/api/v1.rs` — full /v1 surface per stormblock-csi docs/stormblock-api.md (MockEngine is the executable spec): volumes (name-idempotent create, COW clone via `source`, expand, attach/detach with mode gating), snapshots + group snapshots, placement/prestage, fence/promote (epoch CAS), bounded dual-attach, node capacity/topology, `{code,message,current_epoch?}` error envelope (404/409/412/507), optional bearer auth (`management.api_token`)
+- [x] `VolumeManager::create_volume_any` (array-free create) + `create_snapshots_atomic` (GEM+registry locks held across all members = single consistency fence for VolumeGroupSnapshot)
+- [x] Empty-volume snapshot/delete fix in `src/volume/snapshot.rs` (never-written volumes have no GEM map)
+- [x] Config: `management.api_token`, `management.node_name`, `management.topology`; /v1 state persisted to `<data_dir>/v1_state.json`
+- [x] 11 HTTP-level integration tests (`tests/integration_v1_api.rs`) ported from the MockEngine spec + engine-backed COW divergence
+- [ ] Engine data path for #5/#6/#7 (cross-node replication, epoch-carrying writes, resync) — control-plane state only for now
+
+### boot-local + storage-role systemd unit — DONE (issues #11, #12)
+- [x] CLI `boot-local` — attach existing slab(s) non-destructively (`open_backing_device`, no reformat), restore volumes.dat, resolve boot volume by UUID/name/boot.toml, export as /dev/ublkb0 (+ optional image-store as ublkb1), `--local-disk` zeroboot flow-over (per-extent lock cycling so root I/O keeps flowing)
+- [x] initramfs `/init` local-slab path: `rd.stormblock.slab=` / baked boot.toml, erofs root, no network needed
+- [x] `systemd/stormblock-target.service` — storage-role target server (config from /etc/stormblock/stormblock.toml); SIGTERM now shuts down gracefully like Ctrl+C
+- [x] 3 CLI integration tests (`tests/integration_boot_local.rs`)
+
 ### LinuxBoot-style Fedora on iSCSI — DONE
 - [x] `--ublk` flag on `boot-iscsi` CLI — UblkServer per partition (Linux 6.0+)
 - [x] `scripts/build-stormblock-initramfs.sh` — minimal initramfs (busybox + stormblock + ublk_drv + /init)
