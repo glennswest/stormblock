@@ -63,6 +63,14 @@ pub struct ManagementConfig {
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub data_dir: Option<String>,
+    /// Optional bearer token required on /v1 requests (Authorization: Bearer).
+    pub api_token: Option<String>,
+    /// This node's name in the /v1 surface. Falls back to $STORMBLOCK_NODE,
+    /// then $HOSTNAME, then "localhost".
+    pub node_name: Option<String>,
+    /// Topology labels (zone, rack, ...) reported for this node via
+    /// GET /v1/nodes/capacity.
+    pub topology: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for ManagementConfig {
@@ -72,6 +80,9 @@ impl Default for ManagementConfig {
             tls_cert: None,
             tls_key: None,
             data_dir: None,
+            api_token: None,
+            node_name: None,
+            topology: std::collections::BTreeMap::new(),
         }
     }
 }

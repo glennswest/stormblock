@@ -100,6 +100,8 @@ pub struct AppState {
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
     pub slab_registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
     pub gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
+    /// Control-plane state behind the /v1 CSI contract surface.
+    pub v1: tokio::sync::Mutex<api::v1::V1State>,
     pub config: StormBlockConfig,
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
@@ -123,6 +125,7 @@ impl AppState {
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,
             gem,
+            v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
             config,
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),
