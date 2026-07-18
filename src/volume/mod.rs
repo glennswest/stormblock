@@ -162,6 +162,76 @@ impl VolumeManager {
         Ok(id)
     }
 
+    /// Create a new thin volume without binding it to a specific array.
+    ///
+    /// Slab placement happens at write time via the registry, so the volume
+    /// can allocate from any registered slab. Used by the /v1 management
+    /// surface where placement is expressed in nodes, not arrays.
+    pub async fn create_volume_any(
+        &mut self,
+        name: &str,
+        virtual_size: u64,
+    ) -> Result<VolumeId, VolumeError> {
+        let vol = ThinVolume::new(name.to_string(), virtual_size, self.slot_size);
+        let id = vol.id();
+        let handle = Arc::new(ThinVolumeHandle::new(
+            vol,
+            self.gem.clone(),
+            self.registry.clone(),
+            PlacementPolicy::default(),
+        ));
+        self.volumes.insert(id, handle);
+        self.persist().await;
+        Ok(id)
+    }
+
+    /// Snapshot several volumes at a single consistency point.
+    ///
+    /// Holds the GEM and slab-registry locks across every member clone, so
+    /// no write can allocate or COW between the first and last snapshot —
+    /// this is the single fence VolumeGroupSnapshot semantics require.
+    pub async fn create_snapshots_atomic(
+        &mut self,
+        sources: &[(VolumeId, String)],
+    ) -> Result<Vec<VolumeId>, VolumeError> {
+        let mut params = Vec::with_capacity(sources.len());
+        for (source_id, name) in sources {
+            let handle = self.volumes.get(source_id)
+                .ok_or(VolumeError::VolumeNotFound(*source_id))?
+                .clone();
+            let vol = handle.lock().await;
+            params.push((*source_id, name.clone(), vol.virtual_size, vol.slot_size));
+        }
+
+        let mut snaps = Vec::with_capacity(sources.len());
+        {
+            let mut gem = self.gem.lock().await;
+            let mut reg = self.registry.lock().await;
+            for (source_id, name, virtual_size, slot_size) in &params {
+                let snap = snapshot::create_snapshot(
+                    *source_id, name, *virtual_size, *slot_size,
+                    &mut gem, &mut reg,
+                ).await?;
+                snaps.push(snap);
+            }
+        }
+
+        let mut ids = Vec::with_capacity(snaps.len());
+        for snap in snaps {
+            let snap_id = snap.id();
+            let handle = Arc::new(ThinVolumeHandle::new(
+                snap,
+                self.gem.clone(),
+                self.registry.clone(),
+                PlacementPolicy::default(),
+            ));
+            self.volumes.insert(snap_id, handle);
+            ids.push(snap_id);
+        }
+        self.persist().await;
+        Ok(ids)
+    }
+
     /// Delete a volume, freeing all slab slots.
     pub async fn delete_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
         let _handle = self.volumes.remove(&id)

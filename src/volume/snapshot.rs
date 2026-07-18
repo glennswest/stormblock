@@ -24,15 +24,16 @@ pub async fn create_snapshot(
 ) -> Result<ThinVolume, VolumeError> {
     let snap_id = VolumeId::new();
 
-    // Clone volume map in GEM (bumps ref_count in GEM entries)
-    let cloned = gem.clone_volume_map(source_id, snap_id)
-        .ok_or(VolumeError::VolumeNotFound(source_id))?;
-
-    // Increment ref_count on all slab slots (on-disk)
-    for loc in cloned.extents.values() {
-        if let Some(slab) = registry.get_mut(&loc.slab_id) {
-            slab.inc_ref(loc.slot_idx).await
-                .map_err(VolumeError::Drive)?;
+    // Clone volume map in GEM (bumps ref_count in GEM entries). A volume
+    // that has never been written has no GEM map yet — its snapshot is
+    // simply empty (extents appear on first allocate-on-write).
+    if let Some(cloned) = gem.clone_volume_map(source_id, snap_id) {
+        // Increment ref_count on all slab slots (on-disk)
+        for loc in cloned.extents.values() {
+            if let Some(slab) = registry.get_mut(&loc.slab_id) {
+                slab.inc_ref(loc.slot_idx).await
+                    .map_err(VolumeError::Drive)?;
+            }
         }
     }
 
@@ -63,12 +64,12 @@ pub async fn delete_snapshot(
     gem: &mut GlobalExtentMap,
     registry: &mut SlabRegistry,
 ) -> Result<(), VolumeError> {
-    let vmap = gem.remove_volume(snap_id)
-        .ok_or(VolumeError::VolumeNotFound(snap_id))?;
-
-    for loc in vmap.extents.values() {
-        if let Some(slab) = registry.get_mut(&loc.slab_id) {
-            let _ = slab.dec_ref(loc.slot_idx).await;
+    // A never-written volume has no GEM map — nothing to free.
+    if let Some(vmap) = gem.remove_volume(snap_id) {
+        for loc in vmap.extents.values() {
+            if let Some(slab) = registry.get_mut(&loc.slab_id) {
+                let _ = slab.dec_ref(loc.slot_idx).await;
+            }
         }
     }
 
