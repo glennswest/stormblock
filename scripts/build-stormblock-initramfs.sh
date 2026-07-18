@@ -97,7 +97,14 @@ MDEV
 cat > "$INITRD_DIR/init" << 'INITSCRIPT'
 #!/bin/sh
 # StormBlock LinuxBoot init
-# Connects to iSCSI, creates ublk devices, mounts root, switch_root to systemd.
+#
+# Two boot paths:
+#   local (stormcos): rd.stormblock.slab=<dev-or-file> [rd.stormblock.meta=<dir>]
+#                     [stormblock.volume=<uuid-or-name>] — or the same via a
+#                     baked-in /etc/stormblock/boot.toml. Attaches the slab,
+#                     exports the boot volume as /dev/ublkb0, switch_root.
+#   iSCSI:            rd.stormblock.portal= rd.stormblock.iqn= rd.stormblock.layout=
+#                     — provisions the partitioned boot disk over the network.
 
 export PATH=/bin:/sbin:/usr/sbin
 
@@ -113,6 +120,9 @@ IQN=""
 LAYOUT=""
 PORT="3260"
 IP_CONF=""
+SLAB=""
+META=""
+VOLUME=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -120,24 +130,45 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.iqn=*)    IQN="${param#*=}" ;;
         rd.stormblock.layout=*) LAYOUT="${param#*=}" ;;
         rd.stormblock.port=*)   PORT="${param#*=}" ;;
+        rd.stormblock.slab=*)   SLAB="${param#*=}" ;;
+        rd.stormblock.meta=*)   META="${param#*=}" ;;
+        stormblock.volume=*)    VOLUME="${param#*=}" ;;
         ip=*)                   IP_CONF="${param#*=}" ;;
     esac
 done
 
+# Local-slab boot (stormcos) when a slab is named on the cmdline, or when the
+# initramfs carries a boot.toml handoff and no iSCSI portal was given.
+BOOT_MODE="iscsi"
+if [ -n "$SLAB" ]; then
+    BOOT_MODE="local"
+elif [ -z "$PORTAL" ] && [ -f /etc/stormblock/boot.toml ] && [ -f /etc/stormblock/slab ]; then
+    # /etc/stormblock/slab: one line naming the slab device/file
+    SLAB=$(cat /etc/stormblock/slab)
+    BOOT_MODE="local"
+fi
+
 # Validate required parameters
-if [ -z "$PORTAL" ] || [ -z "$IQN" ] || [ -z "$LAYOUT" ]; then
+if [ "$BOOT_MODE" = "iscsi" ] && { [ -z "$PORTAL" ] || [ -z "$IQN" ] || [ -z "$LAYOUT" ]; }; then
     echo "FATAL: Missing required kernel parameters:"
     echo "  rd.stormblock.portal=$PORTAL"
     echo "  rd.stormblock.iqn=$IQN"
     echo "  rd.stormblock.layout=$LAYOUT"
+    echo "  (or rd.stormblock.slab=<dev> for local-slab boot)"
     echo "Dropping to shell..."
     exec /bin/sh
 fi
 
-echo "StormBlock LinuxBoot init"
-echo "  Portal: $PORTAL:$PORT"
-echo "  IQN:    $IQN"
-echo "  Layout: $LAYOUT"
+echo "StormBlock LinuxBoot init ($BOOT_MODE)"
+if [ "$BOOT_MODE" = "local" ]; then
+    echo "  Slab:   $SLAB"
+    [ -n "$META" ] && echo "  Meta:   $META"
+    [ -n "$VOLUME" ] && echo "  Volume: $VOLUME"
+else
+    echo "  Portal: $PORTAL:$PORT"
+    echo "  IQN:    $IQN"
+    echo "  Layout: $LAYOUT"
+fi
 
 # Load ublk driver
 if [ -f /lib/modules/ublk_drv.ko ]; then
@@ -154,7 +185,11 @@ if [ ! -c /dev/ublk-control ]; then
     echo "WARNING: /dev/ublk-control not found — ublk_drv may not be loaded"
 fi
 
-# Network setup
+# Network setup (iSCSI boot only — local-slab boot needs no network)
+if [ "$BOOT_MODE" = "local" ]; then
+    # Load ublk and jump straight to the local attach.
+    :
+else
 echo "Configuring network..."
 ip link set lo up
 
@@ -191,24 +226,35 @@ else
 fi
 
 echo "Network: $(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')"
+fi
 
-# Start stormblock boot-iscsi with ublk export
+# Start stormblock with ublk export
 echo "Starting StormBlock..."
-/usr/sbin/stormblock boot-iscsi \
-    --portal "$PORTAL" --port "$PORT" \
-    --iqn "$IQN" --layout "$LAYOUT" --ublk &
+if [ "$BOOT_MODE" = "local" ]; then
+    # Attach the existing slab (no reformat), export boot volume as ublkb0.
+    # Volume comes from --volume if given, else /etc/stormblock/boot.toml.
+    /usr/sbin/stormblock boot-local \
+        --slab "$SLAB" \
+        ${META:+--meta "$META"} \
+        ${VOLUME:+--volume "$VOLUME"} &
+    ROOTDEV=/dev/ublkb0
+else
+    /usr/sbin/stormblock boot-iscsi \
+        --portal "$PORTAL" --port "$PORT" \
+        --iqn "$IQN" --layout "$LAYOUT" --ublk &
+    ROOTDEV=/dev/ublkb2   # partition index 2 = root
+fi
 STORMBLOCK_PID=$!
 
-# Wait for root device (/dev/ublkb2 — partition index 2 = root)
-echo "Waiting for root device /dev/ublkb2..."
+echo "Waiting for root device $ROOTDEV..."
 TIMEOUT=30
-while [ ! -b /dev/ublkb2 ] && [ $TIMEOUT -gt 0 ]; do
+while [ ! -b "$ROOTDEV" ] && [ $TIMEOUT -gt 0 ]; do
     sleep 1
     TIMEOUT=$((TIMEOUT - 1))
 done
 
-if [ ! -b /dev/ublkb2 ]; then
-    echo "FATAL: root device /dev/ublkb2 not found after 30s"
+if [ ! -b "$ROOTDEV" ]; then
+    echo "FATAL: root device $ROOTDEV not found after 30s"
     echo "StormBlock PID: $STORMBLOCK_PID"
     echo "Available block devices:"
     ls -la /dev/ublk* 2>/dev/null || echo "  (none)"
@@ -216,33 +262,38 @@ if [ ! -b /dev/ublkb2 ]; then
     exec /bin/sh
 fi
 
-echo "Root device ready: /dev/ublkb2"
+echo "Root device ready: $ROOTDEV"
 
-# Mount filesystems
+# Mount filesystems (stormcos local root is erofs; fall back to ext4/auto)
 echo "Mounting filesystems..."
-mount -t ext4 /dev/ublkb2 /sysroot || { echo "FATAL: Failed to mount root"; exec /bin/sh; }
+mount -t erofs -o ro "$ROOTDEV" /sysroot 2>/dev/null \
+    || mount -t ext4 "$ROOTDEV" /sysroot 2>/dev/null \
+    || mount "$ROOTDEV" /sysroot \
+    || { echo "FATAL: Failed to mount root"; exec /bin/sh; }
 
-# Mount boot if partition exists
-if [ -b /dev/ublkb1 ]; then
-    mkdir -p /sysroot/boot
-    mount -t ext4 /dev/ublkb1 /sysroot/boot
-fi
+if [ "$BOOT_MODE" = "iscsi" ]; then
+    # Mount boot if partition exists
+    if [ -b /dev/ublkb1 ]; then
+        mkdir -p /sysroot/boot
+        mount -t ext4 /dev/ublkb1 /sysroot/boot
+    fi
 
-# Mount ESP if partition exists
-if [ -b /dev/ublkb0 ]; then
-    mkdir -p /sysroot/boot/efi
-    mount -t vfat /dev/ublkb0 /sysroot/boot/efi
-fi
+    # Mount ESP if partition exists
+    if [ -b /dev/ublkb0 ]; then
+        mkdir -p /sysroot/boot/efi
+        mount -t vfat /dev/ublkb0 /sysroot/boot/efi
+    fi
 
-# Mount home if partition exists
-if [ -b /dev/ublkb4 ]; then
-    mkdir -p /sysroot/home
-    mount -t ext4 /dev/ublkb4 /sysroot/home
-fi
+    # Mount home if partition exists
+    if [ -b /dev/ublkb4 ]; then
+        mkdir -p /sysroot/home
+        mount -t ext4 /dev/ublkb4 /sysroot/home
+    fi
 
-# Enable swap
-if [ -b /dev/ublkb3 ]; then
-    swapon /dev/ublkb3 2>/dev/null
+    # Enable swap
+    if [ -b /dev/ublkb3 ]; then
+        swapon /dev/ublkb3 2>/dev/null
+    fi
 fi
 
 # Verify systemd exists in the new root
@@ -283,4 +334,5 @@ if [ "$UBLK_FOUND" = true ]; then
 fi
 echo ""
 echo "Boot kernel cmdline:"
-echo "  rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
+echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
+echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"

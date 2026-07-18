@@ -138,6 +138,34 @@ enum SubCommand {
         #[arg(long)]
         ublk: bool,
     },
+    /// Boot from a local slab — attach an existing slab + metadata
+    /// non-destructively and export the boot volume as /dev/ublkb0
+    BootLocal {
+        /// Slab device or file path(s) (e.g. root.slab). Paired with the
+        /// array records in volumes.dat in order.
+        #[arg(long, required = true)]
+        slab: Vec<String>,
+        /// Metadata directory containing volumes.dat (default: "meta" next
+        /// to the first slab)
+        #[arg(long)]
+        meta: Option<String>,
+        /// Boot volume, by UUID or name (overrides --boot-config)
+        #[arg(long)]
+        volume: Option<String>,
+        /// initramfs handoff config ([boot] volume = "...")
+        #[arg(long, default_value = "/etc/stormblock/boot.toml")]
+        boot_config: String,
+        /// Also export this volume (UUID or name) as /dev/ublkb1
+        #[arg(long)]
+        image_store: Option<String>,
+        /// After root is up, migrate the slab to this local disk in the
+        /// background (zeroboot flow-over)
+        #[arg(long)]
+        local_disk: Option<String>,
+        /// Tier for the --local-disk destination slab
+        #[arg(long, default_value = "hot")]
+        local_tier: String,
+    },
     /// Migrate boot volumes from iSCSI slab to local disk
     MigrateBoot {
         /// iSCSI target portal (IP address)
@@ -246,9 +274,22 @@ async fn main() -> anyhow::Result<()> {
             }
             SubCommand::Ublk { volume: _, queues: _ } => {
                 tracing::info!("ublk export mode — requires running storage engine");
-                tracing::info!("Use the REST API POST /api/v1/exports to configure ublk exports");
+                tracing::info!("For local-slab boot use: stormblock boot-local --slab <path> --volume <id>");
                 tracing::info!("Requires Linux 6.0+ with ublk_drv module loaded");
                 return Ok(());
+            }
+            SubCommand::BootLocal {
+                slab, meta, volume, boot_config, image_store, local_disk, local_tier,
+            } => {
+                return handle_boot_local(
+                    slab,
+                    meta.as_deref(),
+                    volume.as_deref(),
+                    boot_config,
+                    image_store.as_deref(),
+                    local_disk.as_deref(),
+                    local_tier,
+                ).await;
             }
             SubCommand::Migrate { local_disk, tier } => {
                 tracing::info!("Migration mode: target={}, tier={}", local_disk, tier);
@@ -613,6 +654,17 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Management API running on {}, press Ctrl+C to stop", config.management.listen_addr);
     }
 
+    // SIGINT (Ctrl+C) and SIGTERM (systemctl stop) both shut down gracefully.
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r?,
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down...");
     {
@@ -805,6 +857,249 @@ async fn handle_boot_iscsi(
         tracing::warn!("iSCSI disconnect: {e}");
     }
 
+    Ok(())
+}
+
+/// boot.toml handoff dropped into the initramfs by `BootManager::initramfs_config`.
+#[derive(serde::Deserialize)]
+struct BootToml {
+    boot: BootTomlSection,
+}
+
+#[derive(serde::Deserialize)]
+struct BootTomlSection {
+    volume: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    server: Option<String>,
+}
+
+/// Resolve a volume selector (UUID or name) against restored metadata.
+async fn resolve_boot_volume(
+    mgr: &VolumeManager,
+    selector: &str,
+) -> anyhow::Result<stormblock::volume::VolumeId> {
+    use stormblock::volume::VolumeId;
+    if let Ok(u) = uuid::Uuid::parse_str(selector) {
+        let id = VolumeId(u);
+        if mgr.get_volume(&id).is_some() {
+            return Ok(id);
+        }
+    }
+    for (id, name, _, _) in mgr.list_volumes().await {
+        if name == selector {
+            return Ok(id);
+        }
+    }
+    anyhow::bail!(
+        "volume '{selector}' not found in slab metadata (have: {})",
+        mgr.list_volumes()
+            .await
+            .iter()
+            .map(|(id, name, _, _)| format!("{name}={}", id.0))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// boot-local: attach an existing local slab (no reformat, no repartition),
+/// restore volume metadata, export the boot volume as /dev/ublkb0.
+/// The local-slab → ublk-root path stormcos boots through (issue #12).
+async fn handle_boot_local(
+    slab_paths: &[String],
+    meta: Option<&str>,
+    volume: Option<&str>,
+    boot_config: &str,
+    image_store: Option<&str>,
+    local_disk: Option<&str>,
+    local_tier: &str,
+) -> anyhow::Result<()> {
+    use std::path::{Path, PathBuf};
+    use stormblock::volume::MetadataStore;
+
+    // 1. Metadata: --meta, or the "meta" directory next to the first slab.
+    let meta_dir: PathBuf = match meta {
+        Some(m) => PathBuf::from(m),
+        None => Path::new(&slab_paths[0])
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("meta"),
+    };
+    let store = MetadataStore::new(meta_dir.clone())?;
+    if !store.exists() {
+        anyhow::bail!("no volume metadata (volumes.dat) in {}", meta_dir.display());
+    }
+    let metadata = store.load()?;
+    if metadata.arrays.is_empty() {
+        anyhow::bail!("metadata in {} records no arrays", meta_dir.display());
+    }
+    if slab_paths.len() > metadata.arrays.len() {
+        anyhow::bail!(
+            "{} slab path(s) given but metadata records only {} array(s)",
+            slab_paths.len(),
+            metadata.arrays.len()
+        );
+    }
+
+    // 2. Attach slabs non-destructively (no reformat) and restore volumes.
+    let mut mgr = VolumeManager::with_data_dir(metadata.extent_size, meta_dir.clone())?;
+    for (path, rec) in slab_paths.iter().zip(&metadata.arrays) {
+        let dev = stormblock::drive::filedev::FileDevice::open(path).await?;
+        mgr.open_backing_device(rec.array_id, Arc::new(dev))
+            .await
+            .map_err(|e| anyhow::anyhow!("attach slab {path}: {e}"))?;
+        println!("Attached slab {path} (array {})", rec.array_id);
+    }
+    mgr.restore().await?;
+
+    // 3. Resolve the boot volume: --volume wins, else boot.toml.
+    let selector = match volume {
+        Some(v) => v.to_string(),
+        None => {
+            let raw = std::fs::read_to_string(boot_config).map_err(|e| {
+                anyhow::anyhow!(
+                    "no --volume given and cannot read {boot_config}: {e}"
+                )
+            })?;
+            let parsed: BootToml = toml::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("parse {boot_config}: {e}"))?;
+            parsed.boot.volume
+        }
+    };
+    let root_id = resolve_boot_volume(&mgr, &selector).await?;
+    let root_name = mgr
+        .get_volume_handle(&root_id)
+        .expect("resolved volume exists")
+        .name()
+        .await;
+
+    let mut exports: Vec<(u32, String, Arc<dyn BlockDevice>)> = vec![(
+        0,
+        root_name.clone(),
+        mgr.get_volume(&root_id).expect("resolved volume exists"),
+    )];
+    if let Some(sel) = image_store {
+        let img_id = resolve_boot_volume(&mgr, sel).await?;
+        let img_name = mgr
+            .get_volume_handle(&img_id)
+            .expect("resolved volume exists")
+            .name()
+            .await;
+        exports.push((1, img_name, mgr.get_volume(&img_id).expect("resolved volume exists")));
+    }
+
+    println!("Boot volume: {root_name} ({})", root_id.0);
+    for (dev_id, name, dev) in &exports {
+        println!(
+            "  /dev/ublkb{dev_id} ← {} ({})",
+            name,
+            stormblock::mgmt::config::human_size(dev.capacity_bytes())
+        );
+    }
+
+    // 4. Optional zeroboot flow-over: migrate extents to a local disk in the
+    //    background, one extent per lock cycle so root I/O keeps flowing.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    if let Some(disk) = local_disk {
+        let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let source_slabs: Vec<_> = {
+            let reg = mgr.registry().lock().await;
+            reg.iter().map(|(id, _)| *id).collect()
+        };
+        let dest_dev: Arc<dyn BlockDevice> =
+            Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+        let dest_slab = Slab::format(dest_dev, metadata.extent_size, tier)
+            .await
+            .map_err(|e| anyhow::anyhow!("format local disk {disk}: {e}"))?;
+        let dest_id = dest_slab.slab_id();
+        mgr.registry().lock().await.add(dest_slab);
+        println!("Flow-over: migrating to local slab {dest_id} on {disk} in background");
+
+        let gem_arc = mgr.gem().clone();
+        let reg_arc = mgr.registry().clone();
+        let mut flow_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let engine = stormblock::placement::PlacementEngine::new();
+            let mut moved = 0u64;
+            let mut failed = 0u64;
+            for source in source_slabs {
+                loop {
+                    if *flow_shutdown.borrow_and_update() {
+                        return;
+                    }
+                    // One extent per lock cycle: ublk I/O interleaves between
+                    // iterations instead of stalling for the whole migration.
+                    let mut gem = gem_arc.lock().await;
+                    let mut reg = reg_arc.lock().await;
+                    let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next()
+                    else {
+                        break;
+                    };
+                    match engine
+                        .migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest_id))
+                        .await
+                    {
+                        Ok(_) => moved += 1,
+                        Err(e) => {
+                            failed += 1;
+                            tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
+                            if failed > 16 {
+                                tracing::error!("flow-over: aborting after repeated failures");
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
+            println!("Flow-over complete: {moved} extent(s) now on local disk");
+        });
+    }
+
+    // 5. Export via ublk (Linux 6.0+ with ublk_drv).
+    #[cfg(target_os = "linux")]
+    {
+        use stormblock::drive::ublk::UblkServer;
+
+        let mut ublk_threads = Vec::new();
+        for (dev_id, name, dev) in exports {
+            let server = UblkServer::new(dev).with_dev_id(dev_id);
+            let rx = shutdown_rx.clone();
+            // UblkServer::run() holds raw pointers (not Send), so run on a
+            // dedicated OS thread with its own tokio runtime.
+            let thread = std::thread::Builder::new()
+                .name(format!("ublk-local-{dev_id}"))
+                .spawn(move || {
+                    let rt = tokio::runtime::Runtime::new()
+                        .expect("failed to create ublk tokio runtime");
+                    rt.block_on(async move {
+                        match server.run(rx).await {
+                            Ok(()) => tracing::info!("ublk#{dev_id} ({name}) stopped"),
+                            Err(e) => tracing::error!("ublk#{dev_id} ({name}) error: {e}"),
+                        }
+                    });
+                })
+                .expect("failed to spawn ublk thread");
+            ublk_threads.push(thread);
+        }
+
+        println!("\nublk devices ready. Press Ctrl+C to stop.");
+        tokio::signal::ctrl_c().await?;
+        println!("Shutting down...");
+        let _ = shutdown_tx.send(true);
+        for t in ublk_threads {
+            let _ = t.join();
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = exports;
+        let _ = shutdown_tx;
+        anyhow::bail!("boot-local ublk export requires Linux 6.0+ with ublk_drv loaded");
+    }
+
+    #[cfg(target_os = "linux")]
     Ok(())
 }
 
