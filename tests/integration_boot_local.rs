@@ -82,12 +82,16 @@ async fn boot_local_attaches_and_resolves_by_name() {
     let (slab, _meta, vol_uuid) = build_artifact(&dir, "boot-machine-a").await;
 
     // meta dir defaults to "meta" next to the slab — exercise the default.
-    let (_ok, text) = run_boot_local(&[
+    // --check validates attach/restore/resolve and exits before ublk export,
+    // so this passes identically on Linux and macOS.
+    let (ok, text) = run_boot_local(&[
         "--slab",
         slab.to_str().unwrap(),
         "--volume",
         "boot-machine-a",
+        "--check",
     ]);
+    assert!(ok, "check mode must exit 0:\n{text}");
     assert!(text.contains("Attached slab"), "attach missing:\n{text}");
     assert!(
         text.contains("Boot volume: boot-machine-a"),
@@ -95,6 +99,7 @@ async fn boot_local_attaches_and_resolves_by_name() {
     );
     assert!(text.contains(&vol_uuid.to_string()), "uuid missing:\n{text}");
     assert!(text.contains("/dev/ublkb0"), "export plan missing:\n{text}");
+    assert!(text.contains("boot-local check OK"), "check marker missing:\n{text}");
 }
 
 #[tokio::test]
@@ -110,14 +115,16 @@ async fn boot_local_resolves_from_boot_toml() {
     )
     .unwrap();
 
-    let (_ok, text) = run_boot_local(&[
+    let (ok, text) = run_boot_local(&[
         "--slab",
         slab.to_str().unwrap(),
         "--meta",
         meta.to_str().unwrap(),
         "--boot-config",
         boot_toml.to_str().unwrap(),
+        "--check",
     ]);
+    assert!(ok, "check mode must exit 0:\n{text}");
     assert!(
         text.contains("Boot volume: boot-machine-b"),
         "boot.toml resolve missing:\n{text}"

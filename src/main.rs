@@ -165,6 +165,10 @@ enum SubCommand {
         /// Tier for the --local-disk destination slab
         #[arg(long, default_value = "hot")]
         local_tier: String,
+        /// Validate the artifact and resolve the boot volume, then exit
+        /// without exporting (no ublk needed)
+        #[arg(long)]
+        check: bool,
     },
     /// Migrate boot volumes from iSCSI slab to local disk
     MigrateBoot {
@@ -279,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             SubCommand::BootLocal {
-                slab, meta, volume, boot_config, image_store, local_disk, local_tier,
+                slab, meta, volume, boot_config, image_store, local_disk, local_tier, check,
             } => {
                 return handle_boot_local(
                     slab,
@@ -289,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
                     image_store.as_deref(),
                     local_disk.as_deref(),
                     local_tier,
+                    *check,
                 ).await;
             }
             SubCommand::Migrate { local_disk, tier } => {
@@ -905,6 +910,7 @@ async fn resolve_boot_volume(
 /// boot-local: attach an existing local slab (no reformat, no repartition),
 /// restore volume metadata, export the boot volume as /dev/ublkb0.
 /// The local-slab → ublk-root path stormcos boots through (issue #12).
+#[allow(clippy::too_many_arguments)]
 async fn handle_boot_local(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -913,6 +919,7 @@ async fn handle_boot_local(
     image_store: Option<&str>,
     local_disk: Option<&str>,
     local_tier: &str,
+    check: bool,
 ) -> anyhow::Result<()> {
     use std::path::{Path, PathBuf};
     use stormblock::volume::MetadataStore;
@@ -997,6 +1004,11 @@ async fn handle_boot_local(
         );
     }
 
+    if check {
+        println!("boot-local check OK");
+        return Ok(());
+    }
+
     // 4. Optional zeroboot flow-over: migrate extents to a local disk in the
     //    background, one extent per lock cycle so root I/O keeps flowing.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1061,10 +1073,14 @@ async fn handle_boot_local(
     {
         use stormblock::drive::ublk::UblkServer;
 
+        let (done_tx, mut done_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(u32, Result<(), String>)>();
+        let total = exports.len();
         let mut ublk_threads = Vec::new();
         for (dev_id, name, dev) in exports {
             let server = UblkServer::new(dev).with_dev_id(dev_id);
             let rx = shutdown_rx.clone();
+            let done = done_tx.clone();
             // UblkServer::run() holds raw pointers (not Send), so run on a
             // dedicated OS thread with its own tokio runtime.
             let thread = std::thread::Builder::new()
@@ -1073,22 +1089,56 @@ async fn handle_boot_local(
                     let rt = tokio::runtime::Runtime::new()
                         .expect("failed to create ublk tokio runtime");
                     rt.block_on(async move {
-                        match server.run(rx).await {
+                        let res = server.run(rx).await;
+                        match &res {
                             Ok(()) => tracing::info!("ublk#{dev_id} ({name}) stopped"),
                             Err(e) => tracing::error!("ublk#{dev_id} ({name}) error: {e}"),
                         }
+                        let _ = done.send((dev_id, res.map_err(|e| e.to_string())));
                     });
                 })
                 .expect("failed to spawn ublk thread");
             ublk_threads.push(thread);
         }
+        drop(done_tx);
 
-        println!("\nublk devices ready. Press Ctrl+C to stop.");
-        tokio::signal::ctrl_c().await?;
+        // Serve until Ctrl+C/SIGTERM — but if the root export (dev 0) dies,
+        // or every server exits, fail instead of hanging the boot forever.
+        println!("\nublk devices starting. Press Ctrl+C to stop.");
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut finished = 0usize;
+        let mut fatal: Option<String> = None;
+        loop {
+            tokio::select! {
+                r = tokio::signal::ctrl_c() => { r?; break; }
+                _ = sigterm.recv() => break,
+                msg = done_rx.recv() => match msg {
+                    Some((dev_id, res)) => {
+                        finished += 1;
+                        if let Err(e) = res {
+                            if dev_id == 0 {
+                                fatal = Some(format!("root export /dev/ublkb0 failed: {e}"));
+                                break;
+                            }
+                            eprintln!("WARNING: /dev/ublkb{dev_id} export failed: {e}");
+                        }
+                        if finished == total {
+                            fatal = Some("all ublk exports exited".to_string());
+                            break;
+                        }
+                    }
+                    None => { fatal = Some("all ublk exports exited".to_string()); break; }
+                }
+            }
+        }
         println!("Shutting down...");
         let _ = shutdown_tx.send(true);
         for t in ublk_threads {
             let _ = t.join();
+        }
+        if let Some(msg) = fatal {
+            anyhow::bail!("{msg} — is ublk_drv loaded (Linux 6.0+)?");
         }
     }
 
