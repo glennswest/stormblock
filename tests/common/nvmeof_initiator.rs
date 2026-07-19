@@ -100,11 +100,12 @@ impl NvmeofInitiator {
         let mut sqe = [0u8; 64];
         sqe[0] = NVME_FABRIC_OPC; // opcode
         sqe[2..4].copy_from_slice(&cid.to_le_bytes()); // CID
-        // CDW10: fctype=CONNECT(1), SQSIZE in upper 16 bits
-        let cdw10: u32 = (FCTYPE_CONNECT as u32) | (127u32 << 16); // SQSIZE = 128
-        sqe[40..44].copy_from_slice(&cdw10.to_le_bytes());
-        // CDW11: QID
-        sqe[44..48].copy_from_slice(&(qid as u32).to_le_bytes());
+        // Spec Fabrics Connect layout (what the Linux kernel sends):
+        // FCTYPE at byte 4; RECFMT bytes 40-41; QID bytes 42-43;
+        // SQSIZE (0's based) bytes 44-45.
+        sqe[4] = FCTYPE_CONNECT;
+        sqe[42..44].copy_from_slice(&qid.to_le_bytes());
+        sqe[44..46].copy_from_slice(&127u16.to_le_bytes());
 
         // Build 1024-byte connect data
         let mut connect_data = vec![0u8; 1024];

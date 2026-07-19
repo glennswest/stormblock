@@ -69,27 +69,32 @@ impl FabricCmd {
         if sqe.opcode() != NVME_FABRIC_OPC {
             return None;
         }
-        let fctype = (sqe.cdw10() & 0xFF) as u8;
+        // FCTYPE is SQE byte 4 (NVMe-oF Fabrics command capsule) — NOT part
+        // of CDW10. Reading it from CDW10 matched only our own initiator and
+        // broke against the Linux kernel (found by the M0 harness, #1).
+        let fctype = sqe.byte(4);
         Some(FabricCmd { fctype, sqe: sqe.clone() })
     }
 
-    /// For Property Get/Set: extract the property offset from cdw11.
+    /// For Property Get/Set: OFST at SQE bytes 44-47.
     pub fn property_offset(&self) -> u32 {
         self.sqe.cdw11()
     }
 
-    /// For Property Get: whether it's a 64-bit (attrib=1) or 32-bit (attrib=0) read.
+    /// For Property Get/Set: ATTRIB at SQE byte 40, bits 2:0 (0 = 4 bytes,
+    /// 1 = 8 bytes).
     pub fn property_size_64(&self) -> bool {
-        (self.sqe.cdw10() >> 8) & 0x01 != 0
+        self.sqe.byte(40) & 0x07 == 0x01
     }
 
-    /// For Connect: extract SQSIZE from cdw10 bits 31:16 and QID from cdw11 bits 15:0.
+    /// For Connect: SQSIZE at SQE bytes 44-45 (0's based).
     pub fn connect_sqsize(&self) -> u16 {
-        ((self.sqe.cdw10() >> 16) & 0xFFFF) as u16
+        self.sqe.u16_at(44)
     }
 
+    /// For Connect: QID at SQE bytes 42-43.
     pub fn connect_qid(&self) -> u16 {
-        (self.sqe.cdw11() & 0xFFFF) as u16
+        self.sqe.u16_at(42)
     }
 }
 

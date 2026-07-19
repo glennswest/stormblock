@@ -146,6 +146,16 @@ impl NvmeSqe {
         u32::from_le_bytes(self.raw[4..8].try_into().unwrap())
     }
 
+    /// Raw SQE byte — fabrics commands place fields outside the CDW grid
+    /// (e.g. FCTYPE at byte 4, Connect QID at bytes 42-43).
+    pub fn byte(&self, idx: usize) -> u8 {
+        self.raw[idx]
+    }
+
+    pub fn u16_at(&self, idx: usize) -> u16 {
+        u16::from_le_bytes([self.raw[idx], self.raw[idx + 1]])
+    }
+
     // cdw10-15 (command-specific dwords)
     pub fn cdw10(&self) -> u32 {
         u32::from_le_bytes(self.raw[40..44].try_into().unwrap())
