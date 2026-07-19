@@ -25,13 +25,14 @@ locals {
   stormblock_url = "https://github.com/glennswest/stormblock/releases/download/v6.1.1/stormblock-x86_64-linux-musl"
 
   # Fixed MAC -> reserved IP outside the g8 DHCP pool (.100-.200);
-  # .62-.65 free per sister-project scan 2026-07-19.
+  # .80-.83 free per LIVE ping-sweep from dev.g8.lo 2026-07-19 — config scans
+  # miss ad-hoc VMs (.62 was live tcluster2!); always live-scan before claiming.
   storm_nodes = {
-    storm1 = { idx = 0, mac = "BC:24:11:08:00:62", ip = "192.168.8.62" }
-    storm2 = { idx = 1, mac = "BC:24:11:08:00:63", ip = "192.168.8.63" }
-    storm3 = { idx = 2, mac = "BC:24:11:08:00:64", ip = "192.168.8.64" }
+    storm1 = { idx = 0, mac = "BC:24:11:08:00:80", ip = "192.168.8.80" }
+    storm2 = { idx = 1, mac = "BC:24:11:08:00:81", ip = "192.168.8.81" }
+    storm3 = { idx = 2, mac = "BC:24:11:08:00:82", ip = "192.168.8.82" }
   }
-  initiator = { idx = 3, mac = "BC:24:11:08:00:65", ip = "192.168.8.65" }
+  initiator = { idx = 3, mac = "BC:24:11:08:00:83", ip = "192.168.8.83" }
 }
 
 inputs = {
