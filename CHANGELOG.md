@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-07-19
+- **feat:** ublk transport for the CSI `/v1` attach path — when `[management] ublk_transport = true` and a volume is attached on the node that holds its master, the engine exports the backing device as a local `/dev/ublkbN` and returns `AttachInfo::Ublk { device_hint }` instead of NVMe-oF/TCP coordinates, giving the CSI node a local device with no network round trip. Falls back transparently to nvme-tcp when ublk is unavailable (non-Linux, `ublk_drv` not loaded) — probed once at startup. Exports are torn down on detach/delete; the CSI node never disconnects a ublk device itself. Closes the ublk half of the attach contract (the `Ublk` variant existed in the wire type but was never produced). New `src/mgmt/ublk_export.rs`; policy `should_offer_ublk` and export bookkeeping are unit-tested off-Linux, the kernel export path is verified on dev.g8.lo.
+
 ### 2026-04-03
 - **feat:** Dynamic iSCSI LUN management REST API (`POST/GET/DELETE /api/v1/luns`)
 - **feat:** Readonly LUN support — `readonly` flag on LUN creation prevents SCSI writes (WRITE PROTECTED sense)

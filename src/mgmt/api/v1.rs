@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::drive::BlockDevice;
+use crate::mgmt::ublk_export::should_offer_ublk;
 use crate::mgmt::AppState;
 use crate::volume::VolumeId as EngineVolumeId;
 
@@ -684,6 +685,7 @@ async fn delete_volume(
         v1.attachments.remove(&id);
         v1.dual_attach.remove(&id);
         if let Some(local) = rec.local_id {
+            state.ublk_exports.lock().await.remove(&id);
             let mut vm = state.volume_manager.lock().await;
             if let Err(e) = vm.delete_volume(EngineVolumeId(local)).await {
                 tracing::warn!("backing volume {local} delete: {e}");
@@ -768,11 +770,36 @@ async fn attach_volume(
             }
         }
     }
+    // Captured before the mutable borrow below; drives the transport choice.
+    let local_id = rec.local_id;
+    let local_node = v1.local_node.clone();
+
     let entry = v1.attachments.entry(id.clone()).or_default();
     if !entry.contains(&req.node) {
         entry.push(req.node.clone());
     }
     v1.save();
+    drop(v1);
+
+    // Local fast path: when configured and the master is on this node, export
+    // the backing device as a local /dev/ublkbN instead of NVMe-oF/TCP. Any
+    // miss (disabled, remote node, ublk unavailable) falls through to
+    // nvme-tcp, which always works — so this is a pure optimization.
+    if should_offer_ublk(
+        state.config.management.ublk_transport,
+        &req.node,
+        &local_node,
+        local_id.is_some(),
+    ) {
+        if let Some(local) = local_id {
+            let device = state.volume_manager.lock().await.get_volume(&EngineVolumeId(local));
+            if let Some(device) = device {
+                if let Some(path) = state.ublk_exports.lock().await.ensure(&id, device) {
+                    return Ok(Json(AttachInfo::Ublk { device_hint: path }));
+                }
+            }
+        }
+    }
     Ok(Json(attach_info_for(&state, &id)))
 }
 
@@ -787,9 +814,17 @@ async fn detach_volume(
     Json(req): Json<DetachRequest>,
 ) -> V1Result<serde_json::Value> {
     let mut v1 = state.v1.lock().await;
+    let local_node = v1.local_node.clone();
     if let Some(nodes) = v1.attachments.get_mut(&id) {
         nodes.retain(|n| n != &req.node);
         v1.save();
+    }
+    drop(v1);
+    // If the local ublk fast path was serving this node, tear the device down
+    // now — its lifetime is the attachment, and the CSI node deliberately
+    // never disconnects a ublk device itself.
+    if req.node == local_node {
+        state.ublk_exports.lock().await.remove(&id);
     }
     // Idempotent: detach replays are no-ops.
     Ok(Json(serde_json::json!({})))
