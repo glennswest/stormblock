@@ -3,6 +3,7 @@
 pub mod api;
 pub mod config;
 pub mod metrics;
+pub mod ublk_export;
 #[cfg(feature = "ui")]
 pub mod ui;
 
@@ -102,6 +103,8 @@ pub struct AppState {
     pub gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
     /// Control-plane state behind the /v1 CSI contract surface.
     pub v1: tokio::sync::Mutex<api::v1::V1State>,
+    /// Live per-volume ublk exports for the local CSI fast path.
+    pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
     pub config: StormBlockConfig,
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
@@ -126,6 +129,7 @@ impl AppState {
             slab_registry,
             gem,
             v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
+            ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
             config,
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),

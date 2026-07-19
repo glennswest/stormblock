@@ -71,6 +71,13 @@ pub struct ManagementConfig {
     /// Topology labels (zone, rack, ...) reported for this node via
     /// GET /v1/nodes/capacity.
     pub topology: std::collections::BTreeMap<String, String>,
+    /// Offer the ublk transport to CSI when a volume is attached on this same
+    /// node (the master is local). The CSI node then gets a local
+    /// `/dev/ublkbN` device with no NVMe-oF/TCP round trip. Requires Linux
+    /// 6.0+ with `ublk_drv` loaded; when unavailable the engine transparently
+    /// falls back to nvme-tcp. Off by default.
+    #[serde(default)]
+    pub ublk_transport: bool,
 }
 
 impl Default for ManagementConfig {
@@ -83,6 +90,7 @@ impl Default for ManagementConfig {
             api_token: None,
             node_name: None,
             topology: std::collections::BTreeMap::new(),
+            ublk_transport: false,
         }
     }
 }

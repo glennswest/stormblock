@@ -5,6 +5,10 @@
 listen_addr = "0.0.0.0:9090"
 # tls_cert = "/etc/stormblock/cert.pem"
 # tls_key = "/etc/stormblock/key.pem"
+# Offer the local ublk fast path to CSI: when a volume is attached on the node
+# that holds its master, export it as /dev/ublkbN (no NVMe-oF/TCP round trip).
+# Requires Linux 6.0+ with ublk_drv loaded; falls back to nvme-tcp otherwise.
+# ublk_transport = true
 
 [[drives]]
 path = "/dev/sda"
