@@ -12,13 +12,18 @@ use serde::{Serialize, Deserialize};
 
 use crate::raid::RaidArrayId;
 use crate::volume::extent::VolumeId;
+use crate::volume::gem::ExtentLocation;
 use crate::volume::thin::PhysicalExtent;
 
 /// Magic bytes: "STRMVOL\0"
 const MAGIC: [u8; 8] = *b"STRMVOL\0";
 
 /// Current metadata format version.
-const VERSION: u32 = 1;
+///
+/// V2 persists each volume's slab extent map — the piece slot tables cannot
+/// express for COW snapshots (shared slots are recorded under the original
+/// writer, so a snapshot's view exists only in this file). See issue #13.
+const VERSION: u32 = 2;
 
 /// Metadata filename.
 const METADATA_FILE: &str = "volumes.dat";
@@ -46,8 +51,54 @@ pub struct VolumeRecord {
     pub id: VolumeId,
     pub name: String,
     pub virtual_size: u64,
-    pub array_id: RaidArrayId,
-    pub extent_map: BTreeMap<u64, PhysicalExtent>,
+    /// Legacy array binding (V1 records); slab-placed volumes carry None.
+    pub array_id: Option<RaidArrayId>,
+    /// Virtual extent index → slab location. Authoritative for mappings the
+    /// slot tables can't reconstruct (a snapshot's shared slots).
+    pub extents: BTreeMap<u64, ExtentLocation>,
+}
+
+/// V1 payload shapes — decode-only, converted on load.
+mod v1 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: RaidArrayId,
+        pub extent_map: BTreeMap<u64, PhysicalExtent>,
+    }
+}
+
+impl From<v1::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v1::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: Some(v.array_id),
+                    // V1 never persisted slab extents; the GEM rebuild from
+                    // slot tables covers everything V1 could express.
+                    extents: BTreeMap::new(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Handles reading/writing volume metadata to disk.
@@ -98,9 +149,9 @@ impl MetadataStore {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
         }
 
-        // Check version
+        // Check version (V1 is decoded via its legacy shapes and converted)
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != VERSION {
+        if version != 1 && version != VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported metadata version {version}"),
@@ -130,6 +181,12 @@ impl MetadataStore {
         }
 
         let payload = &data[28..28 + payload_len];
+        if version == 1 {
+            let (old, _): (v1::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v1): {e}")))?;
+            return Ok(old.into());
+        }
         let (metadata, _): (VolumeMetadata, _) =
             bincode::serde::decode_from_slice(payload, bincode::config::standard())
                 .map_err(|e| io::Error::other(format!("bincode decode: {e}")))?;
@@ -222,19 +279,10 @@ mod tests {
     fn test_metadata() -> VolumeMetadata {
         let array_id = RaidArrayId(Uuid::new_v4());
         let vol_id = VolumeId(Uuid::new_v4());
-        let mut extent_map = BTreeMap::new();
-        extent_map.insert(0, PhysicalExtent {
-            array_id,
-            offset: 0,
-            length: 4 * 1024 * 1024,
-            ref_count: 1,
-        });
-        extent_map.insert(1, PhysicalExtent {
-            array_id,
-            offset: 4 * 1024 * 1024,
-            length: 4 * 1024 * 1024,
-            ref_count: 1,
-        });
+        let slab_id = crate::drive::slab::SlabId(Uuid::new_v4());
+        let mut extents = BTreeMap::new();
+        extents.insert(0, ExtentLocation { slab_id, slot_idx: 3, ref_count: 2, generation: 1 });
+        extents.insert(1, ExtentLocation { slab_id, slot_idx: 9, ref_count: 1, generation: 1 });
 
         VolumeMetadata {
             extent_size: 4 * 1024 * 1024,
@@ -246,8 +294,8 @@ mod tests {
                 id: vol_id,
                 name: "test-vol".to_string(),
                 virtual_size: 100 * 1024 * 1024,
-                array_id,
-                extent_map,
+                array_id: Some(array_id),
+                extents,
             }],
         }
     }
@@ -260,13 +308,57 @@ mod tests {
         // Verify header
         assert_eq!(&encoded[0..8], b"STRMVOL\0");
         let version = u32::from_le_bytes(encoded[8..12].try_into().unwrap());
-        assert_eq!(version, 1);
+        assert_eq!(version, VERSION);
 
         let decoded = MetadataStore::decode(&encoded).unwrap();
         assert_eq!(decoded.extent_size, meta.extent_size);
         assert_eq!(decoded.volumes.len(), 1);
         assert_eq!(decoded.volumes[0].name, "test-vol");
-        assert_eq!(decoded.volumes[0].extent_map.len(), 2);
+        assert_eq!(decoded.volumes[0].extents.len(), 2);
+    }
+
+    /// A V1 file (pre-#13) must still load: legacy shapes decode and convert,
+    /// with empty slab extents (the GEM rebuild covers what V1 could express).
+    #[test]
+    fn v1_metadata_still_loads() {
+        let array_id = RaidArrayId(Uuid::new_v4());
+        let vol_id = VolumeId(Uuid::new_v4());
+        let mut extent_map = BTreeMap::new();
+        extent_map.insert(0, PhysicalExtent {
+            array_id,
+            offset: 0,
+            length: 4 * 1024 * 1024,
+            ref_count: 1,
+        });
+        let old = v1::VolumeMetadata {
+            extent_size: 4 * 1024 * 1024,
+            arrays: vec![ArrayRecord { array_id, total_capacity: 64 * 1024 * 1024 }],
+            volumes: vec![v1::VolumeRecord {
+                id: vol_id,
+                name: "legacy".to_string(),
+                virtual_size: 100 * 1024 * 1024,
+                array_id,
+                extent_map,
+            }],
+        };
+
+        // Hand-build a version-1 envelope around the V1 payload.
+        let payload =
+            bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&payload);
+        let crc = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+
+        let loaded = MetadataStore::decode(&buf).unwrap();
+        assert_eq!(loaded.volumes.len(), 1);
+        assert_eq!(loaded.volumes[0].name, "legacy");
+        assert_eq!(loaded.volumes[0].array_id, Some(array_id));
+        assert!(loaded.volumes[0].extents.is_empty());
     }
 
     #[test]
@@ -282,7 +374,7 @@ mod tests {
         assert_eq!(loaded.extent_size, meta.extent_size);
         assert_eq!(loaded.volumes.len(), 1);
         assert_eq!(loaded.volumes[0].name, "test-vol");
-        assert_eq!(loaded.volumes[0].extent_map.len(), 2);
+        assert_eq!(loaded.volumes[0].extents.len(), 2);
         assert_eq!(loaded.arrays.len(), 1);
 
         // Cleanup

@@ -326,16 +326,63 @@ impl VolumeManager {
         &self.registry
     }
 
-    /// Persist all volume metadata to disk. No-op if no data_dir configured.
+    /// Persist all volume metadata to disk, including each volume's extent
+    /// map. No-op if no data_dir configured.
+    ///
+    /// The extent maps are the piece slab slot tables cannot reconstruct: a
+    /// COW snapshot's shared slots are recorded under the original writer,
+    /// so without this file a snapshot reads as zeros after reattach (#13).
     pub async fn persist(&self) {
-        let _store = match &self.metadata_store {
+        let store = match &self.metadata_store {
             Some(s) => s,
             None => return,
         };
 
-        // TODO: V2 metadata format. For now, GEM is reconstructable from slab
-        // slot tables on recovery. Volume configs (name, size) can be persisted
-        // separately.
+        // Gather per-volume info before taking gem/registry locks so we never
+        // hold them across a volume-handle await (I/O paths lock the volume
+        // first, then gem/registry).
+        let mut vol_info = Vec::with_capacity(self.volumes.len());
+        for (id, handle) in &self.volumes {
+            vol_info.push((*id, handle.name().await, handle.capacity_bytes()));
+        }
+
+        let meta = {
+            let gem = self.gem.lock().await;
+            let reg = self.registry.lock().await;
+            let arrays = self
+                .array_slabs
+                .iter()
+                .map(|(array_id, slab_id)| metadata::ArrayRecord {
+                    array_id: *array_id,
+                    total_capacity: reg
+                        .get(slab_id)
+                        .map(|s| s.total_slots() * s.slot_size())
+                        .unwrap_or(0),
+                })
+                .collect();
+            let volumes = vol_info
+                .into_iter()
+                .map(|(id, name, virtual_size)| metadata::VolumeRecord {
+                    id,
+                    name,
+                    virtual_size,
+                    array_id: None,
+                    extents: gem
+                        .get_volume_map(&id)
+                        .map(|m| m.extents.clone())
+                        .unwrap_or_default(),
+                })
+                .collect();
+            metadata::VolumeMetadata {
+                extent_size: self.slot_size,
+                arrays,
+                volumes,
+            }
+        };
+
+        if let Err(e) = store.save(&meta) {
+            tracing::warn!("Volume metadata persist failed: {e}");
+        }
     }
 
     /// Restore volumes from persisted metadata. No-op if no data_dir or no metadata file.
@@ -352,15 +399,45 @@ impl VolumeManager {
 
         let meta = store.load()?;
 
+        // Rebuild GEM from slab slot tables — authoritative for owned and
+        // COW'd slots (written at allocation time, so always at least as new
+        // as the metadata file after a crash).
+        let mut rebuilt = {
+            let reg = self.registry.lock().await;
+            GlobalExtentMap::rebuild_from_slabs(reg.iter())
+        };
+
         let mut restored = 0u32;
         for vrec in meta.volumes {
-            // Check if array slab exists
-            if !self.array_slabs.contains_key(&vrec.array_id) {
-                tracing::warn!(
-                    "Skipping volume '{}' ({}): array {} not available",
-                    vrec.name, vrec.id, vrec.array_id
-                );
-                continue;
+            // Legacy V1 records bind volumes to arrays; skip if that array
+            // isn't attached. V2 slab-placed records restore regardless.
+            if let Some(array_id) = vrec.array_id {
+                if !self.array_slabs.contains_key(&array_id) {
+                    tracing::warn!(
+                        "Skipping volume '{}' ({}): array {} not available",
+                        vrec.name, vrec.id, array_id
+                    );
+                    continue;
+                }
+            }
+
+            // Overlay persisted extents the slot tables can't express (a
+            // snapshot's shared slots). Slot-table mappings win on conflict;
+            // persisted mappings fill the gaps. (#13)
+            {
+                let reg = self.registry.lock().await;
+                for (vext, loc) in &vrec.extents {
+                    if rebuilt.lookup(vrec.id, *vext).is_none() {
+                        if reg.get(&loc.slab_id).is_some() {
+                            rebuilt.restore_mapping(vrec.id, *vext, loc.clone());
+                        } else {
+                            tracing::warn!(
+                                "Volume '{}' extent {vext}: slab {} not attached, mapping dropped",
+                                vrec.name, loc.slab_id.0
+                            );
+                        }
+                    }
+                }
             }
 
             let vol = ThinVolume::restore(
@@ -380,13 +457,7 @@ impl VolumeManager {
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
         }
 
-        // Rebuild GEM from slab slot tables
-        {
-            let reg = self.registry.lock().await;
-            let rebuilt = GlobalExtentMap::rebuild_from_slabs(reg.iter());
-            let mut gem = self.gem.lock().await;
-            *gem = rebuilt;
-        }
+        *self.gem.lock().await = rebuilt;
 
         tracing::info!("Restored {restored} volume(s) from metadata");
         Ok(())
@@ -593,8 +664,6 @@ mod tests {
     /// open_backing_device (no reformat), restore metadata, read data back.
     #[tokio::test]
     async fn open_backing_device_restores_existing_volume() {
-        use crate::volume::metadata::{ArrayRecord, VolumeMetadata, VolumeRecord};
-
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-volmgr-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -625,25 +694,7 @@ mod tests {
                 off += n;
             }
             vol.flush().await.unwrap();
-
-            // persist() is a V1 stub — write volumes.dat directly.
-            let store = MetadataStore::new(meta_dir.clone()).unwrap();
-            store
-                .save(&VolumeMetadata {
-                    extent_size: 4096,
-                    arrays: vec![ArrayRecord {
-                        array_id,
-                        total_capacity: 64 * 1024 * 1024,
-                    }],
-                    volumes: vec![VolumeRecord {
-                        id: vol_id,
-                        name: "reopen-me".to_string(),
-                        virtual_size: data.len() as u64,
-                        array_id,
-                        extent_map: Default::default(),
-                    }],
-                })
-                .unwrap();
+            mgr.persist().await;
             vol_id
         };
 
@@ -675,6 +726,88 @@ mod tests {
             .open_backing_device(array_id, Arc::new(dev))
             .await
             .is_err());
+
+        let _ = std::fs::remove_file(&backing_path);
+        let _ = std::fs::remove_dir_all(&meta_dir);
+    }
+
+    /// Issue #13: a COW snapshot must survive detach/reattach with its FULL
+    /// content intact — including the shared (never-COW'd) extents that only
+    /// exist in the persisted extent map, not in slab slot tables. The parent
+    /// diverges after the snapshot, so any mapping confusion shows up as the
+    /// snapshot reading the parent's new data (or zeros).
+    #[tokio::test]
+    async fn snapshot_full_content_survives_reattach() {
+        let test_id = uuid::Uuid::new_v4().simple().to_string();
+        let dir = std::env::temp_dir().join("stormblock-volmgr-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let backing_path = dir.join(format!("{test_id}-snap-reattach.bin"));
+        let backing_str = backing_path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&backing_path);
+        let meta_dir = dir.join(format!("{test_id}-snap-meta"));
+
+        let array_id = RaidArrayId(uuid::Uuid::new_v4());
+        // Multiple extents, deterministic per-byte pattern.
+        let golden: Vec<u8> = (0..3 * 4096 + 777).map(|i| (i % 251) as u8).collect();
+
+        // Phase 1: create parent, write golden, snapshot, diverge parent.
+        let (parent_id, snap_id) = {
+            let dev = FileDevice::open_with_capacity(&backing_str, 64 * 1024 * 1024)
+                .await
+                .unwrap();
+            let mut mgr = VolumeManager::with_data_dir(4096, meta_dir.clone()).unwrap();
+            mgr.add_backing_device(array_id, Arc::new(dev)).await;
+            let parent_id = mgr
+                .create_volume("golden", golden.len() as u64, array_id)
+                .await
+                .unwrap();
+            let vol = mgr.get_volume(&parent_id).unwrap();
+            let mut off = 0;
+            while off < golden.len() {
+                off += vol.write(off as u64, &golden[off..]).await.unwrap();
+            }
+            let snap_id = mgr.create_snapshot(parent_id, "snap-cp-01").await.unwrap();
+
+            // Diverge the parent AFTER the snapshot (COW moves the parent to
+            // new slots; the snapshot keeps the originals).
+            vol.write(0, &vec![0xEE_u8; 4096]).await.unwrap();
+            vol.flush().await.unwrap();
+            mgr.persist().await;
+            (parent_id, snap_id)
+        };
+
+        // Phase 2: fresh manager — attach without reformat, restore, verify.
+        let dev = FileDevice::open(&backing_str).await.unwrap();
+        let mut mgr = VolumeManager::with_data_dir(4096, meta_dir.clone()).unwrap();
+        mgr.open_backing_device(array_id, Arc::new(dev)).await.unwrap();
+        mgr.restore().await.unwrap();
+
+        let snap = mgr.get_volume(&snap_id).expect("snapshot restored");
+        let mut got = vec![0u8; golden.len()];
+        let mut off = 0;
+        while off < got.len() {
+            let end = got.len();
+            let n = snap.read(off as u64, &mut got[off..end]).await.unwrap();
+            assert!(n > 0);
+            off += n;
+        }
+        assert_eq!(got, golden, "snapshot content diverged after reattach (#13)");
+
+        // Parent kept its post-snapshot write.
+        let parent = mgr.get_volume(&parent_id).expect("parent restored");
+        let mut head = vec![0u8; 4096];
+        parent.read(0, &mut head).await.unwrap();
+        assert!(head.iter().all(|&b| b == 0xEE), "parent lost its divergent write");
+        // And the rest of the parent still matches golden.
+        let mut tail = vec![0u8; golden.len() - 4096];
+        let mut off = 0;
+        while off < tail.len() {
+            let end = tail.len();
+            let n = parent.read((4096 + off) as u64, &mut tail[off..end]).await.unwrap();
+            assert!(n > 0);
+            off += n;
+        }
+        assert_eq!(tail, golden[4096..], "parent unshared content corrupted");
 
         let _ = std::fs::remove_file(&backing_path);
         let _ = std::fs::remove_dir_all(&meta_dir);

@@ -89,6 +89,27 @@ impl GlobalExtentMap {
         self.reverse.insert(key, (volume_id, vext_idx));
     }
 
+    /// Insert a mapping recovered from persisted metadata.
+    ///
+    /// Unlike `insert`, this never displaces an existing reverse-index claim:
+    /// shared COW slots map several (volume, vext) pairs onto one slot, and
+    /// the reverse index keeps the slot-table owner (same convention as
+    /// `clone_volume_map`).
+    pub fn restore_mapping(
+        &mut self,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        location: ExtentLocation,
+    ) {
+        let key = (location.slab_id, location.slot_idx);
+        self.volumes
+            .entry(volume_id)
+            .or_default()
+            .extents
+            .insert(vext_idx, location);
+        self.reverse.entry(key).or_insert((volume_id, vext_idx));
+    }
+
     /// Look up where a volume's virtual extent lives.
     pub fn lookup(&self, volume_id: VolumeId, vext_idx: u64) -> Option<&ExtentLocation> {
         self.volumes

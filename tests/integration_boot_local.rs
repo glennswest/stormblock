@@ -15,8 +15,7 @@ use std::sync::Arc;
 
 use stormblock::drive::filedev::FileDevice;
 use stormblock::raid::RaidArrayId;
-use stormblock::volume::metadata::{ArrayRecord, VolumeMetadata, VolumeRecord};
-use stormblock::volume::{MetadataStore, VolumeManager};
+use stormblock::volume::VolumeManager;
 
 use tempfile::TempDir;
 
@@ -42,22 +41,7 @@ async fn build_artifact(dir: &TempDir, volume_name: &str) -> (PathBuf, PathBuf, 
     vol.write(0, &vec![0x5A_u8; SLOT as usize]).await.unwrap();
     vol.flush().await.unwrap();
 
-    // persist() is a V1 stub — write volumes.dat directly (same as the
-    // open_backing_device unit test and the stormcos provisioner).
-    let store = MetadataStore::new(meta_dir.clone()).unwrap();
-    store
-        .save(&VolumeMetadata {
-            extent_size: SLOT,
-            arrays: vec![ArrayRecord { array_id, total_capacity: 32 * 1024 * 1024 }],
-            volumes: vec![VolumeRecord {
-                id: vol_id,
-                name: volume_name.to_string(),
-                virtual_size: 4 * 1024 * 1024,
-                array_id,
-                extent_map: Default::default(),
-            }],
-        })
-        .unwrap();
+    mgr.persist().await;
 
     (slab_path, meta_dir, vol_id.0)
 }

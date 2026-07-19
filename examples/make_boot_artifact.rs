@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use stormblock::drive::filedev::FileDevice;
 use stormblock::raid::RaidArrayId;
-use stormblock::volume::metadata::{ArrayRecord, VolumeMetadata, VolumeRecord};
-use stormblock::volume::{MetadataStore, VolumeManager, DEFAULT_EXTENT_SIZE};
+use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -46,20 +45,7 @@ async fn main() -> anyhow::Result<()> {
     vol.write(0, &block).await.map_err(|e| anyhow::anyhow!("write: {e}"))?;
     vol.flush().await.map_err(|e| anyhow::anyhow!("flush: {e}"))?;
 
-    // VolumeManager::persist() is a V1 stub — write volumes.dat directly,
-    // exactly like the stormcos provisioner and the boot-local tests.
-    let store = MetadataStore::new(meta_dir)?;
-    store.save(&VolumeMetadata {
-        extent_size: DEFAULT_EXTENT_SIZE,
-        arrays: vec![ArrayRecord { array_id, total_capacity: slab_mb * 1024 * 1024 }],
-        volumes: vec![VolumeRecord {
-            id: vol_id,
-            name: name.clone(),
-            virtual_size: vol_mb * 1024 * 1024,
-            array_id,
-            extent_map: Default::default(),
-        }],
-    })?;
+    mgr.persist().await;
 
     println!("artifact ready: {}", dir.display());
     println!("  slab:   {} ({slab_mb} MB)", slab_path.display());
