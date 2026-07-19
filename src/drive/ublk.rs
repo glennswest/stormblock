@@ -556,20 +556,24 @@ impl UblkServer {
             let _ = w.join();
         }
 
-        // --- DEL_DEV ---
-        let _ = submit_ctrl_cmd(
-            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, assigned_id, 0, 0, 0,
-        );
-
-        // Unmap descriptor buffers
+        // Release every reference to /dev/ublkcN BEFORE DEL_DEV: the kernel's
+        // synchronous DEL_DEV blocks until the char device is fully released
+        // (mmaps and fds), so issuing it while we still hold them deadlocks
+        // the shutdown.
         for desc_ptr in &desc_ptrs {
             unsafe {
                 libc::munmap(*desc_ptr as *mut libc::c_void, desc_buf_size);
             }
         }
+        drop(char_file);
+
+        // --- DEL_DEV ---
+        let _ = submit_ctrl_cmd(
+            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, assigned_id, 0, 0, 0,
+        );
 
         tracing::info!("ublk device /dev/ublkb{} removed", assigned_id);
-        // char_file and ctrl_file dropped here, closing fds
+        // ctrl_file dropped here, closing its fd
         Ok(())
     }
 }
