@@ -22,8 +22,8 @@
 
 set -euo pipefail
 
-STORM_NODES="${STORM_NODES:-storm1=192.168.8.62 storm2=192.168.8.63 storm3=192.168.8.64}"
-INITIATOR="${INITIATOR:-192.168.8.65}"
+STORM_NODES="${STORM_NODES:-storm1=192.168.8.80 storm2=192.168.8.81 storm3=192.168.8.82}"
+INITIATOR="${INITIATOR:-192.168.8.83}"
 FIO_RUNTIME="${FIO_RUNTIME:-20}"
 NQN_PREFIX="nqn.2026-01.io.stormblock"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
