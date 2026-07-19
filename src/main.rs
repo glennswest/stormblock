@@ -951,6 +951,14 @@ async fn handle_boot_local(
     // 2. Attach slabs non-destructively (no reformat) and restore volumes.
     let mut mgr = VolumeManager::with_data_dir(metadata.extent_size, meta_dir.clone())?;
     for (path, rec) in slab_paths.iter().zip(&metadata.arrays) {
+        // FileDevice::open would create a missing path as an empty file and
+        // die later with a misleading "bad slab magic" — name the real
+        // problem (storage driver not loaded / wrong device) instead (#14).
+        if !Path::new(path).exists() {
+            anyhow::bail!(
+                "slab device {path} does not exist — storage driver not loaded or wrong path?"
+            );
+        }
         let dev = stormblock::drive::filedev::FileDevice::open(path).await?;
         mgr.open_backing_device(rec.array_id, Arc::new(dev))
             .await
@@ -1137,6 +1145,9 @@ async fn handle_boot_local(
         for t in ublk_threads {
             let _ = t.join();
         }
+        // Capture extent maps mutated while serving (COW allocations) so
+        // snapshots stay bootable across the next reattach (#13).
+        mgr.persist().await;
         if let Some(msg) = fatal {
             anyhow::bail!("{msg} — is ublk_drv loaded (Linux 6.0+)?");
         }

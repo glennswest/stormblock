@@ -26,6 +26,9 @@ ConditionPathExists=/etc/stormblock/boot.env
 [Service]
 Type=simple
 EnvironmentFile=/etc/stormblock/boot.env
+# RHEL10 hardening ships kernel.io_uring_disabled=2; ublk IS io_uring (#14).
+# Belt-and-suspenders next to /etc/sysctl.d/95-stormblock-iouring.conf.
+ExecStartPre=-/bin/sh -c 'test ! -e /proc/sys/kernel/io_uring_disabled || echo 0 > /proc/sys/kernel/io_uring_disabled'
 ExecStart=/usr/sbin/stormblock boot-iscsi --portal ${PORTAL} --port ${PORT} --iqn ${IQN} --layout ${LAYOUT} --ublk
 Restart=on-failure
 RestartSec=2

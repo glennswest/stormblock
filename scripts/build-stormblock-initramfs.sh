@@ -5,7 +5,7 @@
 #   /init               — Boot init script (busybox sh)
 #   /usr/sbin/stormblock — Static binary
 #   /bin/busybox         — Shell + basic tools
-#   /lib/modules/        — ublk_drv kernel module
+#   /lib/modules/        — kernel modules, DECOMPRESSED, dep-ordered (#14)
 #   /dev, /proc, /sys, /sysroot — mount points
 #
 # Usage:
@@ -14,16 +14,25 @@
 # Defaults:
 #   stormblock-binary = target/x86_64-unknown-linux-musl/release/stormblock
 #   kernel-version    = $(uname -r)
+#   STORMBLOCK_MODULES = "virtio_scsi sd_mod erofs overlay"  (+ ublk_drv, always)
+#     Override for other boot transports, e.g.
+#     STORMBLOCK_MODULES="ahci sd_mod ext4" ./scripts/build-stormblock-initramfs.sh
+#
+# Modules are resolved with their full dependency chains (modprobe
+# --show-depends) and decompressed at build time — busybox insmod cannot
+# load .ko.xz, and a silently-failed storage driver surfaces later as a
+# misleading "bad slab magic" (#14).
 #
 # Output: /tmp/stormblock-initramfs.img (zstd-compressed cpio)
 #
-# Requirements: busybox (static), cpio, zstd
+# Requirements: busybox (static), cpio, zstd; xz/gzip for module decompression
 
 set -euo pipefail
 
 STORMBLOCK_BIN="${1:-target/x86_64-unknown-linux-musl/release/stormblock}"
 KVER="${2:-$(uname -r)}"
 OUTPUT="${3:-/tmp/stormblock-initramfs.img}"
+MODULES="${STORMBLOCK_MODULES:-virtio_scsi sd_mod erofs overlay} ublk_drv"
 
 if [ ! -f "$STORMBLOCK_BIN" ]; then
     echo "ERROR: stormblock binary not found: $STORMBLOCK_BIN"
@@ -69,23 +78,51 @@ done
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
 
-# ublk kernel module (try compressed and uncompressed)
-UBLK_FOUND=false
-for path in \
-    "/lib/modules/$KVER/kernel/drivers/block/ublk_drv.ko" \
-    "/lib/modules/$KVER/kernel/drivers/block/ublk_drv.ko.xz" \
-    "/lib/modules/$KVER/kernel/drivers/block/ublk_drv.ko.zst" \
-    "/lib/modules/$KVER/kernel/drivers/block/ublk_drv.ko.gz"; do
-    if [ -f "$path" ]; then
-        cp "$path" "$INITRD_DIR/lib/modules/"
-        UBLK_FOUND=true
-        echo "  ublk_drv:   $path"
-        break
+# Kernel modules: resolve full dependency chains, decompress, number for
+# load order. busybox insmod has no decompression and no dep resolution, so
+# both must happen here at build time (#14).
+copy_module() {
+    # $1 = path to .ko / .ko.xz / .ko.zst / .ko.gz ; $2 = NN order prefix
+    local src="$1" idx="$2" base
+    base=$(basename "$src")
+    base="${base%.xz}"; base="${base%.zst}"; base="${base%.gz}"
+    local dst="$INITRD_DIR/lib/modules/${idx}-${base}"
+    [ -f "$dst" ] && return 0
+    # Skip if this module (any order prefix) is already bundled
+    if ls "$INITRD_DIR/lib/modules/"*"-${base}" >/dev/null 2>&1; then
+        return 0
     fi
+    case "$src" in
+        *.xz)  xz -dc "$src" > "$dst" ;;
+        *.zst) zstd -qdc "$src" > "$dst" ;;
+        *.gz)  gzip -dc "$src" > "$dst" ;;
+        *)     cp "$src" "$dst" ;;
+    esac
+    echo "  module:     ${idx}-${base}  ($src)"
+}
+
+MOD_IDX=0
+MISSING_MODS=""
+for mod in $MODULES; do
+    # Dep-ordered list of module paths; "builtin" lines mean nothing to load.
+    deps=$(modprobe --show-depends -S "$KVER" "$mod" 2>/dev/null \
+        | awk '$1 == "insmod" {print $2}') || true
+    if [ -z "$deps" ]; then
+        if modprobe --show-depends -S "$KVER" "$mod" 2>/dev/null | grep -q builtin; then
+            echo "  module:     $mod is builtin, skipping"
+        else
+            MISSING_MODS="$MISSING_MODS $mod"
+            echo "  WARNING: module $mod not found for kernel $KVER"
+        fi
+        continue
+    fi
+    for dep in $deps; do
+        MOD_IDX=$((MOD_IDX + 1))
+        copy_module "$dep" "$(printf '%02d' "$MOD_IDX")"
+    done
 done
-if [ "$UBLK_FOUND" = false ]; then
-    echo "  WARNING: ublk_drv.ko not found for kernel $KVER"
-    echo "           The initramfs will try modprobe at boot time."
+if [ -n "$MISSING_MODS" ]; then
+    echo "  WARNING: missing modules:$MISSING_MODS — /init will try modprobe at boot"
 fi
 
 # Minimal /etc
@@ -113,6 +150,9 @@ mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
+# tmpfs /run: overlay-root mounts live here so they survive switch_root
+# via mount --move (#14).
+mount -t tmpfs tmpfs /run
 
 # Parse kernel cmdline parameters
 PORTAL=""
@@ -123,17 +163,19 @@ IP_CONF=""
 SLAB=""
 META=""
 VOLUME=""
+OVERLAY=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
-        rd.stormblock.portal=*) PORTAL="${param#*=}" ;;
-        rd.stormblock.iqn=*)    IQN="${param#*=}" ;;
-        rd.stormblock.layout=*) LAYOUT="${param#*=}" ;;
-        rd.stormblock.port=*)   PORT="${param#*=}" ;;
-        rd.stormblock.slab=*)   SLAB="${param#*=}" ;;
-        rd.stormblock.meta=*)   META="${param#*=}" ;;
-        stormblock.volume=*)    VOLUME="${param#*=}" ;;
-        ip=*)                   IP_CONF="${param#*=}" ;;
+        rd.stormblock.portal=*)  PORTAL="${param#*=}" ;;
+        rd.stormblock.iqn=*)     IQN="${param#*=}" ;;
+        rd.stormblock.layout=*)  LAYOUT="${param#*=}" ;;
+        rd.stormblock.port=*)    PORT="${param#*=}" ;;
+        rd.stormblock.slab=*)    SLAB="${param#*=}" ;;
+        rd.stormblock.meta=*)    META="${param#*=}" ;;
+        rd.stormblock.overlay=*) OVERLAY="${param#*=}" ;;
+        stormblock.volume=*)     VOLUME="${param#*=}" ;;
+        ip=*)                    IP_CONF="${param#*=}" ;;
     esac
 done
 
@@ -170,19 +212,24 @@ else
     echo "  Layout: $LAYOUT"
 fi
 
-# Load ublk driver
-if [ -f /lib/modules/ublk_drv.ko ]; then
-    insmod /lib/modules/ublk_drv.ko 2>/dev/null
-elif [ -f /lib/modules/ublk_drv.ko.xz ]; then
-    xzcat /lib/modules/ublk_drv.ko.xz > /tmp/ublk_drv.ko && insmod /tmp/ublk_drv.ko 2>/dev/null
-elif [ -f /lib/modules/ublk_drv.ko.zst ]; then
-    zstdcat /lib/modules/ublk_drv.ko.zst > /tmp/ublk_drv.ko && insmod /tmp/ublk_drv.ko 2>/dev/null
-else
-    modprobe ublk_drv 2>/dev/null
-fi
+# Load bundled kernel modules — decompressed and NN- ordered at build time,
+# so plain insmod works and dependencies load first (#14).
+for ko in /lib/modules/*.ko; do
+    [ -f "$ko" ] || continue
+    insmod "$ko" 2>/dev/null || true
+done
+# Fallback for anything the build couldn't bundle
+modprobe ublk_drv 2>/dev/null || true
 
 if [ ! -c /dev/ublk-control ]; then
     echo "WARNING: /dev/ublk-control not found — ublk_drv may not be loaded"
+fi
+
+# RHEL10 ships kernel.io_uring_disabled=2 (hardening); ublk IS io_uring,
+# so re-enable it before starting the server (#14). Installed nodes must
+# also persist this via /etc/sysctl.d/ — see systemd/95-stormblock-iouring.conf.
+if [ -e /proc/sys/kernel/io_uring_disabled ]; then
+    echo 0 > /proc/sys/kernel/io_uring_disabled
 fi
 
 # Network setup (iSCSI boot only — local-slab boot needs no network)
@@ -231,6 +278,23 @@ fi
 # Start stormblock with ublk export
 echo "Starting StormBlock..."
 if [ "$BOOT_MODE" = "local" ]; then
+    # The slab device appears asynchronously after its driver loads — wait
+    # bounded instead of letting boot-local open a nonexistent path (#14).
+    if [ ! -e "$SLAB" ]; then
+        echo "Waiting for slab device $SLAB..."
+        TIMEOUT=30
+        while [ ! -e "$SLAB" ] && [ $TIMEOUT -gt 0 ]; do
+            sleep 1
+            TIMEOUT=$((TIMEOUT - 1))
+        done
+    fi
+    if [ ! -e "$SLAB" ]; then
+        echo "FATAL: slab device $SLAB never appeared (storage driver missing?)"
+        echo "Loaded modules:"; cat /proc/modules 2>/dev/null | cut -d' ' -f1
+        echo "Dropping to shell..."
+        exec /bin/sh
+    fi
+
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
     # Volume comes from --volume if given, else /etc/stormblock/boot.toml.
     /usr/sbin/stormblock boot-local \
@@ -266,10 +330,47 @@ echo "Root device ready: $ROOTDEV"
 
 # Mount filesystems (stormcos local root is erofs; fall back to ext4/auto)
 echo "Mounting filesystems..."
-mount -t erofs -o ro "$ROOTDEV" /sysroot 2>/dev/null \
-    || mount -t ext4 "$ROOTDEV" /sysroot 2>/dev/null \
-    || mount "$ROOTDEV" /sysroot \
-    || { echo "FATAL: Failed to mount root"; exec /bin/sh; }
+mount_root() {
+    # $1 = device, $2 = mountpoint
+    mount -t erofs -o ro "$1" "$2" 2>/dev/null \
+        || mount -t ext4 "$1" "$2" 2>/dev/null \
+        || mount "$1" "$2"
+}
+
+if [ -n "$OVERLAY" ]; then
+    # Immutable-OS mode (#14): read-only root as overlay lowerdir, writable
+    # upper on tmpfs or a block device.
+    #   rd.stormblock.overlay=tmpfs[:SIZE]   e.g. tmpfs:1G (default 512m)
+    #   rd.stormblock.overlay=/dev/ublkb1    pre-formatted writable volume
+    echo "Overlay root: lower=$ROOTDEV upper=$OVERLAY"
+    mkdir -p /run/stormblock/lower /run/stormblock/rw
+    mount_root "$ROOTDEV" /run/stormblock/lower \
+        || { echo "FATAL: Failed to mount overlay lower"; exec /bin/sh; }
+
+    case "$OVERLAY" in
+        tmpfs|tmpfs:*)
+            SIZE="${OVERLAY#tmpfs}"; SIZE="${SIZE#:}"
+            mount -t tmpfs -o "size=${SIZE:-512m}" tmpfs /run/stormblock/rw \
+                || { echo "FATAL: Failed to mount overlay tmpfs"; exec /bin/sh; }
+            ;;
+        *)
+            TIMEOUT=15
+            while [ ! -b "$OVERLAY" ] && [ $TIMEOUT -gt 0 ]; do
+                sleep 1; TIMEOUT=$((TIMEOUT - 1))
+            done
+            mount "$OVERLAY" /run/stormblock/rw \
+                || { echo "FATAL: Failed to mount overlay upper $OVERLAY"; exec /bin/sh; }
+            ;;
+    esac
+    mkdir -p /run/stormblock/rw/upper /run/stormblock/rw/work
+    mount -t overlay overlay \
+        -o lowerdir=/run/stormblock/lower,upperdir=/run/stormblock/rw/upper,workdir=/run/stormblock/rw/work \
+        /sysroot \
+        || { echo "FATAL: Failed to mount overlay root"; exec /bin/sh; }
+else
+    mount_root "$ROOTDEV" /sysroot \
+        || { echo "FATAL: Failed to mount root"; exec /bin/sh; }
+fi
 
 if [ "$BOOT_MODE" = "iscsi" ]; then
     # Mount boot if partition exists
@@ -309,6 +410,9 @@ echo "Switching to real root..."
 mount --move /proc /sysroot/proc
 mount --move /sys /sysroot/sys
 mount --move /dev /sysroot/dev
+# Carry /run (holds the overlay lower/upper mounts) into the new root
+mkdir -p /sysroot/run
+mount --move /run /sysroot/run 2>/dev/null || true
 
 # switch_root — PID 1 becomes /sbin/init, stormblock continues in background
 exec switch_root /sysroot /sbin/init
@@ -336,3 +440,4 @@ echo ""
 echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
+echo "         [rd.stormblock.overlay=tmpfs[:SIZE]|<blockdev>]  — writable overlay over a read-only (erofs) root"

@@ -31,6 +31,10 @@ ConditionPathExists=/etc/stormblock/stormblock.toml
 
 [Service]
 Type=simple
+# RHEL10 hardening ships kernel.io_uring_disabled=2; the io_uring data path
+# and ublk need it on (#14). Belt-and-suspenders next to
+# /etc/sysctl.d/95-stormblock-iouring.conf.
+ExecStartPre=-/bin/sh -c 'test ! -e /proc/sys/kernel/io_uring_disabled || echo 0 > /proc/sys/kernel/io_uring_disabled'
 ExecStart=/usr/sbin/stormblock --config /etc/stormblock/stormblock.toml
 Restart=on-failure
 RestartSec=2
