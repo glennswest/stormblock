@@ -19,6 +19,18 @@ pub const ADMIN_KEEP_ALIVE: u8 = 0x18;
 pub const CNS_NAMESPACE: u8 = 0x00;
 pub const CNS_CONTROLLER: u8 = 0x01;
 pub const CNS_ACTIVE_NS_LIST: u8 = 0x02;
+pub const CNS_NS_DESC_LIST: u8 = 0x03;
+
+/// Namespace Identification Descriptor list (CNS 0x03): one UUID descriptor
+/// then a zero terminator. The Linux initiator issues this during namespace
+/// scan and aborts the namespace when it errors.
+pub fn identify_ns_desc_list(uuid: &[u8; 16]) -> Vec<u8> {
+    let mut data = vec![0u8; 4096];
+    data[0] = 0x03; // NIDT = UUID
+    data[1] = 16; // NIDL
+    data[4..20].copy_from_slice(uuid);
+    data
+}
 
 /// Build Identify Controller data (4096 bytes).
 ///

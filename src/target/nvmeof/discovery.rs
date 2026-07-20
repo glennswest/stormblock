@@ -2,19 +2,21 @@
 
 use std::net::SocketAddr;
 
-/// Discovery log page header (16 bytes) + entries (1024 bytes each).
+/// Discovery log page: 1024-byte header region (GENCTR, NUMREC, RECFMT),
+/// then 1024-byte entries starting at offset 1024 — the kernel initiator
+/// reads entries at that offset, not right after the 16 header bytes.
 pub fn build_discovery_log_page(subsystems: &[DiscoveryEntry]) -> Vec<u8> {
     let num_entries = subsystems.len() as u64;
     let entry_size = 1024usize;
-    let total_size = 16 + num_entries as usize * entry_size;
+    let total_size = 1024 + num_entries as usize * entry_size;
     let mut data = vec![0u8; total_size];
 
-    // Header: Generation Counter (8 bytes) + Number of Records (8 bytes)
     data[0..8].copy_from_slice(&0u64.to_le_bytes()); // genctr
     data[8..16].copy_from_slice(&num_entries.to_le_bytes()); // numrec
+    data[16..18].copy_from_slice(&0u16.to_le_bytes()); // recfmt
 
     for (i, entry) in subsystems.iter().enumerate() {
-        let offset = 16 + i * entry_size;
+        let offset = 1024 + i * entry_size;
         write_discovery_entry(&mut data[offset..offset + entry_size], entry);
     }
 
@@ -58,16 +60,16 @@ fn write_discovery_entry(buf: &mut [u8], entry: &DiscoveryEntry) {
     let port_len = port_bytes.len().min(32);
     buf[32..32 + port_len].copy_from_slice(&port_bytes[..port_len]);
 
-    // TRADDR (bytes 256-511, 256 bytes, ASCII IP address)
+    // SUBNQN (bytes 256-511, 256 bytes) — spec order: NQN before TRADDR
+    let nqn = entry.subnqn.as_bytes();
+    let nqn_len = nqn.len().min(256);
+    buf[256..256 + nqn_len].copy_from_slice(&nqn[..nqn_len]);
+
+    // TRADDR (bytes 512-767, 256 bytes, ASCII IP address)
     let addr_str = entry.traddr.ip().to_string();
     let addr_bytes = addr_str.as_bytes();
     let addr_len = addr_bytes.len().min(256);
-    buf[256..256 + addr_len].copy_from_slice(&addr_bytes[..addr_len]);
-
-    // SUBNQN (bytes 512-767, 256 bytes)
-    let nqn = entry.subnqn.as_bytes();
-    let nqn_len = nqn.len().min(256);
-    buf[512..512 + nqn_len].copy_from_slice(&nqn[..nqn_len]);
+    buf[512..512 + addr_len].copy_from_slice(&addr_bytes[..addr_len]);
 }
 
 /// Well-known discovery NQN.
@@ -90,25 +92,26 @@ mod tests {
         ];
 
         let log = build_discovery_log_page(&entries);
-        assert_eq!(log.len(), 16 + 1024);
+        assert_eq!(log.len(), 1024 + 1024);
 
         let numrec = u64::from_le_bytes(log[8..16].try_into().unwrap());
         assert_eq!(numrec, 1);
 
-        // Check TRTYPE
-        assert_eq!(log[16], 0x03); // TCP
-        // Check ADRFAM
-        assert_eq!(log[17], 0x01); // IPv4
+        // Entries start at offset 1024 (spec), not right after the header
+        assert_eq!(log[1024], 0x03); // TRTYPE = TCP
+        assert_eq!(log[1025], 0x01); // ADRFAM = IPv4
 
-        // Check SUBNQN
-        let nqn = &log[16 + 512..16 + 512 + 27];
+        // SUBNQN at entry offset 256, TRADDR at 512 (spec order)
+        let nqn = &log[1024 + 256..1024 + 256 + 27];
         assert_eq!(std::str::from_utf8(nqn).unwrap(), "nqn.2024.io.stormblock:vol1");
+        let addr = &log[1024 + 512..1024 + 512 + 13];
+        assert_eq!(std::str::from_utf8(addr).unwrap(), "192.168.1.100");
     }
 
     #[test]
     fn empty_discovery_log() {
         let log = build_discovery_log_page(&[]);
-        assert_eq!(log.len(), 16); // header only
+        assert_eq!(log.len(), 1024); // header region only
         let numrec = u64::from_le_bytes(log[8..16].try_into().unwrap());
         assert_eq!(numrec, 0);
     }

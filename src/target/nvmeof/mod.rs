@@ -354,6 +354,17 @@ impl NvmeofTarget {
                         nsids.sort();
                         admin::active_ns_list(&nsids)
                     }
+                    admin::CNS_NS_DESC_LIST => {
+                        match self.namespaces.get(&nsid) {
+                            Some(dev) => admin::identify_ns_desc_list(
+                                dev.id().uuid.as_bytes(),
+                            ),
+                            None => {
+                                let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B);
+                                return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+                            }
+                        }
+                    }
                     _ => {
                         let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x02);
                         return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
@@ -369,6 +380,10 @@ impl NvmeofTarget {
                 let numd = ((sqe.cdw10() >> 16) | ((sqe.cdw11() & 0xFFFF) << 16)) + 1;
                 let log_bytes = numd as usize * 4;
 
+                // LPO (log page offset) — the initiator reads the header
+                // first, then the entries at their offset.
+                let lpo = (sqe.cdw12() as u64) | ((sqe.cdw13() as u64) << 32);
+
                 // Log page 0x70 = Discovery Log Page
                 let data = if lid == 0x70 {
                     let entries = vec![discovery::DiscoveryEntry {
@@ -378,11 +393,11 @@ impl NvmeofTarget {
                         cntlid: 0xFFFF,
                         subsys_type: discovery::SubsysType::NvmeSubsystem,
                     }];
-                    let mut log = discovery::build_discovery_log_page(&entries);
-                    log.truncate(log_bytes);
-                    // Pad if needed
-                    log.resize(log_bytes, 0);
-                    log
+                    let log = discovery::build_discovery_log_page(&entries);
+                    let start = (lpo as usize).min(log.len());
+                    let mut out = log[start..].to_vec();
+                    out.resize(log_bytes, 0);
+                    out
                 } else {
                     // Return empty log for unknown pages
                     vec![0u8; log_bytes]

@@ -124,9 +124,15 @@ impl ControllerProperties {
         0x00010400
     }
 
-    /// CSTS register: RDY if CC.EN=1
+    /// CSTS register: RDY tracks CC.EN; SHST reports shutdown complete as
+    /// soon as CC.SHN is set (we have nothing async to flush per-controller),
+    /// so `nvme disconnect` doesn't stall in "Device not ready".
     pub fn csts(&self) -> u32 {
-        if self.cc & 0x01 != 0 { 1 } else { 0 } // RDY bit
+        let mut csts = if self.cc & 0x01 != 0 { 1 } else { 0 }; // RDY
+        if self.cc & (0x3 << 14) != 0 {
+            csts |= 2 << 2; // SHST = shutdown complete
+        }
+        csts
     }
 
     pub fn get_property(&self, prop: NvmeProperty) -> u64 {
