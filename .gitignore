@@ -5,3 +5,6 @@ Cargo.lock
 *.swo
 .idea/
 .vscode/
+
+# terragrunt working caches
+.terragrunt-cache/
