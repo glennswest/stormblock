@@ -489,8 +489,8 @@ echo "Contents:"
 echo "  /init                      — LinuxBoot init script"
 echo "  /usr/sbin/stormblock       — $(du -h "$INITRD_DIR/usr/sbin/stormblock" | cut -f1) static binary"
 echo "  /bin/busybox               — $(du -h "$INITRD_DIR/bin/busybox" | cut -f1) shell + tools"
-if [ "$UBLK_FOUND" = true ]; then
-    echo "  /lib/modules/ublk_drv.ko*  — kernel module"
+if ls "$INITRD_DIR/lib/modules/"*ublk_drv* >/dev/null 2>&1; then
+    echo "  /lib/modules/*ublk_drv*    — kernel module"
 fi
 echo ""
 echo "Boot kernel cmdline:"
