@@ -164,18 +164,24 @@ SLAB=""
 META=""
 VOLUME=""
 OVERLAY=""
+IMAGE_STORE=""
+WRITABLE=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
-        rd.stormblock.portal=*)  PORTAL="${param#*=}" ;;
-        rd.stormblock.iqn=*)     IQN="${param#*=}" ;;
-        rd.stormblock.layout=*)  LAYOUT="${param#*=}" ;;
-        rd.stormblock.port=*)    PORT="${param#*=}" ;;
-        rd.stormblock.slab=*)    SLAB="${param#*=}" ;;
-        rd.stormblock.meta=*)    META="${param#*=}" ;;
-        rd.stormblock.overlay=*) OVERLAY="${param#*=}" ;;
-        stormblock.volume=*)     VOLUME="${param#*=}" ;;
-        ip=*)                    IP_CONF="${param#*=}" ;;
+        rd.stormblock.portal=*)      PORTAL="${param#*=}" ;;
+        rd.stormblock.iqn=*)         IQN="${param#*=}" ;;
+        rd.stormblock.layout=*)      LAYOUT="${param#*=}" ;;
+        rd.stormblock.port=*)        PORT="${param#*=}" ;;
+        rd.stormblock.slab=*)        SLAB="${param#*=}" ;;
+        rd.stormblock.meta=*)        META="${param#*=}" ;;
+        rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
+        rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
+        # Writable thin volumes, comma-separated name:mount pairs, e.g.
+        # rd.stormblock.writable=var-...:/var,containers-...:/var/lib/containers
+        rd.stormblock.writable=*)    WRITABLE="${param#*=}" ;;
+        stormblock.volume=*)         VOLUME="${param#*=}" ;;
+        ip=*)                        IP_CONF="${param#*=}" ;;
     esac
 done
 
@@ -295,12 +301,40 @@ if [ "$BOOT_MODE" = "local" ]; then
         exec /bin/sh
     fi
 
+    # Writable thin volumes: each becomes a --writable to boot-local, exported
+    # at the next ublk index after root (0) and image-store (1 if present).
+    # Build the arg list and the device->mount map in the SAME order so indices
+    # line up deterministically.
+    WR_ARGS=""
+    WR_IDX=1
+    [ -n "$IMAGE_STORE" ] && WR_IDX=2
+    WRITABLE_MAP=""
+    if [ -n "$WRITABLE" ]; then
+        OIFS=$IFS; IFS=,
+        for entry in $WRITABLE; do
+            IFS=$OIFS
+            wname="${entry%%:*}"
+            wmnt="${entry#*:}"
+            [ -z "$wname" ] && { IFS=,; continue; }
+            [ "$wname" = "$entry" ] && wmnt=""   # no ':' -> no mount hint
+            WR_ARGS="$WR_ARGS --writable $wname"
+            [ -n "$wmnt" ] && WRITABLE_MAP="$WRITABLE_MAP/dev/ublkb$WR_IDX $wmnt
+"
+            WR_IDX=$((WR_IDX + 1))
+            IFS=,
+        done
+        IFS=$OIFS
+    fi
+
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
     # Volume comes from --volume if given, else /etc/stormblock/boot.toml.
+    # shellcheck disable=SC2086
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
         ${META:+--meta "$META"} \
-        ${VOLUME:+--volume "$VOLUME"} &
+        ${IMAGE_STORE:+--image-store "$IMAGE_STORE"} \
+        ${VOLUME:+--volume "$VOLUME"} \
+        $WR_ARGS &
     ROOTDEV=/dev/ublkb0
 else
     /usr/sbin/stormblock boot-iscsi \
@@ -395,6 +429,28 @@ if [ "$BOOT_MODE" = "iscsi" ]; then
     if [ -b /dev/ublkb3 ]; then
         swapon /dev/ublkb3 2>/dev/null
     fi
+fi
+
+# Writable thin volumes (var, containers): boot-local exported them as ublk
+# devices after root. We can't mkfs.xfs here (busybox has no mkfs.xfs), so hand
+# them to systemd via fstab in the real root — x-systemd.makefs formats the
+# empty volume on first boot, x-systemd.growfs grows the fs after auto-expand,
+# and the mounts land over the read-only erofs root. Writing /sysroot/etc/fstab
+# copies-up into the overlay upper (regenerated every boot, which is fine).
+if [ -n "$WRITABLE_MAP" ]; then
+    echo "Registering writable thin volumes in fstab..."
+    printf '%s' "$WRITABLE_MAP" | while read -r wdev wmnt; do
+        [ -z "$wdev" ] && continue
+        n=0
+        while [ ! -b "$wdev" ] && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
+        if [ -b "$wdev" ]; then
+            echo "$wdev $wmnt xfs defaults,x-systemd.makefs,x-systemd.growfs,nofail 0 0" \
+                >> /sysroot/etc/fstab
+            echo "  writable: $wdev -> $wmnt"
+        else
+            echo "  WARNING: $wdev never appeared; $wmnt falls back to overlay (ephemeral)"
+        fi
+    done
 fi
 
 # Verify systemd exists in the new root

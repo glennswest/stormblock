@@ -158,6 +158,12 @@ enum SubCommand {
         /// Also export this volume (UUID or name) as /dev/ublkb1
         #[arg(long)]
         image_store: Option<String>,
+        /// Also export a writable volume (UUID or name), one per flag, at the
+        /// next /dev/ublkb index after root (and image-store). Order is
+        /// preserved so the caller can map each to its mount point. Used for
+        /// stormcos's thin /var and /var/lib/containers volumes.
+        #[arg(long = "writable")]
+        writable: Vec<String>,
         /// After root is up, migrate the slab to this local disk in the
         /// background (zeroboot flow-over)
         #[arg(long)]
@@ -283,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             SubCommand::BootLocal {
-                slab, meta, volume, boot_config, image_store, local_disk, local_tier, check,
+                slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier, check,
             } => {
                 return handle_boot_local(
                     slab,
@@ -291,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
                     volume.as_deref(),
                     boot_config,
                     image_store.as_deref(),
+                    writable,
                     local_disk.as_deref(),
                     local_tier,
                     *check,
@@ -917,6 +924,7 @@ async fn handle_boot_local(
     volume: Option<&str>,
     boot_config: &str,
     image_store: Option<&str>,
+    writable: &[String],
     local_disk: Option<&str>,
     local_tier: &str,
     check: bool,
@@ -1001,6 +1009,21 @@ async fn handle_boot_local(
             .name()
             .await;
         exports.push((1, img_name, mgr.get_volume(&img_id).expect("resolved volume exists")));
+    }
+
+    // Writable thin volumes (var, containers) at the next indices after root
+    // (0) and image-store (1). Order preserved so the caller maps each ublk
+    // device to its mount point.
+    let mut next_dev = exports.len() as u32;
+    for sel in writable {
+        let wid = resolve_boot_volume(&mgr, sel).await?;
+        let wname = mgr
+            .get_volume_handle(&wid)
+            .expect("resolved volume exists")
+            .name()
+            .await;
+        exports.push((next_dev, wname, mgr.get_volume(&wid).expect("resolved volume exists")));
+        next_dev += 1;
     }
 
     println!("Boot volume: {root_name} ({})", root_id.0);
