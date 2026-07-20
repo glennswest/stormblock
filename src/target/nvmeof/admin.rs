@@ -13,6 +13,7 @@ pub const ADMIN_ABORT: u8 = 0x08;
 pub const ADMIN_SET_FEATURES: u8 = 0x09;
 pub const ADMIN_GET_FEATURES: u8 = 0x0A;
 pub const ADMIN_ASYNC_EVENT_REQ: u8 = 0x0C;
+pub const ADMIN_KEEP_ALIVE: u8 = 0x18;
 
 /// Identify CNS values.
 pub const CNS_NAMESPACE: u8 = 0x00;
@@ -20,12 +21,16 @@ pub const CNS_CONTROLLER: u8 = 0x01;
 pub const CNS_ACTIVE_NS_LIST: u8 = 0x02;
 
 /// Build Identify Controller data (4096 bytes).
+///
+/// `discovery` selects CNTRLTYPE (the kernel refuses `nvme discover` against
+/// a controller that doesn't identify as a discovery controller).
 pub fn identify_controller(
     subnqn: &str,
     serial: &str,
     model: &str,
     firmware: &str,
     max_namespaces: u32,
+    discovery: bool,
 ) -> Vec<u8> {
     let mut data = vec![0u8; 4096];
 
@@ -61,8 +66,16 @@ pub fn identify_controller(
     // VER = NVMe 1.4
     data[80..84].copy_from_slice(&0x00010400u32.to_le_bytes());
 
+    // CNTRLTYPE (byte 111): 1 = I/O controller, 2 = discovery controller
+    data[111] = if discovery { 2 } else { 1 };
+
     // OACS (Optional Admin Command Support) — none for now
     data[256..258].copy_from_slice(&0u16.to_le_bytes());
+
+    // KAS (bytes 320-321): Keep Alive granularity in 100 ms units.
+    // Mandatory nonzero for fabrics — the Linux initiator rejects the
+    // controller outright otherwise ("keep-alive support is mandatory").
+    data[320..322].copy_from_slice(&10u16.to_le_bytes());
 
     // ACLS (Abort Command Limit) = 3
     data[258] = 3;
@@ -87,13 +100,25 @@ pub fn identify_controller(
     // ONCS (Optional NVM Command Support) — Write Zeroes, Dataset Management
     data[520..522].copy_from_slice(&0x0004u16.to_le_bytes()); // Dataset Management
 
-    // SGLS (SGL support) — none for TCP transport
-    data[536..540].copy_from_slice(&0u32.to_le_bytes());
+    // SGLS: SGLs supported (bit 0) + SGL data block in capsule (bit 20).
+    // Mandatory nonzero for fabrics — the Linux initiator refuses the
+    // controller with "Mandatory sgls are not supported!" otherwise.
+    data[536..540].copy_from_slice(&((1u32 << 0) | (1u32 << 20)).to_le_bytes());
 
     // SUBNQN (bytes 768-1023, 256 bytes)
     let nqn = subnqn.as_bytes();
     let nqn_len = nqn.len().min(256);
     data[768..768 + nqn_len].copy_from_slice(&nqn[..nqn_len]);
+
+    // NVMe-oF specific (bytes 1792+), all mandatory for fabrics:
+    // IOCCSZ: I/O command capsule size in 16-byte units — 64B SQE + 8 KB
+    // in-capsule data. Writes larger than 8 KB use the R2T/H2CData flow.
+    data[1792..1796].copy_from_slice(&(((64 + 8192) / 16) as u32).to_le_bytes());
+    // IORCSZ: I/O response capsule size (one 16-byte CQE).
+    data[1796..1800].copy_from_slice(&1u32.to_le_bytes());
+    // ICDOFF = 0, FCATT = 0 (dynamic controller model)
+    // MSDBD: one SGL data block descriptor per command.
+    data[1803] = 1;
 
     data
 }
@@ -158,8 +183,21 @@ mod tests {
             "StormBlock Virtual",
             "1.0.0",
             16,
+            false,
         );
         assert_eq!(data.len(), 4096);
+
+        // Fabrics-mandatory fields the Linux initiator validates
+        assert_eq!(u16::from_le_bytes([data[320], data[321]]), 10, "KAS");
+        assert_eq!(
+            u32::from_le_bytes(data[1792..1796].try_into().unwrap()),
+            (64 + 8192) / 16,
+            "IOCCSZ"
+        );
+        assert_eq!(u32::from_le_bytes(data[1796..1800].try_into().unwrap()), 1, "IORCSZ");
+        let sgls = u32::from_le_bytes(data[536..540].try_into().unwrap());
+        assert_ne!(sgls & 0x3, 0, "SGLS mandatory for fabrics");
+        assert_eq!(data[111], 1, "CNTRLTYPE = I/O controller");
 
         // Serial
         let sn = std::str::from_utf8(&data[4..24]).unwrap().trim();

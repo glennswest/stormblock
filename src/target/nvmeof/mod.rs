@@ -105,12 +105,16 @@ impl NvmeofTarget {
         let (hdgst, ddgst) = self.handle_ic_handshake(&mut reader, &mut writer).await?;
 
         // Step 2: Fabric Connect → determine admin vs I/O queue
-        let (cntlid, qid) = self.handle_fabric_connect(&mut reader, &mut writer, hdgst).await?;
-        tracing::info!("NVMe-oF controller {cntlid} connected from {peer}, QID={qid}");
+        let (cntlid, qid, is_discovery) =
+            self.handle_fabric_connect(&mut reader, &mut writer, hdgst).await?;
+        tracing::info!(
+            "NVMe-oF controller {cntlid} connected from {peer}, QID={qid}{}",
+            if is_discovery { " (discovery)" } else { "" }
+        );
 
         // Step 3: Command loop
         let mut props = ControllerProperties::new();
-        self.command_loop(&mut reader, &mut writer, qid, cntlid, &mut props, hdgst, ddgst).await
+        self.command_loop(&mut reader, &mut writer, qid, cntlid, is_discovery, &mut props, hdgst, ddgst).await
     }
 
     async fn handle_ic_handshake<R, W>(
@@ -154,7 +158,7 @@ impl NvmeofTarget {
         reader: &mut R,
         writer: &mut W,
         hdgst: bool,
-    ) -> std::io::Result<(u16, u16)>
+    ) -> std::io::Result<(u16, u16, bool)>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
@@ -187,13 +191,14 @@ impl NvmeofTarget {
 
         let qid = fab.connect_qid();
         let cntlid = self.next_cntlid.fetch_add(1, Ordering::Relaxed);
+        let is_discovery = connect.subnqn == discovery::DISCOVERY_NQN;
 
         let mut cqe = NvmeCqe::success(sqe.cid(), 0, 0);
         cqe.set_dw0(cntlid as u32); // CNTLID in DW0 of connect response
         pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
 
         tracing::debug!("NVMe-oF Connect: host='{}', sub='{}', qid={qid}, cntlid={cntlid}", connect.hostnqn, connect.subnqn);
-        Ok((cntlid, qid))
+        Ok((cntlid, qid, is_discovery))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -203,6 +208,7 @@ impl NvmeofTarget {
         writer: &mut W,
         qid: u16,
         cntlid: u16,
+        is_discovery: bool,
         props: &mut ControllerProperties,
         hdgst: bool,
         ddgst: bool,
@@ -211,30 +217,42 @@ impl NvmeofTarget {
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
     {
+        // Commands that arrived interleaved while a write was collecting its
+        // R2T data are parked here and processed in order.
+        let mut pending: std::collections::VecDeque<(NvmeSqe, Vec<u8>)> =
+            std::collections::VecDeque::new();
         loop {
-            let pdu = pdu::read_pdu(reader).await?;
-            match pdu {
-                NvmeofPdu::CapsuleCmd { sqe, data, .. } => {
-                    let opcode = sqe.opcode();
-                    let cid = sqe.cid();
-
-                    if opcode == NVME_FABRIC_OPC {
-                        self.handle_fabric_cmd(&sqe, &data, writer, props, hdgst).await?;
-                    } else if qid == 0 {
-                        // Admin queue
-                        self.handle_admin_cmd(&sqe, writer, cntlid, hdgst, ddgst).await?;
-                    } else {
-                        // I/O queue
-                        self.handle_io_cmd(&sqe, &data, writer, cid, hdgst, ddgst).await?;
+            let (sqe, data) = if let Some(cmd) = pending.pop_front() {
+                cmd
+            } else {
+                match pdu::read_pdu(reader).await? {
+                    NvmeofPdu::CapsuleCmd { sqe, data, .. } => (sqe, data),
+                    NvmeofPdu::H2CData { cccid, data, .. } => {
+                        tracing::warn!(
+                            "unsolicited H2CData for CID {cccid} ({} bytes), dropping",
+                            data.len()
+                        );
+                        continue;
+                    }
+                    _ => {
+                        tracing::debug!("ignoring unexpected PDU in command loop");
+                        continue;
                     }
                 }
-                NvmeofPdu::H2CData { cccid, data, .. } => {
-                    // H2C data for a pending write — simplified: not yet tracked
-                    tracing::debug!("received H2CData for CID {cccid}, {} bytes", data.len());
-                }
-                _ => {
-                    tracing::debug!("ignoring unexpected PDU in command loop");
-                }
+            };
+
+            let opcode = sqe.opcode();
+            let cid = sqe.cid();
+
+            if opcode == NVME_FABRIC_OPC {
+                self.handle_fabric_cmd(&sqe, &data, writer, props, hdgst).await?;
+            } else if qid == 0 {
+                // Admin queue
+                self.handle_admin_cmd(&sqe, writer, cntlid, is_discovery, hdgst, ddgst).await?;
+            } else {
+                // I/O queue
+                self.handle_io_cmd(&sqe, &data, reader, writer, cid, &mut pending, hdgst, ddgst)
+                    .await?;
             }
         }
     }
@@ -288,6 +306,7 @@ impl NvmeofTarget {
         sqe: &NvmeSqe,
         writer: &mut W,
         cntlid: u16,
+        is_discovery: bool,
         hdgst: bool,
         ddgst: bool,
     ) -> std::io::Result<()> {
@@ -302,12 +321,20 @@ impl NvmeofTarget {
                 let data = match cns {
                     admin::CNS_CONTROLLER => {
                         let serial = format!("SB{cntlid:04X}");
+                        // A connection made to the discovery NQN must identify
+                        // as a discovery controller under that NQN.
+                        let subnqn = if is_discovery {
+                            discovery::DISCOVERY_NQN
+                        } else {
+                            &self.config.nqn
+                        };
                         let mut d = admin::identify_controller(
-                            &self.config.nqn,
+                            subnqn,
                             &serial,
                             "StormBlock NVMe-oF",
                             "1.0.0",
                             self.namespaces.len() as u32,
+                            is_discovery,
                         );
                         // Set CNTLID
                         d[78..80].copy_from_slice(&cntlid.to_le_bytes());
@@ -373,6 +400,11 @@ impl NvmeofTarget {
                 // Don't respond immediately — async event requests are held
                 Ok(())
             }
+            admin::ADMIN_KEEP_ALIVE => {
+                // Fabrics keep-alive heartbeat — always succeed.
+                let cqe = NvmeCqe::success(cid, 0, 0);
+                pdu::write_capsule_resp(writer, &cqe, hdgst).await
+            }
             _ => {
                 tracing::debug!("unsupported admin opcode: {opcode:#04x}");
                 let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x01);
@@ -381,15 +413,22 @@ impl NvmeofTarget {
         }
     }
 
-    async fn handle_io_cmd<W: AsyncWriteExt + Unpin>(
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_io_cmd<R, W>(
         &self,
         sqe: &NvmeSqe,
         data: &[u8],
+        reader: &mut R,
         writer: &mut W,
         cid: u16,
+        pending: &mut std::collections::VecDeque<(NvmeSqe, Vec<u8>)>,
         hdgst: bool,
         ddgst: bool,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<()>
+    where
+        R: AsyncReadExt + Unpin,
+        W: AsyncWriteExt + Unpin,
+    {
         let nsid = sqe.nsid();
         let device = match self.namespaces.get(&nsid) {
             Some(dev) => dev,
@@ -398,6 +437,48 @@ impl NvmeofTarget {
                 return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
             }
         };
+
+        // Writes larger than the in-capsule allowance arrive without their
+        // data: send an R2T for the remainder and collect H2CData PDUs,
+        // parking any interleaved commands for the main loop.
+        let mut full_data: Vec<u8>;
+        let mut data: &[u8] = data;
+        if sqe.opcode() == io::IO_WRITE {
+            let nlb = (sqe.cdw12() & 0xFFFF) as u64 + 1;
+            let expected = (nlb * device.block_size() as u64) as usize;
+            if data.len() < expected {
+                pdu::write_r2t(
+                    writer,
+                    cid,
+                    cid, // ttag: one outstanding transfer per command
+                    data.len() as u32,
+                    (expected - data.len()) as u32,
+                    hdgst,
+                )
+                .await?;
+                full_data = Vec::with_capacity(expected);
+                full_data.extend_from_slice(data);
+                while full_data.len() < expected {
+                    match pdu::read_pdu(reader).await? {
+                        NvmeofPdu::H2CData { cccid, data: chunk, .. } => {
+                            if cccid != cid {
+                                tracing::warn!(
+                                    "H2CData for CID {cccid} while collecting CID {cid}"
+                                );
+                            }
+                            full_data.extend_from_slice(&chunk);
+                        }
+                        NvmeofPdu::CapsuleCmd { sqe, data, .. } => {
+                            pending.push_back((sqe, data));
+                        }
+                        _ => {
+                            tracing::debug!("ignoring unexpected PDU during R2T transfer");
+                        }
+                    }
+                }
+                data = &full_data;
+            }
+        }
 
         let result = io::handle_io_command(sqe, device, data).await;
 
