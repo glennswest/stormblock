@@ -453,6 +453,25 @@ if [ -n "$WRITABLE_MAP" ]; then
     done
 fi
 
+# Preloaded image store: boot-local exported it as ublkb1 (right after root).
+# It is an erofs filesystem image, mounted READ-ONLY — it is the build-time
+# preload that CRI-O/rspacefs serve from, so a zeroboot node never has to pull.
+# Registered in fstab like the writable volumes so systemd owns the mount
+# ordering (it sits under /var, which must mount first).
+if [ -n "$IMAGE_STORE" ]; then
+    ISDEV=/dev/ublkb1
+    ISMNT="${IMAGE_STORE_MOUNT:-/var/lib/stormcos/image-store}"
+    n=0
+    while [ ! -b "$ISDEV" ] && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
+    if [ -b "$ISDEV" ]; then
+        mkdir -p "/sysroot$ISMNT"
+        echo "$ISDEV $ISMNT erofs ro,nofail 0 0" >> /sysroot/etc/fstab
+        echo "  image-store: $ISDEV -> $ISMNT (ro)"
+    else
+        echo "  WARNING: $ISDEV never appeared — preloaded images will NOT be available"
+    fi
+fi
+
 # Verify systemd exists in the new root
 if [ ! -x /sysroot/sbin/init ] && [ ! -x /sysroot/usr/lib/systemd/systemd ]; then
     echo "FATAL: No init found in /sysroot"
