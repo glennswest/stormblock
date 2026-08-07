@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-08-07
+- **fix:** aarch64 build broken by hardcoded `*mut i8` cast in `gethostname` calls (`src/stormfs.rs`, `src/cluster/mod.rs`) — `c_char` is unsigned on aarch64/arm; now casts to `*mut libc::c_char` for portability (#21)
+
 ### 2026-07-19
 - **feat:** ublk transport for the CSI `/v1` attach path — when `[management] ublk_transport = true` and a volume is attached on the node that holds its master, the engine exports the backing device as a local `/dev/ublkbN` and returns `AttachInfo::Ublk { device_hint }` instead of NVMe-oF/TCP coordinates, giving the CSI node a local device with no network round trip. Falls back transparently to nvme-tcp when ublk is unavailable (non-Linux, `ublk_drv` not loaded) — probed once at startup. Exports are torn down on detach/delete; the CSI node never disconnects a ublk device itself. Closes the ublk half of the attach contract (the `Ublk` variant existed in the wire type but was never produced). New `src/mgmt/ublk_export.rs`; policy `should_offer_ublk` and export bookkeeping are unit-tested off-Linux, the kernel export path is verified on dev.g8.lo.
 
