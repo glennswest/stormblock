@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v6.5.0] — 2026-08-08
+
+### 2026-08-08 (reset primitive)
+- **feat:** `POST /v1/volumes/{id}/reset` — discard a clone's divergence and return it to its source's contents without recreating the volume. Delete-and-reclone costs two reference updates for every extent in the golden image; reset touches only the extents the clone actually wrote, so a container restart scales with what that container changed rather than with the image it started from. Returns `freed_extents` / `restored_extents` / `shared_extents`. The volume keeps its id and attachment record. (#4)
+- **feat:** `VolumeManager::reset_volume` and `snapshot::reset_to_source`; new references are taken before old ones are released, so an interruption leaks a reference rather than freeing live data. `GlobalExtentMap::inc_extent_ref` bumps the share count of a single extent — the GEM refcount is what makes a write copy instead of landing in place, so re-sharing must bump both sides or the next container write would scribble onto the golden image. (#4)
+- **fix:** reset is refused with 409 while the volume is attached (contents cannot change under a live host) and for a volume that was not created from a source. `VolumeRec` now records `source_local`.
+
 ## [v6.4.0] — 2026-08-08
 
 ### 2026-08-08 (later)

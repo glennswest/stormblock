@@ -62,7 +62,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
 - **REST API** — axum-based management (drives, arrays, volumes, exports, slabs) with optional TLS.
 - **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
-- **296 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
+- **300 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
 
 ## Data Placement Model
 
@@ -164,6 +164,29 @@ curl -X POST http://node:9090/api/v1/luns \
 
 Thin allocation and reclaim are visible on `/metrics` via
 `stormblock_slab_allocated_bytes` and `stormblock_slab_free_bytes`.
+
+### Clone-per-consumer, reset on restart
+
+Untar a golden image **once**, then clone it per consumer — a clone copies
+no data, it shares the source's extents and diverges copy-on-write. When a
+consumer restarts, reset it instead of deleting and re-cloning: the volume
+keeps its id and only the extents it actually wrote are touched, so the cost
+tracks divergence rather than image size.
+
+```bash
+# Clone the golden image for a new container instance
+curl -X POST http://node:9090/v1/volumes \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"container-1","size_bytes":536870912,
+       "source":{"kind":"volume","id":"<golden-uuid>"}}'
+
+# On restart: squash divergence, back to the golden image
+# → {"freed_extents":3,"restored_extents":3,"shared_extents":47}
+curl -X POST http://node:9090/v1/volumes/<clone-id>/reset
+```
+
+Reset is refused while the volume is attached, since its contents cannot
+change under a live host.
 
 ## Module Structure
 
