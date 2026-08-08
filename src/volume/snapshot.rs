@@ -4,6 +4,9 @@
 //! counting. Writes to either the source or snapshot trigger copy-on-write
 //! (handled by `ThinVolumeHandle::cow_write`).
 
+use std::collections::HashMap;
+
+use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::volume::extent::VolumeId;
 use crate::volume::gem::GlobalExtentMap;
@@ -28,11 +31,16 @@ pub async fn create_snapshot(
     // that has never been written has no GEM map yet — its snapshot is
     // simply empty (extents appear on first allocate-on-write).
     if let Some(cloned) = gem.clone_volume_map(source_id, snap_id) {
-        // Increment ref_count on all slab slots (on-disk)
+        // Increment ref_count on all slab slots (on-disk). Grouped per slab so
+        // each one coalesces its slot-table writes by sector — a clone of an
+        // N-extent image costs sectors touched, not N round trips.
+        let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
         for loc in cloned.extents.values() {
-            if let Some(slab) = registry.get_mut(&loc.slab_id) {
-                slab.inc_ref(loc.slot_idx).await
-                    .map_err(VolumeError::Drive)?;
+            by_slab.entry(loc.slab_id).or_default().push(loc.slot_idx);
+        }
+        for (slab_id, slots) in by_slab {
+            if let Some(slab) = registry.get_mut(&slab_id) {
+                slab.inc_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
             }
         }
     }
@@ -66,9 +74,16 @@ pub async fn delete_snapshot(
 ) -> Result<(), VolumeError> {
     // A never-written volume has no GEM map — nothing to free.
     if let Some(vmap) = gem.remove_volume(snap_id) {
+        // Grouped per slab so the slot table is written by sector and the
+        // header once, rather than twice per extent. Deleting a clone is on
+        // the container restart path, so this is the hot direction too.
+        let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
         for loc in vmap.extents.values() {
-            if let Some(slab) = registry.get_mut(&loc.slab_id) {
-                let _ = slab.dec_ref(loc.slot_idx).await;
+            by_slab.entry(loc.slab_id).or_default().push(loc.slot_idx);
+        }
+        for (slab_id, slots) in by_slab {
+            if let Some(slab) = registry.get_mut(&slab_id) {
+                let _ = slab.dec_ref_batch(&slots).await;
             }
         }
     }

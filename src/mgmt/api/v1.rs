@@ -753,10 +753,20 @@ async fn delete_volume(
     Path(id): Path<String>,
 ) -> V1Result<serde_json::Value> {
     let mut v1 = state.v1.lock().await;
-    if let Some(rec) = v1.volumes.remove(&id) {
+    let removed = v1.volumes.remove(&id);
+    if let Some(rec) = removed {
         account_static_nodes(&mut v1, &rec.vol.replicas, rec.vol.size_bytes, false);
         v1.attachments.remove(&id);
         v1.dual_attach.remove(&id);
+        v1.save();
+        drop(v1);
+
+        // Stop serving it before the backing storage goes away — otherwise a
+        // deleted COW image leaves a namespace pointing at freed slots, which
+        // the container-restart cycle would hit constantly.
+        #[cfg(feature = "nvmeof")]
+        release_nvme_namespace(&state, &id).await;
+
         if let Some(local) = rec.local_id {
             state.ublk_exports.lock().await.remove(&id);
             let mut vm = state.volume_manager.lock().await;
@@ -764,7 +774,6 @@ async fn delete_volume(
                 tracing::warn!("backing volume {local} delete: {e}");
             }
         }
-        v1.save();
     }
     // Idempotent: deleting an absent volume succeeds.
     Ok(Json(serde_json::json!({})))

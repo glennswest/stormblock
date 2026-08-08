@@ -522,6 +522,82 @@ impl Slab {
         self.persist_slot(slot_idx).await
     }
 
+    /// Increment reference counts on many slots at once.
+    ///
+    /// Cloning a volume bumps every extent it shares with its source, so the
+    /// per-slot path costs one read-modify-write per extent. This persists the
+    /// table by sector instead, which is what keeps clone latency proportional
+    /// to sectors touched rather than to image size.
+    pub async fn inc_ref_batch(&mut self, slot_indices: &[u32]) -> DriveResult<()> {
+        // Validate everything before mutating, so a bad index cannot leave the
+        // batch half-applied.
+        for &slot_idx in slot_indices {
+            let idx = slot_idx as usize;
+            if idx >= self.slots.len() {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "slot index {slot_idx} out of range"
+                )));
+            }
+            if self.slots[idx].state == SlotState::Free {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "cannot inc_ref on free slot {slot_idx}"
+                )));
+            }
+        }
+
+        for &slot_idx in slot_indices {
+            self.slots[slot_idx as usize].ref_count += 1;
+        }
+        self.persist_slots(slot_indices).await
+    }
+
+    /// Decrement reference counts on many slots at once, freeing any that
+    /// reach zero. Returns the number freed.
+    ///
+    /// The header is written once at the end rather than once per freed slot.
+    pub async fn dec_ref_batch(&mut self, slot_indices: &[u32]) -> DriveResult<usize> {
+        for &slot_idx in slot_indices {
+            let idx = slot_idx as usize;
+            if idx >= self.slots.len() {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "slot index {slot_idx} out of range"
+                )));
+            }
+            if self.slots[idx].state == SlotState::Free || self.slots[idx].ref_count == 0 {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "cannot dec_ref on free/zero-ref slot {slot_idx}"
+                )));
+            }
+        }
+
+        let mut freed = 0usize;
+        for &slot_idx in slot_indices {
+            let idx = slot_idx as usize;
+            self.slots[idx].ref_count -= 1;
+            if self.slots[idx].ref_count > 0 {
+                continue;
+            }
+
+            // Last reference: same bookkeeping as `free`, but the write is
+            // deferred to the coalesced flush below.
+            let slot = &self.slots[idx];
+            let key = (slot.volume_id, slot.virtual_extent_idx);
+            if self.extent_index.get(&key) == Some(&slot_idx) {
+                self.extent_index.remove(&key);
+            }
+            self.slots[idx] = Slot::free();
+            self.free_bitmap.set(idx, true);
+            self.free_count += 1;
+            freed += 1;
+        }
+
+        self.persist_slots(slot_indices).await?;
+        if freed > 0 {
+            self.persist_header().await?;
+        }
+        Ok(freed)
+    }
+
     /// Decrement the reference count on a slot. Returns true if freed (hit 0).
     pub async fn dec_ref(&mut self, slot_idx: u32) -> DriveResult<bool> {
         let idx = slot_idx as usize;
@@ -614,6 +690,68 @@ impl Slab {
     /// Slot entries are 64 bytes, but the device may have a larger block size
     /// (e.g., 512 bytes for iSCSI). We do a read-modify-write of the aligned
     /// sector to handle devices that require block-aligned I/O.
+    /// Persist several slot entries, coalescing those that share a sector.
+    ///
+    /// A slot entry is 64 bytes while a sector is 512 or 4096, so 8-64
+    /// consecutive entries live in one sector. Clone and delete touch runs of
+    /// slots, so grouping turns one read-modify-write per slot into one write
+    /// per sector — and a sector the batch fills completely needs no read at
+    /// all.
+    async fn persist_slots(&self, slot_indices: &[u32]) -> DriveResult<()> {
+        if slot_indices.is_empty() {
+            return Ok(());
+        }
+        let bs = self.device.block_size() as u64;
+
+        // Sectors at or below entry size gain nothing from grouping.
+        if bs <= SLOT_ENTRY_SIZE {
+            for &slot_idx in slot_indices {
+                self.persist_slot(slot_idx).await?;
+            }
+            return Ok(());
+        }
+
+        let entries_per_sector = (bs / SLOT_ENTRY_SIZE) as usize;
+
+        let mut by_sector: HashMap<u64, Vec<u32>> = HashMap::new();
+        for &slot_idx in slot_indices {
+            let entry_offset = self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
+            by_sector
+                .entry((entry_offset / bs) * bs)
+                .or_default()
+                .push(slot_idx);
+        }
+
+        for (sector_start, mut idxs) in by_sector {
+            idxs.sort_unstable();
+            idxs.dedup();
+
+            // Holding one distinct valid slot per entry means the batch
+            // overwrites every byte of this sector, so the read can be
+            // skipped. Any partial sector — including a final one that runs
+            // past the table into the data region — is read first.
+            let mut sector = if idxs.len() == entries_per_sector {
+                vec![0u8; bs as usize]
+            } else {
+                let mut buf = vec![0u8; bs as usize];
+                self.device.read(sector_start, &mut buf).await?;
+                buf
+            };
+
+            for &slot_idx in &idxs {
+                let entry_offset =
+                    self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
+                let off = (entry_offset - sector_start) as usize;
+                sector[off..off + SLOT_ENTRY_SIZE as usize]
+                    .copy_from_slice(&self.slots[slot_idx as usize].to_bytes());
+            }
+
+            self.device.write(sector_start, &sector).await?;
+        }
+
+        Ok(())
+    }
+
     async fn persist_slot(&self, slot_idx: u32) -> DriveResult<()> {
         let slot = &self.slots[slot_idx as usize];
         let entry_bytes = slot.to_bytes();
@@ -679,6 +817,235 @@ mod tests {
 
     fn cleanup(path: &str) {
         let _ = std::fs::remove_file(path);
+    }
+
+    /// The batched refcount path must land on disk exactly like the per-slot
+    /// path — it coalesces sector writes and skips reads for fully-covered
+    /// sectors, both of which could corrupt neighbouring table entries.
+    #[tokio::test]
+    async fn batched_refcounts_match_disk_after_reopen() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        // 64 KB slots so the device holds ~1000 of them: enough for the slot
+        // table to span several sectors, which is what the batching groups by.
+        let mut slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        // Enough slots to span more than one sector of slot table
+        // (4096-byte sector / 64-byte entry = 64 entries per sector).
+        let vol = VolumeId::new();
+        let mut slots = Vec::new();
+        for vext in 0..100u64 {
+            slots.push(slab.allocate(vol, vext).await.unwrap());
+        }
+
+        // Bump a run that crosses a sector boundary, plus a stray one well
+        // past it, so both the coalesced and single-entry paths are used.
+        let bumped: Vec<u32> = slots[60..70].to_vec();
+        slab.inc_ref_batch(&bumped).await.unwrap();
+        slab.inc_ref_batch(&[slots[99]]).await.unwrap();
+
+        let free_before = slab.free_slots();
+        drop(slab);
+
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(reopened.free_slots(), free_before);
+        for (i, &s) in slots.iter().enumerate() {
+            let expected = if bumped.contains(&s) || i == 99 { 2 } else { 1 };
+            assert_eq!(
+                reopened.get_slot(s).unwrap().ref_count,
+                expected,
+                "slot {s} (index {i}) refcount"
+            );
+            // Neighbours in a rewritten sector must keep their identity.
+            assert_eq!(reopened.get_slot(s).unwrap().volume_id, vol);
+            assert_eq!(reopened.get_slot(s).unwrap().virtual_extent_idx, i as u64);
+        }
+
+        cleanup(&path);
+    }
+
+    /// Dropping a clone must return only the slots that hit zero, and leave
+    /// the ones its source still holds — the container restart cycle does
+    /// this constantly.
+    #[tokio::test]
+    async fn batched_dec_ref_frees_only_last_reference() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        // 64 KB slots so the device holds ~1000 of them: enough for the slot
+        // table to span several sectors, which is what the batching groups by.
+        let mut slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let vol = VolumeId::new();
+        let mut slots = Vec::new();
+        for vext in 0..80u64 {
+            slots.push(slab.allocate(vol, vext).await.unwrap());
+        }
+        let free_after_alloc = slab.free_slots();
+
+        // Clone: every slot now has two references.
+        slab.inc_ref_batch(&slots).await.unwrap();
+
+        // Dropping the clone releases one reference from each — none freed.
+        let freed = slab.dec_ref_batch(&slots).await.unwrap();
+        assert_eq!(freed, 0, "source still holds every slot");
+        assert_eq!(slab.free_slots(), free_after_alloc);
+
+        // Dropping the source too frees them all.
+        let freed = slab.dec_ref_batch(&slots).await.unwrap();
+        assert_eq!(freed, slots.len());
+        assert_eq!(slab.free_slots(), free_after_alloc + slots.len() as u64);
+
+        drop(slab);
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(reopened.free_slots(), free_after_alloc + slots.len() as u64);
+        for &s in &slots {
+            assert_eq!(reopened.get_slot(s).unwrap().state, SlotState::Free);
+        }
+
+        cleanup(&path);
+    }
+
+    /// Rewriting a partially-covered sector must preserve the entries the
+    /// batch did not touch.
+    #[tokio::test]
+    async fn batched_persist_preserves_untouched_neighbours() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        // 64 KB slots so the device holds ~1000 of them: enough for the slot
+        // table to span several sectors, which is what the batching groups by.
+        let mut slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let vol_a = VolumeId::new();
+        let vol_b = VolumeId::new();
+        // Interleave two volumes so neighbours in the same sector differ.
+        let mut a_slots = Vec::new();
+        let mut b_slots = Vec::new();
+        for vext in 0..40u64 {
+            a_slots.push(slab.allocate(vol_a, vext).await.unwrap());
+            b_slots.push(slab.allocate(vol_b, vext).await.unwrap());
+        }
+
+        // Touch only vol_a's slots; vol_b's share the same sectors.
+        slab.inc_ref_batch(&a_slots).await.unwrap();
+        drop(slab);
+
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        for (i, &s) in b_slots.iter().enumerate() {
+            let slot = reopened.get_slot(s).unwrap();
+            assert_eq!(slot.ref_count, 1, "untouched neighbour {s} refcount");
+            assert_eq!(slot.volume_id, vol_b, "untouched neighbour {s} volume");
+            assert_eq!(slot.virtual_extent_idx, i as u64);
+        }
+        for &s in &a_slots {
+            assert_eq!(reopened.get_slot(s).unwrap().ref_count, 2);
+        }
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn batched_refcounts_reject_bad_slots_without_mutating() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        // 64 KB slots so the device holds ~1000 of them: enough for the slot
+        // table to span several sectors, which is what the batching groups by.
+        let mut slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let vol = VolumeId::new();
+        let good = slab.allocate(vol, 0).await.unwrap();
+
+        // An out-of-range index anywhere in the batch fails it whole, leaving
+        // the valid entries alone rather than half-applied.
+        assert!(slab.inc_ref_batch(&[good, u32::MAX]).await.is_err());
+        assert_eq!(slab.get_slot(good).unwrap().ref_count, 1);
+
+        // Same for a free slot.
+        let free_idx = slab.allocate(vol, 1).await.unwrap();
+        slab.free(free_idx).await.unwrap();
+        assert!(slab.inc_ref_batch(&[good, free_idx]).await.is_err());
+        assert_eq!(slab.get_slot(good).unwrap().ref_count, 1);
+
+        assert!(slab.dec_ref_batch(&[good, free_idx]).await.is_err());
+        assert_eq!(slab.get_slot(good).unwrap().ref_count, 1);
+
+        cleanup(&path);
+    }
+
+    /// Counts writes reaching the device, to prove the batching actually
+    /// collapses per-slot round trips rather than merely looking tidier.
+    struct WriteCounter {
+        inner: Arc<dyn BlockDevice>,
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for WriteCounter {
+        fn id(&self) -> &super::super::DeviceId { self.inner.id() }
+        fn capacity_bytes(&self) -> u64 { self.inner.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.inner.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.inner.optimal_io_size() }
+        fn device_type(&self) -> super::super::DriveType { self.inner.device_type() }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            self.writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> DriveResult<()> { self.inner.flush().await }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+        fn smart_status(&self) -> DriveResult<super::super::SmartData> {
+            self.inner.smart_status()
+        }
+    }
+
+    /// A clone of an N-extent image must cost sectors touched, not N round
+    /// trips — that is the whole point of the batching, and it is what keeps
+    /// clone latency flat as VM images grow.
+    #[tokio::test]
+    async fn batched_refcounts_collapse_device_writes() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting: Arc<dyn BlockDevice> = Arc::new(WriteCounter {
+            inner: dev.clone(),
+            writes: writes.clone(),
+            reads: reads.clone(),
+        });
+
+        let mut slab = Slab::format(counting, 64 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let vol = VolumeId::new();
+        let mut slots = Vec::new();
+        for vext in 0..256u64 {
+            slots.push(slab.allocate(vol, vext).await.unwrap());
+        }
+
+        // 4096-byte sectors hold 64 entries each, so 256 contiguous slots are
+        // 4 sectors: 4 writes, and no reads because each is fully covered.
+        writes.store(0, std::sync::atomic::Ordering::Relaxed);
+        reads.store(0, std::sync::atomic::Ordering::Relaxed);
+        slab.inc_ref_batch(&slots).await.unwrap();
+
+        let w = writes.load(std::sync::atomic::Ordering::Relaxed);
+        let r = reads.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(w, 4, "256 slots over 64-entry sectors should be 4 writes, got {w}");
+        assert_eq!(r, 0, "fully covered sectors need no read, got {r}");
+
+        // Per-slot would have been 256 writes and 256 reads.
+        assert!(w < slots.len() / 10);
+
+        cleanup(&path);
     }
 
     #[tokio::test]
