@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v6.4.0] — 2026-08-08
+
+### 2026-08-08 (later)
+- **feat:** NVMe-oF hot-add — a host connects once and later attaches cost an async event plus a rescan, with no Connect and no new TCP session per container. `add_namespace_dynamic`/`remove_namespace` raise a namespace-change event; the admin queue gets its own loop that selects over the socket and that event stream, holding the host's Asynchronous Event Requests and completing one the moment a namespace changes. Adds the Changed Namespace List log page (LID 0x04, cleared on read, with the `0xFFFFFFFF` rescan-everything sentinel when a connection falls behind) and advertises OAES bit 8, without which a host never arms for the event. (#4, #26)
+- **BREAKING:** `AttachInfo::NvmeTcp` previously advertised a per-volume NQN (`nqn.2026-01.io.stormblock:<volume_id>`) that the target rejected at Connect — it only ever answered to its configured subsystem NQN, so the nvme-tcp attach path could not have worked as shipped. It now returns the real subsystem NQN plus a per-volume `nsid`. A per-volume NQN would also force a Connect per container, which hot-add exists to avoid. Consumers must read `nsid` to pick the right namespace. (#26)
+- **feat:** `/v1` attach hot-adds the volume as a namespace and reports its NSID; detach withdraws it once no node holds the volume. Attach is idempotent — a replay reuses the namespace instead of leaking one. (#4)
+- **fix:** `/v1` `delete_volume` tore down the ublk export but never released the NVMe namespace, so deleting a COW image left a namespace pointing at freed slots — hit constantly by the delete-and-reclone container restart cycle. Released before the backing volume goes away.
+- **perf:** COW clone and delete batch their refcount persistence. Each `inc_ref`/`dec_ref` was a read-modify-write of a whole sector, so clone and delete cost two round trips per extent and scaled with image size; delete also rewrote the header once per freed slot. Slot entries are 64 bytes against 512/4096-byte sectors, so entries are now grouped by sector, a fully-covered sector skips its read, and the header is written once. Measured: 256 slots go from 256 writes + 256 reads to 4 writes and 0 reads. Matters most for VM images. (#4)
+
 ## [v6.3.0] — 2026-08-08
 
 ### 2026-08-08

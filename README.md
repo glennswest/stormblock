@@ -54,15 +54,15 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **Slab extent store** — Organic data placement with fixed-size 1 MB slots per device. Volumes spread across any device on any tier.
 - **Global Extent Map (GEM)** — Cross-slab extent tracking with reverse index, COW snapshot cloning, and rebuild-from-slabs recovery.
 - **Thin provisioning** — Extent-based allocator, volumes grow on write, and shrink again on discard: the targets advertise thin provisioning (SCSI VPD 0xB2, NVMe DSM) so initiators issue UNMAP/TRIM, which frees slab slots back to the pool.
-- **COW snapshots** — Instant snapshots via extent map cloning with reference counting.
+- **COW snapshots** — Instant snapshots via extent map cloning with reference counting; clone and delete persist refcounts a sector at a time, so latency tracks sectors touched rather than image size.
 - **Placement engine** — Snapshot-fenced cold copies, tiered data placement (Hot/Warm/Cool/Cold), extent-level replication.
 - **Shared ring IPC** — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd.
-- **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model, namespaces added and removed at runtime.
+- **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model, and hot-add: a host connects once and later attaches arrive as an async event plus a rescan, with no Connect per volume.
 - **iSCSI target** — RFC 7143, CHAP authentication, MPIO/ALUA. Thin volumes export directly as LUNs, added and removed at runtime, and scale to thousands per target.
 - **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
 - **REST API** — axum-based management (drives, arrays, volumes, exports, slabs) with optional TLS.
 - **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
-- **286 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
+- **296 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
 
 ## Data Placement Model
 
