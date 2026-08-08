@@ -169,7 +169,7 @@ impl Bhs {
         self.raw[20..24].copy_from_slice(&tag.to_be_bytes());
     }
 
-    // Bytes 24..28: CmdSN
+    // Bytes 24..28: CmdSN (initiator→target) / StatSN (target→initiator)
     pub fn cmd_sn(&self) -> u32 {
         u32::from_be_bytes(self.raw[24..28].try_into().unwrap())
     }
@@ -178,31 +178,38 @@ impl Bhs {
         self.raw[24..28].copy_from_slice(&sn.to_be_bytes());
     }
 
-    // Bytes 28..32: ExpStatSN / StatSN depending on direction
+    pub fn stat_sn(&self) -> u32 {
+        u32::from_be_bytes(self.raw[24..28].try_into().unwrap())
+    }
+
+    pub fn set_stat_sn(&mut self, sn: u32) {
+        self.raw[24..28].copy_from_slice(&sn.to_be_bytes());
+    }
+
+    // Bytes 28..32: ExpStatSN (initiator→target) / ExpCmdSN (target→initiator)
     pub fn exp_stat_sn(&self) -> u32 {
         u32::from_be_bytes(self.raw[28..32].try_into().unwrap())
     }
 
-    pub fn set_stat_sn(&mut self, sn: u32) {
+    pub fn set_exp_stat_sn(&mut self, sn: u32) {
         self.raw[28..32].copy_from_slice(&sn.to_be_bytes());
     }
 
-    // Bytes 32..36: MaxCmdSN (response) or opcode-specific
+    pub fn exp_cmd_sn(&self) -> u32 {
+        u32::from_be_bytes(self.raw[28..32].try_into().unwrap())
+    }
+
+    pub fn set_exp_cmd_sn(&mut self, sn: u32) {
+        self.raw[28..32].copy_from_slice(&sn.to_be_bytes());
+    }
+
+    // Bytes 32..36: MaxCmdSN (target→initiator)
     pub fn max_cmd_sn(&self) -> u32 {
         u32::from_be_bytes(self.raw[32..36].try_into().unwrap())
     }
 
     pub fn set_max_cmd_sn(&mut self, sn: u32) {
         self.raw[32..36].copy_from_slice(&sn.to_be_bytes());
-    }
-
-    // Bytes 36..40: ExpCmdSN (response) or opcode-specific
-    pub fn exp_cmd_sn(&self) -> u32 {
-        u32::from_be_bytes(self.raw[36..40].try_into().unwrap())
-    }
-
-    pub fn set_exp_cmd_sn(&mut self, sn: u32) {
-        self.raw[36..40].copy_from_slice(&sn.to_be_bytes());
     }
 
     // --- SCSI Command specific fields (bytes 32..48) ---

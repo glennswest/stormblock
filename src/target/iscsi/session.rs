@@ -55,11 +55,18 @@ pub struct ConnectionState {
 
 impl ConnectionState {
     pub fn new(cid: u16) -> Self {
+        Self::with_sns(cid, 1, 1)
+    }
+
+    /// Create a connection continuing the sequence numbers negotiated during
+    /// login: `stat_sn` is the StatSN for the first full-feature response,
+    /// `exp_cmd_sn` the CmdSN expected from the initiator's first command.
+    pub fn with_sns(cid: u16, stat_sn: u32, exp_cmd_sn: u32) -> Self {
         ConnectionState {
             cid,
-            stat_sn: AtomicU32::new(1),
-            exp_cmd_sn: AtomicU32::new(1),
-            max_cmd_sn: AtomicU32::new(32), // window of 32 commands
+            stat_sn: AtomicU32::new(stat_sn),
+            exp_cmd_sn: AtomicU32::new(exp_cmd_sn),
+            max_cmd_sn: AtomicU32::new(exp_cmd_sn.wrapping_add(31)), // window of 32 commands
         }
     }
 

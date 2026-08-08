@@ -83,7 +83,7 @@ impl IscsiConnection {
         bhs.set_transit(true);
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_isid(&self.isid);
         bhs.set_tsih(self.tsih);
         bhs
@@ -107,8 +107,8 @@ impl IscsiConnection {
     }
 
     fn parse_login_response(&mut self, resp: &IscsiPdu) -> Result<(), DriveError> {
-        self.exp_stat_sn = resp.bhs.cmd_sn();
-        self.cmd_sn = u32::from_be_bytes(resp.bhs.raw[28..32].try_into().unwrap());
+        self.exp_stat_sn = resp.bhs.stat_sn();
+        self.cmd_sn = resp.bhs.exp_cmd_sn();
         let tsih = resp.bhs.tsih();
         if tsih != 0 {
             self.tsih = tsih;
@@ -235,7 +235,7 @@ impl IscsiConnection {
                         bhs.set_initiator_task_tag(0xFFFF_FFFF);
                         bhs.set_target_transfer_tag(ttt);
                         bhs.set_cmd_sn(self.cmd_sn);
-                        bhs.set_stat_sn(self.exp_stat_sn);
+                        bhs.set_exp_stat_sn(self.exp_stat_sn);
                         let pdu = IscsiPdu::new(bhs);
                         write_pdu(&mut self.writer, &pdu, false, false)
                             .await
@@ -269,8 +269,7 @@ impl IscsiConnection {
             _ => false,
         };
         if valid {
-            let stat_sn = resp.bhs.cmd_sn(); // bytes 24-27 = StatSN in responses
-            self.exp_stat_sn = stat_sn.wrapping_add(1);
+            self.exp_stat_sn = resp.bhs.stat_sn().wrapping_add(1);
         }
     }
 
@@ -283,7 +282,7 @@ impl IscsiConnection {
         bhs.raw[1] |= 0x40; // Read
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(8);
 
@@ -338,7 +337,7 @@ impl IscsiConnection {
         bhs.raw[1] |= 0x40; // Read
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(96);
 
@@ -389,7 +388,7 @@ impl IscsiConnection {
         bhs.raw[1] |= 0x40; // Read
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         let transfer_len = block_count as u32 * self.block_size;
         bhs.set_expected_data_transfer_length(transfer_len);
@@ -456,7 +455,7 @@ impl IscsiConnection {
         bhs.raw[1] |= 0x20; // Write
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(padded.len() as u32);
 
@@ -503,7 +502,7 @@ impl IscsiConnection {
         bhs.raw[1] |= 0x20; // Write direction (UNMAP sends a parameter list)
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
 
         // UNMAP parameter list: 8-byte header + 16-byte descriptor
@@ -559,7 +558,7 @@ impl IscsiConnection {
         bhs.raw[1] &= 0x80; // Reason code 0: close session
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
 
         let pdu = IscsiPdu::new(bhs);
         write_pdu(&mut self.writer, &pdu, false, false)
@@ -778,7 +777,7 @@ impl BlockDevice for IscsiDevice {
         bhs.set_initiator_task_tag(itt);
         bhs.set_target_transfer_tag(0xFFFF_FFFF);
         bhs.set_cmd_sn(conn.cmd_sn);
-        bhs.set_stat_sn(conn.exp_stat_sn);
+        bhs.set_exp_stat_sn(conn.exp_stat_sn);
 
         let pdu = IscsiPdu::new(bhs);
         write_pdu(&mut conn.writer, &pdu, false, false)

@@ -247,7 +247,14 @@ fn parse_raid_level(s: &str) -> Result<RaidLevel, String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    tracing_subscriber::fmt::init();
+    // RUST_LOG controls verbosity (e.g. RUST_LOG=stormblock=debug for
+    // per-PDU iSCSI tracing); defaults to info when unset.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     tracing::info!("StormBlock starting, config: {}", cli.config);
 
     // Load and merge configuration

@@ -56,6 +56,10 @@ pub struct LoginStateMachine {
     stage: u8,
     auth_complete: bool,
     security_offered: bool,
+    /// StatSN for the next login response (initiator's ExpStatSN follows it).
+    stat_sn: u32,
+    /// ExpCmdSN derived from the latest login request's CmdSN.
+    exp_cmd_sn: u32,
 }
 
 impl LoginStateMachine {
@@ -68,7 +72,20 @@ impl LoginStateMachine {
             stage: STAGE_SECURITY,
             auth_complete: false,
             security_offered: false,
+            stat_sn: 1,
+            exp_cmd_sn: 1,
         }
+    }
+
+    /// StatSN the full-feature phase should use for its first response.
+    pub fn next_stat_sn(&self) -> u32 {
+        self.stat_sn
+    }
+
+    /// ExpCmdSN after the final login request — the CmdSN the initiator
+    /// will use for its first full-feature-phase command.
+    pub fn exp_cmd_sn(&self) -> u32 {
+        self.exp_cmd_sn
     }
 
     /// Process a login request PDU and return the response action.
@@ -77,6 +94,14 @@ impl LoginStateMachine {
         let req_nsg = req.bhs.nsg();
         let transit = req.bhs.transit();
         let text_params = parse_text_params(&req.data);
+
+        // Login PDUs carry the session's initial CmdSN. Immediate PDUs do not
+        // advance CmdSN (RFC 7143 §4.2.2.1), so the first full-feature command
+        // reuses the login CmdSN when the I bit was set.
+        self.exp_cmd_sn = req
+            .bhs
+            .cmd_sn()
+            .wrapping_add(if req.bhs.is_immediate() { 0 } else { 1 });
 
         match req_csg {
             STAGE_SECURITY => self.handle_security(&text_params, req, transit, req_nsg),
@@ -197,10 +222,33 @@ impl LoginStateMachine {
         transit: bool,
         _nsg: u8,
     ) -> LoginResult {
+        // Initiators may start login directly at the operational stage
+        // (CSG=1) when no security negotiation is needed — RouterOS does
+        // this. Refuse the shortcut when CHAP is required.
+        if self.chap_config.is_some() && !self.auth_complete {
+            tracing::warn!("Login: operational stage without authentication, but CHAP is required");
+            return self.make_error_response(req, LoginStatus::AuthFailure);
+        }
+
         let mut response_params: Vec<(&str, &str)> = Vec::new();
 
         for (key, val) in params {
             match key.as_str() {
+                "InitiatorName" => {
+                    self.params.initiator_name = val.clone();
+                }
+                "TargetName" => {
+                    if val != &self.target_name {
+                        tracing::warn!("Login: unknown target '{val}'");
+                        return self.make_error_response(req, LoginStatus::TargetNotFound);
+                    }
+                    self.params.target_name = val.clone();
+                }
+                "SessionType" => {
+                    if val == "Discovery" {
+                        response_params.push(("SessionType", "Discovery"));
+                    }
+                }
                 "HeaderDigest" => {
                     if val.contains("CRC32C") {
                         self.params.header_digest = true;
@@ -288,7 +336,7 @@ impl LoginStateMachine {
     }
 
     fn make_login_response(
-        &self,
+        &mut self,
         req: &IscsiPdu,
         data: &[u8],
         transit: bool,
@@ -309,6 +357,13 @@ impl LoginStateMachine {
 
         bhs.set_initiator_task_tag(req.bhs.initiator_task_tag());
 
+        // Sequence numbers — without these the initiator sees MaxCmdSN=0
+        // (a closed command window) and can never issue a SCSI command.
+        bhs.set_stat_sn(self.stat_sn);
+        bhs.set_exp_cmd_sn(self.exp_cmd_sn);
+        bhs.set_max_cmd_sn(self.exp_cmd_sn.wrapping_add(31));
+        self.stat_sn = self.stat_sn.wrapping_add(1);
+
         // Status class/detail in bytes 36-37
         let (class, detail) = status.class_detail();
         bhs.raw[36] = class;
@@ -317,7 +372,7 @@ impl LoginStateMachine {
         IscsiPdu::with_data(bhs, data.to_vec())
     }
 
-    fn make_error_response(&self, req: &IscsiPdu, status: LoginStatus) -> LoginResult {
+    fn make_error_response(&mut self, req: &IscsiPdu, status: LoginStatus) -> LoginResult {
         let pdu = self.make_login_response(req, &[], false, self.stage, self.stage, status);
         LoginResult::Failed(pdu)
     }

@@ -497,9 +497,14 @@ fn handle_report_luns(lun_ids: &[u64]) -> ScsiResult {
     } else {
         for (i, &lun) in lun_ids.iter().enumerate() {
             let offset = 8 + i * 8;
-            // iSCSI LUN encoding: peripheral device addressing (method 00)
-            // LUN number goes into byte 1 of the 8-byte LUN field
-            let encoded = (lun as u16) << 8;
+            // SAM-5 LUN encoding: peripheral addressing (method 00b) for
+            // LUN < 256 (byte 0 = 0, byte 1 = LUN), flat-space addressing
+            // (method 01b) above that.
+            let encoded: u16 = if lun < 256 {
+                lun as u16
+            } else {
+                0x4000 | (lun as u16 & 0x3FFF)
+            };
             data[offset..offset + 2].copy_from_slice(&encoded.to_be_bytes());
         }
     }

@@ -115,12 +115,14 @@ impl IscsiTarget {
     }
 
     async fn handle_connection(&self, stream: TcpStream, peer: SocketAddr) -> std::io::Result<()> {
+        let local_addr = stream.local_addr().ok();
         let (reader, writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
 
         // Login phase
-        let (session_params, tsih) = self.login_phase(&mut reader, &mut writer).await?;
+        let (session_params, tsih, stat_sn, exp_cmd_sn) =
+            self.login_phase(&mut reader, &mut writer).await?;
         tracing::info!(
             "iSCSI session established from {peer}, TSIH={tsih}, initiator={}",
             session_params.initiator_name
@@ -131,6 +133,9 @@ impl IscsiTarget {
             &mut reader,
             &mut writer,
             &session_params,
+            stat_sn,
+            exp_cmd_sn,
+            local_addr,
         ).await;
 
         // Cleanup
@@ -139,11 +144,14 @@ impl IscsiTarget {
         result
     }
 
+    /// Run the login negotiation. Returns the negotiated session parameters,
+    /// the allocated TSIH, and the (StatSN, ExpCmdSN) the full-feature phase
+    /// must continue from.
     async fn login_phase<R, W>(
         &self,
         reader: &mut R,
         writer: &mut W,
-    ) -> std::io::Result<(SessionParams, u16)>
+    ) -> std::io::Result<(SessionParams, u16, u32, u32)>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
@@ -179,7 +187,7 @@ impl IscsiTarget {
                     final_resp.bhs.set_tsih(tsih);
 
                     write_pdu(writer, &final_resp, false, false).await?;
-                    return Ok((params, tsih));
+                    return Ok((params, tsih, state_machine.next_stat_sn(), state_machine.exp_cmd_sn()));
                 }
                 LoginResult::Failed(resp) => {
                     write_pdu(writer, &resp, false, false).await?;
@@ -192,17 +200,21 @@ impl IscsiTarget {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn full_feature_phase<R, W>(
         &self,
         reader: &mut R,
         writer: &mut W,
         params: &SessionParams,
+        stat_sn: u32,
+        exp_cmd_sn: u32,
+        local_addr: Option<SocketAddr>,
     ) -> std::io::Result<()>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
     {
-        let conn = ConnectionState::new(0);
+        let conn = ConnectionState::with_sns(0, stat_sn, exp_cmd_sn);
         let header_digest = params.header_digest;
         let data_digest = params.data_digest;
         let max_data_seg = params.max_recv_data_segment_length as usize;
@@ -211,8 +223,27 @@ impl IscsiTarget {
             let req = read_pdu(reader, header_digest, data_digest).await?;
             let opcode = match req.bhs.opcode() {
                 Some(op) => op,
-                None => continue,
+                None => {
+                    tracing::warn!(
+                        "iSCSI: unknown opcode byte {:#04x}, ignoring PDU",
+                        req.bhs.raw[0]
+                    );
+                    continue;
+                }
             };
+
+            tracing::debug!(
+                "iSCSI rx: opcode={opcode} itt={:#010x} cmdsn={} imm={} dlen={}",
+                req.bhs.initiator_task_tag(),
+                req.bhs.cmd_sn(),
+                req.bhs.is_immediate(),
+                req.data.len()
+            );
+
+            // All request PDUs carry CmdSN; non-immediate ones advance the window.
+            if !req.bhs.is_immediate() {
+                conn.advance_cmd_sn(req.bhs.cmd_sn());
+            }
 
             match opcode {
                 Opcode::ScsiCommand => {
@@ -220,6 +251,9 @@ impl IscsiTarget {
                 }
                 Opcode::NopOut => {
                     self.handle_nop_out(&req, writer, &conn, header_digest, data_digest).await?;
+                }
+                Opcode::TextRequest => {
+                    self.handle_text_request(&req, writer, &conn, local_addr, header_digest, data_digest).await?;
                 }
                 Opcode::LogoutRequest => {
                     self.handle_logout(&req, writer, &conn, header_digest, data_digest).await?;
@@ -229,10 +263,52 @@ impl IscsiTarget {
                     self.handle_task_mgmt(&req, writer, &conn, header_digest, data_digest).await?;
                 }
                 _ => {
-                    tracing::debug!("ignoring unsupported opcode: {opcode}");
+                    tracing::warn!("iSCSI: ignoring unsupported opcode: {opcode}");
                 }
             }
         }
+    }
+
+    /// Handle a full-feature-phase Text Request — SendTargets discovery.
+    async fn handle_text_request<W: AsyncWriteExt + Unpin>(
+        &self,
+        req: &IscsiPdu,
+        writer: &mut W,
+        conn: &ConnectionState,
+        local_addr: Option<SocketAddr>,
+        header_digest: bool,
+        data_digest: bool,
+    ) -> std::io::Result<()> {
+        let text_params = pdu::parse_text_params(&req.data);
+        tracing::debug!("iSCSI text request: {text_params:?}");
+
+        let mut resp_data = Vec::new();
+        for (key, val) in &text_params {
+            if key == "SendTargets" {
+                // Reply with our target and the portal the initiator reached us on.
+                if val == "All" || val.is_empty() || val == &self.config.target_name {
+                    let addr = local_addr.unwrap_or(self.config.listen_addr);
+                    let target_address = format!("{addr},1");
+                    resp_data = pdu::encode_text_params(&[
+                        ("TargetName", self.config.target_name.as_str()),
+                        ("TargetAddress", target_address.as_str()),
+                    ]);
+                }
+            }
+        }
+
+        let mut bhs = Bhs::new();
+        bhs.set_opcode(Opcode::TextResponse);
+        bhs.set_final(true);
+        bhs.set_initiator_task_tag(req.bhs.initiator_task_tag());
+        bhs.set_target_transfer_tag(0xFFFF_FFFF);
+        let stat_sn = conn.next_stat_sn();
+        bhs.set_stat_sn(stat_sn);
+        bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+        bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+
+        let pdu = IscsiPdu::with_data(bhs, resp_data);
+        write_pdu(writer, &pdu, header_digest, data_digest).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -248,18 +324,28 @@ impl IscsiTarget {
         max_data_seg: usize,
     ) -> std::io::Result<()> {
         let cdb = req.bhs.cdb();
-        let lun_id = req.bhs.lun() >> 48; // LUN encoding: peripheral device addressing
+        // Top 16 bits of the LUN field, masked of the 2-bit address method so
+        // both peripheral (00b) and flat (01b) addressing decode to the LUN number.
+        let lun_id = (req.bhs.lun() >> 48) & 0x3FFF;
         let itt = req.bhs.initiator_task_tag();
         let cmd_sn = req.bhs.cmd_sn();
 
-        conn.advance_cmd_sn(cmd_sn);
+        tracing::debug!(
+            "SCSI cmd: cdb[0]={:#04x} lun={lun_id} itt={itt:#010x} cmdsn={cmd_sn} edtl={}",
+            cdb[0],
+            req.bhs.expected_data_transfer_length()
+        );
 
         let (device, readonly) = {
             let luns = self.luns.read().await;
             match luns.get(&lun_id) {
                 Some(entry) => (entry.device.clone(), entry.readonly),
                 None => {
-                    // LUN not found — send check condition
+                    tracing::warn!(
+                        "SCSI cmd {:#04x} for unknown LUN {lun_id} (active LUNs: {:?})",
+                        cdb[0],
+                        luns.keys().collect::<Vec<_>>()
+                    );
                     let result = scsi::ScsiResult::check_condition(scsi::SenseData::illegal_request());
                     let resp_pdu = self.build_scsi_response(conn, itt, &result);
                     return write_pdu(writer, &resp_pdu, header_digest, data_digest).await;
@@ -304,6 +390,13 @@ impl IscsiTarget {
 
         let lun_ids = self.list_luns().await;
         let result = handle_scsi_command(cdb, &device, &data_out, &lun_ids).await;
+
+        tracing::debug!(
+            "SCSI resp: cdb[0]={:#04x} lun={lun_id} itt={itt:#010x} status={:?} data_len={}",
+            cdb[0],
+            result.status,
+            result.data.len()
+        );
 
         // Send read data via Data-In PDUs if needed
         if !result.data.is_empty() && result.status == ScsiStatus::Good && !is_write {

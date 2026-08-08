@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-08-07
+- **fix:** iSCSI target sequence numbers were at the wrong BHS offsets in every target→initiator PDU (StatSN written to the ExpCmdSN slot, ExpCmdSN to the DataSN slot) and login responses carried no StatSN/ExpCmdSN/MaxCmdSN at all — a spec-compliant initiator (RouterOS) saw `MaxCmdSN=0`, a closed command window, and could never issue a SCSI command, reconnecting every ~10s (#23). Login responses now carry correct sequence numbers seeded from the request CmdSN (immediate-aware), and the full-feature connection continues those counters.
+- **fix:** iSCSI login operational stage (CSG=1) now captures `InitiatorName`/`TargetName`/`SessionType` — initiators that skip the security stage (RouterOS) no longer log in with an empty initiator name; CHAP-required targets reject the security-stage bypass (#23)
+- **feat:** iSCSI full-feature-phase Text Request handling (`SendTargets` discovery reply with TargetName + TargetAddress) (#23)
+- **feat:** per-PDU debug tracing in the iSCSI full-feature phase (opcode, ITT, CmdSN, CDB opcode, LUN, response status) — enable with `RUST_LOG=stormblock=debug`; unknown LUN and unsupported opcodes now log at warn (#23)
+- **fix:** REPORT LUNS encoded LUN numbers into the wrong byte (`[lun, 0]` instead of peripheral `[0, lun]`), so reported non-zero LUNs could never be addressed back; LUN field decoding now masks the SAM-5 address-method bits (#23)
 - **fix:** aarch64 build broken by hardcoded `*mut i8` cast in `gethostname` calls (`src/stormfs.rs`, `src/cluster/mod.rs`) — `c_char` is unsigned on aarch64/arm; now casts to `*mut libc::c_char` for portability (#21)
 
 ### 2026-07-19

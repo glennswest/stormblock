@@ -77,7 +77,7 @@ impl IscsiInitiator {
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
         // ExpStatSN from target's last StatSN
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_isid(&self.isid);
         bhs.set_tsih(self.tsih);
         bhs
@@ -102,9 +102,9 @@ impl IscsiInitiator {
 
     fn parse_login_response(&mut self, resp: &IscsiPdu) -> io::Result<()> {
         // Update ExpStatSN from response's StatSN (bytes 24-27)
-        self.exp_stat_sn = resp.bhs.cmd_sn(); // same byte offset, StatSN in response
+        self.exp_stat_sn = resp.bhs.stat_sn();
         // Update CmdSN from response's ExpCmdSN (bytes 28-31)
-        self.cmd_sn = u32::from_be_bytes(resp.bhs.raw[28..32].try_into().unwrap());
+        self.cmd_sn = resp.bhs.exp_cmd_sn();
         // Update TSIH from response (target assigns session handle)
         let tsih = resp.bhs.tsih();
         if tsih != 0 {
@@ -234,7 +234,7 @@ impl IscsiInitiator {
                     bhs.set_initiator_task_tag(0xFFFF_FFFF);
                     bhs.set_target_transfer_tag(ttt);
                     bhs.set_cmd_sn(self.cmd_sn);
-                    bhs.set_stat_sn(self.exp_stat_sn);
+                    bhs.set_exp_stat_sn(self.exp_stat_sn);
                     let pdu = IscsiPdu::new(bhs);
                     write_pdu(&mut self.writer, &pdu, false, false).await?;
                 }
@@ -254,7 +254,7 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x40;
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(96);
 
@@ -302,7 +302,7 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x40; // Read
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(8);
 
@@ -354,7 +354,7 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x40; // Read
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         let transfer_len = block_count as u32 * self.block_size;
         bhs.set_expected_data_transfer_length(transfer_len);
@@ -405,7 +405,7 @@ impl IscsiInitiator {
         bhs.raw[1] |= 0x20;
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_lun(0);
         bhs.set_expected_data_transfer_length(data.len() as u32);
 
@@ -450,7 +450,7 @@ impl IscsiInitiator {
         bhs.raw[1] = (bhs.raw[1] & 0x80) | 0x00;
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
-        bhs.set_stat_sn(self.exp_stat_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
 
         let pdu = IscsiPdu::new(bhs);
         write_pdu(&mut self.writer, &pdu, false, false).await?;
