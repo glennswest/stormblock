@@ -52,7 +52,7 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 - `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with subcommands (slab, ublk, migrate, boot-iscsi, migrate-boot)
 
 ## Current State
-All phases (0–7) and all roadmap items are implemented. 246 unit/integration tests pass on macOS; 3 external iSCSI tests pass against real LIO Target via mkube job runner. Musl static release build produces an 11 MB stripped PIE binary (x86_64). The drive layer has four backends: SAS (io_uring, Linux), NVMe (VFIO with hugepage DMA and full init), iSCSI (TCP initiator, any target), and FileDevice (tokio, portable). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, background rebuild, and dynamic add_member/remove_member for RAID 1. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). Slab extent store (organic data placement with 1 MB slots per device, tier-indexed registry, GEM) and ublk server for kernel block device export (Linux 6.0+, io_uring URING_CMD). Boot volume manager with templates, COW clones, and direct Linux boot (kernel cmdline + initramfs config for ublk root). Live migration orchestrator for remote → local disk via RAID 1. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, slabs, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP/HTTPS Raft RPCs (TLS via rustls, shares management cert/key), node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Placement engine with snapshot-fenced cold copies, extent-level migration (migrate_extent, evacuate_slab, rebalance with EvenDistribution/TierAffinity strategies), storage topology classification (tier/locality), and slab-based migration orchestration. Slab extent store — organic data placement with fixed-size 1 MB slots per device, tier-indexed slab registry, and Global Extent Map (GEM) for cross-slab extent tracking with reverse index and COW snapshot cloning. Volume layer (Phase 2) rewritten: ThinVolume is config-only, ThinVolumeHandle routes I/O through GEM + SlabRegistry, allocate-on-write and COW via slab slot allocation. Shared ring IPC — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd. Boot-from-iSCSI: connect to remote iSCSI target as a BlockDevice, format as slab, create multi-volume partitioned disk layout (ESP/boot/root/swap/home), export each partition as ublk device, live-migrate to local disk. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
+All phases (0–7) and all roadmap items are implemented. 286 unit/integration tests pass on macOS; 3 external iSCSI tests pass against real LIO Target via mkube job runner. Musl static release build produces an 11 MB stripped PIE binary (x86_64). The drive layer has four backends: SAS (io_uring, Linux), NVMe (VFIO with hugepage DMA and full init), iSCSI (TCP initiator, any target), and FileDevice (tokio, portable). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, background rebuild, and dynamic add_member/remove_member for RAID 1. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). Slab extent store (organic data placement with 1 MB slots per device, tier-indexed registry, GEM) and ublk server for kernel block device export (Linux 6.0+, io_uring URING_CMD). Boot volume manager with templates, COW clones, and direct Linux boot (kernel cmdline + initramfs config for ublk root). Live migration orchestrator for remote → local disk via RAID 1. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, slabs, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP/HTTPS Raft RPCs (TLS via rustls, shares management cert/key), node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Placement engine with snapshot-fenced cold copies, extent-level migration (migrate_extent, evacuate_slab, rebalance with EvenDistribution/TierAffinity strategies), storage topology classification (tier/locality), and slab-based migration orchestration. Slab extent store — organic data placement with fixed-size 1 MB slots per device, tier-indexed slab registry, and Global Extent Map (GEM) for cross-slab extent tracking with reverse index and COW snapshot cloning. Volume layer (Phase 2) rewritten: ThinVolume is config-only, ThinVolumeHandle routes I/O through GEM + SlabRegistry, allocate-on-write and COW via slab slot allocation. Shared ring IPC — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd. Boot-from-iSCSI: connect to remote iSCSI target as a BlockDevice, format as slab, create multi-volume partitioned disk layout (ESP/boot/root/swap/home), export each partition as ublk device, live-migrate to local disk. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
 
 Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compile/build/test. For special runtime testing that needs its own machine (not plain compiles), spin up a VM with terragrunt — see the sister projects for examples. DNS: 192.168.1.252, 192.168.1.154 (dns.gw.lo).
 
@@ -236,29 +236,33 @@ Replaces rigid DiskPool/VDrive/ExtentAllocator with organic, cellular storage. E
 - [x] `install-fedora-iscsi.sh` — 8-phase mkube CI job (provision, format, install Fedora, configure, verify)
 - [x] `systemd/stormblock-ublk.service` — post-switch_root safety net
 
-### Registry-scale export path — IN PROGRESS (issues #22, #24, #25, #26)
+### Registry-scale export path — DONE (issues #22, #24, #25, #26)
 
 Driven by the stormblock-registry / stormblockmk design: a CoW clone per
 container instance means thousands of volumes, each needing an export, each
 reclaiming space when dropped.
 
 **#22 — thin/CoW volumes exportable as iSCSI LUNs**
-- [ ] `LunBacking::Volume { volume_id }` — resolve via `VolumeManager::get_volume_handle`
-- [ ] Persist LUN↔backing mappings to `<data_dir>/luns.json`, restore on startup
+- [x] `LunBacking::Volume { volume_id }` — resolve via `VolumeManager::get_volume`
+- [x] Persist LUN↔backing mappings to `<data_dir>/luns.json`, restore on startup
 
 **#24 — scale to 1000s of LUNs**
-- [ ] `AppState::lun_entries`: `Vec<LunEntry>` → `HashMap<u64, LunEntry>` (O(1) lookup)
-- [ ] Drop the per-SCSI-command `list_luns()` Vec allocation (only REPORT LUNS needs it)
-- [ ] REPORT LUNS: full LUN LIST LENGTH when truncated, SELECT REPORT handling, >255 LUNs
-- [ ] `/api/v1/exports` reports the assigned LUN; auto-assign on create
-- [ ] Scale test at 1000 LUNs (lookup + REPORT LUNS + memory)
+- [x] `AppState::lun_entries`: `Vec<LunEntry>` → `HashMap<u64, LunEntry>` (O(1) lookup)
+- [x] Drop the per-SCSI-command `list_luns()` Vec allocation (only REPORT LUNS needs it)
+- [x] REPORT LUNS: full LUN LIST LENGTH when truncated, SELECT REPORT handling, >255 LUNs
+- [x] `/api/v1/exports` reports the assigned LUN/NSID and goes active; auto-assign on create
+- [x] Scale test at 1000 LUNs (attach + dense sorted numbering) and REPORT LUNS at 2000
 
 **#25 — UNMAP/discard → GEM/slab reclaim**
-- [ ] VPD 0xB2 Logical Block Provisioning (LBPU=1, thin) — without it Linux never issues discards (root cause of monotonic growth)
-- [ ] VPD 0xB0: optimal unmap granularity + alignment from slot size
-- [ ] WRITE SAME(16)/(10) with UNMAP bit
-- [ ] Reclaim reporting: allocated vs reclaimable (`/api/v1/slabs`, metrics)
+- [x] VPD 0xB2 Logical Block Provisioning (LBPU/LBPWS/LBPRZ, thin) — without it Linux never issues discards (root cause of monotonic growth)
+- [x] Data-out collection for UNMAP/WRITE SAME — second root cause: UNMAP's parameter list was never read
+- [x] VPD 0xB0: optimal unmap granularity + alignment from `BlockDevice::discard_granularity()`
+- [x] WRITE SAME(16)/(10) with UNMAP bit
+- [x] Reclaim reporting: slab allocated/free gauges sampled on `/metrics`
 
 **#26 — NVMe-oF dynamic namespaces + advertised address**
-- [ ] `add_namespace_dynamic(&self)` / `remove_namespace(&self)` — interior mutability like iSCSI
-- [ ] `management.advertised_addr` config; AttachInfo + discovery log page stop reporting 127.0.0.1
+- [x] `add_namespace_dynamic(&self)` / `remove_namespace(&self)` — interior mutability like iSCSI
+- [x] `management.advertised_addr` config; AttachInfo + discovery log page stop reporting 127.0.0.1
+
+Not covered (would need a live initiator on rose1 to verify): NVMe-oF
+namespace-scale benchmarks, and steady-state memory profiling at 1000 LUNs.

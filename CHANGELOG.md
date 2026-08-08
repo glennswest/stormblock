@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 2026-08-08
+- **fix:** iSCSI UNMAP/discard never reclaimed thin allocation, so usage only ever grew (#25). Two causes: the target never advertised thin provisioning — VPD page 0xB2 (Logical Block Provisioning) was absent and unlisted in the supported-pages page, so Linux left `discard_max_bytes` at 0 and issued no UNMAP at all — and even a well-behaved UNMAP would have failed, because only `WRITE_10`/`WRITE_16` collected a data-out payload, leaving `handle_unmap` with an empty parameter list. VPD 0xB2 now reports LBPU/LBPWS/LBPWS10/LBPRZ and thin provisioning type; READ CAPACITY(16) gains LBPRZ; data-out collection is driven by `is_data_out_command()` covering UNMAP, WRITE SAME(10/16) and MAINTENANCE OUT.
+- **feat:** WRITE SAME(10/16) — with the UNMAP bit and an all-zero pattern it deallocates, otherwise it writes the pattern in bounded chunks (#25)
+- **feat:** `BlockDevice::discard_granularity()` (default: block size; thin volumes report their slot size) drives the optimal unmap granularity and UGAVALID alignment in the Block Limits VPD page, so initiators align discards to something that actually frees space (#25)
+- **feat:** `/metrics` samples slab capacity/allocated/free per slab and in total at scrape time, making thin growth and reclaim observable (#25)
+- **feat:** `LunBacking::Volume { volume_id }` — thin/COW volumes export directly as iSCSI LUNs, resolved through the same handle `attach` uses (#22)
+- **feat:** the LUN table is persisted to `<data_dir>/luns.json` (temp file + rename) and re-opened at startup, so API-created exports survive a restart; an unresolvable backing is skipped rather than fatal (#22)
+- **feat:** `POST /api/v1/exports` now wires the export into the running target and returns `active` with the assigned `lun_id` (iSCSI) or `nsid` (NVMe-oF) instead of parking in `pending_restart`; DELETE tears it down on the target (#24, #26)
+- **feat:** NVMe-oF namespaces can be added and removed at runtime (`add_namespace_dynamic`/`remove_namespace`/`list_namespaces`), replacing an `Arc<HashMap>` that panicked via `Arc::get_mut` once the target was shared (#26, #24)
+- **feat:** `management.advertised_addr` config (also `$STORMBLOCK_ADVERTISED_ADDR`) — `/v1` attach info and the NVMe-oF discovery log page report a routable address instead of falling back to `127.0.0.1` (#26)
+- **perf:** the iSCSI I/O path no longer allocates a `Vec` of every LUN ID per SCSI command — only REPORT LUNS gathers the list — and `AppState::lun_entries` becomes a `HashMap` keyed by LUN ID, so lookups are O(1) at thousands of LUNs (#24)
+- **fix:** REPORT LUNS follows SPC-4 — LUN LIST LENGTH reports the full list size even when truncated to the allocation length, SELECT REPORT 0x00/0x02 return the list and 0x01 returns empty, reserved values and an under-sized allocation length are an illegal request; LUN encoding is peripheral below 256 and flat-space above, verified to 2000 LUNs (#24)
+- **fix:** MAINTENANCE OUT (SET TARGET PORT GROUPS) is no longer refused on a readonly LUN — readonly rejection now uses `modifies_media()` rather than the data-out predicate (#25)
+- **fix:** `DELETE /api/v1/luns/{id}` now succeeds for a LUN wired in from config at startup
+- **feat:** `POST /api/v1/luns` may omit `lun_id` to be assigned the next free number; LUN numbers are handed out in one place shared with the export path, so the two cannot collide (#24)
+
 ### 2026-08-07
 - **fix:** iSCSI target sequence numbers were at the wrong BHS offsets in every target→initiator PDU (StatSN written to the ExpCmdSN slot, ExpCmdSN to the DataSN slot) and login responses carried no StatSN/ExpCmdSN/MaxCmdSN at all — a spec-compliant initiator (RouterOS) saw `MaxCmdSN=0`, a closed command window, and could never issue a SCSI command, reconnecting every ~10s (#23). Login responses now carry correct sequence numbers seeded from the request CmdSN (immediate-aware), and the full-feature connection continues those counters.
 - **fix:** iSCSI login operational stage (CSG=1) now captures `InitiatorName`/`TargetName`/`SessionType` — initiators that skip the security stage (RouterOS) no longer log in with an empty initiator name; CHAP-required targets reject the security-stage bypass (#23)

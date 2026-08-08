@@ -53,16 +53,16 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **Software RAID** — RAID 1/5/6/10 with AVX2/AVX-512/NEON SIMD parity computation.
 - **Slab extent store** — Organic data placement with fixed-size 1 MB slots per device. Volumes spread across any device on any tier.
 - **Global Extent Map (GEM)** — Cross-slab extent tracking with reverse index, COW snapshot cloning, and rebuild-from-slabs recovery.
-- **Thin provisioning** — Extent-based allocator, volumes grow on write.
+- **Thin provisioning** — Extent-based allocator, volumes grow on write, and shrink again on discard: the targets advertise thin provisioning (SCSI VPD 0xB2, NVMe DSM) so initiators issue UNMAP/TRIM, which frees slab slots back to the pool.
 - **COW snapshots** — Instant snapshots via extent map cloning with reference counting.
 - **Placement engine** — Snapshot-fenced cold copies, tiered data placement (Hot/Warm/Cool/Cold), extent-level replication.
 - **Shared ring IPC** — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd.
-- **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model.
-- **iSCSI target** — RFC 7143, CHAP authentication, MPIO/ALUA.
+- **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model, namespaces added and removed at runtime.
+- **iSCSI target** — RFC 7143, CHAP authentication, MPIO/ALUA. Thin volumes export directly as LUNs, added and removed at runtime, and scale to thousands per target.
 - **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
 - **REST API** — axum-based management (drives, arrays, volumes, exports, slabs) with optional TLS.
 - **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
-- **242 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, PDU fuzz testing.
+- **286 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
 
 ## Data Placement Model
 
@@ -130,9 +130,40 @@ iscsi_bind = "0.0.0.0:3260"
 io_cores = "2-15"
 nvme_queue_depth = 256
 uring_sqpoll = true
+
+[management]
+listen_addr = "0.0.0.0:9090"
+# Where API-created LUNs and volume metadata are persisted, so exports
+# come back after a restart.
+data_dir = "/var/lib/stormblock"
+# Address remote consumers should dial for this node's targets. Target
+# listen addresses are usually wildcards, which tell a caller nothing;
+# without this, attach info and NVMe-oF discovery fall back to loopback.
+advertised_addr = "192.168.200.21"
 ```
 
 See [stormblock-spec.md](docs/stormblock-spec.md) for the full specification.
+
+### Exporting a volume
+
+A thin/COW volume can be served directly, with no restart. The export
+reports the LUN (iSCSI) or namespace ID (NVMe-oF) the initiator must
+address:
+
+```bash
+# Export a volume — returns {"status":"active","lun_id":0,...}
+curl -X POST http://node:9090/api/v1/exports \
+  -H 'Content-Type: application/json' \
+  -d '{"volume_id":"<uuid>","protocol":"iscsi"}'
+
+# Or attach a LUN directly, letting the next free number be assigned
+curl -X POST http://node:9090/api/v1/luns \
+  -H 'Content-Type: application/json' \
+  -d '{"backing":{"type":"volume","volume_id":"<uuid>"}}'
+```
+
+Thin allocation and reclaim are visible on `/metrics` via
+`stormblock_slab_allocated_bytes` and `stormblock_slab_free_bytes`.
 
 ## Module Structure
 
