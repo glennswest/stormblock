@@ -147,6 +147,16 @@ pub trait BlockDevice: Send + Sync {
     /// Optimal I/O size for alignment (typically 4096).
     fn optimal_io_size(&self) -> u32;
 
+    /// Smallest span, in bytes, that `discard` can actually reclaim.
+    ///
+    /// Targets advertise this so initiators align their discards to something
+    /// that frees space — a thin volume reclaims a whole slab slot at a time,
+    /// so a smaller discard is silently a no-op. Defaults to the block size
+    /// for devices where every block is independently reclaimable.
+    fn discard_granularity(&self) -> u32 {
+        self.block_size()
+    }
+
     /// Physical drive type.
     fn device_type(&self) -> DriveType;
 

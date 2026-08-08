@@ -452,6 +452,12 @@ impl BlockDevice for ThinVolumeHandle {
         4096
     }
 
+    /// Space comes back a whole slab slot at a time — `discard` only frees
+    /// fully-covered slots, so a smaller discard reclaims nothing (#25).
+    fn discard_granularity(&self) -> u32 {
+        self.slot_size.min(u32::MAX as u64) as u32
+    }
+
     fn device_type(&self) -> DriveType {
         DriveType::File
     }
@@ -628,7 +634,7 @@ impl BlockDevice for ThinVolumeHandle {
 mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
-    use crate::drive::slab::{Slab, DEFAULT_SLOT_SIZE};
+    use crate::drive::slab::Slab;
     use crate::raid::{RaidArray, RaidLevel};
 
     async fn setup_test_volume(
@@ -741,6 +747,76 @@ mod tests {
         let (handle, paths) = setup_test_volume(4096).await;
         handle.write(0, &[0xCC_u8; 4096]).await.unwrap();
         handle.flush().await.unwrap();
+        cleanup(&paths);
+    }
+
+    /// The #25 symptom: allocation must come back down when data is discarded,
+    /// and the freed slots must return to the slab, not just leave the GEM.
+    #[tokio::test]
+    async fn discard_reclaims_extents_and_slab_slots() {
+        let (handle, paths) = setup_test_volume(4096).await;
+
+        let free_before = {
+            let reg = handle.registry().lock().await;
+            reg.total_free_slots()
+        };
+
+        // Allocate four extents.
+        for i in 0..4u64 {
+            handle.write(i * 4096, &[0xAB_u8; 4096]).await.unwrap();
+        }
+        assert_eq!(handle.extent_count().await, 4);
+        assert_eq!(handle.allocated().await, 4 * 4096);
+        {
+            let reg = handle.registry().lock().await;
+            assert_eq!(reg.total_free_slots(), free_before - 4);
+        }
+
+        // Discard the middle two.
+        handle.discard(4096, 2 * 4096).await.unwrap();
+
+        assert_eq!(handle.extent_count().await, 2);
+        assert_eq!(handle.allocated().await, 2 * 4096);
+        {
+            let reg = handle.registry().lock().await;
+            assert_eq!(
+                reg.total_free_slots(),
+                free_before - 2,
+                "discarded slots must return to the slab"
+            );
+        }
+
+        // Discarded regions read back as zeros (we advertise LBPRZ).
+        let mut buf = vec![0xFF_u8; 4096];
+        handle.read(4096, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0));
+
+        // Untouched extents still hold their data.
+        let mut buf = vec![0u8; 4096];
+        handle.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAB));
+
+        cleanup(&paths);
+    }
+
+    /// A discard smaller than the reclaim granularity must not silently drop
+    /// data — it frees nothing and the extent stays readable.
+    #[tokio::test]
+    async fn partial_discard_frees_nothing() {
+        let (handle, paths) = setup_test_volume(65536).await;
+
+        handle.write(0, &[0xCD_u8; 65536]).await.unwrap();
+        assert_eq!(handle.extent_count().await, 1);
+        assert_eq!(handle.discard_granularity(), 65536);
+
+        // Half a slot — not enough to reclaim.
+        handle.discard(0, 32768).await.unwrap();
+        assert_eq!(handle.extent_count().await, 1);
+
+        let mut buf = vec![0u8; 65536];
+        handle.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xCD), "partial discard must not lose data");
+
         cleanup(&paths);
     }
 }

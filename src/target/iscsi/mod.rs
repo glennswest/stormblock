@@ -363,12 +363,15 @@ impl IscsiTarget {
             }
         };
 
-        // For write commands, data may be inline (immediate data) or need R2T
-        let is_write = matches!(cdb[0], scsi::WRITE_10 | scsi::WRITE_16);
+        // Commands carrying a data-out payload: it may arrive inline
+        // (immediate data) or need R2T. UNMAP and WRITE SAME belong here too —
+        // omitting them meant their parameter list was never collected and the
+        // command always failed (#25).
+        let is_write = scsi::is_data_out_command(cdb[0]);
         let expected_len = req.bhs.expected_data_transfer_length() as usize;
 
-        // Reject writes to readonly LUNs
-        if readonly && is_write {
+        // Reject media-modifying commands on readonly LUNs.
+        if readonly && scsi::modifies_media(cdb[0]) {
             let result = scsi::ScsiResult::check_condition(scsi::SenseData::write_protected());
             let resp_pdu = self.build_scsi_response(conn, itt, &result);
             return write_pdu(writer, &resp_pdu, header_digest, data_digest).await;

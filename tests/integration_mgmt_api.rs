@@ -21,7 +21,7 @@ async fn start_mgmt_server(state: Arc<AppState>) -> (String, tokio::task::JoinHa
     let base_url = format!("http://{addr}");
 
     let router = stormblock::mgmt::api::router(state.clone())
-        .merge(stormblock::mgmt::metrics::metrics_router());
+        .merge(stormblock::mgmt::metrics::metrics_router(state.clone()));
 
     let handle = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();

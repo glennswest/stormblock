@@ -21,10 +21,31 @@ pub const WRITE_16: u8 = 0x8A;
 pub const SYNCHRONIZE_CACHE_10: u8 = 0x35;
 pub const SYNCHRONIZE_CACHE_16: u8 = 0x91;
 pub const UNMAP: u8 = 0x42;
+pub const WRITE_SAME_10: u8 = 0x41;
+pub const WRITE_SAME_16: u8 = 0x93;
 pub const REPORT_LUNS: u8 = 0xA0;
 pub const REQUEST_SENSE: u8 = 0x03;
 pub const MAINTENANCE_IN: u8 = 0xA3;
 pub const MAINTENANCE_OUT: u8 = 0xA4;
+
+/// Commands that carry a data-out payload from the initiator.
+///
+/// UNMAP and WRITE SAME send a parameter list / pattern block; missing them
+/// here means the payload is never collected and the command fails (#25).
+pub fn is_data_out_command(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        WRITE_10 | WRITE_16 | WRITE_SAME_10 | WRITE_SAME_16 | UNMAP | MAINTENANCE_OUT
+    )
+}
+
+/// Commands that modify media, and so must be refused on a readonly LUN.
+pub fn modifies_media(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        WRITE_10 | WRITE_16 | WRITE_SAME_10 | WRITE_SAME_16 | UNMAP
+    )
+}
 
 /// SCSI status codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +178,22 @@ pub async fn handle_scsi_command(
 
         UNMAP => handle_unmap(device, data_out).await,
 
+        WRITE_SAME_10 => {
+            let lba = u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]) as u64;
+            let block_count = u16::from_be_bytes([cdb[7], cdb[8]]) as u64;
+            // UNMAP is bit 3 of byte 1 in WRITE SAME(10).
+            handle_write_same(lba, block_count, cdb[1] & 0x08 != 0, device, data_out).await
+        }
+
+        WRITE_SAME_16 => {
+            let lba = u64::from_be_bytes([
+                cdb[2], cdb[3], cdb[4], cdb[5], cdb[6], cdb[7], cdb[8], cdb[9],
+            ]);
+            let block_count =
+                u32::from_be_bytes([cdb[10], cdb[11], cdb[12], cdb[13]]) as u64;
+            handle_write_same(lba, block_count, cdb[1] & 0x08 != 0, device, data_out).await
+        }
+
         REPORT_LUNS => handle_report_luns(lun_ids, cdb),
 
         MAINTENANCE_IN => {
@@ -242,13 +279,17 @@ fn handle_inquiry_vpd(page_code: u8, alloc_len: usize, device: &Arc<dyn BlockDev
     match page_code {
         // Supported VPD pages
         0x00 => {
-            let mut data = vec![0u8; 7];
+            let pages: [u8; 4] = [
+                0x00, // supported pages list
+                0x83, // device identification
+                0xB0, // block limits
+                0xB2, // logical block provisioning
+            ];
+            let mut data = vec![0u8; 4 + pages.len()];
             data[0] = 0x00; // device type
             data[1] = 0x00; // page code
-            data[3] = 3;    // page length
-            data[4] = 0x00; // supported pages list
-            data[5] = 0x83; // device identification
-            data[6] = 0xB0; // block limits
+            data[3] = pages.len() as u8;
+            data[4..4 + pages.len()].copy_from_slice(&pages);
             let len = data.len().min(alloc_len);
             data.truncate(len);
             ScsiResult::good(data)
@@ -293,6 +334,36 @@ fn handle_inquiry_vpd(page_code: u8, alloc_len: usize, device: &Arc<dyn BlockDev
             data[20..24].copy_from_slice(&0xFFFFFFFFu32.to_be_bytes());
             // Maximum UNMAP block descriptor count
             data[24..28].copy_from_slice(&256u32.to_be_bytes());
+            // Optimal UNMAP granularity, in blocks. Storage is reclaimed a
+            // whole slab slot at a time, so telling the initiator the real
+            // granularity keeps its discards aligned and actually freeing
+            // space (#25).
+            let granularity = (device.discard_granularity() / bs).max(1);
+            data[28..32].copy_from_slice(&granularity.to_be_bytes());
+            // UNMAP granularity alignment: 0, valid (UGAVALID = bit 31).
+            data[32..36].copy_from_slice(&0x8000_0000u32.to_be_bytes());
+            let len = data.len().min(alloc_len);
+            data.truncate(len);
+            ScsiResult::good(data)
+        }
+        // Logical Block Provisioning (0xB2)
+        //
+        // Without this page a Linux initiator leaves discard_max_bytes at 0
+        // and never issues UNMAP at all, so thin allocation only ever grows
+        // (#25). Declaring it is what turns the reclaim path on.
+        0xB2 => {
+            let mut data = vec![0u8; 8];
+            data[0] = 0x00; // device type
+            data[1] = 0xB2; // page code
+            data[3] = 0x04; // page length
+            data[4] = 0x00; // threshold exponent — no thresholds reported
+            // LBPU (bit 7): UNMAP supported.
+            // LBPWS (bit 6): WRITE SAME(16) with UNMAP supported.
+            // LBPWS10 (bit 5): WRITE SAME(10) with UNMAP supported.
+            // LBPRZ (bit 2): unmapped blocks read back as zero — true here,
+            // an extent with no GEM mapping reads as zeros.
+            data[5] = 0b1110_0100;
+            data[6] = 0x02; // provisioning type: thin provisioned
             let len = data.len().min(alloc_len);
             data.truncate(len);
             ScsiResult::good(data)
@@ -395,8 +466,8 @@ fn handle_read_capacity_16(cdb: &[u8], device: &Arc<dyn BlockDevice>) -> ScsiRes
     // Logical blocks per physical block exponent (byte 13)
     let lbppbe = (device.optimal_io_size() / bs).trailing_zeros() as u8;
     data[13] = lbppbe & 0x0f;
-    // LBPME=1 (logical block provisioning management enabled — thin provisioning)
-    data[14] = 0x80;
+    // LBPME=1 (thin provisioned), LBPRZ=1 (unmapped blocks read as zero).
+    data[14] = 0xC0;
 
     let len = data.len().min(alloc_len);
     data.truncate(len);
@@ -460,6 +531,61 @@ async fn do_write(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>, dat
         Ok(_) => ScsiResult::good_empty(),
         Err(_) => ScsiResult::check_condition(SenseData::medium_error()),
     }
+}
+
+/// WRITE SAME(10/16) — write one pattern block across a range.
+///
+/// With UNMAP set and an all-zero pattern this deallocates instead of
+/// writing, which is how `blkdiscard -z` and some filesystems return space.
+/// The zero check matters: a non-zero pattern must still be written out.
+async fn handle_write_same(
+    lba: u64,
+    block_count: u64,
+    unmap: bool,
+    device: &Arc<dyn BlockDevice>,
+    data: &[u8],
+) -> ScsiResult {
+    let bs = device.block_size() as u64;
+    let offset = lba * bs;
+    let len = block_count * bs;
+
+    if offset + len > device.capacity_bytes() {
+        return ScsiResult::check_condition(SenseData::lba_out_of_range());
+    }
+    // A block count of zero means "to the end of the device" in SBC; refuse
+    // it rather than silently wiping the remainder.
+    if block_count == 0 {
+        return ScsiResult::check_condition(SenseData::invalid_field_in_cdb());
+    }
+    if data.len() < bs as usize {
+        return ScsiResult::check_condition(SenseData::illegal_request());
+    }
+
+    let pattern = &data[..bs as usize];
+    let is_zero = pattern.iter().all(|&b| b == 0);
+
+    if unmap && is_zero {
+        return match device.discard(offset, len).await {
+            Ok(()) => ScsiResult::good_empty(),
+            Err(_) => ScsiResult::check_condition(SenseData::medium_error()),
+        };
+    }
+
+    // Write the pattern out in bounded chunks so a large range does not
+    // materialize the whole span in memory at once.
+    const MAX_CHUNK: u64 = 1024 * 1024;
+    let blocks_per_chunk = (MAX_CHUNK / bs).max(1);
+    let mut written = 0u64;
+    while written < block_count {
+        let chunk_blocks = blocks_per_chunk.min(block_count - written);
+        let buf = pattern.repeat(chunk_blocks as usize);
+        if device.write(offset + written * bs, &buf).await.is_err() {
+            return ScsiResult::check_condition(SenseData::medium_error());
+        }
+        written += chunk_blocks;
+    }
+
+    ScsiResult::good_empty()
 }
 
 async fn handle_unmap(device: &Arc<dyn BlockDevice>, data: &[u8]) -> ScsiResult {
@@ -628,6 +754,128 @@ mod tests {
         assert_eq!(result.status, ScsiStatus::Good);
         assert_eq!(result.data.len(), 16);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The Logical Block Provisioning page is what switches a Linux initiator's
+    /// discard support on; without it thin allocation only ever grows (#25).
+    #[tokio::test]
+    async fn vpd_logical_block_provisioning() {
+        let (dev, path) = test_device().await;
+
+        // The page must be advertised in the supported-pages list, or the
+        // initiator will never ask for it.
+        let cdb = [INQUIRY, 0x01, 0x00, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
+        assert_eq!(result.status, ScsiStatus::Good);
+        let page_len = result.data[3] as usize;
+        let pages = &result.data[4..4 + page_len];
+        assert!(pages.contains(&0xB2), "0xB2 missing from supported VPD pages");
+
+        let cdb = [INQUIRY, 0x01, 0xB2, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
+        assert_eq!(result.status, ScsiStatus::Good);
+        assert_eq!(result.data[1], 0xB2);
+        assert_ne!(result.data[5] & 0x80, 0, "LBPU (UNMAP supported) must be set");
+        assert_ne!(result.data[5] & 0x40, 0, "LBPWS must be set");
+        assert_ne!(result.data[5] & 0x04, 0, "LBPRZ must be set");
+        assert_eq!(result.data[6] & 0x07, 0x02, "provisioning type must be thin");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn vpd_block_limits_reports_unmap_granularity() {
+        let (dev, path) = test_device().await;
+        let cdb = [INQUIRY, 0x01, 0xB0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
+
+        assert_eq!(result.status, ScsiStatus::Good);
+        // A plain file device reclaims per block, so granularity is 1 block.
+        let granularity = u32::from_be_bytes(result.data[28..32].try_into().unwrap());
+        assert_eq!(granularity, 1);
+        // UGAVALID must be set for the alignment field to be believed.
+        let alignment = u32::from_be_bytes(result.data[32..36].try_into().unwrap());
+        assert_ne!(alignment & 0x8000_0000, 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn read_capacity_16_advertises_thin_provisioning() {
+        let (dev, path) = test_device().await;
+        let mut cdb = [0u8; 16];
+        cdb[0] = READ_CAPACITY_16;
+        cdb[1] = 0x10;
+        cdb[10..14].copy_from_slice(&32u32.to_be_bytes());
+
+        let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
+        assert_eq!(result.status, ScsiStatus::Good);
+        assert_ne!(result.data[14] & 0x80, 0, "LBPME must be set");
+        assert_ne!(result.data[14] & 0x40, 0, "LBPRZ must be set");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn write_same_16_writes_pattern() {
+        let (dev, path) = test_device().await;
+        let bs = dev.block_size() as usize;
+
+        let mut cdb = [0u8; 16];
+        cdb[0] = WRITE_SAME_16;
+        cdb[10..14].copy_from_slice(&4u32.to_be_bytes()); // 4 blocks
+        let pattern = vec![0x5A_u8; bs];
+        let result = handle_scsi_command(&cdb, &dev, &pattern, &[0]).await;
+        assert_eq!(result.status, ScsiStatus::Good);
+
+        // All four blocks now hold the pattern.
+        let mut buf = vec![0u8; bs * 4];
+        dev.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0x5A));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn write_same_16_rejects_bad_input() {
+        let (dev, path) = test_device().await;
+        let bs = dev.block_size() as usize;
+        let pattern = vec![0u8; bs];
+
+        // A zero block count would mean "to end of device" — refuse it.
+        let mut cdb = [0u8; 16];
+        cdb[0] = WRITE_SAME_16;
+        let result = handle_scsi_command(&cdb, &dev, &pattern, &[0]).await;
+        assert_eq!(result.status, ScsiStatus::CheckCondition);
+
+        // A short pattern (less than one block) is an illegal request.
+        let mut cdb = [0u8; 16];
+        cdb[0] = WRITE_SAME_16;
+        cdb[10..14].copy_from_slice(&1u32.to_be_bytes());
+        let result = handle_scsi_command(&cdb, &dev, &[0u8; 8], &[0]).await;
+        assert_eq!(result.status, ScsiStatus::CheckCondition);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn data_out_and_media_command_classification() {
+        // UNMAP and WRITE SAME must collect a data-out payload — missing that
+        // is what made UNMAP always fail with an empty parameter list (#25).
+        for op in [WRITE_10, WRITE_16, WRITE_SAME_10, WRITE_SAME_16, UNMAP, MAINTENANCE_OUT] {
+            assert!(is_data_out_command(op), "{op:#04x} should collect data-out");
+        }
+        for op in [READ_10, READ_16, INQUIRY, REPORT_LUNS, TEST_UNIT_READY] {
+            assert!(!is_data_out_command(op), "{op:#04x} should not collect data-out");
+        }
+
+        // MAINTENANCE OUT takes data but does not touch media, so a readonly
+        // LUN must still accept it.
+        for op in [WRITE_10, WRITE_16, WRITE_SAME_10, WRITE_SAME_16, UNMAP] {
+            assert!(modifies_media(op), "{op:#04x} should be refused when readonly");
+        }
+        assert!(!modifies_media(MAINTENANCE_OUT));
+        assert!(!modifies_media(READ_10));
     }
 
     /// Build a REPORT LUNS CDB with the given SELECT REPORT + allocation length.

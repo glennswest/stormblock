@@ -186,7 +186,7 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConf
 pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()> {
     let listen_addr = &state.config.management.listen_addr;
     let mut router = api::router(state.clone())
-        .merge(metrics::metrics_router());
+        .merge(metrics::metrics_router(state.clone()));
 
     // Mount web UI at /ui when the ui feature is enabled
     #[cfg(feature = "ui")]
