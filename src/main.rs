@@ -646,10 +646,17 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "nvmeof")]
     if !cli.no_nvmeof {
         if let Some(ref device) = export_device {
+            let listen_addr: std::net::SocketAddr = cli.nvmeof_addr.parse()
+                .expect("invalid NVMe-oF listen address");
+            // Report a routable address in the discovery log page — a wildcard
+            // listen address is useless to a remote initiator (#26).
+            let advertised_addr = config.management
+                .advertised_host()
+                .and_then(|h| format!("{h}:{}", listen_addr.port()).parse().ok());
             let nvmeof_config = target::nvmeof::NvmeofConfig {
-                listen_addr: cli.nvmeof_addr.parse()
-                    .expect("invalid NVMe-oF listen address"),
+                listen_addr,
                 nqn: cli.nvmeof_nqn.clone(),
+                advertised_addr,
                 ..Default::default()
             };
             let mut nvmeof = target::nvmeof::NvmeofTarget::new(nvmeof_config);

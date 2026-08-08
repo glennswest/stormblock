@@ -511,24 +511,9 @@ fn attach_info_for(state: &AppState, volume_id: &str) -> AttachInfo {
         Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(4420)),
         None => (listen, 4420),
     };
-    let traddr = if host.is_empty() || host == "0.0.0.0" || host == "[::]" || host == "::" {
-        // Unspecified listen address: fall back to the management listen host
-        // if it is concrete, else loopback.
-        let mgmt_host = state
-            .config
-            .management
-            .listen_addr
-            .rsplit_once(':')
-            .map(|(h, _)| h.to_string())
-            .unwrap_or_default();
-        if mgmt_host.is_empty() || mgmt_host == "0.0.0.0" || mgmt_host == "[::]" {
-            "127.0.0.1".to_string()
-        } else {
-            mgmt_host
-        }
-    } else {
-        host
-    };
+    // A wildcard listen address tells a remote consumer nothing, so prefer the
+    // configured advertised address (#26).
+    let traddr = state.config.management.resolve_advertised_host(&host);
     AttachInfo::NvmeTcp {
         nqn: format!("nqn.2026-01.io.stormblock:{volume_id}"),
         addresses: vec![NvmeAddress { traddr, trsvcid: port }],

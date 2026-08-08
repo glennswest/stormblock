@@ -37,6 +37,9 @@ pub struct NvmeofConfig {
     pub queue_depth: u16,
     /// Maximum H2C data payload per PDU.
     pub maxh2cdata: u32,
+    /// Address reported in the discovery log page. `listen_addr` is usually a
+    /// wildcard, which a remote initiator cannot connect back to (#26).
+    pub advertised_addr: Option<SocketAddr>,
 }
 
 impl Default for NvmeofConfig {
@@ -47,6 +50,7 @@ impl Default for NvmeofConfig {
             max_io_queues: 64,
             queue_depth: 128,
             maxh2cdata: 131072,
+            advertised_addr: None,
         }
     }
 }
@@ -54,7 +58,10 @@ impl Default for NvmeofConfig {
 /// NVMe-oF/TCP target server.
 pub struct NvmeofTarget {
     config: NvmeofConfig,
-    namespaces: Arc<HashMap<u32, Arc<dyn BlockDevice>>>,
+    /// Namespace map. Behind a `RwLock` so namespaces can be added and removed
+    /// while the target is running and shared behind an `Arc` — the CoW
+    /// registry model creates exports long after boot.
+    namespaces: tokio::sync::RwLock<HashMap<u32, Arc<dyn BlockDevice>>>,
     next_cntlid: AtomicU16,
 }
 
@@ -62,16 +69,43 @@ impl NvmeofTarget {
     pub fn new(config: NvmeofConfig) -> Self {
         NvmeofTarget {
             config,
-            namespaces: Arc::new(HashMap::new()),
+            namespaces: tokio::sync::RwLock::new(HashMap::new()),
             next_cntlid: AtomicU16::new(1),
         }
     }
 
-    /// Add a namespace mapping. Must be called before `run()`.
+    /// Add a namespace mapping at startup (before the target is shared).
     pub fn add_namespace(&mut self, nsid: u32, device: Arc<dyn BlockDevice>) {
-        Arc::get_mut(&mut self.namespaces)
-            .expect("add_namespace after run")
-            .insert(nsid, device);
+        self.namespaces.get_mut().insert(nsid, device);
+    }
+
+    /// Add a namespace at runtime — no `&mut self`, so this works on a target
+    /// already shared behind an `Arc` and serving traffic.
+    pub async fn add_namespace_dynamic(&self, nsid: u32, device: Arc<dyn BlockDevice>) {
+        self.namespaces.write().await.insert(nsid, device);
+    }
+
+    /// Remove a namespace at runtime. Returns true if the namespace existed.
+    pub async fn remove_namespace(&self, nsid: u32) -> bool {
+        self.namespaces.write().await.remove(&nsid).is_some()
+    }
+
+    /// List active namespace IDs, sorted.
+    pub async fn list_namespaces(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.namespaces.read().await.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Number of active namespaces.
+    pub async fn namespace_count(&self) -> usize {
+        self.namespaces.read().await.len()
+    }
+
+    /// Resolve a namespace to its backing device, cloning the `Arc` so the
+    /// lock is never held across I/O.
+    async fn namespace(&self, nsid: u32) -> Option<Arc<dyn BlockDevice>> {
+        self.namespaces.read().await.get(&nsid).cloned()
     }
 
     /// Start accepting connections.
@@ -333,7 +367,7 @@ impl NvmeofTarget {
                             &serial,
                             "StormBlock NVMe-oF",
                             "1.0.0",
-                            self.namespaces.len() as u32,
+                            self.namespace_count().await as u32,
                             is_discovery,
                         );
                         // Set CNTLID
@@ -341,8 +375,8 @@ impl NvmeofTarget {
                         d
                     }
                     admin::CNS_NAMESPACE => {
-                        match self.namespaces.get(&nsid) {
-                            Some(dev) => admin::identify_namespace(dev),
+                        match self.namespace(nsid).await {
+                            Some(dev) => admin::identify_namespace(&dev),
                             None => {
                                 let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B); // NS Not Ready
                                 return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
@@ -350,12 +384,10 @@ impl NvmeofTarget {
                         }
                     }
                     admin::CNS_ACTIVE_NS_LIST => {
-                        let mut nsids: Vec<u32> = self.namespaces.keys().copied().collect();
-                        nsids.sort();
-                        admin::active_ns_list(&nsids)
+                        admin::active_ns_list(&self.list_namespaces().await)
                     }
                     admin::CNS_NS_DESC_LIST => {
-                        match self.namespaces.get(&nsid) {
+                        match self.namespace(nsid).await {
                             Some(dev) => admin::identify_ns_desc_list(
                                 dev.id().uuid.as_bytes(),
                             ),
@@ -388,7 +420,7 @@ impl NvmeofTarget {
                 let data = if lid == 0x70 {
                     let entries = vec![discovery::DiscoveryEntry {
                         subnqn: self.config.nqn.clone(),
-                        traddr: self.config.listen_addr,
+                        traddr: self.config.advertised_addr.unwrap_or(self.config.listen_addr),
                         portid: 1,
                         cntlid: 0xFFFF,
                         subsys_type: discovery::SubsysType::NvmeSubsystem,
@@ -445,13 +477,16 @@ impl NvmeofTarget {
         W: AsyncWriteExt + Unpin,
     {
         let nsid = sqe.nsid();
-        let device = match self.namespaces.get(&nsid) {
+        // Clone the Arc out of the map so the namespace lock is not held
+        // across the I/O below (and a concurrent add/remove cannot block it).
+        let device = match self.namespace(nsid).await {
             Some(dev) => dev,
             None => {
                 let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B);
                 return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
             }
         };
+        let device = &device;
 
         // Writes larger than the in-capsule allowance arrive without their
         // data: send an R2T for the remainder and collect H2CData PDUs,
@@ -532,24 +567,48 @@ mod tests {
         assert_eq!(config.maxh2cdata, 131072);
     }
 
-    #[test]
-    fn nvmeof_target_add_namespace() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let config = NvmeofConfig::default();
-            let mut target = NvmeofTarget::new(config);
+    async fn test_device(tag: &str) -> (Arc<dyn BlockDevice>, String) {
+        let dir = std::env::temp_dir().join("stormblock-nvmeof-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{tag}-{}.bin", uuid::Uuid::new_v4().simple()));
+        let path_str = path.to_str().unwrap().to_string();
+        let dev = crate::drive::filedev::FileDevice::open_with_capacity(&path_str, 1024 * 1024)
+            .await
+            .unwrap();
+        (Arc::new(dev), path_str)
+    }
 
-            let dir = std::env::temp_dir().join("stormblock-nvmeof-test");
-            std::fs::create_dir_all(&dir).unwrap();
-            let path = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
-            let dev = crate::drive::filedev::FileDevice::open_with_capacity(
-                path.to_str().unwrap(), 1024 * 1024
-            ).await.unwrap();
+    #[tokio::test]
+    async fn nvmeof_target_add_namespace() {
+        let mut target = NvmeofTarget::new(NvmeofConfig::default());
+        let (dev, path) = test_device("boot").await;
 
-            target.add_namespace(1, Arc::new(dev));
-            assert_eq!(target.namespaces.len(), 1);
+        target.add_namespace(1, dev);
+        assert_eq!(target.namespace_count().await, 1);
 
-            let _ = std::fs::remove_file(&path);
-        });
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Namespaces must be addable and removable after the target is shared
+    /// behind an `Arc` — the runtime export path has no `&mut` (#26).
+    #[tokio::test]
+    async fn nvmeof_namespace_dynamic_add_remove() {
+        let target = Arc::new(NvmeofTarget::new(NvmeofConfig::default()));
+        let (dev1, path1) = test_device("dyn1").await;
+        let (dev2, path2) = test_device("dyn2").await;
+
+        target.add_namespace_dynamic(1, dev1).await;
+        target.add_namespace_dynamic(7, dev2).await;
+
+        assert_eq!(target.list_namespaces().await, vec![1, 7]);
+        assert!(target.namespace(7).await.is_some());
+
+        assert!(target.remove_namespace(1).await);
+        assert!(!target.remove_namespace(1).await); // already gone
+        assert_eq!(target.list_namespaces().await, vec![7]);
+        assert!(target.namespace(1).await.is_none());
+
+        let _ = std::fs::remove_file(&path1);
+        let _ = std::fs::remove_file(&path2);
     }
 }

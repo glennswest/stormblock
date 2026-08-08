@@ -71,6 +71,14 @@ pub struct ManagementConfig {
     /// Topology labels (zone, rack, ...) reported for this node via
     /// GET /v1/nodes/capacity.
     pub topology: std::collections::BTreeMap<String, String>,
+    /// Address remote consumers should use to reach this node's targets.
+    ///
+    /// Target listen addresses are usually wildcards (`0.0.0.0:4420`), which
+    /// tell a caller nothing, and falling back to loopback is useless to a
+    /// remote initiator. Set this to the node's routable address (host or
+    /// `host:port`) and `/v1/.../attach` plus the NVMe-oF discovery log page
+    /// report it instead. Falls back to `$STORMBLOCK_ADVERTISED_ADDR`.
+    pub advertised_addr: Option<String>,
     /// Offer the ublk transport to CSI when a volume is attached on this same
     /// node (the master is local). The CSI node then gets a local
     /// `/dev/ublkbN` device with no NVMe-oF/TCP round trip. Requires Linux
@@ -90,8 +98,66 @@ impl Default for ManagementConfig {
             api_token: None,
             node_name: None,
             topology: std::collections::BTreeMap::new(),
+            advertised_addr: None,
             ublk_transport: false,
         }
+    }
+}
+
+/// True for a listen host that names no concrete address a peer could dial.
+fn is_wildcard_host(host: &str) -> bool {
+    matches!(host, "" | "0.0.0.0" | "::" | "[::]" | "*")
+}
+
+impl ManagementConfig {
+    /// Host part of the configured advertised address, if any.
+    ///
+    /// Accepts either a bare host (`10.0.0.5`) or `host:port` — the port is
+    /// ignored here because each protocol supplies its own.
+    pub fn advertised_host(&self) -> Option<String> {
+        let raw = self
+            .advertised_addr
+            .clone()
+            .or_else(|| std::env::var("STORMBLOCK_ADVERTISED_ADDR").ok())?;
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        // Bracketed IPv6 literal, optionally with a port.
+        if let Some(rest) = raw.strip_prefix('[') {
+            let host = rest.split(']').next().unwrap_or_default();
+            return (!host.is_empty()).then(|| host.to_string());
+        }
+        // host:port only when there is exactly one colon (bare IPv6 has more).
+        let host = match raw.split_once(':') {
+            Some((h, _)) if raw.matches(':').count() == 1 => h,
+            _ => raw,
+        };
+        (!is_wildcard_host(host)).then(|| host.to_string())
+    }
+
+    /// Resolve the host a remote consumer should dial for a target listening
+    /// on `listen_host`.
+    ///
+    /// Preference order: explicit `advertised_addr`, the target's own listen
+    /// host when it is concrete, the management listen host when it is
+    /// concrete, then loopback as a last resort.
+    pub fn resolve_advertised_host(&self, listen_host: &str) -> String {
+        if let Some(h) = self.advertised_host() {
+            return h;
+        }
+        if !is_wildcard_host(listen_host) {
+            return listen_host.to_string();
+        }
+        let mgmt_host = self
+            .listen_addr
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or("");
+        if !is_wildcard_host(mgmt_host) {
+            return mgmt_host.to_string();
+        }
+        "127.0.0.1".to_string()
     }
 }
 
@@ -441,6 +507,57 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mgmt_with(advertised: Option<&str>, listen: &str) -> ManagementConfig {
+        ManagementConfig {
+            listen_addr: listen.to_string(),
+            advertised_addr: advertised.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn advertised_host_parses_forms() {
+        assert_eq!(
+            mgmt_with(Some("10.0.0.5"), "0.0.0.0:9090").advertised_host().as_deref(),
+            Some("10.0.0.5")
+        );
+        assert_eq!(
+            mgmt_with(Some("10.0.0.5:4420"), "0.0.0.0:9090").advertised_host().as_deref(),
+            Some("10.0.0.5")
+        );
+        assert_eq!(
+            mgmt_with(Some("[fd00::1]:4420"), "0.0.0.0:9090").advertised_host().as_deref(),
+            Some("fd00::1")
+        );
+        // A bare IPv6 literal has more than one colon and keeps all of it.
+        assert_eq!(
+            mgmt_with(Some("fd00::1"), "0.0.0.0:9090").advertised_host().as_deref(),
+            Some("fd00::1")
+        );
+        // Wildcards and blanks advertise nothing.
+        assert!(mgmt_with(Some("0.0.0.0"), "0.0.0.0:9090").advertised_host().is_none());
+        assert!(mgmt_with(Some("  "), "0.0.0.0:9090").advertised_host().is_none());
+    }
+
+    #[test]
+    fn resolve_advertised_host_preference_order() {
+        // Explicit advertised address wins over everything.
+        let c = mgmt_with(Some("203.0.113.7"), "192.168.1.10:9090");
+        assert_eq!(c.resolve_advertised_host("10.1.1.1"), "203.0.113.7");
+
+        // No advertised address: a concrete target listen host is used as-is.
+        let c = mgmt_with(None, "0.0.0.0:9090");
+        assert_eq!(c.resolve_advertised_host("10.1.1.1"), "10.1.1.1");
+
+        // Wildcard target listen host falls back to a concrete mgmt host.
+        let c = mgmt_with(None, "192.168.1.10:9090");
+        assert_eq!(c.resolve_advertised_host("0.0.0.0"), "192.168.1.10");
+
+        // Everything wildcard: loopback is the last resort.
+        let c = mgmt_with(None, "0.0.0.0:9090");
+        assert_eq!(c.resolve_advertised_host("0.0.0.0"), "127.0.0.1");
+    }
 
     #[test]
     fn parse_size_units() {
