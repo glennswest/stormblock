@@ -55,6 +55,26 @@ impl Default for NvmeofConfig {
     }
 }
 
+/// Log page identifier for the Changed Namespace List (NVMe 1.4 §5.14.1.4).
+pub const LID_CHANGED_NS_LIST: u8 = 0x04;
+
+/// Completion DW0 for a Namespace Attribute Changed notice: async event type
+/// 0x2 (Notice) in bits 2:0, event info 0x00 (Namespace Attribute Changed) in
+/// bits 15:8, and the associated log page in bits 23:16.
+const AEN_NS_ATTR_CHANGED: u32 = 0x2 | ((LID_CHANGED_NS_LIST as u32) << 16);
+
+/// Complete a held Asynchronous Event Request with a Namespace Attribute
+/// Changed notice, pointing the host at the Changed Namespace List log page.
+async fn write_ns_changed_aen<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    cid: u16,
+    hdgst: bool,
+) -> std::io::Result<()> {
+    let mut cqe = NvmeCqe::success(cid, 0, 0);
+    cqe.set_dw0(AEN_NS_ATTR_CHANGED);
+    pdu::write_capsule_resp(writer, &cqe, hdgst).await
+}
+
 /// NVMe-oF/TCP target server.
 pub struct NvmeofTarget {
     config: NvmeofConfig,
@@ -62,14 +82,24 @@ pub struct NvmeofTarget {
     /// while the target is running and shared behind an `Arc` — the CoW
     /// registry model creates exports long after boot.
     namespaces: tokio::sync::RwLock<HashMap<u32, Arc<dyn BlockDevice>>>,
+    /// Namespace IDs whose attributes changed, broadcast to admin connections.
+    ///
+    /// This is what makes hot-add cheap: a host connects once and every
+    /// subsequent attach is an async event plus a rescan, with no Connect and
+    /// no new TCP session per container.
+    ns_changed: tokio::sync::broadcast::Sender<u32>,
     next_cntlid: AtomicU16,
 }
 
 impl NvmeofTarget {
     pub fn new(config: NvmeofConfig) -> Self {
+        // Depth only bounds how far an admin connection may fall behind before
+        // it is told to rescan wholesale, so a modest buffer is fine.
+        let (ns_changed, _) = tokio::sync::broadcast::channel(256);
         NvmeofTarget {
             config,
             namespaces: tokio::sync::RwLock::new(HashMap::new()),
+            ns_changed,
             next_cntlid: AtomicU16::new(1),
         }
     }
@@ -81,13 +111,35 @@ impl NvmeofTarget {
 
     /// Add a namespace at runtime — no `&mut self`, so this works on a target
     /// already shared behind an `Arc` and serving traffic.
+    ///
+    /// Connected hosts are notified, so the namespace shows up without a
+    /// reconnect.
     pub async fn add_namespace_dynamic(&self, nsid: u32, device: Arc<dyn BlockDevice>) {
         self.namespaces.write().await.insert(nsid, device);
+        self.notify_ns_changed(nsid);
     }
 
     /// Remove a namespace at runtime. Returns true if the namespace existed.
     pub async fn remove_namespace(&self, nsid: u32) -> bool {
-        self.namespaces.write().await.remove(&nsid).is_some()
+        let existed = self.namespaces.write().await.remove(&nsid).is_some();
+        if existed {
+            self.notify_ns_changed(nsid);
+        }
+        existed
+    }
+
+    /// Announce a namespace attribute change to connected hosts.
+    ///
+    /// Fails only when nobody is listening, which is the common single-node
+    /// case — not an error.
+    fn notify_ns_changed(&self, nsid: u32) {
+        let _ = self.ns_changed.send(nsid);
+    }
+
+    /// Lowest unused namespace ID. NSID 0 is reserved by the spec.
+    pub async fn next_free_nsid(&self) -> u32 {
+        let ns = self.namespaces.read().await;
+        (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1)
     }
 
     /// List active namespace IDs, sorted.
@@ -146,9 +198,127 @@ impl NvmeofTarget {
             if is_discovery { " (discovery)" } else { "" }
         );
 
-        // Step 3: Command loop
+        // Step 3: Command loop. The admin queue gets its own loop because it
+        // must be able to complete a held Asynchronous Event Request the
+        // moment a namespace changes, not just when the next command arrives.
         let mut props = ControllerProperties::new();
-        self.command_loop(&mut reader, &mut writer, qid, cntlid, is_discovery, &mut props, hdgst, ddgst).await
+        if qid == 0 {
+            self.admin_loop(reader, &mut writer, cntlid, is_discovery, &mut props, hdgst, ddgst).await
+        } else {
+            self.command_loop(&mut reader, &mut writer, qid, cntlid, is_discovery, &mut props, hdgst, ddgst).await
+        }
+    }
+
+    /// Admin-queue command loop with async event delivery.
+    ///
+    /// `read_pdu` is not cancellation-safe, so the socket is drained by a
+    /// dedicated task and this loop selects over the resulting channel and the
+    /// namespace-change stream. That is what lets a hot-added namespace reach
+    /// an already-connected host: the held AER completes immediately, the host
+    /// reads the Changed Namespace List and rescans, and no Connect or new TCP
+    /// session is needed per volume.
+    #[allow(clippy::too_many_arguments)]
+    async fn admin_loop<W>(
+        &self,
+        reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
+        writer: &mut W,
+        cntlid: u16,
+        is_discovery: bool,
+        props: &mut ControllerProperties,
+        hdgst: bool,
+        ddgst: bool,
+    ) -> std::io::Result<()>
+    where
+        W: AsyncWriteExt + Unpin,
+    {
+        use std::collections::{BTreeSet, VecDeque};
+        use tokio::sync::broadcast::error::RecvError;
+
+        let (tx, mut cmd_rx) =
+            tokio::sync::mpsc::channel::<std::io::Result<(NvmeSqe, Vec<u8>)>>(32);
+        tokio::spawn(async move {
+            let mut reader = reader;
+            loop {
+                match pdu::read_pdu(&mut reader).await {
+                    Ok(NvmeofPdu::CapsuleCmd { sqe, data, .. }) => {
+                        if tx.send(Ok((sqe, data))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut events = self.ns_changed.subscribe();
+        // AERs the host has posted that we have not answered yet.
+        let mut held_aers: VecDeque<u16> = VecDeque::new();
+        // Namespaces changed since the host last read the log page.
+        let mut changed: BTreeSet<u32> = BTreeSet::new();
+        let mut overflow = false;
+
+        loop {
+            tokio::select! {
+                cmd = cmd_rx.recv() => {
+                    let (sqe, data) = match cmd {
+                        Some(Ok(c)) => c,
+                        Some(Err(e)) => return Err(e),
+                        None => return Ok(()),
+                    };
+                    let opcode = sqe.opcode();
+                    let cid = sqe.cid();
+
+                    if opcode == NVME_FABRIC_OPC {
+                        self.handle_fabric_cmd(&sqe, &data, writer, props, hdgst).await?;
+                        continue;
+                    }
+
+                    match opcode {
+                        admin::ADMIN_ASYNC_EVENT_REQ => {
+                            held_aers.push_back(cid);
+                            // Something already changed while no AER was
+                            // outstanding — report it right away.
+                            if !changed.is_empty() || overflow {
+                                if let Some(cid) = held_aers.pop_front() {
+                                    write_ns_changed_aen(writer, cid, hdgst).await?;
+                                }
+                            }
+                        }
+                        admin::ADMIN_GET_LOG_PAGE
+                            if (sqe.cdw10() & 0xFF) as u8 == LID_CHANGED_NS_LIST =>
+                        {
+                            let numd = ((sqe.cdw10() >> 16) | ((sqe.cdw11() & 0xFFFF) << 16)) + 1;
+                            let list: Vec<u32> = changed.iter().copied().collect();
+                            let mut page = admin::changed_ns_list(&list, overflow);
+                            page.resize(numd as usize * 4, 0);
+                            // Reading the page clears it, per spec.
+                            changed.clear();
+                            overflow = false;
+                            pdu::write_c2h_data(writer, cid, 0, &page, true, true, hdgst, ddgst).await?;
+                        }
+                        _ => {
+                            self.handle_admin_cmd(&sqe, writer, cntlid, is_discovery, hdgst, ddgst).await?;
+                        }
+                    }
+                }
+                ev = events.recv() => {
+                    match ev {
+                        Ok(nsid) => { changed.insert(nsid); }
+                        // Fell too far behind to enumerate: tell the host to
+                        // rescan everything rather than trust a partial list.
+                        Err(RecvError::Lagged(_)) => { overflow = true; }
+                        Err(RecvError::Closed) => continue,
+                    }
+                    if let Some(cid) = held_aers.pop_front() {
+                        write_ns_changed_aen(writer, cid, hdgst).await?;
+                    }
+                }
+            }
+        }
     }
 
     async fn handle_ic_handshake<R, W>(
@@ -610,5 +780,83 @@ mod tests {
 
         let _ = std::fs::remove_file(&path1);
         let _ = std::fs::remove_file(&path2);
+    }
+
+    /// A hot-add must reach already-connected hosts, so adding or removing a
+    /// namespace has to raise a change event — that event is what completes a
+    /// held AER and saves the host a Connect per container.
+    #[tokio::test]
+    async fn namespace_changes_are_broadcast() {
+        let target = Arc::new(NvmeofTarget::new(NvmeofConfig::default()));
+        let mut events = target.ns_changed.subscribe();
+
+        let (dev, path) = test_device("evt").await;
+        target.add_namespace_dynamic(3, dev).await;
+        assert_eq!(events.recv().await.unwrap(), 3);
+
+        assert!(target.remove_namespace(3).await);
+        assert_eq!(events.recv().await.unwrap(), 3);
+
+        // Removing something that was never there is not an event.
+        assert!(!target.remove_namespace(99).await);
+        assert!(events.try_recv().is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn next_free_nsid_skips_reserved_and_used() {
+        let target = Arc::new(NvmeofTarget::new(NvmeofConfig::default()));
+        // NSID 0 is reserved, so the first handed out is 1.
+        assert_eq!(target.next_free_nsid().await, 1);
+
+        let (d1, p1) = test_device("nsid1").await;
+        let (d2, p2) = test_device("nsid2").await;
+        target.add_namespace_dynamic(1, d1).await;
+        target.add_namespace_dynamic(2, d2).await;
+        assert_eq!(target.next_free_nsid().await, 3);
+
+        // A gap left by a detached container is reused.
+        target.remove_namespace(1).await;
+        assert_eq!(target.next_free_nsid().await, 1);
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn aen_dw0_encodes_namespace_attribute_changed() {
+        // Type 0x2 (Notice), info 0x00 (NS Attribute Changed), log page 0x04.
+        assert_eq!(AEN_NS_ATTR_CHANGED & 0x7, 0x2);
+        assert_eq!((AEN_NS_ATTR_CHANGED >> 8) & 0xFF, 0x00);
+        assert_eq!((AEN_NS_ATTR_CHANGED >> 16) & 0xFF, LID_CHANGED_NS_LIST as u32);
+    }
+
+    /// The controller must advertise the notice in OAES or the host never arms
+    /// for it and hot-add silently does nothing.
+    #[test]
+    fn identify_controller_advertises_ns_change_notices() {
+        let data = admin::identify_controller(
+            "nqn.test:sub", "SB0001", "StormBlock", "1.0.0", 1, false,
+        );
+        let oaes = u32::from_le_bytes(data[92..96].try_into().unwrap());
+        assert_ne!(oaes & (1 << 8), 0, "OAES must set Namespace Attribute Changed");
+    }
+
+    #[test]
+    fn changed_ns_list_encoding() {
+        let page = admin::changed_ns_list(&[2, 7], false);
+        assert_eq!(u32::from_le_bytes(page[0..4].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(page[4..8].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(page[8..12].try_into().unwrap()), 0);
+
+        // Overflow tells the host to rescan wholesale rather than trust a
+        // truncated list.
+        let page = admin::changed_ns_list(&[1], true);
+        assert_eq!(u32::from_le_bytes(page[0..4].try_into().unwrap()), admin::NS_LIST_OVERFLOW);
+
+        let many: Vec<u32> = (1..=2000).collect();
+        let page = admin::changed_ns_list(&many, false);
+        assert_eq!(u32::from_le_bytes(page[0..4].try_into().unwrap()), admin::NS_LIST_OVERFLOW);
     }
 }

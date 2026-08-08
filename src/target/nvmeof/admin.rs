@@ -78,6 +78,11 @@ pub fn identify_controller(
     // VER = NVMe 1.4
     data[80..84].copy_from_slice(&0x00010400u32.to_le_bytes());
 
+    // OAES (Optional Asynchronous Events Supported), bit 8 = Namespace
+    // Attribute Changed notices. Without this the host will not arm for the
+    // event, and a hot-added namespace stays invisible until it reconnects.
+    data[92..96].copy_from_slice(&(1u32 << 8).to_le_bytes());
+
     // CNTRLTYPE (byte 111): 1 = I/O controller, 2 = discovery controller
     data[111] = if discovery { 2 } else { 1 };
 
@@ -170,6 +175,27 @@ pub fn identify_namespace(device: &Arc<dyn BlockDevice>) -> Vec<u8> {
     data[128..132].copy_from_slice(&0u32.to_le_bytes());
     data[130] = lbads;
 
+    data
+}
+
+/// Sentinel in the Changed Namespace List meaning "more changed than fit —
+/// rescan everything".
+pub const NS_LIST_OVERFLOW: u32 = 0xFFFF_FFFF;
+
+/// Build the Changed Namespace List log page (4096 bytes, up to 1024 NSIDs).
+///
+/// `overflow` reports that more namespaces changed than could be tracked; the
+/// spec's sentinel then tells the host to rescan everything rather than trust
+/// a partial list.
+pub fn changed_ns_list(nsids: &[u32], overflow: bool) -> Vec<u8> {
+    let mut data = vec![0u8; 4096];
+    if overflow || nsids.len() > 1024 {
+        data[0..4].copy_from_slice(&NS_LIST_OVERFLOW.to_le_bytes());
+        return data;
+    }
+    for (i, &nsid) in nsids.iter().enumerate() {
+        data[i * 4..(i + 1) * 4].copy_from_slice(&nsid.to_le_bytes());
+    }
     data
 }
 

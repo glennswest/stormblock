@@ -239,7 +239,12 @@ async fn v1_rw_attach_only_on_master() {
     .await;
     assert_eq!(s, 200, "{info}");
     assert_eq!(info["transport"], "nvme_tcp");
-    assert!(info["nqn"].as_str().unwrap().contains(id));
+    // Volumes share one subsystem and are told apart by NSID — a per-volume
+    // NQN would force a Connect per attach, which is the overhead the hot-add
+    // path exists to avoid. So the NQN must NOT be volume-specific.
+    let nqn = info["nqn"].as_str().unwrap();
+    assert!(!nqn.is_empty());
+    assert!(!nqn.contains(id), "NQN should be the shared subsystem, got {nqn}");
     assert!(!info["addresses"].as_array().unwrap().is_empty());
 
     server.abort();

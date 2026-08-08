@@ -169,6 +169,14 @@ pub enum AttachInfo {
     NvmeTcp {
         nqn: String,
         addresses: Vec<NvmeAddress>,
+        /// Namespace ID this volume was hot-added as within `nqn`.
+        ///
+        /// Volumes share one subsystem so a node connects once and later
+        /// attaches cost an async event plus a rescan instead of a fresh
+        /// Connect — the node uses this to pick the right namespace out of
+        /// the controller it already has.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nsid: Option<u32>,
     },
     Ublk {
         device_hint: String,
@@ -294,6 +302,10 @@ pub struct V1State {
     pub dual_attach: HashMap<String, DualAttachWindow>,
     /// volume id -> nodes it is exported to
     pub attachments: HashMap<String, Vec<String>>,
+    /// volume id -> NVMe namespace ID it is hot-added as, so detach can
+    /// withdraw the right one.
+    #[serde(default)]
+    pub nvme_nsids: HashMap<String, u32>,
     /// Statically registered peer nodes (test hook / static cluster config).
     /// The local node is always reported live from the slab registry on top
     /// of these.
@@ -490,7 +502,61 @@ fn account_static_nodes(v1: &mut V1State, replicas: &[Replica], size: u64, charg
     }
 }
 
-fn attach_info_for(state: &AppState, volume_id: &str) -> AttachInfo {
+/// Hot-add a volume as a namespace on the shared subsystem, returning its NSID.
+///
+/// Reuses the namespace if this volume is already attached, so an attach
+/// replay is idempotent and does not leak namespaces. Connected hosts are
+/// notified by the target, so no reconnect is needed.
+#[cfg(feature = "nvmeof")]
+async fn ensure_nvme_namespace(
+    state: &AppState,
+    volume_id: &str,
+    local_id: Option<Uuid>,
+) -> Option<u32> {
+    let target = state.nvmeof_target.read().await.as_ref().cloned()?;
+
+    if let Some(nsid) = state.v1.lock().await.nvme_nsids.get(volume_id).copied() {
+        return Some(nsid);
+    }
+
+    let device = state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume(&EngineVolumeId(local_id?))?;
+
+    let nsid = target.next_free_nsid().await;
+    target.add_namespace_dynamic(nsid, device).await;
+
+    let mut v1 = state.v1.lock().await;
+    v1.nvme_nsids.insert(volume_id.to_string(), nsid);
+    v1.save();
+
+    tracing::info!("volume {volume_id} hot-added as NVMe namespace {nsid}");
+    Some(nsid)
+}
+
+/// Withdraw a volume's namespace on detach, so it stops being served and the
+/// NSID can be reused.
+#[cfg(feature = "nvmeof")]
+async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
+    let nsid = {
+        let mut v1 = state.v1.lock().await;
+        let nsid = v1.nvme_nsids.remove(volume_id);
+        if nsid.is_some() {
+            v1.save();
+        }
+        nsid
+    };
+    let Some(nsid) = nsid else { return };
+
+    if let Some(target) = state.nvmeof_target.read().await.as_ref() {
+        target.remove_namespace(nsid).await;
+        tracing::info!("volume {volume_id} withdrawn from NVMe namespace {nsid}");
+    }
+}
+
+fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo {
     let listen = {
         #[cfg(feature = "nvmeof")]
         {
@@ -514,9 +580,31 @@ fn attach_info_for(state: &AppState, volume_id: &str) -> AttachInfo {
     // A wildcard listen address tells a remote consumer nothing, so prefer the
     // configured advertised address (#26).
     let traddr = state.config.management.resolve_advertised_host(&host);
+
+    // Volumes share the target's subsystem and are distinguished by NSID.
+    // A per-volume NQN would force a Connect per container, which is the
+    // overhead the hot-add path exists to avoid.
+    let nqn = {
+        #[cfg(feature = "nvmeof")]
+        {
+            state
+                .config
+                .nvmeof
+                .as_ref()
+                .map(|n| n.nqn.clone())
+                .unwrap_or_else(|| crate::target::nvmeof::NvmeofConfig::default().nqn)
+        }
+        #[cfg(not(feature = "nvmeof"))]
+        {
+            let _ = volume_id;
+            "nqn.2024.io.stormblock:default".to_string()
+        }
+    };
+
     AttachInfo::NvmeTcp {
-        nqn: format!("nqn.2026-01.io.stormblock:{volume_id}"),
+        nqn,
         addresses: vec![NvmeAddress { traddr, trsvcid: port }],
+        nsid,
     }
 }
 
@@ -785,7 +873,15 @@ async fn attach_volume(
             }
         }
     }
-    Ok(Json(attach_info_for(&state, &id)))
+    // NVMe-oF path: hot-add the volume as a namespace on the shared
+    // subsystem. A node that is already connected picks it up from the async
+    // event with no Connect at all.
+    #[cfg(feature = "nvmeof")]
+    let nsid = ensure_nvme_namespace(&state, &id, local_id).await;
+    #[cfg(not(feature = "nvmeof"))]
+    let nsid = None;
+
+    Ok(Json(attach_info_for(&state, nsid)))
 }
 
 #[derive(Deserialize)]
@@ -811,6 +907,21 @@ async fn detach_volume(
     if req.node == local_node {
         state.ublk_exports.lock().await.remove(&id);
     }
+    // Stop serving the namespace once nothing is attached, so a dropped
+    // container's volume does not linger in every connected host's scan.
+    let still_attached = state
+        .v1
+        .lock()
+        .await
+        .attachments
+        .get(&id)
+        .is_some_and(|nodes| !nodes.is_empty());
+    #[cfg(feature = "nvmeof")]
+    if !still_attached {
+        release_nvme_namespace(&state, &id).await;
+    }
+    #[cfg(not(feature = "nvmeof"))]
+    let _ = still_attached;
     // Idempotent: detach replays are no-ops.
     Ok(Json(serde_json::json!({})))
 }
