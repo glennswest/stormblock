@@ -282,6 +282,10 @@ type V1Result<T> = Result<Json<T>, V1Error>;
 pub struct VolumeRec {
     pub vol: Volume,
     pub local_id: Option<Uuid>,
+    /// Engine volume this one was cloned from, when it was created with a
+    /// `source`. Reset returns the clone to this volume's contents.
+    #[serde(default)]
+    pub source_local: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -713,7 +717,10 @@ async fn create_volume(
         bandwidth_class: req.bandwidth_class,
     };
     account_static_nodes(&mut v1, &vol.replicas, vol.size_bytes, true);
-    v1.volumes.insert(vol.id.clone(), VolumeRec { vol: vol.clone(), local_id });
+    v1.volumes.insert(
+        vol.id.clone(),
+        VolumeRec { vol: vol.clone(), local_id, source_local },
+    );
     v1.save();
     Ok(Json(vol))
 }
@@ -777,6 +784,72 @@ async fn delete_volume(
     }
     // Idempotent: deleting an absent volume succeeds.
     Ok(Json(serde_json::json!({})))
+}
+
+#[derive(Serialize)]
+struct ResetResponse {
+    /// Diverged extents whose private copy was released.
+    freed_extents: usize,
+    /// Extents re-pointed at the source's data.
+    restored_extents: usize,
+    /// Extents already identical to the source, left untouched.
+    shared_extents: usize,
+}
+
+/// POST /v1/volumes/{id}/reset — discard divergence, back to the source.
+///
+/// For the clone-per-container model this replaces delete-and-reclone: the
+/// volume keeps its identity and attachment while its contents go back to the
+/// golden image, and only the extents the container actually wrote are
+/// touched.
+async fn reset_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> V1Result<ResetResponse> {
+    let (local_id, source_local, attached) = {
+        let v1 = state.v1.lock().await;
+        let rec = v1
+            .volumes
+            .get(&id)
+            .ok_or_else(|| V1Error::NotFound(format!("volume {id}")))?;
+        let attached = v1
+            .attachments
+            .get(&id)
+            .is_some_and(|nodes| !nodes.is_empty());
+        (rec.local_id, rec.source_local, attached)
+    };
+
+    // Contents would change underneath a live host, which no filesystem
+    // tolerates — the caller resets between runs, not during one.
+    if attached {
+        return Err(V1Error::Conflict(format!(
+            "volume {id} is attached; detach before resetting"
+        )));
+    }
+
+    let source_local = source_local.ok_or_else(|| {
+        V1Error::Conflict(format!("volume {id} was not created from a source"))
+    })?;
+    let local_id = local_id.ok_or_else(|| {
+        V1Error::Conflict(format!("volume {id} has no local backing on this node"))
+    })?;
+
+    let mut vm = state.volume_manager.lock().await;
+    let stats = vm
+        .reset_volume(EngineVolumeId(local_id), EngineVolumeId(source_local))
+        .await
+        .map_err(|e| V1Error::Internal(format!("reset failed: {e}")))?;
+
+    tracing::info!(
+        "volume {id} reset: {} freed, {} restored, {} shared",
+        stats.freed, stats.restored, stats.shared
+    );
+
+    Ok(Json(ResetResponse {
+        freed_extents: stats.freed,
+        restored_extents: stats.restored,
+        shared_extents: stats.shared,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1494,6 +1567,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/volumes", post(create_volume).get(list_volumes))
         .route("/volumes/{id}", get(get_volume).delete(delete_volume))
         .route("/volumes/{id}/expand", post(expand_volume))
+        .route("/volumes/{id}/reset", post(reset_volume))
         .route("/volumes/{id}/attach", post(attach_volume))
         .route("/volumes/{id}/detach", post(detach_volume))
         .route("/volumes/{id}/placement", post(set_placement))

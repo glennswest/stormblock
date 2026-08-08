@@ -110,6 +110,19 @@ impl GlobalExtentMap {
         self.reverse.entry(key).or_insert((volume_id, vext_idx));
     }
 
+    /// Record one more sharer of a single extent.
+    ///
+    /// The recorded count is what makes a write copy-on-write instead of
+    /// landing in place, so re-sharing one extent must bump it on both sides
+    /// exactly as cloning a whole map does.
+    pub fn inc_extent_ref(&mut self, volume_id: VolumeId, vext_idx: u64) {
+        if let Some(vmap) = self.volumes.get_mut(&volume_id) {
+            if let Some(loc) = vmap.extents.get_mut(&vext_idx) {
+                loc.ref_count += 1;
+            }
+        }
+    }
+
     /// Look up where a volume's virtual extent lives.
     pub fn lookup(&self, volume_id: VolumeId, vext_idx: u64) -> Option<&ExtentLocation> {
         self.volumes

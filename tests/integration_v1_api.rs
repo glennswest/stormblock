@@ -550,6 +550,84 @@ async fn v1_snapshot_clone_flow_with_cow_divergence() {
     server.abort();
 }
 
+/// The container-restart shape: clone a golden image, let it diverge, reset it
+/// back. The volume keeps its identity and the golden image is untouched.
+#[tokio::test]
+async fn v1_reset_discards_divergence_without_recreating_the_volume() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state(&dir).await;
+    let (base, server) = start_server(state.clone()).await;
+    let c = reqwest::Client::new();
+
+    // Golden image with data in it.
+    let (s, golden) = post(&c, format!("{base}/v1/volumes"), create_req("golden", 1 << 20, 0)).await;
+    assert_eq!(s, 200, "{golden}");
+    let golden_id = golden["id"].as_str().unwrap().to_string();
+
+    let golden_backing = {
+        let v1 = state.v1.lock().await;
+        v1.volumes[&golden_id].local_id.unwrap()
+    };
+    let golden_vol = {
+        let vm = state.volume_manager.lock().await;
+        vm.get_volume(&stormblock::volume::VolumeId(golden_backing)).unwrap()
+    };
+    golden_vol.write(0, &vec![0xAA_u8; SLOT as usize]).await.unwrap();
+
+    // Clone it, the way a container instance would.
+    let mut clone_req = create_req("container-1", 1 << 20, 0);
+    clone_req["source"] = json!({ "kind": "volume", "id": golden_id });
+    let (s, clone) = post(&c, format!("{base}/v1/volumes"), clone_req).await;
+    assert_eq!(s, 200, "{clone}");
+    let clone_id = clone["id"].as_str().unwrap().to_string();
+
+    let clone_vol = {
+        let v1 = state.v1.lock().await;
+        let backing = v1.volumes[&clone_id].local_id.unwrap();
+        drop(v1);
+        let vm = state.volume_manager.lock().await;
+        vm.get_volume(&stormblock::volume::VolumeId(backing)).unwrap()
+    };
+
+    // The container writes.
+    clone_vol.write(0, &vec![0xBB_u8; SLOT as usize]).await.unwrap();
+    let mut buf = vec![0u8; SLOT as usize];
+    clone_vol.read(0, &mut buf).await.unwrap();
+    assert!(buf.iter().all(|&b| b == 0xBB));
+
+    // Container restarts: squash divergence.
+    let (s, stats) = post(&c, format!("{base}/v1/volumes/{clone_id}/reset"), json!({})).await;
+    assert_eq!(s, 200, "{stats}");
+    assert_eq!(stats["freed_extents"], 1, "only the written extent cost anything");
+    assert_eq!(stats["restored_extents"], 1);
+
+    // Same volume id, golden contents back.
+    clone_vol.read(0, &mut buf).await.unwrap();
+    assert!(buf.iter().all(|&b| b == 0xAA), "reset restores the golden image");
+
+    // Golden image itself is untouched, and a post-reset write still copies.
+    clone_vol.write(0, &vec![0xCC_u8; SLOT as usize]).await.unwrap();
+    golden_vol.read(0, &mut buf).await.unwrap();
+    assert!(buf.iter().all(|&b| b == 0xAA), "golden must survive a post-reset write");
+
+    // Resetting a volume that was not cloned is a conflict, not a crash.
+    let (s, _) = post(&c, format!("{base}/v1/volumes/{golden_id}/reset"), json!({})).await;
+    assert_eq!(s, 409, "a volume with no source cannot be reset");
+
+    // Resetting while attached is refused — contents cannot change under a host.
+    let (s, _) = post(
+        &c,
+        format!("{base}/v1/volumes/{clone_id}/attach"),
+        json!({ "node": "w1", "mode": "read_write" }),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = post(&c, format!("{base}/v1/volumes/{clone_id}/reset"), json!({})).await;
+    assert_eq!(s, 409, "reset must be refused while attached");
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn v1_group_snapshot_is_atomic_and_idempotent() {
     let dir = TempDir::new().unwrap();

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::volume::extent::VolumeId;
-use crate::volume::gem::GlobalExtentMap;
+use crate::volume::gem::{ExtentLocation, GlobalExtentMap};
 use crate::volume::thin::{ThinVolume, VolumeError};
 
 /// Create a snapshot of a source volume.
@@ -89,6 +89,91 @@ pub async fn delete_snapshot(
     }
 
     Ok(())
+}
+
+/// What a reset actually had to do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResetStats {
+    /// Diverged extents whose private copy was released.
+    pub freed: usize,
+    /// Extents re-pointed at the source's data.
+    pub restored: usize,
+    /// Extents already identical to the source, so left untouched — the
+    /// work this avoids versus delete-and-reclone.
+    pub shared: usize,
+}
+
+/// Discard a clone's divergence, returning it to its source's contents.
+///
+/// Delete-and-reclone costs two reference updates for every extent in the
+/// image. This touches only the extents the clone actually wrote, so the cost
+/// tracks divergence rather than image size — which is the difference between
+/// a container restart scaling with the golden image and scaling with what
+/// that container happened to change.
+///
+/// The source is re-shared, not copied, so the clone is immediately COW again.
+/// Resetting to a source that has itself moved on yields the source's current
+/// contents, which is the intended "start from the golden image" semantic.
+pub async fn reset_to_source(
+    clone_id: VolumeId,
+    source_id: VolumeId,
+    gem: &mut GlobalExtentMap,
+    registry: &mut SlabRegistry,
+) -> Result<ResetStats, VolumeError> {
+    let total_before = gem
+        .get_volume_map(&clone_id)
+        .map(|m| m.extents.len())
+        .unwrap_or(0);
+
+    let mut to_free: HashMap<SlabId, Vec<u32>> = HashMap::new();
+    let mut to_share: HashMap<SlabId, Vec<u32>> = HashMap::new();
+    let mut freed = 0usize;
+    let mut restored = 0usize;
+
+    for idx in snapshot_diff(gem, clone_id, source_id) {
+        // Drop the clone's private copy, if it made one here.
+        if let Some(old) = gem.remove(clone_id, idx) {
+            to_free.entry(old.slab_id).or_default().push(old.slot_idx);
+            freed += 1;
+        }
+
+        // Point back at the source's extent, if it still has one here.
+        if let Some(loc) = gem.lookup(source_id, idx).cloned() {
+            to_share.entry(loc.slab_id).or_default().push(loc.slot_idx);
+            gem.restore_mapping(
+                clone_id,
+                idx,
+                ExtentLocation {
+                    slab_id: loc.slab_id,
+                    slot_idx: loc.slot_idx,
+                    ref_count: loc.ref_count + 1,
+                    generation: loc.generation,
+                },
+            );
+            // The source is now shared again, so a write to *it* must copy too.
+            gem.inc_extent_ref(source_id, idx);
+            restored += 1;
+        }
+    }
+
+    // Take the new references before releasing the old ones: interrupted
+    // halfway that leaks a reference, rather than freeing data still in use.
+    for (slab_id, slots) in to_share {
+        if let Some(slab) = registry.get_mut(&slab_id) {
+            slab.inc_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
+        }
+    }
+    for (slab_id, slots) in to_free {
+        if let Some(slab) = registry.get_mut(&slab_id) {
+            slab.dec_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
+        }
+    }
+
+    Ok(ResetStats {
+        freed,
+        restored,
+        shared: total_before.saturating_sub(freed),
+    })
 }
 
 /// Compute the diff between two volumes — returns virtual extent indices
@@ -195,6 +280,164 @@ mod tests {
         for p in paths {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    /// A reset must give the clone the source's contents back, free only what
+    /// diverged, and leave the source itself untouched.
+    #[tokio::test]
+    async fn reset_discards_divergence_and_restores_source_data() {
+        let slot_size = 4096u64;
+        let (source, gem, registry, paths) = setup_volume_for_snapshot(slot_size).await;
+
+        // Golden image: four extents.
+        for i in 0..4u64 {
+            source.write(i * slot_size, &vec![0xA0 + i as u8; slot_size as usize])
+                .await
+                .unwrap();
+        }
+        let source_id = source.volume_id();
+
+        // Clone it.
+        let clone_vol = {
+            let mut g = gem.lock().await;
+            let mut r = registry.lock().await;
+            create_snapshot(source_id, "clone", 128 * 1024 * 1024, slot_size, &mut g, &mut r)
+                .await
+                .unwrap()
+        };
+        let clone_id = clone_vol.id();
+        let clone = Arc::new(ThinVolumeHandle::new(
+            clone_vol, gem.clone(), registry.clone(), PlacementPolicy::default(),
+        ));
+
+        let free_after_clone = registry.lock().await.total_free_slots();
+
+        // Diverge two of the four extents, and write one the source never had.
+        clone.write(0, &vec![0xFF; slot_size as usize]).await.unwrap();
+        clone.write(slot_size, &vec![0xEE; slot_size as usize]).await.unwrap();
+        clone.write(10 * slot_size, &vec![0xDD; slot_size as usize]).await.unwrap();
+
+        let free_after_divergence = registry.lock().await.total_free_slots();
+        assert!(free_after_divergence < free_after_clone, "divergence allocates");
+
+        let stats = {
+            let mut g = gem.lock().await;
+            let mut r = registry.lock().await;
+            reset_to_source(clone_id, source_id, &mut g, &mut r).await.unwrap()
+        };
+
+        // Only the three diverged extents cost anything; the two untouched
+        // ones were skipped entirely.
+        assert_eq!(stats.freed, 3, "three private copies released");
+        assert_eq!(stats.restored, 2, "two re-pointed at the source");
+        assert!(stats.shared >= 2, "untouched extents left alone");
+
+        // Divergence is gone: the clone reads the golden image again.
+        for i in 0..4u64 {
+            let mut buf = vec![0u8; slot_size as usize];
+            clone.read(i * slot_size, &mut buf).await.unwrap();
+            assert!(
+                buf.iter().all(|&b| b == 0xA0 + i as u8),
+                "extent {i} should read as the source's data"
+            );
+        }
+        // The extent the source never had reads back as zeros.
+        let mut buf = vec![0xFF_u8; slot_size as usize];
+        clone.read(10 * slot_size, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "extent beyond the source is unmapped");
+
+        // The source is untouched.
+        for i in 0..4u64 {
+            let mut buf = vec![0u8; slot_size as usize];
+            source.read(i * slot_size, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&b| b == 0xA0 + i as u8), "source extent {i}");
+        }
+
+        // The private copies came back to the slab.
+        assert_eq!(
+            registry.lock().await.total_free_slots(),
+            free_after_clone,
+            "reset returns exactly what divergence took"
+        );
+
+        cleanup(&paths);
+    }
+
+    /// After a reset the clone is shared again, so the next write must copy
+    /// rather than land in the source's slot.
+    #[tokio::test]
+    async fn reset_leaves_clone_copy_on_write() {
+        let slot_size = 4096u64;
+        let (source, gem, registry, paths) = setup_volume_for_snapshot(slot_size).await;
+
+        source.write(0, &vec![0x11; slot_size as usize]).await.unwrap();
+        let source_id = source.volume_id();
+
+        let clone_vol = {
+            let mut g = gem.lock().await;
+            let mut r = registry.lock().await;
+            create_snapshot(source_id, "clone", 128 * 1024 * 1024, slot_size, &mut g, &mut r)
+                .await
+                .unwrap()
+        };
+        let clone_id = clone_vol.id();
+        let clone = Arc::new(ThinVolumeHandle::new(
+            clone_vol, gem.clone(), registry.clone(), PlacementPolicy::default(),
+        ));
+
+        clone.write(0, &vec![0x22; slot_size as usize]).await.unwrap();
+        {
+            let mut g = gem.lock().await;
+            let mut r = registry.lock().await;
+            reset_to_source(clone_id, source_id, &mut g, &mut r).await.unwrap();
+        }
+
+        // Write again after the reset — this must COW, not scribble on the
+        // source, or every container would corrupt the golden image.
+        clone.write(0, &vec![0x33; slot_size as usize]).await.unwrap();
+
+        let mut buf = vec![0u8; slot_size as usize];
+        source.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0x11), "source must survive a post-reset write");
+
+        clone.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0x33), "clone keeps its own new data");
+
+        cleanup(&paths);
+    }
+
+    /// Resetting a clone that never diverged is free.
+    #[tokio::test]
+    async fn reset_of_untouched_clone_is_a_no_op() {
+        let slot_size = 4096u64;
+        let (source, gem, registry, paths) = setup_volume_for_snapshot(slot_size).await;
+
+        for i in 0..3u64 {
+            source.write(i * slot_size, &vec![0x77; slot_size as usize]).await.unwrap();
+        }
+        let source_id = source.volume_id();
+
+        let clone_vol = {
+            let mut g = gem.lock().await;
+            let mut r = registry.lock().await;
+            create_snapshot(source_id, "clone", 128 * 1024 * 1024, slot_size, &mut g, &mut r)
+                .await
+                .unwrap()
+        };
+        let clone_id = clone_vol.id();
+        let free_before = registry.lock().await.total_free_slots();
+
+        let stats = {
+            let mut g = gem.lock().await;
+            let mut r = registry.lock().await;
+            reset_to_source(clone_id, source_id, &mut g, &mut r).await.unwrap()
+        };
+
+        assert_eq!(stats.freed, 0);
+        assert_eq!(stats.restored, 0);
+        assert_eq!(registry.lock().await.total_free_slots(), free_before);
+
+        cleanup(&paths);
     }
 
     #[tokio::test]

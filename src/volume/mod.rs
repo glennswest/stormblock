@@ -261,6 +261,32 @@ impl VolumeManager {
         Ok(())
     }
 
+    /// Discard a clone's divergence, returning it to its source's contents.
+    ///
+    /// Cheaper than deleting and re-cloning: only the extents the clone wrote
+    /// are touched, so a container restart costs what that container changed
+    /// rather than the size of the golden image it started from.
+    pub async fn reset_volume(
+        &mut self,
+        clone_id: VolumeId,
+        source_id: VolumeId,
+    ) -> Result<snapshot::ResetStats, VolumeError> {
+        if !self.volumes.contains_key(&clone_id) {
+            return Err(VolumeError::VolumeNotFound(clone_id));
+        }
+        if !self.volumes.contains_key(&source_id) {
+            return Err(VolumeError::VolumeNotFound(source_id));
+        }
+
+        let stats = {
+            let mut gem = self.gem.lock().await;
+            let mut reg = self.registry.lock().await;
+            snapshot::reset_to_source(clone_id, source_id, &mut gem, &mut reg).await?
+        };
+        self.persist().await;
+        Ok(stats)
+    }
+
     /// Get a volume handle as a `BlockDevice` for target protocols.
     pub fn get_volume(&self, id: &VolumeId) -> Option<Arc<dyn BlockDevice>> {
         self.volumes.get(id).map(|h| h.clone() as Arc<dyn BlockDevice>)
