@@ -74,6 +74,13 @@ pub struct ExportEntry {
     pub protocol: ExportProtocol,
     pub target_id: String,
     pub status: ExportStatus,
+    /// LUN this volume was given on the iSCSI target. An initiator needs it to
+    /// address the right volume once more than one is exported (#24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lun_id: Option<u64>,
+    /// Namespace ID on the NVMe-oF target, for `nvmeof` exports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nsid: Option<u32>,
 }
 
 /// Backing type for a dynamically-created LUN.
@@ -121,6 +128,9 @@ pub struct AppState {
     pub config: StormBlockConfig,
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
+    /// Live NVMe-oF target, so exports can add namespaces at runtime (#26).
+    #[cfg(feature = "nvmeof")]
+    pub nvmeof_target: tokio::sync::RwLock<Option<Arc<crate::target::nvmeof::NvmeofTarget>>>,
     /// Live LUN table, keyed by LUN ID for O(1) lookup at thousands of
     /// LUNs (#24).
     #[cfg(feature = "iscsi")]
@@ -148,6 +158,8 @@ impl AppState {
             config,
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),
+            #[cfg(feature = "nvmeof")]
+            nvmeof_target: tokio::sync::RwLock::new(None),
             #[cfg(feature = "iscsi")]
             lun_entries: tokio::sync::RwLock::new(HashMap::new()),
             #[cfg(feature = "cluster")]

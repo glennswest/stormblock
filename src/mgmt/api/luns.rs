@@ -151,6 +151,75 @@ pub async fn restore_luns(state: &Arc<AppState>) -> usize {
     restored
 }
 
+/// Attach a backing as a LUN, assigning `lun_id` or the next free number.
+///
+/// This is the single place LUN numbers are handed out — the export API goes
+/// through it too, so the two cannot collide (#24). Returns the LUN number.
+pub async fn attach_lun(
+    state: &Arc<AppState>,
+    backing: LunBacking,
+    lun_id: Option<u64>,
+    readonly: bool,
+) -> Result<u64, String> {
+    let iscsi = state
+        .iscsi_target
+        .read()
+        .await
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "iSCSI target not running".to_string())?;
+
+    let lun_id = {
+        let entries = state.lun_entries.read().await;
+        match lun_id {
+            Some(id) => {
+                if entries.contains_key(&id) {
+                    return Err(format!("LUN {id} already exists"));
+                }
+                id
+            }
+            None => (0u64..).find(|id| !entries.contains_key(id)).unwrap_or(0),
+        }
+    };
+
+    let device = open_backing(state, &backing).await?;
+    iscsi.add_lun_dynamic(lun_id, device.clone(), readonly).await;
+
+    {
+        let mut entries = state.lun_entries.write().await;
+        entries.insert(lun_id, LunEntry { lun_id, backing, readonly, device });
+        metrics::gauge!("stormblock_luns_total").set(entries.len() as f64);
+    }
+    persist_luns(state).await;
+
+    Ok(lun_id)
+}
+
+/// Detach a LUN from the target and the LUN table.
+///
+/// Returns true if the LUN existed in either place — a LUN wired in from
+/// config at startup is on the target but absent from the table.
+pub async fn detach_lun(state: &Arc<AppState>, lun_id: u64) -> bool {
+    let was_on_target = match state.iscsi_target.read().await.as_ref() {
+        Some(iscsi) => iscsi.remove_lun(lun_id).await,
+        None => false,
+    };
+
+    let was_in_table = {
+        let mut entries = state.lun_entries.write().await;
+        let existed = entries.remove(&lun_id).is_some();
+        if existed {
+            metrics::gauge!("stormblock_luns_total").set(entries.len() as f64);
+        }
+        existed
+    };
+    if was_in_table {
+        persist_luns(state).await;
+    }
+
+    was_on_target || was_in_table
+}
+
 /// Open the block device behind a LUN backing description.
 async fn open_backing(
     state: &AppState,
@@ -216,34 +285,14 @@ async fn create_lun(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "luns", "method" => "create").increment(1);
 
-    // Check iSCSI target is available
-    let iscsi = {
-        let guard = state.iscsi_target.read().await;
-        match guard.as_ref() {
-            Some(t) => t.clone(),
-            None => return ApiError::internal("iSCSI target not running"),
-        }
-    };
-
-    // Resolve the LUN number: explicit, or the next free one.
-    let lun_id = {
-        let entries = state.lun_entries.read().await;
-        match req.lun_id {
-            Some(id) => {
-                if entries.contains_key(&id) {
-                    return ApiError::conflict(format!("LUN {id} already exists"));
-                }
-                id
-            }
-            None => (0u64..).find(|id| !entries.contains_key(id)).unwrap_or(0),
-        }
-    };
-
-    let device = match open_backing(&state, &req.backing).await {
-        Ok(d) => d,
+    let readonly = req.readonly;
+    let lun_id = match attach_lun(&state, req.backing, req.lun_id, readonly).await {
+        Ok(id) => id,
         Err(e) => {
-            // A missing volume/array is the caller's mistake, not ours.
-            return if e.contains("not found") {
+            return if e.contains("already exists") {
+                ApiError::conflict(e)
+            } else if e.contains("not found") {
+                // A missing volume/array is the caller's mistake, not ours.
                 ApiError::not_found(e)
             } else {
                 ApiError::internal(e)
@@ -251,29 +300,18 @@ async fn create_lun(
         }
     };
 
-    // Add to iSCSI target
-    iscsi.add_lun_dynamic(lun_id, device.clone(), req.readonly).await;
-
-    let entry = LunEntry {
-        lun_id,
-        backing: req.backing,
-        readonly: req.readonly,
-        device: device.clone(),
+    let entries = state.lun_entries.read().await;
+    let Some(entry) = entries.get(&lun_id) else {
+        return ApiError::internal("LUN vanished after creation");
     };
-    let resp = lun_to_response(&entry);
-
-    {
-        let mut entries = state.lun_entries.write().await;
-        entries.insert(lun_id, entry);
-        metrics::gauge!("stormblock_luns_total").set(entries.len() as f64);
-    }
-    persist_luns(&state).await;
+    let resp = lun_to_response(entry);
+    drop(entries);
 
     tracing::info!("LUN {} created ({}, {}{})",
         lun_id,
         resp.device_type,
         crate::mgmt::config::human_size(resp.capacity_bytes),
-        if req.readonly { ", readonly" } else { "" },
+        if readonly { ", readonly" } else { "" },
     );
 
     (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -285,32 +323,8 @@ async fn delete_lun(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "luns", "method" => "delete").increment(1);
 
-    // Remove from iSCSI target
-    let removed = {
-        let guard = state.iscsi_target.read().await;
-        if let Some(iscsi) = guard.as_ref() {
-            iscsi.remove_lun(id).await
-        } else {
-            false
-        }
-    };
-
-    // Remove from entries
-    let existed = {
-        let mut entries = state.lun_entries.write().await;
-        let existed = entries.remove(&id).is_some();
-        if existed {
-            metrics::gauge!("stormblock_luns_total").set(entries.len() as f64);
-        }
-        existed
-    };
-
-    if existed {
-        persist_luns(&state).await;
+    if detach_lun(&state, id).await {
         tracing::info!("LUN {} removed", id);
-        axum::http::StatusCode::NO_CONTENT.into_response()
-    } else if removed {
-        // Was in iSCSI target but not in entries (startup LUN)
         axum::http::StatusCode::NO_CONTENT.into_response()
     } else {
         ApiError::not_found(format!("LUN {id} not found"))

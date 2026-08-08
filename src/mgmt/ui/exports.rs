@@ -135,6 +135,8 @@ pub async fn create(
         protocol,
         target_id,
         status: ExportStatus::PendingRestart,
+        lun_id: None,
+        nsid: None,
     };
 
     {

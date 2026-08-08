@@ -666,6 +666,13 @@ async fn main() -> anyhow::Result<()> {
             let mut nvmeof = target::nvmeof::NvmeofTarget::new(nvmeof_config);
             nvmeof.add_namespace(1, device.clone());
             let nvmeof = Arc::new(nvmeof);
+
+            // Store in AppState so the export API can add namespaces at
+            // runtime instead of parking them until the next restart (#26).
+            {
+                let mut guard = state.nvmeof_target.write().await;
+                *guard = Some(nvmeof.clone());
+            }
             tokio::spawn({
                 let nvmeof = nvmeof.clone();
                 async move {

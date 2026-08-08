@@ -152,6 +152,200 @@ async fn mgmt_get_exports() {
     server.abort();
 }
 
+/// State with a live (unbound) iSCSI target, a data dir for persistence, and
+/// one thin volume — the shape the registry export path needs.
+async fn setup_state_with_iscsi(dir: &TempDir) -> (Arc<AppState>, uuid::Uuid) {
+    use stormblock::target::iscsi::{IscsiConfig, IscsiTarget};
+
+    let devices = common::create_file_devices(dir, 2, 64 * 1024 * 1024).await;
+    let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.unwrap();
+    let array_id = array.array_id();
+    let backing: Arc<dyn BlockDevice> = Arc::new(array);
+
+    let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    vm.add_backing_device(array_id, backing).await;
+    let vol_id = vm.create_volume("export-vol", 8 * 1024 * 1024, array_id).await.unwrap();
+
+    let mut config = StormBlockConfig::default();
+    config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
+
+    let slab_registry = vm.registry().clone();
+    let gem = vm.gem().clone();
+    let state = Arc::new(AppState::new(config, vm, slab_registry, gem));
+
+    // The target is never run() here — nothing binds a port; we only need the
+    // LUN table it maintains.
+    let target = Arc::new(IscsiTarget::new(IscsiConfig::default()));
+    *state.iscsi_target.write().await = Some(target);
+
+    (state, vol_id.0)
+}
+
+/// A thin/CoW volume must be exportable as an iSCSI LUN (#22).
+#[tokio::test]
+async fn mgmt_lun_with_volume_backing() {
+    let dir = TempDir::new().unwrap();
+    let (state, vol_id) = setup_state_with_iscsi(&dir).await;
+    let (base_url, server) = start_mgmt_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client.post(format!("{base_url}/api/v1/luns"))
+        .json(&serde_json::json!({
+            "backing": { "type": "volume", "volume_id": vol_id },
+        }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201, "volume-backed LUN should be created");
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["lun_id"], 0, "first LUN gets number 0");
+    assert_eq!(body["backing"]["type"], "volume");
+    assert_eq!(body["capacity_bytes"], 8 * 1024 * 1024);
+
+    // It is live on the target, not just recorded.
+    let luns = state.iscsi_target.read().await.as_ref().unwrap().list_luns().await;
+    assert_eq!(luns, vec![0]);
+
+    // An unknown volume is a 404, not a 500.
+    let resp = client.post(format!("{base_url}/api/v1/luns"))
+        .json(&serde_json::json!({
+            "backing": { "type": "volume", "volume_id": uuid::Uuid::new_v4() },
+        }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+
+    server.abort();
+}
+
+/// An export should come back with the LUN an initiator must address, and go
+/// live immediately rather than parking until restart (#24, #26).
+#[tokio::test]
+async fn mgmt_export_assigns_lun_and_goes_active() {
+    let dir = TempDir::new().unwrap();
+    let (state, vol_id) = setup_state_with_iscsi(&dir).await;
+    let (base_url, server) = start_mgmt_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client.post(format!("{base_url}/api/v1/exports"))
+        .json(&serde_json::json!({ "volume_id": vol_id, "protocol": "iscsi" }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let export_id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(body["status"], "active", "export should be served immediately");
+    let lun_id = body["lun_id"].as_u64().expect("export must report its LUN");
+
+    // The LUN is on the target and in the LUN table.
+    let luns = state.iscsi_target.read().await.as_ref().unwrap().list_luns().await;
+    assert_eq!(luns, vec![lun_id]);
+
+    // Deleting the export stops serving it, freeing the LUN number.
+    let resp = client.delete(format!("{base_url}/api/v1/exports/{export_id}"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let luns = state.iscsi_target.read().await.as_ref().unwrap().list_luns().await;
+    assert!(luns.is_empty(), "LUN should be detached with its export");
+
+    server.abort();
+}
+
+/// LUNs created through the API must survive a restart (#22): the table is
+/// written to luns.json and the backings are re-opened onto the new target.
+#[tokio::test]
+async fn mgmt_luns_persist_across_restart() {
+    let dir = TempDir::new().unwrap();
+    let (state, vol_id) = setup_state_with_iscsi(&dir).await;
+    let (base_url, server) = start_mgmt_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let backing_file = dir.path().join("lun-backing.img");
+    for lun in [0u64, 5] {
+        let resp = client.post(format!("{base_url}/api/v1/luns"))
+            .json(&serde_json::json!({
+                "lun_id": lun,
+                "backing": {
+                    "type": "file",
+                    "path": format!("{}.{lun}", backing_file.display()),
+                    "size": "4M",
+                },
+                "readonly": lun == 5,
+            }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 201);
+    }
+
+    // A volume-backed LUN too — its volume will not exist after the restart
+    // below, which must be survivable rather than fatal.
+    let resp = client.post(format!("{base_url}/api/v1/luns"))
+        .json(&serde_json::json!({
+            "lun_id": 9,
+            "backing": { "type": "volume", "volume_id": vol_id },
+        }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+    server.abort();
+
+    assert!(dir.path().join("luns.json").exists(), "LUN table should be written");
+
+    // Restart: a fresh state over the same data dir re-opens the LUN table.
+    let (fresh, _) = setup_state_with_iscsi(&dir).await;
+    assert!(fresh.lun_entries.read().await.is_empty());
+
+    let restored = stormblock::mgmt::api::luns::restore_luns(&fresh).await;
+    assert_eq!(restored, 2, "both file-backed LUNs should come back");
+
+    let entries = fresh.lun_entries.read().await;
+    assert!(entries.contains_key(&0));
+    assert!(entries.get(&5).unwrap().readonly, "readonly flag must survive");
+    assert!(
+        !entries.contains_key(&9),
+        "a LUN whose backing cannot be resolved is skipped, not fatal"
+    );
+    drop(entries);
+
+    let luns = fresh.iscsi_target.read().await.as_ref().unwrap().list_luns().await;
+    assert_eq!(luns, vec![0, 5], "restored LUNs must be live on the target");
+}
+
+/// The registry model exports thousands of LUNs; creation and lookup must
+/// hold up and every LUN must be addressable (#24).
+#[tokio::test]
+async fn mgmt_luns_at_scale() {
+    const COUNT: u64 = 1000;
+
+    let dir = TempDir::new().unwrap();
+    let (state, vol_id) = setup_state_with_iscsi(&dir).await;
+    let backing = stormblock::mgmt::LunBacking::Volume { volume_id: vol_id };
+
+    let start = std::time::Instant::now();
+    for _ in 0..COUNT {
+        stormblock::mgmt::api::luns::attach_lun(&state, backing.clone(), None, false)
+            .await
+            .expect("attach should succeed");
+    }
+    let elapsed = start.elapsed();
+
+    assert_eq!(state.lun_entries.read().await.len(), COUNT as usize);
+
+    let target = state.iscsi_target.read().await.as_ref().unwrap().clone();
+    assert_eq!(target.lun_count().await, COUNT as usize);
+
+    // LUN numbers are dense and sorted, so every one is addressable and
+    // REPORT LUNS is deterministic.
+    let luns = target.list_luns().await;
+    assert_eq!(luns.first(), Some(&0));
+    assert_eq!(luns.last(), Some(&(COUNT - 1)));
+    assert_eq!(luns, (0..COUNT).collect::<Vec<_>>());
+
+    // Guards against a return to linear scans on the create path; the real
+    // budget is far under this, it only needs to catch a blowup.
+    assert!(
+        elapsed.as_secs() < 30,
+        "creating {COUNT} LUNs took {elapsed:?}, expected far less"
+    );
+}
+
 #[tokio::test]
 async fn mgmt_get_metrics() {
     let dir = TempDir::new().unwrap();
