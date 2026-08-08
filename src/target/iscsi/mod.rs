@@ -87,9 +87,19 @@ impl IscsiTarget {
         self.luns.write().await.remove(&lun).is_some()
     }
 
-    /// List active LUN IDs.
+    /// List active LUN IDs, sorted.
+    ///
+    /// This allocates proportionally to the LUN count, so it must stay off the
+    /// per-command I/O path — only REPORT LUNS needs the full list (#24).
     pub async fn list_luns(&self) -> Vec<u64> {
-        self.luns.read().await.keys().copied().collect()
+        let mut ids: Vec<u64> = self.luns.read().await.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Number of active LUNs.
+    pub async fn lun_count(&self) -> usize {
+        self.luns.read().await.len()
     }
 
     /// Start accepting connections. Runs until the listener is dropped.
@@ -388,7 +398,14 @@ impl IscsiTarget {
             Vec::new()
         };
 
-        let lun_ids = self.list_luns().await;
+        // Only REPORT LUNS needs the full LUN list; gathering it for every
+        // command would allocate a Vec per I/O, which does not survive
+        // thousands of LUNs (#24).
+        let lun_ids = if cdb[0] == scsi::REPORT_LUNS {
+            self.list_luns().await
+        } else {
+            Vec::new()
+        };
         let result = handle_scsi_command(cdb, &device, &data_out, &lun_ids).await;
 
         tracing::debug!(

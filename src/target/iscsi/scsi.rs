@@ -157,7 +157,7 @@ pub async fn handle_scsi_command(
 
         UNMAP => handle_unmap(device, data_out).await,
 
-        REPORT_LUNS => handle_report_luns(lun_ids),
+        REPORT_LUNS => handle_report_luns(lun_ids, cdb),
 
         MAINTENANCE_IN => {
             let service_action = cdb[1] & 0x1F;
@@ -485,29 +485,60 @@ async fn handle_unmap(device: &Arc<dyn BlockDevice>, data: &[u8]) -> ScsiResult 
     ScsiResult::good_empty()
 }
 
-fn handle_report_luns(lun_ids: &[u64]) -> ScsiResult {
-    let lun_count = lun_ids.len().max(1); // always report at least LUN 0
-    let list_len = lun_count * 8;
-    let mut data = vec![0u8; 8 + list_len];
-    // LUN list length (bytes 0-3)
-    data[0..4].copy_from_slice(&(list_len as u32).to_be_bytes());
-    // Reserved bytes 4-7 = 0
-    if lun_ids.is_empty() {
-        // No LUNs — report LUN 0 (8 zero bytes already there)
+/// Encode a LUN number into the 2 significant bytes of a SAM-5 LUN field.
+///
+/// Peripheral addressing (method 00b) for LUN < 256, flat-space addressing
+/// (method 01b) up to 16383 — the range a single-level LUN field can carry.
+pub fn encode_lun(lun: u64) -> u16 {
+    if lun < 256 {
+        lun as u16
     } else {
-        for (i, &lun) in lun_ids.iter().enumerate() {
-            let offset = 8 + i * 8;
-            // SAM-5 LUN encoding: peripheral addressing (method 00b) for
-            // LUN < 256 (byte 0 = 0, byte 1 = LUN), flat-space addressing
-            // (method 01b) above that.
-            let encoded: u16 = if lun < 256 {
-                lun as u16
-            } else {
-                0x4000 | (lun as u16 & 0x3FFF)
-            };
-            data[offset..offset + 2].copy_from_slice(&encoded.to_be_bytes());
-        }
+        0x4000 | (lun as u16 & 0x3FFF)
     }
+}
+
+/// REPORT LUNS (SPC-4 §6.21).
+///
+/// `lun_ids` is expected sorted. The LUN LIST LENGTH field always reports the
+/// full list size even when the response is truncated to the allocation
+/// length, so an initiator can retry with a large enough buffer — essential
+/// once thousands of LUNs are exported (#24).
+fn handle_report_luns(lun_ids: &[u64], cdb: &[u8]) -> ScsiResult {
+    let select_report = cdb[2];
+    let alloc_len = u32::from_be_bytes([cdb[6], cdb[7], cdb[8], cdb[9]]) as usize;
+
+    // The allocation length must at least cover the 8-byte header.
+    if alloc_len < 16 {
+        return ScsiResult::check_condition(SenseData::invalid_field_in_cdb());
+    }
+
+    let reported: Vec<u64> = match select_report {
+        // 0x00 addressable LUNs, 0x02 all LUNs — both are our full list.
+        0x00 | 0x02 => {
+            if lun_ids.is_empty() {
+                // No LUNs configured: report LUN 0 so an initiator still has
+                // something to address (it will fail INQUIRY, not discovery).
+                vec![0]
+            } else {
+                lun_ids.to_vec()
+            }
+        }
+        // 0x01 well-known logical units only — we expose none.
+        0x01 => Vec::new(),
+        _ => return ScsiResult::check_condition(SenseData::invalid_field_in_cdb()),
+    };
+
+    let list_len = reported.len() * 8;
+    let mut data = vec![0u8; 8 + list_len];
+    // LUN LIST LENGTH (bytes 0-3) — the full length, before truncation.
+    data[0..4].copy_from_slice(&(list_len as u32).to_be_bytes());
+    // Bytes 4-7 reserved.
+    for (i, &lun) in reported.iter().enumerate() {
+        let offset = 8 + i * 8;
+        data[offset..offset + 2].copy_from_slice(&encode_lun(lun).to_be_bytes());
+    }
+
+    data.truncate(alloc_len);
     ScsiResult::good(data)
 }
 
@@ -596,6 +627,100 @@ mod tests {
         let result = handle_scsi_command(&cdb, &dev, &[], &[0]).await;
         assert_eq!(result.status, ScsiStatus::Good);
         assert_eq!(result.data.len(), 16);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Build a REPORT LUNS CDB with the given SELECT REPORT + allocation length.
+    fn report_luns_cdb(select_report: u8, alloc_len: u32) -> [u8; 16] {
+        let mut cdb = [0u8; 16];
+        cdb[0] = REPORT_LUNS;
+        cdb[2] = select_report;
+        cdb[6..10].copy_from_slice(&alloc_len.to_be_bytes());
+        cdb
+    }
+
+    #[test]
+    fn encode_lun_addressing_methods() {
+        // Peripheral addressing (method 00b) below 256.
+        assert_eq!(encode_lun(0), 0x0000);
+        assert_eq!(encode_lun(3), 0x0003);
+        assert_eq!(encode_lun(255), 0x00FF);
+        // Flat-space addressing (method 01b) at and above 256.
+        assert_eq!(encode_lun(256), 0x4100);
+        assert_eq!(encode_lun(1000), 0x43E8);
+    }
+
+    #[tokio::test]
+    async fn report_luns_reports_full_length_when_truncated() {
+        let (dev, path) = test_device().await;
+        let luns: Vec<u64> = (0..64).collect();
+
+        // Only room for the header plus two LUNs.
+        let cdb = report_luns_cdb(0x00, 24);
+        let result = handle_scsi_command(&cdb, &dev, &[], &luns).await;
+        assert_eq!(result.status, ScsiStatus::Good);
+
+        // Payload is truncated to the allocation length...
+        assert_eq!(result.data.len(), 24);
+        // ...but LUN LIST LENGTH still advertises all 64 LUNs so the
+        // initiator knows to retry with a bigger buffer.
+        let list_len = u32::from_be_bytes(result.data[0..4].try_into().unwrap());
+        assert_eq!(list_len, 64 * 8);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn report_luns_select_report_variants() {
+        let (dev, path) = test_device().await;
+        let luns = vec![0u64, 1, 2];
+
+        // 0x01 = well-known LUNs only; we expose none.
+        let result = handle_scsi_command(&report_luns_cdb(0x01, 256), &dev, &[], &luns).await;
+        assert_eq!(result.status, ScsiStatus::Good);
+        assert_eq!(u32::from_be_bytes(result.data[0..4].try_into().unwrap()), 0);
+
+        // 0x02 = all LUNs, same as 0x00 for us.
+        let result = handle_scsi_command(&report_luns_cdb(0x02, 256), &dev, &[], &luns).await;
+        assert_eq!(u32::from_be_bytes(result.data[0..4].try_into().unwrap()), 24);
+
+        // Reserved SELECT REPORT values are an illegal request.
+        let result = handle_scsi_command(&report_luns_cdb(0x77, 256), &dev, &[], &luns).await;
+        assert_eq!(result.status, ScsiStatus::CheckCondition);
+
+        // An allocation length too small for the header is also illegal.
+        let result = handle_scsi_command(&report_luns_cdb(0x00, 8), &dev, &[], &luns).await;
+        assert_eq!(result.status, ScsiStatus::CheckCondition);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The registry model exports thousands of LUNs; REPORT LUNS must encode
+    /// all of them, including those past the 255 peripheral-addressing limit.
+    #[tokio::test]
+    async fn report_luns_at_scale() {
+        let (dev, path) = test_device().await;
+        let luns: Vec<u64> = (0..2000).collect();
+
+        let alloc_len = 8 + 2000 * 8;
+        let cdb = report_luns_cdb(0x00, alloc_len as u32);
+        let result = handle_scsi_command(&cdb, &dev, &[], &luns).await;
+
+        assert_eq!(result.status, ScsiStatus::Good);
+        assert_eq!(result.data.len(), alloc_len);
+        let list_len = u32::from_be_bytes(result.data[0..4].try_into().unwrap());
+        assert_eq!(list_len, 2000 * 8);
+
+        // Spot-check both addressing methods round-trip through the response.
+        let read_at = |i: usize| -> u16 {
+            let off = 8 + i * 8;
+            u16::from_be_bytes(result.data[off..off + 2].try_into().unwrap())
+        };
+        assert_eq!(read_at(0), encode_lun(0));
+        assert_eq!(read_at(255), encode_lun(255));
+        assert_eq!(read_at(256), encode_lun(256));
+        assert_eq!(read_at(1999), encode_lun(1999));
+
         let _ = std::fs::remove_file(&path);
     }
 }

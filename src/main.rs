@@ -632,6 +632,10 @@ async fn main() -> anyhow::Result<()> {
             *target_guard = Some(iscsi.clone());
         }
 
+        // Re-open LUNs created through the API in a previous run (#22). Config
+        // LUNs above are declarative and re-added each boot; these are not.
+        mgmt::api::luns::restore_luns(&state).await;
+
         tokio::spawn({
             let iscsi = iscsi.clone();
             async move {

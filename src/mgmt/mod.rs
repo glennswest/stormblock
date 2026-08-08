@@ -83,6 +83,9 @@ pub enum LunBacking {
     File { path: String, size: Option<String> },
     Device { path: String },
     Raid { array_id: RaidArrayId },
+    /// A thin/CoW volume from the GEM, exported as a LUN (#22). This is the
+    /// backing the registry model uses — one clone per consumer.
+    Volume { volume_id: Uuid },
 }
 
 /// A LUN entry tracked by the management plane.
@@ -91,6 +94,16 @@ pub struct LunEntry {
     pub backing: LunBacking,
     pub readonly: bool,
     pub device: Arc<dyn BlockDevice>,
+}
+
+/// The persisted form of a LUN entry — everything needed to re-open the
+/// backing device on startup. The live `Arc<dyn BlockDevice>` is rebuilt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedLun {
+    pub lun_id: u64,
+    pub backing: LunBacking,
+    #[serde(default)]
+    pub readonly: bool,
 }
 
 /// Shared application state for the management API.
@@ -108,8 +121,10 @@ pub struct AppState {
     pub config: StormBlockConfig,
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
+    /// Live LUN table, keyed by LUN ID for O(1) lookup at thousands of
+    /// LUNs (#24).
     #[cfg(feature = "iscsi")]
-    pub lun_entries: tokio::sync::RwLock<Vec<LunEntry>>,
+    pub lun_entries: tokio::sync::RwLock<HashMap<u64, LunEntry>>,
     #[cfg(feature = "cluster")]
     pub cluster: Option<Arc<crate::cluster::ClusterManager>>,
 }
@@ -134,7 +149,7 @@ impl AppState {
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),
             #[cfg(feature = "iscsi")]
-            lun_entries: tokio::sync::RwLock::new(Vec::new()),
+            lun_entries: tokio::sync::RwLock::new(HashMap::new()),
             #[cfg(feature = "cluster")]
             cluster: None,
         }
