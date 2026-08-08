@@ -235,3 +235,30 @@ Replaces rigid DiskPool/VDrive/ExtentAllocator with organic, cellular storage. E
 - [x] `scripts/build-stormblock-initramfs.sh` — minimal initramfs (busybox + stormblock + ublk_drv + /init)
 - [x] `install-fedora-iscsi.sh` — 8-phase mkube CI job (provision, format, install Fedora, configure, verify)
 - [x] `systemd/stormblock-ublk.service` — post-switch_root safety net
+
+### Registry-scale export path — IN PROGRESS (issues #22, #24, #25, #26)
+
+Driven by the stormblock-registry / stormblockmk design: a CoW clone per
+container instance means thousands of volumes, each needing an export, each
+reclaiming space when dropped.
+
+**#22 — thin/CoW volumes exportable as iSCSI LUNs**
+- [ ] `LunBacking::Volume { volume_id }` — resolve via `VolumeManager::get_volume_handle`
+- [ ] Persist LUN↔backing mappings to `<data_dir>/luns.json`, restore on startup
+
+**#24 — scale to 1000s of LUNs**
+- [ ] `AppState::lun_entries`: `Vec<LunEntry>` → `HashMap<u64, LunEntry>` (O(1) lookup)
+- [ ] Drop the per-SCSI-command `list_luns()` Vec allocation (only REPORT LUNS needs it)
+- [ ] REPORT LUNS: full LUN LIST LENGTH when truncated, SELECT REPORT handling, >255 LUNs
+- [ ] `/api/v1/exports` reports the assigned LUN; auto-assign on create
+- [ ] Scale test at 1000 LUNs (lookup + REPORT LUNS + memory)
+
+**#25 — UNMAP/discard → GEM/slab reclaim**
+- [ ] VPD 0xB2 Logical Block Provisioning (LBPU=1, thin) — without it Linux never issues discards (root cause of monotonic growth)
+- [ ] VPD 0xB0: optimal unmap granularity + alignment from slot size
+- [ ] WRITE SAME(16)/(10) with UNMAP bit
+- [ ] Reclaim reporting: allocated vs reclaimable (`/api/v1/slabs`, metrics)
+
+**#26 — NVMe-oF dynamic namespaces + advertised address**
+- [ ] `add_namespace_dynamic(&self)` / `remove_namespace(&self)` — interior mutability like iSCSI
+- [ ] `management.advertised_addr` config; AttachInfo + discovery log page stop reporting 127.0.0.1
