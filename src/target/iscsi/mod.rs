@@ -162,8 +162,9 @@ impl IscsiTarget {
         let mut writer = BufWriter::new(writer);
 
         // Login phase
-        let (session_params, tsih, stat_sn, exp_cmd_sn) =
+        let (session_params, session, stat_sn, exp_cmd_sn) =
             self.login_phase(&mut reader, &mut writer).await?;
+        let tsih = session.tsih;
         tracing::info!(
             "iSCSI session established from {peer}, TSIH={tsih}, initiator={}",
             session_params.initiator_name
@@ -174,6 +175,7 @@ impl IscsiTarget {
             &mut reader,
             &mut writer,
             &session_params,
+            &session,
             stat_sn,
             exp_cmd_sn,
             local_addr,
@@ -192,7 +194,7 @@ impl IscsiTarget {
         &self,
         reader: &mut R,
         writer: &mut W,
-    ) -> std::io::Result<(SessionParams, u16, u32, u32)>
+    ) -> std::io::Result<(SessionParams, std::sync::Arc<session::Session>, u32, u32)>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
@@ -228,7 +230,7 @@ impl IscsiTarget {
                     final_resp.bhs.set_tsih(tsih);
 
                     write_pdu(writer, &final_resp, false, false).await?;
-                    return Ok((params, tsih, state_machine.next_stat_sn(), state_machine.exp_cmd_sn()));
+                    return Ok((params, session, state_machine.next_stat_sn(), state_machine.exp_cmd_sn()));
                 }
                 LoginResult::Failed(resp) => {
                     write_pdu(writer, &resp, false, false).await?;
@@ -247,6 +249,7 @@ impl IscsiTarget {
         reader: &mut R,
         writer: &mut W,
         params: &SessionParams,
+        session: &std::sync::Arc<session::Session>,
         stat_sn: u32,
         exp_cmd_sn: u32,
         local_addr: Option<SocketAddr>,
@@ -255,7 +258,12 @@ impl IscsiTarget {
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
     {
-        let conn = ConnectionState::with_sns(0, stat_sn, exp_cmd_sn);
+        // Register the connection on the session so its count reflects
+        // reality — a consumer deciding whether an export is safe to withdraw
+        // reads that number.
+        let conn = std::sync::Arc::new(ConnectionState::with_sns(0, stat_sn, exp_cmd_sn));
+        session.register_connection(0, conn.clone()).await;
+        let conn = conn.as_ref();
         let header_digest = params.header_digest;
         let data_digest = params.data_digest;
         let max_data_seg = params.max_recv_data_segment_length as usize;

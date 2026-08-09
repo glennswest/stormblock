@@ -117,6 +117,13 @@ impl Session {
         conn
     }
 
+    /// Register an already-built connection, so the full-feature phase can
+    /// keep the sequence numbers it seeded from login while still being
+    /// visible in the session's connection count.
+    pub async fn register_connection(&self, cid: u16, conn: Arc<ConnectionState>) {
+        self.connections.write().await.insert(cid, conn);
+    }
+
     /// Remove a connection from this session.
     pub async fn remove_connection(&self, cid: u16) {
         self.connections.write().await.remove(&cid);
