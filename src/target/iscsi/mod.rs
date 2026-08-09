@@ -229,8 +229,19 @@ impl IscsiTarget {
         let data_digest = params.data_digest;
         let max_data_seg = params.max_recv_data_segment_length as usize;
 
+        // Commands that arrived interleaved while a write was collecting its
+        // Data-Out are parked here and processed in order. An initiator with
+        // several commands in flight will interleave freely, so treating the
+        // next PDU as necessarily belonging to the current transfer would
+        // (and did) tear the session down mid-write.
+        let mut pending: std::collections::VecDeque<IscsiPdu> =
+            std::collections::VecDeque::new();
+
         loop {
-            let req = read_pdu(reader, header_digest, data_digest).await?;
+            let req = match pending.pop_front() {
+                Some(p) => p,
+                None => read_pdu(reader, header_digest, data_digest).await?,
+            };
             let opcode = match req.bhs.opcode() {
                 Some(op) => op,
                 None => {
@@ -257,7 +268,7 @@ impl IscsiTarget {
 
             match opcode {
                 Opcode::ScsiCommand => {
-                    self.handle_scsi_pdu(&req, reader, writer, &conn, params, header_digest, data_digest, max_data_seg).await?;
+                    self.handle_scsi_pdu(&req, reader, writer, &conn, params, header_digest, data_digest, max_data_seg, &mut pending).await?;
                 }
                 Opcode::NopOut => {
                     self.handle_nop_out(&req, writer, &conn, header_digest, data_digest).await?;
@@ -332,6 +343,7 @@ impl IscsiTarget {
         header_digest: bool,
         data_digest: bool,
         max_data_seg: usize,
+        pending: &mut std::collections::VecDeque<IscsiPdu>,
     ) -> std::io::Result<()> {
         let cdb = req.bhs.cdb();
         // Top 16 bits of the LUN field, masked of the 2-bit address method so
@@ -393,6 +405,7 @@ impl IscsiTarget {
                     params.max_burst_length,
                     header_digest,
                     data_digest,
+                    pending,
                 ).await?;
                 write_data.extend_from_slice(&additional);
             }
@@ -511,6 +524,7 @@ impl IscsiTarget {
         max_burst: u32,
         header_digest: bool,
         data_digest: bool,
+        pending: &mut std::collections::VecDeque<IscsiPdu>,
     ) -> std::io::Result<Vec<u8>> {
         let mut collected = Vec::with_capacity(desired_length as usize);
         let mut offset = buffer_offset;
@@ -536,18 +550,40 @@ impl IscsiTarget {
             let r2t_pdu = IscsiPdu::new(r2t_bhs);
             write_pdu(writer, &r2t_pdu, header_digest, data_digest).await?;
 
-            // Receive Data-Out PDUs until this R2T is satisfied
+            // Receive Data-Out PDUs until this R2T is satisfied. An initiator
+            // with several commands outstanding interleaves them freely, so
+            // anything that is not our Data-Out is handled or parked rather
+            // than treated as a protocol error.
             let mut burst_received: u32 = 0;
             while burst_received < transfer_len {
-                let data_out = read_pdu(reader, header_digest, data_digest).await?;
-                if data_out.bhs.opcode() != Some(Opcode::DataOut) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "expected Data-Out PDU",
-                    ));
+                let pdu = read_pdu(reader, header_digest, data_digest).await?;
+                match pdu.bhs.opcode() {
+                    Some(Opcode::DataOut) => {
+                        let pdu_itt = pdu.bhs.initiator_task_tag();
+                        if pdu_itt != itt {
+                            // Data for a different command: we only solicit one
+                            // transfer at a time, so this should not happen.
+                            tracing::warn!(
+                                "Data-Out for ITT {pdu_itt:#010x} while collecting {itt:#010x}"
+                            );
+                        }
+                        collected.extend_from_slice(&pdu.data);
+                        burst_received += pdu.data.len() as u32;
+                    }
+                    Some(Opcode::NopOut) => {
+                        // Keepalive mid-transfer — the initiator is timing it,
+                        // so answer now rather than after the write completes.
+                        self.handle_nop_out(&pdu, writer, conn, header_digest, data_digest)
+                            .await?;
+                    }
+                    other => {
+                        tracing::debug!(
+                            "parking {:?} received during Data-Out collection",
+                            other
+                        );
+                        pending.push_back(pdu);
+                    }
                 }
-                collected.extend_from_slice(&data_out.data);
-                burst_received += data_out.data.len() as u32;
             }
 
             offset += transfer_len;
