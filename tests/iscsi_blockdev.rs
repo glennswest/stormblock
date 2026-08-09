@@ -12,7 +12,7 @@
 //! Run: cargo test --test iscsi_blockdev -- --ignored --nocapture
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use stormblock::drive::BlockDevice;
 use stormblock::drive::iscsi_dev::IscsiDevice;
@@ -320,8 +320,8 @@ async fn iscsi_thin_volume_io() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(Mutex::new(registry));
-    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+    let registry = Arc::new(RwLock::new(registry));
+    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -375,8 +375,8 @@ async fn iscsi_multi_volume_isolation() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(Mutex::new(registry));
-    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+    let registry = Arc::new(RwLock::new(registry));
+    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -643,8 +643,8 @@ async fn iscsi_multi_extent_volume() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(Mutex::new(registry));
-    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+    let registry = Arc::new(RwLock::new(registry));
+    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -687,7 +687,7 @@ async fn iscsi_multi_extent_volume() {
 
     // Verify GEM has 4 allocated extents
     {
-        let g = gem.lock().await;
+        let g = gem.read().await;
         for ext_idx in 0u64..4 {
             assert!(
                 g.lookup(handle.volume_id(), ext_idx).is_some(),
@@ -722,8 +722,8 @@ async fn iscsi_snapshot_cow() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(Mutex::new(registry));
-    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+    let registry = Arc::new(RwLock::new(registry));
+    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -748,7 +748,7 @@ async fn iscsi_snapshot_cow() {
     let snap_vol = ThinVolume::new("snapshot".to_string(), 2 * 1024 * 1024, DEFAULT_SLOT_SIZE);
     let snap_id = snap_vol.id();
     {
-        let mut g = gem.lock().await;
+        let mut g = gem.write().await;
         let cloned = g.clone_volume_map(orig_id, snap_id);
         assert!(cloned.is_some(), "clone_volume_map returned None");
 
@@ -756,7 +756,7 @@ async fn iscsi_snapshot_cow() {
         let loc = g.lookup(orig_id, 0).expect("original extent not in GEM");
         let slab_id = loc.slab_id;
         let slot_idx = loc.slot_idx;
-        let mut reg = registry.lock().await;
+        let mut reg = registry.write().await;
         let slab = reg.get_mut(&slab_id).expect("slab not found");
         slab.inc_ref(slot_idx).await.expect("inc_ref failed");
     }
@@ -791,7 +791,7 @@ async fn iscsi_snapshot_cow() {
 
     // Verify GEM now has different slots for original and snapshot
     {
-        let g = gem.lock().await;
+        let g = gem.read().await;
         let orig_loc = g.lookup(orig_id, 0).expect("original not in GEM");
         let snap_loc = g.lookup(snap_id, 0).expect("snapshot not in GEM");
         assert_ne!(
@@ -830,8 +830,8 @@ async fn iscsi_sequential_write_stress() {
     let total_slots = slab.total_slots();
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(Mutex::new(registry));
-    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+    let registry = Arc::new(RwLock::new(registry));
+    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,

@@ -141,12 +141,15 @@ impl IscsiTarget {
     }
 
     /// Accept connections on a pre-bound listener. Useful for tests with ephemeral ports.
-    pub async fn run_with_listener(self: Arc<Self>, listener: TcpListener, _reactor: &ReactorPool) -> std::io::Result<()> {
+    pub async fn run_with_listener(self: Arc<Self>, listener: TcpListener, reactor: &ReactorPool) -> std::io::Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
             stream.set_nodelay(true)?;
             let target = self.clone();
-            tokio::spawn(async move {
+            // Dispatch onto the reactor pool rather than the ambient runtime.
+            // The pool was previously accepted and ignored, which is what made
+            // --reactor-cores a no-op.
+            reactor.dispatch(async move {
                 tracing::debug!("iSCSI connection from {peer}");
                 if let Err(e) = target.handle_connection(stream, peer).await {
                     tracing::debug!("iSCSI connection {peer} closed: {e}");

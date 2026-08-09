@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::drive::iscsi_dev::IscsiDevice;
 use crate::drive::slab::{Slab, SlabId, DEFAULT_SLOT_SIZE};
@@ -174,30 +174,30 @@ pub struct BootDiskResult {
     /// Provisioned partitions with their volumes.
     pub partitions: Vec<ProvisionedPartition>,
     /// Shared slab registry.
-    pub registry: Arc<Mutex<SlabRegistry>>,
+    pub registry: Arc<RwLock<SlabRegistry>>,
     /// Shared Global Extent Map.
-    pub gem: Arc<Mutex<GlobalExtentMap>>,
+    pub gem: Arc<RwLock<GlobalExtentMap>>,
 }
 
 /// Orchestrates creating a multi-volume partitioned disk on an iSCSI backing device.
 pub struct IscsiBootManager {
-    registry: Arc<Mutex<SlabRegistry>>,
-    gem: Arc<Mutex<GlobalExtentMap>>,
+    registry: Arc<RwLock<SlabRegistry>>,
+    gem: Arc<RwLock<GlobalExtentMap>>,
 }
 
 impl IscsiBootManager {
     /// Create a new boot manager with fresh registry and GEM.
     pub fn new() -> Self {
         IscsiBootManager {
-            registry: Arc::new(Mutex::new(SlabRegistry::new())),
-            gem: Arc::new(Mutex::new(GlobalExtentMap::new())),
+            registry: Arc::new(RwLock::new(SlabRegistry::new())),
+            gem: Arc::new(RwLock::new(GlobalExtentMap::new())),
         }
     }
 
     /// Create a boot manager with existing registry and GEM.
     pub fn with_state(
-        registry: Arc<Mutex<SlabRegistry>>,
-        gem: Arc<Mutex<GlobalExtentMap>>,
+        registry: Arc<RwLock<SlabRegistry>>,
+        gem: Arc<RwLock<GlobalExtentMap>>,
     ) -> Self {
         IscsiBootManager { registry, gem }
     }
@@ -248,7 +248,7 @@ impl IscsiBootManager {
 
         // 4. Register slab
         {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.write().await;
             reg.add(slab);
         }
 

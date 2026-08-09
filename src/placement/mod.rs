@@ -263,7 +263,7 @@ impl PlacementEngine {
 
         // Compute diff via GEM
         let changed = {
-            let gem = new_snapshot.gem().lock().await;
+            let gem = new_snapshot.gem().read().await;
             snapshot_diff(&gem, old_id, new_snap_id)
         };
 
@@ -670,7 +670,7 @@ mod tests {
 
     async fn setup_test_env(
         slot_size: u64,
-    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::Mutex<GlobalExtentMap>>, Arc<tokio::sync::Mutex<SlabRegistry>>, PlacementEngine, Vec<String>) {
+    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::RwLock<GlobalExtentMap>>, Arc<tokio::sync::RwLock<SlabRegistry>>, PlacementEngine, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-placement-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -699,8 +699,8 @@ mod tests {
 
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::Mutex::new(registry));
-        let gem = Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new()));
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
 
         let vol = ThinVolume::new("source".to_string(), 32 * 1024 * 1024, slot_size);
         let vol_handle = Arc::new(ThinVolumeHandle::new(
@@ -731,8 +731,8 @@ mod tests {
         // Snapshot
         let source_id = vol_handle.volume_id();
         let snap1 = {
-            let mut gem_guard = gem.lock().await;
-            let mut reg_guard = registry.lock().await;
+            let mut gem_guard = gem.write().await;
+            let mut reg_guard = registry.write().await;
             let snap_vol = create_snapshot(source_id, "snap1", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
                 .await
                 .unwrap();
@@ -794,8 +794,8 @@ mod tests {
 
         // Snapshot 2
         let snap2 = {
-            let mut gem_guard = gem.lock().await;
-            let mut reg_guard = registry.lock().await;
+            let mut gem_guard = gem.write().await;
+            let mut reg_guard = registry.write().await;
             let snap_vol = create_snapshot(source_id, "snap2", 32 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
                 .await
                 .unwrap();

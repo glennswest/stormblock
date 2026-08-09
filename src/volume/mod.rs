@@ -30,8 +30,8 @@ pub const DEFAULT_SLOT_SIZE: u64 = crate::drive::slab::DEFAULT_SLOT_SIZE;
 
 /// Manages volumes, slab allocation, and snapshots.
 pub struct VolumeManager {
-    gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
-    registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
+    gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
+    registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
     volumes: HashMap<VolumeId, Arc<ThinVolumeHandle>>,
     /// Legacy mapping: array_id → slab_id (for backward compat with callers
     /// that pass array_id to create_volume).
@@ -47,8 +47,8 @@ impl VolumeManager {
     /// smaller values like 4096 for tests).
     pub fn new(slot_size: u64) -> Self {
         VolumeManager {
-            gem: Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new())),
-            registry: Arc::new(tokio::sync::Mutex::new(SlabRegistry::new())),
+            gem: Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
+            registry: Arc::new(tokio::sync::RwLock::new(SlabRegistry::new())),
             volumes: HashMap::new(),
             array_slabs: HashMap::new(),
             slot_size,
@@ -60,8 +60,8 @@ impl VolumeManager {
     pub fn with_data_dir(slot_size: u64, data_dir: PathBuf) -> std::io::Result<Self> {
         let store = MetadataStore::new(data_dir)?;
         Ok(VolumeManager {
-            gem: Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new())),
-            registry: Arc::new(tokio::sync::Mutex::new(SlabRegistry::new())),
+            gem: Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
+            registry: Arc::new(tokio::sync::RwLock::new(SlabRegistry::new())),
             volumes: HashMap::new(),
             array_slabs: HashMap::new(),
             slot_size,
@@ -88,7 +88,7 @@ impl VolumeManager {
         };
         let slab_id = slab.slab_id();
         {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.write().await;
             reg.add(slab);
         }
         self.array_slabs.insert(array_id, slab_id);
@@ -98,7 +98,7 @@ impl VolumeManager {
     /// Register a pre-formatted slab directly.
     pub async fn add_slab(&mut self, slab: Slab) {
         let id = slab.slab_id();
-        let mut reg = self.registry.lock().await;
+        let mut reg = self.registry.write().await;
         reg.add(slab);
         tracing::info!("Registered slab {}", id.0);
     }
@@ -125,7 +125,7 @@ impl VolumeManager {
         }
         let slab_id = slab.slab_id();
         {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.write().await;
             reg.add(slab);
         }
         self.array_slabs.insert(array_id, slab_id);
@@ -205,8 +205,8 @@ impl VolumeManager {
 
         let mut snaps = Vec::with_capacity(sources.len());
         {
-            let mut gem = self.gem.lock().await;
-            let mut reg = self.registry.lock().await;
+            let mut gem = self.gem.write().await;
+            let mut reg = self.registry.write().await;
             for (source_id, name, virtual_size, slot_size) in &params {
                 let snap = snapshot::create_snapshot(
                     *source_id, name, *virtual_size, *slot_size,
@@ -238,8 +238,8 @@ impl VolumeManager {
             .ok_or(VolumeError::VolumeNotFound(id))?;
 
         // Remove all extents from GEM and dec_ref on slabs
-        let mut gem = self.gem.lock().await;
-        let mut reg = self.registry.lock().await;
+        let mut gem = self.gem.write().await;
+        let mut reg = self.registry.write().await;
         snapshot::delete_snapshot(id, &mut gem, &mut reg).await?;
         drop(gem);
         drop(reg);
@@ -279,8 +279,8 @@ impl VolumeManager {
         }
 
         let stats = {
-            let mut gem = self.gem.lock().await;
-            let mut reg = self.registry.lock().await;
+            let mut gem = self.gem.write().await;
+            let mut reg = self.registry.write().await;
             snapshot::reset_to_source(clone_id, source_id, &mut gem, &mut reg).await?
         };
         self.persist().await;
@@ -312,8 +312,8 @@ impl VolumeManager {
         drop(source_vol);
 
         let snap = {
-            let mut gem = self.gem.lock().await;
-            let mut reg = self.registry.lock().await;
+            let mut gem = self.gem.write().await;
+            let mut reg = self.registry.write().await;
             snapshot::create_snapshot(
                 source_id, name, virtual_size, slot_size,
                 &mut gem, &mut reg,
@@ -343,12 +343,12 @@ impl VolumeManager {
     }
 
     /// Get the shared GEM.
-    pub fn gem(&self) -> &Arc<tokio::sync::Mutex<GlobalExtentMap>> {
+    pub fn gem(&self) -> &Arc<tokio::sync::RwLock<GlobalExtentMap>> {
         &self.gem
     }
 
     /// Get the shared SlabRegistry.
-    pub fn registry(&self) -> &Arc<tokio::sync::Mutex<SlabRegistry>> {
+    pub fn registry(&self) -> &Arc<tokio::sync::RwLock<SlabRegistry>> {
         &self.registry
     }
 
@@ -373,8 +373,8 @@ impl VolumeManager {
         }
 
         let meta = {
-            let gem = self.gem.lock().await;
-            let reg = self.registry.lock().await;
+            let gem = self.gem.read().await;
+            let reg = self.registry.read().await;
             let arrays = self
                 .array_slabs
                 .iter()
@@ -429,7 +429,7 @@ impl VolumeManager {
         // COW'd slots (written at allocation time, so always at least as new
         // as the metadata file after a crash).
         let mut rebuilt = {
-            let reg = self.registry.lock().await;
+            let reg = self.registry.read().await;
             GlobalExtentMap::rebuild_from_slabs(reg.iter())
         };
 
@@ -451,7 +451,7 @@ impl VolumeManager {
             // snapshot's shared slots). Slot-table mappings win on conflict;
             // persisted mappings fill the gaps. (#13)
             {
-                let reg = self.registry.lock().await;
+                let reg = self.registry.read().await;
                 for (vext, loc) in &vrec.extents {
                     if rebuilt.lookup(vrec.id, *vext).is_none() {
                         if reg.get(&loc.slab_id).is_some() {
@@ -483,7 +483,7 @@ impl VolumeManager {
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
         }
 
-        *self.gem.lock().await = rebuilt;
+        *self.gem.write().await = rebuilt;
 
         tracing::info!("Restored {restored} volume(s) from metadata");
         Ok(())

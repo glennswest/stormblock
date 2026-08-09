@@ -419,7 +419,7 @@ fn gen_id(prefix: &str) -> String {
 
 /// Live capacity of this node: sum over registered slabs.
 async fn local_capacity(state: &AppState) -> (u64, u64) {
-    let reg = state.slab_registry.lock().await;
+    let reg = state.slab_registry.read().await;
     let mut total = 0u64;
     let mut free = 0u64;
     for (_, slab) in reg.iter() {

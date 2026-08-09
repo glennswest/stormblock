@@ -233,7 +233,7 @@ mod tests {
 
     async fn setup_volume_for_snapshot(
         slot_size: u64,
-    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::Mutex<GlobalExtentMap>>, Arc<tokio::sync::Mutex<SlabRegistry>>, Vec<String>) {
+    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::RwLock<GlobalExtentMap>>, Arc<tokio::sync::RwLock<SlabRegistry>>, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-snap-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -262,8 +262,8 @@ mod tests {
 
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::Mutex::new(registry));
-        let gem = Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new()));
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
 
         let vol = ThinVolume::new("source".to_string(), 128 * 1024 * 1024, slot_size);
         let handle = Arc::new(ThinVolumeHandle::new(
@@ -299,8 +299,8 @@ mod tests {
 
         // Clone it.
         let clone_vol = {
-            let mut g = gem.lock().await;
-            let mut r = registry.lock().await;
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
             create_snapshot(source_id, "clone", 128 * 1024 * 1024, slot_size, &mut g, &mut r)
                 .await
                 .unwrap()
@@ -310,19 +310,19 @@ mod tests {
             clone_vol, gem.clone(), registry.clone(), PlacementPolicy::default(),
         ));
 
-        let free_after_clone = registry.lock().await.total_free_slots();
+        let free_after_clone = registry.read().await.total_free_slots();
 
         // Diverge two of the four extents, and write one the source never had.
         clone.write(0, &vec![0xFF; slot_size as usize]).await.unwrap();
         clone.write(slot_size, &vec![0xEE; slot_size as usize]).await.unwrap();
         clone.write(10 * slot_size, &vec![0xDD; slot_size as usize]).await.unwrap();
 
-        let free_after_divergence = registry.lock().await.total_free_slots();
+        let free_after_divergence = registry.read().await.total_free_slots();
         assert!(free_after_divergence < free_after_clone, "divergence allocates");
 
         let stats = {
-            let mut g = gem.lock().await;
-            let mut r = registry.lock().await;
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
             reset_to_source(clone_id, source_id, &mut g, &mut r).await.unwrap()
         };
 
@@ -355,7 +355,7 @@ mod tests {
 
         // The private copies came back to the slab.
         assert_eq!(
-            registry.lock().await.total_free_slots(),
+            registry.read().await.total_free_slots(),
             free_after_clone,
             "reset returns exactly what divergence took"
         );
@@ -374,8 +374,8 @@ mod tests {
         let source_id = source.volume_id();
 
         let clone_vol = {
-            let mut g = gem.lock().await;
-            let mut r = registry.lock().await;
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
             create_snapshot(source_id, "clone", 128 * 1024 * 1024, slot_size, &mut g, &mut r)
                 .await
                 .unwrap()
@@ -387,8 +387,8 @@ mod tests {
 
         clone.write(0, &vec![0x22; slot_size as usize]).await.unwrap();
         {
-            let mut g = gem.lock().await;
-            let mut r = registry.lock().await;
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
             reset_to_source(clone_id, source_id, &mut g, &mut r).await.unwrap();
         }
 
@@ -418,24 +418,24 @@ mod tests {
         let source_id = source.volume_id();
 
         let clone_vol = {
-            let mut g = gem.lock().await;
-            let mut r = registry.lock().await;
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
             create_snapshot(source_id, "clone", 128 * 1024 * 1024, slot_size, &mut g, &mut r)
                 .await
                 .unwrap()
         };
         let clone_id = clone_vol.id();
-        let free_before = registry.lock().await.total_free_slots();
+        let free_before = registry.read().await.total_free_slots();
 
         let stats = {
-            let mut g = gem.lock().await;
-            let mut r = registry.lock().await;
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
             reset_to_source(clone_id, source_id, &mut g, &mut r).await.unwrap()
         };
 
         assert_eq!(stats.freed, 0);
         assert_eq!(stats.restored, 0);
-        assert_eq!(registry.lock().await.total_free_slots(), free_before);
+        assert_eq!(registry.read().await.total_free_slots(), free_before);
 
         cleanup(&paths);
     }
@@ -452,8 +452,8 @@ mod tests {
         // Take snapshot
         let source_id = handle.volume_id();
         let snap_vol = {
-            let mut gem_guard = gem.lock().await;
-            let mut reg_guard = registry.lock().await;
+            let mut gem_guard = gem.write().await;
+            let mut reg_guard = registry.write().await;
             create_snapshot(source_id, "snap1", 128 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
                 .await
                 .unwrap()
@@ -499,8 +499,8 @@ mod tests {
         // Take snapshot
         let source_id = handle.volume_id();
         let snap_vol = {
-            let mut gem_guard = gem.lock().await;
-            let mut reg_guard = registry.lock().await;
+            let mut gem_guard = gem.write().await;
+            let mut reg_guard = registry.write().await;
             create_snapshot(source_id, "snap1", 128 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
                 .await
                 .unwrap()
@@ -518,7 +518,7 @@ mod tests {
 
         // Check diff
         let diff = {
-            let gem_guard = gem.lock().await;
+            let gem_guard = gem.read().await;
             snapshot_diff(&gem_guard, source_id, snap_id)
         };
 
@@ -537,8 +537,8 @@ mod tests {
 
         let source_id = handle.volume_id();
         let snap_vol = {
-            let mut gem_guard = gem.lock().await;
-            let mut reg_guard = registry.lock().await;
+            let mut gem_guard = gem.write().await;
+            let mut reg_guard = registry.write().await;
             create_snapshot(source_id, "snap1", 128 * 1024 * 1024, slot_size, &mut gem_guard, &mut reg_guard)
                 .await
                 .unwrap()
@@ -550,19 +550,19 @@ mod tests {
 
         // Get free slots before delete
         let free_before = {
-            let reg = registry.lock().await;
+            let reg = registry.read().await;
             reg.total_free_slots()
         };
 
         // Delete snapshot
         {
-            let mut gem_guard = gem.lock().await;
-            let mut reg_guard = registry.lock().await;
+            let mut gem_guard = gem.write().await;
+            let mut reg_guard = registry.write().await;
             delete_snapshot(snap_id, &mut gem_guard, &mut reg_guard).await.unwrap();
         }
 
         let free_after = {
-            let reg = registry.lock().await;
+            let reg = registry.read().await;
             reg.total_free_slots()
         };
 

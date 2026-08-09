@@ -112,7 +112,7 @@ fn parse_lowercase_sizes() {
 // ── Provisioning workflow (offline, no real iSCSI) ──────────────
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use stormblock::drive::BlockDevice;
 use stormblock::drive::filedev::FileDevice;
@@ -148,8 +148,8 @@ async fn provision_volumes_on_file_slab() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(Mutex::new(registry));
-    let gem = Arc::new(Mutex::new(GlobalExtentMap::new()));
+    let registry = Arc::new(RwLock::new(registry));
+    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
 
     // Parse and resolve layout for 50 MB
     let mut layout = BootDiskLayout::parse("root:30M,swap:10M,home:rest").unwrap();
@@ -215,7 +215,7 @@ async fn provision_volumes_on_file_slab() {
 
     // Verify slab has allocated slots
     {
-        let reg = registry.lock().await;
+        let reg = registry.read().await;
         let slab = reg.get(&slab_id).unwrap();
         assert_eq!(slab.allocated_slots(), 3); // one slot per volume (one write each)
     }

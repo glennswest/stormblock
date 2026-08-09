@@ -100,7 +100,7 @@ pub fn register_metrics() {
 /// This is what makes thin-allocation growth (and whether trims actually come
 /// back) observable over time (#25).
 async fn refresh_capacity_gauges(state: &crate::mgmt::AppState) {
-    let registry = state.slab_registry.lock().await;
+    let registry = state.slab_registry.read().await;
 
     let (mut cap_total, mut alloc_total, mut free_total) = (0u64, 0u64, 0u64);
 

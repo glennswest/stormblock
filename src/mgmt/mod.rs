@@ -119,8 +119,8 @@ pub struct AppState {
     pub arrays: tokio::sync::RwLock<HashMap<RaidArrayId, ArrayInfo>>,
     pub volume_manager: tokio::sync::Mutex<VolumeManager>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
-    pub slab_registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
-    pub gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
+    pub slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
+    pub gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     /// Control-plane state behind the /v1 CSI contract surface.
     pub v1: tokio::sync::Mutex<api::v1::V1State>,
     /// Live per-volume ublk exports for the local CSI fast path.
@@ -143,8 +143,8 @@ impl AppState {
     pub fn new(
         config: StormBlockConfig,
         volume_manager: VolumeManager,
-        slab_registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
-        gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
+        slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
+        gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     ) -> Self {
         AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),

@@ -195,16 +195,16 @@ pub struct ThinVolumeHandle {
     virtual_size: AtomicU64,
     id: VolumeId,
     slot_size: u64,
-    gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
-    registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
+    gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
+    registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
     placement: PlacementPolicy,
 }
 
 impl ThinVolumeHandle {
     pub fn new(
         vol: ThinVolume,
-        gem: Arc<tokio::sync::Mutex<GlobalExtentMap>>,
-        registry: Arc<tokio::sync::Mutex<SlabRegistry>>,
+        gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
+        registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
         placement: PlacementPolicy,
     ) -> Self {
         let device_id = vol.device_id.clone();
@@ -245,7 +245,7 @@ impl ThinVolumeHandle {
 
             // Collect extents to remove
             let to_remove: Vec<(u64, ExtentLocation)> = {
-                let gem = self.gem.lock().await;
+                let gem = self.gem.read().await;
                 gem.volume_extents(&self.id)
                     .map(|iter| {
                         iter.filter(|(&idx, _)| idx >= max_vext_idx)
@@ -258,12 +258,12 @@ impl ThinVolumeHandle {
             for (vext_idx, loc) in to_remove {
                 // Remove from GEM
                 {
-                    let mut gem = self.gem.lock().await;
+                    let mut gem = self.gem.write().await;
                     gem.remove(self.id, vext_idx);
                 }
                 // Dec ref on slab
                 {
-                    let mut reg = self.registry.lock().await;
+                    let mut reg = self.registry.write().await;
                     if let Some(slab) = reg.get_mut(&loc.slab_id) {
                         let _ = slab.dec_ref(loc.slot_idx).await;
                     }
@@ -285,14 +285,14 @@ impl ThinVolumeHandle {
     }
 
     pub async fn allocated(&self) -> u64 {
-        let gem = self.gem.lock().await;
+        let gem = self.gem.read().await;
         gem.get_volume_map(&self.id)
             .map(|m| m.len() as u64 * self.slot_size)
             .unwrap_or(0)
     }
 
     pub async fn extent_count(&self) -> usize {
-        let gem = self.gem.lock().await;
+        let gem = self.gem.read().await;
         gem.get_volume_map(&self.id).map(|m| m.len()).unwrap_or(0)
     }
 
@@ -302,12 +302,12 @@ impl ThinVolumeHandle {
     }
 
     /// Get the shared GEM reference.
-    pub fn gem(&self) -> &Arc<tokio::sync::Mutex<GlobalExtentMap>> {
+    pub fn gem(&self) -> &Arc<tokio::sync::RwLock<GlobalExtentMap>> {
         &self.gem
     }
 
     /// Get the shared SlabRegistry reference.
-    pub fn registry(&self) -> &Arc<tokio::sync::Mutex<SlabRegistry>> {
+    pub fn registry(&self) -> &Arc<tokio::sync::RwLock<SlabRegistry>> {
         &self.registry
     }
 
@@ -350,13 +350,13 @@ impl ThinVolumeHandle {
     ) -> DriveResult<()> {
         // Allocate slot
         let (slab_id, slot_idx) = {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.write().await;
             self.allocate_slot(&mut reg, vext_idx).await?
         };
 
         // Insert into GEM
         {
-            let mut gem = self.gem.lock().await;
+            let mut gem = self.gem.write().await;
             gem.insert(self.id, vext_idx, ExtentLocation {
                 slab_id,
                 slot_idx,
@@ -367,11 +367,29 @@ impl ThinVolumeHandle {
 
         // Write data
         let (device, phys_offset) = {
-            let reg = self.registry.lock().await;
+            let reg = self.registry.read().await;
             let slab = reg.get(&slab_id).ok_or_else(|| {
                 DriveError::Other(anyhow::anyhow!("slab {} not found", slab_id.0))
             })?;
             slab.slot_device_and_offset(slot_idx, off_in_slot)?
+        };
+        device.write(phys_offset, buf).await?;
+        Ok(())
+    }
+
+    /// Write into an extent this volume already owns exclusively.
+    async fn write_in_place(
+        &self,
+        loc: &ExtentLocation,
+        off_in_slot: u64,
+        buf: &[u8],
+    ) -> DriveResult<()> {
+        let (device, phys_offset) = {
+            let reg = self.registry.read().await;
+            let slab = reg.get(&loc.slab_id).ok_or_else(|| {
+                DriveError::Other(anyhow::anyhow!("slab {} not found", loc.slab_id.0))
+            })?;
+            slab.slot_device_and_offset(loc.slot_idx, off_in_slot)?
         };
         device.write(phys_offset, buf).await?;
         Ok(())
@@ -388,7 +406,7 @@ impl ThinVolumeHandle {
         // Read old slot data
         let mut old_data = vec![0u8; self.slot_size as usize];
         {
-            let reg = self.registry.lock().await;
+            let reg = self.registry.read().await;
             let slab = reg.get(&old_loc.slab_id).ok_or_else(|| {
                 DriveError::Other(anyhow::anyhow!("slab {} not found", old_loc.slab_id.0))
             })?;
@@ -397,13 +415,13 @@ impl ThinVolumeHandle {
 
         // Allocate new slot
         let (new_slab_id, new_slot_idx) = {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.write().await;
             self.allocate_slot(&mut reg, vext_idx).await?
         };
 
         // Write old data to new slot, then overlay new data
         {
-            let reg = self.registry.lock().await;
+            let reg = self.registry.read().await;
             let slab = reg.get(&new_slab_id).ok_or_else(|| {
                 DriveError::Other(anyhow::anyhow!("slab {} not found", new_slab_id.0))
             })?;
@@ -413,7 +431,7 @@ impl ThinVolumeHandle {
 
         // Update GEM
         {
-            let mut gem = self.gem.lock().await;
+            let mut gem = self.gem.write().await;
             gem.insert(self.id, vext_idx, ExtentLocation {
                 slab_id: new_slab_id,
                 slot_idx: new_slot_idx,
@@ -424,7 +442,7 @@ impl ThinVolumeHandle {
 
         // Dec ref on old slot
         {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.write().await;
             if let Some(slab) = reg.get_mut(&old_loc.slab_id) {
                 let _ = slab.dec_ref(old_loc.slot_idx).await;
             }
@@ -479,7 +497,7 @@ impl BlockDevice for ThinVolumeHandle {
 
             // Look up extent in GEM
             let location = {
-                let gem = self.gem.lock().await;
+                let gem = self.gem.read().await;
                 gem.lookup(self.id, vext_idx).cloned()
             };
 
@@ -487,7 +505,7 @@ impl BlockDevice for ThinVolumeHandle {
                 Some(loc) => {
                     // Get device + physical offset from slab
                     let (device, phys_offset) = {
-                        let reg = self.registry.lock().await;
+                        let reg = self.registry.read().await;
                         let slab = reg.get(&loc.slab_id).ok_or_else(|| {
                             DriveError::Other(anyhow::anyhow!(
                                 "slab {} not found", loc.slab_id.0
@@ -510,10 +528,18 @@ impl BlockDevice for ThinVolumeHandle {
         Ok(bytes_read as usize)
     }
 
+    /// Write, taking the per-volume lock only when the mapping must change.
+    ///
+    /// A steady-state write lands on an extent this volume already owns
+    /// exclusively, which needs no serialisation — holding the volume lock for
+    /// the whole call (as this used to) meant every write to a volume queued
+    /// behind every other, no matter which extent it touched.
+    ///
+    /// Allocation and COW do change the mapping, so those re-check the extent
+    /// under the lock before acting: two writers can both observe "unmapped"
+    /// before either allocates, and without the re-check the second would
+    /// allocate a duplicate slot and discard the first writer's data.
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
-        // Serialize writes per-volume for COW/allocate-on-write correctness
-        let _vol = self.inner.lock().await;
-
         let buf_len = buf.len() as u64;
         let mut bytes_written = 0u64;
         let mut pos = offset;
@@ -530,31 +556,36 @@ impl BlockDevice for ThinVolumeHandle {
 
             // Look up existing extent in GEM
             let location = {
-                let gem = self.gem.lock().await;
+                let gem = self.gem.read().await;
                 gem.lookup(self.id, vext_idx).cloned()
             };
 
             match location {
-                Some(loc) if loc.ref_count > 1 => {
-                    // COW: shared extent, must copy before writing
-                    self.cow_write(vext_idx, off_in_slot, &buf[buf_start..buf_end], &loc).await?;
+                // Exclusively owned: write straight through, no serialisation.
+                Some(loc) if loc.ref_count == 1 => {
+                    self.write_in_place(&loc, off_in_slot, &buf[buf_start..buf_end]).await?;
                 }
-                Some(loc) => {
-                    // Write in place — exclusive ownership
-                    let (device, phys_offset) = {
-                        let reg = self.registry.lock().await;
-                        let slab = reg.get(&loc.slab_id).ok_or_else(|| {
-                            DriveError::Other(anyhow::anyhow!(
-                                "slab {} not found", loc.slab_id.0
-                            ))
-                        })?;
-                        slab.slot_device_and_offset(loc.slot_idx, off_in_slot)?
+                // Shared, or not yet mapped — the mapping is about to change,
+                // so serialise per volume and re-read it under the lock.
+                _ => {
+                    let _vol = self.inner.lock().await;
+                    let fresh = {
+                        let gem = self.gem.read().await;
+                        gem.lookup(self.id, vext_idx).cloned()
                     };
-                    device.write(phys_offset, &buf[buf_start..buf_end]).await?;
-                }
-                None => {
-                    // Allocate on write
-                    self.allocate_and_write(vext_idx, off_in_slot, &buf[buf_start..buf_end]).await?;
+                    match fresh {
+                        Some(loc) if loc.ref_count > 1 => {
+                            self.cow_write(vext_idx, off_in_slot, &buf[buf_start..buf_end], &loc).await?;
+                        }
+                        Some(loc) => {
+                            // Another writer allocated it, or the sharer went
+                            // away, while we waited for the lock.
+                            self.write_in_place(&loc, off_in_slot, &buf[buf_start..buf_end]).await?;
+                        }
+                        None => {
+                            self.allocate_and_write(vext_idx, off_in_slot, &buf[buf_start..buf_end]).await?;
+                        }
+                    }
                 }
             }
 
@@ -568,7 +599,7 @@ impl BlockDevice for ThinVolumeHandle {
     async fn flush(&self) -> DriveResult<()> {
         // Collect unique slab IDs for this volume, then flush their devices
         let slab_ids: Vec<SlabId> = {
-            let gem = self.gem.lock().await;
+            let gem = self.gem.read().await;
             gem.volume_extents(&self.id)
                 .map(|iter| {
                     iter.map(|(_, loc)| loc.slab_id)
@@ -579,7 +610,7 @@ impl BlockDevice for ThinVolumeHandle {
                 .unwrap_or_default()
         };
 
-        let reg = self.registry.lock().await;
+        let reg = self.registry.read().await;
         for slab_id in slab_ids {
             if let Some(slab) = reg.get(&slab_id) {
                 slab.device().flush().await?;
@@ -600,17 +631,17 @@ impl BlockDevice for ThinVolumeHandle {
             // Only discard full slots
             if off_in_slot == 0 && (end - pos) >= self.slot_size {
                 let location = {
-                    let gem = self.gem.lock().await;
+                    let gem = self.gem.read().await;
                     gem.lookup(self.id, vext_idx).cloned()
                 };
 
                 if let Some(loc) = location {
                     {
-                        let mut gem = self.gem.lock().await;
+                        let mut gem = self.gem.write().await;
                         gem.remove(self.id, vext_idx);
                     }
                     {
-                        let mut reg = self.registry.lock().await;
+                        let mut reg = self.registry.write().await;
                         if let Some(slab) = reg.get_mut(&loc.slab_id) {
                             let _ = slab.dec_ref(loc.slot_idx).await;
                         }
@@ -670,8 +701,8 @@ mod tests {
 
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::Mutex::new(registry));
-        let gem = Arc::new(tokio::sync::Mutex::new(GlobalExtentMap::new()));
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
 
         let vol = ThinVolume::new("test-vol".to_string(), 128 * 1024 * 1024, slot_size);
         let handle = Arc::new(ThinVolumeHandle::new(
@@ -742,6 +773,75 @@ mod tests {
         cleanup(&paths);
     }
 
+    /// Concurrent writers to the same unmapped extent must not each allocate
+    /// a slot — the second would leak one and discard the first writer's data.
+    /// The narrowed write lock re-checks the mapping before allocating, and
+    /// this is what pins that.
+    #[tokio::test]
+    async fn concurrent_first_writes_to_one_extent_allocate_once() {
+        let (handle, paths) = setup_test_volume(4096).await;
+
+        let free_before = handle.registry().read().await.total_free_slots();
+
+        // Eight writers race on the same virtual extent.
+        let mut tasks = Vec::new();
+        for i in 0..8u8 {
+            let h = handle.clone();
+            tasks.push(tokio::spawn(async move {
+                h.write(0, &vec![0xB0 + i; 4096]).await
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+
+        assert_eq!(handle.extent_count().await, 1, "exactly one extent mapped");
+        assert_eq!(
+            handle.registry().read().await.total_free_slots(),
+            free_before - 1,
+            "exactly one slot consumed"
+        );
+
+        // Whichever writer won, the extent holds one of their patterns whole.
+        let mut buf = vec![0u8; 4096];
+        handle.read(0, &mut buf).await.unwrap();
+        let first = buf[0];
+        assert!((0xB0..0xB8).contains(&first), "unexpected content {first:#x}");
+        assert!(buf.iter().all(|&b| b == first), "extent must not be torn");
+
+        cleanup(&paths);
+    }
+
+    /// Writes to different extents must proceed concurrently rather than
+    /// queueing behind one another on a volume-wide lock.
+    #[tokio::test]
+    async fn concurrent_writes_to_distinct_extents_all_land() {
+        let (handle, paths) = setup_test_volume(4096).await;
+
+        let mut tasks = Vec::new();
+        for i in 0..16u64 {
+            let h = handle.clone();
+            tasks.push(tokio::spawn(async move {
+                h.write(i * 4096, &vec![(0x40 + i) as u8; 4096]).await
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+
+        assert_eq!(handle.extent_count().await, 16);
+        for i in 0..16u64 {
+            let mut buf = vec![0u8; 4096];
+            handle.read(i * 4096, &mut buf).await.unwrap();
+            assert!(
+                buf.iter().all(|&b| b == (0x40 + i) as u8),
+                "extent {i} content wrong"
+            );
+        }
+
+        cleanup(&paths);
+    }
+
     #[tokio::test]
     async fn flush_works() {
         let (handle, paths) = setup_test_volume(4096).await;
@@ -757,7 +857,7 @@ mod tests {
         let (handle, paths) = setup_test_volume(4096).await;
 
         let free_before = {
-            let reg = handle.registry().lock().await;
+            let reg = handle.registry().read().await;
             reg.total_free_slots()
         };
 
@@ -768,7 +868,7 @@ mod tests {
         assert_eq!(handle.extent_count().await, 4);
         assert_eq!(handle.allocated().await, 4 * 4096);
         {
-            let reg = handle.registry().lock().await;
+            let reg = handle.registry().read().await;
             assert_eq!(reg.total_free_slots(), free_before - 4);
         }
 
@@ -778,7 +878,7 @@ mod tests {
         assert_eq!(handle.extent_count().await, 2);
         assert_eq!(handle.allocated().await, 2 * 4096);
         {
-            let reg = handle.registry().lock().await;
+            let reg = handle.registry().read().await;
             assert_eq!(
                 reg.total_free_slots(),
                 free_before - 2,

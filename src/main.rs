@@ -564,7 +564,13 @@ async fn main() -> anyhow::Result<()> {
         core_count: cli.reactor_cores,
         pin_cores: cfg!(target_os = "linux"),
     };
-    let reactor = ReactorPool::new(&reactor_config);
+    // One pool shared by both targets, kept alive for the process lifetime —
+    // the accept loops run in spawned tasks and dispatch onto it.
+    let reactor = Arc::new(ReactorPool::new(&reactor_config));
+    tracing::info!(
+        "Target connections dispatch across {} reactor core(s)",
+        reactor.core_count()
+    );
 
     // Start iSCSI target (always, even with no initial device — LUNs can be added via REST)
     #[cfg(feature = "iscsi")]
@@ -636,10 +642,11 @@ async fn main() -> anyhow::Result<()> {
         // LUNs above are declarative and re-added each boot; these are not.
         mgmt::api::luns::restore_luns(&state).await;
 
+        let reactor_for_iscsi = reactor.clone();
         tokio::spawn({
             let iscsi = iscsi.clone();
             async move {
-                if let Err(e) = iscsi.run(&ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false })).await {
+                if let Err(e) = iscsi.run(&reactor_for_iscsi).await {
                     tracing::error!("iSCSI target error: {e}");
                 }
             }
@@ -673,10 +680,11 @@ async fn main() -> anyhow::Result<()> {
                 let mut guard = state.nvmeof_target.write().await;
                 *guard = Some(nvmeof.clone());
             }
+            let reactor_for_nvmeof = reactor.clone();
             tokio::spawn({
                 let nvmeof = nvmeof.clone();
                 async move {
-                    if let Err(e) = nvmeof.run(&ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false })).await {
+                    if let Err(e) = nvmeof.run(&reactor_for_nvmeof).await {
                         tracing::error!("NVMe-oF target error: {e}");
                     }
                 }
@@ -1071,7 +1079,7 @@ async fn handle_boot_local(
     if let Some(disk) = local_disk {
         let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
         let source_slabs: Vec<_> = {
-            let reg = mgr.registry().lock().await;
+            let reg = mgr.registry().read().await;
             reg.iter().map(|(id, _)| *id).collect()
         };
         let dest_dev: Arc<dyn BlockDevice> =
@@ -1080,7 +1088,7 @@ async fn handle_boot_local(
             .await
             .map_err(|e| anyhow::anyhow!("format local disk {disk}: {e}"))?;
         let dest_id = dest_slab.slab_id();
-        mgr.registry().lock().await.add(dest_slab);
+        mgr.registry().write().await.add(dest_slab);
         println!("Flow-over: migrating to local slab {dest_id} on {disk} in background");
 
         let gem_arc = mgr.gem().clone();
@@ -1097,8 +1105,8 @@ async fn handle_boot_local(
                     }
                     // One extent per lock cycle: ublk I/O interleaves between
                     // iterations instead of stalling for the whole migration.
-                    let mut gem = gem_arc.lock().await;
-                    let mut reg = reg_arc.lock().await;
+                    let mut gem = gem_arc.write().await;
+                    let mut reg = reg_arc.write().await;
                     let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next()
                     else {
                         break;

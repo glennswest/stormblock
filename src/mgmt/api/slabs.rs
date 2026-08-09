@@ -64,7 +64,7 @@ fn parse_tier(s: &str) -> Option<StorageTier> {
 
 async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "slabs", "method" => "list").increment(1);
-    let reg = state.slab_registry.lock().await;
+    let reg = state.slab_registry.read().await;
     let items: Vec<SlabResponse> = reg.iter()
         .map(|(id, slab)| {
             let slot_size = slab.slot_size();
@@ -100,7 +100,7 @@ async fn get_slab(
     };
     let slab_id = SlabId(uuid);
 
-    let reg = state.slab_registry.lock().await;
+    let reg = state.slab_registry.read().await;
     match reg.get(&slab_id) {
         Some(slab) => {
             let slot_size = slab.slot_size();
@@ -161,7 +161,7 @@ async fn format_slab(
                 free_bytes: free * slot_size,
                 free_bytes_human: human_size(free * slot_size),
             };
-            state.slab_registry.lock().await.add(slab);
+            state.slab_registry.write().await.add(slab);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
         Err(e) => ApiError::internal(format!("failed to format slab: {e}")),
@@ -179,7 +179,7 @@ async fn delete_slab(
     };
     let slab_id = SlabId(uuid);
 
-    let mut reg = state.slab_registry.lock().await;
+    let mut reg = state.slab_registry.write().await;
     match reg.get(&slab_id) {
         Some(slab) => {
             if slab.allocated_slots() > 0 {
@@ -203,7 +203,7 @@ async fn list_slots(
     };
     let slab_id = SlabId(uuid);
 
-    let reg = state.slab_registry.lock().await;
+    let reg = state.slab_registry.read().await;
     match reg.get(&slab_id) {
         Some(slab) => {
             let mut items = Vec::new();
