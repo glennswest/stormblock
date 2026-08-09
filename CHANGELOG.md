@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [v7.1.0] — 2026-08-09
+
+### 2026-08-09
+- **perf:** `V1State::save()` rewrote the entire control-plane state as pretty JSON on every mutation, making each operation O(total volumes) — measured at ~0.017 ms per existing volume, extrapolating to ~17 ms per clone at 1000 volumes and ~85 ms at 5000, which is the scale the registry model targets (#32). It now diffs against a cached copy of what is on disk and appends only the changed entries, rewriting the full snapshot once every 512 records. Call sites are unchanged.
+- **perf:** clone latency is now flat in the number of existing volumes (0.64 / 0.62 / 0.69 ms at ~21 / ~42 / ~63 volumes, previously 0.81 / 1.09 / 1.51), and clone-and-attach p50 fell from 3.14 ms to **1.46 ms** — inside the 1–2 ms budget #4 asks for. Every operation roughly halved: clone 1.65 → 0.80 ms, attach 1.48 → 0.67 ms, delete 1.52 → 0.68 ms.
+- **note:** durability is deliberately unchanged — the journal append is flushed and synced before `save()` returns, exactly as the full rewrite was. The alternative debounce approach would have traded away a property the CSI contract depends on. An append failure falls back to a full rewrite rather than dropping the change. Records are whole-entity upserts, which makes replay idempotent and compaction crash-safe: the snapshot is written first and the journal dropped second, so a crash in between re-applies entries the snapshot already holds. A torn final record stops replay and keeps everything before it.
+- **test:** `ci-clone-attach-bench.sh` — clone/attach/reset/delete p50 and p99, plus latency against volume count.
+
+
 ## [v7.0.0] — 2026-08-09
 
 ### Breaking
