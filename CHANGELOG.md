@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [v6.5.1] — 2026-08-09
+
+### 2026-08-09
+Both fixes below were found by pointing a real `open-iscsi` initiator at the
+target for the first time (Fedora 43, kernel 7.1.4). Neither could have been
+caught by the existing tests: our own initiator issues one command at a time,
+and the external iSCSI suite exercises *our initiator* against LIO rather than
+our target.
+- **fix:** iSCSI discovery never worked — the target echoed the declarative `SessionType` key back in the login response, and open-iscsi aborts the login on an unexpected key (`couldn't recognize text SessionType=Discovery`). `SessionType` is initiator-to-target only (RFC 7143 §12.21); it is now recorded as `SessionParams::discovery_session` instead of reflected. RouterOS never hit this because it is configured with an explicit IQN and skips discovery.
+- **fix:** any iSCSI write larger than the immediate-data limit could kill the session. `receive_data_via_r2t` assumed the next PDU after an R2T belonged to that transfer; an initiator with several commands in flight interleaves them, so another command arriving mid-write was treated as a protocol error and the connection was dropped (`expected Data-Out PDU`, then a reconnect every 2s). Interleaved PDUs are now parked in a queue drained by the full-feature loop — mirroring what the NVMe-oF side already did for H2CData — and NOP-Out is answered inline so a long write cannot delay a keepalive past its timeout.
+- **test:** `ci-iscsi-reclaim.sh` — end-to-end proof for #25 over a real initiator: ext4 → fill → delete → `fstrim`, watching the engine's own slab accounting. Verified on Fedora 43: `discard_max_bytes` is non-zero (so VPD 0xB2 advertising works), and allocation went 0 → 360 MB → 56 MB with 304 MB reclaimed.
+- **test:** `ci-nvmeof-hotadd.sh` — Linux suite plus live hot-add against a real kernel `nvme_tcp` initiator; verified a hot-added namespace appears on an already-connected controller with no reconnect, and is withdrawn on detach.
+
 ## [v6.5.0] — 2026-08-08
 
 ### 2026-08-08 (reset primitive)
