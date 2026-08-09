@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [v7.0.0] — 2026-08-09
+
+### Breaking
+- **BREAKING:** the Global Extent Map and Slab Registry moved from `Mutex` to `RwLock`, changing public signatures: `AppState::new`, the `AppState.gem` / `AppState.slab_registry` fields, `VolumeManager::gem()` / `registry()`, and `ThinVolumeHandle::new` now take `Arc<tokio::sync::RwLock<_>>`. Callers holding these types must switch `.lock().await` to `.read().await` or `.write().await`. Binary consumers are unaffected; only code linking stormblock as a library needs updating.
+
+### 2026-08-09
+- **perf:** GEM and SlabRegistry were each behind a `Mutex` shared by *every* volume, so an extent lookup on one volume blocked I/O on all of them. Both are now `RwLock`, so the read-dominated hot path (extent lookup, slab resolution — done per 4 KiB chunk) runs concurrently.
+- **perf:** `ThinVolumeHandle::write` held the per-volume lock for the whole call, serialising every write to a volume regardless of which extent it touched. The lock is now taken only when the mapping actually changes (allocation or COW), and those paths re-read the extent under it — two writers can both observe "unmapped" before either allocates, and without that re-check the second would allocate a duplicate slot and discard the first writer's data. Steady-state writes to an exclusively-owned extent take no volume lock at all.
+- **fix:** `--reactor-cores` did nothing. Both targets accepted a `&ReactorPool` and ignored it (the parameter was named `_reactor`), while `main` built a pool from the flag, never referenced it, and dropped it at shutdown — so every connection ran on the ambient runtime and the log showed a configured pool immediately followed by a throwaway single-core one. Connections now dispatch onto one shared pool, kept alive for the process lifetime. Verified on a 4-core host: `Reactor pool started: 4 cores, pin=true` / `Target connections dispatch across 4 reactor core(s)`, with the throwaway pool gone.
+- **test:** concurrent first-writes to a single extent allocate exactly one slot and leave it untorn (this fails without the re-check), and concurrent writes to distinct extents all land correctly.
+
+
 ## [v6.6.0] — 2026-08-09
 
 ### 2026-08-09
