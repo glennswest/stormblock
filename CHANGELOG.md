@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [v6.6.0] — 2026-08-09
+
+### 2026-08-09
+- **fix:** `FileDevice::discard` was a no-op, so freeing a slot reclaimed it inside the slab while the backing store kept every byte it had ever written — measured live, allocation went 72 → 116 MB and never came down (#28). Regular files are now punched with `fallocate(PUNCH_HOLE|KEEP_SIZE)` (KEEP_SIZE preserves the apparent length so slab offsets stay valid) and block devices get `BLKDISCARD`. A device that cannot discard is treated as success rather than an error — the range is still logically free.
+- **fix:** both reclaim routes now reach the device: `Slab::free()` and `dec_ref_batch()` discard the freed slots, coalescing contiguous runs into one call. Fixing only one would have left dropped clones leaking on the other. (#28)
+- **fix:** NVMe-oF Set Features acked without filling completion DW0, so the host read a grant of zero — 0-based for "one queue" — producing `creating 1 I/O queues` and one core's worth of completions for the whole namespace. FID 0x07 now grants `min(requested, max_io_queues - 1)` and returns `(ncqa << 16) | nsqa`; Get Features reports the maximum. Verified live: a 4-core host went from `creating 1 I/O queues` to `creating 4 I/O queues`. (#27)
+- **feat:** `GET /api/v1/sessions` — active iSCSI sessions with TSIH, ISID, initiator/target name, discovery flag and connection count, plus `stormblock_iscsi_sessions_total` / `_active` gauges. `active` excludes discovery sessions, which never address a LUN, so it is the number to check before withdrawing an export; counting them would make an idle target look busy. Consumers previously had to guess with a drain timer and could pull a LUN out from under a live mount. (#29)
+- **fix:** the full-feature connection is now registered on its session, so the reported connection count reflects reality instead of always being zero (#29)
+
+
 ## [v6.5.1] — 2026-08-09
 
 ### 2026-08-09
