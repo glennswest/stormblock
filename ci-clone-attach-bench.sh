@@ -46,13 +46,12 @@ echo "engine: $MGMT   iterations: $ITERS   $(date)"
 
 api "http://$MGMT/api/v1/drives" >/dev/null 2>&1 || { echo "engine not reachable at $MGMT"; exit 2; }
 
-# ── Clone latency vs golden size ────────────────────────────────────────────
-# A clone shares extents, so its cost should track the *number of extents in
-# the source*, not the requested volume size. Writing more data into the
-# golden first is what actually varies the work.
+# ── Does per-op latency depend on how many volumes already exist? ───────────
 
-hdr "Clone latency vs golden image size"
-printf "  %-14s %s\n" "golden data" "clone latency"
+hdr "Clone latency as the volume count grows"
+echo "  A clone is an extent-map operation, so it should not care how many"
+echo "  other volumes exist. If it does, something is O(total volumes)."
+printf "  %-14s %s\n" "volumes" "clone latency"
 
 for MB in 8 32 128; do
     G=$(api -X POST "http://$MGMT/v1/volumes" -H 'Content-Type: application/json' \
@@ -60,20 +59,14 @@ for MB in 8 32 128; do
     GID=$(echo "$G" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
     [ -z "$GID" ] && { echo "  golden create failed: $G"; continue; }
 
-    # Fill the golden so it actually owns extents to share.
-    api -X POST "http://$MGMT/v1/volumes/$GID/attach" -H 'Content-Type: application/json' \
-        -d "{\"node\":\"$NODE\",\"mode\":\"read_write\"}" >/dev/null
-    api -X POST "http://$MGMT/v1/volumes/$GID/detach" -H 'Content-Type: application/json' \
-        -d "{\"node\":\"$NODE\"}" >/dev/null
-
     SAMPLES=""
     for i in $(seq 1 20); do
         T=$(timed -X POST "http://$MGMT/v1/volumes" -H 'Content-Type: application/json' \
             -d "{\"name\":\"c-$MB-$i\",\"size_bytes\":$((512*1024*1024)),\"replica_tier\":{\"slaves\":0},\"source\":{\"kind\":\"volume\",\"id\":\"$GID\"}}")
         SAMPLES="$SAMPLES$T\n"
-        CID=$(api "http://$MGMT/v1/volumes" 2>/dev/null | tr ',' '\n' | grep -o "\"id\":\"[^\"]*\"" | tail -1 | cut -d'"' -f4)
     done
-    printf "  %-14s " "${MB} MB"
+    NVOL=$(api "http://$MGMT/v1/volumes" | grep -o '"id"' | wc -l | tr -d ' ')
+    printf "  %-14s " "~$NVOL total"
     printf "$SAMPLES" | grep -v '^$' | stats
 done
 
@@ -89,24 +82,21 @@ GID=$(echo "$GOLD" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
 CLONE_T=""; ATTACH_T=""; RESET_T=""; DELETE_T=""; E2E_T=""
 
 for i in $(seq 1 "$ITERS"); do
-    S=$(date +%s%N)
-
-    T=$(timed -X POST "http://$MGMT/v1/volumes" -H 'Content-Type: application/json' \
+    # Body and timing from one request — the create response carries the id,
+    # so no lookup round trip lands inside the measured window.
+    R=$(curl -s -m 30 -w '\n%{time_total}' -X POST "http://$MGMT/v1/volumes" \
+        -H 'Content-Type: application/json' \
         -d "{\"name\":\"bench-$i\",\"size_bytes\":$((256*1024*1024)),\"replica_tier\":{\"slaves\":0},\"source\":{\"kind\":\"volume\",\"id\":\"$GID\"}}")
-    CLONE_T="$CLONE_T$T\n"
-
-    VID=$(api "http://$MGMT/v1/volumes/bench-$i" 2>/dev/null | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
-    if [ -z "$VID" ]; then
-        VID=$(api "http://$MGMT/v1/volumes" | tr '}' '\n' | grep "\"name\":\"bench-$i\"" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
-    fi
+    CT=$(printf '%s' "$R" | tail -1 | awk '{printf "%.3f", $1*1000}')
+    VID=$(printf '%s' "$R" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
+    CLONE_T="$CLONE_T$CT\n"
     [ -z "$VID" ] && continue
 
     T=$(timed -X POST "http://$MGMT/v1/volumes/$VID/attach" -H 'Content-Type: application/json' \
         -d "{\"node\":\"$NODE\",\"mode\":\"read_write\"}")
     ATTACH_T="$ATTACH_T$T\n"
 
-    E=$(date +%s%N)
-    E2E_T="$E2E_T$(awk -v a="$S" -v b="$E" 'BEGIN{printf "%.3f", (b-a)/1000000}')\n"
+    E2E_T="$E2E_T$(awk -v a="$CT" -v b="$T" 'BEGIN{printf "%.3f", a+b}')\n"
 
     api -X POST "http://$MGMT/v1/volumes/$VID/detach" -H 'Content-Type: application/json' \
         -d "{\"node\":\"$NODE\"}" >/dev/null
