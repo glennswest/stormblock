@@ -15,6 +15,12 @@ pub const ADMIN_GET_FEATURES: u8 = 0x0A;
 pub const ADMIN_ASYNC_EVENT_REQ: u8 = 0x0C;
 pub const ADMIN_KEEP_ALIVE: u8 = 0x18;
 
+/// Feature identifier: Number of Queues (NVMe 1.4 §5.21.1.7).
+///
+/// The host asks how many I/O queue pairs it may create; the controller
+/// answers in completion DW0. Both the request and the reply are 0-based.
+pub const FEAT_NUM_QUEUES: u8 = 0x07;
+
 /// Identify CNS values.
 pub const CNS_NAMESPACE: u8 = 0x00;
 pub const CNS_CONTROLLER: u8 = 0x01;

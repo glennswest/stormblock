@@ -463,8 +463,53 @@ impl Slab {
 
         self.persist_slot(slot_idx).await?;
         self.persist_header().await?;
+        self.discard_slots(&[slot_idx]).await;
 
         Ok(())
+    }
+
+    /// Hand freed slots back to the underlying device.
+    ///
+    /// Marking a slot free only reclaims it *within* the slab; without this
+    /// the backing store keeps every byte it ever wrote, so a
+    /// clone-per-container workload grows monotonically however much is
+    /// deleted. Contiguous slots are coalesced into one call, which is the
+    /// common case when a clone's extents are released together.
+    ///
+    /// Best-effort: a device that cannot discard is not a failure, the slot is
+    /// still free.
+    async fn discard_slots(&self, slot_indices: &[u32]) {
+        if slot_indices.is_empty() {
+            return;
+        }
+        let slot_size = self.header.slot_size;
+        let mut sorted: Vec<u32> = slot_indices.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+
+        let mut run_start = sorted[0];
+        let mut run_end = sorted[0]; // inclusive
+        for &idx in &sorted[1..] {
+            if idx == run_end + 1 {
+                run_end = idx;
+            } else {
+                self.discard_slot_run(run_start, run_end, slot_size).await;
+                run_start = idx;
+                run_end = idx;
+            }
+        }
+        self.discard_slot_run(run_start, run_end, slot_size).await;
+    }
+
+    async fn discard_slot_run(&self, first: u32, last: u32, slot_size: u64) {
+        let offset = self.header.data_offset + (first as u64) * slot_size;
+        let len = ((last - first) as u64 + 1) * slot_size;
+        if let Err(e) = self.device.discard(offset, len).await {
+            tracing::debug!(
+                "slab {}: discard of slots {first}..={last} failed: {e}",
+                self.id.0
+            );
+        }
     }
 
     /// Read data from a slot at the given offset within the slot.
@@ -571,6 +616,7 @@ impl Slab {
         }
 
         let mut freed = 0usize;
+        let mut freed_slots: Vec<u32> = Vec::new();
         for &slot_idx in slot_indices {
             let idx = slot_idx as usize;
             self.slots[idx].ref_count -= 1;
@@ -588,12 +634,17 @@ impl Slab {
             self.slots[idx] = Slot::free();
             self.free_bitmap.set(idx, true);
             self.free_count += 1;
+            freed_slots.push(slot_idx);
             freed += 1;
         }
 
         self.persist_slots(slot_indices).await?;
         if freed > 0 {
             self.persist_header().await?;
+            // Give the space back to the device, not just to the slab —
+            // otherwise reclaim happens on the single-slot route only and a
+            // dropped clone still leaks its backing store.
+            self.discard_slots(&freed_slots).await;
         }
         Ok(freed)
     }
@@ -1045,6 +1096,85 @@ mod tests {
         // Per-slot would have been 256 writes and 256 reads.
         assert!(w < slots.len() / 10);
 
+        cleanup(&path);
+    }
+
+    /// Freeing a slot must hand the space back to the *device*, not just mark
+    /// it free inside the slab. Without this a clone-per-container workload
+    /// grows forever: allocation was measured going 72 -> 116 MB live and
+    /// never coming down (#28).
+    ///
+    /// Measured by allocated blocks (`du`), not apparent size — hole punching
+    /// deliberately keeps the length so slab offsets stay valid.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn freeing_slots_punches_holes_in_the_backing_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        let mut slab = Slab::format(dev.clone(), 1024 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let blocks = |p: &str| std::fs::metadata(p).map(|m| m.blocks()).unwrap_or(0);
+        let baseline = blocks(&path);
+
+        // Fill 16 slots with real data so they occupy blocks on disk.
+        let vol = VolumeId::new();
+        let mut slots = Vec::new();
+        let payload = vec![0xA5u8; 1024 * 1024];
+        for vext in 0..16u64 {
+            let s = slab.allocate(vol, vext).await.unwrap();
+            slab.write_slot(s, 0, &payload).await.unwrap();
+            slots.push(s);
+        }
+        slab.device().flush().await.unwrap();
+        let filled = blocks(&path);
+        assert!(
+            filled > baseline,
+            "writing should allocate blocks: {baseline} -> {filled}"
+        );
+
+        // Release them through the batched path (what dropping a clone uses).
+        let freed = slab.dec_ref_batch(&slots).await.unwrap();
+        assert_eq!(freed, slots.len());
+        slab.device().flush().await.unwrap();
+
+        let after = blocks(&path);
+        assert!(
+            after < filled,
+            "freed slots must return blocks to the filesystem: {filled} -> {after}"
+        );
+
+        // The file keeps its length, so slab offsets remain valid.
+        let len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(len, 64 * 1024 * 1024, "punching must not truncate the slab");
+
+        cleanup(&path);
+    }
+
+    /// The single-slot route must reclaim too, not only the batched one.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn single_slot_free_also_punches() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (dev, path) = create_slab_device(32 * 1024 * 1024).await;
+        let mut slab = Slab::format(dev.clone(), 1024 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let vol = VolumeId::new();
+        let s = slab.allocate(vol, 0).await.unwrap();
+        slab.write_slot(s, 0, &vec![0x5Au8; 1024 * 1024]).await.unwrap();
+        slab.device().flush().await.unwrap();
+        let filled = std::fs::metadata(&path).unwrap().blocks();
+
+        slab.free(s).await.unwrap();
+        slab.device().flush().await.unwrap();
+        let after = std::fs::metadata(&path).unwrap().blocks();
+
+        assert!(after < filled, "free() must discard: {filled} -> {after}");
         cleanup(&path);
     }
 

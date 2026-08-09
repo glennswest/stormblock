@@ -102,6 +102,37 @@ impl IscsiTarget {
         self.luns.read().await.len()
     }
 
+    /// This target's IQN.
+    pub fn target_name(&self) -> &str {
+        &self.config.target_name
+    }
+
+    /// Active sessions on this target.
+    ///
+    /// A consumer withdrawing an export needs to know whether anyone is still
+    /// attached; with one IQN per export this count is exactly that signal,
+    /// and it replaces guessing with a drain timer (#29).
+    pub async fn sessions(&self) -> Vec<session::SessionInfo> {
+        self.sessions.snapshot().await
+    }
+
+    /// Number of active sessions, including discovery sessions.
+    pub async fn session_count(&self) -> usize {
+        self.sessions.session_count().await
+    }
+
+    /// Sessions actually holding the target open — discovery sessions excluded,
+    /// since they never address a LUN. This is the number to check before
+    /// withdrawing an export.
+    pub async fn active_session_count(&self) -> usize {
+        self.sessions
+            .snapshot()
+            .await
+            .iter()
+            .filter(|s| !s.discovery)
+            .count()
+    }
+
     /// Start accepting connections. Runs until the listener is dropped.
     pub async fn run(self: Arc<Self>, reactor: &ReactorPool) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.config.listen_addr).await?;

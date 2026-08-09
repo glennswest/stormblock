@@ -22,6 +22,11 @@ pub struct FileDevice {
     file: Mutex<File>,
     id: DeviceId,
     capacity: u64,
+    /// True when the path is a block device rather than a regular file —
+    /// discard then means BLKDISCARD, not hole punching. Only consulted on
+    /// Linux, where discard is actually implemented.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    is_block_device: bool,
     _tag_counter: AtomicU64,
 }
 
@@ -40,6 +45,17 @@ impl FileDevice {
             .map_err(DriveError::Io)?;
 
         let metadata = file.metadata().await.map_err(DriveError::Io)?;
+        let is_block_device = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                metadata.file_type().is_block_device()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        };
         let capacity = metadata.len();
 
         let id = DeviceId {
@@ -53,6 +69,7 @@ impl FileDevice {
             file: Mutex::new(file),
             id,
             capacity,
+            is_block_device,
             _tag_counter: AtomicU64::new(0),
         })
     }
@@ -113,9 +130,78 @@ impl BlockDevice for FileDevice {
         Ok(())
     }
 
-    async fn discard(&self, _offset: u64, _len: u64) -> DriveResult<()> {
-        // No-op for file devices. Could use fallocate(PUNCH_HOLE) on Linux.
-        Ok(())
+    /// Release the backing store for a range.
+    ///
+    /// Without this the slab can free a slot while the host file keeps every
+    /// byte it ever touched, so a clone-per-container workload grows forever
+    /// no matter how much is deleted inside the guest.
+    ///
+    /// Regular files are punched with `FALLOC_FL_PUNCH_HOLE`; `KEEP_SIZE`
+    /// keeps the apparent length so slab offsets stay valid and only the
+    /// allocated blocks go back. Block devices get `BLKDISCARD` instead,
+    /// since hole punching is meaningless there.
+    async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+
+            let fd = {
+                let file = self.file.lock().await;
+                file.as_raw_fd()
+            };
+            let is_block = self.is_block_device;
+
+            // errno is thread-local, so it has to be read on the blocking
+            // thread that made the call, not after the await.
+            let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                let rc = if is_block {
+                    let range: [u64; 2] = [offset, len];
+                    // BLKDISCARD = _IO(0x12, 119)
+                    unsafe { libc::ioctl(fd, 0x1277, &range) }
+                } else {
+                    unsafe {
+                        libc::fallocate(
+                            fd,
+                            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                            offset as libc::off_t,
+                            len as libc::off_t,
+                        )
+                    }
+                };
+                if rc != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            })
+            .await
+            .map_err(|e| DriveError::Other(anyhow::anyhow!("discard task failed: {e}")))?;
+
+            if let Err(e) = result {
+                // A filesystem or device that cannot discard is not a failure —
+                // the range is still logically free, it just keeps its blocks.
+                return match e.raw_os_error() {
+                    Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS) | Some(libc::ENOTTY) => {
+                        tracing::debug!("discard unsupported on {}: {e}", self.id.path);
+                        Ok(())
+                    }
+                    _ => Err(DriveError::Io(e)),
+                };
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            // No portable hole-punch; the range stays allocated but is
+            // logically free, which is correct if wasteful.
+            let _ = (offset, len);
+            Ok(())
+        }
     }
 
     fn smart_status(&self) -> DriveResult<SmartData> {

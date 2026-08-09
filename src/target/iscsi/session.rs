@@ -88,6 +88,19 @@ impl ConnectionState {
     }
 }
 
+/// A serialisable view of one active session, for the management API.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionInfo {
+    pub tsih: Tsih,
+    /// Initiator session ID, hex — identifies the initiator across reconnects.
+    pub isid: String,
+    pub initiator_name: String,
+    pub target_name: String,
+    /// A discovery session only does SendTargets; it never holds a LUN open.
+    pub discovery: bool,
+    pub connections: usize,
+}
+
 /// An active iSCSI session (may have multiple connections per RFC 7143 §7).
 pub struct Session {
     pub tsih: Tsih,
@@ -168,11 +181,77 @@ impl SessionRegistry {
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
     }
+
+    /// Point-in-time view of every active session.
+    ///
+    /// Consumers need this to know when a LUN is safe to withdraw: without it
+    /// a teardown has to guess with a drain timer and can pull an export out
+    /// from under a live mount.
+    pub async fn snapshot(&self) -> Vec<SessionInfo> {
+        let sessions: Vec<Arc<Session>> =
+            self.sessions.read().await.values().cloned().collect();
+
+        let mut out = Vec::with_capacity(sessions.len());
+        for s in sessions {
+            out.push(SessionInfo {
+                tsih: s.tsih,
+                isid: format!(
+                    "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    s.isid[0], s.isid[1], s.isid[2], s.isid[3], s.isid[4], s.isid[5]
+                ),
+                initiator_name: s.params.initiator_name.clone(),
+                target_name: s.params.target_name.clone(),
+                discovery: s.params.discovery_session,
+                connections: s.connection_count().await,
+            });
+        }
+        out.sort_by_key(|s| s.tsih);
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Consumers need to distinguish sessions that hold a LUN open from
+    /// discovery sessions, which never address one — withdrawing an export on
+    /// a discovery-only count would pull it from under a live mount (#29).
+    #[tokio::test]
+    async fn snapshot_reports_sessions_and_separates_discovery() {
+        let registry = SessionRegistry::new();
+        assert!(registry.snapshot().await.is_empty());
+
+        let normal = SessionParams {
+            initiator_name: "iqn.1994-05.com.redhat:host1".into(),
+            target_name: "iqn.2024.io.stormblock:vol1".into(),
+            ..Default::default()
+        };
+        let disc = SessionParams {
+            initiator_name: "iqn.1994-05.com.redhat:host1".into(),
+            discovery_session: true,
+            ..Default::default()
+        };
+        let s1 = registry.create_session([0x40, 0, 0, 0, 0, 1], normal).await;
+        registry.create_session([0x40, 0, 0, 0, 0, 2], disc).await;
+        s1.add_connection(0).await;
+
+        let snap = registry.snapshot().await;
+        assert_eq!(snap.len(), 2);
+        assert_eq!(registry.session_count().await, 2);
+
+        let active: Vec<_> = snap.iter().filter(|s| !s.discovery).collect();
+        assert_eq!(active.len(), 1, "only the normal session holds the target");
+        assert_eq!(active[0].initiator_name, "iqn.1994-05.com.redhat:host1");
+        assert_eq!(active[0].target_name, "iqn.2024.io.stormblock:vol1");
+        assert_eq!(active[0].connections, 1);
+        assert_eq!(active[0].isid.len(), 12, "ISID rendered as hex");
+
+        // Once it logs out, nothing is holding the export open.
+        registry.remove_session(s1.tsih).await;
+        let snap = registry.snapshot().await;
+        assert_eq!(snap.iter().filter(|s| !s.discovery).count(), 0);
+    }
 
     #[tokio::test]
     async fn session_lifecycle() {

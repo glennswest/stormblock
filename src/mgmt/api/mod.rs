@@ -8,6 +8,8 @@ pub mod slabs;
 pub mod v1;
 #[cfg(feature = "iscsi")]
 pub mod luns;
+#[cfg(feature = "iscsi")]
+pub mod sessions;
 #[cfg(feature = "cluster")]
 pub mod cluster;
 
@@ -36,6 +38,9 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     #[cfg(feature = "iscsi")]
     let r = r.nest("/api/v1/luns", luns::router(state.clone()));
+
+    #[cfg(feature = "iscsi")]
+    let r = r.nest("/api/v1/sessions", sessions::router(state.clone()));
 
     #[cfg(feature = "cluster")]
     let r = r.merge(cluster::router(state.clone()));

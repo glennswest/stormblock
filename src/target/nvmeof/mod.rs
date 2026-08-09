@@ -609,8 +609,40 @@ impl NvmeofTarget {
                 Ok(())
             }
             admin::ADMIN_SET_FEATURES | admin::ADMIN_GET_FEATURES => {
-                // Minimal: just ack
-                let cqe = NvmeCqe::success(cid, 0, 0);
+                let fid = (sqe.cdw10() & 0xFF) as u8;
+                let mut cqe = NvmeCqe::success(cid, 0, 0);
+
+                if fid == admin::FEAT_NUM_QUEUES {
+                    // The controller reports how many queues it granted in
+                    // DW0, 0-based, as (NCQA << 16) | NSQA. Leaving DW0 at
+                    // zero — as the old blanket ack did — tells the host it
+                    // gets exactly one I/O queue, which is what produced
+                    // "creating 1 I/O queues" and capped throughput at a
+                    // single core's worth of completions.
+                    let (nsqr, ncqr) = if opcode == admin::ADMIN_SET_FEATURES {
+                        // Requested counts are 0-based in CDW11.
+                        (
+                            (sqe.cdw11() & 0xFFFF) as u16,
+                            ((sqe.cdw11() >> 16) & 0xFFFF) as u16,
+                        )
+                    } else {
+                        // Get Features: report the maximum we would grant.
+                        (u16::MAX, u16::MAX)
+                    };
+
+                    // max_io_queues counts queues; the wire value is 0-based,
+                    // so the largest grantable index is one less.
+                    let cap = self.config.max_io_queues.saturating_sub(1);
+                    let granted_sq = nsqr.min(cap);
+                    let granted_cq = ncqr.min(cap);
+                    cqe.set_dw0(((granted_cq as u32) << 16) | granted_sq as u32);
+
+                    tracing::debug!(
+                        "Number of Queues: requested {}sq/{}cq, granted {}sq/{}cq (0-based)",
+                        nsqr, ncqr, granted_sq, granted_cq
+                    );
+                }
+
                 pdu::write_capsule_resp(writer, &cqe, hdgst).await
             }
             admin::ADMIN_ASYNC_EVENT_REQ => {
@@ -746,6 +778,39 @@ mod tests {
             .await
             .unwrap();
         (Arc::new(dev), path_str)
+    }
+
+    /// Set Features (Number of Queues) must report the grant in DW0. Leaving
+    /// it zero tells the host it gets exactly one I/O queue, which is what
+    /// produced "creating 1 I/O queues" and capped throughput at one core
+    /// of completions (#27).
+    #[test]
+    fn num_queues_grant_encoding() {
+        // Wire values are 0-based: 0 means one queue.
+        let cap: u16 = 64u16.saturating_sub(1);
+
+        // A modest request is granted in full.
+        let (nsqr, ncqr) = (7u16, 7u16);
+        let dw0 = ((ncqr.min(cap) as u32) << 16) | nsqr.min(cap) as u32;
+        assert_eq!(dw0 & 0xFFFF, 7, "8 submission queues granted");
+        assert_eq!(dw0 >> 16, 7, "8 completion queues granted");
+
+        // A request beyond our capacity is clamped, not refused.
+        let (nsqr, ncqr) = (1000u16, 1000u16);
+        let dw0 = ((ncqr.min(cap) as u32) << 16) | nsqr.min(cap) as u32;
+        assert_eq!(dw0 & 0xFFFF, cap as u32);
+        assert_eq!(dw0 >> 16, cap as u32);
+
+        // The old behaviour left DW0 at zero, which decodes as one queue —
+        // hence "creating 1 I/O queues" on the host.
+        let old_dw0: u32 = 0;
+        assert_eq!((old_dw0 & 0xFFFF) + 1, 1, "zero DW0 means a single I/O queue");
+    }
+
+    #[test]
+    fn num_queues_feature_id() {
+        // Guards against the FID drifting away from the handler's match.
+        assert_eq!(admin::FEAT_NUM_QUEUES, 0x07);
     }
 
     #[tokio::test]
