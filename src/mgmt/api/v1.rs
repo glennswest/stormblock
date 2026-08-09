@@ -278,7 +278,7 @@ type V1Result<T> = Result<Json<T>, V1Error>;
 
 /// One /v1 volume: the wire object plus its local engine binding (the thin
 /// volume backing it on this node, when this node holds the master).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VolumeRec {
     pub vol: Volume,
     pub local_id: Option<Uuid>,
@@ -288,7 +288,7 @@ pub struct VolumeRec {
     pub source_local: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotRec {
     pub snap: Snapshot,
     pub local_id: Option<Uuid>,
@@ -320,6 +320,67 @@ pub struct V1State {
     pub local_topology: BTreeMap<String, String>,
     #[serde(skip)]
     persist_path: Option<PathBuf>,
+    /// What the on-disk state currently contains, so `save` can journal only
+    /// the entries that actually changed. Boxed to keep `V1State` small.
+    #[serde(skip)]
+    last_persisted: Box<PersistedSnapshot>,
+    /// Records appended since the last full snapshot, used to decide when to
+    /// compact.
+    #[serde(skip)]
+    journal_len: usize,
+}
+
+/// The persisted subset of `V1State`, kept as the baseline for diffing.
+#[derive(Debug, Default, Clone)]
+struct PersistedSnapshot {
+    volumes: HashMap<String, VolumeRec>,
+    snapshots: HashMap<String, SnapshotRec>,
+    group_snapshots: HashMap<String, GroupSnapshot>,
+    dual_attach: HashMap<String, DualAttachWindow>,
+    attachments: HashMap<String, Vec<String>>,
+    nvme_nsids: HashMap<String, u32>,
+    nodes: BTreeMap<String, NodeCapacity>,
+}
+
+
+/// One persisted change.
+///
+/// Whole-entity upserts rather than field-level deltas: the entities are
+/// small, and it makes replay trivially idempotent — which is what lets
+/// compaction be crash-safe (see `compact`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Delta {
+    /// `None` means the entry was removed.
+    Volume(String, Option<VolumeRec>),
+    Snapshot(String, Option<SnapshotRec>),
+    GroupSnapshot(String, Option<GroupSnapshot>),
+    DualAttach(String, Option<DualAttachWindow>),
+    Attachments(String, Option<Vec<String>>),
+    NvmeNsid(String, Option<u32>),
+    Node(String, Option<NodeCapacity>),
+}
+
+/// Rewrite the snapshot once the journal has this many records. Bounds both
+/// replay time at startup and journal size on disk.
+const JOURNAL_COMPACT_THRESHOLD: usize = 512;
+
+/// Diff two maps into whole-entity upserts and removals.
+fn diff_map<K, V, F>(old: &HashMap<K, V>, new: &HashMap<K, V>, mut mk: F, out: &mut Vec<Delta>)
+where
+    K: std::hash::Hash + Eq + Clone + Ord,
+    V: PartialEq + Clone,
+    F: FnMut(K, Option<V>) -> Delta,
+{
+    for (k, v) in new {
+        if old.get(k) != Some(v) {
+            out.push(mk(k.clone(), Some(v.clone())));
+        }
+    }
+    for k in old.keys() {
+        if !new.contains_key(k) {
+            out.push(mk(k.clone(), None));
+        }
+    }
 }
 
 impl V1State {
@@ -344,9 +405,37 @@ impl V1State {
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|bytes| serde_json::from_slice::<V1State>(&bytes).ok())
             .unwrap_or_default();
+
+        // Replay anything journalled since that snapshot. Records are
+        // whole-entity upserts applied in order, so a journal that overlaps
+        // the snapshot (crash between writing it and dropping the journal)
+        // simply re-applies what is already there.
+        if let Some(p) = persist_path.as_ref() {
+            let jpath = Self::journal_path(p);
+            if let Ok(text) = std::fs::read_to_string(&jpath) {
+                let mut replayed = 0usize;
+                for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                    match serde_json::from_str::<Delta>(line) {
+                        Ok(d) => { state.apply(d); replayed += 1; }
+                        Err(e) => {
+                            // A torn final record is expected after a crash
+                            // mid-append; everything before it is still good.
+                            tracing::warn!("v1 journal: stopping replay at malformed record: {e}");
+                            break;
+                        }
+                    }
+                }
+                state.journal_len = replayed;
+                if replayed > 0 {
+                    tracing::info!("v1 state: replayed {replayed} journalled change(s)");
+                }
+            }
+        }
+
         state.local_node = local_node;
         state.local_topology = config.management.topology.clone();
         state.persist_path = persist_path;
+        state.mark_persisted();
         state
     }
 
@@ -364,22 +453,158 @@ impl V1State {
         );
     }
 
-    fn save(&self) {
-        let Some(path) = &self.persist_path else { return };
+    /// Persist whatever changed since the last call.
+    ///
+    /// Rewriting the whole state on every mutation made every control-plane
+    /// operation O(total volumes) — measured at ~0.017 ms per existing
+    /// volume, which is ~17 ms per clone at 1000 volumes (#32). This appends
+    /// only the entries that actually changed and rewrites the snapshot
+    /// occasionally, so the cost tracks the size of the change instead.
+    ///
+    /// Durability is unchanged: the append is flushed and synced before the
+    /// call returns, exactly as the full rewrite was.
+    fn save(&mut self) {
+        let Some(path) = self.persist_path.clone() else { return };
+
+        let deltas = self.deltas_since_last_write();
+        if deltas.is_empty() {
+            return;
+        }
+
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match serde_json::to_vec_pretty(self) {
-            Ok(bytes) => {
-                let tmp = path.with_extension("json.tmp");
-                if std::fs::write(&tmp, bytes)
-                    .and_then(|_| std::fs::rename(&tmp, path))
-                    .is_err()
-                {
-                    tracing::warn!("failed to persist v1 state to {}", path.display());
+
+        if self.journal_len + deltas.len() >= JOURNAL_COMPACT_THRESHOLD {
+            self.compact(&path);
+            return;
+        }
+
+        let mut buf = Vec::new();
+        for d in &deltas {
+            match serde_json::to_vec(d) {
+                Ok(mut line) => {
+                    line.push(b'\n');
+                    buf.extend_from_slice(&line);
+                }
+                Err(e) => {
+                    tracing::warn!("failed to serialize v1 delta: {e}");
+                    return;
                 }
             }
-            Err(e) => tracing::warn!("failed to serialize v1 state: {e}"),
+        }
+
+        let jpath = Self::journal_path(&path);
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&jpath)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(&buf)?;
+                f.sync_data()
+            });
+
+        match appended {
+            Ok(()) => {
+                self.journal_len += deltas.len();
+                self.mark_persisted();
+            }
+            Err(e) => {
+                // Fall back to a full rewrite rather than silently losing the
+                // change — correctness beats the optimisation.
+                tracing::warn!("v1 journal append failed ({e}), rewriting snapshot");
+                self.compact(&path);
+            }
+        }
+    }
+
+    fn journal_path(path: &std::path::Path) -> PathBuf {
+        path.with_extension("journal.jsonl")
+    }
+
+    /// Write a full snapshot and drop the journal.
+    ///
+    /// Snapshot first, journal removed second: a crash in between replays
+    /// entries already contained in the snapshot, and because every delta is
+    /// a whole-entity upsert that is idempotent.
+    fn compact(&mut self, path: &std::path::Path) {
+        let bytes = match serde_json::to_vec_pretty(self) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("failed to serialize v1 state: {e}");
+                return;
+            }
+        };
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, bytes)
+            .and_then(|_| std::fs::rename(&tmp, path))
+            .is_err()
+        {
+            tracing::warn!("failed to persist v1 state to {}", path.display());
+            return;
+        }
+        let _ = std::fs::remove_file(Self::journal_path(path));
+        self.journal_len = 0;
+        self.mark_persisted();
+    }
+
+    /// Entities that differ from what is already on disk.
+    fn deltas_since_last_write(&self) -> Vec<Delta> {
+        let last = &self.last_persisted;
+        let mut out = Vec::new();
+        diff_map(&last.volumes, &self.volumes, Delta::Volume, &mut out);
+        diff_map(&last.snapshots, &self.snapshots, Delta::Snapshot, &mut out);
+        diff_map(&last.group_snapshots, &self.group_snapshots, Delta::GroupSnapshot, &mut out);
+        diff_map(&last.dual_attach, &self.dual_attach, Delta::DualAttach, &mut out);
+        diff_map(&last.attachments, &self.attachments, Delta::Attachments, &mut out);
+        diff_map(&last.nvme_nsids, &self.nvme_nsids, Delta::NvmeNsid, &mut out);
+
+        // nodes is a BTreeMap; same shape, different container.
+        for (k, v) in &self.nodes {
+            if last.nodes.get(k) != Some(v) {
+                out.push(Delta::Node(k.clone(), Some(v.clone())));
+            }
+        }
+        for k in last.nodes.keys() {
+            if !self.nodes.contains_key(k) {
+                out.push(Delta::Node(k.clone(), None));
+            }
+        }
+        out
+    }
+
+    fn mark_persisted(&mut self) {
+        self.last_persisted = Box::new(PersistedSnapshot {
+            volumes: self.volumes.clone(),
+            snapshots: self.snapshots.clone(),
+            group_snapshots: self.group_snapshots.clone(),
+            dual_attach: self.dual_attach.clone(),
+            attachments: self.attachments.clone(),
+            nvme_nsids: self.nvme_nsids.clone(),
+            nodes: self.nodes.clone(),
+        });
+    }
+
+    /// Apply one journal record.
+    fn apply(&mut self, d: Delta) {
+        fn put<K: std::hash::Hash + Eq, V>(m: &mut HashMap<K, V>, k: K, v: Option<V>) {
+            match v {
+                Some(v) => { m.insert(k, v); }
+                None => { m.remove(&k); }
+            }
+        }
+        match d {
+            Delta::Volume(k, v) => put(&mut self.volumes, k, v),
+            Delta::Snapshot(k, v) => put(&mut self.snapshots, k, v),
+            Delta::GroupSnapshot(k, v) => put(&mut self.group_snapshots, k, v),
+            Delta::DualAttach(k, v) => put(&mut self.dual_attach, k, v),
+            Delta::Attachments(k, v) => put(&mut self.attachments, k, v),
+            Delta::NvmeNsid(k, v) => put(&mut self.nvme_nsids, k, v),
+            Delta::Node(k, v) => match v {
+                Some(v) => { self.nodes.insert(k, v); }
+                None => { self.nodes.remove(&k); }
+            },
         }
     }
 
@@ -1590,4 +1815,187 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/nodes/{node}/capacity", get(get_node_capacity))
         .layer(axum::middleware::from_fn_with_state(state.clone(), require_bearer))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    fn state_at(dir: &std::path::Path) -> V1State {
+        let mut s = V1State::default();
+        s.persist_path = Some(dir.join("v1_state.json"));
+        s.mark_persisted();
+        s
+    }
+
+    fn reload(dir: &std::path::Path) -> V1State {
+        let path = dir.join("v1_state.json");
+        let mut state = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<V1State>(&b).ok())
+            .unwrap_or_default();
+        if let Ok(text) = std::fs::read_to_string(V1State::journal_path(&path)) {
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                if let Ok(d) = serde_json::from_str::<Delta>(line) {
+                    state.apply(d);
+                }
+            }
+        }
+        state
+    }
+
+    fn vol(name: &str) -> VolumeRec {
+        VolumeRec {
+            vol: Volume {
+                id: format!("vol-{name}"),
+                name: name.to_string(),
+                size_bytes: 1 << 20,
+                epoch: 1,
+                replicas: Vec::new(),
+                health: VolumeHealth::Healthy,
+                encrypted: false,
+                qos_class: None,
+                bandwidth_class: BandwidthClass::Normal,
+            },
+            local_id: None,
+            source_local: None,
+        }
+    }
+
+    /// A save must write only what changed, not the whole state — that is the
+    /// entire point of #32.
+    #[test]
+    fn save_journals_only_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = state_at(dir.path());
+
+        for i in 0..50 {
+            s.volumes.insert(format!("v{i}"), vol(&format!("v{i}")));
+        }
+        s.save();
+
+        // One more volume: the journal should grow by roughly one record,
+        // not by the size of all 51.
+        let before = std::fs::metadata(V1State::journal_path(&dir.path().join("v1_state.json")))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        s.volumes.insert("late".into(), vol("late"));
+        s.save();
+        let after = std::fs::metadata(V1State::journal_path(&dir.path().join("v1_state.json")))
+            .unwrap()
+            .len();
+
+        let grew = after - before;
+        assert!(grew > 0, "the change must be persisted");
+        assert!(
+            grew < before / 10,
+            "one more volume grew the journal by {grew} bytes against {before} for 50 — not O(change)"
+        );
+
+        // And a save with nothing changed writes nothing at all.
+        let steady = std::fs::metadata(V1State::journal_path(&dir.path().join("v1_state.json")))
+            .unwrap().len();
+        s.save();
+        assert_eq!(
+            std::fs::metadata(V1State::journal_path(&dir.path().join("v1_state.json"))).unwrap().len(),
+            steady,
+            "a no-op save must not write"
+        );
+    }
+
+    /// Everything written must come back, including removals.
+    #[test]
+    fn journal_replays_to_the_same_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = state_at(dir.path());
+
+        s.volumes.insert("a".into(), vol("a"));
+        s.volumes.insert("b".into(), vol("b"));
+        s.save();
+        s.attachments.insert("a".into(), vec!["n1".into()]);
+        s.nvme_nsids.insert("a".into(), 7);
+        s.save();
+        s.volumes.remove("b");
+        s.save();
+
+        let back = reload(dir.path());
+        assert!(back.volumes.contains_key("a"));
+        assert!(!back.volumes.contains_key("b"), "removal must survive replay");
+        assert_eq!(back.attachments.get("a"), Some(&vec!["n1".to_string()]));
+        assert_eq!(back.nvme_nsids.get("a"), Some(&7));
+    }
+
+    /// Crossing the threshold rewrites the snapshot and drops the journal,
+    /// and the state must be identical either way.
+    #[test]
+    fn compaction_folds_the_journal_into_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = state_at(dir.path());
+        let jpath = V1State::journal_path(&dir.path().join("v1_state.json"));
+
+        for i in 0..(JOURNAL_COMPACT_THRESHOLD + 10) {
+            s.volumes.insert(format!("v{i}"), vol(&format!("v{i}")));
+            s.save();
+        }
+
+        assert!(dir.path().join("v1_state.json").exists(), "snapshot must be written");
+
+        // Compaction fires partway through and the journal legitimately grows
+        // again afterwards; what matters is that it was folded in, so the
+        // journal holds far fewer records than the number of saves.
+        let lines = std::fs::read_to_string(&jpath)
+            .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        assert!(
+            lines < JOURNAL_COMPACT_THRESHOLD,
+            "journal has {lines} records after {} saves — compaction did not run",
+            JOURNAL_COMPACT_THRESHOLD + 10
+        );
+
+        // Either way the state must round-trip exactly.
+        let back = reload(dir.path());
+        assert_eq!(back.volumes.len(), JOURNAL_COMPACT_THRESHOLD + 10);
+    }
+
+    /// A crash between writing the snapshot and dropping the journal leaves
+    /// both on disk. Replay must be idempotent, or startup would corrupt.
+    #[test]
+    fn replaying_a_journal_that_overlaps_the_snapshot_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = state_at(dir.path());
+        let path = dir.path().join("v1_state.json");
+
+        s.volumes.insert("a".into(), vol("a"));
+        s.save();
+
+        // Simulate the crash window: snapshot written, journal still present.
+        let journal = std::fs::read(V1State::journal_path(&path)).unwrap();
+        s.compact(&path);
+        std::fs::write(V1State::journal_path(&path), &journal).unwrap();
+
+        let back = reload(dir.path());
+        assert_eq!(back.volumes.len(), 1, "re-applied upsert must not duplicate");
+        assert!(back.volumes.contains_key("a"));
+    }
+
+    /// A torn final record (crash mid-append) must not discard the good ones
+    /// before it.
+    #[test]
+    fn truncated_journal_record_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = state_at(dir.path());
+        let path = dir.path().join("v1_state.json");
+
+        s.volumes.insert("a".into(), vol("a"));
+        s.save();
+
+        let jpath = V1State::journal_path(&path);
+        let mut text = std::fs::read_to_string(&jpath).unwrap();
+        text.push_str("{\"Volume\":[\"b\",{\"vol\":{\"id\":\"vol-b\"");  // torn
+        std::fs::write(&jpath, text).unwrap();
+
+        let back = reload(dir.path());
+        assert!(back.volumes.contains_key("a"), "records before the tear survive");
+        assert!(!back.volumes.contains_key("b"));
+    }
 }
