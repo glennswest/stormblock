@@ -25,6 +25,9 @@ pub struct SessionParams {
     pub data_digest: bool,
     pub max_connections: u32,
     pub max_outstanding_r2t: u32,
+    /// True when the initiator declared `SessionType=Discovery`. Such a
+    /// session only does SendTargets — it never addresses a LUN.
+    pub discovery_session: bool,
 }
 
 impl Default for SessionParams {
@@ -41,6 +44,7 @@ impl Default for SessionParams {
             data_digest: false,
             max_connections: 1,
             max_outstanding_r2t: 1,
+            discovery_session: false,
         }
     }
 }

@@ -134,9 +134,11 @@ impl LoginStateMachine {
                     response_params.push(("TargetAlias", "StormBlock"));
                 }
                 "SessionType" => {
-                    if val == "Discovery" {
-                        response_params.push(("SessionType", "Discovery"));
-                    }
+                    // Declarative (RFC 7143 §12.21): initiator-to-target only.
+                    // Echoing it back makes open-iscsi abort the login with
+                    // "couldn't recognize text SessionType=Discovery", which
+                    // broke SendTargets discovery entirely.
+                    self.params.discovery_session = val == "Discovery";
                 }
                 "AuthMethod" => {
                     if self.chap_config.is_some() && val.contains("CHAP") {
@@ -245,9 +247,11 @@ impl LoginStateMachine {
                     self.params.target_name = val.clone();
                 }
                 "SessionType" => {
-                    if val == "Discovery" {
-                        response_params.push(("SessionType", "Discovery"));
-                    }
+                    // Declarative (RFC 7143 §12.21): initiator-to-target only.
+                    // Echoing it back makes open-iscsi abort the login with
+                    // "couldn't recognize text SessionType=Discovery", which
+                    // broke SendTargets discovery entirely.
+                    self.params.discovery_session = val == "Discovery";
                 }
                 "HeaderDigest" => {
                     if val.contains("CRC32C") {
@@ -427,6 +431,58 @@ mod tests {
                 assert_eq!(params.initiator_name, "iqn.2024.com.test:init");
             }
             LoginResult::Failed(_) => panic!("login should not fail"),
+        }
+    }
+
+    /// `SessionType` is declarative — echoing it back makes open-iscsi abort
+    /// the login with "couldn't recognize text SessionType=Discovery", which
+    /// broke SendTargets discovery outright.
+    #[test]
+    fn declarative_keys_are_not_echoed() {
+        for session_type in ["Discovery", "Normal"] {
+            let mut sm = LoginStateMachine::new("iqn.2024.com.stormblock:disk1".into(), None);
+            let params = encode_text_params(&[
+                ("InitiatorName", "iqn.1994-05.com.redhat:test"),
+                ("SessionType", session_type),
+                ("AuthMethod", "None"),
+            ]);
+            let req = make_login_request(STAGE_SECURITY, STAGE_OPERATIONAL, true, &params);
+            let pdu = match sm.process(&req) {
+                LoginResult::Continue(p) | LoginResult::Complete(p, _) => p,
+                LoginResult::Failed(_) => panic!("login should not fail"),
+            };
+            let echoed = parse_text_params(&pdu.data);
+            assert!(
+                !echoed.iter().any(|(k, _)| k == "SessionType"),
+                "SessionType={session_type} must not be echoed, got {echoed:?}"
+            );
+            assert!(
+                !echoed.iter().any(|(k, _)| k == "InitiatorName"),
+                "InitiatorName must not be echoed either"
+            );
+        }
+    }
+
+    /// A discovery session declares no TargetName; it must still log in, and
+    /// the session must be marked so it is not treated as a normal one.
+    #[test]
+    fn discovery_session_is_recognised() {
+        let mut sm = LoginStateMachine::new("iqn.2024.com.stormblock:disk1".into(), None);
+        let params = encode_text_params(&[
+            ("InitiatorName", "iqn.1994-05.com.redhat:test"),
+            ("SessionType", "Discovery"),
+            ("AuthMethod", "None"),
+        ]);
+        let req = make_login_request(STAGE_SECURITY, STAGE_FULL_FEATURE, true, &params);
+        match sm.process(&req) {
+            LoginResult::Complete(_, p) => {
+                assert!(p.discovery_session, "session should be flagged as discovery");
+                assert_eq!(p.initiator_name, "iqn.1994-05.com.redhat:test");
+            }
+            LoginResult::Continue(_) => {
+                assert!(sm.params.discovery_session, "discovery flag must be recorded");
+            }
+            LoginResult::Failed(_) => panic!("discovery login must not fail"),
         }
     }
 
