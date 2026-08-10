@@ -1,0 +1,15 @@
+{% if nodes.is_empty() %}
+<tr class="empty-row"><td colspan="7">No nodes discovered</td></tr>
+{% else %}
+{% for n in nodes %}
+<tr>
+    <td class="mono">{{ n.name }}{% if n.is_self %} <span class="badge badge-info">self</span>{% endif %}</td>
+    <td class="mono">{{ n.mgmt_addr }}</td>
+    <td>{{ n.cluster }}</td>
+    <td><span class="badge {{ n.status_class }}">{{ n.status }}</span></td>
+    <td class="mono">{{ n.total_human }}</td>
+    <td class="mono">{{ n.free_human }}</td>
+    <td class="mono">{{ n.version }}</td>
+</tr>
+{% endfor %}
+{% endif %}

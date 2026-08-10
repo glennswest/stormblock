@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Nodes — StormBlock{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Nodes</h1>
+    <span class="htmx-indicator" id="nodes-loading">refreshing...</span>
+</div>
+
+<div class="card">
+    {% if clustered %}
+    <p>
+        <strong>{{ local_node }}</strong> is in cluster <strong>{{ cluster_name }}</strong>
+        with {{ peer_count }} live peer{% if peer_count != 1 %}s{% endif %}.
+        Volumes place across these nodes.
+    </p>
+    <form hx-post="/ui/nodes/leave" hx-target="#nodes-table-body" hx-swap="innerHTML">
+        <button type="submit" class="btn btn-danger">Leave cluster</button>
+    </form>
+    {% else %}
+    <p>
+        <strong>{{ local_node }}</strong> is not in a cluster. It serves its own
+        volumes, but replicas need at least two nodes, so create a cluster or
+        join one below.
+    </p>
+    <form hx-post="/ui/nodes/create" hx-target="#nodes-table-body" hx-swap="innerHTML">
+        <input type="text" name="name" placeholder="cluster name" required>
+        <button type="submit" class="btn">Create cluster</button>
+    </form>
+
+    {% if !clusters.is_empty() %}
+    <h3>Clusters on this network</h3>
+    <table>
+        <thead><tr><th>Cluster</th><th>Nodes</th><th></th></tr></thead>
+        <tbody>
+        {% for c in clusters %}
+            <tr>
+                <td>{{ c.name }}</td>
+                <td class="mono">{{ c.node_count }}</td>
+                <td>
+                    <form hx-post="/ui/nodes/join" hx-target="#nodes-table-body" hx-swap="innerHTML">
+                        <input type="hidden" name="cluster_name" value="{{ c.name }}">
+                        <button type="submit" class="btn">Join</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% endif %}
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Node</th>
+                <th>Management</th>
+                <th>Cluster</th>
+                <th>Status</th>
+                <th>Capacity</th>
+                <th>Free</th>
+                <th>Version</th>
+            </tr>
+        </thead>
+        <tbody id="nodes-table-body" hx-get="/ui/nodes/table" hx-trigger="every 5s" hx-indicator="#nodes-loading">
+            {% include "nodes_table.html" %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

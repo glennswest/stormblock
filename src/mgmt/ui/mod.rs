@@ -6,6 +6,7 @@ pub mod drives;
 pub mod arrays;
 pub mod volumes;
 pub mod exports;
+pub mod nodes;
 #[cfg(feature = "cluster")]
 pub mod cluster;
 
@@ -57,6 +58,11 @@ pub fn ui_router(state: Arc<AppState>) -> Router {
             axum::routing::post(volumes::snapshot),
         )
         .route("/volumes/snapshot", axum::routing::post(volumes::snapshot_form))
+        .route("/nodes", get(nodes::page))
+        .route("/nodes/table", get(nodes::table_partial))
+        .route("/nodes/create", axum::routing::post(nodes::create))
+        .route("/nodes/join", axum::routing::post(nodes::join))
+        .route("/nodes/leave", axum::routing::post(nodes::leave))
         .route("/exports", get(exports::list_page).post(exports::create))
         .route("/exports/table", get(exports::table_partial))
         .route("/exports/{id}", axum::routing::delete(exports::delete))
