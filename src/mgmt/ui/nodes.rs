@@ -100,11 +100,11 @@ async fn gather(state: &Arc<AppState>) -> (Vec<NodeRow>, Vec<ClusterRow>, String
     for n in &discovered {
         let same = ours.is_some() && n.beacon.cluster_id == ours;
         let (status, class) = if n.stale {
-            ("unreachable", "badge-error")
+            ("unreachable", "badge-danger")
         } else if same {
-            ("in cluster", "badge-ok")
+            ("in cluster", "badge-success")
         } else if n.beacon.cluster_id.is_some() {
-            ("other cluster", "badge-warn")
+            ("other cluster", "badge-warning")
         } else {
             ("unclustered", "badge-info")
         };
@@ -239,9 +239,21 @@ pub async fn leave(State(state): State<Arc<AppState>>) -> Response {
     respond(&state, msg).await
 }
 
-/// Re-render the table with a toast, the pattern the other pages use.
+/// Creating, joining and leaving change the controls themselves — a create
+/// form becomes a leave button — so swapping only the table would leave stale
+/// actions on screen offering to create a cluster this node just joined.
+/// Success therefore reloads the page; failures keep it and show a toast, so
+/// the message is not lost to the reload.
 async fn respond(state: &Arc<AppState>, (msg, level): (String, &str)) -> Response {
     use axum::response::{Html, IntoResponse};
+
+    if level == "success" {
+        let mut resp = Html(String::new()).into_response();
+        resp.headers_mut()
+            .insert("HX-Refresh", axum::http::HeaderValue::from_static("true"));
+        return resp;
+    }
+
     let (nodes, _, _, _, _) = gather(state).await;
     let table = NodesTable { nodes };
     let toast = shared::toast_oob(&msg, level);

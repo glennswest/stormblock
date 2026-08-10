@@ -157,10 +157,12 @@
       <div class="stat"><h3>Source</h3><p class="sub">Drive layer, slabs + GEM, RAID, targets</p></div>
       <div class="stat"><h3>Features &amp; usage</h3><p class="sub">Config, CLI, REST, clones, booting from it</p></div>
       <div class="stat"><h3>OpenShift</h3><p class="sub">CSI driver, wandering pairs, the /v1 contract</p></div>
-      <div class="stat"><h3>Numbers &amp; lessons</h3><p class="sub">Measured latencies, root causes, what's next</p></div>
+      <div class="stat"><h3>Testing &amp; numbers</h3><p class="sub">Unit → interop → a 4-machine fleet, and what it measured</p></div>
+      <div class="stat"><h3>Lessons</h3><p class="sub">Root causes, and what's next</p></div>
     </div>
     <p class="sub" style="margin-top:3vh">Everything here is in the repo: 195 commits, 7 major versions,
-    <code>docs/stormblock-spec.md</code> for the full spec, <code>CHANGELOG.md</code> for every number quoted.</p>
+    <code>docs/stormblock-spec.md</code> for the full spec, <code>docs/m0-baseline.md</code> for the fleet numbers,
+    <code>CHANGELOG.md</code> for every latency quoted.</p>
   </div>
   <div class="footer"><span class="brandmark">stormblock</span><span>Agenda</span><span class="counter"></span></div>
 </section>
@@ -603,7 +605,7 @@ curl -X POST node:9090/api/v1/exports \
       the agent-sandbox fork path demanded. No data copied, no reconnect, no restart.
     </p>
     <div class="stat-row" style="margin-top:5vh; text-align:left">
-      <div class="stat"><div class="hero-num">312</div><div class="hero-label">tests passing, unit through full-stack TCP round-trips</div></div>
+      <div class="stat"><div class="hero-num">312</div><div class="hero-label">tests passing — and a 4-machine fleet above them</div></div>
       <div class="stat"><div class="hero-num">11 MB</div><div class="hero-label">static musl binary — drivers, RAID, targets, UI, cluster</div></div>
       <div class="stat"><div class="hero-num">1,000</div><div class="hero-label">LUNs attached in the scale test, O(1) per-command lookup</div></div>
     </div>
@@ -640,7 +642,87 @@ curl -X POST node:9090/api/v1/exports \
   <div class="footer"><span class="brandmark">stormblock</span><span>Results</span><span class="counter"></span></div>
 </section>
 
-<!-- 20 · LESSONS -->
+<!-- 20 · TEST LADDER -->
+<section class="slide red-strip">
+  <div class="kicker">Testing</div>
+  <h2>Four rungs: laptop &rarr; CI &rarr; real initiators &rarr; a fleet</h2>
+  <div class="grow">
+    <table>
+      <tr><th style="width:26%">Rung</th><th>What it proves</th><th>Where it runs</th></tr>
+      <tr><td><b>312 unit + integration</b></td><td>Every layer, plus full iSCSI and NVMe-oF round-trips over real TCP against our own initiators. FileDevice means no special hardware.</td><td>Any machine, incl. macOS</td></tr>
+      <tr><td><b>Linux CI suite</b><br><span class="sub"><code>ci-test.sh</code>, <code>ci-nvmeof-hotadd.sh</code></span></td><td>The <code>cfg(linux)</code> paths macOS skips — io_uring, ublk, VFIO gates — plus clippy and the release build.</td><td>mkube job runner, container</td></tr>
+      <tr><td><b>Live interop</b><br><span class="sub"><code>ci-iscsi-reclaim.sh</code>, <code>external_iscsi</code>, <code>install-fedora-iscsi.sh</code></span></td><td>Against software that isn't ours: LIO Target, open-iscsi, the kernel nvme host, a real Fedora install booting from the volume.</td><td>mkube + a MikroTik LIO target</td></tr>
+      <tr><td><b>Multi-host fleet</b><br><span class="sub"><code>deploy/m0/run-m0-baseline.sh</code></span></td><td>Three storage nodes serving a separate initiator host over the network, with fio baselines and byte-compared data-path verification.</td><td>4 Proxmox VMs via terragrunt</td></tr>
+    </table>
+    <div class="plain"><b>In plain terms:</b> the cheap tests run everywhere and catch logic bugs; the expensive ones exist because protocol bugs only show up when the thing on the other end of the wire was written by somebody else — and network storage bugs only show up over an actual network.</div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Testing</span><span class="counter"></span></div>
+</section>
+
+<!-- 21 · MULTI-HOST BASELINE -->
+<section class="slide red-strip">
+  <div class="kicker">Testing</div>
+  <h2>The multi-host baseline: <span class="accent">4 machines</span>, stock kernel initiator</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <div class="flow" style="flex-direction:column; gap:1vh; margin-top:0">
+          <div class="node">storm1 · storm2 · storm3<small>2×10G drives → RAID 1 → 8G thin volume → NVMe-oF/TCP :4420</small></div>
+          <div class="node">initiator host<small>stock kernel nvme-tcp — none of our code</small></div>
+        </div>
+        <ul>
+          <li>Fleet is <b>terragrunt-provisioned and throwaway</b>: apply &rarr; run &rarr; destroy &rarr; release the VM IDs. Repeatable as a CI job.</li>
+          <li>Nodes install the <b>released binary</b> from a GitHub release — no build on the node, so the artifact under test is the artifact that ships.</li>
+          <li>Per node: <code>nvme connect</code>, 8&nbsp;MB random pattern written O_DIRECT, read back, <b>byte-compared</b>, then four fio jobs, then disconnect.</li>
+        </ul>
+      </div>
+      <div>
+        <table>
+          <tr><th>fio job (per node)</th><th class="num">storm1</th><th class="num">storm2</th><th class="num">storm3</th></tr>
+          <tr><td>4K randread — IOPS</td><td class="num">4,785</td><td class="num">5,263</td><td class="num">5,252</td></tr>
+          <tr><td>4K randrw — read IOPS</td><td class="num">2,772</td><td class="num">2,217</td><td class="num">2,548</td></tr>
+          <tr><td>4K randrw — write IOPS</td><td class="num">1,187</td><td class="num">947</td><td class="num">1,093</td></tr>
+          <tr><td>1M seqread — MB/s</td><td class="num">143.3</td><td class="num">62.7</td><td class="num">137.8</td></tr>
+          <tr><td>1M seqwrite — MB/s</td><td class="num">30.0</td><td class="num">22.1</td><td class="num">36.1</td></tr>
+        </table>
+        <p class="sub">2 vCPU / 2 GB VMs, file-backed drives on virtio disks, no tuning, iodepth 16, 20&nbsp;s per job. Published in <code>docs/m0-baseline.md</code>.</p>
+        <div class="plain"><b>In plain terms:</b> a floor, not a ceiling — deliberately unimpressive hardware, so what the numbers establish is that the whole path <i>works and is honest</i>, not how fast it can go.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Testing</span><span class="counter"></span></div>
+</section>
+
+<!-- 22 · WHAT THE FLEET FOUND -->
+<section class="slide red-strip">
+  <div class="kicker">Testing</div>
+  <h2>What the fleet measured that a laptop can't</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li><b>Random reads are healthy; sequential is not.</b> ~5k read IOPS at 4K is respectable for these VMs — but 1M sequential reads carry a p99 tail of <b>0.2–4.6 seconds</b>, orders of magnitude off the random path.</li>
+          <li>That tail is the signature of <b>buffered tokio file I/O in the slab layer</b> — page-cache pressure and blocking writeback, not the network and not the protocol. It is exactly what open issue <b>#30</b> (O_DIRECT + io_uring for slab I/O) exists to fix.</li>
+          <li>Sequential writes at 22–36 MB/s sit under the same ceiling.</li>
+        </ul>
+      </div>
+      <div>
+        <table>
+          <tr><th>1M seqread</th><th class="num">MB/s</th><th class="num">p99 latency</th></tr>
+          <tr><td>storm1</td><td class="num">143.3</td><td class="num">354 ms</td></tr>
+          <tr><td>storm2</td><td class="num">62.7</td><td class="num">4,664 ms</td></tr>
+          <tr><td>storm3</td><td class="num">137.8</td><td class="num">213 ms</td></tr>
+          <tr><td><b>4K randread</b>, same nodes</td><td class="num">~20</td><td class="num">8–19 ms</td></tr>
+        </table>
+        <p class="quote" style="font-size:2.2vh">A single-node benchmark would have reported the same throughput and hidden the tail. Three nodes disagreeing by 2&times; is the finding.</p>
+        <div class="plain"><b>In plain terms:</b> the fleet didn't just confirm it works — it pointed at the one part of the code that's still doing disk I/O the slow, convenient way, and put a number on what that costs.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Testing</span><span class="counter"></span></div>
+</section>
+
+<!-- 23 · LESSONS -->
 <section class="slide red-strip">
   <div class="kicker">Lessons learned</div>
   <h2>The spec is the map; the initiator is the territory</h2>
@@ -666,7 +748,7 @@ curl -X POST node:9090/api/v1/exports \
       <div>
         <h3>Data path</h3>
         <ul>
-          <li>Slab I/O to O_DIRECT + io_uring — today's buffered tokio file I/O is the known throughput ceiling (#30).</li>
+          <li>Slab I/O to O_DIRECT + io_uring (#30) — now with a price tag on it: the fleet's 0.2–4.6&nbsp;s sequential p99 tail.</li>
           <li>iSCSI MC/S or clean multi-session parallelism (#31).</li>
           <li>Engine data path for cross-node replication: epoch-carrying writes and resync — the /v1 control plane is done, the bytes don't move yet.</li>
         </ul>
