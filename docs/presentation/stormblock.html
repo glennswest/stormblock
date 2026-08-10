@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StormBlock — Enterprise Block Storage in Pure Rust</title>
+<style>
+  :root {
+    --rh-red: #EE0000;
+    --rh-dark-red: #A30000;
+    --rh-black: #151515;
+    --rh-gray: #6A6E73;
+    --rh-light: #F2F2F2;
+    --rh-white: #FFFFFF;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: var(--rh-black); }
+  body {
+    font-family: "Red Hat Text", "Red Hat Display", "Inter", "Helvetica Neue", Arial, sans-serif;
+    color: var(--rh-black);
+    overflow: hidden;
+  }
+  .deck { height: 100vh; width: 100vw; position: relative; }
+  section.slide {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column;
+    padding: 4.5vh 5vw 7vh 5vw;
+    background: var(--rh-white);
+  }
+  section.slide.active { display: flex; }
+  section.dark { background: var(--rh-black); color: var(--rh-white); }
+  section.red-strip::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 10px;
+    background: var(--rh-red);
+  }
+  h1 { font-family: "Red Hat Display", "Inter", Arial, sans-serif; font-weight: 900; font-size: 5.2vh; line-height: 1.15; }
+  h2 { font-family: "Red Hat Display", "Inter", Arial, sans-serif; font-weight: 700; font-size: 4.2vh; margin-bottom: 2.2vh; }
+  h2 .accent { color: var(--rh-red); }
+  h3 { font-size: 2.6vh; font-weight: 700; margin: 1.6vh 0 0.8vh 0; }
+  p, li { font-size: 2.4vh; line-height: 1.5; }
+  li { margin-bottom: 1.1vh; }
+  ul { padding-left: 3.2vh; }
+  .sub { color: var(--rh-gray); }
+  .dark .sub { color: #B8BBBE; }
+  .kicker {
+    color: var(--rh-red); font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; font-size: 1.9vh; margin-bottom: 1.4vh;
+  }
+  .grow { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .cols { display: flex; gap: 4vw; align-items: flex-start; }
+  .cols > div { flex: 1; min-width: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1.2vh 0; }
+  th, td { text-align: left; padding: 1.1vh 1.4vh; font-size: 2.2vh; border-bottom: 1px solid #D2D2D2; }
+  th { border-bottom: 3px solid var(--rh-red); font-weight: 700; }
+  .dark th, .dark td { border-color: #3C3F42; }
+  .dark th { border-bottom-color: var(--rh-red); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .hero-num { font-family: "Red Hat Display", Arial, sans-serif; font-weight: 900; font-size: 8.5vh; color: var(--rh-red); line-height: 1; }
+  .hero-label { font-size: 2.3vh; color: var(--rh-gray); margin-top: 0.8vh; }
+  .stat-row { display: flex; gap: 3vw; margin: 2.5vh 0; }
+  .stat { flex: 1; border-top: 4px solid var(--rh-red); padding-top: 1.2vh; }
+  code, pre {
+    font-family: "Red Hat Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 1.95vh;
+  }
+  pre {
+    background: var(--rh-black); color: #E8E8E8; padding: 1.8vh 2vh;
+    border-left: 5px solid var(--rh-red);
+    overflow-x: auto; line-height: 1.5; margin: 1.2vh 0;
+  }
+  .dark pre { background: #212427; }
+  pre .c { color: #8A8D90; }
+  pre .g { color: #5BA352; }
+  pre .r { color: #FF6B6B; }
+  .plain {
+    background: var(--rh-light); border-left: 6px solid var(--rh-gray);
+    padding: 1.2vh 2vh; margin: 1.6vh 0; font-size: 2.1vh; line-height: 1.5;
+  }
+  .plain b:first-child { color: var(--rh-red); }
+  .dark .plain { background: #212427; }
+  .quote {
+    border-left: 6px solid var(--rh-red); padding: 1vh 2.4vh; margin: 2vh 0;
+    font-size: 2.7vh; font-style: italic; background: var(--rh-light);
+  }
+  .dark .quote { background: #212427; }
+  .footer {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 5vh;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 5vw; font-size: 1.7vh; color: var(--rh-gray);
+    border-top: 1px solid #E8E8E8;
+    background: inherit;
+  }
+  .dark .footer { border-top-color: #3C3F42; }
+  .brandmark { font-family: "Red Hat Display", Arial, sans-serif; font-weight: 900; }
+  .brandmark .hat { color: var(--rh-red); }
+  .counter { font-variant-numeric: tabular-nums; }
+  .bar-chart { margin: 1.5vh 0; }
+  .bar-row { display: flex; align-items: center; gap: 1.5vh; margin-bottom: 1.3vh; }
+  .bar-label { width: 30vh; font-size: 2vh; text-align: right; flex-shrink: 0; }
+  .bar-track { flex: 1; }
+  .bar {
+    background: var(--rh-red); color: #fff; font-size: 1.9vh; font-weight: 700;
+    padding: 0.5vh 1vh; white-space: nowrap; min-width: 4vh;
+  }
+  .bar.gray { background: var(--rh-gray); }
+  .bar.dark { background: var(--rh-black); border: 1px solid #555; }
+  .pill {
+    display: inline-block; border: 2px solid var(--rh-red); color: var(--rh-red);
+    font-weight: 700; font-size: 1.9vh; padding: 0.3vh 1.4vh; border-radius: 3vh;
+    margin-right: 1vh; margin-bottom: 1vh;
+  }
+  .dark .pill { border-color: var(--rh-red); color: #fff; background: var(--rh-red); }
+  .flow { display: flex; align-items: stretch; gap: 0; margin: 2.5vh 0; }
+  .flow .node {
+    flex: 1; border: 2px solid var(--rh-black); padding: 1.4vh; text-align: center;
+    font-size: 2vh; font-weight: 700; display: flex; flex-direction: column; justify-content: center;
+  }
+  .flow .node small { font-weight: 400; font-size: 1.7vh; color: var(--rh-gray); margin-top: 0.5vh; }
+  .flow .arrow { display: flex; align-items: center; padding: 0 1vh; font-size: 3vh; color: var(--rh-red); font-weight: 900; }
+  .checklist li::marker { content: "✔  "; color: var(--rh-red); }
+  .xlist li::marker { content: "✘  "; color: var(--rh-red); }
+  @media print {
+    @page { size: 338.7mm 190.5mm; margin: 0; }
+    html, body { overflow: visible; background: var(--rh-white); }
+    section.slide { display: flex !important; position: relative; height: 100vh; page-break-after: always; break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+<!-- 1 · TITLE -->
+<section class="slide dark active">
+  <div class="grow">
+    <div class="kicker">Linux · Rust · Block Storage</div>
+    <h1>StormBlock</h1>
+    <h1 style="color:#B8BBBE; font-weight:400; font-size:4vh; margin-top:1.5vh;">
+      Enterprise block storage in pure Rust
+    </h1>
+    <p class="sub" style="margin-top:4vh; font-size:2.3vh;">
+      Raw NVMe and SAS drives become network volumes over NVMe-oF/TCP and iSCSI —<br>
+      thin, snapshottable, replicated, OpenShift-attachable. One 11&nbsp;MB static binary,<br>
+      from a bare-metal flash node down to a MikroTik router.
+    </p>
+    <p style="margin-top:5vh; font-size:2.2vh;">Glenn West &nbsp;·&nbsp; August 2026 &nbsp;·&nbsp; v7.1.0</p>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>github.com/glennswest/stormblock</span><span class="counter"></span></div>
+</section>
+
+<!-- 2 · AGENDA -->
+<section class="slide red-strip">
+  <h2>Agenda</h2>
+  <div class="grow">
+    <div class="stat-row">
+      <div class="stat"><h3>Overview</h3><p class="sub">The problem, the idea, the platforms</p></div>
+      <div class="stat"><h3>Source</h3><p class="sub">Drive layer, slabs + GEM, RAID, targets</p></div>
+      <div class="stat"><h3>Features &amp; usage</h3><p class="sub">Config, CLI, REST, clones, booting from it</p></div>
+      <div class="stat"><h3>OpenShift</h3><p class="sub">CSI driver, wandering pairs, the /v1 contract</p></div>
+      <div class="stat"><h3>Numbers &amp; lessons</h3><p class="sub">Measured latencies, root causes, what's next</p></div>
+    </div>
+    <p class="sub" style="margin-top:3vh">Everything here is in the repo: 195 commits, 7 major versions,
+    <code>docs/stormblock-spec.md</code> for the full spec, <code>CHANGELOG.md</code> for every number quoted.</p>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Agenda</span><span class="counter"></span></div>
+</section>
+
+<!-- 3 · PROBLEM -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>The problem: a storage node is a whole stack</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li>Serving block storage means owning <b>everything</b>: drive drivers, RAID, thin provisioning, snapshots, wire protocols, management, clustering.</li>
+          <li>The incumbents — SPDK, LIO, Ceph, ZFS — are decades of C/C++, kernel-entangled, and heavy to embed, package, or audit.</li>
+          <li>We wanted one engine that runs the same from a 200GbE flash node to a router with a USB disk — and that other Storm services can link, script, and boot from.</li>
+        </ul>
+        <p class="quote">Single-node first, scale-out later.<br>A lone node must be fully useful; clustering is strictly optional.</p>
+      </div>
+      <div>
+        <table>
+          <tr><th>StormBlock answers with</th><th class="num"></th></tr>
+          <tr><td>Source, pure Rust (no FFI, no SPDK)</td><td class="num">~32.6k lines</td></tr>
+          <tr><td>Test code</td><td class="num">~4.6k lines</td></tr>
+          <tr><td>Tests passing</td><td class="num">312</td></tr>
+          <tr><td>Static musl binary, stripped PIE</td><td class="num">11 MB</td></tr>
+          <tr><td>TLS stack</td><td class="num">rustls, no OpenSSL</td></tr>
+          <tr><td>Runtime dependencies</td><td class="num">none</td></tr>
+        </table>
+        <div class="plain"><b>In plain terms:</b> the appliance software that usually fills a SAN vendor's rack-mounted box, rewritten as one small program you can copy anywhere and run.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Overview</span><span class="counter"></span></div>
+</section>
+
+<!-- 4 · VOCABULARY -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>The vocabulary, in plain terms</h2>
+  <div class="grow">
+    <table>
+      <tr><th style="width:22%">Term</th><th>What it means here</th></tr>
+      <tr><td><b>Target / initiator</b></td><td>The server side and client side of network block storage. StormBlock is the target; anything that mounts a disk over the network is an initiator.</td></tr>
+      <tr><td><b>iSCSI / NVMe-oF</b></td><td>The two wire protocols for "a disk over TCP". iSCSI (port 3260) is the 20-year veteran everything speaks; NVMe-oF (port 4420) is the fast modern one. StormBlock serves both.</td></tr>
+      <tr><td><b>LUN / namespace</b></td><td>One exported disk, as the initiator sees it. A single target can serve thousands.</td></tr>
+      <tr><td><b>Thin provisioning</b></td><td>A "100 GB" volume that only occupies the space actually written — and gives space back when files are deleted (discard/UNMAP).</td></tr>
+      <tr><td><b>COW snapshot / clone</b></td><td>Copy-on-write: a snapshot or clone copies no data, it shares the original's extents and diverges only where written. Instant, whatever the size.</td></tr>
+      <tr><td><b>Slab &amp; extent</b></td><td>Every drive is formatted as a flat array of 1&nbsp;MB slots — a slab. Volumes are stitched together from slots on any slab, any drive, any tier.</td></tr>
+      <tr><td><b>ublk</b></td><td>A Linux 6.0+ interface that lets a userspace program appear as a local disk (<code>/dev/ublkb0</code>) — how a machine boots <i>from</i> StormBlock.</td></tr>
+      <tr><td><b>CSI / PVC</b></td><td>Kubernetes/OpenShift's storage plug interface. A pod asks for a PersistentVolumeClaim; the CSI driver turns that into a StormBlock volume.</td></tr>
+    </table>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Overview</span><span class="counter"></span></div>
+</section>
+
+<!-- 5 · IDEA -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>The idea: <span class="accent">organic</span> storage, not carved pools</h2>
+  <div class="grow">
+    <ul>
+      <li>No rigid pools, no pre-sized virtual drives. Every device is a <b>Slab</b> — a flat array of 1&nbsp;MB slots with an on-disk slot table and CRC32C metadata.</li>
+      <li>The <b>Global Extent Map (GEM)</b> is the single source of truth: volume extent &rarr; (slab, slot), with a reverse index — and it can be <b>rebuilt from the slabs</b> on recovery.</li>
+      <li>Volumes start at one slot and grow, shrink, and spread across devices and tiers as they're written and discarded. Placement moves extents later, live.</li>
+    </ul>
+    <div class="flow">
+      <div class="node">Volume write<small>virtual offset</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">GEM lookup<small>extent &rarr; slab, slot</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">Miss: allocate<small>best-fit slab, tier-aware</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">Slab slot I/O<small>1 MB cells, CRC'd table</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">Drive<small>NVMe · SAS · iSCSI · file</small></div>
+    </div>
+    <p class="sub">Snapshots clone the map, not the data. Discards free slots back to every volume on the device.</p>
+    <div class="plain"><b>In plain terms:</b> instead of slicing each disk into fixed partitions up front, every disk becomes a tray of 1&nbsp;MB cells. Volumes are recipes — lists of which cells hold their data — and moving, copying, or snapshotting a volume is editing the recipe, not shoveling the bytes.</div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Overview</span><span class="counter"></span></div>
+</section>
+
+<!-- 6 · PLATFORMS -->
+<section class="slide red-strip">
+  <div class="kicker">Overview</div>
+  <h2>One binary, four classes of hardware</h2>
+  <div class="grow">
+    <table>
+      <tr><th>Platform</th><th>Drive I/O path</th><th>Targets</th><th>Notes</th></tr>
+      <tr><td><b>Tier 0 full node</b> (x86_64)</td><td>NVMe via VFIO userspace + SAS via io_uring</td><td>NVMe-oF + iSCSI</td><td>Bare metal, hugepage DMA, per-core queue pairs, 200GbE</td></tr>
+      <tr><td><b>Tier 2 JBOD head</b> (ARM64)</td><td>SAS via io_uring, O_DIRECT</td><td>NVMe-oF + iSCSI</td><td>SAS shelf head unit, NEON SIMD parity</td></tr>
+      <tr><td><b>MikroTik RouterOS</b></td><td>tokio file I/O (no VFIO, no io_uring)</td><td>iSCSI</td><td>Container on RouterOS 7+, USB/SATA disks, 256 MB RAM</td></tr>
+      <tr><td><b>Anywhere else</b> (dev, CI, macOS)</td><td>FileDevice (plain files as drives)</td><td>both</td><td>Full engine + tests run with zero special hardware</td></tr>
+    </table>
+    <ul>
+      <li>Feature-gated at compile time: <code>--features "mikrotik,iscsi"</code> strips VFIO, io_uring, and NVMe-oF out of the binary entirely.</li>
+      <li>The NVMe path needs <b>no kernel block layer at all</b> — VFIO hands the PCIe device to userspace; StormBlock is the driver.</li>
+    </ul>
+    <div class="plain"><b>In plain terms:</b> the same program is a datacenter flash appliance, a disk-shelf brain, and a homelab NAS on a router — it just uses the fastest disk access each machine can offer.</div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Overview</span><span class="counter"></span></div>
+</section>
+
+<!-- 7 · SOURCE MAP -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>Eight modules, ~32.6k lines of Rust</h2>
+  <div class="grow">
+    <table>
+      <tr><th>Module</th><th>What it owns</th><th class="num">Lines</th></tr>
+      <tr><td><code>src/mgmt</code></td><td>REST API (axum) · /v1 CSI contract · web UI · TOML config · Prometheus</td><td class="num">7,194</td></tr>
+      <tr><td><code>src/target</code></td><td>iSCSI (RFC 7143) · NVMe-oF/TCP · per-core reactors</td><td class="num">6,213</td></tr>
+      <tr><td><code>src/drive</code></td><td>BlockDevice trait · NVMe/VFIO · SAS/io_uring · iSCSI initiator · slabs · ublk · shared-ring IPC</td><td class="num">6,018</td></tr>
+      <tr><td><code>src/volume</code></td><td>Thin volumes · GEM · COW snapshots · metadata persistence</td><td class="num">3,704</td></tr>
+      <tr><td><code>src/raid</code></td><td>RAID 1/5/6/10 · SIMD parity · write-intent journal · rebuild · scrub</td><td class="num">2,647</td></tr>
+      <tr><td><code>src/cluster</code></td><td>openraft consensus · discovery · heartbeat · replication (feature-gated)</td><td class="num">2,240</td></tr>
+      <tr><td><code>src/placement</code></td><td>Extent migration · slab evacuation · rebalance strategies · topology</td><td class="num">2,029</td></tr>
+      <tr><td><code>src/*.rs</code></td><td>CLI · boot manager · boot-from-iSCSI · live migration · StormFS registration</td><td class="num">2,511</td></tr>
+    </table>
+    <p class="sub">Plus ~4.6k lines of tests: crash recovery, degraded RAID, full iSCSI/NVMe-oF round-trips over real TCP, /v1 HTTP contract tests, PDU fuzzing. External tests run against a real LIO target via CI.</p>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 8 · DRIVE LAYER -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>Drive layer: four backends, one trait</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li><b>NVMe via VFIO</b> — a full userspace NVMe driver: BAR0 mapping, hugepage DMA, per-core submission/completion queue pairs, MMIO doorbells. The kernel only hands over the PCIe device.</li>
+          <li><b>SAS via io_uring</b> — O_DIRECT with registered buffers on kernel HBA drivers; SSD/HDD detection and serials from sysfs; SMART health on a REST endpoint.</li>
+          <li><b>iSCSI initiator</b> — StormBlock can <i>consume</i> any iSCSI target as a drive: login, READ/WRITE(10), UNMAP, NOP keepalive. Remote disks become slabs.</li>
+          <li><b>FileDevice</b> — plain files via tokio: MikroTik, dev machines, CI.</li>
+        </ul>
+      </div>
+      <div>
+<pre><span class="c">// every backend implements</span>
+trait BlockDevice {
+  async fn read(&amp;self, lba, buf);
+  async fn write(&amp;self, lba, buf);
+  async fn flush(&amp;self);
+  async fn discard(&amp;self, lba, len);
+}</pre>
+        <ul>
+          <li><b>ublk server</b> — volumes surface as local <code>/dev/ublkbN</code> via io_uring URING_CMD (Linux 6.0+): the root-disk path.</li>
+          <li><b>Shared-ring IPC</b> — io_uring-style zero-copy rings over Unix socket + memfd + eventfd, for StormFS running on the same host.</li>
+        </ul>
+        <div class="plain"><b>In plain terms:</b> everything above this layer sees "a disk" — whether the bytes live on a passed-through NVMe card, a SAS shelf, another machine's iSCSI export, or an ordinary file.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 9 · SLAB + GEM + RECLAIM -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>Slabs, the GEM, and honest thin provisioning</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+<pre>Volume Z (100 GB virtual)
+ ├ extent 0 → Slab A (NVMe, Hot)  slot 42
+ ├ extent 1 → Slab A (NVMe, Hot)  slot 43
+ ├ extent 2 → Slab B (SAS, Warm)  slot 7
+ └ extent 3 → Slab A (NVMe, Hot)  slot 100</pre>
+        <ul>
+          <li>Slab on-disk format: header, slot table (CRC32C), free bitmap. Slot-table updates are read-modify-write of one aligned sector.</li>
+          <li>Registry indexes slabs by tier (Hot/Warm/Cool/Cold) with best-fit allocation.</li>
+          <li>GEM keeps forward + reverse maps; snapshot = clone map + bump refcounts.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Reclaim, end to end</h3>
+        <ul>
+          <li>Targets advertise thin provisioning (SCSI VPD 0xB2, NVMe DSM) — so initiators actually send UNMAP/TRIM.</li>
+          <li>Discards flow through GEM and free slab slots back to the shared pool; <code>/metrics</code> exposes allocated vs free gauges.</li>
+          <li>WRITE SAME(10/16) with UNMAP, granularity/alignment advertised from the device (VPD 0xB0).</li>
+        </ul>
+        <div class="plain"><b>In plain terms:</b> delete a file inside a VM, and the space comes back to the pool for every other volume — the full loop, from the guest filesystem down to the physical drive, actually closes.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 10 · RAID -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>RAID engine: 1 / 5 / 6 / 10, SIMD parity</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li>XOR parity and RAID 6's GF(2⁸) Q-syndrome in hand-written SIMD: AVX2 on x86_64, NEON on ARM, scalar fallback everywhere else.</li>
+          <li><b>Write-intent journal</b>: dirty stripes marked before writes, cleared after — crash recovery re-syncs only what was in flight.</li>
+          <li>Background <b>rebuild</b> with rate limiting (foreground I/O keeps priority) and periodic <b>scrub</b> (read + parity verify).</li>
+          <li>RAID 1 supports <b>dynamic add/remove member</b> — not a maintenance feature, a <i>migration primitive</i>.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Add/remove member = live migration</h3>
+        <div class="flow" style="flex-direction:column; gap:1vh">
+          <div class="node">RAID 1 on remote iSCSI disk<small>machine running from it</small></div>
+          <div class="node">add_member(local NVMe) &rarr; rebuild<small>mirror fills in the background</small></div>
+          <div class="node">remove_member(remote)<small>machine now runs on local disk — never rebooted</small></div>
+        </div>
+        <div class="plain"><b>In plain terms:</b> mirroring is also how data walks between machines: attach a new disk to the mirror, let it catch up, drop the old one. The volume never stops serving.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 11 · TARGETS -->
+<section class="slide red-strip">
+  <div class="kicker">Source</div>
+  <h2>Two wire protocols, built for thousands of disks</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <h3>iSCSI (:3260)</h3>
+        <ul>
+          <li>RFC 7143: full login negotiation, CHAP (constant-time MD5), header/data digests, multi-connection sessions, R2T/Data-Out.</li>
+          <li>MPIO/ALUA multipath; discovery sessions that real open-iscsi accepts.</li>
+          <li>Thin volumes export directly as LUNs — added and removed <b>at runtime</b>, O(1) lookup, tested at 1,000 attached LUNs and REPORT LUNS at 2,000.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>NVMe-oF/TCP (:4420)</h3>
+        <ul>
+          <li>Discovery subsystem, fabric connect, full admin + I/O command sets, io_uring zero-copy send for read data.</li>
+          <li><b>Namespace hot-add</b>: a host connects once; later volume attaches arrive as an async event + rescan — no new TCP session per container.</li>
+          <li>Per-core reactor pool with CPU pinning; LUN/NSID mappings persist across restarts (<code>luns.json</code>).</li>
+        </ul>
+      </div>
+    </div>
+    <div class="plain"><b>In plain terms:</b> the design load isn't one big disk — it's a container platform where every instance gets its own cloned disk. Thousands of small disks, appearing and vanishing constantly, on one TCP connection per host.</div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Source</span><span class="counter"></span></div>
+</section>
+
+<!-- 12 · USAGE: RUNNING A NODE -->
+<section class="slide red-strip">
+  <div class="kicker">Features &amp; usage</div>
+  <h2>Running a node: one TOML, one binary</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+<pre><span class="c"># stormblock.toml</span>
+[system]
+hostname = "stormblock-nvme-1"
+
+[network]
+nvmeof_bind = "0.0.0.0:4420"
+iscsi_bind  = "0.0.0.0:3260"
+
+[management]
+listen_addr     = "0.0.0.0:9090"
+data_dir        = "/var/lib/stormblock"
+advertised_addr = "192.168.200.21"
+
+[topology]
+site = "nashville"
+rack = "rack-a"
+tier = "tier0"</pre>
+        <p class="sub"><code>data_dir</code> persists volumes, LUN maps, and /v1 state — exports come back after a restart. <code>advertised_addr</code> is what attach info and discovery hand to remote initiators.</p>
+      </div>
+      <div>
+        <h3>Surfaces</h3>
+        <ul>
+          <li><b>CLI</b> — <code>slab</code> (format/list/info), <code>ublk</code>, <code>migrate</code>, <code>boot-iscsi</code>, <code>boot-local</code>, <code>migrate-boot</code>; systemd units for the storage role.</li>
+          <li><b>REST API</b> — drives, arrays, volumes, exports, slabs, cluster; optional TLS + bearer token.</li>
+          <li><b>Web UI</b> — dashboard, drives, arrays, volumes, exports, cluster, and discovered-nodes pages, served by the same binary.</li>
+          <li><b>Prometheus</b> — <code>/metrics</code>: I/O, replication retries, slab allocated/free.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Features &amp; usage</span><span class="counter"></span></div>
+</section>
+
+<!-- 13 · USAGE: CLONE-PER-CONSUMER -->
+<section class="slide red-strip">
+  <div class="kicker">Features &amp; usage</div>
+  <h2>The core workflow: golden image &rarr; clone per consumer</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+<pre><span class="c"># create a volume, idempotent by name</span>
+curl -X POST node:9090/v1/volumes \
+  -d '{"name":"fedora-golden",
+       "size_bytes":10737418240}'
+
+<span class="c"># clone it — copies no data (CoW)</span>
+curl -X POST node:9090/v1/volumes \
+  -d '{"name":"instance-42",
+       "source":{"volume":"fedora-golden"}}'
+
+<span class="c"># export: returns LUN / NSID, goes active</span>
+curl -X POST node:9090/api/v1/exports \
+  -d '{"volume_id":"…","protocol":"iscsi"}'</pre>
+      </div>
+      <div>
+        <ul>
+          <li>Untar a golden OS image <b>once</b>; every container/VM instance gets a CoW clone that shares the source's extents and diverges only where it writes.</li>
+          <li>Clone-and-attach measured at <b>1.46 ms p50</b> — fast enough that "give this sandbox a disk" sits on a request path.</li>
+          <li>Drop the instance &rarr; delete the clone &rarr; discards reclaim its diverged extents. Restart-to-reset for free.</li>
+          <li>Snapshots (<code>/v1/snapshots</code>) freeze any volume the same way; group snapshots freeze many under one consistency point.</li>
+        </ul>
+        <div class="plain"><b>In plain terms:</b> like container images, but for disks: one master copy, unlimited cheap instances, each instance paying only for what it changes.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Features &amp; usage</span><span class="counter"></span></div>
+</section>
+
+<!-- 14 · USAGE: BOOT -->
+<section class="slide red-strip">
+  <div class="kicker">Features &amp; usage</div>
+  <h2>Machines <span class="accent">boot from</span> StormBlock</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <h3>boot-iscsi — diskless first boot</h3>
+        <ul>
+          <li>Provisions a partitioned boot disk (<code>esp:256M,boot:512M,root:6G,swap:1G,home:rest</code>) as thin volumes on a remote iSCSI slab.</li>
+          <li>A minimal initramfs (busybox + stormblock + ublk_drv) logs in and exports each partition as <code>/dev/ublkbN</code>; Fedora installs and boots LinuxBoot-style — verified end-to-end in CI.</li>
+        </ul>
+        <h3>boot-local — every boot after</h3>
+        <ul>
+          <li>Attaches existing slabs <b>non-destructively</b>, restores metadata, resolves the boot volume by UUID/name, exports root as <code>/dev/ublkb0</code>.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Zeroboot flow-over</h3>
+        <div class="flow" style="flex-direction:column; gap:1vh">
+          <div class="node">Machine boots from network slab<small>root on iSCSI, via ublk</small></div>
+          <div class="node">--local-disk: migrate in background<small>per-extent lock cycling — root I/O keeps flowing</small></div>
+          <div class="node">Next boot: fully local<small>no reinstall, no downtime</small></div>
+        </div>
+        <div class="plain"><b>In plain terms:</b> rack a machine with a blank disk, power it on, and it boots an OS it doesn't have — then quietly copies that OS onto its own disk <i>while running from it</i>. StormBlock is serving the very volume it's migrating.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Features &amp; usage</span><span class="counter"></span></div>
+</section>
+
+<!-- 15 · CLUSTER -->
+<section class="slide red-strip">
+  <div class="kicker">Features &amp; usage</div>
+  <h2>Cluster: optional, discoverable, replicated</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li><b>Discovery</b> — UDP multicast announcements with multi-cluster identity; the Nodes UI page shows discovered peers and drives cluster create/join/leave.</li>
+          <li><b>Metadata consensus</b> — openraft 0.9 over HTTP/HTTPS, sharing the management TLS cert; heartbeat health monitoring marks unreachable peers.</li>
+          <li><b>Replication</b> — synchronous (ack after N replicas) or asynchronous with a retry queue: exponential backoff, bounded at 10k entries, Prometheus counters for success/exhausted/dropped.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Placement engine</h3>
+        <ul>
+          <li><code>migrate_extent</code> — move one extent live between slabs.</li>
+          <li><code>evacuate_slab</code> — drain a device for removal.</li>
+          <li><code>rebalance</code> — EvenDistribution or TierAffinity strategies across the pool; placement decisions consult discovered peers.</li>
+          <li>Snapshot-fenced <b>cold copies</b> for tiering data down without racing live writes.</li>
+        </ul>
+        <div class="plain"><b>In plain terms:</b> nodes find each other by shouting on the LAN, agree on metadata by vote, and shuffle 1&nbsp;MB cells between machines in the background — all of it optional; a single node never needs any of it.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Features &amp; usage</span><span class="counter"></span></div>
+</section>
+
+<!-- 16 · OPENSHIFT I -->
+<section class="slide red-strip">
+  <div class="kicker">OpenShift</div>
+  <h2>The OpenShift interface: <span class="accent">stormblock-csi</span></h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <ul>
+          <li>A sister repo makes StormBlock the platform's <b>default StorageClass</b>: CSI controller + node plugin + operator, all Rust (tonic gRPC, kube-rs).</li>
+          <li>Every PVC becomes a <b>wandering replicated pair</b>: a master replica local to the pod's node, a slave prestaged on a second worker.</li>
+          <li>CSI parity list: dynamic provisioning, online expansion, raw block, VolumeSnapshot + VolumeGroupSnapshot, clones via PVC <code>dataSource</code>, CSIStorageCapacity, WaitForFirstConsumer topology.</li>
+        </ul>
+        <table>
+          <tr><th>Provider</th><th>Role</th></tr>
+          <tr><td><b>StormBlock</b></td><td>RWO block; survives node death, fenced failover</td></tr>
+          <tr><td>rspacefs</td><td>Semi-portable data PVCs (hand-off, not shared)</td></tr>
+          <tr><td>StormFS</td><td>True shared RWX filesystem</td></tr>
+        </table>
+      </div>
+      <div>
+        <div class="flow" style="flex-direction:column; gap:1vh">
+          <div class="node">CSI controller plugin<small>Create/Delete/Snapshot/Clone/Expand → /v1 API</small></div>
+          <div class="node">CSI node plugin (DaemonSet)<small>NodeStage/Publish: nvme-tcp or ublk attach</small></div>
+          <div class="node">Wander controller<small>invariant: master local to pod, slave prestaged elsewhere</small></div>
+          <div class="node">Fencing controller (leader-elected)<small>the ONLY caller of promote(); per-volume epochs</small></div>
+        </div>
+        <div class="plain"><b>In plain terms:</b> to OpenShift it's just a StorageClass — you claim a disk, your pod gets it. Behind the scenes every disk secretly lives on two workers, and if the pod's node dies, the pod restarts where the copy already is.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>OpenShift</span><span class="counter"></span></div>
+</section>
+
+<!-- 17 · OPENSHIFT II -->
+<section class="slide red-strip">
+  <div class="kicker">OpenShift</div>
+  <h2>The /v1 contract: fencing as an API</h2>
+  <div class="grow">
+    <table>
+      <tr><th style="width:34%">Endpoint group</th><th>Semantics</th></tr>
+      <tr><td><code>/v1/volumes</code> · snapshots · groups</td><td>Name-idempotent create (CSI retries safely), CoW clone via <code>source</code>, expand, mode-gated attach/detach. Group snapshots hold GEM + registry locks across all members — <b>one consistency fence</b>.</td></tr>
+      <tr><td><code>…/placement</code> · <code>…/prestage</code></td><td>Converge the master/slave pair; replace a slave with throttled background resync. Master==slave is a 409 — anti-affinity is mandatory, not advisory.</td></tr>
+      <tr><td><code>…/fence</code> · <code>…/promote</code></td><td>Compare-and-swap on a per-volume <b>epoch</b>: 412 <code>stale_epoch</code> tells a lagging controller it lost the race. A fenced old master can never ack a write again.</td></tr>
+      <tr><td><code>…/dual-attach</code> (+ close)</td><td>Bounded two-node window (TTL) for KubeVirt live migration; <code>commit</code> = fence + promote the target, sub-second cutover; <code>abort</code> = master unchanged.</td></tr>
+      <tr><td><code>/v1/nodes/capacity</code></td><td>Per-node bytes + topology labels &rarr; CSIStorageCapacity and WaitForFirstConsumer scheduling.</td></tr>
+    </table>
+    <p class="sub">The contract doc's MockEngine is the executable spec; StormBlock's implementation is verified by 11 HTTP-level integration tests ported straight from it. Errors are a typed envelope: <code>{code, message, current_epoch?}</code> over 404/409/412/507.</p>
+    <div class="plain"><b>In plain terms:</b> split brain — two nodes both believing they own a disk — is <i>the</i> storage disaster. Here it's prevented by arithmetic: every ownership change increments a counter, and writes carrying yesterday's number are refused.</div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>OpenShift</span><span class="counter"></span></div>
+</section>
+
+<!-- 18 · RESULTS HERO -->
+<section class="slide dark">
+  <div class="grow" style="text-align:center">
+    <div class="kicker" style="margin-bottom:3vh">Results</div>
+    <p style="font-size:3.2vh; color:#B8BBBE">A sandbox asks for a disk —</p>
+    <h1 style="font-size:7vh; margin:1.5vh 0">cloned, attached, serving in <span style="color:var(--rh-red)">1.46 ms</span></h1>
+    <p class="sub" style="margin-top:3vh; font-size:2.4vh">
+      Golden image &rarr; CoW clone &rarr; live LUN, p50, inside the 1–2 ms budget<br>
+      the agent-sandbox fork path demanded. No data copied, no reconnect, no restart.
+    </p>
+    <div class="stat-row" style="margin-top:5vh; text-align:left">
+      <div class="stat"><div class="hero-num">312</div><div class="hero-label">tests passing, unit through full-stack TCP round-trips</div></div>
+      <div class="stat"><div class="hero-num">11 MB</div><div class="hero-label">static musl binary — drivers, RAID, targets, UI, cluster</div></div>
+      <div class="stat"><div class="hero-num">1,000</div><div class="hero-label">LUNs attached in the scale test, O(1) per-command lookup</div></div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Results</span><span class="counter"></span></div>
+</section>
+
+<!-- 19 · NUMBERS -->
+<section class="slide red-strip">
+  <div class="kicker">Results</div>
+  <h2>Control-plane latency: measured, then halved</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <table>
+          <tr><th>Operation</th><th class="num">Before</th><th class="num">After</th></tr>
+          <tr><td>Clone</td><td class="num">1.65 ms</td><td class="num"><b>0.80 ms</b></td></tr>
+          <tr><td>Attach</td><td class="num">1.48 ms</td><td class="num"><b>0.67 ms</b></td></tr>
+          <tr><td>Delete</td><td class="num">1.52 ms</td><td class="num"><b>0.68 ms</b></td></tr>
+          <tr><td>Clone-and-attach p50</td><td class="num">3.14 ms</td><td class="num"><b>1.46 ms</b></td></tr>
+        </table>
+        <p class="sub">GEM + slab registry moved from Mutex to RwLock; state saves diff-and-append instead of rewriting.</p>
+      </div>
+      <div>
+        <ul>
+          <li><b>Flat, not linear.</b> Clone latency vs existing volumes: 0.64 / 0.62 / 0.69 ms at ~21 / ~42 / ~63 volumes — previously 0.81 / 1.09 / 1.51 and climbing.</li>
+          <li>The old state save rewrote all control-plane JSON per mutation — extrapolating to ~85 ms per clone at 5,000 volumes, exactly the scale the registry model targets. Now: append the changed records, full snapshot every 512.</li>
+          <li>NVMe-oF hot-add means attach cost is an async event + rescan — <b>no Connect, no new TCP session</b> per new volume.</li>
+        </ul>
+        <div class="plain"><b>In plain terms:</b> the fixes weren't "make it fast" — they were "stop it getting slower as it fills up." Cost per disk is now the same for the 10th and the 5,000th.</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Results</span><span class="counter"></span></div>
+</section>
+
+<!-- 20 · LESSONS -->
+<section class="slide red-strip">
+  <div class="kicker">Lessons learned</div>
+  <h2>The spec is the map; the initiator is the territory</h2>
+  <div class="grow">
+    <table>
+      <tr><th>Symptom</th><th>Root cause — always in the protocol fine print</th></tr>
+      <tr><td>Thin volumes grew forever, never shrank</td><td><b>Two</b> independent causes: without VPD page 0xB2 Linux never issues discards at all; and UNMAP's parameter list arrives as a separate data-out phase that was never read. Either alone kept reclaim at zero.</td></tr>
+      <tr><td>iSCSI discovery "never worked"</td><td>The target echoed <code>SessionType</code> back in the login response; open-iscsi aborts on the unexpected key. RouterOS masked the bug for months by skipping discovery entirely.</td></tr>
+      <tr><td>Session hangs after ~128 commands</td><td>ExpStatSN wasn't tracked from response PDUs — the target's command window silently closed. Nothing errors; everything just stops.</td></tr>
+      <tr><td>Hosts never noticed new namespaces</td><td>NVMe-oF hot-add needs the whole chain: OAES bit advertised, host's async event request held, Changed Namespace List log page (cleared on read, with the rescan-everything sentinel). Miss one link and no event ever fires.</td></tr>
+    </table>
+    <p class="quote">Every one of these was found against a real initiator — open-iscsi, RouterOS, the Linux nvme host — not against the spec PDF. Interop testing <i>is</i> the test suite.</p>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Lessons learned</span><span class="counter"></span></div>
+</section>
+
+<!-- 21 · WHAT'S NEXT -->
+<section class="slide red-strip">
+  <div class="kicker">What's next</div>
+  <h2>Open issues, sized honestly</h2>
+  <div class="grow">
+    <div class="cols">
+      <div>
+        <h3>Data path</h3>
+        <ul>
+          <li>Slab I/O to O_DIRECT + io_uring — today's buffered tokio file I/O is the known throughput ceiling (#30).</li>
+          <li>iSCSI MC/S or clean multi-session parallelism (#31).</li>
+          <li>Engine data path for cross-node replication: epoch-carrying writes and resync — the /v1 control plane is done, the bytes don't move yet.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Volume lifecycle</h3>
+        <ul>
+          <li>Online resize — ublk must learn the new size; shrink must refuse to eat a mounted filesystem (#19).</li>
+          <li>First-class volume move / re-home (#20).</li>
+          <li>Grow the pool on disk pressure: add a slab at 80% used instead of preallocating (#18).</li>
+          <li>CSI end-to-end on the 4-node cluster (stormblock-csi#15).</li>
+        </ul>
+      </div>
+    </div>
+    <p class="quote">The pattern so far holds: control plane first with an executable spec, then make the data path honest against real initiators.</p>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>What's next</span><span class="counter"></span></div>
+</section>
+
+<!-- 22 · CLOSE -->
+<section class="slide dark">
+  <div class="grow">
+    <div class="kicker">Try it</div>
+    <h2 style="color:#fff">One curl away</h2>
+<pre>curl -X POST http://node:9090/v1/volumes \
+  -d '{"name": "scratch", "size_bytes": 10737418240}'
+<span class="c"># … then mount it from any Linux box:</span>
+nvme connect -t tcp -a 192.168.200.21 -s 4420 -n &lt;subsystem-nqn&gt;</pre>
+    <div style="margin-top:4vh">
+      <span class="pill">github.com/glennswest/stormblock</span>
+      <span class="pill">docs/stormblock-spec.md — the full spec</span>
+      <span class="pill">stormblock-csi — the OpenShift interface</span>
+    </div>
+    <p class="sub" style="margin-top:5vh; font-size:2.6vh">
+      An 11 MB binary serving the disk of the machine it's running on,<br>
+      while migrating that disk somewhere else.&nbsp; <span style="color:var(--rh-red)">Thank you.</span>
+    </p>
+  </div>
+  <div class="footer"><span class="brandmark">stormblock</span><span>Glenn West · August 2026</span><span class="counter"></span></div>
+</section>
+
+</div>
+<script>
+  const slides = Array.from(document.querySelectorAll("section.slide"));
+  let cur = Math.min(Math.max(parseInt(location.hash.slice(1) || "1", 10) - 1 || 0, 0), slides.length - 1);
+  function show(i) {
+    cur = Math.min(Math.max(i, 0), slides.length - 1);
+    slides.forEach((s, j) => s.classList.toggle("active", j === cur));
+    document.querySelectorAll(".counter").forEach(c => c.textContent = (cur + 1) + " / " + slides.length);
+    history.replaceState(null, "", "#" + (cur + 1));
+  }
+  addEventListener("keydown", e => {
+    if (["ArrowRight", "PageDown", " "].includes(e.key)) { show(cur + 1); e.preventDefault(); }
+    else if (["ArrowLeft", "PageUp"].includes(e.key)) { show(cur - 1); e.preventDefault(); }
+    else if (e.key === "Home") show(0);
+    else if (e.key === "End") show(slides.length - 1);
+  });
+  addEventListener("click", e => {
+    if (e.clientX > innerWidth * 0.75) show(cur + 1);
+    else if (e.clientX < innerWidth * 0.25) show(cur - 1);
+  });
+  show(cur);
+</script>
+</body>
+</html>
