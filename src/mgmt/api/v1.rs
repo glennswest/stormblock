@@ -318,6 +318,11 @@ pub struct V1State {
     pub local_node: String,
     #[serde(skip)]
     pub local_topology: BTreeMap<String, String>,
+    /// Capacity most recently reported by each peer, with the instant it was
+    /// seen. Live data, not persisted: it is refreshed on a timer, and
+    /// journalling it would churn the state file to no purpose.
+    #[serde(skip)]
+    pub peers: BTreeMap<String, (NodeCapacity, std::time::Instant)>,
     #[serde(skip)]
     persist_path: Option<PathBuf>,
     /// What the on-disk state currently contains, so `save` can journal only
@@ -659,6 +664,19 @@ async fn local_capacity(state: &AppState) -> (u64, u64) {
 /// a static entry exists (test setups).
 async fn nodes_view(state: &AppState, v1: &V1State) -> BTreeMap<String, NodeCapacity> {
     let mut nodes = v1.nodes.clone();
+
+    // Peers polled from their own /v1/nodes/capacity. Anything not heard from
+    // recently is left out so volumes stop being placed on a node that is
+    // gone; statically configured entries still stand behind it.
+    let ttl = std::time::Duration::from_secs(
+        state.config.management.peer_timeout_secs.max(1),
+    );
+    for (name, (cap, seen)) in &v1.peers {
+        if seen.elapsed() <= ttl {
+            nodes.insert(name.clone(), cap.clone());
+        }
+    }
+
     let (total, free) = local_capacity(state).await;
     let insert_live = total > 0 || !nodes.contains_key(&v1.local_node);
     if insert_live {

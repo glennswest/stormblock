@@ -3,6 +3,7 @@
 pub mod api;
 pub mod config;
 pub mod metrics;
+pub mod discovery;
 pub mod ublk_export;
 #[cfg(feature = "ui")]
 pub mod ui;

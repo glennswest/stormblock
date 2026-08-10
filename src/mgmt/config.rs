@@ -71,6 +71,22 @@ pub struct ManagementConfig {
     /// Topology labels (zone, rack, ...) reported for this node via
     /// GET /v1/nodes/capacity.
     pub topology: std::collections::BTreeMap<String, String>,
+    /// Management addresses of peer nodes, e.g. `["192.168.8.182:9090"]`.
+    ///
+    /// Their capacity is polled and merged into `GET /v1/nodes/capacity`, so
+    /// replica placement can see more than the local node. Without this the
+    /// engine only ever knows about itself and any request for a slave
+    /// replica fails with `out_of_space`.
+    #[serde(default)]
+    pub peers: Vec<String>,
+    /// How often to poll peers, in seconds (default 10).
+    #[serde(default = "default_peer_poll_secs")]
+    pub peer_poll_secs: u64,
+    /// Drop a peer from the placement view after this long without a
+    /// successful poll (default 60s), so volumes stop being placed on a node
+    /// that is gone.
+    #[serde(default = "default_peer_timeout_secs")]
+    pub peer_timeout_secs: u64,
     /// Address remote consumers should use to reach this node's targets.
     ///
     /// Target listen addresses are usually wildcards (`0.0.0.0:4420`), which
@@ -98,11 +114,17 @@ impl Default for ManagementConfig {
             api_token: None,
             node_name: None,
             topology: std::collections::BTreeMap::new(),
+            peers: Vec::new(),
+            peer_poll_secs: default_peer_poll_secs(),
+            peer_timeout_secs: default_peer_timeout_secs(),
             advertised_addr: None,
             ublk_transport: false,
         }
     }
 }
+
+fn default_peer_poll_secs() -> u64 { 10 }
+fn default_peer_timeout_secs() -> u64 { 60 }
 
 /// True for a listen host that names no concrete address a peer could dial.
 fn is_wildcard_host(host: &str) -> bool {
