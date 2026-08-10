@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 ### 2026-08-10
-- **docs:** `docs/presentation/stormblock.html` — 22-slide deep-dive deck on the engine (architecture, slab/GEM data model, drive backends, RAID, both target protocols, boot-from-StormBlock, cluster/placement), its feature usage (config, CLI, REST, clone-per-consumer), and the OpenShift interface via stormblock-csi (wandering master/slave pairs, the /v1 fencing contract). Keyboard/click navigation, prints to 16:9 PDF. Same house style as the llmpager deck.
+- **docs:** deck gains a Testing arc — the four-rung ladder (312 local tests → Linux CI → live interop against LIO/open-iscsi/kernel nvme → the M0 multi-host fleet), the `docs/m0-baseline.md` fio numbers from 3 storage nodes plus a kernel-initiator host, and what the fleet found that a single node hides: a 0.2–4.6 s sequential p99 tail that prices open issue #30.
+- **docs:** `docs/presentation/stormblock.html` — 25-slide deep-dive deck on the engine (architecture, slab/GEM data model, drive backends, RAID, both target protocols, boot-from-StormBlock, cluster/placement), its feature usage (config, CLI, REST, clone-per-consumer), and the OpenShift interface via stormblock-csi (wandering master/slave pairs, the /v1 fencing contract). Keyboard/click navigation, prints to 16:9 PDF. Same house style as the llmpager deck.
 
 ## [v7.1.0] — 2026-08-09
 
