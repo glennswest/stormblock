@@ -127,6 +127,10 @@ pub struct AppState {
     /// Live per-volume ublk exports for the local CSI fast path.
     pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
     pub config: StormBlockConfig,
+    /// Node/cluster discovery. `None` when it could not be started (for
+    /// example a network without multicast) — the node still serves its own
+    /// volumes, it just cannot see peers.
+    pub discovery: Option<Arc<discovery::Discovery>>,
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
     /// Live NVMe-oF target, so exports can add namespaces at runtime (#26).
@@ -141,6 +145,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// This node's name in the /v1 surface and in discovery beacons.
+    pub fn local_node_name(&self) -> String {
+        self.config
+            .management
+            .node_name
+            .clone()
+            .or_else(|| std::env::var("STORMBLOCK_NODE").ok())
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .unwrap_or_else(|| "localhost".to_string())
+    }
+
     pub fn new(
         config: StormBlockConfig,
         volume_manager: VolumeManager,
@@ -157,6 +172,7 @@ impl AppState {
             v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
             ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
             config,
+            discovery: None,
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),
             #[cfg(feature = "nvmeof")]

@@ -343,6 +343,34 @@ async fn main() -> anyhow::Result<()> {
     let gem = volume_manager.gem().clone();
     let mut state = Arc::new(AppState::new(config.clone(), volume_manager, slab_registry, gem));
 
+    // Node/cluster discovery. Attached before the targets start so peers see
+    // this node as soon as it is serving.
+    if !config.management.discovery_disabled {
+        let node_name = state.local_node_name();
+        let mgmt_addr = {
+            let host = config.management.resolve_advertised_host(
+                config.management.listen_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(""),
+            );
+            let port = config.management.listen_addr
+                .rsplit_once(':').map(|(_, p)| p).unwrap_or("9090");
+            format!("{host}:{port}")
+        };
+        let disc = Arc::new(mgmt::discovery::Discovery::new(
+            node_name,
+            mgmt_addr,
+            config.management.data_dir.as_ref().map(std::path::PathBuf::from),
+            std::time::Duration::from_secs(config.management.peer_stale_secs.max(1)),
+        ));
+        if let Some(s) = Arc::get_mut(&mut state) {
+            s.discovery = Some(disc.clone());
+        }
+        mgmt::discovery::spawn(
+            disc,
+            state.clone(),
+            std::time::Duration::from_secs(config.management.beacon_secs.max(1)),
+        );
+    }
+
     // Collect device paths from config
     let device_paths: Vec<String> = config.drives.iter()
         .map(|d| d.path.clone())
