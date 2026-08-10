@@ -426,9 +426,11 @@ impl Slab {
         };
         self.extent_index.insert((volume_id, vext_idx), slot_idx as u32);
 
-        // Persist slot entry
+        // Only the slot entry is persisted here. The header's free_slots is
+        // derived — `open` recounts it from the slot table — so writing it on
+        // every allocation was a second disk round trip under the registry
+        // lock for a value that is never read back authoritatively.
         self.persist_slot(slot_idx as u32).await?;
-        self.persist_header().await?;
 
         Ok(slot_idx as u32)
     }
@@ -462,7 +464,6 @@ impl Slab {
         self.free_count += 1;
 
         self.persist_slot(slot_idx).await?;
-        self.persist_header().await?;
         self.discard_slots(&[slot_idx]).await;
 
         Ok(())
@@ -640,7 +641,6 @@ impl Slab {
 
         self.persist_slots(slot_indices).await?;
         if freed > 0 {
-            self.persist_header().await?;
             // Give the space back to the device, not just to the slab —
             // otherwise reclaim happens on the single-slot route only and a
             // dropped clone still leaks its backing store.
@@ -812,9 +812,26 @@ impl Slab {
         if bs <= SLOT_ENTRY_SIZE {
             // Block size <= entry size — direct write is fine
             self.device.write(entry_offset, &entry_bytes).await?;
+            return Ok(());
+        }
+
+        let sector_start = (entry_offset / bs) * bs;
+        let entries_per_sector = (bs / SLOT_ENTRY_SIZE) as usize;
+        let first_entry = ((sector_start - self.header.table_offset) / SLOT_ENTRY_SIZE) as usize;
+
+        // `self.slots` is the authoritative copy of the table, so a sector that
+        // lies wholly inside it can be rebuilt from memory — no read needed.
+        // A trailing partial sector overlaps the data region and must still be
+        // read first so those bytes are preserved.
+        if first_entry + entries_per_sector <= self.slots.len() {
+            let mut sector = vec![0u8; bs as usize];
+            for i in 0..entries_per_sector {
+                let off = i * SLOT_ENTRY_SIZE as usize;
+                sector[off..off + SLOT_ENTRY_SIZE as usize]
+                    .copy_from_slice(&self.slots[first_entry + i].to_bytes());
+            }
+            self.device.write(sector_start, &sector).await?;
         } else {
-            // Read-modify-write: read aligned sector, patch entry, write back
-            let sector_start = (entry_offset / bs) * bs;
             let offset_in_sector = (entry_offset - sector_start) as usize;
             let mut sector = vec![0u8; bs as usize];
             self.device.read(sector_start, &mut sector).await?;

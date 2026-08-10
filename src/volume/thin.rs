@@ -842,6 +842,49 @@ mod tests {
         cleanup(&paths);
     }
 
+    /// A single large write must allocate every extent it spans. Reported
+    /// allocation stalling behind what was actually written is #33.
+    #[tokio::test]
+    async fn one_large_write_allocates_every_extent_it_spans() {
+        let slot = 1024 * 1024;
+        let (handle, paths) = setup_test_volume(slot).await;
+
+        // 16 MB in a single call spans 16 slots.
+        let data = vec![0xA7u8; 16 * slot as usize];
+        let n = handle.write(0, &data).await.unwrap();
+        assert_eq!(n, data.len());
+
+        assert_eq!(handle.extent_count().await, 16, "one extent per slot spanned");
+        assert_eq!(handle.allocated().await, 16 * slot, "allocated must track the write");
+
+        // And it must read back whole.
+        let mut buf = vec![0u8; data.len()];
+        handle.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xA7));
+
+        cleanup(&paths);
+    }
+
+    /// Writing at a high offset must allocate that extent, not silently store
+    /// data the map does not know about.
+    #[tokio::test]
+    async fn write_at_high_offset_allocates_and_reports() {
+        let slot = 1024 * 1024;
+        let (handle, paths) = setup_test_volume(slot).await;
+
+        let off = 40 * slot;
+        handle.write(off, &vec![0xBBu8; slot as usize]).await.unwrap();
+
+        assert_eq!(handle.extent_count().await, 1);
+        assert_eq!(handle.allocated().await, slot);
+
+        let mut buf = vec![0u8; slot as usize];
+        handle.read(off, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xBB), "data at a high offset must persist");
+
+        cleanup(&paths);
+    }
+
     #[tokio::test]
     async fn flush_works() {
         let (handle, paths) = setup_test_volume(4096).await;
