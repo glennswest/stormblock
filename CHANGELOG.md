@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [v8.1.0] — 2026-08-11
+
+### Added
+- **feat:** background extent garbage collector (`[gc]` in `stormblock.toml`, on by default, 600 s interval). Reclaims slab slots no volume maps — the capacity #37 stranded, which is otherwise unrecoverable without reformatting the slab, since deleting a slab refuses any slab with allocated slots. `POST /api/v1/slabs/gc` runs a pass immediately (`?dry_run=true` to see what it would free, `?max_reclaim=N` to bound it); `GET /api/v1/slabs/gc` reports configuration and the last pass.
+- **feat:** `SlabRegistry` reservations (`reserve` / `commit` / `is_reserved`). Allocation and mapping are two steps with the registry lock released between them, so a freshly allocated slot is briefly indistinguishable from a leaked one; reservations mark that window and the collector skips it. `ThinVolumeHandle` reserves on allocate and commits once the extent is in the GEM, including on the copy-on-write failure path, where the reservation is dropped so a slot stranded by a failed write becomes collectable rather than pinned for the process lifetime.
+
+### Notes
+- **Liveness is decided by the GEM's forward maps, never the reverse index.** The reverse index records only the *primary* owner of a copy-on-write slot, so `remove_volume` drops the entry for slots a surviving clone still shares — collecting on it would free live data. The union of the forward maps counts shared slots correctly by construction. `keeps_slots_a_clone_still_shares` pins this behaviour: it deletes a clone's source, asserts the reverse lookup is now empty, and asserts the slot survives.
+- Two-pass confirmation (`confirm_passes`, default on) requires an orphan to be seen unreferenced by two consecutive passes, with the locks dropped in between, before its data is freed — defence in depth for any allocation path added later without a reservation. `max_reclaim_per_pass` (default 4096) bounds how long one pass holds the registry lock.
+- **test:** 6 collector tests — the #37 leak state, clone-shared slots surviving, in-flight allocations skipped, dry run, two-pass deferral, and reclaim capping.
+
 ## [v8.0.0] — 2026-08-11
 
 ### Breaking

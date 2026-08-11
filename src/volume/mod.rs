@@ -9,6 +9,7 @@ pub mod gem;
 pub mod metadata;
 pub mod thin;
 pub mod snapshot;
+pub mod gc;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

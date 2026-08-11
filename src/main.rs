@@ -371,6 +371,20 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Background extent collector. Reclaims slab slots no volume maps —
+    // capacity that is otherwise unrecoverable without reformatting the slab,
+    // since a slab with allocated slots refuses deletion.
+    if config.gc.enabled {
+        let last = stormblock::volume::gc::spawn(
+            state.gem.clone(),
+            state.slab_registry.clone(),
+            config.gc.clone(),
+        );
+        if let Some(s) = Arc::get_mut(&mut state) {
+            s.last_gc = Some(last);
+        }
+    }
+
     // Collect device paths from config
     let device_paths: Vec<String> = config.drives.iter()
         .map(|d| d.path.clone())

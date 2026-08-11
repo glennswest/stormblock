@@ -324,10 +324,13 @@ impl ThinVolumeHandle {
         registry: &mut SlabRegistry,
         vext_idx: u64,
     ) -> DriveResult<(SlabId, u32)> {
+        // Reserved until the caller records the mapping — otherwise the
+        // collector cannot tell this slot from a leaked one.
         // Try preferred tier first
         if let Some(slab_id) = registry.best_slab_for_tier(self.placement.preferred_tier) {
             if let Some(slab) = registry.get_mut(&slab_id) {
                 if let Ok(slot_idx) = slab.allocate(self.id, vext_idx).await {
+                    registry.reserve(slab_id, slot_idx);
                     return Ok((slab_id, slot_idx));
                 } // full, try fallback
             }
@@ -338,7 +341,10 @@ impl ThinVolumeHandle {
             if let Some(slab_id) = registry.best_slab_for_tier(tier) {
                 if let Some(slab) = registry.get_mut(&slab_id) {
                     match slab.allocate(self.id, vext_idx).await {
-                        Ok(slot_idx) => return Ok((slab_id, slot_idx)),
+                        Ok(slot_idx) => {
+                            registry.reserve(slab_id, slot_idx);
+                            return Ok((slab_id, slot_idx));
+                        }
                         Err(_) => continue,
                     }
                 }
@@ -371,6 +377,8 @@ impl ThinVolumeHandle {
                 generation: 1,
             });
         }
+        // Mapped now, so the collector can see it is owned.
+        self.registry.write().await.commit(slab_id, slot_idx);
 
         // Write data
         let (device, phys_offset) = {
@@ -426,14 +434,23 @@ impl ThinVolumeHandle {
             self.allocate_slot(&mut reg, vext_idx).await?
         };
 
-        // Write old data to new slot, then overlay new data
-        {
+        // Write old data to new slot, then overlay new data.
+        //
+        // Failing here leaves the slot allocated but never mapped — a genuine
+        // orphan. Drop the reservation on the way out so the collector is
+        // free to reclaim it, rather than pinning it for the process lifetime.
+        let copied = async {
             let reg = self.registry.read().await;
             let slab = reg.get(&new_slab_id).ok_or_else(|| {
                 DriveError::Other(anyhow::anyhow!("slab {} not found", new_slab_id.0))
             })?;
             slab.write_slot(new_slot_idx, 0, &old_data).await?;
-            slab.write_slot(new_slot_idx, off_in_slot, buf).await?;
+            slab.write_slot(new_slot_idx, off_in_slot, buf).await
+        }
+        .await;
+        if let Err(e) = copied {
+            self.registry.write().await.commit(new_slab_id, new_slot_idx);
+            return Err(e);
         }
 
         // Update GEM
@@ -450,6 +467,8 @@ impl ThinVolumeHandle {
         // Dec ref on old slot
         {
             let mut reg = self.registry.write().await;
+            // The new slot is mapped now, so it no longer needs protecting.
+            reg.commit(new_slab_id, new_slot_idx);
             if let Some(slab) = reg.get_mut(&old_loc.slab_id) {
                 if let Err(e) = slab.dec_ref(old_loc.slot_idx).await {
                     tracing::warn!(

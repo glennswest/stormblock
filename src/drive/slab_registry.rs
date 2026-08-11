@@ -4,7 +4,7 @@
 //! or to read/write existing slots. It indexes slabs by storage tier
 //! for placement-aware allocation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::placement::topology::StorageTier;
 use super::slab::{Slab, SlabId};
@@ -13,6 +13,20 @@ use super::slab::{Slab, SlabId};
 pub struct SlabRegistry {
     slabs: HashMap<SlabId, Slab>,
     tier_index: HashMap<StorageTier, Vec<SlabId>>,
+    /// Slots handed out by `allocate` but not yet recorded in the Global
+    /// Extent Map.
+    ///
+    /// Allocation and mapping are not one atomic step: a writer allocates
+    /// under the registry lock, releases it to do the data write, and only
+    /// then takes the GEM lock to record the mapping. In that window the slot
+    /// is `Allocated` with nothing referencing it, which is indistinguishable
+    /// from a leak — so garbage collection would free a slot a write is about
+    /// to use. Reservations make the difference explicit.
+    ///
+    /// In-memory only, and deliberately so: after a restart nothing is
+    /// in flight, and any slot left stranded by a crash mid-write is a real
+    /// orphan that the collector should reclaim.
+    in_flight: HashSet<(SlabId, u32)>,
 }
 
 impl SlabRegistry {
@@ -21,7 +35,30 @@ impl SlabRegistry {
         SlabRegistry {
             slabs: HashMap::new(),
             tier_index: HashMap::new(),
+            in_flight: HashSet::new(),
         }
+    }
+
+    /// Mark a freshly allocated slot as in flight, protecting it from
+    /// collection until the caller records it in the GEM.
+    pub fn reserve(&mut self, slab_id: SlabId, slot_idx: u32) {
+        self.in_flight.insert((slab_id, slot_idx));
+    }
+
+    /// Release a reservation once the mapping exists (or the write failed and
+    /// the slot was given back).
+    pub fn commit(&mut self, slab_id: SlabId, slot_idx: u32) {
+        self.in_flight.remove(&(slab_id, slot_idx));
+    }
+
+    /// Whether a slot is allocated-but-not-yet-mapped.
+    pub fn is_reserved(&self, slab_id: SlabId, slot_idx: u32) -> bool {
+        self.in_flight.contains(&(slab_id, slot_idx))
+    }
+
+    /// How many slots are currently in flight.
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
     }
 
     /// Register a slab.

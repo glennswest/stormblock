@@ -32,6 +32,45 @@ pub struct StormBlockConfig {
     pub cluster: crate::cluster::config::ClusterConfig,
     #[serde(default)]
     pub stormfs: crate::stormfs::StormFsConfig,
+    #[serde(default)]
+    pub gc: GcConfig,
+}
+
+/// Background extent garbage collection.
+///
+/// Reclaims slab slots no volume maps. Leaks should not happen, but when
+/// accounting between the extent map and a slot table diverges the space is
+/// otherwise unrecoverable without reformatting the slab.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GcConfig {
+    /// Run the collector periodically. On by default: the failure it recovers
+    /// from is silent and cumulative, and a pass over an unleaked node costs
+    /// one scan of the slot tables.
+    pub enabled: bool,
+    /// Seconds between passes (default 600).
+    pub interval_secs: u64,
+    /// Require an orphan to be seen by two consecutive passes before its data
+    /// is freed. Costs one interval of delay; buys a second independent check
+    /// that nothing references the slot.
+    pub confirm_passes: bool,
+    /// Most slots one pass may free, bounding how long it holds the registry
+    /// lock on a badly leaked node (default 4096).
+    pub max_reclaim_per_pass: usize,
+    /// Find and report orphans, but never free anything.
+    pub dry_run: bool,
+}
+
+impl Default for GcConfig {
+    fn default() -> Self {
+        GcConfig {
+            enabled: true,
+            interval_secs: 600,
+            confirm_passes: true,
+            max_reclaim_per_pass: 4096,
+            dry_run: false,
+        }
+    }
 }
 
 #[allow(clippy::derivable_impls)]
@@ -52,6 +91,7 @@ impl Default for StormBlockConfig {
             #[cfg(feature = "cluster")]
             cluster: crate::cluster::config::ClusterConfig::default(),
             stormfs: crate::stormfs::StormFsConfig::default(),
+            gc: GcConfig::default(),
         }
     }
 }

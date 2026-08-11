@@ -131,6 +131,8 @@ pub struct AppState {
     /// example a network without multicast) — the node still serves its own
     /// volumes, it just cannot see peers.
     pub discovery: Option<Arc<discovery::Discovery>>,
+    /// Most recent extent-GC pass, when the background collector is running.
+    pub last_gc: Option<Arc<tokio::sync::RwLock<Option<crate::volume::gc::GcSummary>>>>,
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
     /// Live NVMe-oF target, so exports can add namespaces at runtime (#26).
@@ -173,6 +175,7 @@ impl AppState {
             ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
             config,
             discovery: None,
+            last_gc: None,
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),
             #[cfg(feature = "nvmeof")]

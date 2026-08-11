@@ -228,9 +228,119 @@ async fn list_slots(
     }
 }
 
+/// Most orphans listed in one response — the counts are always exact, only
+/// the sample is bounded.
+const MAX_ORPHANS_REPORTED: usize = 100;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct GcQuery {
+    /// Report what would be freed, without freeing it.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Cap on slots freed by this pass.
+    pub max_reclaim: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrphanResponse {
+    pub slab_id: String,
+    pub slot_idx: u32,
+    /// Owner recorded in the slot table — usually a volume that no longer
+    /// exists. Informational; liveness is decided by the extent map.
+    pub stale_owner: String,
+    pub virtual_extent_idx: u64,
+    pub ref_count: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GcRunResponse {
+    pub slabs_scanned: usize,
+    pub slots_scanned: u64,
+    pub live: u64,
+    pub in_flight: usize,
+    pub orphans_found: usize,
+    pub reclaimed: usize,
+    pub bytes_reclaimed: u64,
+    pub bytes_reclaimed_human: String,
+    pub deferred: usize,
+    pub dry_run: bool,
+    pub orphans: Vec<OrphanResponse>,
+    pub orphans_truncated: bool,
+}
+
+/// POST /api/v1/slabs/gc — reclaim slab slots no volume maps.
+///
+/// One pass, run now. The background collector does the same thing on a
+/// timer; this is for when an operator wants the space back immediately, or
+/// wants to see what a pass would do (`?dry_run=true`).
+pub async fn run_gc(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<GcQuery>,
+) -> Response {
+    let report = crate::volume::gc::run_once(
+        &state.gem,
+        &state.slab_registry,
+        crate::volume::gc::GcOptions {
+            dry_run: q.dry_run,
+            confirm_against: None,
+            max_reclaim: q.max_reclaim,
+        },
+    )
+    .await;
+
+    let truncated = report.orphans.len() > MAX_ORPHANS_REPORTED;
+    Json(GcRunResponse {
+        slabs_scanned: report.slabs_scanned,
+        slots_scanned: report.slots_scanned,
+        live: report.live,
+        in_flight: report.in_flight,
+        orphans_found: report.orphans.len(),
+        reclaimed: report.reclaimed,
+        bytes_reclaimed: report.bytes_reclaimed,
+        bytes_reclaimed_human: human_size(report.bytes_reclaimed),
+        deferred: report.deferred,
+        dry_run: report.dry_run,
+        orphans: report
+            .orphans
+            .iter()
+            .take(MAX_ORPHANS_REPORTED)
+            .map(|o| OrphanResponse {
+                slab_id: o.slab_id.to_string(),
+                slot_idx: o.slot_idx,
+                stale_owner: o.volume_id.to_string(),
+                virtual_extent_idx: o.virtual_extent_idx,
+                ref_count: o.ref_count,
+            })
+            .collect(),
+        orphans_truncated: truncated,
+    })
+    .into_response()
+}
+
+/// GET /api/v1/slabs/gc — what the background collector last found.
+pub async fn gc_status(State(state): State<Arc<AppState>>) -> Response {
+    let cfg = &state.config.gc;
+    let last = match &state.last_gc {
+        Some(l) => l.read().await.clone(),
+        None => None,
+    };
+    Json(serde_json::json!({
+        "enabled": cfg.enabled,
+        "interval_secs": cfg.interval_secs,
+        "confirm_passes": cfg.confirm_passes,
+        "max_reclaim_per_pass": cfg.max_reclaim_per_pass,
+        "dry_run": cfg.dry_run,
+        "running": state.last_gc.is_some(),
+        "last_pass": last,
+    }))
+    .into_response()
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_slabs).post(format_slab))
+        // Before /{id}: "gc" is a verb here, not a slab id.
+        .route("/gc", get(gc_status).post(run_gc))
         .route("/{id}", get(get_slab).delete(delete_slab))
         .route("/{id}/slots", get(list_slots))
         .with_state(state)
