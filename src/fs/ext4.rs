@@ -651,7 +651,7 @@ pub async fn format(dev: &Arc<dyn BlockDevice>, params: &Ext4Params) -> anyhow::
             })?;
         let largest = groups.iter().map(|g| g.free).max().unwrap_or(0);
         // Leave at least a quarter of the biggest group for data.
-        let cap = (largest / 4 * 3).max(0);
+        let cap = largest / 4 * 3;
         let size = want.min(cap);
         anyhow::ensure!(
             size >= 1024,
@@ -966,7 +966,7 @@ fn write_dir_inode(block: &mut [u8], ino: u32, mode: u16, data_block: u64, links
     put32(block, off + 12, now); // ctime
     put32(block, off + 16, now); // mtime
     put16(block, off + 26, links);
-    put32(block, off + 28, (bs / 512) as u32); // i_blocks (512-byte units)
+    put32(block, off + 28, bs / 512); // i_blocks (512-byte units)
     put32(block, off + 32, INODE_FL_EXTENTS);
     write_inline_extent(block, off, 0, data_block, 1);
     put16(block, off + 128, 32); // i_extra_isize

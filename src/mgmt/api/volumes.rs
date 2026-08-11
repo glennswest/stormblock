@@ -28,13 +28,27 @@ pub struct VolumeResponse {
     pub allocated_bytes: u64,
     pub allocated_human: String,
     pub array_id: Option<Uuid>,
+    /// Filesystem UUID, for a volume cloned from a preformatted template. Each
+    /// clone gets its own, stamped at clone time (#38).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateVolumeRequest {
     pub name: String,
-    pub size: String,
-    pub array_id: Uuid,
+    /// Required for a plain volume; optional (grow-only) when cloning a
+    /// template, which already knows its size.
+    #[serde(default)]
+    pub size: Option<String>,
+    /// Required for a plain volume. A template clone is placed by the slab
+    /// registry, like the source it descends from.
+    #[serde(default)]
+    pub array_id: Option<Uuid>,
+    /// Clone this preformatted filesystem template instead of creating an
+    /// empty volume — the mkfs-once path. Template id or name.
+    #[serde(default)]
+    pub from_template: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +75,7 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             allocated_bytes: *allocated,
             allocated_human: human_size(*allocated),
             array_id: None,
+            fs_uuid: None,
         }
     }).collect();
     let count = items.len();
@@ -92,6 +107,7 @@ async fn get_volume(
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
                 array_id: None,
+                fs_uuid: None,
             };
             Json(resp).into_response()
         }
@@ -105,18 +121,52 @@ async fn create_volume(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "create").increment(1);
 
-    let size = match parse_size(&req.size) {
+    let size = match super::fstemplates::resolve_size(&req.size, None) {
         Ok(s) => s,
-        Err(e) => return ApiError::bad_request(format!("invalid size '{}': {e}", req.size)),
+        Err(e) => return ApiError::bad_request(e),
     };
 
-    let array_id = RaidArrayId(req.array_id);
+    // Cloning a template is a snapshot plus a fresh filesystem UUID — no
+    // mkfs, no attach. Placement comes from the template's own extents.
+    if let Some(key) = req.from_template.as_deref() {
+        let (vol_id, fs_uuid, size_bytes) =
+            match super::fstemplates::clone_for_volume_api(&state, key, &req.name, size).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+        let vm = state.volume_manager.lock().await;
+        let allocated = match vm.get_volume_handle(&vol_id) {
+            Some(h) => h.allocated().await,
+            None => 0,
+        };
+        let resp = VolumeResponse {
+            id: vol_id.0,
+            name: req.name,
+            virtual_size_bytes: size_bytes,
+            virtual_size_human: human_size(size_bytes),
+            allocated_bytes: allocated,
+            allocated_human: human_size(allocated),
+            array_id: None,
+            fs_uuid,
+        };
+        metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
+        return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
+    }
+
+    let size = match size {
+        Some(s) => s,
+        None => return ApiError::bad_request("size is required"),
+    };
+    let array_id = match req.array_id {
+        Some(a) => RaidArrayId(a),
+        None => return ApiError::bad_request("array_id is required (or use from_template)"),
+    };
 
     // Verify array exists
     {
         let arrays = state.arrays.read().await;
         if !arrays.contains_key(&array_id) {
-            return ApiError::not_found(format!("array {} not found", req.array_id));
+            return ApiError::not_found(format!("array {} not found", array_id.0));
         }
     }
 
@@ -130,7 +180,8 @@ async fn create_volume(
                 virtual_size_human: human_size(size),
                 allocated_bytes: 0,
                 allocated_human: human_size(0),
-                array_id: Some(req.array_id),
+                array_id: Some(array_id.0),
+                fs_uuid: None,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -191,6 +242,7 @@ async fn create_snapshot(
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
                 array_id: None,
+                fs_uuid: None,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -243,6 +295,7 @@ async fn resize_volume(
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
                 array_id: None,
+                fs_uuid: None,
             };
             Json(resp).into_response()
         }

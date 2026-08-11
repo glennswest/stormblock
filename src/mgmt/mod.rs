@@ -124,6 +124,8 @@ pub struct AppState {
     pub gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     /// Control-plane state behind the /v1 CSI contract surface.
     pub v1: tokio::sync::Mutex<api::v1::V1State>,
+    /// Preformatted filesystem templates — mkfs once, clone forever (#38).
+    pub fstemplates: tokio::sync::Mutex<crate::fs::TemplateStore>,
     /// Live per-volume ublk exports for the local CSI fast path.
     pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
     pub config: StormBlockConfig,
@@ -172,6 +174,14 @@ impl AppState {
             slab_registry,
             gem,
             v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
+            fstemplates: tokio::sync::Mutex::new(
+                match config.management.data_dir.as_ref() {
+                    Some(dir) => crate::fs::TemplateStore::load(std::path::Path::new(dir)),
+                    // No data dir means nothing survives a restart anyway; a
+                    // template that outlived its store would be unreachable.
+                    None => crate::fs::TemplateStore::in_memory(),
+                },
+            ),
             ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
             config,
             discovery: None,
