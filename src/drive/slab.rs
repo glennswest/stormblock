@@ -5,7 +5,7 @@
 //! slots in any slab. This replaces the monolithic DiskPool/VDrive model
 //! with organic, per-extent data placement.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bitvec::prelude::*;
@@ -70,6 +70,42 @@ impl From<u8> for SlotState {
             _ => SlotState::Free,
         }
     }
+}
+
+/// Why a slot in a release batch could not be decremented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecRefReject {
+    /// Index past the end of the slot table.
+    OutOfRange,
+    /// Already free, or already at zero references — the extent map named a
+    /// slot the slot table no longer considers owned.
+    AlreadyFree,
+    /// The same slot appeared earlier in this batch.
+    Duplicate,
+}
+
+impl std::fmt::Display for DecRefReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecRefReject::OutOfRange => write!(f, "out of range"),
+            DecRefReject::AlreadyFree => write!(f, "already free"),
+            DecRefReject::Duplicate => write!(f, "duplicate in batch"),
+        }
+    }
+}
+
+/// What a batched reference release actually managed to do.
+///
+/// Carries the per-slot failures rather than collapsing them into a single
+/// error, so a caller can free what it can and still report the divergence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecRefOutcome {
+    /// Slots whose last reference went away — space returned to the slab.
+    pub freed: usize,
+    /// Slots decremented but still referenced by someone else.
+    pub retained: usize,
+    /// Slots that could not be decremented, and why.
+    pub rejected: Vec<(u32, DecRefReject)>,
 }
 
 /// In-memory representation of a slot.
@@ -601,27 +637,34 @@ impl Slab {
     /// reach zero. Returns the number freed.
     ///
     /// The header is written once at the end rather than once per freed slot.
-    pub async fn dec_ref_batch(&mut self, slot_indices: &[u32]) -> DriveResult<usize> {
+    pub async fn dec_ref_batch(&mut self, slot_indices: &[u32]) -> DriveResult<DecRefOutcome> {
+        let mut out = DecRefOutcome::default();
+        let mut seen: HashSet<u32> = HashSet::with_capacity(slot_indices.len());
+        let mut touched: Vec<u32> = Vec::with_capacity(slot_indices.len());
+        let mut freed_slots: Vec<u32> = Vec::new();
+
         for &slot_idx in slot_indices {
             let idx = slot_idx as usize;
+
+            // A repeat inside one batch would decrement a slot an earlier pass
+            // may already have freed, underflowing ref_count to u32::MAX.
+            if !seen.insert(slot_idx) {
+                out.rejected.push((slot_idx, DecRefReject::Duplicate));
+                continue;
+            }
             if idx >= self.slots.len() {
-                return Err(DriveError::Other(anyhow::anyhow!(
-                    "slot index {slot_idx} out of range"
-                )));
+                out.rejected.push((slot_idx, DecRefReject::OutOfRange));
+                continue;
             }
             if self.slots[idx].state == SlotState::Free || self.slots[idx].ref_count == 0 {
-                return Err(DriveError::Other(anyhow::anyhow!(
-                    "cannot dec_ref on free/zero-ref slot {slot_idx}"
-                )));
+                out.rejected.push((slot_idx, DecRefReject::AlreadyFree));
+                continue;
             }
-        }
 
-        let mut freed = 0usize;
-        let mut freed_slots: Vec<u32> = Vec::new();
-        for &slot_idx in slot_indices {
-            let idx = slot_idx as usize;
             self.slots[idx].ref_count -= 1;
+            touched.push(slot_idx);
             if self.slots[idx].ref_count > 0 {
+                out.retained += 1;
                 continue;
             }
 
@@ -636,17 +679,37 @@ impl Slab {
             self.free_bitmap.set(idx, true);
             self.free_count += 1;
             freed_slots.push(slot_idx);
-            freed += 1;
+            out.freed += 1;
         }
 
-        self.persist_slots(slot_indices).await?;
-        if freed > 0 {
+        if !out.rejected.is_empty() {
+            // The extent map and the slot table disagree. That is a real
+            // accounting fault worth surfacing, but it is not a reason to
+            // strand the extents this batch *can* release.
+            tracing::warn!(
+                slab = %self.slab_id(),
+                rejected = out.rejected.len(),
+                freed = out.freed,
+                retained = out.retained,
+                "dec_ref_batch skipped slots: {}",
+                out.rejected
+                    .iter()
+                    .map(|(s, r)| format!("{s}({r})"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+
+        if !touched.is_empty() {
+            self.persist_slots(&touched).await?;
+        }
+        if !freed_slots.is_empty() {
             // Give the space back to the device, not just to the slab —
             // otherwise reclaim happens on the single-slot route only and a
             // dropped clone still leaks its backing store.
             self.discard_slots(&freed_slots).await;
         }
-        Ok(freed)
+        Ok(out)
     }
 
     /// Decrement the reference count on a slot. Returns true if freed (hit 0).
@@ -956,13 +1019,15 @@ mod tests {
         slab.inc_ref_batch(&slots).await.unwrap();
 
         // Dropping the clone releases one reference from each — none freed.
-        let freed = slab.dec_ref_batch(&slots).await.unwrap();
-        assert_eq!(freed, 0, "source still holds every slot");
+        let out = slab.dec_ref_batch(&slots).await.unwrap();
+        assert_eq!(out.freed, 0, "source still holds every slot");
+        assert_eq!(out.retained, slots.len());
+        assert!(out.rejected.is_empty());
         assert_eq!(slab.free_slots(), free_after_alloc);
 
         // Dropping the source too frees them all.
-        let freed = slab.dec_ref_batch(&slots).await.unwrap();
-        assert_eq!(freed, slots.len());
+        let out = slab.dec_ref_batch(&slots).await.unwrap();
+        assert_eq!(out.freed, slots.len());
         assert_eq!(slab.free_slots(), free_after_alloc + slots.len() as u64);
 
         drop(slab);
@@ -1037,8 +1102,84 @@ mod tests {
         assert!(slab.inc_ref_batch(&[good, free_idx]).await.is_err());
         assert_eq!(slab.get_slot(good).unwrap().ref_count, 1);
 
-        assert!(slab.dec_ref_batch(&[good, free_idx]).await.is_err());
-        assert_eq!(slab.get_slot(good).unwrap().ref_count, 1);
+        // Release is deliberately *not* all-or-nothing: the stale entry costs
+        // itself, and the healthy slot is still released.
+        let out = slab.dec_ref_batch(&[good, free_idx]).await.unwrap();
+        assert_eq!(out.freed, 1);
+        assert_eq!(out.rejected, vec![(free_idx, DecRefReject::AlreadyFree)]);
+        assert_eq!(slab.get_slot(good).unwrap().state, SlotState::Free);
+
+        cleanup(&path);
+    }
+
+    /// Regression for #37: one stale extent-map entry must not strand every
+    /// other extent of the volume being deleted.
+    ///
+    /// The old `dec_ref_batch` validated the whole batch first and returned
+    /// `Err` on the first already-free slot, so nothing was decremented at
+    /// all — and the caller discarded that error, leaving the slots allocated
+    /// with an owner that no longer existed and no way to reclaim them.
+    #[tokio::test]
+    async fn one_stale_entry_does_not_strand_the_whole_batch() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        let mut slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let vol = VolumeId::new();
+        let mut slots = Vec::new();
+        for vext in 0..12u64 {
+            slots.push(slab.allocate(vol, vext).await.unwrap());
+        }
+        let free_before = slab.free_slots();
+
+        // Simulate the divergence: one slot is already free, but the volume's
+        // extent map still names it.
+        let stale = slots[5];
+        slab.free(stale).await.unwrap();
+
+        let out = slab.dec_ref_batch(&slots).await.unwrap();
+
+        assert_eq!(out.rejected, vec![(stale, DecRefReject::AlreadyFree)]);
+        assert_eq!(out.freed, slots.len() - 1, "every healthy extent released");
+        assert_eq!(
+            slab.free_slots(),
+            free_before + slots.len() as u64,
+            "all 12 slots are back, not zero of them"
+        );
+        for &s in &slots {
+            assert_eq!(slab.get_slot(s).unwrap().state, SlotState::Free);
+        }
+
+        cleanup(&path);
+    }
+
+    /// A slot repeated inside one batch used to underflow `ref_count` to
+    /// `u32::MAX` on the second decrement (panic in debug, silent corruption
+    /// in release).
+    #[tokio::test]
+    async fn duplicate_slot_in_batch_does_not_underflow() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        let mut slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot)
+            .await
+            .unwrap();
+
+        let vol = VolumeId::new();
+        let slot = slab.allocate(vol, 0).await.unwrap();
+        let free_before = slab.free_slots();
+
+        let out = slab.dec_ref_batch(&[slot, slot, slot]).await.unwrap();
+
+        assert_eq!(out.freed, 1, "released once, not three times");
+        assert_eq!(
+            out.rejected,
+            vec![
+                (slot, DecRefReject::Duplicate),
+                (slot, DecRefReject::Duplicate)
+            ]
+        );
+        assert_eq!(slab.get_slot(slot).unwrap().ref_count, 0);
+        assert_eq!(slab.free_slots(), free_before + 1);
 
         cleanup(&path);
     }
@@ -1153,8 +1294,8 @@ mod tests {
         );
 
         // Release them through the batched path (what dropping a clone uses).
-        let freed = slab.dec_ref_batch(&slots).await.unwrap();
-        assert_eq!(freed, slots.len());
+        let out = slab.dec_ref_batch(&slots).await.unwrap();
+        assert_eq!(out.freed, slots.len());
         slab.device().flush().await.unwrap();
 
         let after = blocks(&path);

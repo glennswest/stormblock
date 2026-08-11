@@ -385,7 +385,14 @@ impl PlacementEngine {
 
         // Dec ref on source slot (may free it)
         if let Some(slab) = registry.get_mut(&source_slab_id) {
-            let _ = slab.dec_ref(source_slot_idx).await;
+            if let Err(e) = slab.dec_ref(source_slot_idx).await {
+                // The extent now lives on the destination, so this only
+                // strands the source copy — but that is still lost capacity.
+                tracing::warn!(
+                    volume = %volume_id, slab = %source_slab_id, slot = source_slot_idx,
+                    "migration could not release the source extent: {e}"
+                );
+            }
         }
 
         Ok(MigrateExtentResult {

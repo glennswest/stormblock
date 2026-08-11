@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [v8.0.0] — 2026-08-11
+
+### Breaking
+- **BREAKING:** `Slab::dec_ref_batch` returns `DecRefOutcome { freed, retained, rejected }` instead of `usize`, and no longer returns `Err` when a slot in the batch is already free — those slots come back in `rejected` while the rest of the batch is still released. Callers reading the old `usize` should use `.freed`; callers that matched on `Err` for a stale slot will no longer see one. Only code linking stormblock as a library is affected.
+
+### Fixed
+- **fix:** `delete_volume` silently leaked **every** extent of the volume being deleted (#37). `dec_ref_batch` validated the whole batch up front and returned `Err` if *any* slot was already free or at `ref_count == 0`, so a single stale extent-map entry rejected the batch and not one extent was released; `delete_snapshot` then discarded that error with `let _ =` and reported success. The slots stayed `Allocated` with `ref_count: 1` naming a volume that no longer existed, and nothing could reclaim them — `DELETE /api/v1/slabs/{id}` refuses any slab with `allocated_slots > 0`, which is exactly the state the leak created, so reformatting was the only recovery. Observed on rose1: 13 orphaned slots stranding 52 MB after every volume had been deleted. Release is now best-effort per slot — a stale entry costs that one extent, not the whole volume — and acquire stays all-or-nothing, since a half-applied `inc_ref` over-counts and is worth refusing while a half-applied release is strictly better than none.
+- **fix:** a slot repeated inside one `dec_ref_batch` passed the up-front validation and was decremented twice, the second time against a slot the first pass had already set to `ref_count: 0` — underflowing to `u32::MAX` in release builds (panic in debug). Repeats are now detected and rejected.
+- **fix:** the release path was silent everywhere it could lose space. `delete_snapshot` now logs rejected slots and the previously unreported case of a slab missing from the registry entirely; `reset_to_source` logs diverged extents it could not release; and the `let _ = dec_ref(...)` calls in `ThinVolumeHandle` (discard, copy-on-write, shrink) and `placement::migrate_extent` now warn instead of discarding the error. Silent divergence between the GEM and the slot table is what made the leak invisible.
+- **test:** `one_stale_entry_does_not_strand_the_whole_batch` (12 extents, one stale — all 12 slots come back, previously zero) and `duplicate_slot_in_batch_does_not_underflow`.
+
 ### 2026-08-10
 - **docs:** deck gains a Testing arc — the four-rung ladder (312 local tests → Linux CI → live interop against LIO/open-iscsi/kernel nvme → the M0 multi-host fleet), the `docs/m0-baseline.md` fio numbers from 3 storage nodes plus a kernel-initiator host, and what the fleet found that a single node hides: a 0.2–4.6 s sequential p99 tail that prices open issue #30.
 - **docs:** `docs/presentation/stormblock.html` — 25-slide deep-dive deck on the engine (architecture, slab/GEM data model, drive backends, RAID, both target protocols, boot-from-StormBlock, cluster/placement), its feature usage (config, CLI, REST, clone-per-consumer), and the OpenShift interface via stormblock-csi (wandering master/slave pairs, the /v1 fencing contract). Keyboard/click navigation, prints to 16:9 PDF. Same house style as the llmpager deck.

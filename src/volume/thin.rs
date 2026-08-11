@@ -265,7 +265,14 @@ impl ThinVolumeHandle {
                 {
                     let mut reg = self.registry.write().await;
                     if let Some(slab) = reg.get_mut(&loc.slab_id) {
-                        let _ = slab.dec_ref(loc.slot_idx).await;
+                        if let Err(e) = slab.dec_ref(loc.slot_idx).await {
+                            // The mapping is already gone, so a failure here
+                            // strands the slot with no owner. Say so.
+                            tracing::warn!(
+                                volume = %self.id, slot = loc.slot_idx, extent = vext_idx,
+                                "discard could not release extent: {e}"
+                            );
+                        }
                     }
                 }
             }
@@ -444,7 +451,12 @@ impl ThinVolumeHandle {
         {
             let mut reg = self.registry.write().await;
             if let Some(slab) = reg.get_mut(&old_loc.slab_id) {
-                let _ = slab.dec_ref(old_loc.slot_idx).await;
+                if let Err(e) = slab.dec_ref(old_loc.slot_idx).await {
+                    tracing::warn!(
+                        volume = %self.id, slot = old_loc.slot_idx,
+                        "copy-on-write could not release the shared extent: {e}"
+                    );
+                }
             }
         }
 
@@ -643,7 +655,12 @@ impl BlockDevice for ThinVolumeHandle {
                     {
                         let mut reg = self.registry.write().await;
                         if let Some(slab) = reg.get_mut(&loc.slab_id) {
-                            let _ = slab.dec_ref(loc.slot_idx).await;
+                            if let Err(e) = slab.dec_ref(loc.slot_idx).await {
+                                tracing::warn!(
+                                    volume = %self.id, slot = loc.slot_idx, extent = vext_idx,
+                                    "shrink could not release extent: {e}"
+                                );
+                            }
                         }
                     }
                 }

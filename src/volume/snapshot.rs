@@ -82,8 +82,36 @@ pub async fn delete_snapshot(
             by_slab.entry(loc.slab_id).or_default().push(loc.slot_idx);
         }
         for (slab_id, slots) in by_slab {
-            if let Some(slab) = registry.get_mut(&slab_id) {
-                let _ = slab.dec_ref_batch(&slots).await;
+            let Some(slab) = registry.get_mut(&slab_id) else {
+                // The map named a slab the registry does not have, so these
+                // extents cannot be released by anyone. Silence here is how
+                // the space went missing with no trace.
+                tracing::warn!(
+                    volume = %snap_id,
+                    slab = %slab_id,
+                    extents = slots.len(),
+                    "slab not in registry while deleting volume — extents not released"
+                );
+                continue;
+            };
+            match slab.dec_ref_batch(&slots).await {
+                Ok(outcome) => {
+                    if !outcome.rejected.is_empty() {
+                        tracing::warn!(
+                            volume = %snap_id,
+                            slab = %slab_id,
+                            leaked = outcome.rejected.len(),
+                            freed = outcome.freed,
+                            "deleting volume left extents allocated — extent map and slot table diverged"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    volume = %snap_id,
+                    slab = %slab_id,
+                    extents = slots.len(),
+                    "failed to release extents while deleting volume: {e}"
+                ),
             }
         }
     }
@@ -165,7 +193,15 @@ pub async fn reset_to_source(
     }
     for (slab_id, slots) in to_free {
         if let Some(slab) = registry.get_mut(&slab_id) {
-            slab.dec_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
+            let outcome = slab.dec_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
+            if !outcome.rejected.is_empty() {
+                tracing::warn!(
+                    clone = %clone_id,
+                    slab = %slab_id,
+                    leaked = outcome.rejected.len(),
+                    "reset left diverged extents allocated"
+                );
+            }
         }
     }
 
