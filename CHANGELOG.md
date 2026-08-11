@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-08-11
+- **docs:** `docs/protocol-overhead.md` — measured iSCSI vs NVMe-oF/TCP connection cost against both stormblock targets with real kernel initiators. Attach is **35.0 ms (NVMe-oF) vs 91.2 ms (iSCSI cold) / 75.5 ms (warm)**, p50 — a consistent 2.6× gap, but tens of milliseconds on both, *not* the seconds-vs-ms the observation suggested. The handshakes themselves are indistinguishable (NVMe connect 21.0 ms, iSCSI login 20.6 ms, 218 vs 255 packets); the gap is device materialisation — 14.0 ms vs 55.7 ms, where iSCSI pays a SCSI bus scan and `sd` probe (INQUIRY/VPD/READ CAPACITY/MODE SENSE) plus udev, and a separate TCP session for SendTargets discovery. Per-volume hot-add on an already-connected controller is **21.7 ms** with no reconnect or rescan (11 namespaces over 3 TCP connections), so 1000 containers cost ~21.7 s and 3 connections on NVMe-oF against ~75.5 s and ~2000 connections for session-per-volume iSCSI. Documents where second-scale attaches plausibly originate (iSCSI `login_timeout` 15 s / `replacement_timeout` 120 s retry paths, `iscsid` serialisation, udev/multipath settle under load, CSI-layer backoff) — none of which a steady-state benchmark exercises.
+- **test:** `attach-bench.sh` (per-phase attach/detach for both protocols) and `hotadd-bench.sh` (per-volume cost on a live NVMe-oF controller).
+
 ## [v8.1.0] — 2026-08-11
 
 ### Added
