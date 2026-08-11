@@ -480,6 +480,14 @@ pub struct Ext4Params {
     pub bytes_per_inode: u64,
     /// Percentage of blocks reserved for root.
     pub reserved_percent: u8,
+    /// The `64bit` incompat feature: 64-byte group descriptors and block
+    /// numbers past 2^32. Required above 16 TiB, and off below it because
+    /// older consumers (RouterOS among them) are happier without it.
+    ///
+    /// It costs a doubled group descriptor table and nothing else here — in
+    /// particular it does *not* pull in `metadata_csum`, so a clone's UUID
+    /// stamp stays a 16-byte patch either way.
+    pub sixty_four_bit: bool,
     /// Trust that the target reads back as zeros, and skip writing blocks that
     /// are all zeros (whole inode tables, the journal body).
     ///
@@ -499,6 +507,7 @@ impl Default for Ext4Params {
             journal_blocks: None,
             bytes_per_inode: 16384,
             reserved_percent: 5,
+            sixty_four_bit: false,
             assume_blank: true,
         }
     }
@@ -513,10 +522,18 @@ pub struct Ext4Report {
     pub groups: u32,
     pub journal_blocks: u32,
     pub free_blocks: u64,
+    pub sixty_four_bit: bool,
     pub uuid: Uuid,
     pub label: String,
     /// Bytes actually written to the device — what a thin volume allocates.
     pub bytes_written: u64,
+}
+
+/// Whether a filesystem of this many blocks needs the `64bit` feature — block
+/// numbers past 2^32 have nowhere to put their high half without it. At 4 KiB
+/// blocks that boundary is 16 TiB.
+pub fn needs_64bit(total_blocks: u64) -> bool {
+    total_blocks > u32::MAX as u64
 }
 
 /// e2fsprogs' default journal size for a filesystem of `blocks` blocks.
@@ -583,7 +600,13 @@ pub async fn format(dev: &Arc<dyn BlockDevice>, params: &Ext4Params) -> anyhow::
     let blocks_per_group: u64 = bs * 8; // one bitmap block's worth
     let group_count = (total_blocks - first_data_block).div_ceil(blocks_per_group);
     anyhow::ensure!(group_count <= u32::MAX as u64, "filesystem too large");
-    let gdt_blocks = (group_count * 32).div_ceil(bs);
+    anyhow::ensure!(
+        params.sixty_four_bit || !needs_64bit(total_blocks),
+        "{total_blocks} blocks ({} TiB) needs the 64bit feature — pass sixty_four_bit",
+        total_bytes / (1 << 40)
+    );
+    let desc_size: u64 = if params.sixty_four_bit { 64 } else { 32 };
+    let gdt_blocks = (group_count * desc_size).div_ceil(bs);
 
     // Inodes: one per `bytes_per_inode`, rounded so the table fills whole
     // blocks, and never below a floor that keeps a small volume usable.
@@ -704,7 +727,7 @@ pub async fn format(dev: &Arc<dyn BlockDevice>, params: &Ext4Params) -> anyhow::
         },
         0,
     );
-    let gdt = build_gdt(bs, &groups, inodes_per_group as u32, gdt_blocks);
+    let gdt = build_gdt(bs, &groups, inodes_per_group as u32, gdt_blocks, desc_size);
 
     let mut written = 0u64;
     // Block 0 carries 1024 bytes of boot area then the primary superblock.
@@ -829,6 +852,7 @@ pub async fn format(dev: &Arc<dyn BlockDevice>, params: &Ext4Params) -> anyhow::
         groups: group_count as u32,
         journal_blocks: journal_blocks as u32,
         free_blocks,
+        sixty_four_bit: params.sixty_four_bit,
         uuid: params.uuid,
         label: params.label.clone(),
         bytes_written: written,
@@ -899,7 +923,10 @@ fn build_superblock(i: &SuperblockInput<'_>, block_group_nr: u16) -> Vec<u8> {
 
     let compat = COMPAT_EXT_ATTR | if i.journal { COMPAT_HAS_JOURNAL } else { 0 };
     put32(&mut sb, 0x5C, compat);
-    put32(&mut sb, 0x60, INCOMPAT_FILETYPE | INCOMPAT_EXTENTS);
+    let incompat = INCOMPAT_FILETYPE
+        | INCOMPAT_EXTENTS
+        | if i.params.sixty_four_bit { INCOMPAT_64BIT } else { 0 };
+    put32(&mut sb, 0x60, incompat);
     put32(
         &mut sb,
         0x64,
@@ -921,7 +948,9 @@ fn build_superblock(i: &SuperblockInput<'_>, block_group_nr: u16) -> Vec<u8> {
         // s_jnl_blocks[16] is the journal inode's i_size.
         put32(&mut sb, 0x10C + 16 * 4, i.journal_size_bytes as u32);
     }
-    put16(&mut sb, 0xFE, 32); // s_desc_size — 32-byte descriptors, no 64bit
+    // s_desc_size. The kernel only reads it when 64bit is set (and then
+    // demands >= 64); 32 is what a 32bit filesystem has anyway.
+    put16(&mut sb, 0xFE, if i.params.sixty_four_bit { 64 } else { 32 });
     put32(&mut sb, 0x108, now); // s_mkfs_time
     put32(&mut sb, 0x150, (i.total_blocks >> 32) as u32);
     put32(&mut sb, 0x154, (i.reserved >> 32) as u32);
@@ -933,10 +962,16 @@ fn build_superblock(i: &SuperblockInput<'_>, block_group_nr: u16) -> Vec<u8> {
     sb
 }
 
-fn build_gdt(bs: u64, groups: &[GroupPlan], inodes_per_group: u32, gdt_blocks: u64) -> Vec<u8> {
+fn build_gdt(
+    bs: u64,
+    groups: &[GroupPlan],
+    inodes_per_group: u32,
+    gdt_blocks: u64,
+    desc_size: u64,
+) -> Vec<u8> {
     let mut gdt = vec![0u8; (gdt_blocks * bs) as usize];
     for (g, plan) in groups.iter().enumerate() {
-        let off = g * 32;
+        let off = g * desc_size as usize;
         put32(&mut gdt, off, plan.block_bitmap as u32);
         put32(&mut gdt, off + 4, plan.inode_bitmap as u32);
         put32(&mut gdt, off + 8, plan.inode_table as u32);
@@ -950,6 +985,15 @@ fn build_gdt(bs: u64, groups: &[GroupPlan], inodes_per_group: u32, gdt_blocks: u
         // Directories: root and lost+found, both in group 0.
         put16(&mut gdt, off + 16, if g == 0 { 2 } else { 0 });
         put16(&mut gdt, off + 18, 0); // flags — every bitmap is initialised
+
+        // 64bit: the high half of every block number, and of the counters
+        // that have one. Free counts never exceed a group, so their high
+        // halves stay zero, but the bitmap and table locations do not.
+        if desc_size >= 64 {
+            put32(&mut gdt, off + 0x20, (plan.block_bitmap >> 32) as u32);
+            put32(&mut gdt, off + 0x24, (plan.inode_bitmap >> 32) as u32);
+            put32(&mut gdt, off + 0x28, (plan.inode_table >> 32) as u32);
+        }
     }
     gdt
 }
@@ -1283,6 +1327,42 @@ mod tests {
         assert_eq!(&jsb[0x30..0x40], params.uuid.as_bytes());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sixty_four_bit_widens_the_descriptors_and_nothing_else() {
+        let (dev, path) = scratch("64bit", 512 * 1024 * 1024).await;
+        let params = Ext4Params { sixty_four_bit: true, journal: true, ..Default::default() };
+        let report = format(&dev, &params).await.unwrap();
+        assert!(report.sixty_four_bit);
+
+        let sb = read_at(&dev, SUPERBLOCK_OFFSET, SUPERBLOCK_LEN).await.unwrap();
+        let l = parse_superblock(&sb).unwrap();
+        assert!(l.sixty_four_bit);
+        assert_eq!(l.desc_size, 64, "the kernel demands >= 64 once 64bit is set");
+        assert_eq!(l.blocks_count, 131072);
+        assert!(l.clean);
+        assert!(l.has_journal());
+        // It must not drag metadata_csum in with it — that is what would turn
+        // the clone-time UUID stamp into a checksum recompute.
+        assert_eq!(l.feature_ro_compat & 0x0400, 0);
+
+        // Every group descriptor is 64 bytes apart and still points at a
+        // plausible bitmap, which is what a 32-byte stride would break.
+        let map = scan_free(&dev, 1024 * 1024).await.unwrap();
+        assert_eq!(map.groups_scanned, 4);
+        assert_eq!(map.free_bytes, report.free_blocks * 4096);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sixteen_tib_is_where_64bit_becomes_mandatory() {
+        let tib = 1024u64 * 1024 * 1024 * 1024;
+        assert!(!needs_64bit(8 * tib / BLOCK_SIZE as u64));
+        assert!(!needs_64bit(u32::MAX as u64));
+        assert!(needs_64bit(u32::MAX as u64 + 1));
+        assert!(needs_64bit(32 * tib / BLOCK_SIZE as u64));
     }
 
     #[tokio::test]

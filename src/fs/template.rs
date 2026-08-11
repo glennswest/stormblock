@@ -116,6 +116,10 @@ pub struct TemplateSpec {
     /// Filesystem label baked into the template. Clones inherit it unless the
     /// clone asks for its own.
     pub label: String,
+    /// The ext4 `64bit` feature: 64-byte group descriptors and block numbers
+    /// past 2^32. Required above 16 TiB; off below it, because consumers that
+    /// predate it (RouterOS among them) are happier without.
+    pub sixty_four_bit: bool,
     /// Format and seal in this process. False leaves the template in
     /// `awaiting_format` for an initiator to format over an export.
     pub format_in_core: bool,
@@ -129,6 +133,7 @@ impl TemplateSpec {
             size_bytes,
             journal: false,
             label: String::new(),
+            sixty_four_bit: false,
             format_in_core: true,
         }
     }
@@ -145,6 +150,9 @@ pub struct FsTemplate {
     pub journal: bool,
     #[serde(default)]
     pub label: String,
+    /// Whether the filesystem uses 64-bit block numbers.
+    #[serde(default)]
+    pub sixty_four_bit: bool,
     /// The UUID the template itself carries. Clones never keep it.
     #[serde(default)]
     pub fs_uuid: Option<Uuid>,
@@ -172,6 +180,7 @@ impl FsTemplate {
             "fs": self.fs.as_str(),
             "size_bytes": self.size_bytes,
             "journal": self.journal,
+            "64bit": self.sixty_four_bit,
             "label": self.label,
             "fs_uuid": self.fs_uuid,
             "state": self.state.as_str(),
@@ -345,6 +354,7 @@ pub async fn create(
         size_bytes: spec.size_bytes,
         journal: spec.journal,
         label: spec.label.clone(),
+        sixty_four_bit: spec.sixty_four_bit,
         fs_uuid: None,
         state: TemplateState::AwaitingFormat,
         raw_volume_id: raw.0,
@@ -360,6 +370,7 @@ pub async fn create(
             label: spec.label.clone(),
             uuid: Uuid::new_v4(),
             journal: spec.journal,
+            sixty_four_bit: spec.sixty_four_bit,
             // The volume was created moments ago and has never been written,
             // so every unwritten block already reads back as zeros. This is
             // what keeps a template's allocation in kilobytes.
@@ -466,6 +477,7 @@ pub async fn seal(
     if let Some(l) = &layout {
         t.fs_uuid = Some(l.uuid);
         t.journal = l.has_journal();
+        t.sixty_four_bit = l.sixty_four_bit;
         if t.label.is_empty() {
             t.label = l.label.clone();
         }

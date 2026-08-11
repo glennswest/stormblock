@@ -107,12 +107,12 @@ ok "engine up"
 
 hdr "mkfs once — templates formatted by the engine itself"
 
-make_template() {  # name journal
-    local name="$1" journal="$2" t0 t1
+make_template() {  # name journal 64bit
+    local name="$1" journal="$2" wide="${3:-false}" t0 t1
     t0=$(date +%s%N)
     local body
     body=$(curl -s -m 120 -X POST "$API/fstemplates" -H 'Content-Type: application/json' \
-        -d "{\"name\":\"$name\",\"size\":\"256M\",\"journal\":$journal,\"label\":\"$name\"}")
+        -d "{\"name\":\"$name\",\"size\":\"256M\",\"journal\":$journal,\"64bit\":$wide,\"label\":\"$name\"}")
     t1=$(date +%s%N)
     local state
     state=$(echo "$body" | jqf "['template']['state']")
@@ -120,12 +120,13 @@ make_template() {  # name journal
         bad "$name did not seal: $body"
         return 1
     fi
-    ok "$name formatted+sealed in $(( (t1-t0)/1000000 )) ms (journal=$journal)"
+    ok "$name formatted+sealed in $(( (t1-t0)/1000000 )) ms (journal=$journal 64bit=$wide)"
     echo "$body" | jqf "['template']['fs_uuid']"
 }
 
 TPL_UUID_PLAIN=$(make_template "ext4-nojournal-256m" false)
 TPL_UUID_JNL=$(make_template "ext4-journal-256m" true)
+make_template "ext4-64bit-256m" true true >/dev/null
 
 # ── Clone forever ───────────────────────────────────────────────────────────
 
@@ -150,14 +151,15 @@ clone() {  # template name
 VOL_A=$(clone "ext4-nojournal-256m" "clone-a")
 VOL_B=$(clone "ext4-nojournal-256m" "clone-b")
 VOL_J=$(clone "ext4-journal-256m" "clone-j")
-[ -n "$VOL_A" ] && [ -n "$VOL_B" ] && [ -n "$VOL_J" ] || { bad "cloning failed"; exit 1; }
-ok "3 clones minted"
+VOL_W=$(clone "ext4-64bit-256m" "clone-w")
+[ -n "$VOL_A" ] && [ -n "$VOL_B" ] && [ -n "$VOL_J" ] && [ -n "$VOL_W" ] || { bad "cloning failed"; exit 1; }
+ok "4 clones minted"
 
 # ── Export and attach with a real initiator ─────────────────────────────────
 
 hdr "Export over iSCSI"
 declare -A LUN
-for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J"; do
+for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J" "W:$VOL_W"; do
     tag="${pair%%:*}"; vol="${pair#*:}"
     body=$(curl -s -m 30 -X POST "$API/exports" -H 'Content-Type: application/json' \
         -d "{\"volume_id\":\"$vol\",\"protocol\":\"iscsi\"}")
@@ -179,7 +181,7 @@ else
 fi
 
 declare -A DEV
-for tag in A B J; do
+for tag in A B J W; do
     d=""
     for _ in $(seq 1 30); do
         d=$(ls /dev/disk/by-path/*"$IQN"*lun-"${LUN[$tag]}" 2>/dev/null | head -1)
@@ -218,7 +220,7 @@ fi
 # ── e2fsck: is the on-disk format actually correct? ─────────────────────────
 
 hdr "e2fsck — full check of a filesystem this engine wrote"
-for tag in A J; do
+for tag in A J W; do
     if e2fsck -fn "${DEV[$tag]}" >"$W/fsck-$tag.log" 2>&1; then
         ok "clone $tag passes e2fsck -fn clean"
     else
@@ -243,15 +245,27 @@ else
     ok "journal-less variant has none — RouterOS can mount it read-write"
 fi
 if dumpe2fs -h "${DEV[A]}" 2>/dev/null | grep "Filesystem features" | grep -qE "metadata_csum|64bit"; then
-    bad "conservative feature set broken (metadata_csum/64bit present)"
+    bad "conservative feature set broken (metadata_csum/64bit present by default)"
 else
-    ok "conservative feature set held"
+    ok "conservative feature set held by default"
+fi
+info "features (clone W, 64bit template):"
+dumpe2fs -h "${DEV[W]}" 2>/dev/null | grep -E "Filesystem features|Group descriptor size|Filesystem state" | sed 's/^/     /'
+if dumpe2fs -h "${DEV[W]}" 2>/dev/null | grep "Filesystem features" | grep -q "64bit"; then
+    ok "64bit variant carries the feature"
+else
+    bad "64bit template came out 32-bit"
+fi
+if dumpe2fs -h "${DEV[W]}" 2>/dev/null | grep "Filesystem features" | grep -q "metadata_csum"; then
+    bad "64bit dragged metadata_csum in — the UUID stamp is no longer a plain patch"
+else
+    ok "64bit did not pull in metadata_csum"
 fi
 
 # ── Mount: the thing consumers actually do ──────────────────────────────────
 
 hdr "Mount read-write, both clones at once"
-for tag in A B J; do
+for tag in A B J W; do
     mkdir -p "$W/mnt-$tag"
 done
 
@@ -276,7 +290,7 @@ mount_check() {  # tag
     [ -d "$mnt/lost+found" ] && ok "clone $tag: lost+found present" || bad "clone $tag: no lost+found"
 }
 
-for tag in A B J; do mount_check "$tag"; done
+for tag in A B J W; do mount_check "$tag"; done
 
 # Divergence: a write into one clone must not appear in its sibling.
 if [ -e "$W/mnt-B/hello" ] && [ "$(cat "$W/mnt-B/hello")" = "storm-B" ]; then
@@ -286,11 +300,11 @@ else
 fi
 
 hdr "Unmount and re-check"
-for tag in A B J; do
+for tag in A B J W; do
     umount "$W/mnt-$tag" 2>/dev/null || bad "clone $tag would not unmount"
 done
 sync
-for tag in A J; do
+for tag in A J W; do
     if e2fsck -fn "${DEV[$tag]}" >"$W/fsck2-$tag.log" 2>&1; then
         ok "clone $tag still clean after a mount/write/unmount cycle"
     else

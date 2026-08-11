@@ -262,6 +262,65 @@ async fn journal_variants_coexist() {
     server.abort();
 }
 
+/// 64bit is the other per-template feature switch: needed above 16 TiB, and
+/// off below it because consumers that predate it are happier without.
+#[tokio::test]
+async fn sixty_four_bit_is_a_per_template_choice() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    for (name, wide) in [("ext4-256m", false), ("ext4-64bit-256m", true)] {
+        let body: serde_json::Value = client
+            .post(format!("{url}/api/v1/fstemplates"))
+            .json(&serde_json::json!({ "name": name, "size": "256M", "64bit": wide }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["template"]["64bit"], wide, "{name}");
+
+        let sealed: Uuid = body["template"]["sealed_volume_id"].as_str().unwrap().parse().unwrap();
+        let dev: Arc<dyn BlockDevice> = {
+            let vm = state.volume_manager.lock().await;
+            vm.get_volume(&VolumeId(sealed)).unwrap()
+        };
+        let sb = ext4::read_at(&dev, ext4::SUPERBLOCK_OFFSET, ext4::SUPERBLOCK_LEN).await.unwrap();
+        let l = ext4::parse_superblock(&sb).unwrap();
+        assert_eq!(l.sixty_four_bit, wide, "{name} on disk");
+        assert_eq!(l.desc_size, if wide { 64 } else { 32 }, "{name} descriptor size");
+        assert!(l.clean);
+    }
+
+    // A clone of the wide template keeps the feature and still gets its own
+    // identity — 64bit does not pull in metadata_csum, so the stamp is still
+    // one patch.
+    let clone: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/ext4-64bit-256m/clone"))
+        .json(&serde_json::json!({ "name": "wide-clone" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id: Uuid = clone["volume_id"].as_str().unwrap().parse().unwrap();
+    let dev: Arc<dyn BlockDevice> = {
+        let vm = state.volume_manager.lock().await;
+        vm.get_volume(&VolumeId(id)).unwrap()
+    };
+    let sb = ext4::read_at(&dev, ext4::SUPERBLOCK_OFFSET, ext4::SUPERBLOCK_LEN).await.unwrap();
+    let l = ext4::parse_superblock(&sb).unwrap();
+    assert!(l.sixty_four_bit);
+    assert!(l.clean);
+    assert_eq!(clone["fs_uuid"].as_str().unwrap().parse::<Uuid>().unwrap(), l.uuid);
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn unsealed_templates_cannot_be_cloned_and_seal_verifies() {
     let dir = TempDir::new().unwrap();

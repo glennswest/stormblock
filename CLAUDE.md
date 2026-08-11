@@ -287,7 +287,9 @@ platform-independent capabilities.
       (stormblock-registry#10)
 - [x] Clone-time UUID stamping (stormblockmk#12) — the piece that can only
       live here, since every consumer clones *through* the engine
-- [x] Journal on/off as a per-template option; variants coexist by name
+- [x] Journal on/off and `64bit` on/off as per-template options; variants
+      coexist by name. Past 16 TiB, `64bit` is required and its absence is an
+      error rather than a truncation
 - [x] `/api/v1/fstemplates` (create/list/get/seal/clone/delete) and
       `from_template` on `POST /api/v1/volumes`
 - [x] `ci-fstemplate-verify.sh` — e2fsck + real mount through an iSCSI

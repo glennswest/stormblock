@@ -190,7 +190,11 @@ curl -X POST http://node:9090/api/v1/volumes \
   -d '{"name":"pvc-1","from_template":"ext4-nojournal-256m"}'
 ```
 
-**Journal on or off is a per-template choice**, never a build-time default:
+**Journal on or off, and `64bit` on or off, are per-template choices**, never
+build-time defaults. `64bit` (64-byte group descriptors, block numbers past
+2^32) is required above 16 TiB and off below it, since consumers that predate
+it are happier without; it does not drag `metadata_csum` in with it, so the
+clone-time UUID stamp stays a plain 16-byte patch either way. For the journal:
 RouterOS cannot replay a journal, so one that ever goes dirty there leaves the
 filesystem read-only permanently, while a Linux host or VM wants the crash
 consistency.
@@ -208,10 +212,18 @@ container, as `Read-only file system`. Pass `?force=true` to override, and
 `{"format": false}` at create time to have an initiator lay the filesystem down
 over an export instead, then `POST /api/v1/fstemplates/{id}/seal`.
 
-The feature set is deliberately conservative (`EXTENTS|FILETYPE` incompat,
-`SPARSE_SUPER|LARGE_FILE|EXTRA_ISIZE` ro_compat, no `metadata_csum`, no
-`64bit`): it is what RouterOS 7.22.2 mounts read-write, and it is what keeps
-the UUID stamp a 16-byte patch rather than a full group-checksum recompute.
+The default feature set is deliberately conservative (`EXTENTS|FILETYPE`
+incompat, `SPARSE_SUPER|LARGE_FILE|EXTRA_ISIZE` ro_compat, no `metadata_csum`,
+no `64bit`, no `bigalloc`, no `quota`): it is what RouterOS 7.22.2 mounts
+read-write, and it is what keeps the UUID stamp a 16-byte patch rather than a
+full group-checksum recompute. `"64bit": true` opts a single template into wide
+block numbers when it needs them:
+
+```bash
+curl -X POST http://node:9090/api/v1/fstemplates \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ext4-64bit-32t","size":"32T","64bit":true,"journal":true}'
+```
 
 ### Clone-per-consumer, reset on restart
 

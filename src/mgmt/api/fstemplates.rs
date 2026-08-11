@@ -73,6 +73,11 @@ pub struct CreateTemplateRequest {
     /// consistency ask for it.
     #[serde(default)]
     pub journal: bool,
+    /// The ext4 `64bit` feature — 64-byte group descriptors and block numbers
+    /// past 2^32. Required above 16 TiB, off by default below it because
+    /// consumers that predate it are happier without.
+    #[serde(default, rename = "64bit", alias = "sixty_four_bit")]
+    pub sixty_four_bit: bool,
     #[serde(default)]
     pub label: Option<String>,
     /// Format here and seal in one call. Default true; false leaves the
@@ -156,6 +161,7 @@ async fn create_template(
         size_bytes: size,
         journal: req.journal,
         label: req.label.unwrap_or_default(),
+        sixty_four_bit: req.sixty_four_bit,
         format_in_core: req.format,
     };
 
