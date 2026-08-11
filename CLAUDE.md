@@ -266,3 +266,37 @@ reclaiming space when dropped.
 
 Not covered (would need a live initiator on rose1 to verify): NVMe-oF
 namespace-scale benchmarks, and steady-state memory profiling at 1000 LUNs.
+
+### Preformatted filesystem templates — DONE (issue #38)
+
+*mkfs once, clone forever.* Moved into core from the mk profile and
+stormblock-registry, and made generic: the consumer list is RouterOS
+containers, StormOS, Proxmox VMs, microVMs and x86 hosts, only one of which
+is RouterOS. A profile should carry platform *choices*, not
+platform-independent capabilities.
+
+- [x] `src/fs/ext4.rs` — pure-Rust ext4: format an *empty* filesystem
+      (superblock, GDT, per-group bitmaps + inode tables, root, `lost+found`,
+      optional journal), `parse_superblock`, `stamp_uuid` / `stamp_label`,
+      `scan_free` (offline free-space map). No C dependency — an empty
+      filesystem needs far less than a general ext4 writer.
+- [x] `src/fs/template.rs` — create → format → seal → clone lifecycle over
+      the `VolumeManager`, persisted to `<data_dir>/fstemplates.json`
+- [x] Seal guard checks every flag a consumer acts on (`VALID_FS`,
+      `ERROR_FS`, `RECOVER`, `ORPHAN_FS`), not just `VALID_FS`
+      (stormblock-registry#10)
+- [x] Clone-time UUID stamping (stormblockmk#12) — the piece that can only
+      live here, since every consumer clones *through* the engine
+- [x] Journal on/off as a per-template option; variants coexist by name
+- [x] `/api/v1/fstemplates` (create/list/get/seal/clone/delete) and
+      `from_template` on `POST /api/v1/volumes`
+- [x] `ci-fstemplate-verify.sh` — e2fsck + real mount through an iSCSI
+      initiator, on a real kernel
+
+Deliberately **not** here: writing image *content* into a filesystem (tar,
+whiteouts, hashing, image config) stays with the consumer that owns the
+content — stormblock-registry keeps its full ext4 writer for that.
+
+Not done: superblock repair / fsck in the engine (raised in stormblockmk#12
+as a candidate — RouterOS has no fsck), and `boot_iscsi.rs` cloning its ESP
+and root from templates rather than constructing them each time.
