@@ -107,12 +107,12 @@ ok "engine up"
 
 hdr "mkfs once — templates formatted by the engine itself"
 
-make_template() {  # name journal 64bit
-    local name="$1" journal="$2" wide="${3:-false}" t0 t1
+make_template() {  # name extra-json
+    local name="$1" extra="${2:-}" t0 t1
     t0=$(date +%s%N)
     local body
     body=$(curl -s -m 120 -X POST "$API/fstemplates" -H 'Content-Type: application/json' \
-        -d "{\"name\":\"$name\",\"size\":\"256M\",\"journal\":$journal,\"64bit\":$wide,\"label\":\"$name\"}")
+        -d "{\"name\":\"$name\",\"size\":\"256M\",\"label\":\"$name\"$extra}")
     t1=$(date +%s%N)
     local state
     state=$(echo "$body" | jqf "['template']['state']")
@@ -120,13 +120,35 @@ make_template() {  # name journal 64bit
         bad "$name did not seal: $body"
         return 1
     fi
-    ok "$name formatted+sealed in $(( (t1-t0)/1000000 )) ms (journal=$journal 64bit=$wide)"
+    ok "$name formatted+sealed in $(( (t1-t0)/1000000 )) ms$(echo "$extra" | sed 's/^,/ (/;s/$/)/')"
     echo "$body" | jqf "['template']['fs_uuid']"
 }
 
-TPL_UUID_PLAIN=$(make_template "ext4-nojournal-256m" false)
-TPL_UUID_JNL=$(make_template "ext4-journal-256m" true)
-make_template "ext4-64bit-256m" true true >/dev/null
+# The default is what mke2fs -t ext4 writes, which is what RouterOS's own
+# format-drive produces. The second is for a consumer that predates it.
+TPL_UUID_JNL=$(make_template "ext4-256m")
+TPL_UUID_PLAIN=$(make_template "ext4-plain-256m" ',"journal":false,"features":"^64bit,^metadata_csum"')
+
+# Concurrency: the formatter takes &self and no lock is held across a format,
+# so N templates should cost about what one does rather than N times as much.
+hdr "Concurrent formats"
+CSTART=$(date +%s%N)
+for i in 1 2 3 4; do
+    curl -s -m 180 -X POST "$API/fstemplates" -H 'Content-Type: application/json' \
+        -d "{\"name\":\"parallel-$i\",\"size\":\"256M\"}" > "$W/par-$i.json" &
+done
+wait
+CEND=$(date +%s%N)
+PAR_MS=$(( (CEND-CSTART)/1000000 ))
+PAR_OK=0
+for i in 1 2 3 4; do
+    [ "$(jqf "['template']['state']" < "$W/par-$i.json")" = "ready" ] && PAR_OK=$((PAR_OK+1))
+done
+if [ "$PAR_OK" = "4" ]; then
+    ok "4 templates formatted concurrently in $PAR_MS ms (one alone: see above)"
+else
+    bad "only $PAR_OK of 4 concurrent formats sealed"
+fi
 
 # ── Clone forever ───────────────────────────────────────────────────────────
 
@@ -148,10 +170,10 @@ clone() {  # template name
     echo "$vol"
 }
 
-VOL_A=$(clone "ext4-nojournal-256m" "clone-a")
-VOL_B=$(clone "ext4-nojournal-256m" "clone-b")
-VOL_J=$(clone "ext4-journal-256m" "clone-j")
-VOL_W=$(clone "ext4-64bit-256m" "clone-w")
+VOL_A=$(clone "ext4-256m" "clone-a")
+VOL_B=$(clone "ext4-256m" "clone-b")
+VOL_J=$(clone "ext4-plain-256m" "clone-j")
+VOL_W=$(clone "ext4-256m" "clone-w")
 [ -n "$VOL_A" ] && [ -n "$VOL_B" ] && [ -n "$VOL_J" ] && [ -n "$VOL_W" ] || { bad "cloning failed"; exit 1; }
 ok "4 clones minted"
 
@@ -193,6 +215,20 @@ for tag in A B J W; do
     info "clone $tag → ${DEV[$tag]}"
 done
 ok "all clones visible to the kernel"
+
+# ── The engine's own check, before the kernel sees any of it ────────────────
+
+hdr "Engine-side fsck"
+for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J"; do
+    tag="${pair%%:*}"; vol="${pair#*:}"
+    body=$(curl -s -m 120 -X POST "$API/volumes/$vol/fsck")
+    clean=$(echo "$body" | jqf "['clean']")
+    if [ "$clean" = "True" ]; then
+        ok "clone $tag: engine fsck clean"
+    else
+        bad "clone $tag: engine fsck found problems: $(echo "$body" | jqf "['problems']")"
+    fi
+done
 
 # ── THE diagnostic: identity ────────────────────────────────────────────────
 
@@ -239,27 +275,24 @@ if dumpe2fs -h "${DEV[J]}" 2>/dev/null | grep -q "has_journal"; then
 else
     bad "journalled template has no journal"
 fi
-if dumpe2fs -h "${DEV[A]}" 2>/dev/null | grep "Filesystem features" | grep -q "has_journal"; then
-    bad "the journal-less template has a journal after all"
+# The default template must carry the profile RouterOS's own format-drive
+# produces (#39): journal, 64bit, flex_bg, metadata_csum — plus the seed that
+# keeps a clone-time UUID stamp a single write.
+FEAT_A=$(dumpe2fs -h "${DEV[A]}" 2>/dev/null | grep "Filesystem features")
+for f in has_journal 64bit flex_bg metadata_csum metadata_csum_seed extent; do
+    if echo "$FEAT_A" | grep -q "$f"; then
+        ok "default template carries $f"
+    else
+        bad "default template is missing $f"
+    fi
+done
+
+info "features (clone J, the ^64bit,^metadata_csum variant):"
+dumpe2fs -h "${DEV[J]}" 2>/dev/null | grep -E "Filesystem features|Filesystem state" | sed 's/^/     /'
+if dumpe2fs -h "${DEV[J]}" 2>/dev/null | grep "Filesystem features" | grep -qE "metadata_csum|64bit|has_journal"; then
+    bad "the -O overrides did not take"
 else
-    ok "journal-less variant has none — RouterOS can mount it read-write"
-fi
-if dumpe2fs -h "${DEV[A]}" 2>/dev/null | grep "Filesystem features" | grep -qE "metadata_csum|64bit"; then
-    bad "conservative feature set broken (metadata_csum/64bit present by default)"
-else
-    ok "conservative feature set held by default"
-fi
-info "features (clone W, 64bit template):"
-dumpe2fs -h "${DEV[W]}" 2>/dev/null | grep -E "Filesystem features|Group descriptor size|Filesystem state" | sed 's/^/     /'
-if dumpe2fs -h "${DEV[W]}" 2>/dev/null | grep "Filesystem features" | grep -q "64bit"; then
-    ok "64bit variant carries the feature"
-else
-    bad "64bit template came out 32-bit"
-fi
-if dumpe2fs -h "${DEV[W]}" 2>/dev/null | grep "Filesystem features" | grep -q "metadata_csum"; then
-    bad "64bit dragged metadata_csum in — the UUID stamp is no longer a plain patch"
-else
-    ok "64bit did not pull in metadata_csum"
+    ok "-O overrides took: no journal, no 64bit, no metadata_csum"
 fi
 
 # ── Mount: the thing consumers actually do ──────────────────────────────────
