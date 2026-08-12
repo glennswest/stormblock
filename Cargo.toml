@@ -59,6 +59,13 @@ libc = "0.2"
 bitvec = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Filesystem creation and checking for preformatted templates (#38, #39).
+# A from-scratch async mke2fs/e2fsck: the engine formats its own thin volumes
+# through the BlockDevice seam, with no loopback, no /dev node and no mkfs.ext4
+# subprocess. Taken by git rather than path so a checkout of this repo alone
+# still builds.
+mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", branch = "main", default-features = false }
+
 # Async utilities
 async-trait = "0.1"
 futures = "0.3"

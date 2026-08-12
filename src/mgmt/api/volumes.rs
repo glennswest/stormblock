@@ -303,11 +303,83 @@ async fn resize_volume(
     }
 }
 
+/// `POST /api/v1/volumes/{id}/fsck` — check a volume's filesystem, and with
+/// `?repair=true` correct what can be corrected.
+///
+/// Worth having here because of who cannot do it themselves: RouterOS has no
+/// fsck and cannot cleanly unmount a network disk, so a volume it left dirty
+/// has nowhere else to be repaired. The engine has the volume locally and can
+/// check it without an attach.
+async fn fsck_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "fsck")
+        .increment(1);
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let repair = matches!(
+        q.get("repair").map(|v| v.as_str()),
+        Some("") | Some("1") | Some("true") | Some("yes")
+    );
+
+    // The lock is held only long enough to take a handle: a check walks every
+    // group, and no other volume operation should queue behind it.
+    let dev = {
+        let vm = state.volume_manager.lock().await;
+        match vm.get_volume(&VolumeId(uuid)) {
+            Some(d) => d,
+            None => return ApiError::not_found(format!("volume {uuid} not found")),
+        }
+    };
+
+    // Repairing a volume something else is writing would race that writer.
+    if repair {
+        let exports = state.exports.read().await;
+        if exports.iter().any(|e| e.volume_id == uuid) {
+            return ApiError::conflict(
+                "volume is exported — detach it before repairing, or run without repair=true",
+            );
+        }
+    }
+
+    let result = if repair {
+        crate::fs::ext4::repair(&dev).await
+    } else {
+        crate::fs::ext4::check(&dev).await
+    };
+
+    match result {
+        Ok(report) => Json(serde_json::json!({
+            "volume_id": uuid,
+            "clean": report.is_clean(),
+            "repaired": report.repaired_anything(),
+            "exit_code": report.exit_code(),
+            "inodes_used": report.inodes_used,
+            "blocks_used": report.blocks_used,
+            "directories": report.directories,
+            "problems": report.problems.iter().map(|p| serde_json::json!({
+                "pass": p.pass,
+                "code": p.code,
+                "severity": format!("{:?}", p.severity).to_lowercase(),
+                "message": p.message,
+                "fixed": p.fixed,
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => ApiError::bad_request(format!("volume {uuid}: {e}")),
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_volumes).post(create_volume))
         .route("/{id}", get(get_volume).delete(delete_volume))
         .route("/{id}/resize", axum::routing::patch(resize_volume))
+        .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/snapshots", axum::routing::post(create_snapshot))
         .with_state(state)
 }

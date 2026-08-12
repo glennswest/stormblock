@@ -52,11 +52,11 @@ async fn fs_uuid_on_disk(state: &AppState, volume_id: Uuid) -> Uuid {
         let vm = state.volume_manager.lock().await;
         vm.get_volume(&VolumeId(volume_id)).expect("volume exists")
     };
-    let sb = ext4::read_at(&dev, ext4::SUPERBLOCK_OFFSET, ext4::SUPERBLOCK_LEN)
-        .await
-        .unwrap();
-    let layout = ext4::parse_superblock(&sb).unwrap();
+    let layout = ext4::read_layout(&dev).await.unwrap();
     assert!(layout.clean, "a clone must be mountable read-write as handed out");
+    // Handed out is handed out: it has to pass a real check, not merely parse.
+    let report = ext4::check(&dev).await.unwrap();
+    assert!(report.is_clean(), "clone fails fsck: {:?}", report.problems);
     layout.uuid
 }
 
@@ -70,7 +70,7 @@ async fn create_seals_in_one_call_and_lists() {
     let resp = client
         .post(format!("{url}/api/v1/fstemplates"))
         .json(&serde_json::json!({
-            "name": "ext4-nojournal-64m",
+            "name": "ext4-64m",
             "size": "64M",
             "label": "storm",
         }))
@@ -82,13 +82,17 @@ async fn create_seals_in_one_call_and_lists() {
     let t = &body["template"];
     assert_eq!(t["state"], "ready", "formatting happens here, so no second call");
     assert_eq!(t["fs"], "ext4");
-    assert_eq!(t["journal"], false);
+    // The default is what `mke2fs -t ext4` writes: journal, checksums, and the
+    // seed that keeps a clone's UUID stamp a single write.
+    assert_eq!(t["journal"], true);
+    assert_eq!(t["metadata_csum"], true);
+    assert_eq!(t["metadata_csum_seed"], true);
     assert!(t["sealed_volume_id"].is_string());
     assert!(t["fs_uuid"].is_string());
 
     // Fetchable by name as well as by id — consumers know the name.
     let by_name: serde_json::Value = client
-        .get(format!("{url}/api/v1/fstemplates/ext4-nojournal-64m"))
+        .get(format!("{url}/api/v1/fstemplates/ext4-64m"))
         .send()
         .await
         .unwrap()
@@ -110,7 +114,7 @@ async fn create_seals_in_one_call_and_lists() {
     // A duplicate name is a conflict, not a second template.
     let dup = client
         .post(format!("{url}/api/v1/fstemplates"))
-        .json(&serde_json::json!({ "name": "ext4-nojournal-64m", "size": "64M" }))
+        .json(&serde_json::json!({ "name": "ext4-64m", "size": "64M" }))
         .send()
         .await
         .unwrap();
@@ -253,28 +257,29 @@ async fn journal_variants_coexist() {
             let vm = state.volume_manager.lock().await;
             vm.get_volume(&VolumeId(sealed)).unwrap()
         };
-        let sb = ext4::read_at(&dev, ext4::SUPERBLOCK_OFFSET, ext4::SUPERBLOCK_LEN).await.unwrap();
-        let l = ext4::parse_superblock(&sb).unwrap();
-        assert_eq!(l.has_journal(), journal, "{name} on disk");
-        assert!(!l.needs_recovery(), "{name} must not ship with a replay pending");
+        let l = ext4::read_layout(&dev).await.unwrap();
+        assert_eq!(l.has_journal, journal, "{name} on disk");
+        assert!(!l.needs_recovery, "{name} must not ship with a replay pending");
     }
 
     server.abort();
 }
 
-/// 64bit is the other per-template feature switch: needed above 16 TiB, and
-/// off below it because consumers that predate it are happier without.
+/// Features are chosen per template in `mke2fs -O` terms. The default is what
+/// `mke2fs -t ext4` writes, which is also what RouterOS's own format-drive
+/// produces; a consumer that predates any of it turns that bit off by name.
 #[tokio::test]
-async fn sixty_four_bit_is_a_per_template_choice() {
+async fn features_are_a_per_template_choice() {
     let dir = TempDir::new().unwrap();
     let state = setup(&dir).await;
     let (url, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
 
-    for (name, wide) in [("ext4-256m", false), ("ext4-64bit-256m", true)] {
+    for (name, wide) in [("ext4-narrow-256m", false), ("ext4-256m", true)] {
+        let features = if wide { None } else { Some("^64bit,^metadata_csum") };
         let body: serde_json::Value = client
             .post(format!("{url}/api/v1/fstemplates"))
-            .json(&serde_json::json!({ "name": name, "size": "256M", "64bit": wide }))
+            .json(&serde_json::json!({ "name": name, "size": "256M", "features": features }))
             .send()
             .await
             .unwrap()
@@ -282,24 +287,24 @@ async fn sixty_four_bit_is_a_per_template_choice() {
             .await
             .unwrap();
         assert_eq!(body["template"]["64bit"], wide, "{name}");
+        assert_eq!(body["template"]["metadata_csum"], wide, "{name}");
 
         let sealed: Uuid = body["template"]["sealed_volume_id"].as_str().unwrap().parse().unwrap();
         let dev: Arc<dyn BlockDevice> = {
             let vm = state.volume_manager.lock().await;
             vm.get_volume(&VolumeId(sealed)).unwrap()
         };
-        let sb = ext4::read_at(&dev, ext4::SUPERBLOCK_OFFSET, ext4::SUPERBLOCK_LEN).await.unwrap();
-        let l = ext4::parse_superblock(&sb).unwrap();
+        let l = ext4::read_layout(&dev).await.unwrap();
         assert_eq!(l.sixty_four_bit, wide, "{name} on disk");
-        assert_eq!(l.desc_size, if wide { 64 } else { 32 }, "{name} descriptor size");
         assert!(l.clean);
+        assert!(ext4::check(&dev).await.unwrap().is_clean(), "{name} fails fsck");
     }
 
-    // A clone of the wide template keeps the feature and still gets its own
-    // identity — 64bit does not pull in metadata_csum, so the stamp is still
-    // one patch.
+    // A clone of the default template keeps the features and still gets its
+    // own identity: metadata_csum is on, and the seed that comes with it is
+    // what keeps the stamp a single superblock write.
     let clone: serde_json::Value = client
-        .post(format!("{url}/api/v1/fstemplates/ext4-64bit-256m/clone"))
+        .post(format!("{url}/api/v1/fstemplates/ext4-256m/clone"))
         .json(&serde_json::json!({ "name": "wide-clone" }))
         .send()
         .await
@@ -312,11 +317,12 @@ async fn sixty_four_bit_is_a_per_template_choice() {
         let vm = state.volume_manager.lock().await;
         vm.get_volume(&VolumeId(id)).unwrap()
     };
-    let sb = ext4::read_at(&dev, ext4::SUPERBLOCK_OFFSET, ext4::SUPERBLOCK_LEN).await.unwrap();
-    let l = ext4::parse_superblock(&sb).unwrap();
-    assert!(l.sixty_four_bit);
+    let l = ext4::read_layout(&dev).await.unwrap();
+    assert!(l.sixty_four_bit && l.metadata_csum && l.csum_seed);
     assert!(l.clean);
     assert_eq!(clone["fs_uuid"].as_str().unwrap().parse::<Uuid>().unwrap(), l.uuid);
+    let report = ext4::check(&dev).await.unwrap();
+    assert!(report.is_clean(), "stamping invalidated checksums: {:?}", report.problems);
 
     server.abort();
 }
@@ -360,19 +366,37 @@ async fn unsealed_templates_cannot_be_cloned_and_seal_verifies() {
     assert_eq!(unformatted.status(), 409);
 
     // Format it the way an initiator would, then dirty the superblock the way
-    // an unclean unmount does (stormblock-registry#10).
+    // an unclean unmount does (stormblock-registry#10). No metadata_csum here,
+    // so patching the flags by hand leaves a superblock that still parses —
+    // the state flags are what is under test, not checksum handling.
     {
         let dev: Arc<dyn BlockDevice> = {
             let vm = state.volume_manager.lock().await;
             vm.get_volume(&VolumeId(raw)).unwrap()
         };
-        ext4::format(&dev, &ext4::Ext4Params { journal: true, ..Default::default() })
-            .await
-            .unwrap();
-        let mut sb = ext4::read_at(&dev, ext4::SUPERBLOCK_OFFSET, ext4::SUPERBLOCK_LEN).await.unwrap();
-        sb[0x3A..0x3C].copy_from_slice(&(ext4::STATE_VALID_FS | ext4::STATE_ERROR_FS).to_le_bytes());
-        sb[0x60..0x64].copy_from_slice(&0x0004u32.to_le_bytes()); // RECOVER
-        ext4::write_at(&dev, ext4::SUPERBLOCK_OFFSET, &sb).await.unwrap();
+        ext4::format(
+            &dev,
+            &ext4::Ext4Params {
+                features: Some("^metadata_csum".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // s_state at 0x3A and s_feature_incompat at 0x60, both relative to the
+        // superblock's home 1024 bytes in.
+        let mut block = vec![0u8; 4096];
+        dev.read(0, &mut block).await.unwrap();
+        let sb = 1024usize;
+        block[sb + 0x3A..sb + 0x3C].copy_from_slice(&0x0003u16.to_le_bytes()); // VALID_FS|ERROR_FS
+        let incompat = u32::from_le_bytes(block[sb + 0x60..sb + 0x64].try_into().unwrap());
+        block[sb + 0x60..sb + 0x64].copy_from_slice(&(incompat | 0x0004).to_le_bytes()); // RECOVER
+        let mut done = 0;
+        while done < block.len() {
+            done += dev.write(done as u64, &block[done..]).await.unwrap();
+        }
+        dev.flush().await.unwrap();
     }
 
     let dirty = client
@@ -551,6 +575,58 @@ async fn a_clone_costs_one_extent_not_a_filesystem() {
     // It still presents the whole filesystem, shared.
     assert_eq!(clone["virtual_size_bytes"], 512 * 1024 * 1024);
     assert!(clone["allocated_bytes"].as_u64().unwrap() > clone_cost * DEFAULT_EXTENT_SIZE);
+
+    server.abort();
+}
+
+/// The engine can check and repair a filesystem on a volume nobody has
+/// mounted — which is the only way a RouterOS volume gets fscked at all, since
+/// RouterOS has neither an fsck nor a clean unmount for a network disk.
+#[tokio::test]
+async fn volumes_can_be_checked_and_repaired_in_place() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "t", "size": "64M" }))
+        .send()
+        .await
+        .unwrap();
+    let clone: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/t/clone"))
+        .json(&serde_json::json!({ "name": "c" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(clone["verified"], true, "clones are checked before hand-off");
+    let vol = clone["volume_id"].as_str().unwrap();
+
+    let report: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{vol}/fsck"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(report["clean"], true, "{report}");
+    assert_eq!(report["exit_code"], 0);
+    assert!(report["problems"].as_array().unwrap().is_empty());
+    assert!(report["directories"].as_u64().unwrap() >= 1, "root at least");
+
+    // A volume that does not exist is a 404, not a crash.
+    let missing = client
+        .post(format!("{url}/api/v1/volumes/{}/fsck", Uuid::new_v4()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
 
     server.abort();
 }

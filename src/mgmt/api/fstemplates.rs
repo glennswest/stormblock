@@ -67,17 +67,17 @@ pub struct CreateTemplateRequest {
     /// Filesystem to lay down. Only ext4 today.
     #[serde(default)]
     pub fs: Option<String>,
-    /// Journal on or off. Off by default — a consumer that cannot replay a
-    /// journal (RouterOS) is left read-only the first time one goes dirty, so
-    /// the safe default is the portable one and hosts that want crash
-    /// consistency ask for it.
+    /// Journal on or off. Absent follows the filesystem kind — ext4 and ext3
+    /// have one, ext2 does not. A consumer that cannot replay a journal
+    /// (RouterOS) is left read-only the first time one goes dirty, so it is
+    /// worth turning off for those and leaving on everywhere else.
     #[serde(default)]
-    pub journal: bool,
-    /// The ext4 `64bit` feature — 64-byte group descriptors and block numbers
-    /// past 2^32. Required above 16 TiB, off by default below it because
-    /// consumers that predate it are happier without.
-    #[serde(default, rename = "64bit", alias = "sixty_four_bit")]
-    pub sixty_four_bit: bool,
+    pub journal: Option<bool>,
+    /// A `mke2fs -O`-style feature list applied over the kind's defaults —
+    /// `"^64bit"`, `"^metadata_csum,^flex_bg"`, and so on. The `-O` vocabulary
+    /// is passed straight through rather than re-invented as flags.
+    #[serde(default)]
+    pub features: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
     /// Format here and seal in one call. Default true; false leaves the
@@ -107,6 +107,9 @@ pub struct CloneRequest {
     pub stamp_backups: bool,
     #[serde(default)]
     pub label: Option<String>,
+    /// Check the clone before handing it out. Default true.
+    #[serde(default = "yes")]
+    pub verify: bool,
 }
 
 /// Resolve `size` / `size_bytes` into bytes.
@@ -161,13 +164,11 @@ async fn create_template(
         size_bytes: size,
         journal: req.journal,
         label: req.label.unwrap_or_default(),
-        sixty_four_bit: req.sixty_four_bit,
+        features: req.features,
         format_in_core: req.format,
     };
 
-    let mut vm = state.volume_manager.lock().await;
-    let mut store = state.fstemplates.lock().await;
-    match template::create(&mut vm, &mut store, &spec).await {
+    match template::create(&state.volume_manager, &state.fstemplates, &spec).await {
         Ok(t) => {
             let body = if t.state == crate::fs::TemplateState::AwaitingFormat {
                 json!({
@@ -219,9 +220,7 @@ async fn seal_template(
         }
     }
 
-    let mut vm = state.volume_manager.lock().await;
-    let mut store = state.fstemplates.lock().await;
-    match template::seal(&mut vm, &mut store, &template_id, force).await {
+    match template::seal(&state.volume_manager, &state.fstemplates, &template_id, force).await {
         Ok(t) => Json(t.json()).into_response(),
         Err(e) => err(e),
     }
@@ -245,11 +244,10 @@ async fn clone_template(
         stamp_uuid: req.stamp_uuid,
         stamp_backups: req.stamp_backups,
         label: req.label,
+        verify: req.verify,
     };
 
-    let mut vm = state.volume_manager.lock().await;
-    let mut store = state.fstemplates.lock().await;
-    match template::clone_template(&mut vm, &mut store, &id, &spec).await {
+    match template::clone_template(&state.volume_manager, &state.fstemplates, &id, &spec).await {
         Ok(c) => (
             axum::http::StatusCode::CREATED,
             Json(json!({
@@ -258,6 +256,7 @@ async fn clone_template(
                 "template_id": c.template_id,
                 "fs_uuid": c.fs_uuid,
                 "size_bytes": c.size_bytes,
+                "verified": c.verified,
             })),
         )
             .into_response(),
@@ -283,9 +282,7 @@ async fn delete_template(
         }
     };
 
-    let mut vm = state.volume_manager.lock().await;
-    let mut store = state.fstemplates.lock().await;
-    match template::delete(&mut vm, &mut store, &template_id, purge, force).await {
+    match template::delete(&state.volume_manager, &state.fstemplates, &template_id, purge, force).await {
         Ok(purged) => Json(json!({ "deleted": template_id, "purged_volumes": purged })).into_response(),
         Err(e) => err(e),
     }
@@ -301,10 +298,8 @@ pub async fn clone_for_volume_api(
     name: &str,
     size_bytes: Option<u64>,
 ) -> Result<(VolumeId, Option<Uuid>, u64), Response> {
-    let spec = CloneSpec { name: name.to_string(), size_bytes, ..CloneSpec::new(name) };
-    let mut vm = state.volume_manager.lock().await;
-    let mut store = state.fstemplates.lock().await;
-    match template::clone_template(&mut vm, &mut store, key, &spec).await {
+    let spec = CloneSpec { size_bytes, ..CloneSpec::new(name) };
+    match template::clone_template(&state.volume_manager, &state.fstemplates, key, &spec).await {
         Ok(c) => Ok((c.volume_id, c.fs_uuid, c.size_bytes)),
         Err(e) => Err(err(e)),
     }
