@@ -275,21 +275,29 @@ containers, StormOS, Proxmox VMs, microVMs and x86 hosts, only one of which
 is RouterOS. A profile should carry platform *choices*, not
 platform-independent capabilities.
 
-- [x] `src/fs/ext4.rs` — pure-Rust ext4: format an *empty* filesystem
-      (superblock, GDT, per-group bitmaps + inode tables, root, `lost+found`,
-      optional journal), `parse_superblock`, `stamp_uuid` / `stamp_label`,
-      `scan_free` (offline free-space map). No C dependency — an empty
-      filesystem needs far less than a general ext4 writer.
+- [x] `src/fs/ext4.rs` — the seam onto
+      [`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs), a from-scratch
+      async `mke2fs`/`e2fsck` in pure Rust: `VolumeDevice` (thin volumes format
+      in place, zeroing is a discard), `format`, `read_layout`, `check` /
+      `repair`, `stamp_uuid` / `stamp_label`. Replaced the hand-rolled writer
+      that shipped first.
 - [x] `src/fs/template.rs` — create → format → seal → clone lifecycle over
       the `VolumeManager`, persisted to `<data_dir>/fstemplates.json`
-- [x] Seal guard checks every flag a consumer acts on (`VALID_FS`,
-      `ERROR_FS`, `RECOVER`, `ORPHAN_FS`), not just `VALID_FS`
-      (stormblock-registry#10)
+- [x] Seal guard: every flag a consumer acts on (`VALID_FS`, `ERROR_FS`,
+      `RECOVER`, `ORPHAN_FS`) **plus a real fsck** — a superblock that says it
+      is clean is a claim, not evidence (stormblock-registry#10)
+- [x] Every clone fsck'd before hand-off, and discarded if it does not check
+      out; `POST /api/v1/volumes/{id}/fsck` (`?repair=true`) for any volume,
+      since RouterOS has neither an fsck nor a clean unmount
 - [x] Clone-time UUID stamping (stormblockmk#12) — the piece that can only
       live here, since every consumer clones *through* the engine
-- [x] Journal on/off and `64bit` on/off as per-template options; variants
-      coexist by name. Past 16 TiB, `64bit` is required and its absence is an
-      error rather than a truncation
+- [x] Per-template features in `mke2fs` vocabulary: kind (`ext2`/`ext3`/`ext4`),
+      `journal` tri-state, and an `-O` list. The default is what
+      `mke2fs -t ext4` writes — journal, `flex_bg`, `64bit`, `metadata_csum`,
+      `metadata_csum_seed` — which is also what RouterOS's own `format-drive`
+      produces (#39)
+- [x] Nothing holds a lock across a format, a check or a stamp: templates
+      build and clones mint concurrently
 - [x] `/api/v1/fstemplates` (create/list/get/seal/clone/delete) and
       `from_template` on `POST /api/v1/volumes`
 - [x] `ci-fstemplate-verify.sh` — e2fsck + real mount through an iSCSI
@@ -299,6 +307,13 @@ Deliberately **not** here: writing image *content* into a filesystem (tar,
 whiteouts, hashing, image config) stays with the consumer that owns the
 content — stormblock-registry keeps its full ext4 writer for that.
 
-Not done: superblock repair / fsck in the engine (raised in stormblockmk#12
-as a candidate — RouterOS has no fsck), and `boot_iscsi.rs` cloning its ESP
-and root from templates rather than constructing them each time.
+Not done: seeding *content* into a template before sealing (skeleton rootfs,
+kernel cmdline, `boot.toml`) via
+[`fio-ext4`](https://github.com/glennswest/fio.ext4.rs) — blocked on
+fio.ext4.rs#1, which stops that crate being taken as a git dependency; and
+`boot_iscsi.rs` cloning its ESP and root from templates rather than
+constructing them each time.
+
+Unconfirmed: whether RouterOS writes to what this now produces (#39). The
+default profile matches its own `format-drive` output, but nothing has been
+attached to a RouterOS box since the change.

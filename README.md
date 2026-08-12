@@ -55,7 +55,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **Global Extent Map (GEM)** — Cross-slab extent tracking with reverse index, COW snapshot cloning, and rebuild-from-slabs recovery.
 - **Thin provisioning** — Extent-based allocator, volumes grow on write, and shrink again on discard: the targets advertise thin provisioning (SCSI VPD 0xB2, NVMe DSM) so initiators issue UNMAP/TRIM, which frees slab slots back to the pool.
 - **COW snapshots** — Instant snapshots via extent map cloning with reference counting; clone and delete persist refcounts a sector at a time, so latency tracks sectors touched rather than image size.
-- **Filesystem templates** — mkfs once, clone forever. The engine writes a blank ext4 itself (pure Rust, journal optional per template), seals it as a snapshot, and every consumer gets a COW clone with a freshly stamped filesystem UUID instead of running mkfs.
+- **Filesystem templates** — mkfs once, clone forever. The engine formats its own volumes through [`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs) (a from-scratch async mke2fs/e2fsck in pure Rust), seals a template as a snapshot, and every consumer gets a COW clone with a freshly stamped filesystem UUID instead of running mkfs. Formats run concurrently and every clone is fsck'd before hand-off.
 - **Placement engine** — Snapshot-fenced cold copies, tiered data placement (Hot/Warm/Cool/Cold), extent-level replication.
 - **Shared ring IPC** — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd.
 - **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model, and hot-add: a host connects once and later attaches arrive as an async event plus a rescan, with no Connect per volume.
@@ -174,27 +174,32 @@ template is effectively instant and starts at near-zero allocation. So format
 once, seal, and clone:
 
 ```bash
-# Format + seal in one call — the engine writes the filesystem locally
+# Format + seal in one call — the engine writes the filesystem locally.
+# The default is what `mke2fs -t ext4` produces.
 curl -X POST http://node:9090/api/v1/fstemplates \
   -H 'Content-Type: application/json' \
-  -d '{"name":"ext4-nojournal-256m","size":"256M","label":"storm"}'
+  -d '{"name":"ext4-256m","size":"256M","label":"storm"}'
 
-# A journalled variant of the same size coexists, told apart by name
+# A variant for a consumer that predates some of it, told apart by name.
+# `features` is an `mke2fs -O` list; `journal` and `fs` (ext2/ext3/ext4) are
+# the other two knobs.
 curl -X POST http://node:9090/api/v1/fstemplates \
   -H 'Content-Type: application/json' \
-  -d '{"name":"ext4-journal-256m","size":"256M","journal":true}'
+  -d '{"name":"ext4-plain-256m","size":"256M","journal":false,
+       "features":"^64bit,^metadata_csum"}'
 
 # Clone one per consumer — a snapshot plus a fresh filesystem UUID
 curl -X POST http://node:9090/api/v1/volumes \
   -H 'Content-Type: application/json' \
-  -d '{"name":"pvc-1","from_template":"ext4-nojournal-256m"}'
+  -d '{"name":"pvc-1","from_template":"ext4-256m"}'
+
+# Check any volume's filesystem; ?repair=true corrects what it can
+curl -X POST http://node:9090/api/v1/volumes/<uuid>/fsck
 ```
 
-**Journal on or off, and `64bit` on or off, are per-template choices**, never
-build-time defaults. `64bit` (64-byte group descriptors, block numbers past
-2^32) is required above 16 TiB and off below it, since consumers that predate
-it are happier without; it does not drag `metadata_csum` in with it, so the
-clone-time UUID stamp stays a plain 16-byte patch either way. For the journal:
+**Every feature is a per-template choice**, expressed in `mke2fs` terms rather
+than re-invented as flags: a filesystem kind (`ext2`/`ext3`/`ext4`), a journal
+switch, and an `-O` list. For the journal:
 RouterOS cannot replay a journal, so one that ever goes dirty there leaves the
 filesystem read-only permanently, while a Linux host or VM wants the crash
 consistency.
@@ -203,27 +208,27 @@ consistency.
 clones of one template collide on mount-by-UUID and in the blkid cache the
 moment both are attached to one host. It happens here because every consumer
 clones *through* the engine — a UUID stamped in a layer above would miss the
-clones that layer never touches.
+clones that layer never touches. The default profile carries
+`metadata_csum_seed`, so checksums are seeded from the superblock rather than
+the UUID and the stamp stays a single write; a filesystem with `metadata_csum`
+and no seed has one pinned from its current UUID first, as `tune2fs -U` does.
 
-Sealing verifies the superblock and refuses a filesystem a consumer could not
-mount read-write — `VALID_FS` clear, `ERROR_FS` set, journal replay pending, or
-orphan cleanup pending. A template that seals dirty fails much later, inside a
-container, as `Read-only file system`. Pass `?force=true` to override, and
+**Every clone is checked before it is handed out**, and a clone that does not
+pass is discarded rather than handed over (`"verify": false` to skip). The same
+check is available for any volume at `POST /api/v1/volumes/{id}/fsck` —
+RouterOS has no fsck and cannot cleanly unmount a network disk, so a volume it
+leaves dirty has nowhere else to be repaired.
+
+Sealing runs a real fsck and refuses a filesystem a consumer could not mount
+read-write — `VALID_FS` clear, `ERROR_FS` set, journal replay pending, orphan
+cleanup pending, or anything the check turns up. A template that seals dirty
+fails much later, inside a container, as `Read-only file system`. Pass `?force=true` to override, and
 `{"format": false}` at create time to have an initiator lay the filesystem down
 over an export instead, then `POST /api/v1/fstemplates/{id}/seal`.
 
-The default feature set is deliberately conservative (`EXTENTS|FILETYPE`
-incompat, `SPARSE_SUPER|LARGE_FILE|EXTRA_ISIZE` ro_compat, no `metadata_csum`,
-no `64bit`, no `bigalloc`, no `quota`): it is what RouterOS 7.22.2 mounts
-read-write, and it is what keeps the UUID stamp a 16-byte patch rather than a
-full group-checksum recompute. `"64bit": true` opts a single template into wide
-block numbers when it needs them:
-
-```bash
-curl -X POST http://node:9090/api/v1/fstemplates \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"ext4-64bit-32t","size":"32T","64bit":true,"journal":true}'
-```
+Formats do not queue. No lock is held across a format, a check or a stamp, and
+the formatter takes `&self` so one format fans out across block groups —
+provisioning many templates at once costs about what one does, not the sum.
 
 ### Clone-per-consumer, reset on restart
 
@@ -254,7 +259,7 @@ change under a live host.
 src/drive/       BlockDevice trait, NVMe/SAS/FileDevice, Slab extent store, ublk, ring IPC
 src/raid/        RAID 1/5/6/10, SIMD parity, write journal, rebuild, scrub
 src/volume/      Thin provisioning, COW snapshots, GEM, extent allocator, metadata
-src/fs/          ext4 writer/reader (blank filesystems, seal guard, UUID stamp), templates
+src/fs/          filesystem templates: format/check via mkfs-ext4, seal guard, UUID stamp
 src/placement/   Cold copies, storage topology, tiered replication
 src/target/      NVMe-oF/TCP + iSCSI target protocols, per-core reactor
 src/mgmt/        REST API (axum), TOML config, Prometheus metrics, web UI
