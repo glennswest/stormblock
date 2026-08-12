@@ -652,7 +652,6 @@ mod tests {
     use std::sync::Arc;
 
     use crate::drive::filedev::FileDevice;
-    use crate::drive::BlockDevice;
     use crate::raid::RaidArrayId;
 
     async fn manager(size: u64) -> (VolumeManager, String) {
