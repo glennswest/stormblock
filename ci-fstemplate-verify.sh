@@ -27,7 +27,7 @@ fi
 ok()   { echo -e "  ${GREEN}OK${RESET}: $1" >&2; }
 bad()  { echo -e "  ${RED}FAIL${RESET}: $1" >&2; FAILURES=$((FAILURES+1)); }
 info() { echo "  .. $1" >&2; }
-hdr()  { echo; echo -e "${BOLD}${CYAN}── $1 ──${RESET}"; echo; }
+hdr()  { echo >&2; echo -e "${BOLD}${CYAN}── $1 ──${RESET}" >&2; echo >&2; }
 
 IQN="iqn.2024.io.stormblock:fstemplate"
 PORT=3260
@@ -50,7 +50,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-jqf() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval('d$1'))" 2>/dev/null; }
+# Pull one field out of a JSON body: `jqf template state` for
+# `.template.state`. The key path comes in as argv rather than being pasted
+# into the program text — quoting it into an eval collides with the quotes
+# already there and silently yields nothing.
+jqf() {
+    python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for k in sys.argv[1:]:
+    d = d[int(k)] if isinstance(d, list) else d[k]
+print("" if d is None else d)
+' "$@" 2>/dev/null
+}
 
 echo -e "${BOLD}StormBlock — preformatted filesystem templates (#38)${RESET}"
 echo "kernel: $(uname -r)   date: $(date)"
@@ -117,13 +129,13 @@ make_template() {  # name extra-json
         -d "{\"name\":\"$name\",\"size\":\"256M\",\"label\":\"$name\"$extra}")
     t1=$(date +%s%N)
     local state
-    state=$(echo "$body" | jqf "['template']['state']")
+    state=$(echo "$body" | jqf template state)
     if [ "$state" != "ready" ]; then
         bad "$name did not seal: $body"
         return 1
     fi
     ok "$name formatted+sealed in $(( (t1-t0)/1000000 )) ms$(echo "$extra" | sed 's/^,/ (/;s/$/)/')"
-    echo "$body" | jqf "['template']['fs_uuid']"
+    echo "$body" | jqf template fs_uuid
 }
 
 # The default is what mke2fs -t ext4 writes, which is what RouterOS's own
@@ -147,7 +159,7 @@ CEND=$(date +%s%N)
 PAR_MS=$(( (CEND-CSTART)/1000000 ))
 PAR_OK=0
 for i in 1 2 3 4; do
-    [ "$(jqf "['template']['state']" < "$W/par-$i.json")" = "ready" ] && PAR_OK=$((PAR_OK+1))
+    [ "$(jqf template state < "$W/par-$i.json")" = "ready" ] && PAR_OK=$((PAR_OK+1))
 done
 if [ "$PAR_OK" = "4" ]; then
     ok "4 templates formatted concurrently in $PAR_MS ms (one alone: see above)"
@@ -166,12 +178,12 @@ clone() {  # template name
         -d "{\"name\":\"$2\"}")
     t1=$(date +%s%N)
     local vol
-    vol=$(echo "$body" | jqf "['volume_id']")
+    vol=$(echo "$body" | jqf volume_id)
     if [ -z "$vol" ] || [ "$vol" = "None" ]; then
         bad "clone $2 failed: $body"
         return 1
     fi
-    info "$2: volume $vol in $(( (t1-t0)/1000000 )) ms, fs_uuid=$(echo "$body" | jqf "['fs_uuid']")"
+    info "$2: volume $vol in $(( (t1-t0)/1000000 )) ms, fs_uuid=$(echo "$body" | jqf fs_uuid)"
     echo "$vol"
 }
 
@@ -190,7 +202,7 @@ for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J" "W:$VOL_W"; do
     tag="${pair%%:*}"; vol="${pair#*:}"
     body=$(curl -s -m 30 -X POST "$API/exports" -H 'Content-Type: application/json' \
         -d "{\"volume_id\":\"$vol\",\"protocol\":\"iscsi\"}")
-    lun=$(echo "$body" | jqf "['lun_id']")
+    lun=$(echo "$body" | jqf lun_id)
     if [ -z "$lun" ] || [ "$lun" = "None" ]; then
         bad "export $tag failed: $body"; exit 1
     fi
@@ -227,11 +239,11 @@ hdr "Engine-side fsck"
 for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J"; do
     tag="${pair%%:*}"; vol="${pair#*:}"
     body=$(curl -s -m 120 -X POST "$API/volumes/$vol/fsck")
-    clean=$(echo "$body" | jqf "['clean']")
+    clean=$(echo "$body" | jqf clean)
     if [ "$clean" = "True" ]; then
         ok "clone $tag: engine fsck clean"
     else
-        bad "clone $tag: engine fsck found problems: $(echo "$body" | jqf "['problems']")"
+        bad "clone $tag: engine fsck found problems: $(echo "$body" | jqf problems)"
     fi
 done
 
