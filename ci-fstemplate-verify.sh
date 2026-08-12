@@ -22,9 +22,11 @@ if [ -t 1 ]; then
     GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'
     CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 fi
-ok()   { echo -e "  ${GREEN}OK${RESET}: $1"; }
-bad()  { echo -e "  ${RED}FAIL${RESET}: $1"; FAILURES=$((FAILURES+1)); }
-info() { echo "  .. $1"; }
+# Progress goes to stderr: these are called from inside $( ) capture, and a
+# progress line landing in the captured value is a bug that hides itself.
+ok()   { echo -e "  ${GREEN}OK${RESET}: $1" >&2; }
+bad()  { echo -e "  ${RED}FAIL${RESET}: $1" >&2; FAILURES=$((FAILURES+1)); }
+info() { echo "  .. $1" >&2; }
 hdr()  { echo; echo -e "${BOLD}${CYAN}── $1 ──${RESET}"; echo; }
 
 IQN="iqn.2024.io.stormblock:fstemplate"
@@ -133,11 +135,14 @@ TPL_UUID_PLAIN=$(make_template "ext4-plain-256m" ',"journal":false,"features":"^
 # so N templates should cost about what one does rather than N times as much.
 hdr "Concurrent formats"
 CSTART=$(date +%s%N)
+PAR_PIDS=()
 for i in 1 2 3 4; do
     curl -s -m 180 -X POST "$API/fstemplates" -H 'Content-Type: application/json' \
         -d "{\"name\":\"parallel-$i\",\"size\":\"256M\"}" > "$W/par-$i.json" &
+    PAR_PIDS+=($!)
 done
-wait
+# Only these: a bare `wait` would also wait on the engine, which never exits.
+wait "${PAR_PIDS[@]}"
 CEND=$(date +%s%N)
 PAR_MS=$(( (CEND-CSTART)/1000000 ))
 PAR_OK=0
