@@ -299,6 +299,22 @@ else
     bad "clone B saw the wrong content"
 fi
 
+# What the kernel logged while writing. If ext4 rejected anything about the
+# on-disk layout it says so here and nowhere else — this is the diagnostic
+# that separates "our format is wrong" from "the consumer is fussy" (#39).
+hdr "Kernel ext4 log"
+DMESG=$(dmesg -T 2>/dev/null | grep -iE "EXT4-fs|ext4_" | tail -25)
+if [ -n "$DMESG" ]; then
+    echo "$DMESG" | sed 's/^/     /'
+    if echo "$DMESG" | grep -qiE "error|corrupt|invalid|remount|read-only"; then
+        bad "the kernel logged an ext4 complaint against a filesystem we wrote"
+    else
+        ok "no ext4 errors logged"
+    fi
+else
+    info "no ext4 lines in dmesg (kernel log unreadable in this container?)"
+fi
+
 hdr "Unmount and re-check"
 for tag in A B J W; do
     umount "$W/mnt-$tag" 2>/dev/null || bad "clone $tag would not unmount"
