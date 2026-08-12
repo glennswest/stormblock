@@ -374,12 +374,143 @@ async fn fsck_volume(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WriteFilesRequest {
+    pub files: Vec<super::fstemplates::SeedFileRequest>,
+}
+
+/// The volume behind an id, refusing while something else may be writing it.
+///
+/// A file written under a live mount would be a write the mounted filesystem
+/// does not know about — its cached metadata would overwrite ours.
+async fn writable_volume(
+    state: &AppState,
+    uuid: Uuid,
+) -> Result<Arc<dyn BlockDevice>, Response> {
+    {
+        let exports = state.exports.read().await;
+        if exports.iter().any(|e| e.volume_id == uuid) {
+            return Err(ApiError::conflict(
+                "volume is exported — detach it before writing files into it",
+            ));
+        }
+    }
+    let vm = state.volume_manager.lock().await;
+    vm.get_volume(&VolumeId(uuid))
+        .ok_or_else(|| ApiError::not_found(format!("volume {uuid} not found")))
+}
+
+/// `POST /api/v1/volumes/{id}/files` — write files into the volume's
+/// filesystem in userspace: no mount, no loop device, no attach.
+async fn write_volume_files(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<WriteFilesRequest>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "write_files")
+        .increment(1);
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+
+    let mut files = Vec::with_capacity(req.files.len());
+    for f in req.files {
+        match f.resolve() {
+            Ok(s) => files.push(s),
+            Err(e) => return ApiError::bad_request(e),
+        }
+    }
+    if files.is_empty() {
+        return ApiError::bad_request("no files given");
+    }
+
+    let dev = match writable_volume(&state, uuid).await {
+        Ok(d) => d,
+        Err(resp) => return resp,
+    };
+
+    if let Err(e) = crate::fs::files::write_files(&dev, &files).await {
+        return ApiError::bad_request(format!("volume {uuid}: {e}"));
+    }
+
+    // Writing metadata is exactly where a filesystem goes quietly wrong, so
+    // say whether it still checks out rather than leaving the caller to ask.
+    let clean = crate::fs::ext4::check(&dev)
+        .await
+        .map(|r| r.is_clean())
+        .unwrap_or(false);
+
+    Json(serde_json::json!({
+        "volume_id": uuid,
+        "written": files.iter().map(|f| &f.path).collect::<Vec<_>>(),
+        "clean": clean,
+    }))
+    .into_response()
+}
+
+/// `GET /api/v1/volumes/{id}/files?path=/etc/hostname` — read one file, or
+/// list a directory when `path` names one.
+async fn read_volume_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "read_files")
+        .increment(1);
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let path = match q.get("path") {
+        Some(p) => p.clone(),
+        None => return ApiError::bad_request("path is required"),
+    };
+
+    let dev = {
+        let vm = state.volume_manager.lock().await;
+        match vm.get_volume(&VolumeId(uuid)) {
+            Some(d) => d,
+            None => return ApiError::not_found(format!("volume {uuid} not found")),
+        }
+    };
+
+    // A directory reads as a listing; a file reads as its bytes. Base64 so a
+    // binary file survives the trip.
+    match crate::fs::files::list_dir(&dev, &path).await {
+        Ok(entries) => Json(serde_json::json!({
+            "volume_id": uuid,
+            "path": path,
+            "entries": entries.iter().map(|e| serde_json::json!({
+                "name": e.name,
+                "is_dir": e.is_dir,
+                "size": e.size,
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(_) => match crate::fs::files::read_file(&dev, &path).await {
+            Ok(bytes) => {
+                use base64::Engine;
+                Json(serde_json::json!({
+                    "volume_id": uuid,
+                    "path": path,
+                    "size": bytes.len(),
+                    "contents_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }))
+                .into_response()
+            }
+            Err(e) => ApiError::not_found(format!("volume {uuid}: {e}")),
+        },
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_volumes).post(create_volume))
         .route("/{id}", get(get_volume).delete(delete_volume))
         .route("/{id}/resize", axum::routing::patch(resize_volume))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
+        .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/snapshots", axum::routing::post(create_snapshot))
         .with_state(state)
 }

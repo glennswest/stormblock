@@ -630,3 +630,121 @@ async fn volumes_can_be_checked_and_repaired_in_place() {
 
     server.abort();
 }
+
+/// A template can ship content, and every clone inherits it without the file
+/// ever being written again. This is the piece that needs no mount, no loop
+/// device and no attach — the engine writes into its own volume.
+#[tokio::test]
+async fn templates_can_carry_files_that_clones_inherit() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let created = client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({
+            "name": "seeded",
+            "size": "64M",
+            "files": [
+                { "path": "/etc/hostname", "contents": "router\n" },
+                { "path": "/etc/conf.d/net", "contents": "dhcp\n" },
+                { "path": "/boot.bin", "contents_base64": "AAECAw==" },
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["template"]["state"], "ready", "{body}");
+    let seeded = body["template"]["seeded"].as_array().unwrap();
+    assert_eq!(seeded.len(), 3);
+
+    // The clone carries the content, and is still a filesystem that checks out.
+    let clone: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/seeded/clone"))
+        .json(&serde_json::json!({ "name": "pvc" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(clone["verified"], true);
+    let vol = clone["volume_id"].as_str().unwrap();
+
+    let file: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes/{vol}/files?path=/etc/hostname"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    use base64::Engine;
+    let got = base64::engine::general_purpose::STANDARD
+        .decode(file["contents_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(got, b"router\n", "clone did not inherit the seeded file");
+
+    // A binary file survives the round trip byte for byte.
+    let bin: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes/{vol}/files?path=/boot.bin"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bin["contents_base64"], "AAECAw==");
+
+    // A directory reads as a listing.
+    let etc: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes/{vol}/files?path=/etc"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = etc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"hostname"), "{names:?}");
+    assert!(names.contains(&"conf.d"), "{names:?}");
+
+    // Writing into a clone afterwards leaves it checkable, and does not reach
+    // back into the template it came from.
+    let wrote: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{vol}/files"))
+        .json(&serde_json::json!({
+            "files": [{ "path": "/etc/hostname", "contents": "pvc-1\n" }],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(wrote["clean"], true, "{wrote}");
+
+    let sealed: Uuid = body["template"]["sealed_volume_id"].as_str().unwrap().parse().unwrap();
+    let template_file: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes/{sealed}/files?path=/etc/hostname"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let template_got = base64::engine::general_purpose::STANDARD
+        .decode(template_file["contents_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(template_got, b"router\n", "the clone wrote through to its template");
+
+    server.abort();
+}

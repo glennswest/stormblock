@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use super::ApiError;
 use crate::fs::template::{self, CloneSpec, FsKind, TemplateError, TemplateSpec};
+use crate::fs::SeedFile;
 use crate::mgmt::config::parse_size;
 use crate::mgmt::AppState;
 use crate::volume::VolumeId;
@@ -80,6 +81,11 @@ pub struct CreateTemplateRequest {
     pub features: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    /// Files written into the filesystem before it is sealed, so every clone
+    /// inherits them. `contents` is plain text; `contents_base64` carries
+    /// anything that is not.
+    #[serde(default)]
+    pub files: Vec<SeedFileRequest>,
     /// Format here and seal in one call. Default true; false leaves the
     /// template `awaiting_format` for an initiator to format over an export.
     #[serde(default = "yes")]
@@ -88,6 +94,36 @@ pub struct CreateTemplateRequest {
 
 fn yes() -> bool {
     true
+}
+
+/// One file to place into a template's filesystem.
+#[derive(Debug, Deserialize)]
+pub struct SeedFileRequest {
+    /// Absolute path inside the filesystem. Parents are created.
+    pub path: String,
+    #[serde(default)]
+    pub contents: Option<String>,
+    #[serde(default)]
+    pub contents_base64: Option<String>,
+}
+
+impl SeedFileRequest {
+    pub(crate) fn resolve(self) -> Result<SeedFile, String> {
+        let bytes = match (self.contents, self.contents_base64) {
+            (Some(_), Some(_)) => {
+                return Err(format!("{}: give contents or contents_base64, not both", self.path))
+            }
+            (Some(text), None) => text.into_bytes(),
+            (None, Some(b64)) => {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64.as_bytes())
+                    .map_err(|e| format!("{}: contents_base64 is not base64: {e}", self.path))?
+            }
+            (None, None) => Vec::new(),
+        };
+        Ok(SeedFile { path: self.path, contents: bytes })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +194,14 @@ async fn create_template(
         Err(e) => return ApiError::bad_request(e),
     };
 
+    let mut seed = Vec::with_capacity(req.files.len());
+    for f in req.files {
+        match f.resolve() {
+            Ok(s) => seed.push(s),
+            Err(e) => return ApiError::bad_request(e),
+        }
+    }
+
     let spec = TemplateSpec {
         name: req.name,
         fs,
@@ -165,6 +209,7 @@ async fn create_template(
         journal: req.journal,
         label: req.label.unwrap_or_default(),
         features: req.features,
+        seed,
         format_in_core: req.format,
     };
 

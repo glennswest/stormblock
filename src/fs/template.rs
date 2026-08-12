@@ -49,6 +49,7 @@ use uuid::Uuid;
 use crate::volume::{VolumeId, VolumeManager};
 
 use super::ext4;
+use super::files::{self, SeedFile};
 
 /// The volume manager, shared. Every entry point here locks it for as short a
 /// window as the operation allows and **never across a format or a check** —
@@ -150,6 +151,12 @@ pub struct TemplateSpec {
     /// them. The engine's own vocabulary is the one every consumer already
     /// speaks, so it is passed through rather than re-invented as flags.
     pub features: Option<String>,
+    /// Files written into the filesystem before it is sealed, so every clone
+    /// inherits them for free — a skeleton `/etc`, a kernel cmdline, the
+    /// `boot.toml` an initramfs reads. Written in userspace, with no mount.
+    ///
+    /// Only meaningful with `format_in_core`.
+    pub seed: Vec<SeedFile>,
     /// Format and seal in this process. False leaves the template in
     /// `awaiting_format` for an initiator to format over an export.
     pub format_in_core: bool,
@@ -164,6 +171,7 @@ impl TemplateSpec {
             journal: None,
             label: String::new(),
             features: None,
+            seed: Vec::new(),
             format_in_core: true,
         }
     }
@@ -203,6 +211,10 @@ pub struct FsTemplate {
     /// How many clones have been minted from it.
     #[serde(default)]
     pub clones: u64,
+    /// Paths seeded into the filesystem before sealing, for the record. The
+    /// contents live in the filesystem, not here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seeded: Vec<String>,
 }
 
 impl FsTemplate {
@@ -229,6 +241,7 @@ impl FsTemplate {
             "raw_volume_id": self.raw_volume_id,
             "sealed_volume_id": self.sealed_volume_id,
             "clones": self.clones,
+            "seeded": self.seeded,
         })
     }
 }
@@ -407,6 +420,7 @@ pub async fn create(
         raw_volume_id: raw.0,
         sealed_volume_id: None,
         clones: 0,
+        seeded: spec.seed.iter().map(|f| f.path.clone()).collect(),
     };
 
     // Claim the name before the long part. Two creates racing on one name
@@ -467,6 +481,29 @@ pub async fn create(
         return Err(TemplateError::Internal(format!("formatting {}: {e}", spec.name)));
     }
 
+    // Contents go in before the seal, so a clone inherits them without ever
+    // writing them again. Also unlocked: this is I/O against one volume.
+    if !spec.seed.is_empty() {
+        let dev = vm
+            .lock()
+            .await
+            .get_volume(&raw)
+            .ok_or_else(|| TemplateError::Internal("template volume vanished".to_string()))?;
+        let seeded = files::write_files(&dev, &spec.seed).await;
+        drop(dev);
+        if let Err(e) = seeded {
+            let mut s = store.lock().await;
+            s.remove(&template.id);
+            s.persist();
+            drop(s);
+            let _ = vm.lock().await.delete_volume(raw).await;
+            return Err(TemplateError::Internal(format!(
+                "seeding {}: {e}",
+                spec.name
+            )));
+        }
+    }
+
     template.fs_uuid = Some(params.uuid);
     {
         let mut s = store.lock().await;
@@ -476,6 +513,8 @@ pub async fn create(
         s.persist();
     }
 
+    // Seal checks the filesystem, which is also the check on what was just
+    // seeded into it.
     seal(vm, store, &template.id, false).await
 }
 

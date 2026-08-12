@@ -13,14 +13,17 @@
 //! | blank filesystem creation | yes — content-free, local, fast, pure Rust is enough | |
 //! | clone-time UUID stamping | yes — only the engine has the clone in hand | |
 //! | superblock inspection / seal guard | yes — a storage operation | |
+//! | writing a handful of known files into one | yes — [`files`], in userspace, no mount | |
 //! | writing image *content* into a filesystem | | the consumer that owns the content (tar, whiteouts, image config) |
 //!
 //! See [`ext4`] for the on-disk format and [`template`] for the lifecycle.
 
 pub mod ext4;
+pub mod files;
 pub mod template;
 
-pub use ext4::{Ext4Layout, Ext4Params, Ext4Report, SealBlocker};
+pub use ext4::{Ext4Layout, Ext4Params, Ext4Report, FsProfile, SealBlocker};
+pub use files::SeedFile;
 pub use template::{
     clone_template, CloneResult, CloneSpec, FsKind, FsTemplate, TemplateError, TemplateSpec,
     TemplateState, TemplateStore,

@@ -64,7 +64,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # through the BlockDevice seam, with no loopback, no /dev node and no mkfs.ext4
 # subprocess. Taken by git rather than path so a checkout of this repo alone
 # still builds.
-mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", branch = "main", default-features = false }
+# Pinned to the same tag fio-ext4 depends on, so cargo resolves one copy and
+# the two crates agree on the BlockDevice trait.
+mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v1.0.0", default-features = false }
+
+# Userspace file I/O into those filesystems — writing a template's contents
+# with no mount, no loop device and no attach.
+fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.0.0", default-features = false }
 
 # Async utilities
 async-trait = "0.1"
