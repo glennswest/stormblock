@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v8.2.0] — 2026-08-13
+
 ### 2026-08-13
 - **fix:** `VolumeDevice` reports the volume's logical sector size to the formatter (#40). It implemented `size`/`read_at`/`write_at` but not `logical_sector_size`, so it inherited the 512-byte default and the size classes picked **1 KiB blocks** for a 256 MiB volume. Nothing downstream could correct it — kernel detection needs an fd to ioctl and a thin volume has none, so the device has to say. Measured on dev.g8.lo (kernel 6.17.1) with clones exported over iSCSI: `e2fsck -fn` passed clean on every one and **every mount failed**, `EXT4-fs (sdb): bad block size 1024`. Both crate pins moved v1.0.0 → v1.0.2 together, so cargo still resolves one copy of `mkfs-ext4`.
 - **Verified on a real kernel.** `ci-fstemplate-verify.sh` on dev.g8.lo, Fedora kernel 6.17.1, four clones exported over iSCSI to the in-tree target and attached with open-iscsi: `blkid` reads them, `e2fsck -fn` is clean, all four mount read-write **at once**, take writes, unmount, and check clean again — with no ext4 complaint in the kernel log. Distinct filesystem UUIDs on every clone, the label carried through, and the `-O` overrides took.
