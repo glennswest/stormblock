@@ -78,11 +78,12 @@ ok "tools present"
 systemctl start iscsid 2>/dev/null || service iscsid start 2>/dev/null || true
 sleep 1
 
-if [ ! -x ./target/debug/stormblock ]; then
-    info "building"
-    cargo build --bin stormblock 2>&1 | tail -5
-fi
+# Always build. A stale binary from a previous run silently verifies the
+# previous commit, which is worse than not running at all.
+info "building"
+cargo build --bin stormblock 2>&1 | tail -3 >&2
 [ -x ./target/debug/stormblock ] || { echo "no binary"; exit 2; }
+info "binary: $(date -r ./target/debug/stormblock '+%Y-%m-%d %H:%M:%S'), tree: $(git log --oneline -1)"
 
 # ── Start the engine ────────────────────────────────────────────────────────
 

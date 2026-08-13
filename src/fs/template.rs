@@ -878,6 +878,18 @@ mod tests {
         let t = create(&vm, &store, &spec).await.unwrap();
         assert_eq!(t.state, TemplateState::Ready);
         assert_eq!(t.fs, FsKind::Ext4);
+
+        // Thin volumes have 4 KiB sectors, and the kernel refuses to mount a
+        // filesystem with smaller blocks than that (#40) — even though fsck is
+        // perfectly happy with one.
+        let sealed_dev = volume(&vm, t.clone_source().unwrap()).await;
+        let layout = ext4::read_layout(&sealed_dev).await.unwrap();
+        assert!(
+            layout.block_size >= sealed_dev.block_size() as u64,
+            "{}-byte blocks on a {}-byte-sector volume will not mount",
+            layout.block_size,
+            sealed_dev.block_size()
+        );
         assert!(t.journal, "the ext4 profile carries one");
         assert!(t.metadata_csum && t.csum_seed, "and the checksums, seeded");
         let template_uuid = t.fs_uuid.expect("template carries a uuid");
