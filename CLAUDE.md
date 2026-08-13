@@ -319,7 +319,13 @@ fio.ext4.rs#1, which stops that crate being taken as a git dependency; and
 `boot_iscsi.rs` cloning its ESP and root from templates rather than
 constructing them each time.
 
-Unconfirmed: whether RouterOS writes to what this now produces (#39). The
-default profile matches its own `format-drive` output and the Linux kernel
-mounts and writes it, but nothing has been attached to a RouterOS box since
-the change.
+**Confirmed on RouterOS (2026-08-13, #39 closed).** A clone of a v8.2.0
+template attached over NVMe-TCP takes writes: `/file add` succeeds, and the
+disk table corroborates it rather than the return code alone — free space
+234 438 656 → 234 434 560 (one 4 KiB block) and free inodes 65 524 → 65 523.
+The geometry shows the new profile: 65 536 inodes against the old 16 384, and
+~32 MB less free space on the same 256 MiB volume, which is the journal. The
+clone carried a fresh UUID with its checksums still valid, so
+`metadata_csum_seed` held the stamp to one superblock write rather than the
+structural rewrite that was the risk. Verified against stormblockmk v0.7.0
+with six templates, 64m–10240m, each built in 0.06–0.81 s.

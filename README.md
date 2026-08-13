@@ -232,10 +232,12 @@ Measured on a Fedora 6.17.1 host: one 256 MiB template formats and seals in
 **50 ms**, four concurrently in **79 ms** total; a clone costs 54–86 ms
 including its verification fsck.
 
-Verified against a real kernel rather than only against itself: clones exported
-over iSCSI and attached with open-iscsi are read by `blkid`, pass `e2fsck -fn`,
-mount read-write four at a time, take writes, unmount and check clean again
-(`ci-fstemplate-verify.sh`).
+Verified against real consumers rather than only against itself: clones
+exported over iSCSI and attached with open-iscsi are read by `blkid`, pass
+`e2fsck -fn`, mount read-write four at a time, take writes, unmount and check
+clean again (`ci-fstemplate-verify.sh`); and a clone attached to RouterOS over
+NVMe-TCP takes writes, with the disk table's free-block and free-inode counts
+moving to match.
 
 ### Clone-per-consumer, reset on restart
 
