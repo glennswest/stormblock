@@ -67,6 +67,11 @@ print("" if d is None else d)
 echo -e "${BOLD}StormBlock — preformatted filesystem templates (#38)${RESET}"
 echo "kernel: $(uname -r)   date: $(date)"
 
+# Where the kernel log stood before this run, so the check below reads only
+# what this run caused. Without it a previous run's failures are re-reported
+# as if they were current.
+DMESG_MARK=$(dmesg 2>/dev/null | wc -l)
+
 # ── Preflight ───────────────────────────────────────────────────────────────
 
 hdr "Preflight"
@@ -364,10 +369,10 @@ fi
 # on-disk layout it says so here and nowhere else — this is the diagnostic
 # that separates "our format is wrong" from "the consumer is fussy" (#39).
 hdr "Kernel ext4 log"
-DMESG=$(dmesg -T 2>/dev/null | grep -iE "EXT4-fs|ext4_" | tail -25)
+DMESG=$(dmesg -T 2>/dev/null | tail -n +$((DMESG_MARK + 1)) | grep -iE "EXT4-fs|ext4_" | tail -25)
 if [ -n "$DMESG" ]; then
     echo "$DMESG" | sed 's/^/     /'
-    if echo "$DMESG" | grep -qiE "error|corrupt|invalid|remount|read-only"; then
+    if echo "$DMESG" | grep -qiE "error|corrupt|invalid|remount|read-only|bad block size|cannot|unable|failed"; then
         bad "the kernel logged an ext4 complaint against a filesystem we wrote"
     else
         ok "no ext4 errors logged"
