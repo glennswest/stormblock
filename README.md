@@ -227,8 +227,15 @@ fails much later, inside a container, as `Read-only file system`. Pass `?force=t
 over an export instead, then `POST /api/v1/fstemplates/{id}/seal`.
 
 Formats do not queue. No lock is held across a format, a check or a stamp, and
-the formatter takes `&self` so one format fans out across block groups —
-provisioning many templates at once costs about what one does, not the sum.
+the formatter takes `&self` so one format fans out across block groups.
+Measured on a Fedora 6.17.1 host: one 256 MiB template formats and seals in
+**50 ms**, four concurrently in **79 ms** total; a clone costs 54–86 ms
+including its verification fsck.
+
+Verified against a real kernel rather than only against itself: clones exported
+over iSCSI and attached with open-iscsi are read by `blkid`, pass `e2fsck -fn`,
+mount read-write four at a time, take writes, unmount and check clean again
+(`ci-fstemplate-verify.sh`).
 
 ### Clone-per-consumer, reset on restart
 

@@ -301,7 +301,12 @@ platform-independent capabilities.
 - [x] `/api/v1/fstemplates` (create/list/get/seal/clone/delete) and
       `from_template` on `POST /api/v1/volumes`
 - [x] `ci-fstemplate-verify.sh` — e2fsck + real mount through an iSCSI
-      initiator, on a real kernel
+      initiator, on a real kernel. **Passing** on dev.g8.lo (Fedora 6.17.1):
+      four clones attached at once, `blkid`, `e2fsck -fn`, mount rw, write,
+      unmount, check again, no kernel complaint
+- [x] The volume reports its logical sector size, so blocks are never smaller
+      than the sectors underneath them (#40) — the failure that passed fsck
+      and refused to mount
 
 Deliberately **not** here: writing image *content* into a filesystem (tar,
 whiteouts, hashing, image config) stays with the consumer that owns the
@@ -315,5 +320,6 @@ fio.ext4.rs#1, which stops that crate being taken as a git dependency; and
 constructing them each time.
 
 Unconfirmed: whether RouterOS writes to what this now produces (#39). The
-default profile matches its own `format-drive` output, but nothing has been
-attached to a RouterOS box since the change.
+default profile matches its own `format-drive` output and the Linux kernel
+mounts and writes it, but nothing has been attached to a RouterOS box since
+the change.
