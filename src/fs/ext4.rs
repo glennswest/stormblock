@@ -84,6 +84,16 @@ impl mkfs_ext4::BlockDevice for VolumeDevice {
         self.dev.capacity_bytes()
     }
 
+    /// The volume's logical sector, which the formatter takes as the floor for
+    /// the filesystem's block size.
+    ///
+    /// Without this the size classes decide alone: a 256 MiB volume gets 1 KiB
+    /// blocks, which `e2fsck` is perfectly happy with and the kernel refuses to
+    /// mount on a 4 KiB-sector LUN — `EXT4-fs (sdb): bad block size 1024`.
+    fn logical_sector_size(&self) -> u32 {
+        self.dev.block_size().max(512)
+    }
+
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> mkfs_ext4::Result<()> {
         let mut done = 0usize;
         while done < buf.len() {
@@ -206,6 +216,10 @@ pub struct Ext4Params {
     pub bytes_per_inode: Option<u32>,
     /// Percentage of blocks reserved for root.
     pub reserved_percent: f64,
+    /// Filesystem block size. `None` lets the formatter decide: the size
+    /// classes as `mke2fs` computes them, with the volume's logical sector as
+    /// the floor (see [`VolumeDevice::logical_sector_size`]).
+    pub block_size: Option<u32>,
     /// Trust that the target reads back as zeros, so zeroing is a discard.
     /// True for a freshly created thin volume.
     pub assume_blank: bool,
@@ -221,6 +235,7 @@ impl Default for Ext4Params {
             features: None,
             bytes_per_inode: None,
             reserved_percent: 5.0,
+            block_size: None,
             assume_blank: true,
         }
     }
@@ -237,6 +252,9 @@ impl Ext4Params {
         }
         if let Some(ratio) = self.bytes_per_inode {
             p = p.inode_ratio(ratio);
+        }
+        if let Some(bs) = self.block_size {
+            p = p.block_size(bs);
         }
         if self.journal == Some(false) {
             p = p.no_journal();
@@ -647,6 +665,25 @@ mod tests {
         assert!(fsck.is_clean(), "fresh filesystem: {:?}", fsck.problems);
         assert!(seal_blockers(&dev).await.unwrap().is_empty());
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The kernel refuses a filesystem whose blocks are smaller than the
+    /// device's sectors, and a 256 MiB volume is exactly the size class that
+    /// would otherwise pick 1 KiB blocks. Passed e2fsck, failed to mount:
+    /// `EXT4-fs (sdb): bad block size 1024`.
+    #[tokio::test]
+    async fn blocks_are_never_smaller_than_the_volume_sectors() {
+        let (dev, path) = scratch("sectors", 256 * 1024 * 1024).await;
+        let sector = dev.block_size();
+        let report = format(&dev, &Ext4Params::default()).await.unwrap();
+        assert!(
+            report.block_size >= sector,
+            "{}-byte blocks on a {sector}-byte-sector volume will not mount",
+            report.block_size
+        );
+        assert_eq!(report.blocks * report.block_size as u64, 256 * 1024 * 1024);
+        assert!(check(&dev).await.unwrap().is_clean());
         let _ = std::fs::remove_file(path);
     }
 

@@ -268,7 +268,7 @@ if [ "$UUID_A" != "$TPL_UUID_PLAIN" ] && [ "$UUID_B" != "$TPL_UUID_PLAIN" ]; the
 else
     bad "a clone kept the template's UUID"
 fi
-[ "$LABEL_A" = "ext4-nojournal-256m" ] && ok "label survives cloning" || bad "label lost: '$LABEL_A'"
+[ "$LABEL_A" = "ext4-256m" ] && ok "label survives cloning" || bad "label lost: '$LABEL_A'"
 
 # ── e2fsck: is the on-disk format actually correct? ─────────────────────────
 
@@ -282,15 +282,25 @@ for tag in A J W; do
     fi
 done
 
+BS_A=$(dumpe2fs -h "${DEV[A]}" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2); print $2}')
+SEC_A=$(cat "/sys/block/$(basename "${DEV[A]}")/queue/logical_block_size" 2>/dev/null || echo 0)
+info "block size $BS_A on a $SEC_A-byte-sector LUN"
+if [ "${BS_A:-0}" -ge "${SEC_A:-0}" ] 2>/dev/null; then
+    ok "filesystem blocks are not smaller than the device sectors"
+else
+    bad "block size $BS_A under a $SEC_A-byte sector — the kernel will refuse to mount it"
+fi
 info "features (clone A):"
 dumpe2fs -h "${DEV[A]}" 2>/dev/null | grep -E "Filesystem features|Filesystem state|Inode count|Block count|Free blocks" | sed 's/^/     /'
 info "features (clone J):"
 dumpe2fs -h "${DEV[J]}" 2>/dev/null | grep -E "Filesystem features|Journal|Filesystem state" | sed 's/^/     /'
 
+# Clone J is the ^64bit,^metadata_csum,journal:false variant; the default (A)
+# is the journalled one, checked in the feature loop below.
 if dumpe2fs -h "${DEV[J]}" 2>/dev/null | grep -q "has_journal"; then
-    ok "journalled variant carries has_journal"
+    bad "the journal-less variant has a journal after all"
 else
-    bad "journalled template has no journal"
+    ok "journal-less variant has none"
 fi
 # The default template must carry the profile RouterOS's own format-drive
 # produces (#39): journal, 64bit, flex_bg, metadata_csum — plus the seed that
