@@ -171,3 +171,52 @@ async fn volume_resize_grow_and_shrink() {
     vol.read(0, &mut buf3).await.unwrap();
     assert_eq!(buf3, data);
 }
+
+/// A copy-on-write slot larger than one `tokio::fs::File` transfer.
+///
+/// `tokio::fs::File` moves at most 2 MiB per read or write and reports the
+/// short count. `FileDevice` used to pass that count up as though the
+/// transfer were complete, so copying a 4 MiB slot for copy-on-write copied
+/// half of it and the clone read zeros for the rest. Every slot here is 1 MiB
+/// in the other tests, which is why nothing caught it: the engine sizes slots
+/// by device, and a real deployment gets 4 MiB.
+#[tokio::test]
+async fn cow_preserves_a_slot_larger_than_one_file_transfer() {
+    const SLOT: u64 = 4 * 1024 * 1024;
+
+    let dir = TempDir::new().unwrap();
+    let devices = common::create_file_devices(&dir, 2, 256 * 1024 * 1024).await;
+    let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.expect("RAID-1 create");
+    let array_id = array.array_id();
+    let backing: Arc<dyn BlockDevice> = Arc::new(array);
+
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_backing_device(array_id, backing).await;
+
+    let vol_id = vm.create_volume("wide", 32 * 1024 * 1024, array_id).await.unwrap();
+    let vol = vm.get_volume(&vol_id).unwrap();
+
+    // Fill one whole slot with a position-dependent pattern, so a byte that
+    // moved shows as clearly as a byte that vanished.
+    let filled: Vec<u8> = (0..SLOT).map(|i| (i % 251) as u8).collect();
+    vol.write(0, &filled).await.unwrap();
+    vol.flush().await.unwrap();
+
+    // The snapshot is what makes the slot shared, so the next write copies.
+    let _snap = vm.create_snapshot(vol_id, "before").await.unwrap();
+
+    // One 4 KiB write at the front triggers the copy of the whole slot.
+    vol.write(0, &vec![0xEE_u8; 4096]).await.unwrap();
+    vol.flush().await.unwrap();
+
+    let mut back = vec![0u8; SLOT as usize];
+    vol.read(0, &mut back).await.unwrap();
+
+    assert_eq!(&back[..4096], &vec![0xEE_u8; 4096][..], "the write itself did not land");
+    let tail_start = 4096usize;
+    assert_eq!(
+        &back[tail_start..],
+        &filled[tail_start..],
+        "copy-on-write lost the part of the slot the write did not cover",
+    );
+}

@@ -425,7 +425,17 @@ impl ThinVolumeHandle {
             let slab = reg.get(&old_loc.slab_id).ok_or_else(|| {
                 DriveError::Other(anyhow::anyhow!("slab {} not found", old_loc.slab_id.0))
             })?;
-            slab.read_slot(old_loc.slot_idx, 0, &mut old_data).await?;
+            // A short copy here is silent data loss: the tail of the slot the
+            // clone inherited would read back as whatever the new slot already
+            // held. Refusing the write keeps the old mapping, which still has
+            // the data.
+            let n = slab.read_slot(old_loc.slot_idx, 0, &mut old_data).await?;
+            if n != old_data.len() {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "copy-on-write read {n} of {} bytes from slab {} slot {}",
+                    old_data.len(), old_loc.slab_id.0, old_loc.slot_idx
+                )));
+            }
         }
 
         // Allocate new slot
@@ -444,7 +454,13 @@ impl ThinVolumeHandle {
             let slab = reg.get(&new_slab_id).ok_or_else(|| {
                 DriveError::Other(anyhow::anyhow!("slab {} not found", new_slab_id.0))
             })?;
-            slab.write_slot(new_slot_idx, 0, &old_data).await?;
+            let n = slab.write_slot(new_slot_idx, 0, &old_data).await?;
+            if n != old_data.len() {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "copy-on-write wrote {n} of {} bytes into slab {} slot {new_slot_idx}",
+                    old_data.len(), new_slab_id.0
+                )));
+            }
             slab.write_slot(new_slot_idx, off_in_slot, buf).await
         }
         .await;

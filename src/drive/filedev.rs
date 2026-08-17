@@ -110,18 +110,35 @@ impl BlockDevice for FileDevice {
         DriveType::File
     }
 
+    /// One call transfers the whole buffer, which is what `BlockDevice`
+    /// promises and what every caller above here assumes.
+    ///
+    /// A single `tokio::fs::File` read or write moves at most 2 MiB — its
+    /// internal buffer cap — and reports the short count rather than failing.
+    /// A caller that takes that count for the whole transfer silently keeps
+    /// whatever was already in the rest of the buffer: a 4 MiB slab slot
+    /// copied for copy-on-write arrived half copied, so every clone lost the
+    /// data in the second half of any slot it wrote to.
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset)).await.map_err(DriveError::Io)?;
-        let n = file.read(buf).await.map_err(DriveError::Io)?;
-        Ok(n)
+        let mut done = 0usize;
+        while done < buf.len() {
+            // Zero is end of file, not an error: a read that runs off the end
+            // of the backing file is short, and the count says so.
+            match file.read(&mut buf[done..]).await.map_err(DriveError::Io)? {
+                0 => break,
+                n => done += n,
+            }
+        }
+        Ok(done)
     }
 
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset)).await.map_err(DriveError::Io)?;
-        let n = file.write(buf).await.map_err(DriveError::Io)?;
-        Ok(n)
+        file.write_all(buf).await.map_err(DriveError::Io)?;
+        Ok(buf.len())
     }
 
     async fn flush(&self) -> DriveResult<()> {
@@ -212,6 +229,35 @@ impl BlockDevice for FileDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One call, one whole buffer — even past the 2 MiB a single
+    /// `tokio::fs::File` transfer moves.
+    #[tokio::test]
+    async fn transfers_larger_than_one_tokio_buffer_complete() {
+        const BIG: usize = 5 * 1024 * 1024;
+        let dir = std::env::temp_dir().join("stormblock-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test-filedev-big.bin");
+        let _ = std::fs::remove_file(&path);
+
+        let dev = FileDevice::open_with_capacity(path.to_str().unwrap(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+
+        let pattern: Vec<u8> = (0..BIG).map(|i| (i % 251) as u8).collect();
+        assert_eq!(dev.write(0, &pattern).await.unwrap(), BIG, "short write reported as complete");
+
+        let mut back = vec![0u8; BIG];
+        assert_eq!(dev.read(0, &mut back).await.unwrap(), BIG, "short read reported as complete");
+        assert_eq!(back, pattern);
+
+        // A read that runs off the end is legitimately short, and says so.
+        let mut past = vec![0u8; 4096];
+        let n = dev.read(8 * 1024 * 1024 - 1024, &mut past).await.unwrap();
+        assert_eq!(n, 1024);
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[tokio::test]
     async fn roundtrip_write_read() {
