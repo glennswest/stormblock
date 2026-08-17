@@ -428,9 +428,21 @@ if [ "$SEEN" = "$SEED_N" ]; then
 else
     bad "clone S: /many holds $SEEN names, expected $SEED_N"
 fi
-[ "$(cat "$M/many/entry-0399.conf" 2>/dev/null)" = "n=399" ] \
-    && ok "clone S: a name looked up by hash gives back its own contents" \
-    || bad "clone S: entry-0399.conf did not read back"
+# Contents, not just names: an index that points a name at the wrong leaf
+# still lists every name. Each entry says which one it is, so a swap shows.
+CBAD=0; CFIRST=""
+for i in $(seq 0 $((SEED_N - 1))); do
+    f=$(printf "%s/many/entry-%04d.conf" "$M" "$i")
+    # NULs would otherwise be dropped with a warning and compare equal.
+    got=$(head -c 32 "$f" 2>/dev/null | tr -d '\0')
+    [ "$got" = "n=$i" ] || { CBAD=$((CBAD+1)); [ -z "$CFIRST" ] && CFIRST=$i; }
+done
+if [ "$CBAD" = "0" ]; then
+    ok "clone S: every name gives back its own contents"
+else
+    bad "clone S: $CBAD of $SEED_N entries read back wrong (first: entry-$(printf %04d "$CFIRST"))"
+    od -An -c "$(printf "%s/many/entry-%04d.conf" "$M" "$CFIRST")" 2>/dev/null | head -3 | sed 's/^/     /'
+fi
 if dumpe2fs -h "${DEV[S]}" 2>/dev/null | grep "Filesystem features" | grep -q dir_index; then
     ok "clone S: dir_index is set"
 else
