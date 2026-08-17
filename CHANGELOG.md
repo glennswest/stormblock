@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v8.2.1] — 2026-08-17
+
 ### 2026-08-17
 - **fix:** copy-on-write lost half of every slot it copied. `FileDevice` passed up the byte count from a single `tokio::fs::File` read or write, and a single one of those moves at most 2 MiB — so copying a 4 MiB slab slot for a CoW clone copied the first 2 MiB and left the rest as whatever the new slot already held. A clone read its inherited data correctly until the guest wrote *anywhere* in a slot; from then on the parts of that slot the guest had not written read back as zeros, on disk, past `sync`, with `e2fsck` clean and no kernel complaint. `FileDevice` now transfers the whole buffer per call, which is what `BlockDevice` documents and what every caller assumes, and a short copy in `cow_write` fails the write instead of committing a half-copied slot. Nothing caught this because the engine sizes slots by device and every test used the 1 MiB default, under the cap; the two new tests use 4 MiB and 5 MiB.
 - **test:** the filesystem-template CI script now seeds a template with content and reads it back through a real kernel — a deep path, a 200 KB multi-block file, and 400 names in one directory, which is enough to force a hash tree. It sweeps every entry's contents at mount and again after 32 MB is written into the clone, with the page cache dropped in between, and reads the tree with `debugfs -R htree_dump`. The CoW data loss above is what that sweep found on its first run.
