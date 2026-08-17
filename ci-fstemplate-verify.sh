@@ -149,6 +149,36 @@ make_template() {  # name extra-json
 TPL_UUID_JNL=$(make_template "ext4-256m")
 TPL_UUID_PLAIN=$(make_template "ext4-plain-256m" ',"journal":false,"features":"^64bit,^metadata_csum"')
 
+# A template that ships content. The engine writes these files in userspace
+# through fio-ext4 — no mount, no loop device, no attach — so the kernel is the
+# only thing that can say whether what it wrote is a filesystem or merely
+# something fio-ext4 can read back. SEED_N names in one directory is the point:
+# past one block a directory has to become a hash tree, and a wrong tree is
+# structurally perfect and still unreadable.
+SEED_N=400
+python3 - "$SEED_N" > "$W/seeded.json" <<'PYEOF'
+import json, sys
+n = int(sys.argv[1])
+files = [
+    {"path": "/boot.toml", "contents": 'slab = "local"\nvolume = "root"\n'},
+    {"path": "/etc/hostname", "contents": "seeded\n"},
+    {"path": "/etc/sysconfig/network/deep/nested/file", "contents": "deep\n"},
+    {"path": "/big", "contents": "x" * 200000},
+]
+files += [{"path": f"/many/entry-{i:04d}.conf", "contents": f"n={i}\n"} for i in range(n)]
+json.dump({"name": "ext4-seeded-256m", "size": "256M", "label": "seeded", "files": files},
+          sys.stdout)
+PYEOF
+SEED_T0=$(date +%s%N)
+SEED_BODY=$(curl -s -m 180 -X POST "$API/fstemplates" -H 'Content-Type: application/json' \
+    --data-binary "@$W/seeded.json")
+SEED_T1=$(date +%s%N)
+if [ "$(echo "$SEED_BODY" | jqf template state)" = "ready" ]; then
+    ok "ext4-seeded-256m formatted, seeded with $((SEED_N + 4)) files and sealed in $(( (SEED_T1-SEED_T0)/1000000 )) ms"
+else
+    bad "the seeded template did not seal: $SEED_BODY"
+fi
+
 # Concurrency: the formatter takes &self and no lock is held across a format,
 # so N templates should cost about what one does rather than N times as much.
 hdr "Concurrent formats"
@@ -197,14 +227,15 @@ VOL_A=$(clone "ext4-256m" "clone-a")
 VOL_B=$(clone "ext4-256m" "clone-b")
 VOL_J=$(clone "ext4-plain-256m" "clone-j")
 VOL_W=$(clone "ext4-256m" "clone-w")
-[ -n "$VOL_A" ] && [ -n "$VOL_B" ] && [ -n "$VOL_J" ] && [ -n "$VOL_W" ] || { bad "cloning failed"; exit 1; }
-ok "4 clones minted"
+VOL_S=$(clone "ext4-seeded-256m" "clone-s")
+[ -n "$VOL_A" ] && [ -n "$VOL_B" ] && [ -n "$VOL_J" ] && [ -n "$VOL_W" ] && [ -n "$VOL_S" ] || { bad "cloning failed"; exit 1; }
+ok "5 clones minted"
 
 # ── Export and attach with a real initiator ─────────────────────────────────
 
 hdr "Export over iSCSI"
 declare -A LUN
-for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J" "W:$VOL_W"; do
+for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J" "W:$VOL_W" "S:$VOL_S"; do
     tag="${pair%%:*}"; vol="${pair#*:}"
     body=$(curl -s -m 30 -X POST "$API/exports" -H 'Content-Type: application/json' \
         -d "{\"volume_id\":\"$vol\",\"protocol\":\"iscsi\"}")
@@ -226,7 +257,7 @@ else
 fi
 
 declare -A DEV
-for tag in A B J W; do
+for tag in A B J W S; do
     d=""
     for _ in $(seq 1 30); do
         d=$(ls /dev/disk/by-path/*"$IQN"*lun-"${LUN[$tag]}" 2>/dev/null | head -1)
@@ -242,7 +273,7 @@ ok "all clones visible to the kernel"
 # ── The engine's own check, before the kernel sees any of it ────────────────
 
 hdr "Engine-side fsck"
-for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J"; do
+for pair in "A:$VOL_A" "B:$VOL_B" "J:$VOL_J" "S:$VOL_S"; do
     tag="${pair%%:*}"; vol="${pair#*:}"
     body=$(curl -s -m 120 -X POST "$API/volumes/$vol/fsck")
     clean=$(echo "$body" | jqf clean)
@@ -279,7 +310,7 @@ fi
 # ── e2fsck: is the on-disk format actually correct? ─────────────────────────
 
 hdr "e2fsck — full check of a filesystem this engine wrote"
-for tag in A J W; do
+for tag in A J W S; do
     if e2fsck -fn "${DEV[$tag]}" >"$W/fsck-$tag.log" 2>&1; then
         ok "clone $tag passes e2fsck -fn clean"
     else
@@ -331,7 +362,7 @@ fi
 # ── Mount: the thing consumers actually do ──────────────────────────────────
 
 hdr "Mount read-write, both clones at once"
-for tag in A B J W; do
+for tag in A B J W S; do
     mkdir -p "$W/mnt-$tag"
 done
 
@@ -356,13 +387,71 @@ mount_check() {  # tag
     [ -d "$mnt/lost+found" ] && ok "clone $tag: lost+found present" || bad "clone $tag: no lost+found"
 }
 
-for tag in A B J W; do mount_check "$tag"; done
+for tag in A B J W S; do mount_check "$tag"; done
 
 # Divergence: a write into one clone must not appear in its sibling.
 if [ -e "$W/mnt-B/hello" ] && [ "$(cat "$W/mnt-B/hello")" = "storm-B" ]; then
     ok "clones diverge — B kept its own content"
 else
     bad "clone B saw the wrong content"
+fi
+
+# ── Seeded content, read by the kernel rather than by the writer ───────────
+
+hdr "Seeded content — what fio-ext4 wrote, read back through ext4"
+
+M="$W/mnt-S"
+if [ -f "$M/boot.toml" ] && grep -q 'volume = "root"' "$M/boot.toml"; then
+    ok "clone S: /boot.toml present with the right contents"
+else
+    bad "clone S: /boot.toml missing or wrong"
+fi
+[ "$(cat "$M/etc/hostname" 2>/dev/null)" = "seeded" ] \
+    && ok "clone S: parent directories were created" \
+    || bad "clone S: /etc/hostname missing"
+[ -f "$M/etc/sysconfig/network/deep/nested/file" ] \
+    && ok "clone S: a five-deep path resolves" \
+    || bad "clone S: the deep path is not there"
+BIG=$(stat -c %s "$M/big" 2>/dev/null || echo 0)
+if [ "$BIG" = "200000" ] && [ "$(tr -d 'x' < "$M/big" | wc -c)" = "0" ]; then
+    ok "clone S: a 200 KB multi-block file is intact ($BIG bytes)"
+else
+    bad "clone S: /big is $BIG bytes, expected 200000"
+fi
+
+# The directory that had to become a hash tree. Every name present is the
+# check: an index that loses names still passes e2fsck if the leaves it does
+# point at are well formed.
+SEEN=$(ls -U "$M/many" 2>/dev/null | wc -l)
+if [ "$SEEN" = "$SEED_N" ]; then
+    ok "clone S: all $SEED_N names in the indexed directory are readable"
+else
+    bad "clone S: /many holds $SEEN names, expected $SEED_N"
+fi
+[ "$(cat "$M/many/entry-0399.conf" 2>/dev/null)" = "n=399" ] \
+    && ok "clone S: a name looked up by hash gives back its own contents" \
+    || bad "clone S: entry-0399.conf did not read back"
+if dumpe2fs -h "${DEV[S]}" 2>/dev/null | grep "Filesystem features" | grep -q dir_index; then
+    ok "clone S: dir_index is set"
+else
+    bad "clone S: no dir_index feature"
+fi
+# debugfs reads the tree with the counts, limits and checksums it expects —
+# the one check that is not ours marking our own homework.
+if debugfs -R "htree_dump /many" "${DEV[S]}" >"$W/htree.log" 2>&1 && \
+   grep -qiE "Number of entries|Indirect level|Entry #" "$W/htree.log"; then
+    ok "clone S: debugfs reads the hash tree ($(grep -ciE '^ *Entry #' "$W/htree.log") index entries)"
+elif grep -qi "not a hash-indexed" "$W/htree.log"; then
+    bad "clone S: /many never became a hash tree — $SEED_N names should have forced one"
+else
+    bad "clone S: debugfs could not read the tree: $(tail -3 "$W/htree.log" | tr '\n' ' ')"
+fi
+
+# Writing into a seeded clone: the kernel now maintains the same tree.
+if cp "$M/boot.toml" "$M/many/added-by-kernel.conf" 2>/dev/null && sync; then
+    ok "clone S: the kernel adds a name to the tree the engine built"
+else
+    bad "clone S: the kernel would not write into the indexed directory"
 fi
 
 # What the kernel logged while writing. If ext4 rejected anything about the
@@ -382,11 +471,11 @@ else
 fi
 
 hdr "Unmount and re-check"
-for tag in A B J W; do
+for tag in A B J W S; do
     umount "$W/mnt-$tag" 2>/dev/null || bad "clone $tag would not unmount"
 done
 sync
-for tag in A J W; do
+for tag in A J W S; do
     if e2fsck -fn "${DEV[$tag]}" >"$W/fsck2-$tag.log" 2>&1; then
         ok "clone $tag still clean after a mount/write/unmount cycle"
     else
