@@ -366,6 +366,24 @@ for tag in A B J W S; do
     mkdir -p "$W/mnt-$tag"
 done
 
+# Every seeded entry, contents and all: an index that points a name at the
+# wrong leaf still lists every name, and each entry says which one it is.
+seed_sweep() {  # when
+    local when="$1" bad=0 first="" i f got
+    for i in $(seq 0 $((SEED_N - 1))); do
+        f=$(printf "%s/mnt-S/many/entry-%04d.conf" "$W" "$i")
+        # NULs would otherwise be dropped with a warning and compare equal.
+        got=$(head -c 32 "$f" 2>/dev/null | tr -d '\0')
+        [ "$got" = "n=$i" ] || { bad=$((bad+1)); [ -z "$first" ] && first=$i; }
+    done
+    if [ "$bad" = "0" ]; then
+        ok "clone S: every seeded entry gives back its own contents ($when)"
+    else
+        bad "clone S: $bad of $SEED_N entries read back wrong $when (first: entry-$(printf %04d "$first"))"
+        od -An -c "$(printf "%s/mnt-S/many/entry-%04d.conf" "$W" "$first")" 2>/dev/null | head -3 | sed 's/^/     /'
+    fi
+}
+
 mount_check() {  # tag
     local tag="$1" dev="${DEV[$tag]}" mnt="$W/mnt-$tag"
     if ! mount "$dev" "$mnt" 2>"$W/mount-$tag.log"; then
@@ -378,6 +396,9 @@ mount_check() {  # tag
         return 1
     fi
     ok "clone $tag mounted read-write"
+    # Read the seeded content before this clone is written to, so a failure
+    # after the writes can be told from one that was there on arrival.
+    [ "$tag" = "S" ] && seed_sweep "on arrival, before any write"
     echo "storm-$tag" > "$mnt/hello" 2>/dev/null || { bad "clone $tag: write failed"; return 1; }
     dd if=/dev/urandom of="$mnt/blob" bs=1M count=32 status=none 2>/dev/null || \
         { bad "clone $tag: bulk write failed"; return 1; }
@@ -428,21 +449,8 @@ if [ "$SEEN" = "$SEED_N" ]; then
 else
     bad "clone S: /many holds $SEEN names, expected $SEED_N"
 fi
-# Contents, not just names: an index that points a name at the wrong leaf
-# still lists every name. Each entry says which one it is, so a swap shows.
-CBAD=0; CFIRST=""
-for i in $(seq 0 $((SEED_N - 1))); do
-    f=$(printf "%s/many/entry-%04d.conf" "$M" "$i")
-    # NULs would otherwise be dropped with a warning and compare equal.
-    got=$(head -c 32 "$f" 2>/dev/null | tr -d '\0')
-    [ "$got" = "n=$i" ] || { CBAD=$((CBAD+1)); [ -z "$CFIRST" ] && CFIRST=$i; }
-done
-if [ "$CBAD" = "0" ]; then
-    ok "clone S: every name gives back its own contents"
-else
-    bad "clone S: $CBAD of $SEED_N entries read back wrong (first: entry-$(printf %04d "$CFIRST"))"
-    od -An -c "$(printf "%s/many/entry-%04d.conf" "$M" "$CFIRST")" 2>/dev/null | head -3 | sed 's/^/     /'
-fi
+seed_sweep "after 32 MB was written into it"
+
 if dumpe2fs -h "${DEV[S]}" 2>/dev/null | grep "Filesystem features" | grep -q dir_index; then
     ok "clone S: dir_index is set"
 else
