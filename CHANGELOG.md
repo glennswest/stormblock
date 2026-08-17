@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-08-17
+- **chore:** both filesystem crate pins moved v1.0.2 → **v1.2.0**, together, so cargo still resolves one copy of `mkfs-ext4` and the two crates agree on the `BlockDevice` seam. Additive on both sides — nothing the engine calls changed shape, and the 378 tests here pass unchanged.
+  - [`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs) gains extended attributes (v1.1.0) — the codecs for both places ext4 keeps them, in-inode and in a block of their own — so a filesystem written here can carry SELinux labels and POSIX ACLs; and the `dir_index` on-disk format with `Filesystem::lookup` walking the hash index (v1.2.0), which answers in a two- or three-block walk instead of a read of the whole directory. Its hashes are asserted against `debugfs -R dx_hash` from e2fsprogs rather than against itself.
+  - [`fio-ext4`](https://github.com/glennswest/fio.ext4.rs) gains tar streaming with OCI whiteout semantics, hard links, `rename`, `write_at` and triple indirection (v1.1.0), and now *maintains* hash-indexed directories rather than only reading them (v1.2.0) — filling a directory with *n* names was *n*² block reads and is linear now. Two fixes there land on paths [`fs::files`](src/fs/files.rs) already uses: deleting a file whose xattrs lived in their own block leaked that block, and overwriting a file kept the old inode along with its mode, owner and labels.
+
 ### 2026-08-13
 - **docs:** #39 confirmed fixed on RouterOS hardware against v8.2.0 and stormblockmk v0.7.0. A clone attached over NVMe-TCP takes writes, corroborated by the disk table rather than the return code: free space 234 438 656 → 234 434 560 (one 4 KiB block), free inodes 65 524 → 65 523. The geometry shows the new default profile — 65 536 inodes against the old 16 384, ~32 MB less free space on the same 256 MiB volume for the journal — and the clone carries a fresh UUID with valid checksums, so `metadata_csum_seed` kept the stamp to one superblock write. Six templates, 64m–10240m, built in 0.06–0.81 s each.
 

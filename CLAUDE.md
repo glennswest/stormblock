@@ -312,11 +312,17 @@ Deliberately **not** here: writing image *content* into a filesystem (tar,
 whiteouts, hashing, image config) stays with the consumer that owns the
 content — stormblock-registry keeps its full ext4 writer for that.
 
-Not done: seeding *content* into a template before sealing (skeleton rootfs,
-kernel cmdline, `boot.toml`) via
-[`fio-ext4`](https://github.com/glennswest/fio.ext4.rs) — blocked on
-fio.ext4.rs#1, which stops that crate being taken as a git dependency; and
-`boot_iscsi.rs` cloning its ESP and root from templates rather than
+Seeding *content* into a template before sealing (skeleton rootfs, kernel
+cmdline, `boot.toml`) is done — `src/fs/files.rs` writes files into a volume
+the engine already holds through
+[`fio-ext4`](https://github.com/glennswest/fio.ext4.rs), with no mount, no loop
+device and no attach. fio.ext4.rs#1 is resolved: the crate declares its own
+`mkfs-ext4` by git rather than by sibling path, so it can be taken as a git
+dependency. Both pins track **v1.2.0** and must move together, so cargo
+resolves one copy of `mkfs-ext4` and the two crates agree on the `BlockDevice`
+trait.
+
+Not done: `boot_iscsi.rs` cloning its ESP and root from templates rather than
 constructing them each time.
 
 **Confirmed on RouterOS (2026-08-13, #39 closed).** A clone of a v8.2.0
