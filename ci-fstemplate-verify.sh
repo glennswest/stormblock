@@ -421,6 +421,11 @@ fi
 
 hdr "Seeded content — what fio-ext4 wrote, read back through ext4"
 
+# Cold. Everything below has already been read once, so without this the page
+# cache answers and the disk is never asked — which is precisely the thing
+# under test.
+sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || info "could not drop caches — reads below may be served from memory"
+
 M="$W/mnt-S"
 if [ -f "$M/boot.toml" ] && grep -q 'volume = "root"' "$M/boot.toml"; then
     ok "clone S: /boot.toml present with the right contents"
