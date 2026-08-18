@@ -1,0 +1,6 @@
+{
+  "transport": "nvme_tcp",
+  "nqn": "nqn.2024.io.stormblock:default",
+  "addresses": [{ "traddr": "192.168.200.21", "trsvcid": 4420 }],
+  "nsid": 7
+}

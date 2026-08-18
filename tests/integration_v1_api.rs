@@ -90,6 +90,51 @@ async fn v1_create_is_idempotent_by_name() {
     server.abort();
 }
 
+/// The `qos_class` taxonomy is pinned on both sides of the wire
+/// (stormblock-csi#10, #35): an unknown class is a hard error, not a string
+/// that gets stored and never acted on.
+#[tokio::test]
+async fn v1_qos_class_is_validated_against_the_taxonomy() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state(&dir).await;
+    let (base, server) = start_server(state).await;
+    let c = reqwest::Client::new();
+
+    for class in ["bronze", "silver", "gold", "platinum"] {
+        let mut req = create_req(&format!("pvc-{class}"), 1 << 20, 0);
+        req["qos_class"] = json!(class);
+        let (s, v) = post(&c, format!("{base}/v1/volumes"), req).await;
+        assert_eq!(s, 200, "{class}: {v}");
+        assert_eq!(v["qos_class"], class);
+    }
+
+    // Absent is not the same as unknown: asking for no class stays valid.
+    let (s, v) = post(&c, format!("{base}/v1/volumes"), create_req("pvc-none", 1 << 20, 0)).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["qos_class"].is_null());
+
+    for bad in ["diamond", "Gold", "", "bronze "] {
+        let mut req = create_req("pvc-bad", 1 << 20, 0);
+        req["qos_class"] = json!(bad);
+        let (s, e) = post(&c, format!("{base}/v1/volumes"), req).await;
+        assert_eq!(s, 400, "qos_class {bad:?} was accepted: {e}");
+        assert_eq!(e["code"], "bad_request");
+        assert!(
+            e["message"].as_str().unwrap().contains("platinum"),
+            "the error names the taxonomy: {e}"
+        );
+    }
+
+    // Rejected before the name is even looked at: a bad class on an existing
+    // name is still a bad request, not an idempotent hit.
+    let mut req = create_req("pvc-gold", 1 << 20, 0);
+    req["qos_class"] = json!("diamond");
+    let (s, _) = post(&c, format!("{base}/v1/volumes"), req).await;
+    assert_eq!(s, 400);
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn v1_pair_lands_on_two_nodes_and_hint_honored() {
     let dir = TempDir::new().unwrap();

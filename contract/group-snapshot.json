@@ -1,0 +1,17 @@
+{
+  "id": "gsnap-00000001",
+  "name": "backup-1",
+  "snapshots": [
+    {
+      "id": "snap-00000001",
+      "name": "backup-1-vol-0000002a",
+      "source_volume_id": "vol-0000002a",
+      "size_bytes": 10737418240,
+      "ready": true,
+      "created_at_ms": 1754700000000,
+      "group_snapshot_id": "gsnap-00000001"
+    }
+  ],
+  "ready": true,
+  "created_at_ms": 1754700000000
+}

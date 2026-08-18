@@ -1,0 +1,11 @@
+{
+  "name": "pvc-web-0",
+  "size_bytes": 10737418240,
+  "master_node": "w1",
+  "excluded_nodes": ["w3"],
+  "replica_tier": { "slaves": 1 },
+  "bandwidth_class": "normal",
+  "qos_class": "gold",
+  "encrypted": false,
+  "source": { "kind": "snapshot", "id": "snap-00000001" }
+}

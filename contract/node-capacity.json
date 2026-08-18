@@ -1,0 +1,6 @@
+{
+  "node": "w1",
+  "total_bytes": 1099511627776,
+  "free_bytes": 549755813888,
+  "topology": { "topology.stormblock.io/rack": "r1", "topology.stormblock.io/zone": "z1" }
+}

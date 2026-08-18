@@ -122,7 +122,10 @@ pub enum VolumeSource {
     Volume(String),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+// Serialize as well as Deserialize: the wire-contract fixtures are asserted by
+// round-tripping, and a request type that can only be read cannot show that a
+// field it stopped reading is still on the wire (#34).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateVolumeRequest {
     pub name: String,
     pub size_bytes: u64,
@@ -860,10 +863,37 @@ fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo {
 // Volume handlers
 // ---------------------------------------------------------------------------
 
+/// The `qos_class` taxonomy, agreed with stormblock-csi (its #10, ours #35).
+///
+/// The wire field stays a string — only the accepted set is pinned. Pinning it
+/// on both sides is the point: a class added or renamed on one side surfaces as
+/// a rejected create rather than as a string that is carried, stored and never
+/// acted on, which is indistinguishable from working until someone looks at
+/// what the volume actually got.
+pub const QOS_CLASSES: [&str; 4] = ["bronze", "silver", "gold", "platinum"];
+
+/// Reject a `qos_class` outside the agreed taxonomy. Absent stays valid: not
+/// asking for a class is not the same as asking for one that does not exist.
+fn validate_qos_class(class: Option<&String>) -> Result<(), V1Error> {
+    match class {
+        None => Ok(()),
+        Some(c) if QOS_CLASSES.contains(&c.as_str()) => Ok(()),
+        Some(c) => Err(V1Error::BadRequest(format!(
+            "unknown qos_class {c:?} (expected one of {})",
+            QOS_CLASSES.join(", ")
+        ))),
+    }
+}
+
 async fn create_volume(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateVolumeRequest>,
 ) -> V1Result<Volume> {
+    // Before anything is looked up or allocated, and before the idempotency
+    // check: a request naming a class that does not exist is malformed whether
+    // or not a volume by that name is already here.
+    validate_qos_class(req.qos_class.as_ref())?;
+
     let mut v1 = state.v1.lock().await;
     v1.expire_windows(now_ms());
 

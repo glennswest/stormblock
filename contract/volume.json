@@ -1,0 +1,18 @@
+{
+  "id": "vol-0000002a",
+  "name": "pvc-web-0",
+  "size_bytes": 10737418240,
+  "epoch": 3,
+  "replicas": [
+    { "node": "w1", "role": "master", "sync": { "state": "in_sync" } },
+    {
+      "node": "w2",
+      "role": "slave",
+      "sync": { "state": "resyncing", "progress_pct": 62.5, "lag_bytes": 1048576 }
+    }
+  ],
+  "health": "degraded",
+  "encrypted": true,
+  "qos_class": "gold",
+  "bandwidth_class": "high"
+}
