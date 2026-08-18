@@ -70,7 +70,7 @@ mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v1.3.0"
 
 # Userspace file I/O into those filesystems — writing a template's contents
 # with no mount, no loop device and no attach.
-fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.3.0", default-features = false }
+fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.3.1", default-features = false }
 
 # Async utilities
 async-trait = "0.1"
