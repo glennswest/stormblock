@@ -422,8 +422,11 @@ async fn unsealed_templates_cannot_be_cloned_and_seal_verifies() {
     server.abort();
 }
 
+/// Deleting a template takes its volume with it, and leaves its clones alone
+/// (#47). `?purge=false` is the way to keep the volume — and what a node that
+/// does keep one ends up with is exactly what the orphan endpoint reports.
 #[tokio::test]
-async fn delete_purges_only_with_force_once_clones_exist() {
+async fn delete_purges_its_volume_and_spares_the_clones() {
     let dir = TempDir::new().unwrap();
     let state = setup(&dir).await;
     let (url, server) = start(state.clone()).await;
@@ -439,33 +442,132 @@ async fn delete_purges_only_with_force_once_clones_exist() {
         .await
         .unwrap();
     let id = created["template"]["id"].as_str().unwrap().to_string();
-    client
+    // Sealed: the scratch volume is gone, and only the snapshot remains.
+    assert!(created["template"]["raw_volume_id"].is_null());
+
+    let clone: serde_json::Value = client
         .post(format!("{url}/api/v1/fstemplates/t/clone"))
         .json(&serde_json::json!({ "name": "c" }))
         .send()
         .await
-        .unwrap();
-
-    let refused = client
-        .delete(format!("{url}/api/v1/fstemplates/{id}?purge=true"))
-        .send()
+        .unwrap()
+        .json()
         .await
         .unwrap();
-    assert_eq!(refused.status(), 409);
+    let clone_id = clone["volume_id"].as_str().unwrap().to_string();
 
+    // A descendant no longer blocks the purge: the clone holds its own
+    // refcounted reference to every extent it inherited.
     let purged = client
-        .delete(format!("{url}/api/v1/fstemplates/{id}?purge=true&force=true"))
+        .delete(format!("{url}/api/v1/fstemplates/{id}"))
         .send()
         .await
         .unwrap();
     assert_eq!(purged.status(), 200);
     let body: serde_json::Value = purged.json().await.unwrap();
-    assert_eq!(body["purged_volumes"].as_array().unwrap().len(), 2);
+    assert_eq!(body["purged_volumes"].as_array().unwrap().len(), 1);
 
     assert_eq!(
         client.get(format!("{url}/api/v1/fstemplates/{id}")).send().await.unwrap().status(),
         404
     );
+    assert_eq!(
+        client.get(format!("{url}/api/v1/volumes/{clone_id}")).send().await.unwrap().status(),
+        200,
+        "the clone outlives the template it came from"
+    );
+
+    server.abort();
+}
+
+/// The state #47 found a node in, and the way out of it.
+#[tokio::test]
+async fn kept_volumes_show_up_as_orphans_and_are_reclaimable() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "t", "size": "64M" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["template"]["id"].as_str().unwrap().to_string();
+    let sealed = created["template"]["sealed_volume_id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{url}/api/v1/fstemplates/t/clone"))
+        .json(&serde_json::json!({ "name": "pvc-1" }))
+        .send()
+        .await
+        .unwrap();
+
+    // A live template is not debris.
+    let clean: serde_json::Value = client
+        .get(format!("{url}/api/v1/fstemplates/orphans"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(clean["count"], 0);
+
+    // The old behaviour, asked for explicitly: forget the template, keep its
+    // volume. Nothing afterwards can name that volume from the store.
+    let kept = client
+        .delete(format!("{url}/api/v1/fstemplates/{id}?purge=false"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(kept.status(), 200);
+    assert_eq!(kept.json::<serde_json::Value>().await.unwrap()["purged_volumes"][0], serde_json::Value::Null);
+
+    let found: serde_json::Value = client
+        .get(format!("{url}/api/v1/fstemplates/orphans"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found["count"], 1);
+    assert_eq!(found["orphans"][0]["volume_id"], sealed);
+
+    let reclaimed: serde_json::Value = client
+        .delete(format!("{url}/api/v1/fstemplates/orphans"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reclaimed["count"], 1);
+    assert_eq!(
+        client.get(format!("{url}/api/v1/volumes/{sealed}")).send().await.unwrap().status(),
+        404
+    );
+
+    // And the consumer's clone was never in the set.
+    let volumes: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = volumes["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"pvc-1"), "{names:?}");
 
     server.abort();
 }
