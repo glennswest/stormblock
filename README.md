@@ -273,6 +273,24 @@ curl -X POST http://node:9090/v1/volumes/<clone-id>/reset
 Reset is refused while the volume is attached, since its contents cannot
 change under a live host.
 
+### Growing a volume online
+
+A volume grows in place, and the block device grows with it. `POST
+/v1/volumes/{id}/expand` moves the volume's virtual size and then tells the
+kernel, via `UBLK_U_CMD_UPDATE_SIZE`, so `/dev/ublkbN` reports the new capacity
+and `xfs_growfs` has somewhere to grow into. **No quiesce**: resizing has no
+consistency point to capture, and stalling a live `/var` to make it bigger
+turns a day-2 operation into an outage. The capability is negotiated at device
+creation and degrades to "the volume grew, the device did not" — said loudly —
+on a kernel older than 6.12.
+
+Shrinking is not the same operation and is not offered as one. A smaller size
+comes back `409`: the extents past the new end would be freed immediately, and
+xfs cannot shrink at all, so a shrink of a mounted volume destroys live data
+with nothing to undo it. `VolumeManager::shrink_volume` exists for a caller
+that means it. Moving a volume onto a smaller one, with its data, is a copy —
+a different operation.
+
 ## Module Structure
 
 ```

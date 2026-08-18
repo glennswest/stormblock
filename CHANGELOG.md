@@ -2,7 +2,16 @@
 
 ## [Unreleased]
 
+## [v9.0.0] — 2026-08-18
+
+### Breaking
+
+- **`VolumeManager::resize_volume` grows only.** A smaller size returns `VolumeError::ShrinkRefused` (HTTP 409) rather than freeing every extent past the new end. On a mounted xfs — which cannot shrink at all — the old behaviour destroyed live filesystem data with nothing to undo it (#19). `VolumeManager::shrink_volume` performs it for a caller that names it.
+- **`DELETE /api/v1/fstemplates/{id}` purges the template's volume** unless told `?purge=false` (#47). Shipped in v8.3.0, which understated it: a caller that relied on delete-the-entry-keep-the-volume must now say so. Purging a template with clones no longer requires `force` either — a clone holds its own refcounted reference to every extent, so it is unaffected.
+- **`/v1` volume create rejects an unknown `qos_class`** with `400` instead of storing it (#35). A driver sending a class outside `bronze | silver | gold | platinum` now fails where it previously appeared to succeed.
+
 ### 2026-08-18
+- **fix:** `UBLK_U_CMD_GET_FEATURES` is declared `_IOR`, not `_IOWR`. Encoded with the wrong direction bits it never reached its handler and came back as an error — which, for a *feature query*, is indistinguishable from a kernel that has no such feature. `UBLK_F_UPDATE_SIZE` was therefore never negotiated on a 6.17 kernel that offers it. Only the on-metal test could have found this, and did.
 - **feat:** a ublk-exported volume follows its own resize (#19). `UblkServer` negotiates `UBLK_F_UPDATE_SIZE` at ADD_DEV — after asking the kernel for its feature mask, since a flag an older kernel does not know fails ADD_DEV outright and losing the resize is better than losing the device — and `update_size()` issues `UBLK_U_CMD_UPDATE_SIZE` with the new size in sectors. **No quiesce**: it is an independent control command with no consistency point to capture, so I/O keeps flowing; stalling a live `/var` to make it bigger would turn a day-2 operation into an outage. `/v1` expand pushes the new size down to the device after growing the backing volume, and says so loudly if the device does not follow — otherwise the volume grows and `xfs_growfs` finds nothing to grow into.
 - **BREAKING:** `VolumeManager::resize_volume` grows only. A smaller size comes back as `VolumeError::ShrinkRefused` (HTTP 409) instead of freeing every extent past the new end — which, on a mounted xfs, silently destroyed live filesystem data with nothing to undo it (#19). Shrinking is still possible through `VolumeManager::shrink_volume`, so destroying data is something a caller has to name rather than something it can reach by passing a smaller number to the same function. A caller that wants a smaller volume *with its data* wants a move, which is a copy and a different operation (#20).
 - **feat:** `/v1` volume create validates `qos_class` against the taxonomy agreed with stormblock-csi — `bronze | silver | gold | platinum` (#35, mirror of stormblock-csi#10). The wire field stays a string; only the accepted set is pinned, and an unknown class comes back as `400 bad_request` naming the set rather than being stored and never acted on. Validated before the name lookup, so a bad class on an existing name is still a bad request rather than an idempotent hit.
