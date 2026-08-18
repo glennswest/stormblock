@@ -335,3 +335,79 @@ clone carried a fresh UUID with its checksums still valid, so
 `metadata_csum_seed` held the stamp to one superblock write rather than the
 structural rewrite that was the risk. Verified against stormblockmk v0.7.0
 with six templates, 64m–10240m, each built in 0.06–0.81 s.
+
+---
+
+## Session 2026-08-18 — issue sweep (v8.2.1 → v9.2.0)
+
+Nine issues closed. What each one turned out to be, so the next session does
+not re-derive it:
+
+- **#46** (32 MiB template clone fails verify) — not a size-specific defect.
+  The same copy-on-write short-copy fixed in v8.2.1 (`8dc3134`), seen from the
+  clone side: at that geometry the root directory's data block lands in the
+  second half of the first 4 MiB slot, and a copy that stopped at 2 MiB left
+  the inode table intact with the directory blocks reading as zeros. Regression
+  test runs at 4 MiB and 8 MiB slots because every earlier test used the 1 MiB
+  default, under tokio's cap.
+- **#47** (template volumes leaked) — three leaks: the scratch volume outlived
+  a successful create, a create that failed at seal left both halves, and
+  `DELETE` kept the volumes by default. **v8.3.0 changed the DELETE default**;
+  `?purge=false` restores the old behaviour.
+- **#48** (failed discard reported as discarded) — `let _ = delete_volume(…)`
+  in three places. Now retries once and returns `TemplateError::Leaked` with
+  the volume id, which is the only handle that exists since a clone carries the
+  *caller's* name. The orphan sweep's in-use set is a **required argument**, so
+  it cannot be forgotten.
+- **#41** (sequential heartbeat) — fixed by concurrency *and* by giving each
+  probe its own deadline: the cluster HTTP client's timeout is 10 s, ten
+  heartbeat intervals, which is what let one wedged peer swallow a round.
+- **#19** (ublk never learns a new size) — the real find was that
+  `UBLK_U_CMD_GET_FEATURES` is `_IOR`, not `_IOWR`. Encoded wrongly it errored,
+  and for a *feature query* an error is indistinguishable from "no such
+  feature", so `UBLK_F_UPDATE_SIZE` was never negotiated on a kernel that has
+  it. **Only the on-metal test could have found this.** `resize_volume` is now
+  grow-only; `shrink_volume` is the explicit door.
+- **#18** (pool growth on pressure) — sources are configured, never discovered.
+  A `directory` source only creates new files and is also how to grow into the
+  free tail of the node's own disk. A `device` source already carrying a slab
+  is **adopted with its data**, not reformatted.
+- **#20** (volume move) — offline, filesystem-level, two calls. The copy pipes
+  `pack_tar` into `unpack_tar` over a bounded channel driven by one `join!`:
+  no scratch file, fixed memory, and tar is what preserves hard links and
+  xattrs (SELinux labels). Restartable, **not** resumable mid-copy.
+- **#35 / #34** — `qos_class` taxonomy pinned; CSI wire fixtures vendored into
+  `contract/` and round-tripped. They passed as copied: the two sides already
+  agreed. Note the stale-epoch *message wording* differs between the fixture
+  and what the engine emits — only `current_epoch` is contractual.
+- **#31** (iSCSI MC/S) — the whole job was moving **CmdSN to the session** and
+  leaving StatSN on the connection (RFC 7143 §4.2.2.1). Also fixed a live bug:
+  any connection closing used to tear down the whole session.
+
+### Still open, and why
+
+All of them are blocked on something outside this repo:
+
+- **#44** (StormKV for the GEM), **#42** (SWIM gossip) — need work in StormKV
+  first; #42 wants `stormkv-gossip` extracted into a shared crate.
+- **#36 / #30** — need a box with a real NVMe namespace. See below.
+- **#17**, **#16** — other repos.
+- **#15**, **#7**, **#6**, **#5**, **#3**, **#2** — need the multi-node lab.
+  The `/v1` API layer for #5/#6/#7 is done; only the engine data path is not.
+
+### #36: the inversion did not reproduce
+
+`examples/qd_sweep.rs` measures 4K random write against a `ThinVolume`
+directly — no iSCSI or NVMe-oF, since the transport is not what #30 is about.
+On dev.g8.lo (8 vCPU), v9.2.0, 20 s per point:
+
+- **cold** (every write allocates) and **warm** (fully allocated) both scale
+  then plateau. No inversion in either.
+- **CPU-seconds per million I/Os is flat across every depth** (~24–26). Lock
+  contention would make the per-operation cost *rise* with depth; it does not.
+
+That is consistent with the original 5.4x QD32-vs-QD1 inversion being the
+2-vCPU rig. **But the backing here is a QEMU virtual disk, not an NVMe
+namespace**, and the ~13k IOPS ceiling is probably that disk — so this does not
+establish what the engine does on real NVMe, and #36 stays open for that.
+#30 has lost its main justification and should be re-argued on its own merits.
