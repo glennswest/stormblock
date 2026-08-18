@@ -66,11 +66,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # still builds.
 # Pinned to the same tag fio-ext4 depends on, so cargo resolves one copy and
 # the two crates agree on the BlockDevice trait.
-mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v1.2.0", default-features = false }
+mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v1.3.0", default-features = false }
 
 # Userspace file I/O into those filesystems — writing a template's contents
 # with no mount, no loop device and no attach.
-fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.2.0", default-features = false }
+fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.3.0", default-features = false }
 
 # Async utilities
 async-trait = "0.1"

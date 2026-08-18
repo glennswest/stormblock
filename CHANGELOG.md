@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-08-18
+- **chore(deps):** `mkfs-ext4` and `fio-ext4` both to v1.3.0. Two changes reach the engine. Formatting a template writes less: the reserved GDT blocks of a backup group and the bitmaps of a group flagged `BLOCK_UNINIT` or `INODE_UNINIT` are no longer written, because nothing reads them and `mke2fs` does not write them either — measured on a 1 TiB ext4 as 17,563.7 MiB in 35,463 writes becoming 17,429.8 MiB in 19,547. And `read_block_bitmap`/`read_inode_bitmap` now compute an uninitialised group's bitmap from the geometry, as its flag says to, rather than returning a block that was never written — which matters here precisely because a thin volume is *not* guaranteed to read back as zeros, so the old behaviour could see a bitmap full of whatever the slab held before. Both pins move together: two different tags are two source ids, cargo would resolve two copies of `mkfs-ext4`, and the `BlockDevice` trait from one does not satisfy the other.
+
 ## [v9.2.0] — 2026-08-18
 
 ### 2026-08-18
