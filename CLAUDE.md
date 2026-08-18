@@ -395,19 +395,30 @@ All of them are blocked on something outside this repo:
 - **#15**, **#7**, **#6**, **#5**, **#3**, **#2** — need the multi-node lab.
   The `/v1` API layer for #5/#6/#7 is done; only the engine data path is not.
 
-### #36: the inversion did not reproduce
+### #36: the 5.4x inversion does not reproduce, but this rig cannot say more
 
 `examples/qd_sweep.rs` measures 4K random write against a `ThinVolume`
 directly — no iSCSI or NVMe-oF, since the transport is not what #30 is about.
-On dev.g8.lo (8 vCPU), v9.2.0, 20 s per point:
 
-- **cold** (every write allocates) and **warm** (fully allocated) both scale
-  then plateau. No inversion in either.
-- **CPU-seconds per million I/Os is flat across every depth** (~24–26). Lock
-  contention would make the per-operation cost *rise* with depth; it does not.
+**Read the harness's own noise floor before believing any number from it.**
+The first two single-pass runs on dev.g8.lo disagreed with each other: one put
+the warm peak at QD32 with no inversion, the next at QD1 with a 0.85x
+"inversion". That is run-to-run variance, not a depth effect, and reporting
+either would have been reporting noise. The harness now samples each depth
+`--repeats` times with the passes **interleaved** (so host drift cannot land on
+one depth) and reports the median with the spread beside it, calling the result
+`INCONCLUSIVE` when the depth effect is inside the spread.
 
-That is consistent with the original 5.4x QD32-vs-QD1 inversion being the
-2-vCPU rig. **But the backing here is a QEMU virtual disk, not an NVMe
-namespace**, and the ~13k IOPS ceiling is probably that disk — so this does not
-establish what the engine does on real NVMe, and #36 stays open for that.
-#30 has lost its main justification and should be re-argued on its own merits.
+What is established:
+
+- **No 5.4x inversion.** Every depth on this rig sits within a narrow band of
+  every other; an effect that size would be unmissable.
+- **CPU-seconds per million I/Os is flat (~22–26) across all depths, in every
+  run.** That is the stable number and the discriminating one: lock contention
+  makes the per-operation cost *rise* with depth. It does not.
+
+What is **not** established: the backing is a QEMU virtual disk, not an NVMe
+namespace, and the ~10–14k IOPS ceiling is probably that disk. So this says
+nothing about the engine on real NVMe, and #36 stays open for exactly that.
+#30 has lost its main justification and should be re-argued on its own merits
+rather than treated as confirmed.
