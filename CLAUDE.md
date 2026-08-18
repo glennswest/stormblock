@@ -338,6 +338,28 @@ with six templates, 64m–10240m, each built in 0.06–0.81 s.
 
 ---
 
+## Session 2026-08-18 — ext4 crate releases (v9.2.0 → v9.2.1)
+
+`mkfs-ext4` v1.3.0 and `fio-ext4` v1.3.0, then `fio-ext4` v1.3.1. Two things
+worth not re-deriving:
+
+- **Both pins move together.** `fio-ext4` pins `mkfs-ext4` by tag itself, and
+  two different tags are two cargo source ids — cargo then resolves two copies
+  and the `BlockDevice` trait from one does not satisfy the other. Release
+  order is `mkfs.ext4.rs` → `fio.ext4.rs` → here. Check what tag the `fio-ext4`
+  tag you are taking depends on: v1.3.1 pins `mkfs-ext4` v1.3.0, which is why
+  only one pin moved for this release.
+- **`fio-ext4` v1.3.1 is a correctness fix that our own checking could not
+  see.** An extent leaf's checksum went at the end of the block rather than at
+  `EXT4_EXTENT_TAIL_OFFSET`; the offsets coincide at 1 KiB and 4 KiB and differ
+  at 2 KiB, 8 KiB and 32 KiB. A template built on 2 KiB blocks passed our
+  `fsck` and its content digest and was still refused by the kernel with EIO.
+  The lesson for template work: our reader agreeing with our writer proves
+  nothing — `e2fsck` 1.47.3 and a real mount on `dev.g8.lo` are the check that
+  counts.
+
+---
+
 ## Session 2026-08-18 — issue sweep (v8.2.1 → v9.2.0)
 
 Nine issues closed. What each one turned out to be, so the next session does
