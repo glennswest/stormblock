@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.1.0] — 2026-08-18
+
 ### 2026-08-18
 - **feat:** first-class volume move — re-home or shrink a volume without losing it (#20). `POST /api/v1/moves` snapshots the source (copy-on-write, so it costs metadata and doubles as the rollback point), creates the target at the new size, formats it to match the source's profile, streams the *contents* across and fscks the result — then stops, with the source untouched. `POST /api/v1/moves/{id}/commit` deletes the source, and only the caller can say when, because only the caller knows whether its consumer has been repointed; `/abort` deletes the target instead. This is the operation `resize` cannot be: shrinking frees the extents past the new end and xfs cannot shrink into that, so the only safe form is a new smaller filesystem with the contents copied in.
 - **feat:** the copy is streamed from one filesystem straight into the other — no scratch file, no whole-archive buffer — so a 64 GiB volume holding 2 GiB moves 2 GiB and the memory cost is fixed. It goes through tar rather than a hand-rolled tree walk, which preserves modes, ownership, timestamps, symlinks, hard links, device nodes and extended attributes (SELinux labels among them, without which a rootfs stops booting). Both ends count every category independently and any mismatch fails the move.
