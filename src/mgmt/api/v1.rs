@@ -1150,6 +1150,20 @@ async fn expand_volume(
             let mut vm = state.volume_manager.lock().await;
             if let Err(e) = vm.resize_volume(EngineVolumeId(local), req.size_bytes).await {
                 tracing::warn!("backing volume {local} resize: {e}");
+            } else {
+                drop(vm);
+                // Layer 3: the kernel device has to learn the new size, or the
+                // volume grew and nothing above it can tell (#19). A failure
+                // here is loud: the node is about to run `xfs_growfs` against a
+                // device that did not move.
+                match state.ublk_exports.lock().await.update_size(&id, req.size_bytes) {
+                    Ok(true) => tracing::info!("volume {id}: ublk device resized to {}", req.size_bytes),
+                    Ok(false) => {}
+                    Err(e) => tracing::error!(
+                        "volume {id} grew to {} but its ublk device did not follow: {e}",
+                        req.size_bytes
+                    ),
+                }
             }
         }
         v1.save();

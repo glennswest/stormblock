@@ -163,8 +163,20 @@ async fn volume_resize_grow_and_shrink() {
     vol.read(40 * 1024 * 1024, &mut buf2).await.unwrap();
     assert_eq!(buf2, data_high);
 
-    // Shrink back to 32 MB — data at offset 0 still intact
-    vm.resize_volume(vol_id, 32 * 1024 * 1024).await.unwrap();
+    // Shrinking is not something resize does — it frees the extents past the
+    // new end, and a filesystem above cannot follow (#19).
+    let refused = vm.resize_volume(vol_id, 32 * 1024 * 1024).await.unwrap_err();
+    assert!(
+        matches!(refused, stormblock::volume::VolumeError::ShrinkRefused { .. }),
+        "{refused}"
+    );
+    assert_eq!(vol.capacity_bytes(), 64 * 1024 * 1024, "the refusal changed nothing");
+    let mut still_there = vec![0u8; 4096];
+    vol.read(40 * 1024 * 1024, &mut still_there).await.unwrap();
+    assert_eq!(still_there, data_high, "the extent past 32 MB survived the refusal");
+
+    // Naming the shrink is what performs it — data at offset 0 still intact.
+    vm.shrink_volume(vol_id, 32 * 1024 * 1024).await.unwrap();
     assert_eq!(vol.capacity_bytes(), 32 * 1024 * 1024);
 
     let mut buf3 = vec![0u8; 4096];

@@ -249,8 +249,40 @@ impl VolumeManager {
         Ok(())
     }
 
-    /// Resize a volume to `new_size` bytes.
+    /// Grow a volume to `new_size` bytes.
+    ///
+    /// **Growth only.** A shrink comes back as
+    /// [`VolumeError::ShrinkRefused`]: the extents past the new end are freed
+    /// immediately, and xfs — which is what everything above this actually
+    /// runs — cannot shrink at all, so a shrink of a mounted volume destroys
+    /// live filesystem data with nothing to undo it (#19). A caller that means
+    /// it uses [`VolumeManager::shrink_volume`]; a caller that wants a smaller
+    /// volume with its data intact wants a move, which is a different
+    /// operation (#20).
     pub async fn resize_volume(&mut self, id: VolumeId, new_size: u64) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        let current = handle.capacity_bytes();
+        if new_size < current {
+            return Err(VolumeError::ShrinkRefused { current, requested: new_size });
+        }
+        self.resize_volume_unchecked(id, new_size).await
+    }
+
+    /// Shrink a volume, freeing every extent past the new end.
+    ///
+    /// Separate from [`VolumeManager::resize_volume`] so that destroying data
+    /// is something a caller has to name, rather than something it can reach by
+    /// passing a smaller number to the same function (#19). Nothing checks what
+    /// is on the volume — that is the caller's to know.
+    pub async fn shrink_volume(&mut self, id: VolumeId, new_size: u64) -> Result<(), VolumeError> {
+        self.resize_volume_unchecked(id, new_size).await
+    }
+
+    async fn resize_volume_unchecked(
+        &mut self,
+        id: VolumeId,
+        new_size: u64,
+    ) -> Result<(), VolumeError> {
         if new_size == 0 {
             return Err(VolumeError::InvalidSize("size must be > 0".to_string()));
         }
@@ -659,7 +691,17 @@ mod tests {
         let extents_before = handle.extent_count().await;
         assert_eq!(extents_before, 2);
 
-        mgr.resize_volume(vol_id, 50 * 1024 * 1024).await.unwrap();
+        // Shrinking through the ordinary resize path is refused: it frees the
+        // extents past the new end, and no filesystem above can follow (#19).
+        let refused = mgr.resize_volume(vol_id, 50 * 1024 * 1024).await.unwrap_err();
+        assert!(
+            matches!(refused, VolumeError::ShrinkRefused { .. }),
+            "{refused}"
+        );
+        assert_eq!(handle.extent_count().await, extents_before, "nothing was freed");
+
+        // Naming it is what makes it happen.
+        mgr.shrink_volume(vol_id, 50 * 1024 * 1024).await.unwrap();
 
         let extents_after = handle.extent_count().await;
         assert_eq!(extents_after, 1);
@@ -679,7 +721,12 @@ mod tests {
         mgr.add_backing_device(array_id, backing).await;
 
         let vol_id = mgr.create_volume("no-zero", 50 * 1024 * 1024, array_id).await.unwrap();
+        // Zero is a shrink first and an invalid size second, so that is what
+        // comes back through the grow-only door.
         let result = mgr.resize_volume(vol_id, 0).await;
+        assert!(matches!(result, Err(VolumeError::ShrinkRefused { .. })), "{result:?}");
+        // Through the explicit door it is still rejected, as a size.
+        let result = mgr.shrink_volume(vol_id, 0).await;
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("size must be > 0"));
 

@@ -77,6 +77,8 @@ pub enum VolumeError {
     InvalidSize(String),
     Drive(DriveError),
     AllocatorError(String),
+    /// A shrink was asked for without saying so explicitly (#19).
+    ShrinkRefused { current: u64, requested: u64 },
 }
 
 impl fmt::Display for VolumeError {
@@ -87,6 +89,12 @@ impl fmt::Display for VolumeError {
             VolumeError::InvalidSize(msg) => write!(f, "invalid size: {msg}"),
             VolumeError::Drive(e) => write!(f, "drive error: {e}"),
             VolumeError::AllocatorError(msg) => write!(f, "allocator error: {msg}"),
+            VolumeError::ShrinkRefused { current, requested } => write!(
+                f,
+                "refusing to shrink from {current} to {requested} bytes: a filesystem on this \
+                 volume generally cannot follow, and the extents past the new end are freed \
+                 immediately — use the explicit shrink path if that is really what you want"
+            ),
         }
     }
 }

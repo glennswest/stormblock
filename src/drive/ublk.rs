@@ -12,7 +12,7 @@
 use std::fs::OpenOptions;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 /// Wrapper around a raw pointer to make it `Send`.
 /// Safety: the mmap'd descriptor memory is valid for the lifetime of the worker
@@ -31,11 +31,24 @@ use super::{BlockDevice, DriveError, DriveResult};
 // Encoding: (3 << 30) | (sizeof_ctrl_cmd << 16) | ('u' << 8) | nr
 // sizeof(ublksrv_ctrl_cmd) = 32, so base = 0xC0207500
 // ---------------------------------------------------------------------------
-const UBLK_U_CMD_ADD_DEV: u32 = 0xC020_7504;
-const UBLK_U_CMD_DEL_DEV: u32 = 0xC020_7505;
-const UBLK_U_CMD_START_DEV: u32 = 0xC020_7506;
-const UBLK_U_CMD_STOP_DEV: u32 = 0xC020_7507;
-const UBLK_U_CMD_SET_PARAMS: u32 = 0xC020_7508;
+/// Encode a control command number the way the kernel does:
+/// `_IOWR('u', nr, struct ublksrv_ctrl_cmd)`, with `sizeof(...) == 32`.
+///
+/// Derived rather than written out, so a command added later cannot be off by a
+/// digit; the test below pins the results against the hex an strace shows.
+const fn ublk_ctrl_cmd(nr: u32) -> u32 {
+    (3 << 30) | ((std::mem::size_of::<UblkCtrlCmd>() as u32) << 16) | (0x75 << 8) | nr
+}
+
+const UBLK_U_CMD_ADD_DEV: u32 = ublk_ctrl_cmd(0x04);
+const UBLK_U_CMD_DEL_DEV: u32 = ublk_ctrl_cmd(0x05);
+const UBLK_U_CMD_START_DEV: u32 = ublk_ctrl_cmd(0x06);
+const UBLK_U_CMD_STOP_DEV: u32 = ublk_ctrl_cmd(0x07);
+const UBLK_U_CMD_SET_PARAMS: u32 = ublk_ctrl_cmd(0x08);
+/// Reports the kernel's `UBLK_F_*` feature mask into a `__u64` at `addr`.
+const UBLK_U_CMD_GET_FEATURES: u32 = ublk_ctrl_cmd(0x13);
+/// Resize a live device. New size is in **sectors**, in `cmd->data[0]`.
+const UBLK_U_CMD_UPDATE_SIZE: u32 = ublk_ctrl_cmd(0x15);
 
 // ---------------------------------------------------------------------------
 // ublk I/O commands — ioctl-encoded (_IOWR('u', nr, ublksrv_io_cmd))
@@ -64,6 +77,12 @@ const UBLK_PARAM_TYPE_DISCARD: u32 = 1 << 1;
 // ---------------------------------------------------------------------------
 const UBLK_F_URING_CMD_COMP_IN_TASK: u64 = 1 << 1;
 const UBLK_F_CMD_IOCTL_ENCODE: u64 = 1 << 6;
+/// The device may be resized in place with `UBLK_U_CMD_UPDATE_SIZE`.
+///
+/// Negotiated at ADD_DEV, and only when the running kernel reports it — a flag
+/// the kernel does not know makes ADD_DEV fail outright, so a node on an older
+/// kernel must ask for the device without it and lose only the resize (#19).
+const UBLK_F_UPDATE_SIZE: u64 = 1 << 10;
 
 /// Default max I/O buffer size (512 KB).
 const DEFAULT_MAX_IO_BYTES: u32 = 512 * 1024;
@@ -236,6 +255,12 @@ pub struct UblkServer {
     nr_queues: u16,
     queue_depth: u16,
     running: Arc<AtomicBool>,
+    /// Whether the kernel took `UBLK_F_UPDATE_SIZE` at ADD_DEV. Set during
+    /// `run()`; until then no resize is possible.
+    resizable: Arc<AtomicBool>,
+    /// The capacity the kernel currently believes in, in 512-byte sectors.
+    /// This is what a resize moves, and what makes a repeat resize a no-op.
+    dev_sectors: Arc<AtomicU64>,
 }
 
 impl UblkServer {
@@ -248,6 +273,8 @@ impl UblkServer {
             nr_queues: 1,
             queue_depth: DEFAULT_QUEUE_DEPTH,
             running: Arc::new(AtomicBool::new(false)),
+            resizable: Arc::new(AtomicBool::new(false)),
+            dev_sectors: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -274,6 +301,86 @@ impl UblkServer {
     pub fn dev_path(&self) -> String {
         let id = self.dev_id.load(Ordering::Relaxed);
         format!("/dev/ublkb{}", id)
+    }
+
+    /// Whether this device can be resized in place — i.e. the kernel took
+    /// `UBLK_F_UPDATE_SIZE` when the device was added.
+    pub fn resizable(&self) -> bool {
+        self.resizable.load(Ordering::Relaxed)
+    }
+
+    /// Tell the kernel the device is bigger now (#19).
+    ///
+    /// Without this a volume resize stops at the engine: `virtual_size` moves,
+    /// the ublk device keeps the capacity it was given at `SET_PARAMS`, and
+    /// `xfs_growfs` finds nothing to grow into — the resize is invisible to
+    /// everything above stormblock.
+    ///
+    /// **No quiesce.** `UPDATE_SIZE` is an independent control command and
+    /// there is no consistency point to capture, so I/O keeps flowing
+    /// throughout. Stalling a live `/var` to make it bigger would turn a
+    /// routine day-2 operation into an outage.
+    ///
+    /// Growth only. The kernel would accept a smaller size, but a filesystem
+    /// above it generally cannot, and the volume layer refuses the shrink
+    /// before this is ever reached.
+    pub fn update_size(&self, new_capacity_bytes: u64) -> DriveResult<()> {
+        let dev_id = self.dev_id.load(Ordering::Relaxed);
+        if dev_id < 0 {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "ublk device is not running — nothing to resize"
+            )));
+        }
+        if !self.resizable() {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "ublk device {dev_id} was created without UBLK_F_UPDATE_SIZE (kernel too old) \
+                 — the volume grew but /dev/ublkb{dev_id} cannot follow"
+            )));
+        }
+        if new_capacity_bytes % 512 != 0 {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "ublk size must be a whole number of 512-byte sectors, got {new_capacity_bytes}"
+            )));
+        }
+        let sectors = new_capacity_bytes / 512;
+        let current = self.dev_sectors.load(Ordering::Relaxed);
+        if sectors == current {
+            return Ok(());
+        }
+        if sectors < current {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "refusing to shrink ublk device {dev_id} from {current} to {sectors} sectors: \
+                 a mounted filesystem cannot follow a device that got smaller"
+            )));
+        }
+
+        let ctrl_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/ublk-control")
+            .map_err(|e| {
+                DriveError::Other(anyhow::anyhow!("failed to open /dev/ublk-control: {e}"))
+            })?;
+        let mut ring: IoUring<squeue::Entry128> = IoUring::builder()
+            .build(8)
+            .map_err(|e| DriveError::Other(anyhow::anyhow!("io_uring create failed: {e}")))?;
+
+        submit_ctrl_cmd(
+            &mut ring,
+            ctrl_file.as_raw_fd(),
+            UBLK_U_CMD_UPDATE_SIZE,
+            dev_id as u32,
+            0,
+            0,
+            // The new size rides in cmd->data[0], in sectors.
+            sectors,
+        )?;
+
+        self.dev_sectors.store(sectors, Ordering::Relaxed);
+        tracing::info!(
+            "ublk device {dev_id} resized: {current} -> {sectors} sectors ({new_capacity_bytes} bytes)"
+        );
+        Ok(())
     }
 
     /// Run the ublk server until the shutdown signal fires.
@@ -319,13 +426,29 @@ impl UblkServer {
             );
         }
 
+        // Ask the kernel what it supports before asking it for anything. A
+        // flag an older kernel does not know fails ADD_DEV outright, so an
+        // unsupported UBLK_F_UPDATE_SIZE must cost the resize and not the
+        // device (#19).
+        let kernel_features = query_features(&mut ctrl_ring, ctrl_fd).unwrap_or(0);
+        let resizable = kernel_features & UBLK_F_UPDATE_SIZE != 0;
+        let mut flags = UBLK_F_URING_CMD_COMP_IN_TASK | UBLK_F_CMD_IOCTL_ENCODE;
+        if resizable {
+            flags |= UBLK_F_UPDATE_SIZE;
+        } else {
+            tracing::info!(
+                "ublk: this kernel does not offer UBLK_F_UPDATE_SIZE — the device \
+                 will not follow a volume resize"
+            );
+        }
+
         let mut dev_info = UblkCtrlDevInfo {
             nr_hw_queues: nr_queues,
             queue_depth,
             max_io_buf_bytes: DEFAULT_MAX_IO_BYTES,
             dev_id: req_id,
             ublksrv_pid: std::process::id() as i32,
-            flags: UBLK_F_URING_CMD_COMP_IN_TASK | UBLK_F_CMD_IOCTL_ENCODE,
+            flags,
             ..Default::default()
         };
 
@@ -341,10 +464,14 @@ impl UblkServer {
 
         let assigned_id = dev_info.dev_id;
         self.dev_id.store(assigned_id as i32, Ordering::Relaxed);
+        // What the kernel echoed back, not what was asked for.
+        self.resizable
+            .store(dev_info.flags & UBLK_F_UPDATE_SIZE != 0, Ordering::Relaxed);
         tracing::info!("ublk device created: dev_id={}", assigned_id);
 
         // --- SET_PARAMS ---
         let sectors = capacity / 512;
+        self.dev_sectors.store(sectors, Ordering::Relaxed);
         let bs_shift = block_size.trailing_zeros() as u8;
         let max_sectors = DEFAULT_MAX_IO_BYTES / 512;
 
@@ -583,6 +710,27 @@ impl UblkServer {
 // ===========================================================================
 
 /// Submit a control command on `/dev/ublk-control` and wait for the CQE.
+/// Ask the kernel for its `UBLK_F_*` feature mask.
+///
+/// Older kernels do not implement `GET_FEATURES` at all; that is not an error
+/// here, it just means no optional feature can be negotiated.
+fn query_features(
+    ring: &mut IoUring<squeue::Entry128>,
+    ctrl_fd: RawFd,
+) -> DriveResult<u64> {
+    let mut features: u64 = 0;
+    submit_ctrl_cmd(
+        ring,
+        ctrl_fd,
+        UBLK_U_CMD_GET_FEATURES,
+        u32::MAX,
+        &mut features as *mut u64 as u64,
+        std::mem::size_of::<u64>() as u32,
+        0,
+    )?;
+    Ok(features)
+}
+
 fn submit_ctrl_cmd(
     ring: &mut IoUring<squeue::Entry128>,
     ctrl_fd: RawFd,
@@ -857,6 +1005,21 @@ mod tests {
         assert_eq!(std::mem::size_of::<UblkParamBasic>(), 32);
         assert_eq!(std::mem::size_of::<UblkParamDiscard>(), 24);
         assert_eq!(std::mem::size_of::<UblkParams>(), 64);
+    }
+
+    /// The derived command numbers against the hex an strace shows, so the
+    /// encoder and the kernel's ABI cannot drift apart unnoticed (#19).
+    #[test]
+    fn ctrl_command_numbers_match_the_ioctl_encoding() {
+        assert_eq!(UBLK_U_CMD_ADD_DEV, 0xC020_7504);
+        assert_eq!(UBLK_U_CMD_DEL_DEV, 0xC020_7505);
+        assert_eq!(UBLK_U_CMD_START_DEV, 0xC020_7506);
+        assert_eq!(UBLK_U_CMD_STOP_DEV, 0xC020_7507);
+        assert_eq!(UBLK_U_CMD_SET_PARAMS, 0xC020_7508);
+        assert_eq!(UBLK_U_CMD_GET_FEATURES, 0xC020_7513);
+        assert_eq!(UBLK_U_CMD_UPDATE_SIZE, 0xC020_7515);
+        // And the flag the resize is negotiated with.
+        assert_eq!(UBLK_F_UPDATE_SIZE, 1 << 10);
     }
 
     #[test]

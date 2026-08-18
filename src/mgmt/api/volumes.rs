@@ -279,6 +279,16 @@ async fn resize_volume(
 
     let mut vm = state.volume_manager.lock().await;
     match vm.resize_volume(vol_id, new_size).await {
+        // Growth only — a shrink frees every extent past the new end and no
+        // filesystem above it can follow, so it is a conflict rather than a
+        // malformed request (#19).
+        Err(crate::volume::VolumeError::ShrinkRefused { current, requested }) => {
+            return ApiError::conflict(format!(
+                "refusing to shrink volume {uuid} from {current} to {requested} bytes: a \
+                 filesystem on it cannot follow, and the extents past the new end would be \
+                 freed immediately. Moving a volume to a smaller one is a copy, not a resize."
+            ))
+        }
         Ok(()) => {
             let handle = match vm.get_volume_handle(&vol_id) {
                 Some(h) => h,

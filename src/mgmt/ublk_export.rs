@@ -37,6 +37,12 @@ struct Export {
     /// Fires the ublk server's shutdown watch on teardown (DEL_DEV).
     #[cfg(target_os = "linux")]
     shutdown: tokio::sync::watch::Sender<bool>,
+    /// Kept so a volume resize can be pushed down to the kernel device (#19).
+    /// Without it the volume grows and `/dev/ublkbN` stays the size it was
+    /// given at `SET_PARAMS`, so `xfs_growfs` finds nothing to grow into.
+    /// `None` only in tests, which inject an export without a kernel behind it.
+    #[cfg(target_os = "linux")]
+    server: Option<Arc<crate::drive::ublk::UblkServer>>,
 }
 
 /// Tracks the live per-volume ublk exports on this node.
@@ -81,6 +87,31 @@ impl UblkExportManager {
         self.start(volume_id, device)
     }
 
+    /// Whether this node currently exports `volume_id` as a ublk device.
+    pub fn is_exported(&self, volume_id: &str) -> bool {
+        self.exports.contains_key(volume_id)
+    }
+
+    /// Push a new size down to the kernel device backing `volume_id`.
+    ///
+    /// `Ok(false)` means there is nothing to tell — no ublk export for this
+    /// volume — which is the common case and not a failure. `Err` means there
+    /// is a device and it could not be resized, which the caller must surface:
+    /// the volume is now bigger than the block device anything above it sees.
+    #[cfg(target_os = "linux")]
+    pub fn update_size(&self, volume_id: &str, new_capacity_bytes: u64) -> Result<bool, String> {
+        let Some(export) = self.exports.get(volume_id) else { return Ok(false) };
+        let Some(server) = export.server.as_ref() else {
+            return Err(format!("ublk export for {volume_id} has no server handle"));
+        };
+        server.update_size(new_capacity_bytes).map(|()| true).map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn update_size(&self, _volume_id: &str, _new_capacity_bytes: u64) -> Result<bool, String> {
+        Ok(false)
+    }
+
     /// Tear down the export for `volume_id`, if any (detach / delete).
     pub fn remove(&mut self, volume_id: &str) {
         if let Some(_e) = self.exports.remove(volume_id) {
@@ -99,7 +130,8 @@ impl UblkExportManager {
         let id = self.next_id;
         let device_path = format!("/dev/ublkb{id}");
         let (shutdown, rx) = tokio::sync::watch::channel(false);
-        let server = UblkServer::new(device).with_dev_id(id);
+        let server = Arc::new(UblkServer::new(device).with_dev_id(id));
+        let runner = server.clone();
         // UblkServer::run() holds non-Send raw pointers, so it must run on a
         // dedicated OS thread with its own runtime (same pattern as the
         // boot-iscsi ublk export in main.rs).
@@ -114,7 +146,7 @@ impl UblkExportManager {
                     }
                 };
                 rt.block_on(async move {
-                    if let Err(e) = server.run(rx).await {
+                    if let Err(e) = runner.run(rx).await {
                         tracing::error!("ublk-csi {id}: export failed: {e}");
                     }
                 });
@@ -123,7 +155,10 @@ impl UblkExportManager {
         // ids are not recycled: a monotonic counter avoids reassigning a
         // /dev/ublkbN that a just-torn-down export might still be vacating.
         self.next_id += 1;
-        self.exports.insert(volume_id.to_string(), Export { device_path: device_path.clone(), shutdown });
+        self.exports.insert(
+            volume_id.to_string(),
+            Export { device_path: device_path.clone(), shutdown, server: Some(server) },
+        );
         tracing::info!(volume = volume_id, device = %device_path, "ublk export created for CSI attach");
         Some(device_path)
     }
@@ -171,6 +206,8 @@ mod tests {
                     device_path: path.to_string(),
                     #[cfg(target_os = "linux")]
                     shutdown: tokio::sync::watch::channel(false).0,
+                    #[cfg(target_os = "linux")]
+                    server: None,
                 },
             );
         }
