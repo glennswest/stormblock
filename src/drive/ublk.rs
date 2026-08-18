@@ -40,13 +40,26 @@ const fn ublk_ctrl_cmd(nr: u32) -> u32 {
     (3 << 30) | ((std::mem::size_of::<UblkCtrlCmd>() as u32) << 16) | (0x75 << 8) | nr
 }
 
+/// The same, for the one control command the kernel declares as `_IOR` rather
+/// than `_IOWR`.
+///
+/// The direction bits are part of the value the kernel dispatches on, so a
+/// read-only command encoded as read-write does not reach its handler at all —
+/// it comes back as an error, which for a *feature query* looks exactly like a
+/// kernel that has no such feature. That is how `UBLK_F_UPDATE_SIZE` was
+/// quietly never negotiated on a kernel that offers it.
+const fn ublk_ctrl_cmd_read(nr: u32) -> u32 {
+    (2 << 30) | ((std::mem::size_of::<UblkCtrlCmd>() as u32) << 16) | (0x75 << 8) | nr
+}
+
 const UBLK_U_CMD_ADD_DEV: u32 = ublk_ctrl_cmd(0x04);
 const UBLK_U_CMD_DEL_DEV: u32 = ublk_ctrl_cmd(0x05);
 const UBLK_U_CMD_START_DEV: u32 = ublk_ctrl_cmd(0x06);
 const UBLK_U_CMD_STOP_DEV: u32 = ublk_ctrl_cmd(0x07);
 const UBLK_U_CMD_SET_PARAMS: u32 = ublk_ctrl_cmd(0x08);
 /// Reports the kernel's `UBLK_F_*` feature mask into a `__u64` at `addr`.
-const UBLK_U_CMD_GET_FEATURES: u32 = ublk_ctrl_cmd(0x13);
+/// `_IOR`, unlike every other control command here.
+const UBLK_U_CMD_GET_FEATURES: u32 = ublk_ctrl_cmd_read(0x13);
 /// Resize a live device. New size is in **sectors**, in `cmd->data[0]`.
 const UBLK_U_CMD_UPDATE_SIZE: u32 = ublk_ctrl_cmd(0x15);
 
@@ -1016,7 +1029,10 @@ mod tests {
         assert_eq!(UBLK_U_CMD_START_DEV, 0xC020_7506);
         assert_eq!(UBLK_U_CMD_STOP_DEV, 0xC020_7507);
         assert_eq!(UBLK_U_CMD_SET_PARAMS, 0xC020_7508);
-        assert_eq!(UBLK_U_CMD_GET_FEATURES, 0xC020_7513);
+        // _IOR, not _IOWR: 0x8… rather than 0xC…, and the difference is the
+        // whole command as far as the kernel's dispatch is concerned.
+        assert_eq!(UBLK_U_CMD_GET_FEATURES, 0x8020_7513);
+        assert_ne!(UBLK_U_CMD_GET_FEATURES, ublk_ctrl_cmd(0x13));
         assert_eq!(UBLK_U_CMD_UPDATE_SIZE, 0xC020_7515);
         // And the flag the resize is negotiated with.
         assert_eq!(UBLK_F_UPDATE_SIZE, 1 << 10);
