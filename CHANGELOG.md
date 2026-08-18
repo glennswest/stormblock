@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.1.1] — 2026-08-18
+
 ### 2026-08-18
 - **fix:** a volume that could not be thrown away is no longer reported as thrown away (#48). Three places in the template lifecycle discarded a volume with `let _ = delete_volume(…)` and then told the caller, in as many words, that it had been discarded — so when the delete failed the volume survived and nothing said so. That failure is not hypothetical: `delete_volume` releases slots best-effort and still returns `Err` for the ones it could not release (#37). The discard now retries once and, if the volume is still there, returns `TemplateError::Leaked` **carrying the volume id** — which is the only thing that makes it reclaimable, since a clone is created under the *caller's* name (`pvc-web-1`, not `fstemplate-…`) and is therefore indistinguishable by name from a live consumer volume. `POST /api/v1/fstemplates/{id}/clone` puts `leaked_volume_id` in the error body.
 - **fix:** the orphan sweep will not reclaim a volume this node is serving (#48). `orphans` and `reclaim_orphans` now take the in-use set as a **required argument** rather than an optional guard, because the consequence of forgetting it is deleting something that is attached. The management layer computes it from the export table, the iSCSI LUN table and the ublk export map — one shared helper with the volume-move guard (#20), since they are the same question and two implementations of it means one is eventually wrong. A volume that will not delete is logged at `error` and reported as *not* reclaimed.
