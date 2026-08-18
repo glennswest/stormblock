@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-08-18
+- **fix:** a filesystem template no longer leaks its volumes (#47). Three separate leaks, all in the same lifecycle. (1) The scratch volume outlived a successful create — 94 `-raw` volumes against 17 templates on one node — so `seal` now drops it once the snapshot is taken; the sealed snapshot holds its own refcounted extents and never depended on the volume it came from. (2) A create that failed at seal left both halves standing, and the caller's retry paid for two more: every failure path in `create` — format, seed and now seal — goes through one rollback that forgets the template and deletes every volume it made. (3) `DELETE /api/v1/fstemplates/{id}` defaulted to keeping the volumes, which is what left 75 sealed volumes no template claimed; purging is the default now, and `?purge=false` is the way to keep them. Purging no longer needs `force` when clones descend from the template — a snapshot keeps its own reference to every extent, so the clone is untouched either way.
+- **feat:** `GET /api/v1/fstemplates/orphans` lists volumes named like a template's that no template in the store claims, with what each has allocated, and `DELETE` on the same path reclaims them — the reconciliation a node already in this state needs, since nothing else could tell that debris apart from live volumes by name. Clones are named by their consumer and are never in the set.
+- **test:** a 32 MiB template clones clean on 4 MiB and 8 MiB slab slots — the geometry from #46, where the inode table ends around 2 MiB and the root directory's data block lands in the second half of the first slot. It fails on v8.2.0's `FileDevice` and passes on v8.2.1's, which confirms #46 as the copy-on-write short-copy fixed in `8dc3134` seen from the clone side rather than a size-specific defect of its own.
+
 ## [v8.2.1] — 2026-08-17
 
 ### 2026-08-17

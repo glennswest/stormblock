@@ -6,7 +6,9 @@
 //! GET    /api/v1/fstemplates/{id}         one, by id or name
 //! POST   /api/v1/fstemplates/{id}/seal    verify + snapshot an externally formatted template
 //! POST   /api/v1/fstemplates/{id}/clone   mint a CoW clone with a fresh filesystem UUID
-//! DELETE /api/v1/fstemplates/{id}         remove (?purge to delete its volumes, ?force)
+//! DELETE /api/v1/fstemplates/{id}         remove, with its volumes (?purge=false keeps them)
+//! GET    /api/v1/fstemplates/orphans      template volumes no template claims
+//! DELETE /api/v1/fstemplates/orphans      delete them
 //! ```
 //!
 //! `POST /api/v1/volumes` also takes `from_template`, which is the same clone
@@ -34,6 +36,8 @@ use crate::volume::VolumeId;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_templates).post(create_template))
+        // Ahead of `/{id}`: a literal path wins over the capture.
+        .route("/orphans", get(list_orphans).delete(reclaim_orphans))
         .route("/{id}", get(get_template).delete(delete_template))
         .route("/{id}/seal", post(seal_template))
         .route("/{id}/clone", post(clone_template))
@@ -55,6 +59,11 @@ fn err(e: TemplateError) -> Response {
 
 fn flag(q: &std::collections::HashMap<String, String>, key: &str) -> bool {
     matches!(q.get(key).map(|v| v.as_str()), Some("") | Some("1") | Some("true") | Some("yes"))
+}
+
+/// A flag that is on unless the caller explicitly turns it off.
+fn flag_default_on(q: &std::collections::HashMap<String, String>, key: &str) -> bool {
+    !matches!(q.get(key).map(|v| v.as_str()), Some("0") | Some("false") | Some("no"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,7 +261,7 @@ async fn seal_template(
     if !force {
         let raw = {
             let store = state.fstemplates.lock().await;
-            store.get(&template_id).map(|t| t.raw_volume_id)
+            store.get(&template_id).and_then(|t| t.raw_volume_id)
         };
         if let Some(raw) = raw {
             let exports = state.exports.read().await;
@@ -316,7 +325,10 @@ async fn delete_template(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "delete")
         .increment(1);
-    let purge = flag(&q, "purge");
+    // Purging is the default. Removing the store entry while leaving the
+    // volumes standing is how a node fills with template debris nothing can
+    // name afterwards — 186 of 187 volumes on one instance (#47).
+    let purge = flag_default_on(&q, "purge");
     let force = flag(&q, "force");
 
     let template_id = {
@@ -331,6 +343,25 @@ async fn delete_template(
         Ok(purged) => Json(json!({ "deleted": template_id, "purged_volumes": purged })).into_response(),
         Err(e) => err(e),
     }
+}
+
+async fn list_orphans(State(state): State<Arc<AppState>>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "orphans")
+        .increment(1);
+    let found = template::orphans(&state.volume_manager, &state.fstemplates).await;
+    let bytes: u64 = found.iter().map(|o| o.allocated_bytes).sum();
+    Json(json!({ "orphans": found, "count": found.len(), "allocated_bytes": bytes }))
+        .into_response()
+}
+
+async fn reclaim_orphans(State(state): State<Arc<AppState>>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "reclaim_orphans")
+        .increment(1);
+    let gone = template::reclaim_orphans(&state.volume_manager, &state.fstemplates).await;
+    let bytes: u64 = gone.iter().map(|o| o.allocated_bytes).sum();
+    tracing::info!("reclaimed {} orphaned template volume(s), {bytes} bytes", gone.len());
+    Json(json!({ "reclaimed": gone, "count": gone.len(), "allocated_bytes": bytes }))
+        .into_response()
 }
 
 /// Clone a template on behalf of `POST /api/v1/volumes {from_template}`.

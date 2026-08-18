@@ -204,8 +204,14 @@ pub struct FsTemplate {
     #[serde(default)]
     pub fs_uuid: Option<Uuid>,
     pub state: TemplateState,
-    /// The volume that gets formatted.
-    pub raw_volume_id: Uuid,
+    /// The scratch volume that gets formatted, while it still exists.
+    ///
+    /// [`seal`] drops it: once the snapshot is taken, the sealed volume holds
+    /// every extent (copy-on-write refcounts, so the snapshot does not depend
+    /// on its origin) and the scratch copy is pure cost. Keeping it is what
+    /// left 94 `-raw` volumes against 17 templates on one node (#47).
+    #[serde(default)]
+    pub raw_volume_id: Option<Uuid>,
     /// The clean snapshot clones descend from. Set at seal.
     pub sealed_volume_id: Option<Uuid>,
     /// How many clones have been minted from it.
@@ -222,6 +228,17 @@ impl FsTemplate {
     /// volume (which may still be attached and changing).
     pub fn clone_source(&self) -> Option<VolumeId> {
         self.sealed_volume_id.map(VolumeId)
+    }
+
+    /// Every volume this template owns. Deleting the template must account for
+    /// all of them — a template whose entry goes away while its volumes stay is
+    /// space nothing can name afterwards (#47).
+    pub fn volumes(&self) -> Vec<VolumeId> {
+        [self.sealed_volume_id, self.raw_volume_id]
+            .into_iter()
+            .flatten()
+            .map(VolumeId)
+            .collect()
     }
 
     pub fn json(&self) -> serde_json::Value {
@@ -377,6 +394,28 @@ impl TemplateStore {
     }
 }
 
+/// Undo a half-built template: forget it, and delete every volume it made.
+///
+/// Every failure inside [`create`] goes through here. A create that does not
+/// produce a usable template must leave nothing behind, because the caller's
+/// next move is to try the same name again — and each attempt that leaves its
+/// volumes standing costs the node two more of them for good (#47).
+async fn rollback(vm: &VmLock, store: &StoreLock, id: &Uuid) {
+    let volumes = {
+        let mut s = store.lock().await;
+        let volumes = s.get(id).map(|t| t.volumes()).unwrap_or_default();
+        s.remove(id);
+        s.persist();
+        volumes
+    };
+    let mut m = vm.lock().await;
+    for vol in volumes {
+        if let Err(e) = m.delete_volume(vol).await {
+            tracing::warn!("rolling back template {id}: volume {vol} not deleted: {e}");
+        }
+    }
+}
+
 /// Create a template: a volume, a filesystem on it, and a sealed snapshot.
 ///
 /// With `format_in_core` the whole lifecycle runs here and the returned
@@ -417,7 +456,7 @@ pub async fn create(
         csum_seed: false,
         fs_uuid: None,
         state: TemplateState::AwaitingFormat,
-        raw_volume_id: raw.0,
+        raw_volume_id: Some(raw.0),
         sealed_volume_id: None,
         clones: 0,
         seeded: spec.seed.iter().map(|f| f.path.clone()).collect(),
@@ -473,11 +512,7 @@ pub async fn create(
 
     if let Err(e) = format {
         // Nothing half-formatted survives as a template.
-        let mut s = store.lock().await;
-        s.remove(&template.id);
-        s.persist();
-        drop(s);
-        let _ = vm.lock().await.delete_volume(raw).await;
+        rollback(vm, store, &template.id).await;
         return Err(TemplateError::Internal(format!("formatting {}: {e}", spec.name)));
     }
 
@@ -492,11 +527,7 @@ pub async fn create(
         let seeded = files::write_files(&dev, &spec.seed).await;
         drop(dev);
         if let Err(e) = seeded {
-            let mut s = store.lock().await;
-            s.remove(&template.id);
-            s.persist();
-            drop(s);
-            let _ = vm.lock().await.delete_volume(raw).await;
+            rollback(vm, store, &template.id).await;
             return Err(TemplateError::Internal(format!(
                 "seeding {}: {e}",
                 spec.name
@@ -514,8 +545,16 @@ pub async fn create(
     }
 
     // Seal checks the filesystem, which is also the check on what was just
-    // seeded into it.
-    seal(vm, store, &template.id, false).await
+    // seeded into it. A template that will not seal is not a template: roll it
+    // back rather than leave a formatted volume and a store entry the caller
+    // cannot use and will not name again (#47).
+    match seal(vm, store, &template.id, false).await {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            rollback(vm, store, &template.id).await;
+            Err(e)
+        }
+    }
 }
 
 /// Seal a formatted template: verify the superblock, snapshot it, mark ready.
@@ -539,10 +578,20 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
         )));
     }
 
-    let raw = VolumeId(template.raw_volume_id);
-    let dev = vm.lock().await.get_volume(&raw).ok_or_else(|| {
-        TemplateError::NotFound(format!("template volume {} is gone", template.raw_volume_id))
-    })?;
+    let raw = template
+        .raw_volume_id
+        .map(VolumeId)
+        .ok_or_else(|| {
+            TemplateError::Conflict(format!(
+                "fstemplate {} has no volume to seal",
+                template.name
+            ))
+        })?;
+    let dev = vm
+        .lock()
+        .await
+        .get_volume(&raw)
+        .ok_or_else(|| TemplateError::NotFound(format!("template volume {raw} is gone")))?;
 
     // Checking is I/O over the volume and nothing else, so it holds no lock:
     // an fsck of one template must not stall every other volume operation.
@@ -594,6 +643,7 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
         .get_mut(id)
         .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {id} not found")))?;
     t.sealed_volume_id = Some(sealed.0);
+    t.raw_volume_id = None;
     t.state = TemplateState::Ready;
     if let Some(l) = &layout {
         t.fs_uuid = Some(l.uuid);
@@ -608,6 +658,17 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
     let out = t.clone();
     s.persist();
     drop(s);
+
+    // The snapshot owns its extents outright — copy-on-write refcounts mean it
+    // does not depend on the volume it was taken from — so the scratch volume
+    // is now pure cost. Dropping it here is what keeps one template to one
+    // volume instead of two (#47).
+    if let Err(e) = vm.lock().await.delete_volume(raw).await {
+        tracing::warn!(
+            "fstemplate {}: scratch volume {raw} not deleted after sealing: {e}",
+            out.name
+        );
+    }
 
     tracing::info!("fstemplate {} sealed as volume {}", out.name, sealed.0);
     Ok(out)
@@ -795,11 +856,14 @@ pub async fn clone_template(
     })
 }
 
-/// Remove a template. `purge` also deletes its volumes.
+/// Remove a template, and by default the volumes it owns.
 ///
-/// Clones are independent volumes — copy-on-write means deleting the template
-/// does not take their data with it — but a template with descendants is
-/// usually still wanted, so purging one requires `force`.
+/// Clones are independent volumes: a snapshot holds its own refcounted
+/// reference to every extent, so deleting the template it descends from takes
+/// nothing away from it. That is why `force` is no longer required to purge a
+/// template with descendants — it only silences the warning. Pass
+/// `purge = false` to keep the volumes, which is how a node ends up with
+/// template debris nothing can name (#47), so it is not the default.
 pub async fn delete(
     vm: &VmLock,
     store: &StoreLock,
@@ -814,19 +878,20 @@ pub async fn delete(
         .cloned()
         .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {id} not found")))?;
     if purge && template.clones > 0 && !force {
-        return Err(TemplateError::Conflict(format!(
-            "fstemplate {} has {} clone(s) descending from it — purge with force=true only if \
-             you know they are gone",
-            template.name, template.clones
-        )));
+        tracing::warn!(
+            "purging fstemplate {} with {} clone(s) descending from it — they keep their own \
+             refcounted extents and are unaffected",
+            template.name,
+            template.clones
+        );
     }
 
     let mut purged = Vec::new();
     if purge {
         let mut m = vm.lock().await;
-        for vol in [template.sealed_volume_id, Some(template.raw_volume_id)].into_iter().flatten() {
-            match m.delete_volume(VolumeId(vol)).await {
-                Ok(()) => purged.push(vol),
+        for vol in template.volumes() {
+            match m.delete_volume(vol).await {
+                Ok(()) => purged.push(vol.0),
                 Err(e) => tracing::warn!("purging template volume {vol}: {e}"),
             }
         }
@@ -836,6 +901,62 @@ pub async fn delete(
     s.remove(id);
     s.persist();
     Ok(purged)
+}
+
+/// A volume that looks like it belonged to a template, and does not.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrphanVolume {
+    pub volume_id: Uuid,
+    pub name: String,
+    pub size_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+/// The prefix every volume this module creates carries: the scratch volume is
+/// `fstemplate-{name}-raw`, the sealed snapshot `fstemplate-{fs}-{name}`.
+/// Clones are named by whoever asked for them, so they never match.
+const VOLUME_PREFIX: &str = "fstemplate-";
+
+/// Volumes named like a template's, which no template in the store claims.
+///
+/// This is the reconciliation an instance needs *after* the fact. Before the
+/// fixes above, a `DELETE` without `purge` removed the store entry and left
+/// both volumes standing; nothing afterwards could tell those apart from live
+/// ones by name (#47). Comparing against the store is what tells them apart.
+pub async fn orphans(vm: &VmLock, store: &StoreLock) -> Vec<OrphanVolume> {
+    let claimed: std::collections::HashSet<Uuid> = {
+        let s = store.lock().await;
+        s.templates.iter().flat_map(|t| t.volumes()).map(|v| v.0).collect()
+    };
+    let volumes = vm.lock().await.list_volumes().await;
+    volumes
+        .into_iter()
+        .filter(|(id, name, _, _)| name.starts_with(VOLUME_PREFIX) && !claimed.contains(&id.0))
+        .map(|(id, name, size, allocated)| OrphanVolume {
+            volume_id: id.0,
+            name,
+            size_bytes: size,
+            allocated_bytes: allocated,
+        })
+        .collect()
+}
+
+/// Delete every volume [`orphans`] reports, and say what went.
+pub async fn reclaim_orphans(vm: &VmLock, store: &StoreLock) -> Vec<OrphanVolume> {
+    let found = orphans(vm, store).await;
+    let mut reclaimed = Vec::with_capacity(found.len());
+    let mut m = vm.lock().await;
+    for orphan in found {
+        match m.delete_volume(VolumeId(orphan.volume_id)).await {
+            Ok(()) => reclaimed.push(orphan),
+            Err(e) => tracing::warn!(
+                "reclaiming orphaned template volume {} ({}): {e}",
+                orphan.volume_id,
+                orphan.name
+            ),
+        }
+    }
+    reclaimed
 }
 
 #[cfg(test)]
@@ -849,12 +970,20 @@ mod tests {
 
     /// A node with one slab, and the two locks the lifecycle takes.
     async fn node(size: u64) -> (VmLock, StoreLock, String) {
+        node_with_slots(size, 1024 * 1024).await
+    }
+
+    /// A node whose slab slots are `slot_size` bytes. The engine sizes slots by
+    /// device and a real deployment gets 4 MiB, so the default 1 MiB here is
+    /// the smaller, gentler case — anything that only goes wrong on a
+    /// copy-on-write of a full-size slot needs this (#46).
+    async fn node_with_slots(size: u64, slot_size: u64) -> (VmLock, StoreLock, String) {
         let dir = std::env::temp_dir().join("stormblock-fstemplate-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{}.slab", Uuid::new_v4().simple()));
         let p = path.to_str().unwrap().to_string();
         let dev = FileDevice::open_with_capacity(&p, size).await.unwrap();
-        let mut vm = VolumeManager::new(1024 * 1024);
+        let mut vm = VolumeManager::new(slot_size);
         vm.add_backing_device(RaidArrayId(Uuid::new_v4()), Arc::new(dev)).await;
         (
             tokio::sync::Mutex::new(vm),
@@ -1070,7 +1199,7 @@ mod tests {
 
         // Format it the way an initiator would, then dirty the superblock the
         // way an unclean unmount does.
-        let dev = volume(&vm, VolumeId(t.raw_volume_id)).await;
+        let dev = volume(&vm, VolumeId(t.raw_volume_id.expect("awaiting format"))).await;
         ext4::format(&dev, &ext4::Ext4Params::default()).await.unwrap();
         dirty_superblock(&dev).await;
 
@@ -1104,6 +1233,42 @@ mod tests {
         sb.state = state::VALID_FS | state::ERROR_FS;
         sb.feature_incompat |= IncompatFeatures::RECOVER;
         fs.flush_superblock().await.unwrap();
+    }
+
+    /// A clone of a 32 MiB template checks out, on 4 MiB slots (#46).
+    ///
+    /// At this geometry the inode table runs from 4 KiB to ~2 MiB and the root
+    /// directory's data block lands just past it — inside the *second* half of
+    /// the first 4 MiB slot. The clone's UUID stamp writes the superblock,
+    /// which copies that slot; a copy that stopped at 2 MiB left the inode
+    /// table intact and the directory blocks reading back as zeros, which is
+    /// exactly what the report described. Small slots never showed it, because
+    /// the short transfer was capped at 2 MiB.
+    #[tokio::test]
+    async fn a_32mib_template_clones_clean_on_full_size_slots() {
+        for slot in [4 * 1024 * 1024u64, 8 * 1024 * 1024] {
+            let (vm, store, path) = node_with_slots(2 * 1024 * 1024 * 1024, slot).await;
+            let t = create(&vm, &store, &TemplateSpec::new("ext4-32m", 32 * 1024 * 1024))
+                .await
+                .unwrap_or_else(|e| panic!("{slot}-byte slots: creating the template: {e}"));
+            assert_eq!(t.state, TemplateState::Ready);
+
+            // verify is on by default, so a clone that does not check out comes
+            // back as an error rather than as a volume.
+            let c = clone_template(&vm, &store, "ext4-32m", &CloneSpec::new("verify-32m"))
+                .await
+                .unwrap_or_else(|e| panic!("{slot}-byte slots: {e}"));
+            assert!(c.verified);
+            assert_ne!(c.fs_uuid, t.fs_uuid, "the clone carries its own identity");
+
+            // And read the root directory back through the filesystem itself,
+            // rather than trusting the check alone.
+            let dev = volume(&vm, c.volume_id).await;
+            let layout = ext4::read_layout(&dev).await.unwrap();
+            assert_eq!(layout.uuid, c.fs_uuid.unwrap());
+
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[tokio::test]
@@ -1162,20 +1327,71 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// A sealed template owns exactly one volume, and deleting it takes that
+    /// volume with it — clones and all (#47).
     #[tokio::test]
-    async fn purge_needs_force_once_clones_exist() {
+    async fn a_template_costs_one_volume_and_purges_it() {
         let (vm, store, path) = node(2 * 1024 * 1024 * 1024).await;
         let t = create(&vm, &store, &TemplateSpec::new("t", 64 * 1024 * 1024))
             .await
             .unwrap();
-        clone_template(&vm, &store, "t", &CloneSpec::new("c")).await.unwrap();
 
-        let err = delete(&vm, &store, &t.id, true, false).await.unwrap_err();
-        assert!(matches!(err, TemplateError::Conflict(_)), "{err}");
+        // The scratch volume went at seal: the sealed snapshot holds its own
+        // refcounted extents and does not need its origin.
+        assert!(t.raw_volume_id.is_none(), "the scratch volume outlived the seal");
+        let named: Vec<String> = vm
+            .lock()
+            .await
+            .list_volumes()
+            .await
+            .into_iter()
+            .map(|(_, n, _, _)| n)
+            .filter(|n| n.starts_with("fstemplate-"))
+            .collect();
+        assert_eq!(named.len(), 1, "one template, one volume: {named:?}");
 
-        let purged = delete(&vm, &store, &t.id, true, true).await.unwrap();
-        assert_eq!(purged.len(), 2, "raw and sealed volumes both go");
+        let c = clone_template(&vm, &store, "t", &CloneSpec::new("c")).await.unwrap();
+
+        // Descendants no longer block the purge — a snapshot keeps its own
+        // reference to every extent, so the clone is untouched by this.
+        let purged = delete(&vm, &store, &t.id, true, false).await.unwrap();
+        assert_eq!(purged.len(), 1, "the sealed volume goes");
         assert!(store.lock().await.find("t").is_none());
+        assert!(vm.lock().await.get_volume(&c.volume_id).is_some(), "the clone survived");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The state #47 found a node in: volumes named like a template's that no
+    /// template claims, because a `DELETE` without `purge` walked away from them.
+    #[tokio::test]
+    async fn orphaned_template_volumes_are_found_and_reclaimed() {
+        let (vm, store, path) = node(2 * 1024 * 1024 * 1024).await;
+        let t = create(&vm, &store, &TemplateSpec::new("t", 64 * 1024 * 1024))
+            .await
+            .unwrap();
+        // A clone, named by its consumer: never mistaken for template debris.
+        clone_template(&vm, &store, "t", &CloneSpec::new("pvc-1")).await.unwrap();
+
+        assert!(orphans(&vm, &store).await.is_empty(), "a live template is not debris");
+
+        // The old behaviour, by hand: forget the template, keep its volumes.
+        delete(&vm, &store, &t.id, false, false).await.unwrap();
+
+        let found = orphans(&vm, &store).await;
+        assert_eq!(found.len(), 1, "the sealed volume is now unclaimed: {found:?}");
+
+        let gone = reclaim_orphans(&vm, &store).await;
+        assert_eq!(gone.len(), 1);
+        assert!(orphans(&vm, &store).await.is_empty());
+        assert!(
+            vm.lock()
+                .await
+                .list_volumes()
+                .await
+                .iter()
+                .any(|(_, n, _, _)| n == "pvc-1"),
+            "reclaiming debris must not touch a clone"
+        );
 
         let _ = std::fs::remove_file(path);
     }

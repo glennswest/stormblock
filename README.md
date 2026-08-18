@@ -226,6 +226,17 @@ fails much later, inside a container, as `Read-only file system`. Pass `?force=t
 `{"format": false}` at create time to have an initiator lay the filesystem down
 over an export instead, then `POST /api/v1/fstemplates/{id}/seal`.
 
+**A template is one volume, and deleting it takes that volume with it.** The
+scratch volume a template is formatted on is dropped the moment it is sealed —
+the sealed snapshot holds its own refcounted extents and does not depend on the
+volume it was taken from — and `DELETE /api/v1/fstemplates/{id}` purges what is
+left unless asked not to (`?purge=false`). A create that fails anywhere, at
+format, at seed or at seal, leaves nothing behind, so retrying a name does not
+cost two more volumes each time. For a node that already accumulated debris,
+`GET /api/v1/fstemplates/orphans` lists volumes named like a template's that no
+template claims, and `DELETE` on the same path reclaims them; clones are named
+by their consumer, so they are never in that set.
+
 Formats do not queue. No lock is held across a format, a check or a stamp, and
 the formatter takes `&self` so one format fans out across block groups.
 Measured on a Fedora 6.17.1 host: one 256 MiB template formats and seals in
