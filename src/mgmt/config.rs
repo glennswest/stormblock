@@ -257,6 +257,17 @@ pub struct IscsiExportConfig {
     pub target_name: String,
     pub chap_user: Option<String>,
     pub chap_secret: Option<String>,
+    /// Most connections one session may carry — MC/S (#31). Default 4.
+    ///
+    /// Negotiation takes the lower of this and what the initiator asks for, so
+    /// raising it cannot affect a consumer that does not want more than one.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+}
+
+#[cfg(feature = "iscsi")]
+fn default_max_connections() -> u32 {
+    4
 }
 
 #[cfg(feature = "iscsi")]
@@ -372,12 +383,14 @@ impl StormBlockConfig {
                 target_name: default_iscsi_target_name(),
                 chap_user: None,
                 chap_secret: None,
+                max_connections: default_max_connections(),
             });
             self.iscsi = Some(IscsiExportConfig {
                 listen_addr: iscsi_addr.unwrap_or(&existing.listen_addr).to_string(),
                 target_name: iscsi_target_name.unwrap_or(&existing.target_name).to_string(),
                 chap_user: chap_user.map(|s| s.to_string()).or(existing.chap_user),
                 chap_secret: chap_secret.map(|s| s.to_string()).or(existing.chap_secret),
+                max_connections: existing.max_connections,
             });
         }
 
@@ -708,6 +721,7 @@ pin_cores = false
                 target_name: "iqn.2024.io.test:t1".to_string(),
                 chap_user: None,
                 chap_secret: None,
+                max_connections: default_max_connections(),
             });
             assert!(cfg.validate().is_err());
         }

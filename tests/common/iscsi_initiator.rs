@@ -38,6 +38,13 @@ pub struct IscsiInitiator {
     max_recv_data_seg: u32,
     block_size: u32,
     isid: [u8; 6],
+    /// Connection id within the session — 0 for a leading connection, and a
+    /// distinct value for each MC/S connection added afterwards (#31).
+    cid: u16,
+    /// What to ask for during negotiation.
+    want_max_connections: u32,
+    /// What the target agreed to.
+    pub negotiated_max_connections: u32,
 }
 
 impl IscsiInitiator {
@@ -58,7 +65,36 @@ impl IscsiInitiator {
             max_recv_data_seg: 8192,
             block_size: 4096, // default, updated by read_capacity
             isid,
+            cid: 0,
+            want_max_connections: 1,
+            negotiated_max_connections: 1,
         })
+    }
+
+    /// Ask for MC/S during login.
+    pub fn wanting_connections(mut self, n: u32) -> Self {
+        self.want_max_connections = n;
+        self
+    }
+
+    /// Turn this into a second connection on an existing session.
+    ///
+    /// The ISID and TSIH together name the session to join, and the CID names
+    /// this connection within it — which is exactly what RFC 7143 §6.3.1 says
+    /// a non-zero TSIH in a login request means.
+    pub fn joining(mut self, isid: [u8; 6], tsih: u16, cid: u16) -> Self {
+        self.isid = isid;
+        self.tsih = tsih;
+        self.cid = cid;
+        self
+    }
+
+    pub fn isid(&self) -> [u8; 6] {
+        self.isid
+    }
+
+    pub fn tsih(&self) -> u16 {
+        self.tsih
     }
 
     fn next_itt(&mut self) -> u32 {
@@ -80,11 +116,12 @@ impl IscsiInitiator {
         bhs.set_exp_stat_sn(self.exp_stat_sn);
         bhs.set_isid(&self.isid);
         bhs.set_tsih(self.tsih);
+        bhs.set_cid(self.cid);
         bhs
     }
 
-    fn operational_params() -> Vec<(&'static str, &'static str)> {
-        vec![
+    fn operational_params(&self) -> Vec<(&'static str, String)> {
+        let base: Vec<(&'static str, &'static str)> = vec![
             ("HeaderDigest", "None"),
             ("DataDigest", "None"),
             ("MaxRecvDataSegmentLength", "65536"),
@@ -93,11 +130,14 @@ impl IscsiInitiator {
             ("DefaultTime2Wait", "2"),
             ("DefaultTime2Retain", "0"),
             ("MaxOutstandingR2T", "1"),
-            ("MaxConnections", "1"),
             ("ImmediateData", "Yes"),
             ("InitialR2T", "No"),
             ("ErrorRecoveryLevel", "0"),
-        ]
+        ];
+        let mut out: Vec<(&'static str, String)> =
+            base.into_iter().map(|(k, v)| (k, v.to_string())).collect();
+        out.push(("MaxConnections", self.want_max_connections.to_string()));
+        out
     }
 
     fn parse_login_response(&mut self, resp: &IscsiPdu) -> io::Result<()> {
@@ -119,6 +159,11 @@ impl IscsiInitiator {
             if key == "MaxRecvDataSegmentLength" {
                 if let Ok(v) = val.parse::<u32>() {
                     self.max_recv_data_seg = v;
+                }
+            }
+            if key == "MaxConnections" {
+                if let Ok(v) = val.parse::<u32>() {
+                    self.negotiated_max_connections = v;
                 }
             }
         }
@@ -185,7 +230,10 @@ impl IscsiInitiator {
             self.tsih, self.exp_stat_sn, self.cmd_sn
         );
 
-        let op_data = encode_text_params(&Self::operational_params());
+        let op_params = self.operational_params();
+        let op_refs: Vec<(&str, &str)> =
+            op_params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let op_data = encode_text_params(&op_refs);
         let bhs = self.make_login_bhs(login_itt, STAGE_OPERATIONAL, STAGE_FULL_FEATURE);
         let pdu = IscsiPdu::with_data(bhs, op_data);
         write_pdu(&mut self.writer, &pdu, false, false).await?;

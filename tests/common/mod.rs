@@ -59,21 +59,38 @@ pub async fn setup_raid1_volume(
 pub async fn start_iscsi_target(
     device: Arc<dyn BlockDevice>,
     config: IscsiConfig,
-) -> (SocketAddr, JoinHandle<()>) {
+) -> (SocketAddr, RunningIscsiTarget) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
     let addr = listener.local_addr().expect("local_addr failed");
 
-    let target = IscsiTarget::new(config);
+    let target = Arc::new(IscsiTarget::new(config));
     target.add_lun(0, device).await;
-    let target = Arc::new(target);
 
     let reactor = ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false });
+    let runner = target.clone();
     let handle = tokio::spawn(async move {
-        let _ = target.run_with_listener(listener, &reactor).await;
+        let _ = runner.run_with_listener(listener, &reactor).await;
     });
 
     wait_for_listener(addr).await;
-    (addr, handle)
+    (addr, RunningIscsiTarget { target, handle })
+}
+
+/// A running target, kept reachable so a test can ask it what it thinks its
+/// state is rather than inferring it from the wire.
+pub struct RunningIscsiTarget {
+    target: Arc<IscsiTarget>,
+    handle: JoinHandle<()>,
+}
+
+impl RunningIscsiTarget {
+    pub fn target(&self) -> &Arc<IscsiTarget> {
+        &self.target
+    }
+
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
 }
 
 /// Start an NVMe-oF/TCP target on an ephemeral port. Returns (listen address, server task handle).

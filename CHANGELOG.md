@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-08-18
+- **feat:** iSCSI MC/S — multiple connections per session (#31). Login negotiates `MaxConnections` up to `iscsi.max_connections` (default 4) instead of clamping to 1, and a login carrying a non-zero TSIH **joins** that session rather than starting a new one (RFC 7143 §6.3.1). The ISID must match too: the two identify the session together and a TSIH alone is guessable. New login statuses for the two ways joining can fail — `SessionNotFound` (0x0203) and `TooManyConnections` (0x0206) — rather than silently making a second session.
+- **BREAKING (internal):** **CmdSN is now session-wide, StatSN stays per-connection** (RFC 7143 §4.2.2.1). This is the part that had to be right before MC/S could work at all: the command window lived on `ConnectionState`, which single-connection code could get away with, but two connections would then each advertise their own window and an initiator would be told two different things about one session's flow control. `Session` owns one `CmdSnWindow` shared by every connection on it, advanced with `compare_exchange` since two connections can acknowledge concurrently. `ConnectionState::exp_cmd_sn`/`max_cmd_sn` are methods now, not fields.
+- **fix:** a closing connection removes **itself** from its session, not the whole session. Previously any connection closing tore the session down, which with MC/S would take its siblings' paths with it; the session now ends when its last connection does.
+- **note:** negotiation takes the lower of the target's cap and the initiator's request, so an initiator asking for one connection still gets exactly one — raising the cap cannot change what an existing consumer sees. There is a test asserting precisely that.
+
 ## [v9.1.1] — 2026-08-18
 
 ### 2026-08-18

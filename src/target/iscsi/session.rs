@@ -50,41 +50,106 @@ impl Default for SessionParams {
 }
 
 /// Per-connection state tracking CmdSN/StatSN windows.
+/// How many commands the initiator may have outstanding at once.
+const CMD_WINDOW: u32 = 32;
+
+/// The command-sequence window, which belongs to the **session** and not to
+/// any one connection (RFC 7143 §4.2.2.1).
+///
+/// This is the part of MC/S that has to be right before anything else can be.
+/// CmdSN is assigned by the initiator per *session* and may arrive on any
+/// connection of it; StatSN is per *connection*. Tracking ExpCmdSN per
+/// connection — as this did while only one connection was ever allowed — makes
+/// each connection advertise its own command window, so an initiator with two
+/// connections is told two different things about one session's flow control
+/// and its commands are acknowledged out of order.
+///
+/// Shared by `Arc` rather than looked up through the session, so the response
+/// path stays a couple of atomic loads with no lock.
+#[derive(Debug)]
+pub struct CmdSnWindow {
+    exp_cmd_sn: AtomicU32,
+    max_cmd_sn: AtomicU32,
+}
+
+impl CmdSnWindow {
+    pub fn new(exp_cmd_sn: u32) -> Self {
+        CmdSnWindow {
+            exp_cmd_sn: AtomicU32::new(exp_cmd_sn),
+            max_cmd_sn: AtomicU32::new(exp_cmd_sn.wrapping_add(CMD_WINDOW - 1)),
+        }
+    }
+
+    pub fn exp_cmd_sn(&self) -> u32 {
+        self.exp_cmd_sn.load(Ordering::Relaxed)
+    }
+
+    pub fn max_cmd_sn(&self) -> u32 {
+        self.max_cmd_sn.load(Ordering::Relaxed)
+    }
+
+    /// Seed the window to where login left it, before any command arrives.
+    pub fn advance_to(&self, exp_cmd_sn: u32) {
+        self.exp_cmd_sn.store(exp_cmd_sn, Ordering::Relaxed);
+        self.max_cmd_sn.store(exp_cmd_sn.wrapping_add(CMD_WINDOW - 1), Ordering::Relaxed);
+    }
+
+    /// Acknowledge a command. Only the expected one advances the window, so a
+    /// command that arrives early on a second connection waits for its
+    /// predecessor rather than opening a hole in the sequence.
+    ///
+    /// `compare_exchange` rather than load-then-store: with MC/S two
+    /// connections can acknowledge concurrently, and a read-modify-write that
+    /// is not atomic would let the window advance twice for one command.
+    pub fn advance(&self, cmd_sn: u32) {
+        let exp = self.exp_cmd_sn.load(Ordering::Relaxed);
+        if cmd_sn != exp {
+            return;
+        }
+        if self
+            .exp_cmd_sn
+            .compare_exchange(exp, exp.wrapping_add(1), Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.max_cmd_sn.store(exp.wrapping_add(CMD_WINDOW), Ordering::Relaxed);
+        }
+    }
+}
+
 pub struct ConnectionState {
     pub cid: u16,
     pub stat_sn: AtomicU32,
-    pub exp_cmd_sn: AtomicU32,
-    pub max_cmd_sn: AtomicU32,
+    /// The session's command window, shared with every other connection on it.
+    pub cmd_sn: Arc<CmdSnWindow>,
 }
 
 impl ConnectionState {
     pub fn new(cid: u16) -> Self {
-        Self::with_sns(cid, 1, 1)
+        Self::with_sns(cid, 1, Arc::new(CmdSnWindow::new(1)))
     }
 
     /// Create a connection continuing the sequence numbers negotiated during
-    /// login: `stat_sn` is the StatSN for the first full-feature response,
-    /// `exp_cmd_sn` the CmdSN expected from the initiator's first command.
-    pub fn with_sns(cid: u16, stat_sn: u32, exp_cmd_sn: u32) -> Self {
-        ConnectionState {
-            cid,
-            stat_sn: AtomicU32::new(stat_sn),
-            exp_cmd_sn: AtomicU32::new(exp_cmd_sn),
-            max_cmd_sn: AtomicU32::new(exp_cmd_sn.wrapping_add(31)), // window of 32 commands
-        }
+    /// login: `stat_sn` is the StatSN for the first full-feature response, and
+    /// `cmd_sn` is the session's window — the same one every connection of the
+    /// session shares.
+    pub fn with_sns(cid: u16, stat_sn: u32, cmd_sn: Arc<CmdSnWindow>) -> Self {
+        ConnectionState { cid, stat_sn: AtomicU32::new(stat_sn), cmd_sn }
     }
 
     pub fn next_stat_sn(&self) -> u32 {
         self.stat_sn.fetch_add(1, Ordering::Relaxed)
     }
 
+    pub fn exp_cmd_sn(&self) -> u32 {
+        self.cmd_sn.exp_cmd_sn()
+    }
+
+    pub fn max_cmd_sn(&self) -> u32 {
+        self.cmd_sn.max_cmd_sn()
+    }
+
     pub fn advance_cmd_sn(&self, cmd_sn: u32) {
-        // Advance ExpCmdSN if this is the expected command
-        let exp = self.exp_cmd_sn.load(Ordering::Relaxed);
-        if cmd_sn == exp {
-            self.exp_cmd_sn.store(exp.wrapping_add(1), Ordering::Relaxed);
-            self.max_cmd_sn.store(exp.wrapping_add(32), Ordering::Relaxed);
-        }
+        self.cmd_sn.advance(cmd_sn);
     }
 }
 
@@ -107,12 +172,24 @@ pub struct Session {
     pub isid: [u8; 6],
     pub params: SessionParams,
     pub connections: RwLock<HashMap<u16, Arc<ConnectionState>>>,
+    /// One command window for the whole session, handed to every connection
+    /// that joins it.
+    pub cmd_sn: Arc<CmdSnWindow>,
 }
 
 impl Session {
-    /// Register a new connection for this session.
+    /// Register a new connection for this session, sharing its command window.
     pub async fn add_connection(&self, cid: u16) -> Arc<ConnectionState> {
-        let conn = Arc::new(ConnectionState::new(cid));
+        self.add_connection_with_stat_sn(cid, 1).await
+    }
+
+    /// Register a new connection continuing from a StatSN login left off at.
+    pub async fn add_connection_with_stat_sn(
+        &self,
+        cid: u16,
+        stat_sn: u32,
+    ) -> Arc<ConnectionState> {
+        let conn = Arc::new(ConnectionState::with_sns(cid, stat_sn, self.cmd_sn.clone()));
         self.connections.write().await.insert(cid, conn.clone());
         conn
     }
@@ -163,6 +240,7 @@ impl SessionRegistry {
             isid,
             params,
             connections: RwLock::new(HashMap::new()),
+            cmd_sn: Arc::new(CmdSnWindow::new(1)),
         });
         self.sessions.write().await.insert(tsih, session.clone());
         session
@@ -289,6 +367,77 @@ mod tests {
         assert_eq!(conn.next_stat_sn(), 3);
 
         conn.advance_cmd_sn(1);
-        assert_eq!(conn.exp_cmd_sn.load(Ordering::Relaxed), 2);
+        assert_eq!(conn.exp_cmd_sn(), 2);
+    }
+
+    /// The MC/S invariant: StatSN is per connection, CmdSN is per **session**
+    /// (RFC 7143 §4.2.2.1). Two connections on one session must advertise one
+    /// command window, or the initiator is told two different things about its
+    /// own flow control (#31).
+    #[tokio::test]
+    async fn cmd_sn_is_session_wide_and_stat_sn_is_not() {
+        let registry = SessionRegistry::new();
+        let session = registry.create_session([1, 2, 3, 4, 5, 6], SessionParams::default()).await;
+
+        let a = session.add_connection(0).await;
+        let b = session.add_connection(1).await;
+        assert_eq!(session.connection_count().await, 2);
+
+        // StatSN runs independently per connection.
+        assert_eq!(a.next_stat_sn(), 1);
+        assert_eq!(a.next_stat_sn(), 2);
+        assert_eq!(b.next_stat_sn(), 1, "connection b keeps its own StatSN");
+
+        // CmdSN does not: a command acknowledged on one connection moves the
+        // window both of them advertise.
+        assert_eq!(a.exp_cmd_sn(), 1);
+        assert_eq!(b.exp_cmd_sn(), 1);
+        a.advance_cmd_sn(1);
+        assert_eq!(a.exp_cmd_sn(), 2);
+        assert_eq!(b.exp_cmd_sn(), 2, "connection b did not see the session advance");
+        assert_eq!(a.max_cmd_sn(), b.max_cmd_sn(), "one window, one answer");
+
+        // And the next one can be acknowledged on the other connection, which
+        // is the whole point of having two.
+        b.advance_cmd_sn(2);
+        assert_eq!(a.exp_cmd_sn(), 3);
+
+        // A command that arrives out of order does not open a hole.
+        b.advance_cmd_sn(9);
+        assert_eq!(a.exp_cmd_sn(), 3, "an early command must wait for its predecessor");
+    }
+
+    /// A connection joining later shares the window as it stands, not a fresh
+    /// one — otherwise the second path would rewind the session's flow control.
+    #[tokio::test]
+    async fn a_late_connection_joins_the_window_in_progress() {
+        let registry = SessionRegistry::new();
+        let session = registry.create_session([9; 6], SessionParams::default()).await;
+        let first = session.add_connection(0).await;
+        for sn in 1..=5 {
+            first.advance_cmd_sn(sn);
+        }
+        assert_eq!(first.exp_cmd_sn(), 6);
+
+        let late = session.add_connection(1).await;
+        assert_eq!(late.exp_cmd_sn(), 6, "the new connection rewound the session");
+        assert_eq!(late.next_stat_sn(), 1, "but its own StatSN starts fresh");
+    }
+
+    /// One connection closing leaves the session, and its siblings, alone.
+    #[tokio::test]
+    async fn removing_one_connection_keeps_the_session() {
+        let registry = SessionRegistry::new();
+        let session = registry.create_session([7; 6], SessionParams::default()).await;
+        session.add_connection(0).await;
+        let survivor = session.add_connection(1).await;
+
+        session.remove_connection(0).await;
+        assert_eq!(session.connection_count().await, 1);
+        assert!(registry.get_session(session.tsih).await.is_some());
+
+        // The survivor still drives the session's window.
+        survivor.advance_cmd_sn(1);
+        assert_eq!(survivor.exp_cmd_sn(), 2);
     }
 }

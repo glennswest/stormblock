@@ -651,6 +651,11 @@ async fn main() -> anyhow::Result<()> {
             target_name: cli.iscsi_target_name.clone(),
             chap,
             max_sessions: 64,
+            max_connections: config
+                .iscsi
+                .as_ref()
+                .map(|c| c.max_connections)
+                .unwrap_or(4),
         };
         let iscsi = target::iscsi::IscsiTarget::new(iscsi_config);
 

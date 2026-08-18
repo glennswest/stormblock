@@ -20,6 +20,13 @@ pub enum LoginStatus {
     InitiatorError,
     AuthFailure,
     TargetNotFound,
+    /// The initiator named a session (TSIH) this target does not have. RFC
+    /// 7143 §11.13.5 status 0x0203 — distinct from "unknown target", because
+    /// the target is right and the *session* is the thing that is gone.
+    SessionNotFound,
+    /// The session is already carrying as many connections as it negotiated
+    /// (0x0206). MC/S's flow-control answer to one connection too many.
+    TooManyConnections,
     TargetError,
 }
 
@@ -32,6 +39,8 @@ impl LoginStatus {
             LoginStatus::InitiatorError => (2, 0),
             LoginStatus::AuthFailure => (2, 1),
             LoginStatus::TargetNotFound => (2, 2),
+            LoginStatus::SessionNotFound => (2, 3),
+            LoginStatus::TooManyConnections => (2, 6),
             LoginStatus::TargetError => (3, 0),
         }
     }
@@ -60,6 +69,10 @@ pub struct LoginStateMachine {
     stat_sn: u32,
     /// ExpCmdSN derived from the latest login request's CmdSN.
     exp_cmd_sn: u32,
+    /// Most connections this target will carry on one session (MC/S, #31).
+    /// Negotiation takes the lower of this and what the initiator asked for,
+    /// which is what RFC 7143 §12.2 requires.
+    max_connections: u32,
 }
 
 impl LoginStateMachine {
@@ -74,7 +87,14 @@ impl LoginStateMachine {
             security_offered: false,
             stat_sn: 1,
             exp_cmd_sn: 1,
+            max_connections: 1,
         }
+    }
+
+    /// Offer MC/S up to `max` connections per session.
+    pub fn with_max_connections(mut self, max: u32) -> Self {
+        self.max_connections = max.max(1);
+        self
     }
 
     /// StatSN the full-feature phase should use for its first response.
@@ -233,6 +253,9 @@ impl LoginStateMachine {
         }
 
         let mut response_params: Vec<(&str, &str)> = Vec::new();
+        // Held outside the loop so the reply can borrow it: the answer is a
+        // number chosen during negotiation, not a literal.
+        let mut negotiated_max_connections: Option<u32> = None;
 
         for (key, val) in params {
             match key.as_str() {
@@ -297,8 +320,12 @@ impl LoginStateMachine {
                 }
                 "MaxConnections" => {
                     if let Ok(v) = val.parse::<u32>() {
-                        self.params.max_connections = v.min(1); // single-conn for now
-                        response_params.push(("MaxConnections", "1"));
+                        // The lower of the two wins (RFC 7143 §12.2). An
+                        // initiator that says 1 gets 1 whatever this target
+                        // would allow, which is why raising the cap cannot
+                        // break a consumer that does not want MC/S.
+                        self.params.max_connections = v.clamp(1, self.max_connections);
+                        negotiated_max_connections = Some(self.params.max_connections);
                     }
                 }
                 "MaxOutstandingR2T" => {
@@ -318,6 +345,11 @@ impl LoginStateMachine {
                 }
                 _ => {}
             }
+        }
+
+        let max_conns = negotiated_max_connections.map(|v| v.to_string());
+        if let Some(v) = &max_conns {
+            response_params.push(("MaxConnections", v));
         }
 
         // Always provide MaxRecvDataSegmentLength from target side
@@ -379,6 +411,27 @@ impl LoginStateMachine {
     fn make_error_response(&mut self, req: &IscsiPdu, status: LoginStatus) -> LoginResult {
         let pdu = self.make_login_response(req, &[], false, self.stage, self.stage, status);
         LoginResult::Failed(pdu)
+    }
+
+    /// A bare rejection, for a refusal decided *after* the state machine has
+    /// already said the login could complete.
+    ///
+    /// MC/S needs this: whether a connection may join is a property of the
+    /// session, which the state machine cannot see — it only knows the
+    /// negotiation went well. Rather than teach it about the session registry,
+    /// the caller rejects with the right status once it knows (#31).
+    pub fn reject(req: &IscsiPdu, status: LoginStatus) -> IscsiPdu {
+        let mut bhs = Bhs::new();
+        bhs.set_opcode(Opcode::LoginResponse);
+        let mut isid = [0u8; 6];
+        isid.copy_from_slice(&req.bhs.raw[8..14]);
+        bhs.set_isid(&isid);
+        bhs.set_tsih(req.bhs.tsih());
+        bhs.set_initiator_task_tag(req.bhs.initiator_task_tag());
+        let (class, detail) = status.class_detail();
+        bhs.raw[36] = class;
+        bhs.raw[37] = detail;
+        IscsiPdu::with_data(bhs, Vec::new())
     }
 }
 

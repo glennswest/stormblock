@@ -274,6 +274,36 @@ curl -X POST http://node:9090/v1/volumes/<clone-id>/reset
 Reset is refused while the volume is attached, since its contents cannot
 change under a live host.
 
+### Multiple connections per iSCSI session (MC/S)
+
+An iSCSI session can carry several TCP connections, so an iSCSI-only consumer
+is not limited to one stream. The target offers up to `max_connections`
+(default 4) and negotiation takes the **lower** of that and what the initiator
+asks for — an initiator that wants one connection still gets one, so raising
+the cap cannot change what an existing consumer sees.
+
+```toml
+[iscsi]
+max_connections = 4
+```
+
+A login carrying a non-zero TSIH adds a connection to that session rather than
+starting a new one, and the ISID has to match as well: the two identify the
+session together, and a TSIH on its own is guessable. One connection closing
+now removes **that connection**, not the session — the session ends when its
+last connection does.
+
+The part that had to be right first: **CmdSN belongs to the session, StatSN to
+the connection** (RFC 7143 §4.2.2.1). One shared command window is handed to
+every connection that joins, so an initiator with two paths is told one
+consistent thing about its own flow control. Tracking it per connection — which
+is what single-connection code could get away with — would have each connection
+advertising a different window for the same session.
+
+`GET /api/v1/sessions` reports the per-session connection count. NVMe-oF reaches
+parallelism through queue count instead, so this matters for consumers that are
+iSCSI-only.
+
 ### Moving a volume — re-home, or shrink
 
 Growing is a resize (above). Shrinking is not, and cannot be: the extents past

@@ -37,6 +37,14 @@ pub struct IscsiConfig {
     pub chap: Option<ChapConfig>,
     /// Maximum concurrent sessions.
     pub max_sessions: u32,
+    /// Most connections one session may carry — MC/S (#31).
+    ///
+    /// Default 4. The negotiation takes the lower of this and what the
+    /// initiator asks for, so a consumer that wants one connection still gets
+    /// one; raising it only helps initiators that ask. NVMe-oF reaches
+    /// parallelism through queue count instead, so this matters for consumers
+    /// that are iSCSI-only.
+    pub max_connections: u32,
 }
 
 impl Default for IscsiConfig {
@@ -46,6 +54,7 @@ impl Default for IscsiConfig {
             target_name: "iqn.2024.io.stormblock:default".into(),
             chap: None,
             max_sessions: 64,
+            max_connections: 4,
         }
     }
 }
@@ -165,12 +174,15 @@ impl IscsiTarget {
         let mut writer = BufWriter::new(writer);
 
         // Login phase
-        let (session_params, session, stat_sn, exp_cmd_sn) =
+        let (session_params, session, conn) =
             self.login_phase(&mut reader, &mut writer).await?;
         let tsih = session.tsih;
+        let cid = conn.cid;
         tracing::info!(
-            "iSCSI session established from {peer}, TSIH={tsih}, initiator={}",
-            session_params.initiator_name
+            "iSCSI connection {cid} established from {peer}, TSIH={tsih}, initiator={} ({} on \
+             this session)",
+            session_params.initiator_name,
+            session.connection_count().await,
         );
 
         // Full feature phase
@@ -178,26 +190,43 @@ impl IscsiTarget {
             &mut reader,
             &mut writer,
             &session_params,
-            &session,
-            stat_sn,
-            exp_cmd_sn,
+            &conn,
             local_addr,
         ).await;
 
-        // Cleanup
-        self.sessions.remove_session(tsih).await;
-        tracing::debug!("iSCSI session {tsih} from {peer} ended");
+        // Cleanup. **This connection**, not the session: with MC/S one
+        // connection dropping must not take its siblings' session with it, and
+        // an initiator that loses a path expects the others to keep serving.
+        // The session goes when its last connection does.
+        session.remove_connection(cid).await;
+        if session.connection_count().await == 0 {
+            self.sessions.remove_session(tsih).await;
+            tracing::debug!("iSCSI session {tsih} from {peer} ended (last connection closed)");
+        } else {
+            tracing::debug!(
+                "iSCSI connection {cid} from {peer} closed; session {tsih} still has {}",
+                session.connection_count().await
+            );
+        }
         result
     }
 
-    /// Run the login negotiation. Returns the negotiated session parameters,
-    /// the allocated TSIH, and the (StatSN, ExpCmdSN) the full-feature phase
-    /// must continue from.
+    /// Run the login negotiation.
+    ///
+    /// Returns the negotiated parameters, the session this connection belongs
+    /// to — a **new** one for a leading login, or the **existing** one when the
+    /// initiator presents a non-zero TSIH (RFC 7143 §6.3.1, which is how MC/S
+    /// adds a connection) — and the registered connection itself, already
+    /// sharing the session's command window.
     async fn login_phase<R, W>(
         &self,
         reader: &mut R,
         writer: &mut W,
-    ) -> std::io::Result<(SessionParams, std::sync::Arc<session::Session>, u32, u32)>
+    ) -> std::io::Result<(
+        SessionParams,
+        std::sync::Arc<session::Session>,
+        std::sync::Arc<ConnectionState>,
+    )>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
@@ -205,7 +234,8 @@ impl IscsiTarget {
         let mut state_machine = LoginStateMachine::new(
             self.config.target_name.clone(),
             self.config.chap.clone(),
-        );
+        )
+        .with_max_connections(self.config.max_connections);
 
         loop {
             let req = read_pdu(reader, false, false).await?;
@@ -221,19 +251,95 @@ impl IscsiTarget {
                     write_pdu(writer, &resp, false, false).await?;
                 }
                 LoginResult::Complete(resp, params) => {
-                    // Allocate TSIH and register session
-                    let session = self.sessions.create_session(
-                        req.bhs.isid(),
-                        params.clone(),
-                    ).await;
-                    let tsih = session.tsih;
+                    let requested_tsih = req.bhs.tsih();
+                    let cid = req.bhs.cid();
 
-                    // Set TSIH in response
+                    // A non-zero TSIH is the initiator saying "add this
+                    // connection to that session" rather than "make me a new
+                    // one". Joining is what MC/S *is*; without it a second
+                    // connection becomes a second session and shares nothing.
+                    let session = match requested_tsih {
+                        0 => {
+                            let s = self
+                                .sessions
+                                .create_session(req.bhs.isid(), params.clone())
+                                .await;
+                            // The leading connection seeds the session's
+                            // command window from what login negotiated.
+                            s.cmd_sn.advance_to(state_machine.exp_cmd_sn());
+                            s
+                        }
+                        tsih => match self.sessions.get_session(tsih).await {
+                            // The ISID has to match as well as the TSIH. They
+                            // identify the initiator's session together, and a
+                            // TSIH alone is guessable.
+                            Some(s) if s.isid == req.bhs.isid() => {
+                                let existing = s.connection_count().await as u32;
+                                if existing >= s.params.max_connections.max(1) {
+                                    tracing::warn!(
+                                        "iSCSI: refusing connection {cid} on session {tsih} —                                          already at its negotiated {} connection(s)",
+                                        s.params.max_connections
+                                    );
+                                    let pdu = LoginStateMachine::reject(
+                                        &req,
+                                        login::LoginStatus::TooManyConnections,
+                                    );
+                                    write_pdu(writer, &pdu, false, false).await?;
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionRefused,
+                                        "session is at its connection limit",
+                                    ));
+                                }
+                                if s.connections.read().await.contains_key(&cid) {
+                                    tracing::warn!(
+                                        "iSCSI: connection id {cid} is already in use on                                          session {tsih}"
+                                    );
+                                    let pdu = LoginStateMachine::reject(
+                                        &req,
+                                        login::LoginStatus::InitiatorError,
+                                    );
+                                    write_pdu(writer, &pdu, false, false).await?;
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::AddrInUse,
+                                        "duplicate connection id",
+                                    ));
+                                }
+                                tracing::info!(
+                                    "iSCSI: connection {cid} joining existing session {tsih}"
+                                );
+                                s
+                            }
+                            _ => {
+                                // Session gone (or not the initiator's). Per
+                                // RFC 7143 this is a failure, not a silent new
+                                // session — the initiator believes it has state
+                                // here that it does not.
+                                tracing::warn!(
+                                    "iSCSI: login for unknown session TSIH={tsih}"
+                                );
+                                let pdu = LoginStateMachine::reject(
+                                    &req,
+                                    login::LoginStatus::SessionNotFound,
+                                );
+                                write_pdu(writer, &pdu, false, false).await?;
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::NotFound,
+                                    "no such session",
+                                ));
+                            }
+                        },
+                    };
+
+                    let tsih = session.tsih;
+                    let conn = session
+                        .add_connection_with_stat_sn(cid, state_machine.next_stat_sn())
+                        .await;
+
                     let mut final_resp = resp;
                     final_resp.bhs.set_tsih(tsih);
 
                     write_pdu(writer, &final_resp, false, false).await?;
-                    return Ok((params, session, state_machine.next_stat_sn(), state_machine.exp_cmd_sn()));
+                    return Ok((params, session, conn));
                 }
                 LoginResult::Failed(resp) => {
                     write_pdu(writer, &resp, false, false).await?;
@@ -252,20 +358,18 @@ impl IscsiTarget {
         reader: &mut R,
         writer: &mut W,
         params: &SessionParams,
-        session: &std::sync::Arc<session::Session>,
-        stat_sn: u32,
-        exp_cmd_sn: u32,
+        conn: &std::sync::Arc<ConnectionState>,
         local_addr: Option<SocketAddr>,
     ) -> std::io::Result<()>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
     {
-        // Register the connection on the session so its count reflects
-        // reality — a consumer deciding whether an export is safe to withdraw
-        // reads that number.
-        let conn = std::sync::Arc::new(ConnectionState::with_sns(0, stat_sn, exp_cmd_sn));
-        session.register_connection(0, conn.clone()).await;
+        // The connection was registered on the session during login, which is
+        // also where it was given the session's shared command window — so its
+        // count reflects reality from the moment the login completes, and a
+        // consumer deciding whether an export is safe to withdraw reads a
+        // number that was never briefly wrong.
         let conn = conn.as_ref();
         let header_digest = params.header_digest;
         let data_digest = params.data_digest;
@@ -367,8 +471,8 @@ impl IscsiTarget {
         bhs.set_target_transfer_tag(0xFFFF_FFFF);
         let stat_sn = conn.next_stat_sn();
         bhs.set_stat_sn(stat_sn);
-        bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
-        bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+        bhs.set_exp_cmd_sn(conn.exp_cmd_sn());
+        bhs.set_max_cmd_sn(conn.max_cmd_sn());
 
         let pdu = IscsiPdu::with_data(bhs, resp_data);
         write_pdu(writer, &pdu, header_digest, data_digest).await
@@ -513,8 +617,8 @@ impl IscsiTarget {
                 bhs.set_status(ScsiStatus::Good as u8);
                 let stat_sn = conn.next_stat_sn();
                 bhs.set_stat_sn(stat_sn);
-                bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
-                bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+                bhs.set_exp_cmd_sn(conn.exp_cmd_sn());
+                bhs.set_max_cmd_sn(conn.max_cmd_sn());
             }
 
             let pdu = IscsiPdu::with_data(bhs, chunk.to_vec());
@@ -538,8 +642,8 @@ impl IscsiTarget {
 
         let stat_sn = conn.next_stat_sn();
         bhs.set_stat_sn(stat_sn);
-        bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
-        bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+        bhs.set_exp_cmd_sn(conn.exp_cmd_sn());
+        bhs.set_max_cmd_sn(conn.max_cmd_sn());
 
         if let (ScsiStatus::CheckCondition, Some(sense)) = (result.status, &result.sense) {
             let sense_data = sense.to_bytes();
@@ -583,8 +687,8 @@ impl IscsiTarget {
             r2t_bhs.set_initiator_task_tag(itt);
             r2t_bhs.set_target_transfer_tag(itt); // Use ITT as TTT for simplicity
             r2t_bhs.set_stat_sn(conn.stat_sn.load(std::sync::atomic::Ordering::Relaxed));
-            r2t_bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
-            r2t_bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+            r2t_bhs.set_exp_cmd_sn(conn.exp_cmd_sn());
+            r2t_bhs.set_max_cmd_sn(conn.max_cmd_sn());
             r2t_bhs.set_r2t_sn(r2t_sn);
             r2t_bhs.set_buffer_offset(offset);
             r2t_bhs.set_desired_data_transfer_length(transfer_len);
@@ -656,8 +760,8 @@ impl IscsiTarget {
 
         let stat_sn = conn.next_stat_sn();
         bhs.set_stat_sn(stat_sn);
-        bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
-        bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+        bhs.set_exp_cmd_sn(conn.exp_cmd_sn());
+        bhs.set_max_cmd_sn(conn.max_cmd_sn());
 
         let pdu = IscsiPdu::new(bhs);
         write_pdu(writer, &pdu, header_digest, data_digest).await
@@ -680,8 +784,8 @@ impl IscsiTarget {
 
         let stat_sn = conn.next_stat_sn();
         bhs.set_stat_sn(stat_sn);
-        bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
-        bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+        bhs.set_exp_cmd_sn(conn.exp_cmd_sn());
+        bhs.set_max_cmd_sn(conn.max_cmd_sn());
 
         let pdu = IscsiPdu::new(bhs);
         write_pdu(writer, &pdu, header_digest, data_digest).await
@@ -704,8 +808,8 @@ impl IscsiTarget {
 
         let stat_sn = conn.next_stat_sn();
         bhs.set_stat_sn(stat_sn);
-        bhs.set_exp_cmd_sn(conn.exp_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
-        bhs.set_max_cmd_sn(conn.max_cmd_sn.load(std::sync::atomic::Ordering::Relaxed));
+        bhs.set_exp_cmd_sn(conn.exp_cmd_sn());
+        bhs.set_max_cmd_sn(conn.max_cmd_sn());
 
         let pdu = IscsiPdu::new(bhs);
         write_pdu(writer, &pdu, header_digest, data_digest).await
