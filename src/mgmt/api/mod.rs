@@ -102,6 +102,68 @@ impl ApiError {
     }
 }
 
+/// Everything on this node that is currently serving `volume_id`.
+///
+/// One answer, shared: a volume-level move must not copy a filesystem
+/// something is still writing to (#20), and the template orphan sweep must not
+/// delete a volume something has attached (#48). Both questions are the same
+/// question, and having two implementations of it means one of them is
+/// eventually wrong.
+pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<String> {
+    let mut busy = Vec::new();
+
+    for e in state.exports.read().await.iter() {
+        if e.volume_id == volume_id {
+            busy.push(format!("export {} ({})", e.id, e.protocol));
+        }
+    }
+    #[cfg(feature = "iscsi")]
+    for (lun_id, entry) in state.lun_entries.read().await.iter() {
+        if matches!(entry.backing, crate::mgmt::LunBacking::Volume { volume_id: v } if v == volume_id)
+        {
+            busy.push(format!("iSCSI LUN {lun_id}"));
+        }
+    }
+    if state.ublk_exports.lock().await.is_exported(&volume_id.to_string()) {
+        busy.push("a ublk device".to_string());
+    }
+    busy
+}
+
+/// Every volume this node is currently serving.
+///
+/// The set form, for callers deciding what is safe to delete in bulk.
+pub async fn volumes_in_use(state: &AppState) -> std::collections::HashSet<uuid::Uuid> {
+    let mut in_use = std::collections::HashSet::new();
+    for e in state.exports.read().await.iter() {
+        in_use.insert(e.volume_id);
+    }
+    #[cfg(feature = "iscsi")]
+    for entry in state.lun_entries.read().await.values() {
+        if let crate::mgmt::LunBacking::Volume { volume_id } = entry.backing {
+            in_use.insert(volume_id);
+        }
+    }
+    // ublk exports are keyed by the /v1 volume id rather than the engine's, so
+    // they are matched by string against the engine ids we already have.
+    let ublk = state.ublk_exports.lock().await;
+    let volumes: Vec<uuid::Uuid> = state
+        .volume_manager
+        .lock()
+        .await
+        .list_volumes()
+        .await
+        .into_iter()
+        .map(|(id, _, _, _)| id.0)
+        .collect();
+    for id in volumes {
+        if ublk.is_exported(&id.to_string()) {
+            in_use.insert(id);
+        }
+    }
+    in_use
+}
+
 /// Standard list response wrapper.
 #[derive(Debug, Serialize)]
 pub struct ListResponse<T: Serialize> {

@@ -234,8 +234,9 @@ left unless asked not to (`?purge=false`). A create that fails anywhere, at
 format, at seed or at seal, leaves nothing behind, so retrying a name does not
 cost two more volumes each time. For a node that already accumulated debris,
 `GET /api/v1/fstemplates/orphans` lists volumes named like a template's that no
-template claims, and `DELETE` on the same path reclaims them; clones are named
-by their consumer, so they are never in that set.
+template claims **and nothing on this node is serving**, and `DELETE` on the
+same path reclaims them; clones are named by their consumer, so they are never
+in that set.
 
 Formats do not queue. No lock is held across a format, a check or a stamp, and
 the formatter takes `&self` so one format fans out across block groups.

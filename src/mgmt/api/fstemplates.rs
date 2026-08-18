@@ -54,6 +54,19 @@ fn err(e: TemplateError) -> Response {
         TemplateError::NotSealable(m) => ApiError::conflict(m),
         TemplateError::Invalid(m) => ApiError::bad_request(m),
         TemplateError::Internal(m) => ApiError::internal(m),
+        // The id is the response, not a detail of it. A leaked clone carries a
+        // caller-chosen name, so nothing on this side can find it by name
+        // later — the caller has to be handed the one thing that identifies
+        // it, or the volume is unreclaimable (#48).
+        TemplateError::Leaked { volume_id, message } => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": format!("{message}; volume {volume_id} is leaked"),
+                "code": 500,
+                "leaked_volume_id": volume_id,
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -348,7 +361,9 @@ async fn delete_template(
 async fn list_orphans(State(state): State<Arc<AppState>>) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "orphans")
         .increment(1);
-    let found = template::orphans(&state.volume_manager, &state.fstemplates).await;
+    // Never offer to reclaim something this node is serving (#48).
+    let in_use = super::volumes_in_use(&state).await;
+    let found = template::orphans(&state.volume_manager, &state.fstemplates, &in_use).await;
     let bytes: u64 = found.iter().map(|o| o.allocated_bytes).sum();
     Json(json!({ "orphans": found, "count": found.len(), "allocated_bytes": bytes }))
         .into_response()
@@ -357,7 +372,8 @@ async fn list_orphans(State(state): State<Arc<AppState>>) -> Response {
 async fn reclaim_orphans(State(state): State<Arc<AppState>>) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "reclaim_orphans")
         .increment(1);
-    let gone = template::reclaim_orphans(&state.volume_manager, &state.fstemplates).await;
+    let in_use = super::volumes_in_use(&state).await;
+    let gone = template::reclaim_orphans(&state.volume_manager, &state.fstemplates, &in_use).await;
     let bytes: u64 = gone.iter().map(|o| o.allocated_bytes).sum();
     tracing::info!("reclaimed {} orphaned template volume(s), {bytes} bytes", gone.len());
     Json(json!({ "reclaimed": gone, "count": gone.len(), "allocated_bytes": bytes }))

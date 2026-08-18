@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use super::ApiError;
 use crate::mgmt::config::parse_size;
-use crate::mgmt::{AppState, LunBacking};
+use crate::mgmt::AppState;
 use crate::volume::relocate::{self, MoveError, MoveSpec, MoveState};
 use crate::volume::VolumeId;
 
@@ -74,32 +74,6 @@ fn yes() -> bool {
     true
 }
 
-/// Everything this node knows of that is currently serving `volume_id`.
-///
-/// A move is offline by contract: the copy source has to be static, and a
-/// filesystem still mounted somewhere is not. This is the same guard resize
-/// already applies, widened to every way a volume can be reachable — an
-/// exported volume with a live initiator is exactly the case where a
-/// "successful" move produces a target missing whatever was written during it.
-async fn what_is_serving(state: &AppState, volume_id: Uuid) -> Vec<String> {
-    let mut busy = Vec::new();
-
-    for e in state.exports.read().await.iter() {
-        if e.volume_id == volume_id {
-            busy.push(format!("export {} ({:?})", e.id, e.protocol));
-        }
-    }
-    for (lun_id, entry) in state.lun_entries.read().await.iter() {
-        if matches!(entry.backing, LunBacking::Volume { volume_id: v } if v == volume_id) {
-            busy.push(format!("iSCSI LUN {lun_id}"));
-        }
-    }
-    if state.ublk_exports.lock().await.is_exported(&volume_id.to_string()) {
-        busy.push("a ublk device".to_string());
-    }
-    busy
-}
-
 async fn start_move(
     State(state): State<Arc<AppState>>,
     Json(req): Json<StartMoveRequest>,
@@ -114,7 +88,7 @@ async fn start_move(
         }
     };
 
-    let busy = what_is_serving(&state, req.volume_id).await;
+    let busy = super::what_is_serving(&state, req.volume_id).await;
     if !busy.is_empty() {
         return ApiError::conflict(format!(
             "volume {} is still served by {} — a move copies a static filesystem, so detach it \
@@ -199,7 +173,7 @@ async fn finish(state: Arc<AppState>, id: String, commit: bool) -> Response {
     // something at. Re-checked rather than trusted from the start call: the
     // caller has been off doing things in between, and that is the point.
     if commit && mv.state == MoveState::ReadyToCommit {
-        let busy = what_is_serving(&state, mv.source).await;
+        let busy = super::what_is_serving(&state, mv.source).await;
         if !busy.is_empty() {
             return ApiError::conflict(format!(
                 "the source volume {} is being served again by {} — repoint it at the target \

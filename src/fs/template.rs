@@ -273,6 +273,13 @@ pub enum TemplateError {
     /// Wrong state for the operation (sealing a sealed template, cloning an
     /// unsealed one, purging one with descendants).
     Conflict(String),
+    /// A volume that had to be thrown away could not be, so it is still there
+    /// under a name the caller chose. Carries the id, because that is the only
+    /// way anyone can clean it up: a clone is created under the *caller's* name
+    /// (`pvc-web-1`, not `fstemplate-…`), so a leaked one is indistinguishable
+    /// by name from a live consumer volume and no sweeper can safely find it
+    /// (#48).
+    Leaked { volume_id: Uuid, message: String },
     /// The filesystem on the volume is not in a state a consumer can mount.
     NotSealable(String),
     Invalid(String),
@@ -288,6 +295,9 @@ impl std::fmt::Display for TemplateError {
             TemplateError::NotSealable(m) => write!(f, "{m}"),
             TemplateError::Invalid(m) => write!(f, "{m}"),
             TemplateError::Internal(m) => write!(f, "{m}"),
+            TemplateError::Leaked { volume_id, message } => {
+                write!(f, "{message}; volume {volume_id} is leaked")
+            }
         }
     }
 }
@@ -394,6 +404,54 @@ impl TemplateStore {
     }
 }
 
+/// Throw away a volume the caller must not be handed, and say so truthfully.
+///
+/// The whole point is the return value. Discarding used to be `let _ = …`, so
+/// when the delete failed the volume survived and the caller was told, in as
+/// many words, that it had been discarded (#48). That is not a hypothetical
+/// failure: `delete_volume` releases slots best-effort and still reports the
+/// ones it could not release (#37).
+///
+/// Retried once, because most of those failure modes are transient-ish and a
+/// second attempt costs nothing next to a volume nobody can ever find again.
+async fn discard(vm: &VmLock, id: VolumeId) -> std::result::Result<(), String> {
+    let first = match vm.lock().await.delete_volume(id).await {
+        Ok(()) => return Ok(()),
+        Err(e) => e.to_string(),
+    };
+    match vm.lock().await.delete_volume(id).await {
+        Ok(()) => {
+            tracing::warn!("discarding volume {id} succeeded on the second attempt (first: {first})");
+            Ok(())
+        }
+        // A volume that is already gone is discarded, whatever the first error
+        // said — this is the retry finding the state it wanted.
+        Err(crate::volume::VolumeError::VolumeNotFound(_)) => Ok(()),
+        Err(second) => Err(format!("{first} (retry: {second})")),
+    }
+}
+
+/// Discard a volume, folding a failed discard into the error the caller gets.
+///
+/// `context` says what went wrong first; the caller is never told the volume
+/// was thrown away unless it actually was.
+async fn discard_or_report(vm: &VmLock, id: VolumeId, context: String) -> TemplateError {
+    match discard(vm, id).await {
+        Ok(()) => TemplateError::Internal(format!("{context} — the volume was discarded")),
+        Err(why) => {
+            tracing::error!(
+                volume = %id,
+                "{context} — and it could NOT be discarded: {why}. The volume is leaked and \
+                 carries a caller-chosen name, so nothing can find it automatically."
+            );
+            TemplateError::Leaked {
+                volume_id: id.0,
+                message: format!("{context} — and it could NOT be discarded: {why}"),
+            }
+        }
+    }
+}
+
 /// Undo a half-built template: forget it, and delete every volume it made.
 ///
 /// Every failure inside [`create`] goes through here. A create that does not
@@ -468,7 +526,20 @@ pub async fn create(
         let mut s = store.lock().await;
         if s.by_name(&spec.name).is_some() {
             drop(s);
-            let _ = vm.lock().await.delete_volume(raw).await;
+            // The loser gives its volume back — and if it cannot, that is the
+            // error the caller gets, rather than a tidy "already exists" over
+            // a volume nobody will ever look for.
+            if let Err(why) = discard(vm, raw).await {
+                tracing::error!(volume = %raw, "lost a race for the name {} and could not give the volume back: {why}", spec.name);
+                return Err(TemplateError::Leaked {
+                    volume_id: raw.0,
+                    message: format!(
+                        "fstemplate {} already exists, and this attempt's volume could NOT be \
+                         discarded: {why}",
+                        spec.name
+                    ),
+                });
+            }
             return Err(TemplateError::Exists(format!(
                 "fstemplate {} already exists",
                 spec.name
@@ -792,10 +863,12 @@ pub async fn clone_template(
                     // shares its template's identity is the bug this exists to
                     // prevent (stormblockmk#12).
                     drop(dev);
-                    let _ = vm.lock().await.delete_volume(id).await;
-                    return Err(TemplateError::Internal(format!(
-                        "stamping a fresh filesystem UUID on the clone: {e}"
-                    )));
+                    return Err(discard_or_report(
+                        vm,
+                        id,
+                        format!("stamping a fresh filesystem UUID on clone {}: {e}", spec.name),
+                    )
+                    .await);
                 }
             }
         }
@@ -831,11 +904,12 @@ pub async fn clone_template(
             Err(e) => Some(e.to_string()),
         };
         if let Some(why) = problem {
-            let _ = vm.lock().await.delete_volume(id).await;
-            return Err(TemplateError::Internal(format!(
-                "clone {} did not check out and was discarded: {why}",
-                spec.name
-            )));
+            return Err(discard_or_report(
+                vm,
+                id,
+                format!("clone {} did not check out ({why})", spec.name),
+            )
+            .await);
         }
     }
 
@@ -917,13 +991,23 @@ pub struct OrphanVolume {
 /// Clones are named by whoever asked for them, so they never match.
 const VOLUME_PREFIX: &str = "fstemplate-";
 
-/// Volumes named like a template's, which no template in the store claims.
+/// Volumes named like a template's, which no template in the store claims and
+/// nothing is currently serving.
 ///
 /// This is the reconciliation an instance needs *after* the fact. Before the
 /// fixes above, a `DELETE` without `purge` removed the store entry and left
 /// both volumes standing; nothing afterwards could tell those apart from live
 /// ones by name (#47). Comparing against the store is what tells them apart.
-pub async fn orphans(vm: &VmLock, store: &StoreLock) -> Vec<OrphanVolume> {
+///
+/// `in_use` is a required argument rather than an optional guard, because the
+/// consequence of forgetting it is deleting a volume something has attached
+/// (#48). This module cannot compute it — export tables live in the management
+/// layer — so the caller must, and being unable to omit it is the point.
+pub async fn orphans(
+    vm: &VmLock,
+    store: &StoreLock,
+    in_use: &std::collections::HashSet<Uuid>,
+) -> Vec<OrphanVolume> {
     let claimed: std::collections::HashSet<Uuid> = {
         let s = store.lock().await;
         s.templates.iter().flat_map(|t| t.volumes()).map(|v| v.0).collect()
@@ -931,7 +1015,9 @@ pub async fn orphans(vm: &VmLock, store: &StoreLock) -> Vec<OrphanVolume> {
     let volumes = vm.lock().await.list_volumes().await;
     volumes
         .into_iter()
-        .filter(|(id, name, _, _)| name.starts_with(VOLUME_PREFIX) && !claimed.contains(&id.0))
+        .filter(|(id, name, _, _)| {
+            name.starts_with(VOLUME_PREFIX) && !claimed.contains(&id.0) && !in_use.contains(&id.0)
+        })
         .map(|(id, name, size, allocated)| OrphanVolume {
             volume_id: id.0,
             name,
@@ -942,15 +1028,21 @@ pub async fn orphans(vm: &VmLock, store: &StoreLock) -> Vec<OrphanVolume> {
 }
 
 /// Delete every volume [`orphans`] reports, and say what went.
-pub async fn reclaim_orphans(vm: &VmLock, store: &StoreLock) -> Vec<OrphanVolume> {
-    let found = orphans(vm, store).await;
+///
+/// A volume that will not delete is reported at `error` and left alone rather
+/// than counted as reclaimed — the caller is told what actually went.
+pub async fn reclaim_orphans(
+    vm: &VmLock,
+    store: &StoreLock,
+    in_use: &std::collections::HashSet<Uuid>,
+) -> Vec<OrphanVolume> {
+    let found = orphans(vm, store, in_use).await;
     let mut reclaimed = Vec::with_capacity(found.len());
-    let mut m = vm.lock().await;
     for orphan in found {
-        match m.delete_volume(VolumeId(orphan.volume_id)).await {
+        match discard(vm, VolumeId(orphan.volume_id)).await {
             Ok(()) => reclaimed.push(orphan),
-            Err(e) => tracing::warn!(
-                "reclaiming orphaned template volume {} ({}): {e}",
+            Err(why) => tracing::error!(
+                "reclaiming orphaned template volume {} ({}) failed: {why} — it is still there",
                 orphan.volume_id,
                 orphan.name
             ),
@@ -1361,6 +1453,119 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// A clone that fails its verify is really gone before the caller is told
+    /// it was discarded (#48).
+    ///
+    /// The clone carries the *caller's* name — `pvc-1`, not `fstemplate-…` —
+    /// so one left behind is indistinguishable from a live consumer volume and
+    /// no sweeper can ever find it. Being actually gone is the only guarantee
+    /// available.
+    #[tokio::test]
+    async fn a_discarded_clone_is_really_gone_before_the_caller_is_told() {
+        let (vm, store, path) = node(2 * 1024 * 1024 * 1024).await;
+        let t = create(&vm, &store, &TemplateSpec::new("t", 64 * 1024 * 1024)).await.unwrap();
+
+        // Wreck the sealed template's filesystem so every clone of it fails
+        // its own verify. The clone inherits the damage copy-on-write.
+        {
+            let sealed = volume(&vm, t.clone_source().unwrap()).await;
+            let mut wreck = vec![0xFFu8; 8192];
+            wreck[..1024].fill(0);
+            sealed.write(0, &wreck).await.unwrap();
+        }
+
+        let before: Vec<String> = vm
+            .lock()
+            .await
+            .list_volumes()
+            .await
+            .into_iter()
+            .map(|(_, n, _, _)| n)
+            .collect();
+
+        let err = clone_template(&vm, &store, "t", &CloneSpec::new("pvc-1"))
+            .await
+            .expect_err("a clone of a wrecked template must not be handed out");
+
+        // Whatever it says, it must not claim a discard that did not happen.
+        match &err {
+            TemplateError::Internal(m) => {
+                assert!(m.contains("was discarded"), "{m}");
+            }
+            TemplateError::Leaked { volume_id, message } => {
+                panic!("the clone leaked as {volume_id}: {message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        // And it is gone — by name, which is the only handle anyone has.
+        let after: Vec<String> = vm
+            .lock()
+            .await
+            .list_volumes()
+            .await
+            .into_iter()
+            .map(|(_, n, _, _)| n)
+            .collect();
+        assert_eq!(after.len(), before.len(), "the failed clone leaked: {after:?}");
+        assert!(!after.contains(&"pvc-1".to_string()), "{after:?}");
+
+        // It is also not something the orphan sweep could have cleaned up
+        // afterwards, which is why it had to go now.
+        let nothing = std::collections::HashSet::new();
+        assert!(
+            !orphans(&vm, &store, &nothing).await.iter().any(|o| o.name == "pvc-1"),
+            "a caller-named clone is invisible to the template sweep by design"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A leaked volume names itself, because nothing else can find it: a clone
+    /// carries the caller's name, not the template prefix (#48).
+    #[test]
+    fn a_leak_error_carries_the_volume_id() {
+        let id = Uuid::new_v4();
+        let e = TemplateError::Leaked {
+            volume_id: id,
+            message: "clone pvc-1 did not check out (bad) — and it could NOT be discarded: busy"
+                .to_string(),
+        };
+        let rendered = e.to_string();
+        assert!(rendered.contains(&id.to_string()), "{rendered}");
+        assert!(rendered.contains("could NOT be discarded"), "{rendered}");
+        assert!(rendered.contains("leaked"), "{rendered}");
+    }
+
+    /// The sweep must never offer up something this node is serving (#48).
+    #[tokio::test]
+    async fn an_attached_orphan_is_not_reclaimable() {
+        let (vm, store, path) = node(2 * 1024 * 1024 * 1024).await;
+        let t = create(&vm, &store, &TemplateSpec::new("t", 64 * 1024 * 1024)).await.unwrap();
+        let sealed = t.sealed_volume_id.unwrap();
+
+        // The state #47 leaves behind: the store forgets it, the volume stays.
+        delete(&vm, &store, &t.id, false, false).await.unwrap();
+
+        // With nothing attached it is debris, and reclaimable.
+        let nothing = std::collections::HashSet::new();
+        assert_eq!(orphans(&vm, &store, &nothing).await.len(), 1);
+
+        // Attached, it is not — even though it is just as unclaimed.
+        let attached: std::collections::HashSet<Uuid> = [sealed].into_iter().collect();
+        assert!(
+            orphans(&vm, &store, &attached).await.is_empty(),
+            "an attached volume was offered for reclamation"
+        );
+        assert!(reclaim_orphans(&vm, &store, &attached).await.is_empty());
+        assert!(
+            vm.lock().await.get_volume(&VolumeId(sealed)).is_some(),
+            "the attached volume survived the sweep"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
     /// The state #47 found a node in: volumes named like a template's that no
     /// template claims, because a `DELETE` without `purge` walked away from them.
     #[tokio::test]
@@ -1372,17 +1577,21 @@ mod tests {
         // A clone, named by its consumer: never mistaken for template debris.
         clone_template(&vm, &store, "t", &CloneSpec::new("pvc-1")).await.unwrap();
 
-        assert!(orphans(&vm, &store).await.is_empty(), "a live template is not debris");
+        let nothing_attached = std::collections::HashSet::new();
+        assert!(
+            orphans(&vm, &store, &nothing_attached).await.is_empty(),
+            "a live template is not debris"
+        );
 
         // The old behaviour, by hand: forget the template, keep its volumes.
         delete(&vm, &store, &t.id, false, false).await.unwrap();
 
-        let found = orphans(&vm, &store).await;
+        let found = orphans(&vm, &store, &nothing_attached).await;
         assert_eq!(found.len(), 1, "the sealed volume is now unclaimed: {found:?}");
 
-        let gone = reclaim_orphans(&vm, &store).await;
+        let gone = reclaim_orphans(&vm, &store, &nothing_attached).await;
         assert_eq!(gone.len(), 1);
-        assert!(orphans(&vm, &store).await.is_empty());
+        assert!(orphans(&vm, &store, &nothing_attached).await.is_empty());
         assert!(
             vm.lock()
                 .await
