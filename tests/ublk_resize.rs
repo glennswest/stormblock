@@ -60,25 +60,42 @@ async fn a_live_ublk_device_follows_its_volume_growing() {
     let server = Arc::new(UblkServer::new(volume.clone()).with_dev_id(9));
     let (shutdown, rx) = tokio::sync::watch::channel(false);
     let runner = server.clone();
+    // Whatever the server thread died of, so a device that never appears comes
+    // with the reason rather than only the absence.
+    let failure = Arc::new(std::sync::Mutex::new(None::<String>));
+    let failed = failure.clone();
     let thread = std::thread::Builder::new()
         .name("ublk-resize-test".to_string())
         .spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             if let Err(e) = rt.block_on(runner.run(rx)) {
                 eprintln!("ublk server exited: {e}");
+                *failed.lock().unwrap() = Some(e.to_string());
             }
         })
         .unwrap();
 
-    // Wait for the device to appear.
-    let dev_path = server.dev_path();
-    let mut waited = 0;
-    while kernel_capacity(&dev_path).is_none() && waited < 100 {
+    // Wait for the device: the id is assigned inside run(), so the path is not
+    // known until ADD_DEV has come back.
+    let mut dev_path = String::new();
+    for _ in 0..150 {
+        let p = server.dev_path();
+        if !p.ends_with("-1") && kernel_capacity(&p).is_some() {
+            dev_path = p;
+            break;
+        }
+        if let Some(e) = failure.lock().unwrap().as_ref() {
+            panic!("ublk server failed before the device appeared: {e}");
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        waited += 1;
     }
-    let before = kernel_capacity(&dev_path)
-        .unwrap_or_else(|| panic!("{dev_path} never appeared — is ublk_drv loaded?"));
+    assert!(
+        !dev_path.is_empty(),
+        "no ublk device appeared within 15s (server path {}, error {:?})",
+        server.dev_path(),
+        failure.lock().unwrap()
+    );
+    let before = kernel_capacity(&dev_path).expect("device present");
     assert_eq!(before, START, "{dev_path} came up at the wrong size");
     assert!(
         server.resizable(),
