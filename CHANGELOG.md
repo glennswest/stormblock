@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-08-18
+- **perf:** the cluster heartbeat probes its peers concurrently (#41). A round used to await each peer in turn, so it cost `N × RTT` — and, worse for a failure detector, one hung peer stalled every peer behind it in the list: the condition the detector exists to notice was the one that made it slowest, and a healthy node's detection latency degraded in proportion to how many unhealthy ones happened to sort before it. Probes now go out together under a 64-at-a-time cap, so a round costs about one RTT and a dead peer costs one deadline wherever it sits.
+- **fix:** a heartbeat probe carries its own deadline, derived from the heartbeat interval (floor 500 ms), instead of inheriting the cluster HTTP client's 10 s — ten intervals, which is what let a single wedged peer swallow a round whole. A round that overruns its interval now logs and skips to the next tick rather than queueing rounds behind it, and the round applies its results under one membership write lock instead of one per peer. New `stormblock_cluster_heartbeat_round_seconds` histogram.
+- **note:** this leaves the heartbeat `O(N²)` fleet-wide per interval, which is a design property of all-to-all probing rather than of this loop; replacing it with a gossip failure detector is #42.
+
 ## [v8.3.0] — 2026-08-18
 
 ### 2026-08-18

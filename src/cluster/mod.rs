@@ -74,7 +74,9 @@ impl ClusterManager {
         let hb_handle = heartbeat::start_heartbeat(
             local_info.clone(),
             self.membership.clone(),
-            Duration::from_millis(self.config.heartbeat_interval_ms),
+            heartbeat::HeartbeatTuning::for_interval(Duration::from_millis(
+                self.config.heartbeat_interval_ms,
+            )),
             self.config.membership_path(),
             hb_client,
             hb_scheme,

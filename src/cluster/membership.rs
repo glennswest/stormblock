@@ -99,6 +99,15 @@ impl MembershipStore {
         self.members.get(&node_id).map(|e| (&e.info, e.status))
     }
 
+    /// How many consecutive heartbeats a node has missed.
+    ///
+    /// The status alone cannot answer this — a node under the suspect
+    /// threshold is still `Online` whether it answered or not — and the
+    /// difference is what a heartbeat round is judged on.
+    pub fn missed_heartbeats(&self, node_id: u64) -> Option<u32> {
+        self.members.get(&node_id).map(|e| e.missed_heartbeats)
+    }
+
     /// List all nodes with their status.
     pub fn list_nodes(&self) -> Vec<(&NodeInfo, NodeStatus)> {
         self.members.values().map(|e| (&e.info, e.status)).collect()
