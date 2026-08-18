@@ -10,6 +10,7 @@ pub mod metadata;
 pub mod thin;
 pub mod snapshot;
 pub mod gc;
+pub mod pressure;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

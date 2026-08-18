@@ -273,6 +273,56 @@ curl -X POST http://node:9090/v1/volumes/<clone-id>/reset
 Reset is refused while the volume is attached, since its contents cannot
 change under a live host.
 
+### Growing the pool on disk pressure
+
+Thin volumes overcommit, so a node can run out of **physical** space while every
+volume still reports free virtual space — invisible until writes start failing,
+and confusing when they do. The pool watches its own utilisation and adds a slab
+when it crosses a high-water mark:
+
+```toml
+[pressure]
+enabled = true
+high_water_pct = 80          # add capacity at or above this
+check_interval_secs = 60
+min_slab_bytes = 1073741824  # smallest slab worth adding
+max_slabs = 64               # backstop against a bad source list
+
+# Where capacity may come from, claimed in order. Nothing is ever discovered.
+[[pressure.sources]]
+kind = "directory"           # creates a new backing file — never overwrites
+path = "/var/lib/stormblock/grow"
+slab_bytes = 8589934592
+
+[[pressure.sources]]
+kind = "device"              # claimed whole; adopted if it already holds a slab
+path = "/dev/sdb2"
+```
+
+**Grow on pressure, never preallocate** — preallocating to the virtual size
+gives back everything thin provisioning saved. The pool grows one slab at a
+time, when it is actually needed. A slab is added rather than enlarged because a
+slab's data region starts past a slot table sized at format time; growing one in
+place would move every byte of data.
+
+Sources are configured and never discovered: formatting the wrong device is
+unrecoverable, and "it had no filesystem on it" is not consent. A `directory`
+source only ever creates new files, which is also how to grow into the unused
+tail of the node's own disk — mount the spare space and point it there. A
+`device` source that already carries a readable slab is **adopted with its
+data**, not reformatted, so a source claimed before a reboot comes back intact.
+
+```bash
+# How full is this node, and what is the watcher doing about it?
+curl -s http://node:9090/api/v1/slabs/pool
+```
+
+Pressure with every source claimed is logged at error and reported as
+`sources_exhausted` — the pool is under pressure and the engine is out of ways
+to answer it, which is not a state to discover late. `stormblock_pool_used_pct`,
+`stormblock_pool_free_bytes` and `stormblock_pool_slabs_added_total` carry the
+same story to Prometheus.
+
 ### Growing a volume online
 
 A volume grows in place, and the block device grows with it. `POST

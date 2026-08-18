@@ -34,6 +34,9 @@ pub struct StormBlockConfig {
     pub stormfs: crate::stormfs::StormFsConfig,
     #[serde(default)]
     pub gc: GcConfig,
+    /// Grow the pool when it comes under physical pressure (#18).
+    #[serde(default)]
+    pub pressure: crate::volume::pressure::PressureConfig,
 }
 
 /// Background extent garbage collection.
@@ -92,6 +95,7 @@ impl Default for StormBlockConfig {
             cluster: crate::cluster::config::ClusterConfig::default(),
             stormfs: crate::stormfs::StormFsConfig::default(),
             gc: GcConfig::default(),
+            pressure: crate::volume::pressure::PressureConfig::default(),
         }
     }
 }

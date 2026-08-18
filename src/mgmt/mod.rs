@@ -128,6 +128,8 @@ pub struct AppState {
     pub fstemplates: tokio::sync::Mutex<crate::fs::TemplateStore>,
     /// Live per-volume ublk exports for the local CSI fast path.
     pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
+    /// Latest pool-pressure sample, kept current by the watcher (#18).
+    pub pool_pressure: Option<std::sync::Arc<tokio::sync::RwLock<Option<crate::volume::pressure::PressureStatus>>>>,
     pub config: StormBlockConfig,
     /// Node/cluster discovery. `None` when it could not be started (for
     /// example a network without multicast) — the node still serves its own
@@ -183,6 +185,7 @@ impl AppState {
                 },
             ),
             ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
+            pool_pressure: None,
             config,
             discovery: None,
             last_gc: None,

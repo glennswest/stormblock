@@ -336,11 +336,46 @@ pub async fn gc_status(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+/// `GET /api/v1/slabs/pool` — the pool as a whole: how full it is, and what
+/// the pressure watcher is doing about it (#18).
+///
+/// Per-slab numbers were always available and nothing summed them, so the one
+/// question an operator actually asks — is this node about to run out of
+/// physical space — had no answer. Thin volumes overcommit, so it cannot be
+/// inferred from what the volumes report either.
+pub async fn pool_status(State(state): State<Arc<AppState>>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "slabs", "method" => "pool")
+        .increment(1);
+
+    // The watcher's own view when there is one — it carries the decision
+    // history. Otherwise sample directly, so the accounting is available on a
+    // node that never enabled growth.
+    if let Some(cell) = &state.pool_pressure {
+        if let Some(status) = cell.read().await.clone() {
+            return Json(status).into_response();
+        }
+    }
+
+    let usage = crate::volume::pressure::PoolUsage::sample(&state.slab_registry).await;
+    Json(serde_json::json!({
+        "enabled": false,
+        "high_water_pct": null,
+        "used_pct": usage.used_pct(),
+        "under_pressure": false,
+        "usage": usage,
+        "sources_remaining": 0,
+        "slabs_added": 0,
+    }))
+    .into_response()
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_slabs).post(format_slab))
         // Before /{id}: "gc" is a verb here, not a slab id.
         .route("/gc", get(gc_status).post(run_gc))
+        // Likewise "pool": the aggregate over every slab, not one of them.
+        .route("/pool", get(pool_status))
         .route("/{id}", get(get_slab).delete(delete_slab))
         .route("/{id}/slots", get(list_slots))
         .with_state(state)

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-08-18
+- **feat:** the pool grows itself on disk pressure (#18). Thin volumes overcommit, so physical space runs out while every volume still reports free virtual space — nothing noticed until writes failed. `volume::pressure` adds the pool-level accounting that was missing (per-slab numbers existed; nothing summed them, including a per-tier breakdown so hot-tier pressure is visible when the pool as a whole looks comfortable) and a watcher that adds a slab at or above `high_water_pct` (default 80). Grow on pressure, never preallocate: preallocating to the virtual size gives back everything thin provisioning saved.
+- **feat:** growth sources are configured and never discovered — formatting the wrong device is unrecoverable, and "it had no filesystem on it" is not consent. A `directory` source only creates new backing files, which is also how to grow into the unused tail of the node's own disk; a `device` source that already carries a readable slab is **adopted with its data** rather than reformatted, so a source claimed before a reboot comes back intact. A failing source is retired after one attempt rather than retried every interval, and `max_slabs` backstops a misconfigured list.
+- **feat:** `GET /api/v1/slabs/pool` reports usage, `used_pct`, whether the pool is under pressure, sources left and what the last check decided — available whether or not growth is enabled, since the accounting is the useful half on its own. New gauges `stormblock_pool_used_pct` / `_total_bytes` / `_free_bytes` and counters `stormblock_pool_slabs_added_total` / `_growth_failures_total`. Pressure with every source claimed logs at **error** every interval: it does not resolve itself and is not a state to discover late.
+- **note:** an empty pool reads as 100% used rather than 0%. No capacity is a pressure condition, not a comfortable one — reporting it as empty-and-fine is how a node with no slabs looks healthy right up until its first write.
+
 ## [v9.0.0] — 2026-08-18
 
 ### Breaking

@@ -346,6 +346,66 @@ async fn mgmt_luns_at_scale() {
     );
 }
 
+/// `GET /api/v1/slabs/pool` answers the one question per-slab numbers could
+/// not: how full is this node's physical pool (#18). Available whether or not
+/// the growth watcher is enabled, since the accounting is useful on its own.
+#[tokio::test]
+async fn mgmt_pool_usage_is_reported() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state_with_array(&dir).await;
+    let (base_url, server) = start_mgmt_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!("{base_url}/api/v1/slabs/pool"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(body["enabled"], false, "no watcher configured in this state");
+    assert_eq!(body["under_pressure"], false);
+    let usage = &body["usage"];
+    assert!(usage["slabs"].as_u64().unwrap() >= 1);
+    let total = usage["total_slots"].as_u64().unwrap();
+    assert!(total > 0, "a slab-backed node reports capacity: {body}");
+    assert_eq!(usage["allocated_slots"].as_u64().unwrap(), 0, "nothing written yet");
+    assert_eq!(body["used_pct"].as_f64().unwrap(), 0.0);
+    assert_eq!(
+        usage["total_bytes"].as_u64().unwrap(),
+        total * DEFAULT_EXTENT_SIZE,
+        "bytes follow slots at the pool's slot size"
+    );
+    // The tier breakdown is what makes hot-tier pressure visible when the pool
+    // as a whole looks comfortable.
+    assert!(!usage["by_tier"].as_array().unwrap().is_empty());
+
+    // Allocating moves it — the accounting is live, not a boot-time snapshot.
+    {
+        let mut vm = state.volume_manager.lock().await;
+        let id = vm.create_volume_any("pool-usage", 8 * 1024 * 1024).await.unwrap();
+        let vol = vm.get_volume(&id).unwrap();
+        vol.write(0, &vec![0x42u8; 4096]).await.unwrap();
+    }
+    let after: serde_json::Value = client
+        .get(format!("{base_url}/api/v1/slabs/pool"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        after["usage"]["allocated_slots"].as_u64().unwrap() > 0,
+        "a write shows up in pool usage: {after}"
+    );
+    assert!(after["used_pct"].as_f64().unwrap() > 0.0);
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn mgmt_get_metrics() {
     let dir = TempDir::new().unwrap();

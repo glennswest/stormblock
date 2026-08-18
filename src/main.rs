@@ -385,6 +385,26 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Pool pressure watcher. Thin volumes overcommit, so physical space runs
+    // out while every volume still reports free virtual space — nothing else
+    // notices until writes start failing (#18).
+    if config.pressure.enabled {
+        if config.pressure.sources.is_empty() {
+            tracing::warn!(
+                "pool pressure watching is enabled with no growth sources — pressure will be \
+                 reported but nothing can be done about it"
+            );
+        }
+        let status = stormblock::volume::pressure::spawn(
+            config.pressure.clone(),
+            state.slab_registry.clone(),
+            DEFAULT_EXTENT_SIZE,
+        );
+        if let Some(s) = Arc::get_mut(&mut state) {
+            s.pool_pressure = Some(status);
+        }
+    }
+
     // Collect device paths from config
     let device_paths: Vec<String> = config.drives.iter()
         .map(|d| d.path.clone())
