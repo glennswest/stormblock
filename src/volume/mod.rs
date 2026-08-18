@@ -11,6 +11,7 @@ pub mod thin;
 pub mod snapshot;
 pub mod gc;
 pub mod pressure;
+pub mod relocate;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

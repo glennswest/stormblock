@@ -273,6 +273,49 @@ curl -X POST http://node:9090/v1/volumes/<clone-id>/reset
 Reset is refused while the volume is attached, since its contents cannot
 change under a live host.
 
+### Moving a volume — re-home, or shrink
+
+Growing is a resize (above). Shrinking is not, and cannot be: the extents past
+the new end are freed immediately and **xfs cannot shrink into that**, so
+`resize` refuses it. The only safe form of "make this smaller" is to build a
+new, smaller filesystem and copy the contents across — which is what a move is,
+and why the copy is at the filesystem level rather than the block level. A
+block-level clone would faithfully reproduce the size being escaped.
+
+```bash
+# Copy and verify. Nothing is destroyed — all three volumes exist afterwards.
+curl -X POST http://node:9090/api/v1/moves \
+  -H 'Content-Type: application/json' \
+  -d '{"volume_id":"<uuid>","target_name":"var-small","target_size":"24G"}'
+
+# → {"move":{"state":"ready_to_commit","verified":true,
+#             "target_volume_id":"…","rollback_snapshot_id":"…"}}
+
+# Repoint whatever used the source at the target, then:
+curl -X POST http://node:9090/api/v1/moves/<move-id>/commit   # source goes
+curl -X POST http://node:9090/api/v1/moves/<move-id>/abort    # target goes instead
+```
+
+**Two calls, because the ones people skip when they script this are the ones
+that matter.** The first snapshots the source (copy-on-write, so it costs
+metadata and doubles as the way back), creates the target, formats it to match,
+streams the contents across and *fsck's the result* — and stops. The source is
+untouched. Only `commit` deletes it, and only after the caller has moved its
+consumer over, which is the one thing the engine cannot know.
+
+The copy is streamed straight from one filesystem into the other with no scratch
+file and no whole-archive buffer, so a 64 GiB volume holding 2 GiB moves 2 GiB.
+It goes through tar rather than a hand-rolled tree walk, which is what preserves
+modes, ownership, timestamps, symlinks, hard links, device nodes and extended
+attributes — SELinux labels among them, without which a rootfs stops booting.
+Both ends count what crossed independently and a mismatch in any category fails
+the move.
+
+A move is **offline by contract**: an exported or attached volume is refused,
+because anything written during the copy would not be in the target. It is
+*restartable* rather than resumable — an interrupted move is discarded and
+re-run, which costs time and never data.
+
 ### Growing the pool on disk pressure
 
 Thin volumes overcommit, so a node can run out of **physical** space while every

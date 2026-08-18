@@ -128,6 +128,13 @@ pub struct AppState {
     pub fstemplates: tokio::sync::Mutex<crate::fs::TemplateStore>,
     /// Live per-volume ublk exports for the local CSI fast path.
     pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
+    /// Volume moves, live and finished (#20). Kept so a move interrupted
+    /// between its copy and its commit is still nameable after a restart —
+    /// otherwise a crash there leaves two volumes and no record of which is
+    /// which.
+    pub moves: tokio::sync::RwLock<HashMap<Uuid, crate::volume::relocate::VolumeMove>>,
+    /// Where persisted management state lives, when there is anywhere.
+    pub data_dir: Option<std::path::PathBuf>,
     /// Latest pool-pressure sample, kept current by the watcher (#18).
     pub pool_pressure: Option<std::sync::Arc<tokio::sync::RwLock<Option<crate::volume::pressure::PressureStatus>>>>,
     pub config: StormBlockConfig,
@@ -185,6 +192,11 @@ impl AppState {
                 },
             ),
             ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
+            moves: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
+                Some(dir) => api::moves::load(std::path::Path::new(dir)),
+                None => HashMap::new(),
+            }),
+            data_dir: config.management.data_dir.as_ref().map(std::path::PathBuf::from),
             pool_pressure: None,
             config,
             discovery: None,

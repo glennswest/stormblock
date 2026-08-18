@@ -8,6 +8,7 @@ pub mod fstemplates;
 pub mod slabs;
 pub mod discovery;
 pub mod v1;
+pub mod moves;
 #[cfg(feature = "iscsi")]
 pub mod luns;
 #[cfg(feature = "iscsi")]
@@ -36,6 +37,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/exports", exports::router(state.clone()))
         .nest("/api/v1/slabs", slabs::router(state.clone()))
         .nest("/api/v1/fstemplates", fstemplates::router(state.clone()))
+        .nest("/api/v1/moves", moves::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
         .nest("/v1", v1::router(state.clone()));
