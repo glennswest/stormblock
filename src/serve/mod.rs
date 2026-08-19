@@ -13,6 +13,8 @@
 //!
 //! See `docs/layering.md`.
 
+pub mod config;
+pub mod ctx;
 pub mod netstat;
 pub mod status;
 pub mod tarfs;
