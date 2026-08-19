@@ -80,9 +80,22 @@ Master checklist lives in **stormblock-registry/CLAUDE.md**, "Layered goldens
       were about to replace. Size the system group for **two generations**; a
       rebase transiently holds both, since old blocks stay refcounted until
       the old goldens are deleted.
-- [ ] **Raw import** — `POST /mk/v1/volumes/{id}/raw`, sparse-aware, so a
-      pre-built `.img` can be imported and sealed without unpacking. `/tar`
-      exists; a pre-built filesystem is a block copy, not an unpack.
+- [x] **Raw import** — `POST /mk/v1/volumes/{id}/raw`, sparse-aware. Landed
+      in stormblockmk 2026-08-19 and proven end to end; **belongs down here**
+      with the rest of layer 2 (see below).
+- [ ] **Promote the serving layer out of stormblockmk** — see
+      [docs/layering.md](docs/layering.md). Measured: 4,865 lines in
+      stormblockmk, of which the RouterOS-specific part is 11 mentions in
+      config defaults and startup composition. The wiring table, reconciler,
+      readiness, reaper, tar/raw import, trim and live-session detection are
+      deployment-agnostic — a stormos profile wants ~3,700 of those lines and
+      can only fork them today. Includes fixing the export-durability gap the
+      split exposes: the engine keeps its export table in memory only and the
+      profile persists it, which is a correctness requirement living in the
+      wrong layer. **Design constraint from the notes:** layer 2 serves
+      *volumes*, and must not assume the thing attaching is a container —
+      VMs and micro-VMs are the easier case, since a clone already *is* a
+      block device.
 
 
 ### Phase 0: Build fixes (get it compiling) — DONE
