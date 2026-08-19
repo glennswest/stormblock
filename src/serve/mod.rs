@@ -14,5 +14,7 @@
 //! See `docs/layering.md`.
 
 pub mod netstat;
+pub mod status;
 pub mod tarfs;
 pub mod trim;
+pub mod wiring;
