@@ -513,19 +513,35 @@ there was effectively a single implicit grouping. What the model needs is
 **many pallets, several per drive, spread over several drives**, discovered by
 scanning rather than configured.
 
-- [ ] `src/pallet/format.rs` — v1 writer + reader, byte-compatible with
+- [x] `src/pallet/format.rs` — v1 writer + reader, byte-compatible with
       `stormuefi-map`. Content first, header last, so a torn publish leaves a
       pallet that fails its own CRC rather than one that lies.
-- [ ] `src/pallet/gpt.rs` — GPT read/write, protective MBR, primary + backup.
+- [x] `src/pallet/gpt.rs` — GPT read/write, protective MBR, primary + backup.
       Activation is an **attribute write** (bits 48–63), never a data write.
       Allocation is first-fit in free space, 1 MiB aligned, and refuses to
       alias — firmware does not publish a handle for an overlapping entry.
-- [ ] `src/pallet/store.rs` — discovery across every opened drive; selection
+- [x] `src/pallet/store.rs` — discovery across every opened drive; selection
       order (priority desc, version desc) with the spec's candidate rule.
-- [ ] `src/pallet/manager.rs` — the lifecycle library (#52): compose, publish,
+- [x] `src/pallet/manager.rs` — the lifecycle library (#52): compose, publish,
       verify, activate, mark-successful, roll back, prune with keep-N-1.
-- [ ] `/api/v1/pallets` + `stormblock pallet` CLI.
-- [ ] `docs/pallets.md`.
+- [x] `/api/v1/pallets` + `stormblock pallet` CLI.
+- [x] `docs/pallets.md`.
+- [x] `src/pallet/select.rs` — the read-only half, as pure functions plus a
+      `PalletBrowser` that cannot write. This is what a firmware or initramfs
+      consumer holds, and what stormuefi mirrors.
+- [x] A pallet **kind** (boot/system/kernel/kube/app/runtime/data) and a
+      version label, in the superblock's reserved area, zero meaning
+      "unspecified". Priority orders only pallets of the same kind.
+- [x] Moves: a whole pallet between drives keeping its identity, and one member
+      between pallets as a new version of each.
+- [x] Whole-drive pallets (one pallet per device, no GPT) stay discoverable and
+      `adopt_whole_drive` migrates them onto a partitioned drive.
+
+**Learned, and worth not re-deriving:** the GPT LBA size is *not* the device's
+block size. A file device reports 4096 because that is the I/O size it prefers;
+an image assembled as a file needs 512, which is what every tool and firmware
+assumes. A 4Kn table on an image is one our own reader accepts and `fdisk`
+cannot find — so the check that counts is an external one, byte by byte.
 
 Not covered here, and still open on #51: volume-level sealed/read-only attach
 refusal, and per-leg physical offsets for a read-only consumer that must not

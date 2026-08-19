@@ -3,6 +3,55 @@
 ## [Unreleased]
 
 ### 2026-08-19
+- **feat:** **Pallets** (#51, #52) — a pallet is a GPT partition holding a
+  named, versioned, self-contained set of sealed member images plus the
+  manifest describing them, and stormblock is now the producer for the format
+  `stormuefi` already reads. `src/pallet/`: the v1 writer and reader
+  (byte-compatible with `stormuefi-map`), a GPT reader/writer, discovery across
+  drives, the selection policy, and the lifecycle manager. See
+  [docs/pallets.md](docs/pallets.md).
+- **feat:** A drive is **subdivided into many pallets** instead of being one.
+  Several pallets per drive and several drives per node are the normal case,
+  found by scanning each GPT rather than by configuration — the only
+  arrangement that survives a disk moved between nodes or an image assembled
+  elsewhere. A file-backed device is a drive like any other here.
+- **feat:** A pallet carries a **kind** — `boot`, `system`, `kernel`, `kube`,
+  `app`, `runtime`, `data` — and a human-readable **version label** beside the
+  monotonic `pallet_version`. Both live in the superblock's reserved area and
+  are defined so zero means "unspecified", so a pallet written before they
+  existed still reads correctly. Priority orders only pallets of the same kind:
+  a kube pallet does not outrank a boot pallet by carrying a bigger number.
+- **feat:** A **read-only** selection surface for boot-time consumers —
+  `pallet::select` is pure functions over plain data (no I/O, no device, no
+  async) and `PalletBrowser` has no method that writes. This is what stormuefi
+  mirrors; `select_verified` walks the fallback chain and returns the first
+  pallet that passes with the reason each earlier one was rejected.
+- **feat:** Lifecycle (#52): publish, verify, activate, mark successful, roll
+  back, set read-only/sealed, prune keeping N-1. Nothing in use is ever
+  rewritten — an upgrade is a new partition and a recompose is a new version —
+  and activation is an attribute write, so there is no window with nothing to
+  boot and rollback restores nothing.
+- **feat:** **Moves.** A whole pallet moves between drives keeping its identity
+  (copy, verify at the destination, adopt the GUID, drop the source — in that
+  order, so no interruption leaves two disks claiming to be the same pallet).
+  One member — a container, a kernel — moves between pallets as a new version
+  of each, read through the source's extent map with nothing staged in between.
+- **feat:** `/api/v1/pallets` and a `stormblock pallet` CLI over the same
+  library. A member can be sourced from a volume, so the golden a pallet ships
+  is published by being read out of the GEM.
+- **feat:** Whole-drive pallets from before drives were subdivided are still
+  discovered, verified and readable, and `adopt` migrates one onto a
+  partitioned drive. Subdividing such a drive in place is refused: the table
+  wants the bytes the superblock is in.
+- **fix:** The GPT is written in 512-byte LBAs on a file-backed device rather
+  than in the 4096-byte size it *prefers* for I/O. An image is how disks and
+  ISOs are assembled, and a 4Kn table there is one this code reads back happily
+  and `fdisk` cannot find at all. On read the LBA size is discovered rather
+  than assumed. Validated against `fdisk` and byte-by-byte, not only against
+  our own reader.
+- **chore:** Logs go to stderr, so a subcommand's stdout is only its answer.
+
+### 2026-08-19
 - **test:** Layered goldens: `layers_stack_to_any_depth` (four levels deep) and
   `a_child_survives_its_parent_being_deleted` prove these are complete
   filesystems sharing refcounted blocks, not overlay layers borrowing them.
