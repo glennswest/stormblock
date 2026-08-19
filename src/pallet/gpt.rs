@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::drive::BlockDevice;
+use crate::drive::{BlockDevice, DriveType};
 
 use super::{crc32, format::PALLET_TYPE_GUID, PalletError, PartitionView, Result};
 
@@ -89,9 +89,29 @@ impl GptEntry {
     }
 }
 
+/// The LBA size a GPT on this device should use.
+///
+/// This is **not** simply the device's block size. A file-backed device
+/// reports 4096 because that is the I/O size it prefers, not because it has
+/// 4 KiB sectors — and a file is how disk images and ISOs are assembled, where
+/// every tool and every firmware assumes 512-byte LBAs. Getting this wrong
+/// produces a table that this code can read back happily and nothing else can
+/// find at all. A real 4Kn drive reports 4096 because it *is* 4Kn, and there
+/// the answer is genuinely 4096.
+pub fn default_lba_size(device: &Arc<dyn BlockDevice>) -> u32 {
+    match device.device_type() {
+        DriveType::File => 512,
+        _ => device.block_size(),
+    }
+}
+
+/// LBA sizes to try when locating a table someone else wrote.
+const LBA_CANDIDATES: [u32; 2] = [512, 4096];
+
 /// A GPT, in memory.
 #[derive(Debug, Clone)]
 pub struct Gpt {
+    /// The LBA size this table is expressed in — see [`default_lba_size`].
     pub block_size: u32,
     pub disk_guid: [u8; 16],
     pub first_usable_lba: u64,
@@ -129,9 +149,14 @@ fn entries_lbas(block_size: u32) -> u64 {
 }
 
 impl Gpt {
-    /// An empty table sized to the device.
+    /// An empty table sized to the device, in the LBA size that device wants.
     pub fn create(device: &Arc<dyn BlockDevice>) -> Gpt {
-        let bs = device.block_size();
+        Gpt::create_with_lba(device, default_lba_size(device))
+    }
+
+    /// An empty table in an explicit LBA size — for an image that must be
+    /// readable by something with a fixed idea of its sector size.
+    pub fn create_with_lba(device: &Arc<dyn BlockDevice>, bs: u32) -> Gpt {
         let last_lba = device.capacity_bytes() / bs as u64 - 1;
         let ent = entries_lbas(bs);
         Gpt {
@@ -147,25 +172,36 @@ impl Gpt {
 
     /// Read the table, preferring the primary and falling back to the backup
     /// when the primary header does not check out.
+    ///
+    /// The LBA size is discovered rather than assumed: a disk written
+    /// elsewhere may be 512 or 4Kn, and the difference is only visible by
+    /// finding the header where one of them would put it.
     pub async fn read(device: &Arc<dyn BlockDevice>) -> Result<Gpt> {
-        let bs = device.block_size();
         let view = PartitionView::whole(device.clone());
-        let last_lba = device.capacity_bytes() / bs as u64 - 1;
+        let preferred = default_lba_size(device);
+        let mut sizes = vec![preferred];
+        sizes.extend(LBA_CANDIDATES.iter().copied().filter(|c| *c != preferred));
 
-        match Gpt::read_at(&view, bs, 1).await {
-            Ok(mut g) => {
-                g.alternate_lba = last_lba;
-                Ok(g)
+        let mut first_err = None;
+        for bs in sizes.iter().copied() {
+            if device.capacity_bytes() < 4 * bs as u64 {
+                continue;
             }
-            Err(primary_err) => match Gpt::read_at(&view, bs, last_lba).await {
+            let last_lba = device.capacity_bytes() / bs as u64 - 1;
+            match Gpt::read_at(&view, bs, 1).await {
                 Ok(mut g) => {
-                    g.recovered_from_backup = true;
                     g.alternate_lba = last_lba;
-                    Ok(g)
+                    return Ok(g);
                 }
-                Err(_) => Err(primary_err),
-            },
+                Err(e) => first_err.get_or_insert(e),
+            };
+            if let Ok(mut g) = Gpt::read_at(&view, bs, last_lba).await {
+                g.recovered_from_backup = true;
+                g.alternate_lba = last_lba;
+                return Ok(g);
+            }
         }
+        Err(first_err.unwrap_or(PalletError::NotGpt))
     }
 
     async fn read_at(view: &PartitionView, bs: u32, header_lba: u64) -> Result<Gpt> {

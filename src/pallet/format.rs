@@ -654,8 +654,13 @@ impl PalletBuilder {
         // layout is a change here and nowhere else.
         let extent_count = self.members.iter().filter(|m| m.content.byte_len() > 0).count();
 
+        // Extents are counted in the pallet's own block size — which is the
+        // media's, so a pre-kernel reader working in sectors needs no scaling.
+        // Content is nonetheless *placed* on 4 KiB boundaries, because a 512
+        // byte block size should not cost every member its alignment.
+        let content_align = bs.max(SUPERBLOCK_LEN as u64);
         let tables_end = SUPERBLOCK_LEN + n * MEMBER_LEN + extent_count * EXTENT_LEN;
-        let member_data_offset = align_up(tables_end as u64, bs.max(SUPERBLOCK_LEN as u64));
+        let member_data_offset = align_up(tables_end as u64, content_align);
 
         let mut members_tbl = vec![0u8; n * MEMBER_LEN];
         let mut extents_tbl = vec![0u8; extent_count * EXTENT_LEN];
@@ -668,6 +673,7 @@ impl PalletBuilder {
             let digest = digest_content(m.content.as_ref()).await?;
 
             let (first, count) = if len > 0 {
+                cursor = align_up(cursor, content_align);
                 let blocks = len.div_ceil(bs);
                 let e = &mut extents_tbl[extent_idx * EXTENT_LEN..(extent_idx + 1) * EXTENT_LEN];
                 wr_u64(e, 0, 0);
@@ -761,11 +767,15 @@ impl PalletBuilder {
                 largest_free: view.len(),
             });
         }
-        if self.block_size < view.block_size() {
+        // The floor is the smallest unit the media can actually address, not
+        // the largest it would prefer: a file device asks for 4 KiB I/O but
+        // addresses 512-byte sectors, and an image has to be readable by
+        // firmware that assumes exactly that.
+        let min_bs = super::gpt::default_lba_size(view.device());
+        if self.block_size < min_bs {
             return Err(PalletError::BadGeometry(format!(
-                "pallet block size {} is smaller than the device's {}",
+                "pallet block size {} is smaller than the {min_bs}-byte sectors this device                  addresses",
                 self.block_size,
-                view.block_size()
             )));
         }
 

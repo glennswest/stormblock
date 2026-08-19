@@ -324,7 +324,12 @@ impl PalletManager {
         // device it will live on rather than a default that may be smaller.
         let drive_index = spec.drive.unwrap_or(0);
         let drive = self.store.drive(drive_index)?.clone();
-        let bs = spec.block_size.unwrap_or_else(|| drive.device.block_size().max(4096));
+        // The pallet's block size is the LBA size of the table it lives in, so
+        // an extent's `partition_block` is a sector offset from the partition
+        // start and a firmware reader has no unit conversion to get wrong.
+        let bs = spec
+            .block_size
+            .unwrap_or_else(|| super::gpt::default_lba_size(&drive.device));
         builder = builder.block_size(bs);
 
         let built = builder.build().await?;

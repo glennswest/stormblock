@@ -425,11 +425,13 @@ async fn gpt_survives_a_lost_primary_header() {
         .await
         .unwrap();
 
-    // Wipe the primary header. Both copies are written on every mutation
-    // exactly so this is recoverable.
-    let bs = dev.block_size() as u64;
-    dev.write(bs, &vec![0u8; bs as usize]).await.unwrap();
-    dev.flush().await.unwrap();
+    // Wipe the primary header — LBA 1, and the table is in 512-byte LBAs
+    // because an image has to be readable by something that assumes that.
+    // Both copies are written on every mutation exactly so this is
+    // recoverable.
+    let whole = stormblock::pallet::PartitionView::whole(dev.clone());
+    whole.write_at(512, &[0u8; 512]).await.unwrap();
+    whole.flush().await.unwrap();
 
     let gpt = Gpt::read(&dev).await.expect("backup GPT");
     assert!(gpt.recovered_from_backup);

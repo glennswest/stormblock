@@ -387,7 +387,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // RUST_LOG controls verbosity (e.g. RUST_LOG=stormblock=debug for
     // per-PDU iSCSI tracing); defaults to info when unset.
+    // Logs on stderr, so a subcommand's stdout is only its answer — `pallet
+    // list | awk` has to be usable.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
