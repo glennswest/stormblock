@@ -16,6 +16,8 @@
 pub mod config;
 pub mod ctx;
 pub mod netstat;
+pub mod reap;
+pub mod reconcile;
 pub mod status;
 pub mod tarfs;
 pub mod trim;
