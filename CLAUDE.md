@@ -536,6 +536,10 @@ scanning rather than configured.
       between pallets as a new version of each.
 - [x] Whole-drive pallets (one pallet per device, no GPT) stay discoverable and
       `adopt_whole_drive` migrates them onto a partitioned drive.
+- [x] `convert_drive(src, dest)` — the whole-drive operation: copy every pallet,
+      verify each at the destination, remove from the source, optionally hand
+      the source a fresh table. Refuses to wipe a source that is still the only
+      copy of something that failed to convert.
 
 **Learned, and worth not re-deriving:** the GPT LBA size is *not* the device's
 block size. A file device reports 4096 because that is the I/O size it prefers;

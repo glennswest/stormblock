@@ -626,6 +626,78 @@ async fn init_gpt(State(state): State<Arc<AppState>>, Json(req): Json<InitReques
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ConvertRequest {
+    /// Source drive, by path or index.
+    pub from: String,
+    /// Destination drive, by path or index.
+    pub to: String,
+    /// Leave every pallet on the source as well.
+    #[serde(default)]
+    pub keep_source: bool,
+    /// Give the source a fresh empty table afterwards. Destructive, and
+    /// skipped if anything failed to convert.
+    #[serde(default)]
+    pub reinit_source: bool,
+}
+
+/// Convert a drive onto another — a whole-drive pallet becoming a partitioned
+/// one, or a drive being evacuated before it is pulled.
+async fn convert(State(state): State<Arc<AppState>>, Json(req): Json<ConvertRequest>) -> Response {
+    let mgr = manager(&state).await;
+    let (from, to) = match (
+        mgr.store().drive_index_of(&req.from),
+        mgr.store().drive_index_of(&req.to),
+    ) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    let opts = crate::pallet::ConvertOptions {
+        remove_source: !req.keep_source,
+        init_destination: true,
+        reinit_source: req.reinit_source,
+    };
+    match mgr.convert_drive(from, to, opts).await {
+        Ok(report) => {
+            #[derive(Serialize)]
+            struct Skipped {
+                #[serde(flatten)]
+                pallet: PalletResponse,
+                reason: String,
+            }
+            #[derive(Serialize)]
+            struct ConvertResponse {
+                source: String,
+                destination: String,
+                converted: Vec<PalletResponse>,
+                skipped: Vec<Skipped>,
+                removed_from_source: usize,
+                source_reinitialized: bool,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                note: Option<String>,
+            }
+            Json(ConvertResponse {
+                source: report.source,
+                destination: report.destination,
+                converted: report.converted.iter().map(PalletResponse::from).collect(),
+                skipped: report
+                    .skipped
+                    .iter()
+                    .map(|(p, r)| Skipped {
+                        pallet: PalletResponse::from(p),
+                        reason: r.clone(),
+                    })
+                    .collect(),
+                removed_from_source: report.removed_from_source,
+                source_reinitialized: report.source_reinitialized,
+                note: report.note,
+            })
+            .into_response()
+        }
+        Err(e) => err(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AdoptRequest {
     pub from: String,
     pub to: String,
@@ -657,6 +729,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/prune", post(prune))
         .route("/gpt", post(init_gpt))
         .route("/adopt", post(adopt))
+        .route("/convert", post(convert))
         .route("/{id}", get(get_one).delete(delete))
         .route("/{id}/verify", post(verify))
         .route("/{id}/activate", post(activate))

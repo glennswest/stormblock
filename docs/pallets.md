@@ -309,6 +309,7 @@ simply trying the next one. The running system makes a decision stick with
 | `copy_pallet(id, drive)` / `move_pallet(id, drive)` | between drives, verified at the destination |
 | `copy_member` / `move_member` / `member_spec` | move a container, a kernel, anything, between pallets |
 | `adopt_whole_drive(from, to)` | migrate a pre-subdivision whole-drive pallet |
+| `convert_drive(from, to, ConvertOptions)` | a whole drive onto another: copy, verify, remove, optionally reinitialise the source (§7) |
 | `delete(id, force)` / `prune(name, keep)` | remove entries, keeping N-1 |
 
 Two invariants shape all of it:
@@ -381,7 +382,45 @@ stormblock pallet --drive /dev/nvme0n1 prune stormcos-boot --keep 3
 fallback depends on. Refcounting is pallet-aware in exactly this sense: an older
 pallet still pins its members.
 
-## 7. Migrating from whole-drive pallets
+## 7. Converting a drive
+
+One call for the operation a drive replacement actually is: **everything on the
+source becomes partitioned pallets on the destination.**
+
+```bash
+stormblock pallet --drive old.img --drive /dev/nvme1n1 \
+  convert --from old.img --to /dev/nvme1n1 --reinit-source
+```
+
+It covers both shapes a source can be in, without the caller having to know
+which it is looking at:
+
+- a **whole-drive pallet** from before drives were subdivided, which cannot be
+  partitioned in place because the table wants the bytes its superblock is in;
+- an **already-partitioned drive** carrying several pallets — evacuation, the
+  same thing you do to a disk you are about to pull.
+
+What it guarantees:
+
+- **Copy, verify, then remove.** Nothing leaves the source until its copy has
+  been read back at the destination and checked against the manifest's digests.
+- **Identities survive.** A partitioned source's pallets keep their partition
+  GUIDs, so every reference to them still resolves. (A whole-drive pallet has no
+  real GUID to keep — its identity is derived from the device path — so it
+  arrives with a fresh one.)
+- **A pallet that will not parse is skipped and reported**, never copied:
+  copying it would only spread the damage.
+- **`--reinit-source` is refused while anything failed**, because that is
+  exactly the case where the source is still the only copy of it. Without it,
+  a converted whole-drive source still holds its pallet — there is no GPT entry
+  to remove — and the report says so rather than leaving you to notice.
+- The destination gets a GPT written if it has none; an existing table is never
+  overwritten.
+
+`--keep-source` copies instead of moving, for seeding a second drive rather than
+emptying the first.
+
+## 8. Migrating from whole-drive pallets
 
 The earlier arrangement put one pallet on a whole device: superblock at byte
 zero, no partition table. Such a device is still **discovered**
@@ -401,7 +440,11 @@ stormblock pallet --drive old.img --drive /dev/nvme0n1 adopt --from old.img --to
 stormblock pallet --drive old.img init-gpt old.img --force   # now it can carry many
 ```
 
-## 8. REST
+`adopt` is the single-pallet primitive; `convert` (§7) is the same move with the
+reinitialisation, the reporting and the refusals around it, and is what you
+usually want.
+
+## 9. REST
 
 Base `/api/v1/pallets`. The store is rebuilt from the node's open drives on
 every request rather than cached, so nothing here can disagree with the disk.
@@ -420,13 +463,14 @@ every request rather than cached, so nothing here can disagree with the disk.
 | POST | `/{id}/recompose` | add/remove members as a new version |
 | POST | `/{id}/members/{name}/copy` · `/move` | `{"into":"<pallet id>"}` |
 | DELETE | `/{id}` `?force=` | remove the GPT entry |
+| POST | `/convert` | `{"from","to","keep_source","reinit_source"}` — a whole drive onto another |
 | POST | `/prune` · `/gpt` · `/adopt` | retention, init a table, migrate a whole-drive pallet |
 
 A member sourced as `{"source":"volume","volume_id":"…"}` is read straight out
 of the GEM — the golden a pallet ships is a sealed clone, published by being
 read out of the engine with nothing staged in between.
 
-## 9. What is guaranteed, and what is not yet
+## 10. What is guaranteed, and what is not yet
 
 Guaranteed, and asserted by tests:
 
@@ -439,7 +483,8 @@ Guaranteed, and asserted by tests:
 - A tampered upgrade is refused and the previous pallet is selected.
 - Activation writes no content, on any pallet.
 - A move preserves identity and verifies at the destination before the source
-  goes.
+  goes, and a whole-drive conversion never wipes a source that is still the only
+  copy of something.
 - The GPT is standard: validated against `fdisk` and byte-by-byte, not only
   against this code.
 

@@ -14,7 +14,8 @@ use stormblock::drive::BlockDevice;
 use stormblock::pallet::format::PalletKind;
 use stormblock::pallet::manager::{PublishSpec, RecomposeSpec};
 use stormblock::pallet::{
-    BytesContent, Gpt, MemberKind, MemberSpec, PalletBrowser, PalletManager, PalletStore,
+    BytesContent, ConvertOptions, Gpt, MemberKind, MemberSpec, PalletBrowser, PalletManager,
+    PalletStore,
 };
 
 use tempfile::TempDir;
@@ -519,4 +520,132 @@ async fn publishing_spills_onto_the_next_drive_with_room() {
     let loc = mgr.publish(s).await.expect("publish should find room");
     assert_eq!(loc.drive, "disk1");
     assert!(mgr.verify(loc.id).await.unwrap().ok);
+}
+
+#[tokio::test]
+async fn convert_moves_a_whole_drive_pallet_onto_a_partitioned_drive() {
+    let dir = TempDir::new().unwrap();
+    let old = drive(&dir, "legacy").await;
+    let new = drive(&dir, "disk0").await;
+
+    let view = stormblock::pallet::PartitionView::whole(old.clone());
+    stormblock::pallet::PalletBuilder::new("stormcos-boot", 3)
+        .kind(PalletKind::Boot)
+        .block_size(512)
+        .member(member("kernel", "kernel", MemberKind::Kernel, b"legacy-kernel"))
+        .publish(&view)
+        .await
+        .unwrap();
+
+    let mut store = PalletStore::default();
+    store.add_drive("legacy", old.clone());
+    store.add_drive("disk0", new.clone());
+    let mgr = PalletManager::new(store);
+
+    // The destination has no table yet; convert writes one rather than making
+    // the caller sequence it.
+    let report = mgr
+        .convert_drive(0, 1, ConvertOptions { reinit_source: true, ..Default::default() })
+        .await
+        .expect("convert");
+
+    assert_eq!(report.converted.len(), 1);
+    assert!(report.skipped.is_empty());
+    assert!(report.source_reinitialized);
+    assert_eq!(report.converted[0].drive, "disk0");
+    assert_eq!(report.converted[0].version, 3);
+    assert!(!report.converted[0].is_whole_drive());
+    assert!(mgr.verify(report.converted[0].id).await.unwrap().ok);
+
+    // The source is now an ordinary drive that carries pallets.
+    let left: Vec<_> = mgr.list().await.into_iter().filter(|p| p.drive == "legacy").collect();
+    assert!(left.is_empty(), "{left:#?}");
+    let mut s = PublishSpec::new("data", PalletKind::Data);
+    s.drive = Some(0);
+    s.members = vec![member("blob", "data", MemberKind::Raw, b"payload")];
+    mgr.publish(s).await.expect("the converted drive takes pallets");
+}
+
+#[tokio::test]
+async fn convert_evacuates_a_partitioned_drive_keeping_identities() {
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0", "disk1"]).await;
+
+    let mut ids = Vec::new();
+    for i in 1..=3 {
+        let payload = format!("kernel-v{i}");
+        let mut s = boot_spec("stormcos-boot", payload.as_bytes(), b"initramfs");
+        s.drive = Some(0);
+        ids.push(mgr.publish(s).await.unwrap().id);
+    }
+    let mut app = PublishSpec::new("registry", PalletKind::App);
+    app.drive = Some(0);
+    app.members = vec![member("pause", "container", MemberKind::Container, b"pause-image")];
+    ids.push(mgr.publish(app).await.unwrap().id);
+
+    let report = mgr.convert_drive(0, 1, ConvertOptions::default()).await.unwrap();
+    assert_eq!(report.converted.len(), 4);
+    assert_eq!(report.removed_from_source, 4);
+    assert!(report.skipped.is_empty());
+
+    // Every pallet is on the destination, under the identity it already had.
+    let all = mgr.list().await;
+    assert_eq!(all.len(), 4);
+    assert!(all.iter().all(|p| p.drive == "disk1"));
+    for id in &ids {
+        let loc = mgr.get(*id).await.expect("identity survives the conversion");
+        assert_eq!(loc.drive, "disk1");
+        assert!(mgr.verify(*id).await.unwrap().ok);
+    }
+}
+
+#[tokio::test]
+async fn convert_leaves_the_source_alone_when_something_does_not_convert() {
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0", "disk1"]).await;
+
+    let good = {
+        let mut s = boot_spec("stormcos-boot", b"kernel", b"initramfs");
+        s.drive = Some(0);
+        mgr.publish(s).await.unwrap()
+    };
+    let broken = {
+        let mut s = PublishSpec::new("half-written", PalletKind::Data);
+        s.drive = Some(0);
+        s.members = vec![member("blob", "data", MemberKind::Raw, b"payload")];
+        mgr.publish(s).await.unwrap()
+    };
+    // Torn publish: content down, superblock never written.
+    let view = mgr.store().view(&broken).unwrap();
+    view.write_at(0, &vec![0u8; 4096]).await.unwrap();
+    view.flush().await.unwrap();
+
+    let report = mgr
+        .convert_drive(0, 1, ConvertOptions { reinit_source: true, ..Default::default() })
+        .await
+        .unwrap();
+
+    assert_eq!(report.converted.len(), 1);
+    assert_eq!(report.converted[0].name, "stormcos-boot");
+    assert_eq!(report.skipped.len(), 1);
+    assert!(
+        !report.source_reinitialized,
+        "the source is still the only copy of what failed, so it is not wiped"
+    );
+    assert!(report.note.is_some());
+
+    // The unreadable one is still where it was, still reported as unreadable.
+    let left = mgr.store().scan_drive(0).await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, broken.id);
+    assert!(!left[0].is_readable());
+    assert!(mgr.verify(good.id).await.is_ok());
+}
+
+#[tokio::test]
+async fn convert_refuses_a_drive_onto_itself() {
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0"]).await;
+    mgr.publish(boot_spec("stormcos-boot", b"kernel", b"initramfs")).await.unwrap();
+    assert!(mgr.convert_drive(0, 0, ConvertOptions::default()).await.is_err());
 }

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### 2026-08-19
+- **feat:** `pallet convert --from <drive> --to <drive>` — one call for what a
+  drive replacement actually is: everything on the source becomes partitioned
+  pallets on the destination. It covers both shapes a source can be in without
+  the caller having to know which — a whole-drive pallet that cannot be
+  partitioned in place, and an already-partitioned drive being evacuated.
+  Copy, verify, then remove: nothing leaves the source until its copy has been
+  read back at the destination and checked against the manifest's digests, and
+  identities survive so every reference still resolves. A pallet that will not
+  parse is skipped and reported rather than copied. `--reinit-source` gives the
+  source a fresh table so it can carry pallets, and is **refused while anything
+  failed to convert** — exactly the case where the source is still the only
+  copy. `POST /api/v1/pallets/convert` and `PalletManager::convert_drive`.
+
 ## [v9.3.0] — 2026-08-19
 
 ### 2026-08-19

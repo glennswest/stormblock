@@ -345,6 +345,23 @@ enum PalletAction {
         #[arg(long, default_value = "2")]
         keep: usize,
     },
+    /// Convert a drive onto another: everything on the source becomes
+    /// partitioned pallets on the destination
+    Convert {
+        /// Source drive (path or index)
+        #[arg(long)]
+        from: String,
+        /// Destination drive (path or index)
+        #[arg(long)]
+        to: String,
+        /// Copy instead of moving — leave every pallet on the source too
+        #[arg(long)]
+        keep_source: bool,
+        /// Give the source a fresh empty table afterwards, so it can carry
+        /// pallets. Destructive, and skipped if anything failed to convert
+        #[arg(long)]
+        reinit_source: bool,
+    },
     /// Migrate a whole-drive pallet onto a partitioned drive
     Adopt {
         /// Drive holding the whole-drive pallet
@@ -1264,6 +1281,42 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
                 println!("pruned {} ({} v{})", p.id, p.name, p.version);
             }
             println!("{} removed, keeping the newest {}", removed.len(), (*keep).max(2));
+        }
+        PalletAction::Convert { from, to, keep_source, reinit_source } => {
+            let (f, t) = (pe(store.drive_index_of(from))?, pe(store.drive_index_of(to))?);
+            let report = pe(mgr
+                .convert_drive(
+                    f,
+                    t,
+                    stormblock::pallet::ConvertOptions {
+                        remove_source: !*keep_source,
+                        init_destination: true,
+                        reinit_source: *reinit_source,
+                    },
+                )
+                .await)?;
+            println!("{} -> {}", report.source, report.destination);
+            for p in &report.converted {
+                print!("  converted: ");
+                print_pallet(p);
+            }
+            for (p, why) in &report.skipped {
+                print!("  SKIPPED:   ");
+                print_pallet(p);
+                println!("             {why}");
+            }
+            println!(
+                "{} converted, {} removed from the source{}",
+                report.converted.len(),
+                report.removed_from_source,
+                if report.source_reinitialized { ", source reinitialized" } else { "" }
+            );
+            if let Some(note) = &report.note {
+                println!("note: {note}");
+            }
+            if !report.skipped.is_empty() {
+                anyhow::bail!("{} pallet(s) did not convert", report.skipped.len());
+            }
         }
         PalletAction::Adopt { from, to } => {
             let (f, t) = (pe(store.drive_index_of(from))?, pe(store.drive_index_of(to))?);

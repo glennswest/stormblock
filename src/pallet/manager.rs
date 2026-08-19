@@ -187,6 +187,45 @@ pub struct RecomposeSpec {
 
 // ------------------------------------------------------------------ manager
 
+/// How a drive conversion should treat the source.
+#[derive(Debug, Clone, Copy)]
+pub struct ConvertOptions {
+    /// Take each pallet off the source once its copy verifies. A whole-drive
+    /// pallet has no entry to remove and only leaves via `reinit_source`.
+    pub remove_source: bool,
+    /// Write a GPT on the destination when it has none.
+    pub init_destination: bool,
+    /// Give the source a fresh, empty table afterwards, so it can carry
+    /// pallets like any other drive. Destructive, and refused if anything
+    /// failed to convert.
+    pub reinit_source: bool,
+}
+
+impl Default for ConvertOptions {
+    fn default() -> Self {
+        ConvertOptions {
+            remove_source: true,
+            init_destination: true,
+            reinit_source: false,
+        }
+    }
+}
+
+/// What a conversion did.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConvertReport {
+    pub source: String,
+    pub destination: String,
+    pub converted: Vec<PalletLocation>,
+    /// Pallets left where they were, and why.
+    pub skipped: Vec<(PalletLocation, String)>,
+    pub removed_from_source: usize,
+    pub source_reinitialized: bool,
+    /// Something the caller needs to know that is not a failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// Owns pallet lifecycle over a set of drives.
 pub struct PalletManager {
     store: PalletStore,
@@ -722,6 +761,141 @@ impl PalletManager {
                 ))
             })?;
         self.copy_pallet(src.id, dest_drive).await
+    }
+
+    // -------------------------------------------------------------- convert
+
+    /// Convert one drive onto another: everything on the source becomes
+    /// partitioned pallets on the destination.
+    ///
+    /// This is the operation a drive replacement actually is, and it covers
+    /// both shapes the source can be in without the caller having to know
+    /// which it is looking at:
+    ///
+    /// - a **whole-drive pallet** from before drives were subdivided, which
+    ///   cannot be partitioned in place because the table wants the bytes its
+    ///   superblock is in; and
+    /// - an **already-partitioned drive** carrying several pallets, which is
+    ///   evacuation — the same thing you do to a disk you are about to pull.
+    ///
+    /// Order is copy, verify, and only then remove: nothing leaves the source
+    /// until its copy has been read back at the destination and checked
+    /// against the manifest's digests. A pallet that will not parse is skipped
+    /// and reported rather than copied, because copying it would only spread
+    /// the damage.
+    pub async fn convert_drive(
+        &self,
+        src_drive: usize,
+        dest_drive: usize,
+        opts: ConvertOptions,
+    ) -> Result<ConvertReport> {
+        if src_drive == dest_drive {
+            return Err(PalletError::Refused(
+                "source and destination are the same drive; a drive cannot be converted onto \
+                 itself"
+                    .into(),
+            ));
+        }
+        let src = self.store.drive(src_drive)?.clone();
+        let dest = self.store.drive(dest_drive)?.clone();
+
+        // Give the destination a table if it has none. `init_gpt` is the one
+        // that refuses to write over an existing table, or over a whole-drive
+        // pallet's superblock.
+        let dest_had_gpt = Gpt::read(&dest.device).await.is_ok();
+        if !dest_had_gpt {
+            if !opts.init_destination {
+                return Err(PalletError::Refused(format!(
+                    "{} has no GPT; pass init_destination to write one",
+                    dest.path
+                )));
+            }
+            self.init_gpt(dest_drive, false).await?;
+        }
+
+        let found = self.store.scan_drive(src_drive).await.unwrap_or_default();
+        if found.is_empty() {
+            return Err(PalletError::NotFound(format!("no pallets on {}", src.path)));
+        }
+
+        let mut report = ConvertReport {
+            source: src.path.clone(),
+            destination: dest.path.clone(),
+            converted: Vec::new(),
+            skipped: Vec::new(),
+            removed_from_source: 0,
+            source_reinitialized: false,
+            note: None,
+        };
+
+        let mut whole_drive_source = false;
+        for loc in found {
+            if !loc.is_readable() {
+                let reason = match &loc.state {
+                    PalletState::Unreadable { reason } => reason.clone(),
+                    PalletState::Readable => unreachable!(),
+                };
+                report.skipped.push((loc, reason));
+                continue;
+            }
+            whole_drive_source |= loc.is_whole_drive();
+
+            // A whole-drive pallet has no GPT entry to remove and no real
+            // identity to preserve, so it is always a copy; the source only
+            // stops being a pallet when its drive is reinitialised.
+            let moved = opts.remove_source && !loc.is_whole_drive();
+            let outcome = if moved {
+                self.move_pallet(loc.id, dest_drive).await
+            } else {
+                self.copy_pallet(loc.id, dest_drive).await
+            };
+            match outcome {
+                Ok(new_loc) => {
+                    if moved {
+                        report.removed_from_source += 1;
+                    }
+                    report.converted.push(new_loc);
+                }
+                Err(e) => report.skipped.push((loc, e.to_string())),
+            }
+        }
+
+        if report.converted.is_empty() {
+            return Err(PalletError::Refused(format!(
+                "nothing could be converted from {}: {}",
+                src.path,
+                report
+                    .skipped
+                    .first()
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_else(|| "no readable pallets".into())
+            )));
+        }
+
+        // Reinitialising the source is the only way a whole-drive pallet
+        // actually leaves it, and it is destructive, so it happens on request
+        // and never by inference. It is also refused while anything failed to
+        // convert — that is the case where the source is still the only copy.
+        if opts.reinit_source {
+            if !report.skipped.is_empty() {
+                report.note = Some(format!(
+                    "{} left intact: {} pallet(s) did not convert, and the source is still the \
+                     only copy of them",
+                    src.path,
+                    report.skipped.len()
+                ));
+            } else {
+                self.init_gpt(src_drive, true).await?;
+                report.source_reinitialized = true;
+            }
+        } else if whole_drive_source && opts.remove_source {
+            report.note = Some(format!(
+                "{} still holds the whole-drive pallet: it has no GPT entry to remove, so it only \
+                 leaves when the drive is reinitialised (reinit_source)",
+                src.path
+            ));
+        }
+        Ok(report)
     }
 
     /// Copy a pallet onto another drive, byte for byte.

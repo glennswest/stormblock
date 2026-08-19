@@ -60,8 +60,8 @@ pub use format::{
 };
 pub use gpt::{Gpt, GptEntry};
 pub use manager::{
-    MemberVerdict, PalletManager, PalletMemberContent, PalletStatus, PublishSpec, RecomposeSpec,
-    VerifyReport,
+    ConvertOptions, ConvertReport, MemberVerdict, PalletManager, PalletMemberContent, PalletStatus,
+    PublishSpec, RecomposeSpec, VerifyReport,
 };
 pub use select::{Candidate, PalletBrowser};
 pub use store::{DriveRef, PalletLocation, PalletState, PalletStore};
