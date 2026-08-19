@@ -259,6 +259,10 @@ enum ImageAction {
         out: String,
         #[arg(long)]
         format: Option<String>,
+        /// ISO only: carry the slab too. It is empty in a fresh image, so it
+        /// is left out unless asked for
+        #[arg(long)]
+        include_slab: bool,
     },
     /// Show an image's partitions and the pallets in it
     Inspect {
@@ -1208,11 +1212,21 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
                 }
             }
         }
-        ImageAction::Convert { input, out, format } => {
+        ImageAction::Convert { input, out, format, include_slab } => {
             let format = resolve(out, format)?;
-            stormblock::image::formats::convert(Path::new(input), Path::new(out), format)
+            if format == ImageFormat::Iso {
+                stormblock::image::iso::from_image_with(
+                    Path::new(input),
+                    Path::new(out),
+                    stormblock::image::iso::IsoOptions { include_slab: *include_slab },
+                )
                 .await
                 .map_err(ie)?;
+            } else {
+                stormblock::image::formats::convert(Path::new(input), Path::new(out), format)
+                    .await
+                    .map_err(ie)?;
+            }
             let len = tokio::fs::metadata(out).await?.len();
             println!("{out} — {} ({format})", stormblock::mgmt::config::human_size(len));
         }

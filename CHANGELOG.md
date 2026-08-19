@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### 2026-08-19
+- **feat:** **Image building** — `stormblock image build --spec image.toml --out
+  disk.qcow2`, plus `inspect`, `convert` and `formats`. A disk image is a GPT
+  plus a concatenation of pallets, so the builder reimplements none of it: an
+  image file is a drive to this engine, so assembly opens the file and drives
+  the ordinary `PalletManager`. Every pallet is verified *inside the image*
+  after it lands, and a build whose pallet does not verify fails rather than
+  warns. See [docs/images.md](docs/images.md).
+- **feat:** One TOML spec describes an ESP, pallets (composed from files or
+  imported byte-for-byte from another image), arbitrary raw partitions and a
+  formatted slab. Order on disk is the order of the sections; sizes may be
+  omitted and computed, and a declared size that does not fit is refused rather
+  than truncated.
+- **feat:** Output formats: raw, qcow2 (v3, sparse), fixed VHD, monolithic
+  sparse VMDK, and a hybrid ISO. A 320 MB image with an empty slab converts to
+  about 10 MB of qcow2 or VMDK.
+- **feat:** The ISO is the same image seen twice — an ISO9660 filesystem with an
+  EFI El Torito entry at the front, and a GPT in the 32 KiB system area
+  describing the same bytes, so the file boots from optical media and from a
+  USB stick. The pallets inside verify through the ordinary pallet tooling. The
+  slab is left out by default: it is empty, and carrying it turned a 35 MB image
+  into a 320 MB one.
+- **feat:** `src/image/fat.rs` writes the ESP itself — FAT16 or FAT32 by size,
+  with real VFAT long names. Both widths exist because FAT32's 65,525-cluster
+  floor (~33 MiB) sits just above El Torito's 16-bit sector-count ceiling
+  (32 MiB): without FAT16 there is no ESP size that satisfies both. Fixed
+  timestamps and sorted entries, so the same tree builds the same bytes.
+- **feat:** `PartitionDevice` — a partition as a `BlockDevice`, so anything that
+  formats a device can be pointed at one inside an image without knowing it is
+  inside one.
+- **fix:** A name that is already 8.3 is stored plainly. The sanitiser replaced
+  the dot before splitting the extension, so `BOOTX64.EFI` became `BOOTX6~1`
+  with a long-name entry it never needed. Found by `mtools`, not by us.
+- **fix:** The El Torito catalog is EFI-only, and an oversized ESP warns at
+  build time. Found by `xorriso`: the boot image's 16-bit sector count had
+  silently saturated at 65535, and the unbootable BIOS placeholder entry was
+  being reported as a hidden image.
+- **test:** `ci-image-verify.sh` — mtools reads the ESP and compares extracted
+  files against their sources, an independent Python parser rebuilds the raw
+  image from each container format's own metadata, `xorriso` reads the ISO, and
+  `stormblock pallet verify` runs against the ISO itself.
+
 ## [v9.4.0] — 2026-08-19
 
 ### 2026-08-19

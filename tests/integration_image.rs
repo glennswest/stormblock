@@ -178,7 +178,8 @@ async fn every_format_carries_the_same_image() {
 async fn an_iso_carries_the_partitions_and_a_gpt_over_them() {
     let tmp = TempDir::new().unwrap();
     make_sources(tmp.path());
-    let spec = ImageSpec::from_toml(&spec_toml(tmp.path(), "")).unwrap();
+    let spec =
+        ImageSpec::from_toml(&spec_toml(tmp.path(), "[slab]\nsize = \"rest\"\ntier = \"hot\"")).unwrap();
     let raw = tmp.path().join("disk.img");
     ImageBuilder::new(spec).build(&raw).await.unwrap();
 
@@ -192,8 +193,14 @@ async fn an_iso_carries_the_partitions_and_a_gpt_over_them() {
     assert_eq!(&bytes[17 * 2048 + 7..17 * 2048 + 30], b"EL TORITO SPECIFICATION");
     // …and a GPT in its system area describing the same bytes.
     assert_eq!(&bytes[512..520], b"EFI PART");
+    // The ESP and the pallet come along; the slab does not — it is the mutable
+    // end of a disk and empty, and carrying it would be 200 MB of zeros.
     let gpt = stormblock::image::build::table_of(&iso).await.unwrap();
     assert_eq!(gpt.partitions().count(), 2);
+    assert!(
+        std::fs::metadata(&iso).unwrap().len() < std::fs::metadata(&raw).unwrap().len() / 2,
+        "an ISO without the slab should be far smaller than the disk"
+    );
 
     // The pallet inside the ISO is the pallet, still verifiable — which is the
     // whole point of everything inside it being partition-relative.
@@ -201,4 +208,16 @@ async fn an_iso_carries_the_partitions_and_a_gpt_over_them() {
     assert_eq!(pallets.len(), 1);
     assert!(pallets[0].is_readable());
     assert_eq!(pallets[0].name, "stormcos-boot");
+
+    // …and a live image that really does ship a slab can ask for it.
+    let with_slab = tmp.path().join("live.iso");
+    stormblock::image::iso::from_image_with(
+        &raw,
+        &with_slab,
+        stormblock::image::iso::IsoOptions { include_slab: true },
+    )
+    .await
+    .unwrap();
+    let gpt = stormblock::image::build::table_of(&with_slab).await.unwrap();
+    assert_eq!(gpt.partitions().count(), 3);
 }

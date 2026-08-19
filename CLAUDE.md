@@ -541,6 +541,24 @@ scanning rather than configured.
       the source a fresh table. Refuses to wipe a source that is still the only
       copy of something that failed to convert.
 
+### Image building (2026-08-19)
+
+`stormblock image build` assembles disk images and ISOs out of pallets —
+`src/image/`, [docs/images.md](docs/images.md), verified by
+`ci-image-verify.sh`. An image file is a drive, so the builder drives the
+ordinary `PalletManager` rather than reimplementing publishing.
+
+**Two things external tools found that ours could not**, and the reason
+`ci-image-verify.sh` exists:
+
+- `mtools` showed `BOOTX64.EFI` stored as `BOOTX6~1`: the FAT name sanitiser
+  replaced the dot before splitting the extension, so every plain 8.3 name
+  became a long one.
+- `xorriso` showed the El Torito boot image saturating its 16-bit sector count.
+  **FAT32's 65,525-cluster floor (~33 MiB) sits just above El Torito's 32 MiB
+  ceiling** — the two do not overlap, which is why `fat.rs` writes FAT16 too.
+  An ESP for an ISO must be ≤ 32 MiB.
+
 **Learned, and worth not re-deriving:** the GPT LBA size is *not* the device's
 block size. A file device reports 4096 because that is the I/O size it prefers;
 an image assembled as a file needs 512, which is what every tool and firmware
