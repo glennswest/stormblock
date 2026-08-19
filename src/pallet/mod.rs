@@ -4,10 +4,12 @@
 //! > self-contained set of sealed member images and the manifest that
 //! > describes them.
 //!
-//! The format is specified in `stormuefi/docs/PALLET-SPEC.md` v1 and its
-//! reference reader — `no_std`, allocation-free, OVMF-verified — is
-//! `stormuefi-map`. This module is the **producer**: it writes what that
-//! reader consumes, and owns the lifecycle around it (#51, #52).
+//! The format is specified in `docs/pallets.md` in this repository, and its
+//! decode side is `crates/pallet-format` — `no_std`, no allocation, no write
+//! path — which firmware links too, so there is one reader rather than two
+//! that must stay bit-compatible forever (#53). This module is the
+//! **producer**: it writes what that reader consumes, and owns the lifecycle
+//! around it (#51, #52).
 //!
 //! # Why a partition
 //!

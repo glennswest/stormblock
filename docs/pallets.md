@@ -1,11 +1,20 @@
 # Pallets
 
-**Status: implemented, 2026-08-19.** Producer side of the format specified in
-[`stormuefi/docs/PALLET-SPEC.md`](https://github.com/glennswest/stormuefi/blob/main/docs/PALLET-SPEC.md)
-v1, whose reference reader is `stormuefi-map` — `no_std`, allocation-free and
-OVMF-verified. Engine issues: [#51](https://github.com/glennswest/stormblock/issues/51)
+**Status: implemented, 2026-08-19.** *This document is the specification.* The
+format began life as `stormuefi/docs/PALLET-SPEC.md`; ownership moved here with
+the producer, and that path now points back at this file.
+
+The **decode** side is a crate of its own —
+[`crates/pallet-format`](../crates/pallet-format) — `no_std`, no allocation on
+the read path, no async, no I/O and **no write path at all**. stormblock links
+it for the engine; stormuefi links the same crate compiled for
+`x86_64-unknown-uefi`. One reader, two targets, so a format change lands in
+both at once and cannot drift (§10).
+
+Engine issues: [#51](https://github.com/glennswest/stormblock/issues/51)
 (primitives), [#52](https://github.com/glennswest/stormblock/issues/52)
-(lifecycle).
+(lifecycle), [#53](https://github.com/glennswest/stormblock/issues/53) (the
+split).
 
 > A **pallet** is a GPT partition containing a named, versioned, self-contained
 > set of sealed member images and the manifest that describes them.
@@ -470,7 +479,60 @@ A member sourced as `{"source":"volume","volume_id":"…"}` is read straight out
 of the GEM — the golden a pallet ships is a sealed clone, published by being
 read out of the engine with nothing staged in between.
 
-## 10. What is guaranteed, and what is not yet
+## 10. One reader, two targets
+
+`crates/pallet-format` exists because one on-disk format with two consumers is
+exactly the shape that produces two hand-maintained readers which must stay
+bit-compatible forever — and whose drift fails as *the node does not boot*.
+
+**The shared crate is a browser, not a format library.** It decodes: superblock,
+member and extent tables; `crc32` and the three CRCs; the extent remap; kinds
+and attributes; manifest and member digest verification. Navigate, verify,
+resolve. Nothing that mutates.
+
+**Everything else stays in stormblock**: publish, write, allocate, activate,
+renumber, migrate, copy, move, convert, retention. None of it is duplicated, and
+none of it leaks into a crate firmware links.
+
+Three consequences worth stating:
+
+- **The frozen surface is the minimum.** Only "how to read a pallet" must never
+  drift. Emission has exactly one implementation, so there is nothing to keep in
+  sync on the write side.
+- **A read-only crate cannot grow a write path by accident**, which matters more
+  than the convenience of sharing emission helpers, because the code that runs
+  before the kernel — before Secure Boot hands off, before a shell exists —
+  should be small enough to read in one sitting.
+- **Offsets have one definition.** `pallet_format::layout` names every field's
+  position, and stormblock's writer lays bytes down at those offsets rather than
+  re-declaring them.
+
+```toml
+# In a firmware consumer:
+stormblock-pallet-format = { git = "https://github.com/glennswest/stormblock", default-features = false, features = ["verify"] }
+```
+
+```rust
+let pallet = Pallet::parse(&partition_head)?;   // superblock + both tables
+pallet.verify_manifest()?;                      // the signed quantity
+let kernel = pallet.find_role("kernel")?;
+pallet.verify_member(&kernel, &reader, &mut scratch)?;   // content, through the extent map
+let m = pallet.map(&kernel, offset)?;           // where to read next
+```
+
+`BlockReader` is the only thing the caller supplies, and it reads
+partition-relative blocks in the pallet's own `block_size` — which stormblock
+writes equal to the media's sector size, so on a real device the two coincide
+and there is no unit to convert (§2.4).
+
+The crate is tested against **hand-built bytes**, not against our own writer: a
+decoder tested only by its own encoder proves nothing about either. Its CRC is
+checked against the value every other implementation produces, and
+`tests/integration_pallet.rs` reads engine-written pallets back through this
+path — synchronous, scratch buffer, `BlockReader` — including refusing a
+tampered one.
+
+## 11. What is guaranteed, and what is not yet
 
 Guaranteed, and asserted by tests:
 

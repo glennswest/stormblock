@@ -5,7 +5,7 @@
 
 > A disk image is a GPT plus a concatenation of pallets.
 
-That line from `PALLET-SPEC.md` is the whole design. Everything inside a pallet
+That line from [docs/pallets.md](pallets.md) is the whole design. Everything inside a pallet
 is addressed relative to its partition, so assembling an image is *appending
 bytes and adding a GPT entry* — no offsets to rewrite, no signatures to redo.
 The builder is therefore small: **an image file is a drive** to this engine, so

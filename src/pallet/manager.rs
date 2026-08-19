@@ -446,13 +446,9 @@ impl PalletManager {
             if spec.remove.iter().any(|r| r == m.name()) {
                 continue;
             }
-            let content = Arc::new(PalletMemberContent::new(
-                pallet.clone(),
-                view.clone(),
-                m.clone(),
-            ));
+            let content = Arc::new(PalletMemberContent::new(pallet.clone(), view.clone(), m));
             members.push(
-                MemberSpec::new(m.name().to_string(), m.role().to_string(), m.kind, content)
+                MemberSpec::new(m.name(), m.role(), m.kind, content)
                     .with_flags(m.flags),
             );
         }
@@ -1053,8 +1049,8 @@ impl PalletManager {
         let view = self.store.view(&loc)?;
         let pallet = Arc::new(self.store.open(&loc).await?);
         let m = pallet.find(member)?;
-        let content = Arc::new(PalletMemberContent::new(pallet, view, m.clone()));
-        Ok(MemberSpec::new(m.name().to_string(), m.role().to_string(), m.kind, content).with_flags(m.flags))
+        let content = Arc::new(PalletMemberContent::new(pallet, view, m));
+        Ok(MemberSpec::new(m.name(), m.role(), m.kind, content).with_flags(m.flags))
     }
 
     // -------------------------------------------------------------- removal

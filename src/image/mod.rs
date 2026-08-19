@@ -1,6 +1,6 @@
 //! Image assembly — a bootable disk, built out of pallets.
 //!
-//! From `PALLET-SPEC.md`: *a disk image is a GPT plus a concatenation of
+//! From `docs/pallets.md`: *a disk image is a GPT plus a concatenation of
 //! pallets*, because every pallet is self-contained and partition-relative.
 //! Adding one is appending bytes and adding a GPT entry; removing one is
 //! deleting an entry. Nothing inside is rewritten, and nothing is re-signed.

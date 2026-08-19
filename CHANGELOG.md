@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### 2026-08-19
+- **refactor:** The pallet format's **read side is a crate of its own** —
+  `crates/pallet-format`, `no_std`, no allocation on the read path, no async, no
+  I/O, and no write path at all (#53). `format.rs` claimed byte-compatibility
+  with a reader that did not implement this format yet, and the way that claim
+  becomes true matters: transcribing v1 into a second reader would reproduce the
+  failure mode already argued against — two hand-maintained readers of one
+  on-disk layout, in two repos, whose drift fails as *the node does not boot*.
+  Now firmware and the engine link the same reader. Verified against
+  `x86_64-unknown-uefi`, not asserted.
+- **refactor:** stormblock keeps emission — there is no second writer, so there
+  is nothing to keep in sync on that side — and lays bytes down at the offsets
+  `pallet_format::layout` defines, so every field has exactly one definition.
+  `pallet::Pallet` is now a thin async layer whose every decode is the shared
+  reader; `crc32`, `crc32_continue` and `superblock_crc` come from it too.
+- **test:** 12 crate tests work from **hand-built bytes** rather than from our
+  own writer, because a decoder tested only against its own encoder proves
+  nothing about either. The CRC is checked against the value every other
+  implementation produces, and `firmware_reads_what_the_engine_wrote` reads an
+  engine-written pallet back through the firmware path itself — synchronous,
+  scratch buffer, `BlockReader` — including refusing a tampered one.
+- **docs:** `docs/pallets.md` is the living specification; the links that
+  pointed at `stormuefi/docs/PALLET-SPEC.md` now point here, since the format
+  moved with the producer.
+
 ## [v9.5.0] — 2026-08-19
 
 ### 2026-08-19

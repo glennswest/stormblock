@@ -541,6 +541,23 @@ scanning rather than configured.
       the source a fresh table. Refuses to wipe a source that is still the only
       copy of something that failed to convert.
 
+### The format's read side is a crate (2026-08-19, #53)
+
+`crates/pallet-format` — `no_std`, no allocation, no async, no I/O, **no write
+path**. Firmware links it, so it must stay small enough to read in one sitting
+and structurally unable to write. stormblock keeps emission and writes at the
+offsets `pallet_format::layout` defines.
+
+The rule this encodes: **one on-disk format may have only one reader.** Two
+hand-maintained readers in two repos drift, and the drift fails as *the node
+does not boot*. Emission needs no such sharing because there is only ever one
+writer.
+
+Check it with `cargo check -p stormblock-pallet-format --target
+x86_64-unknown-uefi --no-default-features --features verify` — the `no_std`
+claim is verified, not asserted. Its tests work from hand-built bytes on
+purpose: a decoder tested only against its own encoder proves nothing.
+
 ### Image building (2026-08-19)
 
 `stormblock image build` assembles disk images and ISOs out of pallets —

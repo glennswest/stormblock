@@ -13,7 +13,7 @@
 //! answers, which is the property that matters — one selection rule, not one
 //! per consumer that then drift.
 //!
-//! The rule, from `PALLET-SPEC.md`:
+//! The rule, from `docs/pallets.md`:
 //!
 //! ```text
 //! candidates = pallets with priority > 0, ordered by (priority desc, version desc)
