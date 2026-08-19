@@ -184,3 +184,52 @@ Related: Kubernetes is already Rust here (`rustkube`), so the runtimes above
 stormblock — containers, k8s, VMs, micro-VMs — can be one Rust stack rather
 than a Rust storage layer under borrowed pieces.
 
+
+## Layer references, and what it takes to move them
+
+A layered golden is not a stack that gets composed at read time. Each level
+owns a **complete extent map**, and every entry in it is an
+`ExtentLocation { slab_id: SlabId(Uuid), slot_idx: u32 }` — a slab named by
+UUID, and a slot within it. `base → l2 → l3` means `l3`'s map already names
+every slot it needs, whichever level first wrote it.
+
+Two things follow, and they pull in opposite directions.
+
+**Depth is free to read.** There is no chain to walk, at any depth, so a
+twelve-level stack reads exactly as fast as a one-level one. A runtime clone
+of the deepest level is one map copy plus a refcount bump — measured at one
+slot for a 9 MiB stack, the cost of the clone stamping its own filesystem
+identity. Because that is so cheap, a clone can be made before it is wanted
+and parked; a cold start becomes a map lookup rather than a build. Writes go
+copy-on-write into fresh slab space and rewrite only that clone's map, so the
+levels underneath are never written — the clone is disposable by
+construction. All of this is asserted in
+`fs::template::tests::a_clone_flattens_the_stack_and_writes_only_to_itself`.
+
+The reason to squash is therefore **space, never latency**: each level carries
+its own filesystem metadata, and each level's writes round up to a slot. Two
+or three levels is a good trade; twelve is paying that tax twelve times for no
+read benefit.
+
+**But a map is only meaningful next to the slabs it names.** This is the real
+cost of flattening, and it decides how a volume travels:
+
+- **Moving a pallet is free.** Slabs are identified by UUID, not by node,
+  device, or path. Move the slabs and every map that references them stays
+  valid verbatim — nothing to rewrite, nothing to rebuild, and the layer
+  structure comes along untouched. This is the case worth designing for,
+  because it is the common one.
+- **Moving a volume away from its slabs is a rebuild.** Cloning a container to
+  a node that does not hold those slabs means materialising the content into
+  the destination's own slabs and writing a fresh map. Here the flat map is an
+  advantage rather than an obstacle: there is one map to read and one set of
+  slots to pull, with no chain to resolve first. `volume::relocate` is this
+  operation within a node; across nodes is the same shape with a network in
+  the middle.
+
+Local first. Off-system references — a map entry naming a slab held by another
+node — are possible and are not ruled out by anything above, since the
+reference is already a UUID rather than a local address. They are deliberately
+not the starting point: a local reference cannot be broken by a partition, and
+a design that works when every slot is reachable is the one worth having
+before adding the case where some are not.

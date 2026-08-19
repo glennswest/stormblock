@@ -3,6 +3,21 @@
 ## [Unreleased]
 
 ### 2026-08-19
+- **test:** Layered goldens: `layers_stack_to_any_depth` (four levels deep) and
+  `a_child_survives_its_parent_being_deleted` prove these are complete
+  filesystems sharing refcounted blocks, not overlay layers borrowing them.
+- **test:** `a_clone_flattens_the_stack_and_writes_only_to_itself` measures the
+  runtime model: a clone of a 9 MiB two-level stack costs one slot, reads every
+  level through one flat map, and its writes never reach the goldens beneath.
+- **docs:** `docs/layering.md` — layer references are `(slab UUID, slot)`, so
+  depth is free to read and squashing is a space decision, never a latency one;
+  moving a pallet preserves every reference verbatim, while moving a volume away
+  from its slabs is a rebuild.
+- **chore:** Drop the dead `Slab::persist_header` (free_slots is derived and
+  recounted by `open`; its call site was removed deliberately) and two redundant
+  imports in `serve/api.rs`.
+
+### 2026-08-19
 - **feat:** a template's `parent_id` is exposed in the API, not only persisted.
   Lineage the engine keeps to itself makes "rebuild everything built on this
   base" a question nothing outside can answer — and the thing that wants to

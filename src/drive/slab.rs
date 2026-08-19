@@ -905,17 +905,6 @@ impl Slab {
         Ok(())
     }
 
-    /// Persist the header (updates free_slots count).
-    async fn persist_header(&mut self) -> DriveResult<()> {
-        self.header.free_slots = self.free_count;
-        self.header.update_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let bytes = self.header.to_bytes();
-        self.device.write(0, &bytes).await?;
-        Ok(())
-    }
 }
 
 /// Align a value up to the given alignment.

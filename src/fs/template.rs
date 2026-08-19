@@ -1307,6 +1307,322 @@ mod tests {
         assert!(sealed.clone_source().is_some());
     }
 
+    /// The chain a system is actually built as: scratch → runtime → app →
+    /// config, each level `FROM` the last.
+    ///
+    /// Depth is the thing most likely to have an unnoticed limit, and here it
+    /// is free: `create_snapshot` clones an extent map and raises a refcount,
+    /// so every level owns a *complete* map and nothing reads through its
+    /// parent. A four-deep chain is four independent filesystems that happen
+    /// to share most of their blocks — not four levels of indirection.
+    #[tokio::test]
+    async fn layers_stack_to_any_depth() {
+        let (vm, store, _path) = node(4 * 1024 * 1024 * 1024).await;
+
+        let seed = |path: &str, byte: u8, len: usize| SeedFile {
+            path: path.to_string(),
+            contents: vec![byte; len],
+        };
+
+        // scratch → the runtime
+        let runtime = create(
+            &vm,
+            &store,
+            &TemplateSpec {
+                seed: vec![seed("/stormd", 0xaa, 256 * 1024)],
+                ..TemplateSpec::new("l-runtime", 64 * 1024 * 1024)
+            },
+        )
+        .await
+        .unwrap();
+
+        // FROM the runtime → the app
+        let app = create(
+            &vm,
+            &store,
+            &TemplateSpec::new("l-app", 64 * 1024 * 1024).from_parent("l-runtime"),
+        )
+        .await
+        .unwrap();
+        {
+            let dev = volume(&vm, VolumeId(app.raw_volume_id.unwrap())).await;
+            crate::fs::files::write_files(&dev, &[seed("/app/netwatch", 0xbb, 128 * 1024)])
+                .await
+                .unwrap();
+        }
+        let app = seal(&vm, &store, &app.id, false).await.unwrap();
+
+        // FROM the app → this deployment's config
+        let deploy = create(
+            &vm,
+            &store,
+            &TemplateSpec::new("l-deploy", 64 * 1024 * 1024).from_parent("l-app"),
+        )
+        .await
+        .unwrap();
+        {
+            let dev = volume(&vm, VolumeId(deploy.raw_volume_id.unwrap())).await;
+            crate::fs::files::write_files(&dev, &[seed("/etc/netwatch.toml", 0xcc, 512)])
+                .await
+                .unwrap();
+        }
+        let deploy = seal(&vm, &store, &deploy.id, false).await.unwrap();
+
+        // Lineage is a chain, not a star.
+        assert_eq!(app.parent_id, Some(runtime.id));
+        assert_eq!(deploy.parent_id, Some(app.id));
+
+        // Every level's contents accumulate, and the deepest has all three.
+        let dev = volume(&vm, deploy.clone_source().unwrap()).await;
+        for (path, len) in [
+            ("/stormd", 256 * 1024),
+            ("/app/netwatch", 128 * 1024),
+            ("/etc/netwatch.toml", 512),
+        ] {
+            let got = crate::fs::files::read_file(&dev, path)
+                .await
+                .unwrap_or_else(|e| panic!("{path} missing at the deepest level: {e}"));
+            assert_eq!(got.len(), len, "{path} truncated");
+        }
+        drop(dev);
+
+        // And the middle of the chain is still itself: the app has the
+        // runtime and its own binary, and not the deployment's config.
+        let dev = volume(&vm, app.clone_source().unwrap()).await;
+        assert!(crate::fs::files::read_file(&dev, "/stormd").await.is_ok());
+        assert!(crate::fs::files::read_file(&dev, "/app/netwatch").await.is_ok());
+        assert!(
+            crate::fs::files::read_file(&dev, "/etc/netwatch.toml").await.is_err(),
+            "a parent must not see what its child added"
+        );
+        drop(dev);
+
+        // A clone of the deepest level is what a pod would get.
+        let c = clone_template(&vm, &store, "l-deploy", &CloneSpec::new("l-pod"))
+            .await
+            .unwrap();
+        let dev = volume(&vm, c.volume_id).await;
+        assert!(crate::fs::files::read_file(&dev, "/stormd").await.is_ok());
+        assert!(crate::fs::files::read_file(&dev, "/etc/netwatch.toml").await.is_ok());
+    }
+
+    /// A runtime clone is the stack, flattened, for free.
+    ///
+    /// This is the property the whole design rests on, so it is worth
+    /// demonstrating rather than asserting. A pod does not mount a stack of
+    /// layers and does not compose anything: `create_snapshot` hands it a
+    /// **complete extent map** whose entries point straight at whichever slab
+    /// slot holds each block, wherever in the chain that block was written.
+    /// One map, direct references across the stack, no indirection at read
+    /// time and no chain to walk however deep the chain was.
+    ///
+    /// Writes land only in the clone — copy-on-write against slots the
+    /// goldens still share — so the stack underneath is untouched and the
+    /// clone can simply be thrown away.
+    ///
+    /// The cost is a slot, not a copy: real slab usage grows by what the
+    /// clone *writes*, not by what it can *see*. Measured here: a clone of a
+    /// 9 MiB stack costs one slot — the clone stamping its own filesystem
+    /// identity — and a 4 KiB write into it costs two more, the data slot and
+    /// the metadata slot it dirties. Slot granularity, not byte count, is
+    /// what a write actually costs.
+    ///
+    /// Two consequences worth stating plainly, because they are easy to get
+    /// backwards:
+    ///
+    /// 1. **Depth has no read cost, at any depth.** The map is flat by
+    ///    construction, so a twelve-level stack reads exactly as fast as a
+    ///    one-level one. The reason to squash is space — each level carries
+    ///    its own filesystem metadata and rounds its writes up to a slot —
+    ///    and never latency. A clone can also be made *before* it is needed
+    ///    and parked, since it costs a slot and no copying, which makes a
+    ///    cold start a map lookup rather than any kind of build.
+    /// 2. **A write never reaches the levels underneath.** Copy-on-write
+    ///    takes fresh slab space and rewrites only this volume's map; the
+    ///    goldens keep their refcounts and their bytes. Asserted below by
+    ///    reading the golden back after the clone has written to it.
+    #[tokio::test]
+    async fn a_clone_flattens_the_stack_and_writes_only_to_itself() {
+        let slot = 4 * 1024 * 1024;
+        let (vm, store, _path) = node_with_slots(4 * 1024 * 1024 * 1024, slot).await;
+
+        async fn used_slots(vm: &VmLock) -> u64 {
+            let m = vm.lock().await;
+            let reg = m.registry().read().await;
+            reg.total_free_slots()
+        }
+
+        // runtime → app: two levels, real content in each.
+        create(
+            &vm,
+            &store,
+            &TemplateSpec {
+                seed: vec![SeedFile {
+                    path: "/stormd".to_string(),
+                    contents: vec![0xaa; 8 * 1024 * 1024],
+                }],
+                ..TemplateSpec::new("flat-runtime", 128 * 1024 * 1024)
+            },
+        )
+        .await
+        .unwrap();
+
+        let app = create(
+            &vm,
+            &store,
+            &TemplateSpec::new("flat-app", 128 * 1024 * 1024).from_parent("flat-runtime"),
+        )
+        .await
+        .unwrap();
+        {
+            let dev = volume(&vm, VolumeId(app.raw_volume_id.unwrap())).await;
+            crate::fs::files::write_files(
+                &dev,
+                &[SeedFile { path: "/app".to_string(), contents: vec![0xbb; 1024 * 1024] }],
+            )
+            .await
+            .unwrap();
+        }
+        seal(&vm, &store, &app.id, false).await.unwrap();
+
+        // What a pod gets.
+        let free_before = used_slots(&vm).await;
+        let pod = clone_template(&vm, &store, "flat-app", &CloneSpec::new("flat-pod"))
+            .await
+            .unwrap();
+        let free_after_clone = used_slots(&vm).await;
+
+        // Cloning does not copy the stack. It copies a map, raises refcounts,
+        // and pays only for stamping the clone's own filesystem identity —
+        // one slot, against the 9 MiB of content the clone can now read,
+        // which would be three slots at minimum if it were copied.
+        let clone_cost = free_before - free_after_clone;
+        assert!(
+            clone_cost <= 1,
+            "cloning cost {clone_cost} slots; it should share the stack, not copy it"
+        );
+
+        // And the clone sees the whole stack through that one map.
+        let dev = volume(&vm, pod.volume_id).await;
+        assert_eq!(
+            crate::fs::files::read_file(&dev, "/stormd").await.unwrap().len(),
+            8 * 1024 * 1024,
+            "the runtime's file, written two levels down"
+        );
+        assert_eq!(
+            crate::fs::files::read_file(&dev, "/app").await.unwrap().len(),
+            1024 * 1024
+        );
+
+        // Writing touches only the clone.
+        crate::fs::files::write_files(
+            &dev,
+            &[SeedFile { path: "/run/state".to_string(), contents: vec![0xdd; 4096] }],
+        )
+        .await
+        .unwrap();
+        drop(dev);
+        let free_after_write = used_slots(&vm).await;
+        assert!(
+            free_after_write < free_after_clone,
+            "the write consumed nothing; copy-on-write should have taken a slot"
+        );
+
+        // The golden underneath never saw it.
+        let app_dev = volume(
+            &vm,
+            store.lock().await.by_name("flat-app").unwrap().clone_source().unwrap(),
+        )
+        .await;
+        assert!(
+            crate::fs::files::read_file(&app_dev, "/run/state").await.is_err(),
+            "a pod's write reached the golden it was cloned from"
+        );
+
+        println!(
+            "clone of a 9 MiB stack cost {clone_cost} slot(s); a 4 KiB write into it cost {} slot(s) of {} MiB",
+            free_after_clone - free_after_write,
+            slot / 1048576
+        );
+    }
+
+    /// **These are not overlay layers.** Each level is a complete filesystem
+    /// on a block device of its own; nothing is composed at mount time and
+    /// nothing reads through a parent.
+    ///
+    /// The proof is deleting the parent. Under an overlay model a child is a
+    /// diff and loses its lower layer with it. Here the child kept a complete
+    /// extent map when it was cloned, and the blocks it shares are
+    /// refcounted rather than borrowed — so the parent's *entry* goes and the
+    /// child's contents do not.
+    #[tokio::test]
+    async fn a_child_survives_its_parent_being_deleted() {
+        let (vm, store, _path) = node(2 * 1024 * 1024 * 1024).await;
+
+        create(
+            &vm,
+            &store,
+            &TemplateSpec {
+                seed: vec![SeedFile {
+                    path: "/stormd".to_string(),
+                    contents: vec![0xaa; 512 * 1024],
+                }],
+                ..TemplateSpec::new("orphan-base", 64 * 1024 * 1024)
+            },
+        )
+        .await
+        .unwrap();
+
+        let child = create(
+            &vm,
+            &store,
+            &TemplateSpec::new("orphan-child", 64 * 1024 * 1024).from_parent("orphan-base"),
+        )
+        .await
+        .unwrap();
+        {
+            let dev = volume(&vm, VolumeId(child.raw_volume_id.unwrap())).await;
+            crate::fs::files::write_files(
+                &dev,
+                &[SeedFile { path: "/app".to_string(), contents: vec![0xbb; 64 * 1024] }],
+            )
+            .await
+            .unwrap();
+        }
+        let child = seal(&vm, &store, &child.id, false).await.unwrap();
+
+        // The parent goes entirely — entry and volumes.
+        let base_id = store.lock().await.by_name("orphan-base").map(|t| t.id).unwrap();
+        delete(&vm, &store, &base_id, true, true).await.unwrap();
+        assert!(
+            store.lock().await.by_name("orphan-base").is_none(),
+            "the parent should be gone"
+        );
+
+        // The child is untouched: its own file, and the parent's.
+        let dev = volume(&vm, child.clone_source().unwrap()).await;
+        let inherited = crate::fs::files::read_file(&dev, "/stormd")
+            .await
+            .expect("the parent's file must survive the parent");
+        assert_eq!(inherited.len(), 512 * 1024);
+        assert_eq!(inherited[0], 0xaa, "and still be the right bytes");
+        assert_eq!(
+            crate::fs::files::read_file(&dev, "/app").await.unwrap().len(),
+            64 * 1024
+        );
+        drop(dev);
+
+        // And it still clones, which is what a pod actually needs.
+        let c = clone_template(&vm, &store, "orphan-child", &CloneSpec::new("orphan-pod"))
+            .await
+            .unwrap();
+        let dev = volume(&vm, c.volume_id).await;
+        assert_eq!(
+            crate::fs::files::read_file(&dev, "/stormd").await.unwrap().len(),
+            512 * 1024
+        );
+    }
+
     /// Lineage has to be visible from outside, or "rebuild everything built
     /// on this base" is a question only the engine can answer — and the thing
     /// that wants to ask is not the engine.

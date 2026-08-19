@@ -42,8 +42,6 @@ use crate::volume::{VolumeId, DEFAULT_EXTENT_SIZE};
 
 use super::ctx::ServeContext;
 use super::netstat;
-use super::reap;
-use super::reconcile;
 use super::tarfs;
 use super::trim;
 use super::wiring::{WireProto, WireState};
