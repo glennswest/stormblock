@@ -306,7 +306,7 @@ fn chs(total_sectors: u64) -> (u16, u8, u8) {
     } else {
         spt = 17;
         cth = ts / spt;
-        heads = ((cth + 1023) / 1024).max(4);
+        heads = cth.div_ceil(1024).max(4);
         if heads > 16 {
             spt = 31;
             heads = 16;

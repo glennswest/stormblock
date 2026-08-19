@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.5.0] — 2026-08-19
+
 ### 2026-08-19
 - **feat:** **Image building** — `stormblock image build --spec image.toml --out
   disk.qcow2`, plus `inspect`, `convert` and `formats`. A disk image is a GPT

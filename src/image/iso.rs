@@ -63,19 +63,13 @@ struct Placed {
 }
 
 /// What to carry into the ISO.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct IsoOptions {
     /// Carry the slab as well. Off by default: a slab is the *mutable* end of
     /// a disk and starts out empty, so including it turns a 35 MB image into a
     /// 320 MB one made mostly of zeros. An installer formats one on the target
     /// disk; a live image that genuinely ships content in its slab can ask.
     pub include_slab: bool,
-}
-
-impl Default for IsoOptions {
-    fn default() -> Self {
-        IsoOptions { include_slab: false }
-    }
 }
 
 /// Build an ISO from a finished raw image.
