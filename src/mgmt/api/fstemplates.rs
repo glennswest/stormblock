@@ -112,6 +112,18 @@ pub struct CreateTemplateRequest {
     /// template `awaiting_format` for an initiator to format over an export.
     #[serde(default = "yes")]
     pub format: bool,
+    /// Build on top of another template — its name or id. `FROM`, in the
+    /// sense a container build means it.
+    ///
+    /// The new template's raw volume is a copy-on-write clone of the parent's
+    /// sealed snapshot, so it starts out already formatted and already
+    /// holding the parent's contents; write only what is new and seal. Every
+    /// block the parent contributed is shared, so a runtime common to five
+    /// images is stored once rather than five times.
+    ///
+    /// Incompatible with `format`, which would erase what the parent is for.
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 fn yes() -> bool {
@@ -232,7 +244,12 @@ async fn create_template(
         label: req.label.unwrap_or_default(),
         features: req.features,
         seed,
-        format_in_core: req.format,
+        // `format` defaults to true, and a caller naming a parent plainly does
+        // not want the parent's filesystem formatted away. Treat the parent as
+        // the stronger statement rather than making every such request also
+        // remember to say `format: false`.
+        format_in_core: req.format && req.parent.is_none(),
+        parent: req.parent,
     };
 
     match template::create(&state.volume_manager, &state.fstemplates, &spec).await {

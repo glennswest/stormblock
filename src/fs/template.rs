@@ -118,6 +118,12 @@ impl std::fmt::Display for FsKind {
 pub enum TemplateState {
     /// A raw volume waiting for something to lay a filesystem down on it.
     AwaitingFormat,
+    /// A raw volume that is *already* a filesystem, because it was cloned
+    /// from a parent template, waiting for its own content before it is
+    /// sealed. There is nothing to format — that work was done once, in the
+    /// parent — so this is a distinct state rather than a flavour of
+    /// `AwaitingFormat`.
+    AwaitingSeed,
     /// Sealed: `sealed_volume_id` is a clean snapshot, safe to clone.
     Ready,
 }
@@ -126,6 +132,7 @@ impl TemplateState {
     pub fn as_str(&self) -> &'static str {
         match self {
             TemplateState::AwaitingFormat => "awaiting_format",
+            TemplateState::AwaitingSeed => "awaiting_seed",
             TemplateState::Ready => "ready",
         }
     }
@@ -160,6 +167,21 @@ pub struct TemplateSpec {
     /// Format and seal in this process. False leaves the template in
     /// `awaiting_format` for an initiator to format over an export.
     pub format_in_core: bool,
+    /// Build this template's filesystem *from* another template's, rather
+    /// than from a blank volume — `FROM` in the sense a container build means
+    /// it.
+    ///
+    /// The raw volume becomes a copy-on-write clone of the parent's sealed
+    /// snapshot, so it arrives already formatted and already carrying the
+    /// parent's contents. Every block the parent contributed is then *shared*
+    /// rather than stored a second time: snapshots clone an extent map and
+    /// raise a refcount, so a runtime that five images have in common costs
+    /// one copy, not five.
+    ///
+    /// The filesystem's shape is the parent's — kind, journal, features, block
+    /// layout — because it *is* the parent's filesystem. Only `size_bytes` may
+    /// differ, and only upwards.
+    pub parent: Option<String>,
 }
 
 impl TemplateSpec {
@@ -173,7 +195,18 @@ impl TemplateSpec {
             features: None,
             seed: Vec::new(),
             format_in_core: true,
+            parent: None,
         }
+    }
+
+    /// Build this template on top of another — `FROM`, in a container build's
+    /// sense. The parent's filesystem is inherited rather than rebuilt, and
+    /// its blocks are shared rather than copied.
+    pub fn from_parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = Some(parent.into());
+        // There is nothing to format: the filesystem arrives with the clone.
+        self.format_in_core = false;
+        self
     }
 }
 
@@ -221,6 +254,14 @@ pub struct FsTemplate {
     /// contents live in the filesystem, not here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seeded: Vec<String>,
+    /// The template this one was built `FROM`, if any.
+    ///
+    /// Recorded for lineage, not for reads: a snapshot owns a complete extent
+    /// map of its own, so nothing about reading this template's filesystem
+    /// goes through its parent. Deleting the parent is safe for the same
+    /// reason — the blocks are refcounted, not borrowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
 }
 
 impl FsTemplate {
@@ -494,30 +535,136 @@ pub async fn create(
         return Err(TemplateError::Exists(format!("fstemplate {} already exists", spec.name)));
     }
 
-    let raw = vm
-        .lock()
-        .await
-        .create_volume_any(&format!("fstemplate-{}-raw", spec.name), spec.size_bytes)
-        .await
-        .map_err(|e| TemplateError::Internal(format!("creating template volume: {e}")))?;
+    // `FROM` a parent, or from nothing.
+    //
+    // With a parent the raw volume is a copy-on-write clone of the parent's
+    // sealed snapshot, which means it is already a filesystem: there is
+    // nothing to mkfs, and the blocks the parent contributed are shared
+    // rather than written again. Without one it is a blank volume that
+    // something still has to format.
+    let parent = match spec.parent.as_deref() {
+        None => None,
+        Some(key) => {
+            let p = store
+                .lock()
+                .await
+                .find(key)
+                .cloned()
+                .ok_or_else(|| TemplateError::NotFound(format!("parent fstemplate {key} not found")))?;
+            if p.state != TemplateState::Ready {
+                return Err(TemplateError::Conflict(format!(
+                    "parent fstemplate {} is {} — seal it before building on it",
+                    p.name,
+                    p.state.as_str()
+                )));
+            }
+            if spec.format_in_core {
+                // Formatting over a parent would erase the very thing the
+                // parent was for. Refuse rather than silently pick one.
+                return Err(TemplateError::Invalid(
+                    "format_in_core cannot be combined with parent: the parent's filesystem                      is the filesystem"
+                        .to_string(),
+                ));
+            }
+            if spec.size_bytes < p.size_bytes {
+                return Err(TemplateError::Invalid(format!(
+                    "size_bytes {} is smaller than parent {} ({}); a filesystem cannot be                      shrunk into a smaller volume",
+                    spec.size_bytes, p.name, p.size_bytes
+                )));
+            }
+            Some(p)
+        }
+    };
 
+    let raw = match &parent {
+        None => vm
+            .lock()
+            .await
+            .create_volume_any(&format!("fstemplate-{}-raw", spec.name), spec.size_bytes)
+            .await
+            .map_err(|e| TemplateError::Internal(format!("creating template volume: {e}")))?,
+        Some(p) => {
+            let source = p.clone_source().ok_or_else(|| {
+                TemplateError::Internal(format!("parent {} has no sealed snapshot", p.name))
+            })?;
+            let mut m = vm.lock().await;
+            let id = m
+                .create_snapshot(source, &format!("fstemplate-{}-raw", spec.name))
+                .await
+                .map_err(|e| TemplateError::Internal(format!("cloning parent {}: {e}", p.name)))?;
+            if spec.size_bytes > p.size_bytes {
+                m.resize_volume(id, spec.size_bytes).await.map_err(|e| {
+                    TemplateError::Internal(format!("growing template volume: {e}"))
+                })?;
+            }
+            drop(m);
+
+            // Give it an identity of its own, now, before anything is written
+            // to it and long before it is sealed.
+            //
+            // The clone arrives carrying the parent's filesystem UUID, so two
+            // templates built on one parent would otherwise both claim it —
+            // and with `metadata_csum` the UUID is the seed for every checksum
+            // in the filesystem, so stamping it later means rewriting all of
+            // them. `metadata_csum_seed` is what makes doing it here a single
+            // superblock write instead.
+            let dev = vm
+                .lock()
+                .await
+                .get_volume(&id)
+                .ok_or_else(|| TemplateError::Internal("cloned volume vanished".to_string()))?;
+            let fresh = Uuid::new_v4();
+            if let Err(e) = ext4::stamp_uuid(&dev, fresh, true).await {
+                drop(dev);
+                let _ = discard(vm, id).await;
+                return Err(TemplateError::Internal(format!(
+                    "stamping a fresh uuid on the clone of {}: {e}",
+                    p.name
+                )));
+            }
+            drop(dev);
+            id
+        }
+    };
+
+    // A template built on a parent *is* the parent's filesystem, so its shape
+    // is inherited rather than restated: asking for ext2-with-no-journal on
+    // top of an ext4 parent describes a filesystem that does not exist.
     let mut template = FsTemplate {
         id: Uuid::new_v4(),
         name: spec.name.clone(),
-        fs: spec.fs,
+        fs: parent.as_ref().map(|p| p.fs).unwrap_or(spec.fs),
         size_bytes: spec.size_bytes,
-        journal: spec.journal.unwrap_or(spec.fs != FsKind::Ext2),
-        label: spec.label.clone(),
-        features: spec.features.clone(),
-        sixty_four_bit: false,
-        metadata_csum: false,
-        csum_seed: false,
+        journal: match &parent {
+            Some(p) => p.journal,
+            None => spec.journal.unwrap_or(spec.fs != FsKind::Ext2),
+        },
+        label: match &parent {
+            Some(p) if spec.label.is_empty() => p.label.clone(),
+            _ => spec.label.clone(),
+        },
+        features: match &parent {
+            Some(p) => p.features.clone(),
+            None => spec.features.clone(),
+        },
+        sixty_four_bit: parent.as_ref().map(|p| p.sixty_four_bit).unwrap_or(false),
+        metadata_csum: parent.as_ref().map(|p| p.metadata_csum).unwrap_or(false),
+        csum_seed: parent.as_ref().map(|p| p.csum_seed).unwrap_or(false),
+        // The clone carries the parent's filesystem UUID until something
+        // stamps it. Two templates off one parent must not keep sharing it,
+        // so `seal` gives this one an identity of its own.
+        // Set below for a parent-built template, which was stamped at
+        // creation; `seal` re-reads it off the filesystem either way.
         fs_uuid: None,
-        state: TemplateState::AwaitingFormat,
+        state: match &parent {
+            Some(_) => TemplateState::AwaitingSeed,
+            None => TemplateState::AwaitingFormat,
+        },
         raw_volume_id: Some(raw.0),
         sealed_volume_id: None,
         clones: 0,
         seeded: spec.seed.iter().map(|f| f.path.clone()).collect(),
+        parent_id: parent.as_ref().map(|p| p.id),
     };
 
     // Claim the name before the long part. Two creates racing on one name
@@ -1086,6 +1233,102 @@ mod tests {
 
     async fn volume(vm: &VmLock, id: VolumeId) -> Arc<dyn BlockDevice> {
         vm.lock().await.get_volume(&id).expect("volume exists")
+    }
+
+    /// `FROM` a sealed template: the child is that filesystem, not a new one.
+    ///
+    /// This is the layering a container build does, expressed as volumes. The
+    /// point is what it costs — the parent's blocks are shared through the
+    /// extent map's refcounts, so a runtime five images have in common is
+    /// stored once — and the property that makes it safe: a snapshot owns a
+    /// complete map of its own, so nothing reads *through* the parent.
+    #[tokio::test]
+    async fn a_template_can_be_built_from_another() {
+        let (vm, store, _path) = node(2 * 1024 * 1024 * 1024).await;
+
+        let base = create(
+            &vm,
+            &store,
+            &TemplateSpec {
+                label: "base".to_string(),
+                seed: vec![SeedFile {
+                    path: "/runtime".to_string(),
+                    contents: vec![0xab; 512 * 1024],
+                }],
+                ..TemplateSpec::new("base-runtime", 64 * 1024 * 1024)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(base.state, TemplateState::Ready);
+
+        let child = create(
+            &vm,
+            &store,
+            &TemplateSpec::new("app", 64 * 1024 * 1024).from_parent("base-runtime"),
+        )
+        .await
+        .unwrap();
+
+        // Already a filesystem: there is nothing to format, so it is waiting
+        // for content rather than for a mkfs.
+        assert_eq!(child.state, TemplateState::AwaitingSeed);
+        assert_eq!(child.parent_id, Some(base.id));
+        assert_eq!(child.fs, base.fs, "the child is the parent's filesystem");
+        assert_eq!(child.journal, base.journal);
+
+        // The parent's contents came with it.
+        let raw = volume(&vm, VolumeId(child.raw_volume_id.unwrap())).await;
+        let got = crate::fs::files::read_file(&raw, "/runtime")
+            .await
+            .expect("the parent's file is present in the child");
+        assert_eq!(got.len(), 512 * 1024);
+
+        // …but not the parent's identity. Two children of one parent must not
+        // both claim its filesystem UUID, and with metadata_csum that UUID
+        // seeds every checksum, so it is stamped at creation rather than left
+        // to be fixed up later.
+        let layout = ext4::read_layout(&raw).await.unwrap();
+        assert_ne!(
+            Some(layout.uuid),
+            base.fs_uuid,
+            "the child kept its parent's filesystem uuid"
+        );
+        drop(raw);
+
+        // And it seals like any other template.
+        let sealed = seal(&vm, &store, &child.id, false).await.unwrap();
+        assert_eq!(sealed.state, TemplateState::Ready);
+        assert!(sealed.clone_source().is_some());
+    }
+
+    /// Formatting over a parent would destroy the thing the parent is for.
+    #[tokio::test]
+    async fn from_parent_refuses_to_also_format() {
+        let (vm, store, _path) = node(1024 * 1024 * 1024).await;
+        create(&vm, &store, &TemplateSpec::new("base2", 64 * 1024 * 1024)).await.unwrap();
+
+        let mut spec = TemplateSpec::new("app2", 64 * 1024 * 1024).from_parent("base2");
+        spec.format_in_core = true; // asking for both
+        assert!(matches!(
+            create(&vm, &store, &spec).await,
+            Err(TemplateError::Invalid(_))
+        ));
+    }
+
+    /// A parent that is not sealed has no snapshot to descend from.
+    #[tokio::test]
+    async fn from_parent_requires_a_sealed_parent() {
+        let (vm, store, _path) = node(1024 * 1024 * 1024).await;
+        let mut unsealed = TemplateSpec::new("half", 64 * 1024 * 1024);
+        unsealed.format_in_core = false;
+        create(&vm, &store, &unsealed).await.unwrap();
+
+        assert!(matches!(
+            create(&vm, &store, &TemplateSpec::new("app3", 64 * 1024 * 1024).from_parent("half"))
+                .await,
+            Err(TemplateError::Conflict(_))
+        ));
     }
 
     #[tokio::test]

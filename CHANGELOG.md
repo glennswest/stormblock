@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### 2026-08-19
+- **feat:** a template can be built **from** another — `FROM`, in the sense a
+  container build means it. `TemplateSpec.parent` (and `parent` on
+  `POST /api/v1/fstemplates`) makes the new template's raw volume a
+  copy-on-write clone of the parent's sealed snapshot instead of a blank one,
+  so it arrives already formatted and already carrying the parent's contents:
+  write only what is new, then seal.
+  The point is what it costs. Snapshots clone an extent map and raise a
+  refcount on shared slab slots, so a runtime that several images have in
+  common is **stored once rather than once per image** — measured across this
+  fleet's 14 images, `stormd` is currently stored 5 times (46.4 MB) and
+  `stormsh` 4 times (11.8 MB), about 46 MB of pure duplication. And because a
+  snapshot owns a complete extent map of its own, nothing reads *through* a
+  parent: there is no chain to walk however deep the layering goes, and
+  deleting a parent stays safe because the blocks are refcounted, not borrowed.
+  A child inherits the parent's filesystem shape — kind, journal, features,
+  block layout — because it *is* that filesystem; only `size_bytes` may differ,
+  and only upwards. It gets a **fresh filesystem UUID stamped at creation**,
+  before anything is written: two children of one parent must not both claim
+  the parent's identity, and under `metadata_csum` that UUID seeds every
+  checksum in the filesystem, so stamping late would mean rewriting all of
+  them (`metadata_csum_seed` is what makes doing it here one superblock write).
+  New state `awaiting_seed` distinguishes "already a filesystem, waiting for
+  content" from `awaiting_format`. Naming a parent implies `format: false`,
+  and asking for both is refused rather than silently resolved — formatting
+  over a parent would erase the thing the parent is for.
+
 ### 2026-08-18
 - **chore(deps):** `mkfs-ext4` to v1.4.0 and `fio-ext4` to v1.3.2, moving both
   pins together as they have to be — two tags are two source ids, and the
