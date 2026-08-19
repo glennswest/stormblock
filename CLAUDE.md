@@ -498,3 +498,35 @@ namespace, and the ~10–14k IOPS ceiling is probably that disk. So this says
 nothing about the engine on real NVMe, and #36 stays open for exactly that.
 #30 has lost its main justification and should be re-argued on its own merits
 rather than treated as confirmed.
+
+---
+
+## Pallets — engine support (2026-08-19, #51/#52)
+
+A **pallet** is a GPT partition holding a named, versioned, self-contained set
+of sealed member images plus the manifest that describes them. On-disk format
+is specified in `stormuefi/docs/PALLET-SPEC.md` v1; the reader is built and
+OVMF-verified in `stormuefi-map`. stormblock owns the **producer** side.
+
+The engine had no notion of one: a drive carried a slab and nothing else, so
+there was effectively a single implicit grouping. What the model needs is
+**many pallets, several per drive, spread over several drives**, discovered by
+scanning rather than configured.
+
+- [ ] `src/pallet/format.rs` — v1 writer + reader, byte-compatible with
+      `stormuefi-map`. Content first, header last, so a torn publish leaves a
+      pallet that fails its own CRC rather than one that lies.
+- [ ] `src/pallet/gpt.rs` — GPT read/write, protective MBR, primary + backup.
+      Activation is an **attribute write** (bits 48–63), never a data write.
+      Allocation is first-fit in free space, 1 MiB aligned, and refuses to
+      alias — firmware does not publish a handle for an overlapping entry.
+- [ ] `src/pallet/store.rs` — discovery across every opened drive; selection
+      order (priority desc, version desc) with the spec's candidate rule.
+- [ ] `src/pallet/manager.rs` — the lifecycle library (#52): compose, publish,
+      verify, activate, mark-successful, roll back, prune with keep-N-1.
+- [ ] `/api/v1/pallets` + `stormblock pallet` CLI.
+- [ ] `docs/pallets.md`.
+
+Not covered here, and still open on #51: volume-level sealed/read-only attach
+refusal, and per-leg physical offsets for a read-only consumer that must not
+reconstruct RAID.
