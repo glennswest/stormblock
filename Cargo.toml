@@ -29,6 +29,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # Management API
 axum = "0.8"
+# Serving: streaming request/response bodies for tar and raw import, and
+# verifying an imported image where it lands rather than only where it was
+# built.
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+sha2 = "0.10"
+hex = "0.4"
 hyper = "1"
 tower = "0.5"
 
