@@ -444,3 +444,111 @@ fn write_entry(b: &mut [u8], e: &GptEntry) {
         b[56 + i * 2..58 + i * 2].copy_from_slice(&u.to_le_bytes());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(block_size: u32, last_lba: u64) -> Gpt {
+        let ent = entries_lbas(block_size);
+        Gpt {
+            block_size,
+            disk_guid: Uuid::new_v4().to_bytes_le(),
+            first_usable_lba: 2 + ent,
+            last_usable_lba: last_lba - 1 - ent,
+            alternate_lba: last_lba,
+            entries: vec![GptEntry::empty(); NUM_ENTRIES as usize],
+            recovered_from_backup: false,
+        }
+    }
+
+    /// 128 MiB of 512-byte blocks.
+    fn small() -> Gpt {
+        table(512, 128 * 1024 * 1024 / 512 - 1)
+    }
+
+    #[test]
+    fn allocation_aligns_to_a_megabyte_and_never_overlaps() {
+        let mut g = small();
+        let a = g.allocate("one", PALLET_TYPE_GUID, 3 * 1024 * 1024, 0).unwrap();
+        let b = g.allocate("two", PALLET_TYPE_GUID, 3 * 1024 * 1024, 0).unwrap();
+
+        let align = ALIGN_BYTES / 512;
+        assert_eq!(g.entries[a].first_lba % align, 0);
+        assert_eq!(g.entries[b].first_lba % align, 0);
+        assert!(
+            g.entries[a].last_lba < g.entries[b].first_lba,
+            "firmware does not publish a handle for an overlapping entry"
+        );
+        assert!(g.entries[a].size_bytes(512) >= 3 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_freed_run_is_reused() {
+        let mut g = small();
+        let a = g.allocate("one", PALLET_TYPE_GUID, 4 * 1024 * 1024, 0).unwrap();
+        let first = g.entries[a].first_lba;
+        g.allocate("two", PALLET_TYPE_GUID, 4 * 1024 * 1024, 0).unwrap();
+        g.remove(a).unwrap();
+        let c = g.allocate("three", PALLET_TYPE_GUID, 2 * 1024 * 1024, 0).unwrap();
+        assert_eq!(g.entries[c].first_lba, first, "first-fit takes the hole back");
+    }
+
+    #[test]
+    fn an_overlapping_insert_is_refused() {
+        let mut g = small();
+        let a = g.allocate("one", PALLET_TYPE_GUID, 4 * 1024 * 1024, 0).unwrap();
+        let mut clash = GptEntry::empty();
+        clash.type_guid = PALLET_TYPE_GUID;
+        clash.unique_guid = Uuid::new_v4().to_bytes_le();
+        clash.first_lba = g.entries[a].last_lba;
+        clash.last_lba = clash.first_lba + 100;
+        clash.name = "clash".into();
+        match g.insert(clash) {
+            Err(PalletError::Overlaps { with }) => assert_eq!(with, "one"),
+            other => panic!("expected an overlap refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn running_out_of_room_reports_the_largest_run_there_is() {
+        let mut g = small();
+        let err = g.allocate("huge", PALLET_TYPE_GUID, 1024 * 1024 * 1024, 0).unwrap_err();
+        match err {
+            PalletError::NoSpace { largest_free, .. } => {
+                assert!(largest_free > 100 * 1024 * 1024, "{largest_free}")
+            }
+            other => panic!("expected NoSpace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entry_round_trips_through_its_on_disk_form() {
+        let e = GptEntry {
+            type_guid: PALLET_TYPE_GUID,
+            unique_guid: Uuid::new_v4().to_bytes_le(),
+            first_lba: 2048,
+            last_lba: 6143,
+            attributes: 0x000F_0000_0000_0001,
+            name: "stormcos-boot".into(),
+        };
+        let mut b = [0u8; ENTRY_SIZE as usize];
+        write_entry(&mut b, &e);
+        assert_eq!(parse_entry(&b), e);
+        assert!(e.is_pallet());
+        assert_eq!(e.block_count(), 4096);
+    }
+
+    #[test]
+    fn free_runs_account_for_every_partition_wherever_it_sits() {
+        let mut g = table(4096, 32 * 1024 * 1024 / 4096 - 1);
+        let a = g.allocate("a", PALLET_TYPE_GUID, 2 * 1024 * 1024, 0).unwrap();
+        let b = g.allocate("b", PALLET_TYPE_GUID, 2 * 1024 * 1024, 0).unwrap();
+        g.remove(a).unwrap();
+        let runs = g.free_runs();
+        // The hole before `b`, and everything after it.
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(runs[0].1 < g.entries[b].first_lba);
+        assert!(runs[1].0 > g.entries[b].last_lba);
+    }
+}

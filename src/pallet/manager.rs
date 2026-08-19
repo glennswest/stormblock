@@ -212,13 +212,23 @@ impl PalletManager {
     /// Write a fresh, empty GPT. Refuses a drive that already has one, since
     /// that would strand every partition on it.
     pub async fn init_gpt(&self, drive_index: usize, force: bool) -> Result<()> {
-        let d = self.store.drive(drive_index)?;
+        let d = self.store.drive(drive_index)?.clone();
         if !force {
             if let Ok(existing) = Gpt::read(&d.device).await {
                 let used = existing.partitions().count();
                 return Err(PalletError::Refused(format!(
                     "{} already has a GPT with {used} partition(s)",
                     d.path
+                )));
+            }
+            // A whole-drive pallet keeps its superblock at byte zero, which is
+            // where the protective MBR and the GPT header have to go. Writing a
+            // table here does not subdivide the drive, it destroys the pallet
+            // on it.
+            if let Some(p) = self.store.whole_drive_pallet(drive_index).await {
+                return Err(PalletError::Refused(format!(
+                    "{} is a whole-drive pallet ('{}' v{}). Adopt it onto another drive first —                      subdividing is a copy, because the table wants the bytes the superblock is in",
+                    d.path, p.name, p.version
                 )));
             }
         }
@@ -499,6 +509,10 @@ impl PalletManager {
             .scan()
             .await
             .into_iter()
+            // A whole-drive pallet has no entry to renumber; leaving it out of
+            // the ladder is the only honest thing, and it is why adoption
+            // exists.
+            .filter(|p| !p.is_whole_drive())
             .filter(|p| p.kind == target.kind && p.id != id && p.attributes.priority > 0)
             .collect();
         peers.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
@@ -580,7 +594,9 @@ impl PalletManager {
         }
         let mut a = loc.attributes;
         a.read_only = read_only;
-        self.apply_attributes(&[(loc.drive_index, loc.entry_index, a)]).await?;
+        if !loc.is_whole_drive() {
+            self.apply_attributes(&[(loc.drive_index, loc.entry_index, a)]).await?;
+        }
         self.write_superblock_flags(&loc, a).await?;
         self.store.find(id).await
     }
@@ -590,7 +606,9 @@ impl PalletManager {
         let loc = self.store.find(id).await?;
         let mut a = loc.attributes;
         a.sealed = sealed;
-        self.apply_attributes(&[(loc.drive_index, loc.entry_index, a)]).await?;
+        if !loc.is_whole_drive() {
+            self.apply_attributes(&[(loc.drive_index, loc.entry_index, a)]).await?;
+        }
         self.write_superblock_flags(&loc, a).await?;
         self.store.find(id).await
     }
@@ -614,6 +632,15 @@ impl PalletManager {
     }
 
     async fn apply_attributes(&self, changes: &[(usize, usize, Attributes)]) -> Result<()> {
+        if let Some((d, _, _)) = changes
+            .iter()
+            .find(|(_, e, _)| *e == super::store::WHOLE_DRIVE)
+        {
+            return Err(PalletError::Refused(format!(
+                "{} holds a whole-drive pallet: there is no GPT entry to carry priority, tries or                  the successful bit. Adopt it onto a partitioned drive first",
+                self.store.drive(*d)?.path
+            )));
+        }
         let mut drives: Vec<usize> = changes.iter().map(|(d, _, _)| *d).collect();
         drives.sort_unstable();
         drives.dedup();
@@ -635,6 +662,37 @@ impl PalletManager {
 
     // ---------------------------------------------------------------- moves
 
+    /// Move a pre-subdivision whole-drive pallet onto a partitioned drive.
+    ///
+    /// This is the migration from "the drive is the pallet" to "the drive holds
+    /// pallets". It has to be a copy: the GPT needs the first bytes of the
+    /// device, and those are the pallet's superblock. Afterwards the source
+    /// drive can be given a table of its own with `init_gpt(.., force)` and
+    /// start carrying several pallets like any other.
+    pub async fn adopt_whole_drive(
+        &self,
+        src_drive: usize,
+        dest_drive: usize,
+    ) -> Result<PalletLocation> {
+        if src_drive == dest_drive {
+            return Err(PalletError::Refused(
+                "a whole-drive pallet cannot be adopted onto its own drive: the partition table                  would land on the superblock it is trying to preserve"
+                    .into(),
+            ));
+        }
+        let src = self
+            .store
+            .whole_drive_pallet(src_drive)
+            .await
+            .ok_or_else(|| {
+                PalletError::NotFound(format!(
+                    "no whole-drive pallet on {}",
+                    self.store.drives()[src_drive].path
+                ))
+            })?;
+        self.copy_pallet(src.id, dest_drive).await
+    }
+
     /// Copy a pallet onto another drive, byte for byte.
     ///
     /// Nothing inside a pallet is absolute, so this is a copy and not a
@@ -650,21 +708,30 @@ impl PalletManager {
         let dest = self.store.drive(dest_drive)?.clone();
         let src_view = self.store.view(&src)?;
 
-        let want = align_up(src.size_bytes, ALIGN_BYTES);
         let mut gpt = Gpt::read(&dest.device).await?;
-        let slot = gpt.allocate(
-            &src.partition_name,
-            PALLET_TYPE_GUID,
-            want,
-            src.attributes.to_u64(),
-        )?;
+        // Size the destination for what the pallet *uses*, not for the space it
+        // happened to sit in — a whole-drive pallet "occupies" its entire disk
+        // and would otherwise never fit anywhere. Headroom is preserved when
+        // the source was a partition and the room is there.
+        let used = align_up(src.used_bytes.max(ALIGN_BYTES), ALIGN_BYTES);
+        let want = if !src.is_whole_drive() && src.size_bytes <= gpt.largest_free_bytes() {
+            align_up(src.size_bytes, ALIGN_BYTES).max(used)
+        } else {
+            used
+        };
+        let part_name = if src.partition_name.is_empty() {
+            src.name.clone()
+        } else {
+            src.partition_name.clone()
+        };
+        let slot = gpt.allocate(&part_name, PALLET_TYPE_GUID, want, src.attributes.to_u64())?;
         gpt.write(&dest.device).await?;
         let dest_view = gpt.view(&dest.device, slot)?;
 
         // Only the bytes the pallet uses — a pallet is usually laid into a
         // partition with headroom, and headroom is not worth copying.
         let bs = dest.device.block_size() as u64;
-        let len = align_up(src.used_bytes.min(src.size_bytes), bs);
+        let len = align_up(src.used_bytes.min(src.size_bytes), bs).min(dest_view.len());
         let mut buf = vec![0u8; COPY_CHUNK];
         let mut off = 0u64;
         while off < len {
@@ -806,6 +873,12 @@ impl PalletManager {
                 )));
             }
         }
+        if loc.is_whole_drive() {
+            return Err(PalletError::Refused(format!(
+                "'{}' is a whole-drive pallet: there is no GPT entry to remove. Reformat the                  drive if that is really what you want",
+                loc.name
+            )));
+        }
         let dev = self.store.drive(loc.drive_index)?.device.clone();
         let mut gpt = Gpt::read(&dev).await?;
         gpt.remove(loc.entry_index)?;
@@ -832,7 +905,7 @@ impl PalletManager {
 
         let mut removed = Vec::new();
         for loc in versions.into_iter().skip(keep) {
-            if active.contains(&loc.id) {
+            if active.contains(&loc.id) || loc.is_whole_drive() {
                 continue;
             }
             let dev = self.store.drive(loc.drive_index)?.device.clone();

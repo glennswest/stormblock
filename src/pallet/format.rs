@@ -539,6 +539,7 @@ pub struct Placement {
 }
 
 /// A laid-out pallet: the header bytes, and where every member's content goes.
+#[derive(Debug)]
 pub struct BuiltPallet {
     /// Superblock + member table + extent table, padded to `member_data_offset`.
     pub header: Vec<u8>,
@@ -1008,5 +1009,187 @@ impl Pallet {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pallet::BytesContent;
+
+    fn spec(name: &str, bytes: &[u8]) -> MemberSpec {
+        MemberSpec::new(
+            name,
+            "container",
+            MemberKind::Container,
+            Arc::new(BytesContent(bytes.to_vec())),
+        )
+    }
+
+    /// The layout is a contract with a reader that runs in firmware and cannot
+    /// be updated in lockstep with this. Round-tripping through our own reader
+    /// would prove nothing about it, so the offsets are asserted directly.
+    #[tokio::test]
+    async fn the_superblock_lands_exactly_where_the_spec_says() {
+        let built = PalletBuilder::new("stormcos-boot", 7)
+            .block_size(4096)
+            .kind(PalletKind::Boot)
+            .version_label("6.12.0")
+            .member(spec("kernel", b"payload"))
+            .build()
+            .await
+            .unwrap();
+        let h = &built.header;
+
+        assert_eq!(&h[0..8], b"STORMPAL");
+        assert_eq!(rd_u32(h, 8), 1, "format version");
+        assert_eq!(rd_u32(h, 12), 4096, "superblock_len");
+        assert_eq!(rd_u32(h, 16), 4096, "block_size");
+        assert_eq!(rd_u32(h, 20), 128, "member_size");
+        assert_eq!(rd_u32(h, 24), 1, "member_count");
+        assert_eq!(rd_u32(h, 28), 32, "extent_size");
+        assert_eq!(rd_u32(h, 32), 1, "extent_count");
+        assert_eq!(rd_u64(h, 36), 7, "pallet_version");
+        assert_eq!(rd_u64(h, 44), 8192, "member_data_offset");
+        assert_eq!(str_from(&h[52..52 + NAME_LEN]), "stormcos-boot");
+        assert_eq!(&h[92..124], &built.manifest_digest);
+        assert_eq!(rd_u32(h, 124), crc32(&h[SUPERBLOCK_LEN..SUPERBLOCK_LEN + MEMBER_LEN]));
+        assert_eq!(rd_u32(h, 132), superblock_crc(h), "superblock_crc skips itself");
+        // Sealed and read-only are mirrored for a consumer that never sees the GPT.
+        assert_eq!(rd_u64(h, 136), (1u64 << 57) | (1u64 << 58));
+        // Extension fields, defined so that zero reads back as "unspecified".
+        assert_eq!(rd_u32(h, OFF_KIND), PalletKind::Boot.to_u32());
+        assert_eq!(
+            str_from(&h[OFF_VERSION_LABEL..OFF_VERSION_LABEL + VERSION_LABEL_LEN]),
+            "6.12.0"
+        );
+        assert!(h[180..SUPERBLOCK_LEN].iter().all(|&b| b == 0), "reserved stays zero");
+
+        // Member table at 4096, fields where the spec puts them.
+        let m = &h[SUPERBLOCK_LEN..SUPERBLOCK_LEN + MEMBER_LEN];
+        assert_eq!(str_from(&m[0..NAME_LEN]), "kernel");
+        assert_eq!(str_from(&m[40..40 + ROLE_LEN]), "container");
+        assert_eq!(rd_u32(m, 56), MemberKind::Container.to_u32());
+        assert_eq!(rd_u32(m, 60), FLAG_SEALED | FLAG_READ_ONLY | FLAG_DIGEST);
+        assert_eq!(rd_u64(m, 64), 7, "byte_len");
+        assert_eq!(rd_u32(m, 72), 0, "extent_first");
+        assert_eq!(rd_u32(m, 76), 1, "extent_count");
+
+        // Extent table follows it; partition_block is partition-relative.
+        let x = &h[SUPERBLOCK_LEN + MEMBER_LEN..SUPERBLOCK_LEN + MEMBER_LEN + EXTENT_LEN];
+        assert_eq!(rd_u64(x, 0), 0, "logical_block");
+        assert_eq!(rd_u64(x, 8), 2, "partition_block = 8192/4096");
+        assert_eq!(rd_u64(x, 16), 1, "block_count");
+    }
+
+    #[tokio::test]
+    async fn the_manifest_digest_covers_the_combination() {
+        let a = PalletBuilder::new("p", 1)
+            .member(spec("kernel", b"k"))
+            .member(spec("initramfs", b"i"))
+            .build()
+            .await
+            .unwrap();
+        // Same members, one of them different content: a different manifest,
+        // which is the property signing each image separately cannot give.
+        let b = PalletBuilder::new("p", 1)
+            .member(spec("kernel", b"k"))
+            .member(spec("initramfs", b"i-other"))
+            .build()
+            .await
+            .unwrap();
+        assert_ne!(a.manifest_digest, b.manifest_digest);
+
+        // And the same members in the other order is also a different manifest.
+        let c = PalletBuilder::new("p", 1)
+            .member(spec("initramfs", b"i"))
+            .member(spec("kernel", b"k"))
+            .build()
+            .await
+            .unwrap();
+        assert_ne!(a.manifest_digest, c.manifest_digest);
+    }
+
+    #[test]
+    fn attributes_round_trip_through_the_gpt_bits() {
+        let a = Attributes {
+            priority: 15,
+            tries_left: 3,
+            successful: true,
+            sealed: true,
+            read_only: false,
+            required: true,
+        };
+        let raw = a.to_u64();
+        assert_eq!(raw >> 48 & 0xF, 15);
+        assert_eq!(raw >> 52 & 0xF, 3);
+        assert_eq!(raw >> 56 & 1, 1);
+        assert_eq!(raw >> 57 & 1, 1);
+        assert_eq!(raw >> 58 & 1, 0);
+        assert_eq!(raw & 1, 1, "UEFI required-partition bit");
+        assert_eq!(Attributes::from_u64(raw), a);
+    }
+
+    #[test]
+    fn a_pallet_out_of_tries_is_not_a_candidate_unless_it_was_confirmed_good() {
+        let mut a = Attributes { priority: 5, tries_left: 0, successful: false, ..Default::default() };
+        assert!(!a.is_candidate());
+        a.successful = true;
+        assert!(a.is_candidate());
+        a.priority = 0;
+        assert!(!a.is_candidate(), "priority 0 means never boot");
+    }
+
+    #[tokio::test]
+    async fn a_newer_format_version_is_refused_rather_than_guessed_at() {
+        let mut built = PalletBuilder::new("p", 1)
+            .member(spec("m", b"x"))
+            .build()
+            .await
+            .unwrap();
+        wr_u32(&mut built.header, 8, 2);
+        let crc = superblock_crc(&built.header);
+        wr_u32(&mut built.header, 132, crc);
+        match Superblock::parse(&built.header) {
+            Err(PalletError::UnsupportedVersion(2)) => {}
+            other => panic!("expected UnsupportedVersion(2), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_flipped_bit_in_the_tables_fails_the_crc() {
+        let built = PalletBuilder::new("p", 1)
+            .member(spec("m", b"x"))
+            .build()
+            .await
+            .unwrap();
+        let mut buf = built.header.clone();
+        buf.truncate(SUPERBLOCK_LEN + MEMBER_LEN + EXTENT_LEN);
+        assert!(Pallet::parse(buf.clone()).is_ok());
+        buf[SUPERBLOCK_LEN] ^= 0x01;
+        assert!(matches!(Pallet::parse(buf), Err(PalletError::BadMemberCrc)));
+    }
+
+    #[tokio::test]
+    async fn a_name_too_long_for_the_field_is_an_error_not_a_truncation() {
+        let long = "x".repeat(NAME_LEN + 1);
+        let err = PalletBuilder::new(long, 1).build().await.unwrap_err();
+        assert!(matches!(err, PalletError::TooLong { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_member_carries_no_extent() {
+        let built = PalletBuilder::new("p", 1)
+            .member(spec("empty", b""))
+            .member(spec("full", b"data"))
+            .build()
+            .await
+            .unwrap();
+        let mut buf = built.header.clone();
+        buf.truncate(SUPERBLOCK_LEN + 2 * MEMBER_LEN + EXTENT_LEN);
+        let p = Pallet::parse(buf).unwrap();
+        assert_eq!(p.sb.extent_count, 1);
+        assert_eq!(p.find("empty").unwrap().extent_count, 0);
+        assert_eq!(p.find("full").unwrap().extent_count, 1);
     }
 }

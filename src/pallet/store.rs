@@ -10,6 +10,15 @@
 //! not an edge one: an upgrade is a *new* partition beside the running one, so
 //! a drive carrying a system has at least two the moment it has ever been
 //! upgraded.
+//!
+//! A file-backed device is a drive like any other here — same GPT, same
+//! partitions, same everything. That matters for the migration this module has
+//! to survive: the earlier arrangement put **one pallet on a whole device**,
+//! superblock at byte zero and no partition table at all. Such a device is
+//! still discovered ([`PalletLocation::is_whole_drive`]) rather than quietly
+//! disappearing, because subdividing it is a copy — the GPT wants the very
+//! bytes its superblock sits in, so the pallet has to move before the table
+//! can exist. [`super::PalletManager::adopt_whole_drive`] is that move.
 
 use std::sync::Arc;
 
@@ -41,6 +50,10 @@ pub enum PalletState {
     Unreadable { reason: String },
 }
 
+/// Entry index for a pallet that occupies a whole device with no GPT — the
+/// arrangement that predates partitioned drives.
+pub const WHOLE_DRIVE: usize = usize::MAX;
+
 /// One pallet, and where it is.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PalletLocation {
@@ -66,6 +79,13 @@ pub struct PalletLocation {
 }
 
 impl PalletLocation {
+    /// True when this pallet owns the entire device and there is no GPT entry
+    /// behind it — so it has no attribute bits, and cannot take part in the
+    /// priority ladder until it is adopted into a partition.
+    pub fn is_whole_drive(&self) -> bool {
+        self.entry_index == WHOLE_DRIVE
+    }
+
     pub fn is_readable(&self) -> bool {
         matches!(self.state, PalletState::Readable)
     }
@@ -120,9 +140,22 @@ impl PalletStore {
     }
 
     /// Every pallet on one drive, in GPT entry order.
+    ///
+    /// A device with no usable GPT is not necessarily empty: it may be a
+    /// whole-drive pallet from before drives were subdivided. That is checked
+    /// before giving up, because a pallet nobody can find is the same as a
+    /// pallet that is gone.
     pub async fn scan_drive(&self, drive_index: usize) -> Result<Vec<PalletLocation>> {
         let d = self.drive(drive_index)?;
-        let gpt = Gpt::read(&d.device).await?;
+        let gpt = match Gpt::read(&d.device).await {
+            Ok(g) => g,
+            Err(e) => {
+                return match self.whole_drive_pallet(drive_index).await {
+                    Some(loc) => Ok(vec![loc]),
+                    None => Err(e),
+                }
+            }
+        };
         let bs = gpt.block_size;
         let mut out = Vec::new();
         for (entry_index, e) in gpt.pallets() {
@@ -171,6 +204,46 @@ impl PalletStore {
             out.push(loc);
         }
         Ok(out)
+    }
+
+    /// A pallet occupying the whole device, superblock at byte zero, with no
+    /// partition table — the pre-subdivision layout.
+    ///
+    /// Its attributes cannot come from a GPT entry it does not have, so the
+    /// sealed and read-only bits are read from the superblock mirror and it is
+    /// given one try at the bottom of the ladder. It can be selected and read;
+    /// it cannot be promoted, because there is nowhere to record that.
+    pub async fn whole_drive_pallet(&self, drive_index: usize) -> Option<PalletLocation> {
+        let d = self.drive(drive_index).ok()?;
+        let view = PartitionView::whole(d.device.clone());
+        let p = Pallet::read(&view).await.ok()?;
+        Some(PalletLocation {
+            // No GPT means no UniquePartitionGUID, and a pallet still needs a
+            // handle callers can name. Derived from the device path so it is
+            // at least stable for as long as the arrangement lasts.
+            id: derived_id(&d.path),
+            drive: d.path.clone(),
+            drive_index,
+            entry_index: WHOLE_DRIVE,
+            partition_name: String::new(),
+            name: p.name().to_string(),
+            kind: p.kind(),
+            version: p.version(),
+            version_label: p.version_label().to_string(),
+            attributes: Attributes {
+                priority: 1,
+                tries_left: 1,
+                successful: false,
+                sealed: p.sb.sealed(),
+                read_only: p.sb.read_only(),
+                required: true,
+            },
+            start_bytes: 0,
+            size_bytes: d.device.capacity_bytes(),
+            used_bytes: used_bytes(&p),
+            member_count: p.member_count(),
+            state: PalletState::Readable,
+        })
     }
 
     /// Every pallet on every drive. A drive without a GPT is skipped rather
@@ -233,6 +306,15 @@ impl PalletStore {
     pub async fn open(&self, loc: &PalletLocation) -> Result<Pallet> {
         Pallet::read(&self.view(loc)?).await
     }
+}
+
+/// A stable stand-in identity for a pallet that has no GPT entry to carry one.
+fn derived_id(path: &str) -> Uuid {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(path.as_bytes());
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(b)
 }
 
 /// How much of a partition a pallet actually occupies — the end of its

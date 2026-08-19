@@ -243,3 +243,88 @@ impl PipeOrder for Vec<Candidate> {
         order(&self, kind)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(version: u64, priority: u8, tries: u8, ok: bool, kind: PalletKind) -> Candidate {
+        Candidate {
+            id: Uuid::new_v4(),
+            kind,
+            version,
+            attributes: Attributes {
+                priority,
+                tries_left: tries,
+                successful: ok,
+                sealed: true,
+                read_only: true,
+                required: true,
+            },
+            readable: true,
+        }
+    }
+
+    #[test]
+    fn priority_wins_and_version_breaks_the_tie() {
+        let low = cand(9, 1, 1, true, PalletKind::Boot);
+        let old = cand(1, 5, 1, true, PalletKind::Boot);
+        let new = cand(2, 5, 1, true, PalletKind::Boot);
+        let ordered = order(&[low, old, new], Some(PalletKind::Boot));
+        assert_eq!(ordered[0].id, new.id);
+        assert_eq!(ordered[1].id, old.id);
+        assert_eq!(ordered[2].id, low.id);
+    }
+
+    #[test]
+    fn a_pallet_that_cannot_boot_is_not_in_the_ladder_at_all() {
+        let disabled = cand(3, 0, 3, true, PalletKind::Boot);
+        let spent = cand(2, 5, 0, false, PalletKind::Boot);
+        let good = cand(1, 5, 1, false, PalletKind::Boot);
+        let mut broken = cand(4, 9, 3, true, PalletKind::Boot);
+        broken.readable = false;
+
+        let ordered = order(&[disabled, spent, good, broken], Some(PalletKind::Boot));
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].id, good.id);
+    }
+
+    #[test]
+    fn kinds_do_not_compete_but_an_unlabelled_pallet_still_counts() {
+        let boot = cand(1, 5, 1, true, PalletKind::Boot);
+        let kube = cand(9, 15, 1, true, PalletKind::Kube);
+        let legacy = cand(2, 6, 1, true, PalletKind::Unspecified);
+
+        let chosen = select(&[boot, kube, legacy], Some(PalletKind::Boot)).unwrap();
+        assert_eq!(
+            chosen.id, legacy.id,
+            "a pallet written before `kind` existed is still a boot candidate"
+        );
+        assert!(
+            !order(&[boot, kube, legacy], Some(PalletKind::Boot))
+                .iter()
+                .any(|c| c.id == kube.id),
+            "a kube pallet does not outrank boot by carrying a bigger number"
+        );
+        assert_eq!(select(&[boot, kube], Some(PalletKind::Kube)).unwrap().id, kube.id);
+    }
+
+    #[test]
+    fn falling_back_takes_the_next_one_down() {
+        let newest = cand(3, 15, 1, false, PalletKind::Boot);
+        let previous = cand(2, 14, 1, true, PalletKind::Boot);
+        let oldest = cand(1, 13, 1, true, PalletKind::Boot);
+        let all = [newest, previous, oldest];
+
+        assert_eq!(fallback_after(&all, newest.id, None).unwrap().id, previous.id);
+        assert_eq!(fallback_after(&all, previous.id, None).unwrap().id, oldest.id);
+        assert!(fallback_after(&all, oldest.id, None).is_none(), "the chain ends");
+    }
+
+    #[test]
+    fn falling_back_from_something_not_in_the_ladder_starts_at_the_top() {
+        let disabled = cand(3, 0, 1, true, PalletKind::Boot);
+        let good = cand(2, 5, 1, true, PalletKind::Boot);
+        assert_eq!(fallback_after(&[disabled, good], disabled.id, None).unwrap().id, good.id);
+    }
+}
