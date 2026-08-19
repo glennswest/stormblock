@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.3.0] — 2026-08-19
+
 ### 2026-08-19
 - **feat:** **Pallets** (#51, #52) — a pallet is a GPT partition holding a
   named, versioned, self-contained set of sealed member images plus the
