@@ -102,6 +102,15 @@ enum SubCommand {
         #[command(subcommand)]
         action: SlabAction,
     },
+    /// Pallets — sealed, versioned sets of images, several per drive
+    Pallet {
+        /// Drives to work with (files or /dev nodes; a file is a drive like
+        /// any other). Repeat for several.
+        #[arg(long = "drive", global = true)]
+        drives: Vec<String>,
+        #[command(subcommand)]
+        action: PalletAction,
+    },
     /// Export a volume via ublk to the local kernel (/dev/ublkbN)
     Ublk {
         /// Volume UUID to export
@@ -218,6 +227,135 @@ enum SlabAction {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum PalletAction {
+    /// Write a fresh GPT so a drive can carry pallets
+    InitGpt {
+        /// Drive to initialize (path or index into --drive)
+        drive: String,
+        /// Overwrite an existing table
+        #[arg(long)]
+        force: bool,
+    },
+    /// List every pallet on every drive
+    List {
+        /// Only this kind (boot, system, kernel, kube, app, runtime, data)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Show a pallet and its members
+    Info {
+        /// Pallet UUID
+        id: String,
+    },
+    /// What is selected, what could take over, what will not be used
+    Status {
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// The order a boot-time consumer would try them in
+    Chain {
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Check a pallet and every member it claims
+    Verify {
+        /// Pallet UUID, or `all`
+        id: String,
+    },
+    /// Publish a new pallet from files on disk
+    Publish {
+        /// Pallet name (max 40 bytes; must match the partition name)
+        #[arg(long)]
+        name: String,
+        /// Kind: boot, system, kernel, kube, app, runtime, data
+        #[arg(long, default_value = "unspecified")]
+        kind: String,
+        /// Human-readable version, e.g. 6.12.0-200.fc41
+        #[arg(long, default_value = "")]
+        label: String,
+        /// A member, as name:role:kind:path (repeat)
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
+        /// Drive to land on (path or index); defaults to the first
+        #[arg(long = "on")]
+        drive: Option<String>,
+        /// Partition size, e.g. 512M. Defaults to fitting the content
+        #[arg(long)]
+        size: Option<String>,
+        /// Verify and select it in one step
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Make a pallet the one its consumers select
+    Activate { id: String },
+    /// Record that a pallet booted and is good
+    Successful { id: String },
+    /// Select the pallet below the active one
+    Rollback {
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Copy a pallet to another drive, keeping the original
+    Copy {
+        id: String,
+        /// Destination drive (path or index)
+        #[arg(long)]
+        to: String,
+    },
+    /// Move a pallet to another drive, identity and all
+    Move {
+        id: String,
+        #[arg(long)]
+        to: String,
+    },
+    /// Move one member into another pallet, as a new version of each
+    MoveMember {
+        /// Source pallet UUID
+        id: String,
+        /// Member name
+        member: String,
+        /// Destination pallet UUID
+        #[arg(long)]
+        into: String,
+    },
+    /// Set the read-only bit
+    ReadOnly {
+        id: String,
+        #[arg(long)]
+        value: bool,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Set the sealed bit
+    Sealed {
+        id: String,
+        #[arg(long)]
+        value: bool,
+    },
+    /// Remove a pallet's GPT entry
+    Delete {
+        id: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Keep the newest N versions of a name (never fewer than 2)
+    Prune {
+        name: String,
+        #[arg(long, default_value = "2")]
+        keep: usize,
+    },
+    /// Migrate a whole-drive pallet onto a partitioned drive
+    Adopt {
+        /// Drive holding the whole-drive pallet
+        #[arg(long)]
+        from: String,
+        /// Partitioned destination drive
+        #[arg(long)]
+        to: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 struct VolumeSpec {
     name: String,
@@ -288,6 +426,9 @@ async fn main() -> anyhow::Result<()> {
         match cmd {
             SubCommand::Slab { action } => {
                 return handle_slab_command(action).await;
+            }
+            SubCommand::Pallet { drives, action } => {
+                return handle_pallet_command(drives, action).await;
             }
             SubCommand::Ublk { volume: _, queues: _ } => {
                 tracing::info!("ublk export mode — requires running storage engine");
@@ -859,6 +1000,278 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 slab.free_slots() * slab.slot_size()));
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- pallets
+
+/// Open the drives a pallet command works over. A file is a drive here — same
+/// GPT, same partitions — which is what makes an image assembled on a laptop
+/// and a disk in a node the same thing.
+async fn pallet_store(drives: &[String]) -> anyhow::Result<stormblock::pallet::PalletStore> {
+    let mut store = stormblock::pallet::PalletStore::default();
+    for path in drives {
+        let dev = stormblock::drive::open_one_drive(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+        store.add_drive(path.clone(), Arc::from(dev));
+    }
+    Ok(store)
+}
+
+fn parse_member_spec(s: &str) -> anyhow::Result<(String, String, String, String)> {
+    let parts: Vec<&str> = s.split(':').collect();
+    match parts.as_slice() {
+        [name, role, kind, path] => Ok((
+            name.to_string(),
+            role.to_string(),
+            kind.to_string(),
+            path.to_string(),
+        )),
+        [name, role, path] => Ok((
+            name.to_string(),
+            role.to_string(),
+            role.to_string(),
+            path.to_string(),
+        )),
+        _ => Err(anyhow::anyhow!(
+            "member must be name:role:kind:path (or name:role:path), got '{s}'"
+        )),
+    }
+}
+
+fn print_pallet(p: &stormblock::pallet::PalletLocation) {
+    let where_ = if p.is_whole_drive() {
+        format!("{} (whole drive, no GPT)", p.drive)
+    } else {
+        format!("{}#{}", p.drive, p.entry_index)
+    };
+    let state = if p.is_readable() { "" } else { " UNREADABLE" };
+    println!(
+        "{}  {} v{} [{}] {:<10} pri={} tries={} {}{}{}{}",
+        p.id,
+        p.name,
+        p.version,
+        p.kind,
+        where_,
+        p.attributes.priority,
+        p.attributes.tries_left,
+        if p.attributes.successful { "good " } else { "" },
+        if p.attributes.sealed { "sealed " } else { "" },
+        if p.attributes.read_only { "ro" } else { "rw" },
+        state,
+    );
+}
+
+/// Pallet errors carry their own explanation; this just changes the type.
+fn pe<T>(r: Result<T, stormblock::pallet::PalletError>) -> anyhow::Result<T> {
+    r.map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyhow::Result<()> {
+    use stormblock::pallet::format::PalletKind;
+    use stormblock::pallet::manager::{PublishSpec, RecomposeSpec};
+    use stormblock::pallet::{PalletBrowser, PalletManager};
+
+    if drives.is_empty() {
+        anyhow::bail!("no drives given: pass --drive <path> at least once");
+    }
+    let store = pallet_store(drives).await?;
+    let mgr = PalletManager::new(store.clone());
+    let kind_of = |k: &Option<String>| k.as_deref().map(PalletKind::parse);
+    let id_of = |s: &str| {
+        uuid::Uuid::parse_str(s).map_err(|_| anyhow::anyhow!("'{s}' is not a pallet UUID"))
+    };
+
+    match action {
+        PalletAction::InitGpt { drive, force } => {
+            let idx = pe(store.drive_index_of(drive))?;
+            pe(mgr.init_gpt(idx, *force).await)?;
+            println!("{drive}: GPT written (primary and backup)");
+        }
+        PalletAction::List { kind } => {
+            let kind = kind_of(kind);
+            let all = mgr.list().await;
+            let shown: Vec<_> =
+                all.iter().filter(|p| kind.is_none() || Some(p.kind) == kind).collect();
+            if shown.is_empty() {
+                println!("no pallets on {} drive(s)", drives.len());
+            }
+            for p in shown {
+                print_pallet(p);
+            }
+        }
+        PalletAction::Info { id } => {
+            let loc = pe(mgr.get(id_of(id)?).await)?;
+            print_pallet(&loc);
+            println!("  label: {}", loc.version_label);
+            println!(
+                "  partition: start {} bytes, size {}, used {}",
+                loc.start_bytes,
+                stormblock::mgmt::config::human_size(loc.size_bytes),
+                stormblock::mgmt::config::human_size(loc.used_bytes),
+            );
+            match mgr.store().open(&loc).await {
+                Ok(p) => {
+                    for m in p.members() {
+                        println!(
+                            "  member {:<20} role={:<12} kind={:<10} {:>10}  {}",
+                            m.name,
+                            m.role,
+                            m.kind,
+                            stormblock::mgmt::config::human_size(m.byte_len),
+                            &m.digest_hex()[..16],
+                        );
+                    }
+                }
+                Err(err) => println!("  manifest unreadable: {err}"),
+            }
+        }
+        PalletAction::Status { kind } => {
+            let s = mgr.status(kind_of(kind)).await;
+            match &s.active {
+                Some(a) => {
+                    print!("active:    ");
+                    print_pallet(a);
+                }
+                None => println!("active:    none"),
+            }
+            for p in s.available.iter().filter(|p| Some(p.id) != s.active.as_ref().map(|a| a.id)) {
+                print!("available: ");
+                print_pallet(p);
+            }
+            for f in &s.failed {
+                print!("failed:    ");
+                print_pallet(&f.location);
+                println!("           {}", f.reason);
+            }
+        }
+        PalletAction::Chain { kind } => {
+            let browser = PalletBrowser::new(store.clone());
+            for (i, p) in browser.chain(kind_of(kind)).await.iter().enumerate() {
+                print!("{}. ", i + 1);
+                print_pallet(p);
+            }
+        }
+        PalletAction::Verify { id } => {
+            let targets = if id == "all" {
+                mgr.list().await.into_iter().map(|p| p.id).collect::<Vec<_>>()
+            } else {
+                vec![id_of(id)?]
+            };
+            let mut bad = 0;
+            for t in targets {
+                let r = pe(mgr.verify(t).await)?;
+                println!(
+                    "{} {} v{}: {}",
+                    r.id,
+                    r.name,
+                    r.version,
+                    if r.ok { "ok".to_string() } else { format!("FAILED — {}", r.reason.clone().unwrap_or_default()) }
+                );
+                for m in &r.members {
+                    println!(
+                        "    {:<20} {}",
+                        m.name,
+                        if m.ok { "ok".into() } else { format!("FAILED — {}", m.reason.clone().unwrap_or_default()) }
+                    );
+                }
+                if !r.ok {
+                    bad += 1;
+                }
+            }
+            if bad > 0 {
+                anyhow::bail!("{bad} pallet(s) failed verification");
+            }
+        }
+        PalletAction::Publish { name, kind, label, members, drive, size, activate } => {
+            let mut spec = PublishSpec::new(name.clone(), PalletKind::parse(kind));
+            spec.version_label = label.clone();
+            spec.activate = *activate;
+            if let Some(d) = drive {
+                spec.drive = Some(pe(store.drive_index_of(d))?);
+            }
+            if let Some(sz) = size {
+                spec.size_bytes = Some(parse_size(sz).map_err(|m| anyhow::anyhow!("{m}"))?);
+            }
+            for m in members {
+                let (name, role, kind, path) = parse_member_spec(m)?;
+                spec.members.push(pe(stormblock::pallet::manager::file_member(
+                    name,
+                    role,
+                    stormblock::pallet::MemberKind::parse(&kind),
+                    path,
+                )
+                .await)?);
+            }
+            let loc = pe(mgr.publish(spec).await)?;
+            println!("published and verified:");
+            print_pallet(&loc);
+        }
+        PalletAction::Activate { id } => {
+            let loc = pe(mgr.activate(id_of(id)?).await)?;
+            print!("active: ");
+            print_pallet(&loc);
+        }
+        PalletAction::Successful { id } => {
+            let loc = pe(mgr.mark_successful(id_of(id)?).await)?;
+            print!("confirmed good: ");
+            print_pallet(&loc);
+        }
+        PalletAction::Rollback { kind } => {
+            let loc = pe(mgr.rollback(kind_of(kind)).await)?;
+            print!("rolled back to: ");
+            print_pallet(&loc);
+        }
+        PalletAction::Copy { id, to } => {
+            let dest = pe(store.drive_index_of(to))?;
+            let loc = pe(mgr.copy_pallet(id_of(id)?, dest).await)?;
+            print!("copied: ");
+            print_pallet(&loc);
+        }
+        PalletAction::Move { id, to } => {
+            let dest = pe(store.drive_index_of(to))?;
+            let loc = pe(mgr.move_pallet(id_of(id)?, dest).await)?;
+            print!("moved: ");
+            print_pallet(&loc);
+        }
+        PalletAction::MoveMember { id, member, into } => {
+            let (dest, src) = pe(mgr.move_member(id_of(id)?, member, id_of(into)?, false).await)?;
+            print!("destination: ");
+            print_pallet(&dest);
+            print!("source:      ");
+            print_pallet(&src);
+            println!("(both are new versions; the originals are untouched)");
+        }
+        PalletAction::ReadOnly { id, value, force } => {
+            let loc = pe(mgr.set_read_only(id_of(id)?, *value, *force).await)?;
+            print_pallet(&loc);
+        }
+        PalletAction::Sealed { id, value } => {
+            let loc = pe(mgr.set_sealed(id_of(id)?, *value).await)?;
+            print_pallet(&loc);
+        }
+        PalletAction::Delete { id, force } => {
+            let loc = pe(mgr.delete(id_of(id)?, *force).await)?;
+            println!("removed {} ({} v{})", loc.id, loc.name, loc.version);
+        }
+        PalletAction::Prune { name, keep } => {
+            let removed = pe(mgr.prune(name, *keep).await)?;
+            for p in &removed {
+                println!("pruned {} ({} v{})", p.id, p.name, p.version);
+            }
+            println!("{} removed, keeping the newest {}", removed.len(), (*keep).max(2));
+        }
+        PalletAction::Adopt { from, to } => {
+            let (f, t) = (pe(store.drive_index_of(from))?, pe(store.drive_index_of(to))?);
+            let loc = pe(mgr.adopt_whole_drive(f, t).await)?;
+            print!("adopted: ");
+            print_pallet(&loc);
+            println!("the source drive can now be subdivided: pallet init-gpt {from} --force");
+        }
+    }
+    // Silence the unused-import warning when RecomposeSpec is not constructed.
+    let _ = std::marker::PhantomData::<RecomposeSpec>;
     Ok(())
 }
 

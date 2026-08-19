@@ -5,6 +5,7 @@ pub mod arrays;
 pub mod volumes;
 pub mod exports;
 pub mod fstemplates;
+pub mod pallets;
 pub mod slabs;
 pub mod discovery;
 pub mod v1;
@@ -36,6 +37,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/volumes", volumes::router(state.clone()))
         .nest("/api/v1/exports", exports::router(state.clone()))
         .nest("/api/v1/slabs", slabs::router(state.clone()))
+        .nest("/api/v1/pallets", pallets::router(state.clone()))
         .nest("/api/v1/fstemplates", fstemplates::router(state.clone()))
         .nest("/api/v1/moves", moves::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
