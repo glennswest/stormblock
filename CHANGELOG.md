@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.4.0] — 2026-08-19
+
 ### 2026-08-19
 - **feat:** `pallet convert --from <drive> --to <drive>` — one call for what a
   drive replacement actually is: everything on the source becomes partitioned
