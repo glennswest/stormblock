@@ -60,6 +60,31 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Layered goldens — engine items (2026-08-19)
+
+Master checklist lives in **stormblock-registry/CLAUDE.md**, "Layered goldens
+— the plan". The engine owns two of its items:
+
+- [x] **`FROM` for templates** — `TemplateSpec.parent` makes a template's raw
+      volume a CoW clone of a parent's sealed snapshot instead of a blank, so
+      a runtime several images share is stored once. New `awaiting_seed`
+      state; a fresh filesystem UUID is stamped at creation, because two
+      children must not both claim the parent's identity and under
+      `metadata_csum` that UUID seeds every checksum in the filesystem.
+- [ ] **Volume groups** — a "system" group for goldens and a "data" group for
+      PVCs, so the system disk can be replaced wholesale without touching
+      state. **A group has to be a hard allocation boundary, not a
+      preference:** `PlacementPolicy` is tier-based with fallback today, so a
+      golden would silently spill onto the data disk when the system disk
+      fills — leaving a half-migrated system scattered across the disk you
+      were about to replace. Size the system group for **two generations**; a
+      rebase transiently holds both, since old blocks stay refcounted until
+      the old goldens are deleted.
+- [ ] **Raw import** — `POST /mk/v1/volumes/{id}/raw`, sparse-aware, so a
+      pre-built `.img` can be imported and sealed without unpacking. `/tar`
+      exists; a pre-built filesystem is a block copy, not an unpack.
+
+
 ### Phase 0: Build fixes (get it compiling) — DONE
 - [x] Fix `openraft` version: 0.10 → 0.9
 - [x] Add `anyhow` to dependencies
