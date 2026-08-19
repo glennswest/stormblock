@@ -102,6 +102,11 @@ enum SubCommand {
         #[command(subcommand)]
         action: SlabAction,
     },
+    /// Build and inspect disk images and ISOs made of pallets
+    Image {
+        #[command(subcommand)]
+        action: ImageAction,
+    },
     /// Pallets — sealed, versioned sets of images, several per drive
     Pallet {
         /// Drives to work with (files or /dev nodes; a file is a drive like
@@ -225,6 +230,43 @@ enum SlabAction {
         /// Device path of the slab
         device: String,
     },
+}
+
+#[derive(clap::Subcommand)]
+enum ImageAction {
+    /// Build an image from a TOML spec
+    Build {
+        /// Path to the image spec
+        #[arg(long, default_value = "image.toml")]
+        spec: String,
+        /// Output path. The format is taken from its extension unless
+        /// --format says otherwise
+        #[arg(long)]
+        out: String,
+        /// raw, qcow2, vhd, vmdk, iso
+        #[arg(long)]
+        format: Option<String>,
+        /// Keep the intermediate raw image beside a converted one
+        #[arg(long)]
+        keep_raw: bool,
+    },
+    /// Convert an existing raw image to another format
+    Convert {
+        /// Raw image to read
+        #[arg(long = "in")]
+        input: String,
+        #[arg(long)]
+        out: String,
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Show an image's partitions and the pallets in it
+    Inspect {
+        /// Image file (raw or ISO)
+        image: String,
+    },
+    /// List the formats this build can write
+    Formats,
 }
 
 #[derive(clap::Subcommand)]
@@ -446,6 +488,9 @@ async fn main() -> anyhow::Result<()> {
         match cmd {
             SubCommand::Slab { action } => {
                 return handle_slab_command(action).await;
+            }
+            SubCommand::Image { action } => {
+                return handle_image_command(action).await;
             }
             SubCommand::Pallet { drives, action } => {
                 return handle_pallet_command(drives, action).await;
@@ -1086,6 +1131,123 @@ fn print_pallet(p: &stormblock::pallet::PalletLocation) {
 /// Pallet errors carry their own explanation; this just changes the type.
 fn pe<T>(r: Result<T, stormblock::pallet::PalletError>) -> anyhow::Result<T> {
     r.map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+// ----------------------------------------------------------------- images
+
+async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
+    use std::path::{Path, PathBuf};
+    use stormblock::image::{ImageBuilder, ImageFormat, ImageSpec};
+
+    let ie = |e: stormblock::image::ImageError| anyhow::anyhow!("{e}");
+    let resolve = |out: &str, want: &Option<String>| -> anyhow::Result<ImageFormat> {
+        match want {
+            Some(f) => ImageFormat::parse(f)
+                .ok_or_else(|| anyhow::anyhow!("unknown image format '{f}'")),
+            None => Ok(ImageFormat::from_path(Path::new(out)).unwrap_or(ImageFormat::Raw)),
+        }
+    };
+
+    match action {
+        ImageAction::Formats => {
+            for f in ImageFormat::ALL {
+                println!("{:<6} .{}", f.as_str(), f.extension());
+            }
+        }
+        ImageAction::Build { spec, out, format, keep_raw } => {
+            let format = resolve(out, format)?;
+            let spec_dir = Path::new(spec).parent().map(PathBuf::from);
+            let image_spec = ImageSpec::load(spec).await.map_err(ie)?;
+            // Paths in a spec are relative to the spec, which is what anyone
+            // editing one expects.
+            if let Some(dir) = spec_dir.filter(|d| !d.as_os_str().is_empty()) {
+                std::env::set_current_dir(&dir)
+                    .map_err(|e| anyhow::anyhow!("cannot enter {}: {e}", dir.display()))?;
+            }
+            let out_path = PathBuf::from(out);
+            let raw_path = if format == ImageFormat::Raw {
+                out_path.clone()
+            } else {
+                out_path.with_extension("raw.img")
+            };
+
+            let report = ImageBuilder::new(image_spec).build(&raw_path).await.map_err(ie)?;
+            println!(
+                "{} — {} in {} partitions",
+                raw_path.display(),
+                stormblock::mgmt::config::human_size(report.size_bytes),
+                report.partitions.len()
+            );
+            for p in &report.partitions {
+                println!(
+                    "  {:<14} {:>10} at {:<12} {}",
+                    p.kind,
+                    stormblock::mgmt::config::human_size(p.size_bytes),
+                    stormblock::mgmt::config::human_size(p.start_bytes),
+                    match (&p.pallet_id, p.verified) {
+                        (Some(id), Some(true)) => format!("{} v{} verified", id, p.pallet_version.unwrap_or(0)),
+                        (Some(id), _) => format!("{id} NOT VERIFIED"),
+                        _ => p.name.clone(),
+                    }
+                );
+            }
+
+            if format != ImageFormat::Raw {
+                stormblock::image::formats::convert(&raw_path, &out_path, format)
+                    .await
+                    .map_err(ie)?;
+                let len = tokio::fs::metadata(&out_path).await?.len();
+                println!(
+                    "{} — {} ({})",
+                    out_path.display(),
+                    stormblock::mgmt::config::human_size(len),
+                    format
+                );
+                if !keep_raw {
+                    tokio::fs::remove_file(&raw_path).await.ok();
+                }
+            }
+        }
+        ImageAction::Convert { input, out, format } => {
+            let format = resolve(out, format)?;
+            stormblock::image::formats::convert(Path::new(input), Path::new(out), format)
+                .await
+                .map_err(ie)?;
+            let len = tokio::fs::metadata(out).await?.len();
+            println!("{out} — {} ({format})", stormblock::mgmt::config::human_size(len));
+        }
+        ImageAction::Inspect { image } => {
+            let path = Path::new(image);
+            let gpt = stormblock::image::build::table_of(path).await.map_err(ie)?;
+            println!(
+                "{image}: GPT in {}-byte LBAs{}",
+                gpt.block_size,
+                if gpt.recovered_from_backup { " (read from the backup)" } else { "" }
+            );
+            for (i, e) in gpt.partitions() {
+                println!(
+                    "  {i:>3}  {:<20} {:>10} at {:<12} {}",
+                    e.name,
+                    stormblock::mgmt::config::human_size(e.size_bytes(gpt.block_size)),
+                    stormblock::mgmt::config::human_size(e.start_bytes(gpt.block_size)),
+                    if e.is_pallet() { "pallet" } else { "" }
+                );
+            }
+            for p in stormblock::image::build::pallets_in(path).await.map_err(ie)? {
+                println!(
+                    "  pallet {} {} v{} [{}] {} — {} member(s){}",
+                    p.id,
+                    p.name,
+                    p.version,
+                    p.kind,
+                    p.version_label,
+                    p.member_count,
+                    if p.is_readable() { "" } else { " UNREADABLE" }
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyhow::Result<()> {

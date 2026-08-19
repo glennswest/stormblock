@@ -318,11 +318,14 @@ fn terminator() -> Vec<u8> {
     v
 }
 
-/// Validation entry, an unbootable default entry, then a UEFI section pointing
-/// at the ESP.
+/// The boot catalog: a UEFI validation entry and one default entry pointing at
+/// the ESP, no emulation.
 ///
-/// The default entry is deliberately not bootable: there is no BIOS loader in
-/// this image, and claiming one would send a BIOS machine into nothing.
+/// EFI-only on purpose. There is no BIOS loader in this image, so a bootable
+/// x86 entry would send a BIOS machine into nothing, and a *non*-bootable
+/// placeholder is an El Torito image with no size — which is exactly what
+/// `xorriso` calls a hidden image and warns about. One honest entry is better
+/// than two, one of which is a lie.
 fn boot_catalog(placed: &[Placed]) -> Result<Vec<u8>> {
     let esp = placed
         .iter()
@@ -332,7 +335,7 @@ fn boot_catalog(placed: &[Placed]) -> Result<Vec<u8>> {
     let mut v = vec![0u8; ISO_SECTOR as usize];
     // Validation entry.
     v[0] = 0x01;
-    v[1] = 0x00; // x86 — the platform of the (unbootable) default entry
+    v[1] = PLATFORM_EFI;
     let id = b"stormblock";
     v[4..4 + id.len()].copy_from_slice(id);
     v[30] = 0x55;
@@ -343,21 +346,26 @@ fn boot_catalog(placed: &[Placed]) -> Result<Vec<u8>> {
     }
     v[28..30].copy_from_slice(&(0u16.wrapping_sub(sum)).to_le_bytes());
 
-    // Default entry: present because the format requires one, not bootable.
-    v[32] = 0x00;
-    v[33] = 0x00;
-
-    // Section header for UEFI, final header, one entry.
-    v[64] = 0x91;
-    v[65] = PLATFORM_EFI;
-    v[66..68].copy_from_slice(&1u16.to_le_bytes());
-
-    // Section entry: no emulation, the ESP as the boot image.
+    // Default entry: the ESP, no emulation.
     let sectors_512 = esp.len.div_ceil(512);
-    v[96] = 0x88; // bootable
-    v[97] = 0x00; // no emulation
-    v[102..104].copy_from_slice(&(sectors_512.min(0xFFFF) as u16).to_le_bytes());
-    v[104..108].copy_from_slice(&(esp.iso_sector as u32).to_le_bytes());
+    if sectors_512 > 0xFFFF {
+        // El Torito counts the boot image in 512-byte sectors in a 16-bit
+        // field. Firmware that honours it would see only the first 32 MiB of
+        // a larger ESP — so say so rather than let it be discovered at a boot
+        // prompt. The GPT entry still covers the whole partition, which is the
+        // path a USB stick takes.
+        tracing::warn!(
+            "ESP is {} bytes: El Torito can only describe {} of it, so optical boot may see a \
+             truncated filesystem. Build the ISO with an ESP of 32M or less (FAT16) — booting \
+             the same file from USB is unaffected.",
+            esp.len,
+            0xFFFFu64 * 512
+        );
+    }
+    v[32] = 0x88; // bootable
+    v[33] = 0x00; // no emulation
+    v[38..40].copy_from_slice(&(sectors_512.min(0xFFFF) as u16).to_le_bytes());
+    v[40..44].copy_from_slice(&(esp.iso_sector as u32).to_le_bytes());
     Ok(v)
 }
 
