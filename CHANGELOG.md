@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.6.0] — 2026-08-19
+
 ### 2026-08-19
 - **refactor:** The pallet format's **read side is a crate of its own** —
   `crates/pallet-format`, `no_std`, no allocation on the read path, no async, no
