@@ -320,48 +320,74 @@ impl PalletManager {
             builder = builder.member(m);
         }
 
-        // Pick the drive before sizing, so the pallet's block size matches the
-        // device it will live on rather than a default that may be smaller.
-        let drive_index = spec.drive.unwrap_or(0);
-        let drive = self.store.drive(drive_index)?.clone();
-        // The pallet's block size is the LBA size of the table it lives in, so
-        // an extent's `partition_block` is a sector offset from the partition
-        // start and a firmware reader has no unit conversion to get wrong.
-        let bs = spec
-            .block_size
-            .unwrap_or_else(|| super::gpt::default_lba_size(&drive.device));
-        builder = builder.block_size(bs);
-
-        let built = builder.build().await?;
-        let want = align_up(spec.size_bytes.unwrap_or(built.total_bytes).max(built.total_bytes), ALIGN_BYTES);
-
-        // Allocate the partition first: it is the claim on the range, and two
-        // publishes racing for the same free run would otherwise both win.
-        let mut gpt = Gpt::read(&drive.device).await?;
-        let slot = gpt.allocate(&spec.name, PALLET_TYPE_GUID, want, attrs.to_u64())?;
-        gpt.write(&drive.device).await?;
-
-        let view = gpt.view(&drive.device, slot)?;
-        builder.write(&built, &view).await?;
-
-        let id = gpt.entries[slot].uuid();
-        let loc = self.store.find(id).await?;
-
-        // Check it where it landed, not where it was built — the two are only
-        // the same claim until a cable disagrees.
-        let report = self.verify(id).await?;
-        if !report.ok {
-            return Err(PalletError::Refused(format!(
-                "published pallet did not verify: {}",
-                report.reason.unwrap_or_else(|| "unknown".into())
-            )));
+        // "The first drive with room" is answered by trying them: free space is
+        // what the GPT says right now, not what a caller was told earlier.
+        let candidates: Vec<usize> = match spec.drive {
+            Some(i) => vec![i],
+            None => (0..self.store.drives().len()).collect(),
+        };
+        if candidates.is_empty() {
+            return Err(PalletError::NotFound("no drives to publish onto".into()));
         }
 
-        if spec.activate {
-            self.activate(id).await?;
-            return self.store.find(id).await;
+        let mut built: Option<(u32, super::format::BuiltPallet)> = None;
+        let mut last_err = None;
+        for idx in candidates {
+            let drive = self.store.drive(idx)?.clone();
+            // The pallet's block size is the LBA size of the table it lives in,
+            // so an extent's `partition_block` is a sector offset from the
+            // partition start and a firmware reader has no unit conversion to
+            // get wrong.
+            let bs = spec
+                .block_size
+                .unwrap_or_else(|| super::gpt::default_lba_size(&drive.device));
+            if built.as_ref().map_or(true, |(b, _)| *b != bs) {
+                builder = builder.block_size(bs);
+                built = Some((bs, builder.build().await?));
+            }
+            let (_, ref b) = *built.as_ref().expect("just built");
+            let want = align_up(
+                spec.size_bytes.unwrap_or(b.total_bytes).max(b.total_bytes),
+                ALIGN_BYTES,
+            );
+
+            // Allocate the partition first: it is the claim on the range, and
+            // two publishes racing for the same free run would otherwise both
+            // win.
+            let mut gpt = Gpt::read(&drive.device).await?;
+            let slot = match gpt.allocate(&spec.name, PALLET_TYPE_GUID, want, attrs.to_u64()) {
+                Ok(s) => s,
+                Err(e @ PalletError::NoSpace { .. }) => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            gpt.write(&drive.device).await?;
+
+            let view = gpt.view(&drive.device, slot)?;
+            builder.write(b, &view).await?;
+
+            let id = gpt.entries[slot].uuid();
+            let loc = self.store.find(id).await?;
+
+            // Check it where it landed, not where it was built — the two are
+            // only the same claim until a cable disagrees.
+            let report = self.verify(id).await?;
+            if !report.ok {
+                return Err(PalletError::Refused(format!(
+                    "published pallet did not verify: {}",
+                    report.reason.unwrap_or_else(|| "unknown".into())
+                )));
+            }
+
+            if spec.activate {
+                self.activate(id).await?;
+                return self.store.find(id).await;
+            }
+            return Ok(loc);
         }
-        Ok(loc)
+        Err(last_err.unwrap_or(PalletError::NoSpace { need: 0, largest_free: 0 }))
     }
 
     /// Republish a pallet as a new version with members added or dropped.

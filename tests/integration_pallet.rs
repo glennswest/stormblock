@@ -496,3 +496,27 @@ async fn a_whole_drive_pallet_is_still_found_and_can_be_adopted() {
     }
     assert_eq!(mgr.list().await.iter().filter(|p| p.drive == "legacy").count(), 2);
 }
+
+#[tokio::test]
+async fn publishing_spills_onto_the_next_drive_with_room() {
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0", "disk1"]).await;
+
+    // Fill disk0 with pallets sized to leave nothing useful behind.
+    let payload = vec![7u8; 20 * 1024 * 1024];
+    for i in 0..3 {
+        let mut s = PublishSpec::new(format!("filler-{i}"), PalletKind::Data);
+        s.members = vec![member("blob", "data", MemberKind::Raw, &payload)];
+        s.drive = Some(0);
+        if mgr.publish(s).await.is_err() {
+            break;
+        }
+    }
+    // With no drive named, the publish looks for one with room rather than
+    // failing on the first.
+    let mut s = PublishSpec::new("stormcos-boot", PalletKind::Boot);
+    s.members = vec![member("kernel", "kernel", MemberKind::Kernel, &payload)];
+    let loc = mgr.publish(s).await.expect("publish should find room");
+    assert_eq!(loc.drive, "disk1");
+    assert!(mgr.verify(loc.id).await.unwrap().ok);
+}
