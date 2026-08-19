@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-08-19
+- **feat:** a template's `parent_id` is exposed in the API, not only persisted.
+  Lineage the engine keeps to itself makes "rebuild everything built on this
+  base" a question nothing outside can answer — and the thing that wants to
+  ask is not the engine. A template with no parent reports `null` rather than
+  omitting the field, so a consumer can tell "no parent" from "not asked".
 - **feat:** a template can be built **from** another — `FROM`, in the sense a
   container build means it. `TemplateSpec.parent` (and `parent` on
   `POST /api/v1/fstemplates`) makes the new template's raw volume a

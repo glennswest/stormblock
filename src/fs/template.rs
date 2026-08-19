@@ -300,6 +300,11 @@ impl FsTemplate {
             "sealed_volume_id": self.sealed_volume_id,
             "clones": self.clones,
             "seeded": self.seeded,
+            // Lineage, so a consumer can ask what was built on what. Without
+            // it a template's parent is knowable only to the engine, and
+            // "rebuild everything that sits on this base" is not a question
+            // anything outside can answer.
+            "parent_id": self.parent_id,
         })
     }
 }
@@ -1300,6 +1305,35 @@ mod tests {
         let sealed = seal(&vm, &store, &child.id, false).await.unwrap();
         assert_eq!(sealed.state, TemplateState::Ready);
         assert!(sealed.clone_source().is_some());
+    }
+
+    /// Lineage has to be visible from outside, or "rebuild everything built
+    /// on this base" is a question only the engine can answer — and the thing
+    /// that wants to ask is not the engine.
+    #[tokio::test]
+    async fn a_childs_parent_is_visible_in_the_api() {
+        let (vm, store, _path) = node(1024 * 1024 * 1024).await;
+        let base = create(&vm, &store, &TemplateSpec::new("lineage-base", 64 * 1024 * 1024))
+            .await
+            .unwrap();
+        let child = create(
+            &vm,
+            &store,
+            &TemplateSpec::new("lineage-child", 64 * 1024 * 1024).from_parent("lineage-base"),
+        )
+        .await
+        .unwrap();
+
+        let j = child.json();
+        assert_eq!(
+            j.get("parent_id").and_then(|v| v.as_str()),
+            Some(base.id.to_string().as_str()),
+            "a child must name its parent in the API, not only on disk"
+        );
+        // A template with no parent says so, rather than omitting the field
+        // and leaving a consumer to guess whether it was asked.
+        assert!(base.json().get("parent_id").is_some());
+        assert!(base.json()["parent_id"].is_null());
     }
 
     /// Formatting over a parent would destroy the thing the parent is for.
