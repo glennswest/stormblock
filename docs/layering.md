@@ -159,3 +159,28 @@ from an image", with the target as a parameter — filesystem golden, whole-disk
 golden, and a format wrapper — rather than bootability being bolted onto
 `sbregistry build-image`, which is named and shaped for OCI images.
 
+### What this replaces (2026-08-19)
+
+stormcos is to be **pure Rust**, and this stack is what builds it — replacing
+`stormcos_builder`, which today composes the node image in a disposable LXC
+clone from harvested component releases and publishes qcow2/raw.zst. Notably
+that builder shells out to almost nothing already (one `qemu-img`); the
+non-Rust part is the LXC compose step, not the tooling around it.
+
+So the target is: a stormcos image is a **whole-disk golden**, built by
+`mkfs-ext4` + `fio-ext4` plus the GPT/ESP/bootloader piece that does not exist
+yet — no LXC, no distro tooling, no host to be shared or to go stale. The same
+artifact then imports through `/raw` and clones per node like any other golden,
+which also makes a node image rebuild a rebase rather than a re-compose.
+
+**Per architecture, and this is not a detail.** A bootable image is
+arch-specific all the way down: x86_64 wants BIOS and/or UEFI with its own
+loader binaries, arm64 is UEFI-only in practice, and the ESP contents differ.
+The builder takes the target arch as a parameter and the two are separate
+artifacts — a `base-<chainid>` shared across architectures is a category error,
+since the layers themselves differ.
+
+Related: Kubernetes is already Rust here (`rustkube`), so the runtimes above
+stormblock — containers, k8s, VMs, micro-VMs — can be one Rust stack rather
+than a Rust storage layer under borrowed pieces.
+
