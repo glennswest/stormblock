@@ -80,6 +80,22 @@ Master checklist lives in **stormblock-registry/CLAUDE.md**, "Layered goldens
       were about to replace. Size the system group for **two generations**; a
       rebase transiently holds both, since old blocks stay refcounted until
       the old goldens are deleted.
+- [ ] **Failure-domain topology.** `placement/topology.rs` models
+      `StorageTier` (Hot/Warm/Cool/Cold) and `Locality` — *how fast and how
+      far*. It has no notion of *what fails together*: no chassis, rack, row,
+      floor, building or site. Those are orthogonal — two drives can both be
+      Hot and local and share a power supply — and the second is what
+      placement needs to keep a volume's only copies out of one blast radius.
+      **Density makes this urgent rather than theoretical.** A MikroTik node
+      carries ~16 drives; a 4U 160-bay NVMe server (Supermicro
+      ASG-4116S-NU160R, FMS 2026) carries 160+. At that point a *node* is
+      already a failure domain worth reasoning about internally, and a rack of
+      them is 4,000+ drives. stormblock has to know its own drives first, then
+      where those drives are.
+      Ties directly to volume groups: a group is "a set of slabs", and with
+      topology it becomes "a set of slabs constrained by failure domain" —
+      which makes "replace the system disk" and "survive losing a rack" the
+      same mechanism.
 - [x] **Raw import** — `POST /mk/v1/volumes/{id}/raw`, sparse-aware. Landed
       in stormblockmk 2026-08-19 and proven end to end; **belongs down here**
       with the rest of layer 2 (see below).
