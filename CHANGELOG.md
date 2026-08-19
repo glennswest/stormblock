@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### 2026-08-18
+- **chore(deps):** `mkfs-ext4` to v1.4.0 and `fio-ext4` to v1.3.2, moving both
+  pins together as they have to be — two tags are two source ids, and the
+  `BlockDevice` trait from one copy does not satisfy the other. `mkfs-ext4`
+  v1.4.0 makes `fsck` verify the checksum on every extent-tree node that lives
+  in a block of its own, which is the check whose absence let v1.3.1's bug
+  through: walking a tree reads the entries and never looks at the four bytes
+  after them, so a template could check clean here and still be refused by the
+  kernel that mounts it. Every check the engine runs over a formatted volume
+  now covers that. The `mkfs-ext4` pin was still on v1.3.0 and so did not carry
+  the journal extent-leaf fix at all.
+
 ## [v9.2.1] — 2026-08-18
 
 ### 2026-08-18
