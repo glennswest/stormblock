@@ -19,6 +19,12 @@
 //! See [`ext4`] for the on-disk format and [`template`] for the lifecycle.
 
 pub mod ext4;
+/// Reading the blocks a filesystem is *not* using.
+///
+/// Lived in the RouterOS profile because "mk must not patch the engine", which
+/// is exactly the rule this layering removes: it is a read-only ext2/3/4
+/// layout reader, and where free space is on a volume is engine knowledge.
+pub mod ext4_free;
 pub mod files;
 pub mod template;
 

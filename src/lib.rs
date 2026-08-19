@@ -4,6 +4,7 @@ pub mod volume;
 pub mod fs;
 pub mod target;
 pub mod mgmt;
+pub mod serve;
 pub mod stormfs;
 pub mod boot;
 pub mod boot_iscsi;
