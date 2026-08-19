@@ -107,3 +107,55 @@ and one more boundary.
 mechanisms sitting in the profile because the profile is their only caller.
 They are the two things a second deployment would copy first. They move with
 layer 2.
+
+## Bootable formats — where they fit (notes, 2026-08-19)
+
+A golden today is a bare filesystem: `mkfs-ext4` formats the whole device,
+there is no partition table and nothing boots it. That is the right shape for
+a container root and it is already the right shape for a micro-VM. It is not
+the shape a firmware boot wants.
+
+The ladder, cheapest first, with what exists:
+
+1. **Micro-VM, direct kernel boot — nothing new needed.** A
+   firecracker/cloud-hypervisor guest is handed a kernel, an initrd and a raw
+   block device for root. A clone *is* that block device. No partition table,
+   no bootloader, no ESP. This is why micro-VMs are the easy case: the format
+   we already build is the format they want.
+2. **Network boot — already specified.** `docs/stormblock-ipxe-boot.md` and
+   `docs/linuxboot-iscsi-spec.md`. The root lives on a stormblock volume and
+   firmware never reads a local disk, so again nothing on the image has to be
+   made bootable.
+3. **VM with firmware boot — this is the real gap.** Needs a whole-disk image:
+   protective MBR + GPT, an ESP (FAT32) holding a bootloader, and the rootfs
+   partition. **None of that code exists** in stormblock, mkfs-ext4 or
+   fio-ext4 — searched. It is a GPT writer, a small FAT32 writer, and
+   bootloader placement.
+4. **Hypervisor container formats — qcow2, VMDK, VHD.** A wrapper around a raw
+   image. `mkube/pkg/diskimg/` already has Go converters (`qcow2.go`,
+   `vhd.go`, `vmdk.go`), currently *to* raw; the build tool needs the other
+   direction, or to shell out.
+5. **ISO (El Torito)** — separate wrapping, mostly install media rather than a
+   runtime root.
+
+### Two golden shapes, named
+
+The distinction to keep straight, because it changes what a clone is:
+
+- **Filesystem golden** — what is built today. Clone attaches as the root
+  filesystem. Containers, micro-VMs, netboot.
+- **Whole-disk golden** — partition table, ESP, rootfs partition. Clone
+  attaches as a *disk* that firmware can boot.
+
+Both are goldens, both clone by refcount, both import through
+`/mk/v1/volumes/{id}/raw`. The difference is only what the builder lays down,
+which is another reason bootability belongs in the **builder**, decided once
+at build time, exactly like the golden itself.
+
+### Consequence for the build tool
+
+This is an argument for a `stormblock-build` that owns "produce an artifact
+from an image", with the target as a parameter — filesystem golden, whole-disk
+golden, and a format wrapper — rather than bootability being bolted onto
+`sbregistry build-image`, which is named and shaped for OCI images.
+
