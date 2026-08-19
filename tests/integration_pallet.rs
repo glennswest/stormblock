@@ -649,3 +649,76 @@ async fn convert_refuses_a_drive_onto_itself() {
     mgr.publish(boot_spec("stormcos-boot", b"kernel", b"initramfs")).await.unwrap();
     assert!(mgr.convert_drive(0, 0, ConvertOptions::default()).await.is_err());
 }
+
+/// The firmware path, run against bytes the engine actually wrote.
+///
+/// Not the async wrapper — the shared `no_std` reader directly: synchronous,
+/// no allocation, a caller-provided scratch buffer and a `BlockReader` that
+/// does nothing but hand over blocks. This is the code that runs before the
+/// kernel, and this test is the claim that it and the writer agree.
+struct RamReader {
+    bytes: Vec<u8>,
+    block: usize,
+}
+
+impl stormblock_pallet_format::BlockReader for RamReader {
+    fn read_blocks(&self, block: u64, buf: &mut [u8]) -> Result<(), ()> {
+        let at = block as usize * self.block;
+        if at + buf.len() > self.bytes.len() {
+            return Err(());
+        }
+        buf.copy_from_slice(&self.bytes[at..at + buf.len()]);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn firmware_reads_what_the_engine_wrote() {
+    use stormblock_pallet_format as fw;
+
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0"]).await;
+    let mut spec = boot_spec("stormcos-boot", b"vmlinuz-payload-0123456789", b"initramfs-payload");
+    spec.kind = PalletKind::Boot;
+    spec.version_label = "6.12.0-200.fc41".into();
+    let loc = mgr.publish(spec).await.unwrap();
+
+    // Everything the firmware would read: the partition, as bytes.
+    let view = mgr.store().view(&loc).unwrap();
+    let mut partition = vec![0u8; loc.used_bytes as usize];
+    view.read_at(0, &mut partition).await.unwrap();
+
+    let pallet = fw::Pallet::parse(&partition).expect("the shared reader parses it");
+    assert_eq!(pallet.name(), "stormcos-boot");
+    assert_eq!(pallet.version(), loc.version);
+    assert_eq!(pallet.kind(), fw::PalletKind::Boot);
+    assert_eq!(pallet.version_label(), "6.12.0-200.fc41");
+    assert_eq!(pallet.member_count(), 2);
+
+    let kernel = pallet.find("kernel").expect("finds the kernel by name");
+    assert_eq!(kernel.role(), "kernel");
+    assert_eq!(kernel.kind, fw::MemberKind::Kernel);
+    assert_eq!(kernel.byte_len, 26);
+
+    // And it verifies: the manifest over the tables, then the content through
+    // the extent map, with a fixed scratch buffer and no allocator.
+    let reader = RamReader { bytes: partition.clone(), block: pallet.sb.block_size as usize };
+    let mut scratch = vec![0u8; pallet.sb.block_size as usize * 8];
+    pallet.verify_manifest().expect("manifest");
+    pallet.verify_all(&reader, &mut scratch).expect("every member");
+
+    // The remap resolves to the same place the engine reads from.
+    let map = pallet.map(&kernel, 0).unwrap();
+    let at = map.partition_block * pallet.sb.block_size as u64 + map.offset_in_block;
+    assert_eq!(&partition[at as usize..at as usize + 15], b"vmlinuz-payload");
+
+    // One flipped byte of content and the firmware refuses it — which is the
+    // whole reason this path exists.
+    let mut tampered = partition.clone();
+    tampered[at as usize] ^= 0xFF;
+    let reader = RamReader { bytes: tampered, block: pallet.sb.block_size as usize };
+    assert_eq!(
+        pallet.verify_all(&reader, &mut scratch).unwrap_err(),
+        fw::Error::DigestMismatch
+    );
+}

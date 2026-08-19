@@ -1265,7 +1265,7 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
 }
 
 async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyhow::Result<()> {
-    use stormblock::pallet::format::PalletKind;
+    use stormblock::pallet::format::{parse_pallet_kind, MemberExt};
     use stormblock::pallet::manager::{PublishSpec, RecomposeSpec};
     use stormblock::pallet::{PalletBrowser, PalletManager};
 
@@ -1274,7 +1274,7 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
     }
     let store = pallet_store(drives).await?;
     let mgr = PalletManager::new(store.clone());
-    let kind_of = |k: &Option<String>| k.as_deref().map(PalletKind::parse);
+    let kind_of = |k: &Option<String>| k.as_deref().map(parse_pallet_kind);
     let id_of = |s: &str| {
         uuid::Uuid::parse_str(s).map_err(|_| anyhow::anyhow!("'{s}' is not a pallet UUID"))
     };
@@ -1312,8 +1312,8 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
                     for m in p.members() {
                         println!(
                             "  member {:<20} role={:<12} kind={:<10} {:>10}  {}",
-                            m.name,
-                            m.role,
+                            m.name(),
+                            m.role(),
                             m.kind,
                             stormblock::mgmt::config::human_size(m.byte_len),
                             &m.digest_hex()[..16],
@@ -1381,7 +1381,7 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
             }
         }
         PalletAction::Publish { name, kind, label, members, drive, size, activate } => {
-            let mut spec = PublishSpec::new(name.clone(), PalletKind::parse(kind));
+            let mut spec = PublishSpec::new(name.clone(), parse_pallet_kind(kind));
             spec.version_label = label.clone();
             spec.activate = *activate;
             if let Some(d) = drive {
@@ -1395,7 +1395,7 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
                 spec.members.push(pe(stormblock::pallet::manager::file_member(
                     name,
                     role,
-                    stormblock::pallet::MemberKind::parse(&kind),
+                    stormblock::pallet::parse_member_kind(&kind),
                     path,
                 )
                 .await)?);

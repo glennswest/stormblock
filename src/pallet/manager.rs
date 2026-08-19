@@ -22,7 +22,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use super::format::{Attributes, Member, MemberKind, MemberSpec, PalletBuilder, PalletKind};
+use super::format::{
+    Attributes, Member, MemberExt, MemberKind, MemberSpec, PalletBuilder, PalletKind,
+};
 use super::gpt::{Gpt, GptEntry, ALIGN_BYTES};
 use super::store::{PalletLocation, PalletState, PalletStore};
 use super::{
@@ -441,7 +443,7 @@ impl PalletManager {
 
         let mut members: Vec<MemberSpec> = Vec::new();
         for m in pallet.members() {
-            if spec.remove.contains(&m.name) {
+            if spec.remove.iter().any(|r| r == m.name()) {
                 continue;
             }
             let content = Arc::new(PalletMemberContent::new(
@@ -450,7 +452,7 @@ impl PalletManager {
                 m.clone(),
             ));
             members.push(
-                MemberSpec::new(m.name.clone(), m.role.clone(), m.kind, content)
+                MemberSpec::new(m.name().to_string(), m.role().to_string(), m.kind, content)
                     .with_flags(m.flags),
             );
         }
@@ -538,12 +540,12 @@ impl PalletManager {
             if !ok {
                 report.ok = false;
                 report.reason.get_or_insert_with(|| {
-                    format!("member '{}' failed verification", m.name)
+                    format!("member '{}' failed verification", m.name())
                 });
             }
             report.members.push(MemberVerdict {
-                name: m.name.clone(),
-                role: m.role.clone(),
+                name: m.name().to_string(),
+                role: m.role().to_string(),
                 kind: m.kind.to_string(),
                 byte_len: m.byte_len,
                 digest: m.digest_hex(),
@@ -1052,7 +1054,7 @@ impl PalletManager {
         let pallet = Arc::new(self.store.open(&loc).await?);
         let m = pallet.find(member)?;
         let content = Arc::new(PalletMemberContent::new(pallet, view, m.clone()));
-        Ok(MemberSpec::new(m.name.clone(), m.role.clone(), m.kind, content).with_flags(m.flags))
+        Ok(MemberSpec::new(m.name().to_string(), m.role().to_string(), m.kind, content).with_flags(m.flags))
     }
 
     // -------------------------------------------------------------- removal

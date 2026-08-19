@@ -1,3 +1,9 @@
+[workspace]
+# The pallet format's decode side is its own crate so firmware and the engine
+# can share one reader rather than maintaining two that must stay
+# bit-compatible forever (#53).
+members = ["crates/pallet-format"]
+
 [package]
 name = "stormblock"
 version = "9.5.0"
@@ -56,6 +62,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+
+# The pallet on-disk format, read side — no_std, no I/O, no write path. The
+# writer in src/pallet/format.rs lays bytes down at the offsets this crate
+# defines, so emission has one implementation and the offsets have one
+# definition. stormuefi links the same crate for x86_64-unknown-uefi (#53).
+stormblock-pallet-format = { path = "crates/pallet-format", features = ["serde"] }
 
 # Data integrity
 crc32c = "0.6"
@@ -116,6 +128,8 @@ arm64 = []
 mikrotik = []
 
 [dev-dependencies]
+# Integration tests read engine-written pallets through the firmware path.
+stormblock-pallet-format = { path = "crates/pallet-format" }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 

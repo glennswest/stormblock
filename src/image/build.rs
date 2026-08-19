@@ -17,7 +17,7 @@ use crate::drive::partition::PartitionDevice;
 use crate::drive::slab::{Slab, DEFAULT_SLOT_SIZE};
 use crate::drive::BlockDevice;
 use crate::mgmt::config::parse_size;
-use crate::pallet::format::{MemberKind, PalletKind};
+use crate::pallet::format::{parse_member_kind, parse_pallet_kind, MemberKind, PalletKind};
 use crate::pallet::manager::PublishSpec;
 use crate::pallet::{
     BytesContent, Gpt, MemberSpec, PalletManager, PalletStore, PartitionView, PALLET_TYPE_GUID,
@@ -415,7 +415,7 @@ impl ImageBuilder {
             .ok_or_else(|| ImageError::Spec("a composed pallet needs a `name`".into()))?;
         let mut spec = PublishSpec::new(
             name,
-            entry.kind.as_deref().map(PalletKind::parse).unwrap_or(PalletKind::Unspecified),
+            entry.kind.as_deref().map(parse_pallet_kind).unwrap_or(PalletKind::Unspecified),
         );
         spec.version = entry.version;
         spec.version_label = entry.version_label.clone().unwrap_or_default();
@@ -498,18 +498,18 @@ async fn member_len(m: &MemberEntry) -> Result<u64> {
 }
 
 async fn member_spec(m: &MemberEntry) -> Result<MemberSpec> {
-    let kind = m.kind.as_deref().map(MemberKind::parse).unwrap_or(MemberKind::Raw);
+    let kind = m.kind.as_deref().map(parse_member_kind).unwrap_or(MemberKind::Raw);
     match (&m.file, &m.text) {
         (Some(f), _) => Ok(crate::pallet::manager::file_member(
-            m.name.clone(),
-            m.role.clone(),
+            m.name.to_string(),
+            m.role.to_string(),
             kind,
             f.clone(),
         )
         .await?),
         (None, Some(t)) => Ok(MemberSpec::new(
-            m.name.clone(),
-            m.role.clone(),
+            m.name.to_string(),
+            m.role.to_string(),
             kind,
             Arc::new(BytesContent(t.clone().into_bytes())),
         )),

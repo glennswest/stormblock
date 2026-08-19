@@ -1,0 +1,22 @@
+[package]
+name = "stormblock-pallet-format"
+version = "1.0.0"
+edition = "2021"
+authors = ["Glenn West"]
+description = "Read-only no_std reader for the stormblock pallet on-disk format v1"
+repository = "https://github.com/glennswest/stormblock"
+license = "TBD"
+rust-version = "1.75"
+
+[features]
+default = ["verify"]
+# Serde derives on the small value types, so a host can put them in an API
+# response. Off by default: firmware has no use for it.
+serde = ["dep:serde"]
+# SHA-256 content and manifest verification. Without it the crate can navigate
+# a pallet but not prove anything about it.
+verify = ["dep:sha2"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false, optional = true }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }

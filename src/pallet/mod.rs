@@ -55,8 +55,9 @@ use async_trait::async_trait;
 use crate::drive::{BlockDevice, DriveError};
 
 pub use format::{
-    Attributes, BuiltPallet, MemberKind, MemberSpec, Pallet, PalletBuilder, PalletKind, Placement,
-    FLAG_DIGEST, FLAG_READ_ONLY, FLAG_SEALED, PALLET_TYPE_GUID,
+    parse_member_kind, parse_pallet_kind, Attributes, BuiltPallet, MemberExt, MemberKind,
+    MemberSpec, Pallet, PalletBuilder, PalletKind, Placement, FLAG_DIGEST, FLAG_READ_ONLY,
+    FLAG_SEALED, PALLET_TYPE_GUID,
 };
 pub use gpt::{Gpt, GptEntry};
 pub use manager::{
@@ -167,29 +168,36 @@ impl From<DriveError> for PalletError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, PalletError>;
-
-/// CRC-32/IEEE — the one GPT and the pallet superblock use.
-///
-/// Not `crc32c`: that is a different polynomial, and the reader in firmware
-/// checks this one.
-pub fn crc32(data: &[u8]) -> u32 {
-    crc32_continue(0, data)
-}
-
-/// Continue a CRC over another run, so the superblock's CRC can skip its own
-/// field without copying 4 KB — the same trick the firmware reader uses.
-pub fn crc32_continue(prev: u32, data: &[u8]) -> u32 {
-    let mut crc = !prev;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+/// The shared reader's errors, carried into the engine's vocabulary. It has no
+/// allocator, so its errors carry no strings; this is where they get context.
+impl From<stormblock_pallet_format::Error> for PalletError {
+    fn from(e: stormblock_pallet_format::Error) -> Self {
+        use stormblock_pallet_format::Error as E;
+        match e {
+            E::BadMagic => PalletError::BadMagic,
+            E::UnsupportedVersion(v) => PalletError::UnsupportedVersion(v),
+            E::BadGeometry => PalletError::BadGeometry("superblock geometry".into()),
+            E::BadHeaderCrc => PalletError::BadHeaderCrc,
+            E::BadMemberCrc => PalletError::BadMemberCrc,
+            E::BadExtentCrc => PalletError::BadExtentCrc,
+            E::Truncated => PalletError::Truncated { need: 0, have: 0 },
+            E::NotFound => PalletError::NotFound("member".into()),
+            E::OutOfRange => PalletError::OutOfRange { offset: 0, len: 0 },
+            E::ManifestMismatch => PalletError::ManifestMismatch,
+            E::DigestMismatch => PalletError::DigestMismatch { member: String::new() },
+            E::NoDigest => PalletError::NoDigest { member: String::new() },
+            E::ReadFailed => PalletError::Refused("read failed".into()),
+            E::ScratchTooSmall => PalletError::BadGeometry("scratch smaller than one block".into()),
         }
     }
-    !crc
 }
+
+pub type Result<T> = std::result::Result<T, PalletError>;
+
+// CRC-32/IEEE — the one GPT and the pallet superblock use, and *not* `crc32c`,
+// which is a different polynomial. Defined in the shared format crate so the
+// engine and the firmware reader compute the same thing by construction.
+pub use stormblock_pallet_format::{crc32, crc32_continue, superblock_crc};
 
 // ------------------------------------------------------------ partition view
 

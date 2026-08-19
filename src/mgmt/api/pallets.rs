@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::{ApiError, ListResponse};
 use crate::mgmt::AppState;
-use crate::pallet::format::{MemberKind, PalletKind};
+use crate::pallet::format::{parse_member_kind, parse_pallet_kind, MemberExt, MemberKind, PalletKind};
 use crate::pallet::manager::{PublishSpec, RecomposeSpec};
 use crate::pallet::{
     BytesContent, MemberSpec, PalletBrowser, PalletError, PalletLocation, PalletManager,
@@ -59,7 +59,7 @@ pub struct KindQuery {
 
 impl KindQuery {
     fn parsed(&self) -> Option<PalletKind> {
-        self.kind.as_deref().map(PalletKind::parse)
+        self.kind.as_deref().map(parse_pallet_kind)
     }
 }
 
@@ -215,8 +215,8 @@ async fn get_one(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
             .members()
             .iter()
             .map(|m| MemberResponse {
-                name: m.name.clone(),
-                role: m.role.clone(),
+                name: m.name().to_string(),
+                role: m.role().to_string(),
                 kind: m.kind.to_string(),
                 byte_len: m.byte_len,
                 digest: m.digest_hex(),
@@ -299,7 +299,7 @@ async fn build_members(
 ) -> Result<Vec<MemberSpec>, Response> {
     let mut out = Vec::with_capacity(reqs.len());
     for r in reqs {
-        let kind = r.kind.as_deref().map(MemberKind::parse).unwrap_or(MemberKind::Raw);
+        let kind = r.kind.as_deref().map(parse_member_kind).unwrap_or(MemberKind::Raw);
         let spec = match r.source {
             MemberSource::Volume { volume_id, byte_len } => {
                 let Ok(vid) = Uuid::parse_str(&volume_id) else {
@@ -347,7 +347,7 @@ async fn publish(State(state): State<Arc<AppState>>, Json(req): Json<PublishRequ
 
     let mut spec = PublishSpec::new(
         req.name,
-        req.kind.as_deref().map(PalletKind::parse).unwrap_or(PalletKind::Unspecified),
+        req.kind.as_deref().map(parse_pallet_kind).unwrap_or(PalletKind::Unspecified),
     );
     spec.version = req.version;
     spec.version_label = req.version_label.unwrap_or_default();
@@ -412,7 +412,7 @@ async fn recompose(
         remove: req.remove,
         version: req.version,
         version_label: req.version_label,
-        kind: req.kind.as_deref().map(PalletKind::parse),
+        kind: req.kind.as_deref().map(parse_pallet_kind),
         name: req.name,
         drive,
         size_bytes: None,
