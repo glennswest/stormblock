@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.8.0] — 2026-08-19
+
 ### 2026-08-19
 - **feat:** `standing_report` / `standing_needed`, and
   `GET /api/v1/fstemplates/standby` — *which templates would make a start
