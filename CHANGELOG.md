@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### 2026-08-19
+- **feat:** A sealed `fstemplate` keeps **one clone standing by**, and
+  `POST /api/v1/fstemplates/{id}/claim` takes it and mints the replacement
+  behind the caller (#55). Minting is a snapshot, a fresh filesystem identity
+  and a check — seconds, none of which depends on *when* the start happens, so
+  all of it now happens before the start. What a claim pays is a lookup. This is
+  what makes stormboot's fast path actually fast, and it works before the
+  registry is up: the engine holds the invariant itself.
+- **feat:** `POST /api/v1/fstemplates/{id}/standby` pre-warms a template
+  explicitly, and a template reports its `standing` clone, so whether a start
+  will be a lookup or a mint is visible rather than guessed.
+- **feat:** A claim with nothing standing mints inline rather than refusing — a
+  start that waits beats a start that does not happen — and reports
+  `from_standby: false`, so a slow start is explainable instead of mysterious.
+- **feat:** Sealing mints the first standing clone, and a startup pass gives
+  every `Ready` template one. Both are spawned: a node should serve requests now
+  and be fast shortly, not the other way round.
+- **fix:** The standing clone is one of a template's volumes, so deleting the
+  template takes it along (#47), and the serve-layer reaper's referenced set
+  includes it — a clone minted before anyone asks for it is, by definition,
+  referenced by nothing, which is exactly the shape that sweep collects.
+
 ## [v9.6.0] — 2026-08-19
 
 ### 2026-08-19

@@ -541,6 +541,28 @@ scanning rather than configured.
       the source a fresh table. Refuses to wipe a source that is still the only
       copy of something that failed to convert.
 
+### Standing clones (2026-08-19, #55)
+
+A sealed template holds one pre-minted clone; `claim` takes it and replenishes
+behind the caller. The engine owns it because the engine owns templates,
+snapshots and volumes — so the invariant holds without anyone asking, and
+stormboot's fast path works before the registry is up.
+
+Three things that are cheap now and expensive later, all from the interim
+version in sbregistry:
+
+- **Keyed by the template**, never by a name or tag. A template is derived from
+  the manifest digest, so a moved tag needs no detection or repair — the new
+  manifest is a new template with its own standing clone.
+- **One, not a pool.** A second only helps when two starts of the same template
+  collide, and these nodes are memory constrained.
+- **Never handed out twice.** `claim` takes the field under the store lock;
+  the loser of a race mints its own. Two containers on one writable filesystem
+  is the worst outcome available here, and it is silent.
+
+sbregistry's interim implementation (`standing` on `CloneRec`,
+`POST /v1/clones/claim`) should be **removed**, not kept in parallel.
+
 ### The format's read side is a crate (2026-08-19, #53)
 
 `crates/pallet-format` — `no_std`, no allocation, no async, no I/O, **no write
