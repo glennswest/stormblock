@@ -959,6 +959,13 @@ pub struct CloneSpec {
     pub stamp_backups: bool,
     /// Give the clone its own label.
     pub label: Option<String>,
+    /// This clone is being minted to stand by, not handed to anyone yet.
+    ///
+    /// It is not counted against the template — `clones` means clones that went
+    /// somewhere, and a pre-minted one that nobody has claimed has not — and it
+    /// does not itself trigger a top-up, which is what would otherwise make
+    /// minting recursive.
+    pub standby: bool,
     /// Check the clone before handing it out. On by default: a clone that
     /// fails fsck is one that fails inside a container later, and the check is
     /// a read-only pass over metadata the stamp just touched. Turn it off for
@@ -999,8 +1006,8 @@ pub struct CloneResult {
 /// This is the provisioning path: a snapshot plus, at most, one 16-byte patch.
 /// No mkfs, no attach, no round trip.
 pub async fn clone_template(
-    vm: &VmLock,
-    store: &StoreLock,
+    vm: &Arc<VmLock>,
+    store: &Arc<StoreLock>,
     key: &str,
     spec: &CloneSpec,
 ) -> Result<CloneResult> {
@@ -1118,9 +1125,23 @@ pub async fn clone_template(
     {
         let mut s = store.lock().await;
         if let Some(t) = s.get_mut(&template.id) {
-            t.clones += 1;
+            // A standing clone is counted when it is claimed, not when it is
+            // minted: `clones` answers "how many went somewhere".
+            if !spec.standby {
+                t.clones += 1;
+            }
         }
         s.persist();
+    }
+
+    // A take is a take, whichever door it came through: if this template has
+    // no clone waiting now, mint one behind the caller (#55). Cheap, because it
+    // only fires when the field is empty — and it is what keeps the *next*
+    // start fast rather than only the next claim.
+    if !spec.standby
+        && store.lock().await.get(&template.id).is_some_and(|t| t.standing.is_none())
+    {
+        replenish(vm, store, template.id);
     }
 
     Ok(CloneResult {
@@ -1159,8 +1180,8 @@ pub struct ClaimSpec {
 /// Minting is a snapshot, a stamp and a check, none of which depends on when
 /// the start happens, so all of it belongs before the start rather than in it.
 pub async fn ensure_standing(
-    vm: &VmLock,
-    store: &StoreLock,
+    vm: &Arc<VmLock>,
+    store: &Arc<StoreLock>,
     key: &str,
 ) -> Result<Option<StandingClone>> {
     // Claim the right to mint under the lock, so two callers arriving together
@@ -1186,7 +1207,8 @@ pub async fn ensure_standing(
         t
     };
 
-    let spec = CloneSpec::new(standby_name(&template));
+    let mut spec = CloneSpec::new(standby_name(&template));
+    spec.standby = true;
     let minted = clone_template(vm, store, &template.id.to_string(), &spec).await;
 
     let mut s = store.lock().await;
@@ -1229,6 +1251,54 @@ pub async fn ensure_standing(
             Err(e)
         }
     }
+}
+
+/// What a template's fast path looks like right now.
+#[derive(Debug, Clone, Serialize)]
+pub struct StandingStatus {
+    pub template_id: Uuid,
+    pub name: String,
+    pub state: &'static str,
+    /// The clone waiting, if there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub standing: Option<Uuid>,
+    /// A mint is in flight, so this will resolve itself without help.
+    pub minting: bool,
+    /// Sealed, nothing waiting, nothing in flight: the next start of this
+    /// template pays for a clone.
+    pub needs_clone: bool,
+}
+
+/// Which templates would make a start wait, and which would not.
+///
+/// A *check*, separate from the fix: a supervisor that restarts the engine, or
+/// watches it, should be able to ask whether the invariant holds without
+/// causing work as a side effect of asking. [`ensure_standing_all`] is the fix.
+pub fn standing_report(store: &TemplateStore) -> Vec<StandingStatus> {
+    store
+        .templates
+        .iter()
+        .map(|t| StandingStatus {
+            template_id: t.id,
+            name: t.name.clone(),
+            state: t.state.as_str(),
+            standing: t.standing.as_ref().map(|c| c.volume_id),
+            minting: t.minting,
+            // An unsealed template has no snapshot to clone from, so it is not
+            // *missing* anything — it is simply not ready to have one.
+            needs_clone: t.state == TemplateState::Ready
+                && t.standing.is_none()
+                && !t.minting,
+        })
+        .collect()
+}
+
+/// Just the ones that would make a start wait.
+pub async fn standing_needed(store: &StoreLock) -> Vec<StandingStatus> {
+    standing_report(&*store.lock().await)
+        .into_iter()
+        .filter(|s| s.needs_clone)
+        .collect()
 }
 
 /// Give every sealed template a clone standing by.
@@ -1276,6 +1346,9 @@ pub async fn claim(
         };
         let taken = s.get_mut(&t.id).and_then(|m| m.standing.take());
         if taken.is_some() {
+            if let Some(m) = s.get_mut(&t.id) {
+                m.clones += 1;
+            }
             s.persist();
         }
         (t, taken)

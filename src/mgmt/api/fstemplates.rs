@@ -38,6 +38,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(list_templates).post(create_template))
         // Ahead of `/{id}`: a literal path wins over the capture.
         .route("/orphans", get(list_orphans).delete(reclaim_orphans))
+        // Check, and enforce. Separate verbs on purpose: asking whether the
+        // invariant holds must not be what makes it hold (#55).
+        .route("/standby", get(standby_report).post(standby_enforce))
         .route("/{id}", get(get_template).delete(delete_template))
         .route("/{id}/seal", post(seal_template))
         .route("/{id}/clone", post(clone_template))
@@ -347,6 +350,8 @@ async fn clone_template(
         stamp_backups: req.stamp_backups,
         label: req.label,
         verify: req.verify,
+        // Handed to whoever asked, so it counts against the template.
+        standby: false,
     };
 
     match template::clone_template(&state.volume_manager, &state.fstemplates, &id, &spec).await {
@@ -413,6 +418,42 @@ async fn reclaim_orphans(State(state): State<Arc<AppState>>) -> Response {
     tracing::info!("reclaimed {} orphaned template volume(s), {bytes} bytes", gone.len());
     Json(json!({ "reclaimed": gone, "count": gone.len(), "allocated_bytes": bytes }))
         .into_response()
+}
+
+/// Which templates would make a start wait.
+///
+/// The check a supervisor runs — at its own startup, or on a timer — without
+/// causing work by asking. `POST` on the same path is the fix.
+async fn standby_report(State(state): State<Arc<AppState>>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "standby_report")
+        .increment(1);
+    let all = template::standing_report(&*state.fstemplates.lock().await);
+    let needed: Vec<_> = all.iter().filter(|s| s.needs_clone).collect();
+    let ready = all.iter().filter(|s| s.standing.is_some()).count();
+    Json(json!({
+        "templates": all,
+        "ready": ready,
+        "needs_clone": needed.len(),
+        "healthy": needed.is_empty(),
+    }))
+    .into_response()
+}
+
+/// Mint whatever is missing. Idempotent, and safe to call on every supervisor
+/// start: a template that already has a clone waiting is left alone.
+async fn standby_enforce(State(state): State<Arc<AppState>>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "standby_enforce")
+        .increment(1);
+    let before = template::standing_needed(&state.fstemplates).await;
+    let minted = template::ensure_standing_all(&state.volume_manager, &state.fstemplates).await;
+    let after = template::standing_needed(&state.fstemplates).await;
+    Json(json!({
+        "minted": minted,
+        "wanted": before.len(),
+        "still_needed": after.len(),
+        "templates": after,
+    }))
+    .into_response()
 }
 
 #[derive(Debug, Default, Deserialize)]

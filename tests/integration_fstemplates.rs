@@ -1101,3 +1101,165 @@ async fn claim_over_http_takes_the_standing_clone() {
         .unwrap();
     assert!(listed.get("standing").is_some(), "in {listed}");
 }
+
+/// The check a supervisor runs, and the fix it runs after.
+///
+/// Asking must not be what makes the answer true: a report that minted as a
+/// side effect would make "is this node warm?" unanswerable.
+#[tokio::test]
+async fn the_report_says_what_would_make_a_start_wait_without_changing_it() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let a = sealed_template(&state, "report-a").await;
+    let b = sealed_template(&state, "report-b").await;
+    let mut unsealed = TemplateSpec::new("report-unsealed", 64 * 1024 * 1024);
+    unsealed.format_in_core = false;
+    template::create(&state.volume_manager, &state.fstemplates, &unsealed).await.unwrap();
+
+    let report = template::standing_report(&*state.fstemplates.lock().await);
+    assert_eq!(report.len(), 3);
+    // The unsealed one has no snapshot to clone from, so it is not missing
+    // anything — it is not ready to have one.
+    let un = report.iter().find(|s| s.name == "report-unsealed").unwrap();
+    assert!(!un.needs_clone);
+    assert_eq!(report.iter().filter(|s| s.needs_clone).count(), 2);
+
+    // Asking twice gives the same answer: the check changed nothing.
+    assert_eq!(template::standing_needed(&state.fstemplates).await.len(), 2);
+
+    // The fix is a separate call, and it is idempotent.
+    assert_eq!(
+        template::ensure_standing_all(&state.volume_manager, &state.fstemplates).await,
+        2
+    );
+    assert!(template::standing_needed(&state.fstemplates).await.is_empty());
+    assert_eq!(
+        template::ensure_standing_all(&state.volume_manager, &state.fstemplates).await,
+        0
+    );
+
+    let report = template::standing_report(&*state.fstemplates.lock().await);
+    for id in [a, b] {
+        let s = report.iter().find(|s| s.template_id == id).unwrap();
+        assert!(s.standing.is_some() && !s.needs_clone);
+    }
+}
+
+/// A take is a take: an ordinary clone leaves the template warm for the next
+/// start, not just a claim does.
+#[tokio::test]
+async fn taking_a_clone_mints_the_replacement() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let id = sealed_template(&state, "topup").await;
+
+    // An ordinary clone, through the path a volume create takes — no claim
+    // involved.
+    let spec = stormblock::fs::CloneSpec::new("ordinary-clone");
+    template::clone_template(&state.volume_manager, &state.fstemplates, &id.to_string(), &spec)
+        .await
+        .expect("clone");
+
+    // The replacement is spawned, so wait for the invariant rather than for a
+    // fixed delay.
+    for _ in 0..100 {
+        if state.fstemplates.lock().await.get(&id).unwrap().standing.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        state.fstemplates.lock().await.get(&id).unwrap().standing.is_some(),
+        "a take should leave a clone standing by for the next start"
+    );
+    assert!(template::standing_needed(&state.fstemplates).await.is_empty());
+}
+
+/// And a claim replenishes what it took.
+#[tokio::test]
+async fn a_claim_replenishes_behind_the_caller() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let id = sealed_template(&state, "replenish").await;
+    let first = template::ensure_standing(&state.volume_manager, &state.fstemplates, &id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let claimed = template::claim(
+        &state.volume_manager,
+        &state.fstemplates,
+        &id.to_string(),
+        &ClaimSpec::default(),
+    )
+    .await
+    .unwrap();
+    assert!(claimed.from_standby);
+
+    for _ in 0..100 {
+        if state.fstemplates.lock().await.get(&id).unwrap().standing.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let next = state.fstemplates.lock().await.get(&id).unwrap().standing.clone();
+    let next = next.expect("the replacement was minted behind the caller");
+    assert_ne!(
+        next.volume_id, first.volume_id,
+        "the replacement is a new clone, not the one just handed out"
+    );
+
+    // So a second claim is fast again.
+    let second = template::claim(
+        &state.volume_manager,
+        &state.fstemplates,
+        &id.to_string(),
+        &ClaimSpec::default(),
+    )
+    .await
+    .unwrap();
+    assert!(second.from_standby);
+    assert_eq!(second.volume_id.0, next.volume_id);
+}
+
+#[tokio::test]
+async fn standby_check_and_enforce_over_http() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    sealed_template(&state, "http-standby").await;
+    let (url, _server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let before: serde_json::Value = client
+        .get(format!("{url}/api/v1/fstemplates/standby"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(before["healthy"], false, "in {before}");
+    assert_eq!(before["needs_clone"], 1);
+
+    let fixed: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/standby"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fixed["minted"], 1);
+    assert_eq!(fixed["still_needed"], 0);
+
+    let after: serde_json::Value = client
+        .get(format!("{url}/api/v1/fstemplates/standby"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["healthy"], true);
+    assert_eq!(after["ready"], 1);
+}

@@ -355,6 +355,46 @@ enum PalletAction {
         #[arg(long)]
         to: String,
     },
+    /// Add members to a pallet, publishing it as a new version
+    ///
+    /// A sealed pallet is never edited in place — that is what sealing is —
+    /// so this publishes a new version carrying the existing members plus
+    /// the new ones. The old version stays until it is pruned.
+    AddMember {
+        /// Pallet UUID
+        id: String,
+        /// A member, as name:role:kind:path (repeat)
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
+        /// Land the new version on this drive (path or index)
+        #[arg(long = "on")]
+        drive: Option<String>,
+        /// Make the new version the one consumers select
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Drop members from a pallet, publishing it as a new version
+    RemoveMember {
+        /// Pallet UUID
+        id: String,
+        /// Member name (repeat)
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
+        #[arg(long = "on")]
+        drive: Option<String>,
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Copy one member into another pallet, as a new version of the destination
+    CopyMember {
+        /// Source pallet UUID
+        id: String,
+        /// Member name
+        member: String,
+        /// Destination pallet UUID
+        #[arg(long)]
+        into: String,
+    },
     /// Move one member into another pallet, as a new version of each
     MoveMember {
         /// Source pallet UUID
@@ -1431,6 +1471,57 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
             print!("moved: ");
             print_pallet(&loc);
         }
+        PalletAction::AddMember { id, members, drive, activate } => {
+            let mut add = Vec::new();
+            for m in members {
+                let (name, role, kind, path) = parse_member_spec(m)?;
+                add.push(pe(stormblock::pallet::manager::file_member(
+                    name,
+                    role,
+                    stormblock::pallet::parse_member_kind(&kind),
+                    path,
+                )
+                .await)?);
+            }
+            let on = match drive {
+                Some(d) => Some(pe(store.drive_index_of(d))?),
+                None => None,
+            };
+            let loc = pe(mgr
+                .recompose(
+                    id_of(id)?,
+                    RecomposeSpec { add, drive: on, activate: *activate, ..Default::default() },
+                )
+                .await)?;
+            print!("new version: ");
+            print_pallet(&loc);
+            println!("(the previous version is untouched — prune it when you are ready)");
+        }
+        PalletAction::RemoveMember { id, members, drive, activate } => {
+            let on = match drive {
+                Some(d) => Some(pe(store.drive_index_of(d))?),
+                None => None,
+            };
+            let loc = pe(mgr
+                .recompose(
+                    id_of(id)?,
+                    RecomposeSpec {
+                        remove: members.clone(),
+                        drive: on,
+                        activate: *activate,
+                        ..Default::default()
+                    },
+                )
+                .await)?;
+            print!("new version: ");
+            print_pallet(&loc);
+        }
+        PalletAction::CopyMember { id, member, into } => {
+            let loc = pe(mgr.copy_member(id_of(id)?, member, id_of(into)?, false).await)?;
+            print!("destination: ");
+            print_pallet(&loc);
+            println!("(a new version of the destination; the source is unchanged)");
+        }
         PalletAction::MoveMember { id, member, into } => {
             let (dest, src) = pe(mgr.move_member(id_of(id)?, member, id_of(into)?, false).await)?;
             print!("destination: ");
@@ -1502,8 +1593,6 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
             println!("the source drive can now be subdivided: pallet init-gpt {from} --force");
         }
     }
-    // Silence the unused-import warning when RecomposeSpec is not constructed.
-    let _ = std::marker::PhantomData::<RecomposeSpec>;
     Ok(())
 }
 
