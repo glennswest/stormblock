@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [v9.9.0] — 2026-08-20
+
+### 2026-08-20
+- **feat:** `/api/v1/images` — build, convert and inspect over REST. The builder
+  was already a library; the CLI is glue over it, and so is this: same
+  `ImageBuilder`, same `BuildReport`, same verification inside the image. It is
+  engine-level for the reason `docs/layering.md` gives — building an image is
+  mechanism, not a deployment choice, so every profile that merges
+  `mgmt::api::router` gets it and none of them forks it.
+  - `POST /build` takes the spec as JSON (`ImageSpec` is already `Deserialize`),
+    as TOML, or as a path to one, plus `out`, `format`, `keep_raw` and
+    `include_slab`.
+  - `POST /convert`, `POST /inspect` (GPT and the pallets in it, read through the
+    ordinary pallet tooling), `GET /formats`.
+- **fix (by construction):** the REST path **resolves** relative paths instead of
+  `chdir`-ing. The CLI changes directory so a spec's paths resolve against the
+  spec file, which is right for a process that then exits; a daemon cannot,
+  because the working directory is process-global and a build would move the
+  ground under every request in flight. Paths resolve against `base_dir` (or the
+  spec file's own directory) and are refused, by name, when there is nothing to
+  resolve them against.
+
 ## [v9.8.0] — 2026-08-19
 
 ### 2026-08-19

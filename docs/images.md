@@ -20,6 +20,10 @@ stormblock image convert --in disk.img --out disk.iso --format iso
 stormblock image formats
 ```
 
+The CLI is glue: the builder is `crate::image`, a library, and **`/api/v1/images`
+is the same glue over HTTP** (§8). Anything that can reach a node's management
+API can build an image; nothing about this is shell-only.
+
 ---
 
 ## 1. The spec
@@ -227,3 +231,44 @@ from_image = "stormcos-v1.img"
 stormblock image inspect stormcos.iso
 stormblock pallet --drive stormcos.iso list
 ```
+
+## 8. Over REST
+
+`/api/v1/images`, served by any profile that merges `mgmt::api::router`. It
+belongs to the engine for the reason [docs/layering.md](layering.md) gives:
+assembling an image is *mechanism*, not a deployment choice, so a second
+profile inherits it rather than forking it.
+
+| Method | Path | |
+|---|---|---|
+| POST | `/api/v1/images/build` | the spec plus `out`, `format`, `keep_raw`, `include_slab` |
+| POST | `/api/v1/images/convert` | `{in, out, format, include_slab}` |
+| POST | `/api/v1/images/inspect` | `{path}` → the GPT and the pallets in it |
+| GET | `/api/v1/images/formats` | what can be written |
+
+The spec arrives in whichever form the caller has: `spec` as JSON (`ImageSpec`
+is `Deserialize`, so it is the same document the TOML describes), `spec_toml`
+as text, or `spec_path` pointing at a file on the node.
+
+**Paths are resolved, not `chdir`-ed.** The CLI changes directory so a spec's
+relative paths resolve against the spec file — correct for a process that then
+exits. A daemon cannot: the working directory is process-global, so one build
+would move the ground under every other request in flight. Relative paths are
+resolved against `base_dir` (or the spec file's directory) and refused **by
+name** when there is nothing to resolve them against, because a path that
+silently resolved against wherever the daemon happens to be would build an
+image out of files nobody named.
+
+**A build holds its connection**, which is minutes for a real image. That is
+the same bargain the CLI makes, and it keeps "did it verify" in the same answer
+as "did it build"; a job id would separate them.
+
+```bash
+curl -sS -X POST http://node:9090/api/v1/images/build \
+  -H 'Authorization: Bearer '"$TOKEN" -H 'Content-Type: application/json' \
+  -d '{"spec_path":"/build/image.toml","out":"/data/images/stormcos.iso","format":"iso"}'
+```
+
+The consumer this exists for is a registry: stormblock-registry composes the
+spec from content-addressed references — every member resolved to a real path —
+and posts it here. See its `docs/pallets.md`.
