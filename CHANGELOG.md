@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.7.0] — 2026-08-19
+
 ### 2026-08-19
 - **feat:** A sealed `fstemplate` keeps **one clone standing by**, and
   `POST /api/v1/fstemplates/{id}/claim` takes it and mints the replacement
