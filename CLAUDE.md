@@ -460,6 +460,40 @@ not re-derive it:
   leaving StatSN on the connection (RFC 7143 §4.2.2.1). Also fixed a live bug:
   any connection closing used to tear down the whole session.
 
+---
+
+## Session 2026-08-19 — StormFS data-path surface (#49, #50) — IN PROGRESS
+
+Working the issue list in reverse. #50 is the newer number but sits on top of
+#49 by its own account ("base chunk lifecycle is the immediate blocker"), so
+#49 lands first and #50 on top of it in the same session.
+
+Work plan:
+
+- [ ] `src/volume/chunk.rs` — chunk lifecycle (#49). A StormFS chunk is a run
+      of whole slab slots inside one volume, addressed `(volume, offset, len)`.
+      Ownership map per volume, first-fit; `allocate` is **eager and
+      tier-scoped** (StormFS owns which tier, StormBlock owns where on it), so
+      it takes slots from `best_slab_for_tier` and records the GEM mapping
+      rather than leaving it to allocate-on-write, which would place the chunk
+      wherever the *volume's* policy says. Deallocate is idempotent by
+      construction: re-freeing what is already free is a success, or one
+      sweeper crash wedges the queue forever.
+- [ ] `src/volume/versioned.rs` — the three fence-free primitives (#50).
+      Versioned-map CAS and atomic multi-block write are **one mechanism**: a
+      commit re-points a target range at extents the writer already filled
+      elsewhere, all-or-nothing, only if the range is still at the expected
+      version. Pinned reads are the existing COW retention exposed — a pin is
+      a snapshot, so a superseded extent stays alive by ref-count with no new
+      retention machinery.
+- [ ] Crash atomicity for the swap: the slab slot table is what recovery reads,
+      so a swap has to re-point slot entries too, and a commit journal in
+      `<data_dir>` rolls a partial swap forward. Without it the multi-block
+      write is atomic only against concurrency, which is the half the issue
+      does not care about.
+- [ ] `src/mgmt/api/stormfs.rs` — routes, one persisted state file.
+- [ ] Tests, spec §9.1, changelog, release.
+
 ### Still open, and why
 
 All of them are blocked on something outside this repo:

@@ -242,7 +242,13 @@ LBA 34         GPT entries end
 
 ## 4. Multi-drive: several drives, one node
 
-Nothing is configured. `PalletStore` is handed drives and finds what is on them
+Nothing is configured. Drives are opened and closed at runtime through
+`POST /api/v1/drives` and `DELETE /api/v1/drives/{id}` (v9.10.0) — a disk that
+turns up after the process did must not cost a restart, because restarting
+takes down every volume the node is serving. A drive carrying a slab is refused
+for closing, by asking the slab registry whether any slab's device *is* that
+device.
+ `PalletStore` is handed drives and finds what is on them
 by reading each GPT and each superblock. That is the only arrangement that
 survives the cases that matter — a disk moved between nodes, a pallet copied
 onto a spare, an image assembled elsewhere and written whole. A configured list

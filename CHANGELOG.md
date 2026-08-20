@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [v9.10.0] — 2026-08-20
+
+### 2026-08-20
+- **feat:** `POST /api/v1/drives` and `DELETE /api/v1/drives/{id}` — open and
+  close a drive without restarting the node. The pallet store is rebuilt from
+  `state.drives` on every request, so a drive that is not open does not exist to
+  publish onto; until now adding one meant a restart, which takes down every
+  volume the node is serving in order to add a disk that has nothing to do with
+  them. `path` may be a device or a file; `size_bytes` creates or extends a
+  sparse file first.
+- **feat:** Closing refuses to strand data, **by identity rather than by
+  convention**: the slab registry is asked whether any slab's device *is* this
+  device (`Arc::ptr_eq`), so "this drive carries slab X" is a fact rather than a
+  profile's belief about which index the slab took. `?force=true` exists for a
+  disk that is already gone, and says so in the log.
+- **layering:** This is engine-level for the reason `docs/layering.md` gives, and
+  because of a concrete consumer: one registry serves a RouterOS node and an x86
+  one, and must not learn two APIs to give a pallet a home. stormblockmk had this
+  as `/mk/v1/drives` for a single release — wrong side of the line — and now keeps
+  only *which* drives it carries, plus its own file-backed-only rule.
+
 ## [v9.9.0] — 2026-08-20
 
 ### 2026-08-20
