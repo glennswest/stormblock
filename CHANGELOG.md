@@ -2,6 +2,70 @@
 
 ## [Unreleased]
 
+### 2026-08-20
+- **feat:** `/api/v1/stormfs` — the data path StormFS consumes (#49). Four
+  routes `docs/stormblock-spec.md` §9.1 has listed since v0.1 and nothing
+  implemented; what `src/stormfs.rs` does is the opposite direction,
+  announcing this node's volumes to a metadata server. A chunk is a run of
+  whole slab slots inside one volume, addressed as the same
+  `(volume, offset, len)` the client then reads and writes over iSCSI or
+  NVMe-oF — whole slots because a slot is the unit the volume can reclaim,
+  which is already what `discard_granularity` reports.
+- **feat:** allocation is **eager and tier-scoped**. StormFS owns policy —
+  which tier a file belongs on — while StormBlock owns placement, so the
+  slots come from that tier and are mapped now rather than left to
+  allocate-on-write, which would place them by the *volume's* policy instead
+  and could fail later on space the call reported as available. A tier with
+  no room is `507`, never a quiet substitution of a slower one. Batched,
+  because a 1 GiB write at a 4 MiB chunk size is 256 allocations and one
+  round trip each would put the round-trip count back in the data path the
+  design exists to keep it out of.
+- **feat:** deallocate is **idempotent by construction** — the sweeper can
+  crash between freeing an extent and dropping its queue entry, so it will
+  re-free, and making that an error wedges the queue permanently on one
+  crash. Trim is the same call with one bit changed: both free the slots,
+  only deallocate returns the address range, so a chunk StormFS has punched a
+  hole in cannot be handed to a second caller.
+- **feat:** `POST /api/v1/stormfs/commit` — versioned-map CAS and atomic
+  multi-block write, which turn out to be one mechanism (#50). A writer fills
+  scratch extents wherever it likes and the commit re-points the target range
+  at them; because the swap moves extent *identity* rather than bytes it is
+  cheap enough to run under one lock, validated in full before anything is
+  applied. That is the atomic multi-block write, and it is why StormFS needs
+  no journal of its own. Gating the same swap on a version is the CAS: a
+  writer that stalled long enough to lose its lease is harmless rather than
+  dangerous, since its data went into extents nobody points at and its swap
+  fails the check — no fencing round trip, and no correctness argument that
+  depends on clocks. A stale commit is `409` carrying `current_version`.
+- **feat:** `/api/v1/stormfs/pins` — pinned-version reads, which are the
+  engine's copy-on-write retention exposed rather than new machinery. A pin
+  is a snapshot, so a commit that supersedes an extent decrements its
+  reference instead of freeing it; the reader reads the snapshot volume
+  through the ordinary export path, which keeps StormFS's rule that no
+  process sits in the data path. It also makes tier migration invisible — a
+  reader pinned to an older version keeps reading the source chunks until it
+  releases.
+- **note:** what makes a commit untearable is **not a journal**. The durable
+  record of an extent map is the volume metadata file, written whole and
+  atomically with a checksum, so a crash finds the whole swap or none of it.
+  Versions live in `<data_dir>/stormfs.json` and **the write order is
+  load-bearing**: versions first, then the map. A crash between them leaves
+  the version ahead of the map, so a stale writer is told to re-read and
+  finds the old data — it retries. The other order leaves the version behind
+  a map that has already moved, and that writer would commit over committed
+  data. Versions must be monotonic, not gapless, so burning one is free.
+- **fix:** `DELETE /api/v1/volumes/{id}` asks the shared `what_is_serving`
+  question instead of only checking the export table, so a volume backing a
+  live iSCSI LUN or a ublk device is no longer deletable out from under it —
+  the guard the move path and the template sweep have always used. A StormFS
+  pin now counts as serving, since deleting a pin's snapshot behind its
+  reader's back is exactly what the pin exists to prevent.
+- **feat:** `Slab::reassign_slot` — re-point a slot at a different volume and
+  virtual extent without touching the bytes. The slot table is what
+  `rebuild_from_slabs` reads when there is nothing better, so leaving it
+  naming the scratch address would make the recovery path disagree with the
+  map.
+
 ## [v9.10.0] — 2026-08-20
 
 ### 2026-08-20

@@ -462,37 +462,54 @@ not re-derive it:
 
 ---
 
-## Session 2026-08-19 — StormFS data-path surface (#49, #50) — IN PROGRESS
+## Session 2026-08-20 — StormFS data-path surface (#49, #50) — DONE
 
-Working the issue list in reverse. #50 is the newer number but sits on top of
-#49 by its own account ("base chunk lifecycle is the immediate blocker"), so
-#49 lands first and #50 on top of it in the same session.
+Worked the issue list in reverse, in the lane the pallet work (#51–#60) was
+not in. #50 is the newer number but sits on top of #49 by its own account
+("base chunk lifecycle is the immediate blocker"), so #49 landed first.
 
-Work plan:
+- [x] `src/volume/chunk.rs` — chunk lifecycle (#49). A chunk is a run of whole
+      slab slots inside one volume, addressed `(volume, offset, len)`.
+      `allocate` is **eager and tier-scoped**: StormFS owns which tier,
+      StormBlock owns where on it, so slots come from `best_slab_for_tier` and
+      the GEM mapping is recorded now rather than left to allocate-on-write,
+      which would place the chunk by the *volume's* policy and could fail on
+      space this call reported as free. Deallocate is idempotent by
+      construction. Trim is the same call with one bit changed: both free the
+      slots, only deallocate returns the address range.
+- [x] `src/volume/versioned.rs` — the three primitives (#50). CAS and atomic
+      multi-block write are **one mechanism**; pins are the existing COW
+      retention exposed.
+- [x] `src/mgmt/api/stormfs.rs` + spec §9.1.1/§9.1.2, 18 HTTP tests.
 
-- [ ] `src/volume/chunk.rs` — chunk lifecycle (#49). A StormFS chunk is a run
-      of whole slab slots inside one volume, addressed `(volume, offset, len)`.
-      Ownership map per volume, first-fit; `allocate` is **eager and
-      tier-scoped** (StormFS owns which tier, StormBlock owns where on it), so
-      it takes slots from `best_slab_for_tier` and records the GEM mapping
-      rather than leaving it to allocate-on-write, which would place the chunk
-      wherever the *volume's* policy says. Deallocate is idempotent by
-      construction: re-freeing what is already free is a success, or one
-      sweeper crash wedges the queue forever.
-- [ ] `src/volume/versioned.rs` — the three fence-free primitives (#50).
-      Versioned-map CAS and atomic multi-block write are **one mechanism**: a
-      commit re-points a target range at extents the writer already filled
-      elsewhere, all-or-nothing, only if the range is still at the expected
-      version. Pinned reads are the existing COW retention exposed — a pin is
-      a snapshot, so a superseded extent stays alive by ref-count with no new
-      retention machinery.
-- [ ] Crash atomicity for the swap: the slab slot table is what recovery reads,
-      so a swap has to re-point slot entries too, and a commit journal in
-      `<data_dir>` rolls a partial swap forward. Without it the multi-block
-      write is atomic only against concurrency, which is the half the issue
-      does not care about.
-- [ ] `src/mgmt/api/stormfs.rs` — routes, one persisted state file.
-- [ ] Tests, spec §9.1, changelog, release.
+### The journal the plan called for was not needed, and that is the finding
+
+The plan above said a swap needs a commit journal in `<data_dir>` to roll a
+partial swap forward, on the reasoning that the slab slot table is what
+recovery reads. That was wrong about which record is authoritative. **The
+durable record of an extent map is the volume metadata file**, written whole
+and atomically with a checksum by `MetadataStore` — `rebuild_from_slabs` is
+the fallback for when there is no such file, and the existing COW path already
+leaves duplicate slot claims that only that fallback would ever see. So a
+commit is untearable across a crash for free: the map is written in one piece.
+Slots are still re-pointed (`Slab::reassign_slot`) so the fallback agrees, but
+nothing hinges on it.
+
+What *does* need care is that versions live in a second file. **The write
+order is load-bearing**: versions first, then the map. A crash between them
+leaves the version ahead of the map, so a stale writer is told to re-read and
+finds the old data — it retries, which costs nothing. The other order leaves
+the version behind a map that has already moved, and that writer would commit
+over committed data. Versions must be monotonic, not gapless.
+
+Also worth not re-deriving: a `409` from `commit` carries `current_version`,
+so the writer never needs a second round trip to ask what it missed — the
+same shape as `current_epoch` in the `/v1` surface (#35).
+
+Not done: nothing here has met a real StormFS client. The primitives are
+tested against the engine and over HTTP, but the two sides have not been run
+against each other, which is the check that counts — the same lesson as the
+ext4 work, where our reader agreeing with our writer proved nothing.
 
 ### Still open, and why
 
