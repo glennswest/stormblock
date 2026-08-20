@@ -740,6 +740,49 @@ impl Slab {
         self.extent_index.get(&(volume_id, vext_idx)).copied()
     }
 
+    /// Re-point a slot at a different volume and virtual extent, without
+    /// touching the bytes in it.
+    ///
+    /// This is what a fence-free commit does (#50): a writer fills scratch
+    /// extents, and the commit moves their *identity* to the addresses the
+    /// reader uses. Moving the identity rather than copying the bytes is the
+    /// whole point — it is what makes the swap cheap enough to be atomic.
+    ///
+    /// The slot table records which extent owns each slot, and that record is
+    /// what `GlobalExtentMap::rebuild_from_slabs` reads when there is nothing
+    /// better; leaving it naming the scratch address would make the recovery
+    /// path disagree with the map. The generation moves too, so a reader
+    /// holding an older `ExtentLocation` can tell its copy is stale.
+    pub async fn reassign_slot(
+        &mut self,
+        slot_idx: u32,
+        volume_id: VolumeId,
+        vext_idx: u64,
+    ) -> DriveResult<()> {
+        let idx = slot_idx as usize;
+        if idx >= self.slots.len() {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "slot index {slot_idx} out of range"
+            )));
+        }
+        if self.slots[idx].state == SlotState::Free {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "cannot reassign free slot {slot_idx}"
+            )));
+        }
+
+        let old_key = (self.slots[idx].volume_id, self.slots[idx].virtual_extent_idx);
+        if self.extent_index.get(&old_key) == Some(&slot_idx) {
+            self.extent_index.remove(&old_key);
+        }
+        self.slots[idx].volume_id = volume_id;
+        self.slots[idx].virtual_extent_idx = vext_idx;
+        self.slots[idx].generation += 1;
+        self.extent_index.insert((volume_id, vext_idx), slot_idx);
+
+        self.persist_slot(slot_idx).await
+    }
+
     /// Get the slot at a given index.
     pub fn get_slot(&self, slot_idx: u32) -> Option<&Slot> {
         self.slots.get(slot_idx as usize)

@@ -10,6 +10,7 @@ pub mod gem;
 pub mod metadata;
 pub mod thin;
 pub mod snapshot;
+pub mod versioned;
 pub mod gc;
 pub mod pressure;
 pub mod relocate;
