@@ -41,6 +41,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}", get(get_template).delete(delete_template))
         .route("/{id}/seal", post(seal_template))
         .route("/{id}/clone", post(clone_template))
+        // The fast path: take the clone that is already standing by (#55).
+        .route("/{id}/claim", post(claim_clone))
+        .route("/{id}/standby", post(ensure_standby))
         .with_state(state)
 }
 
@@ -304,7 +307,22 @@ async fn seal_template(
         }
     }
 
-    match template::seal(&state.volume_manager, &state.fstemplates, &template_id, force).await {
+    let sealed = template::seal(&state.volume_manager, &state.fstemplates, &template_id, force).await;
+    if sealed.is_ok() {
+        // A sealed template is one clones can be taken from, so this is the
+        // moment its standing clone starts existing (#55). Spawned: sealing
+        // should not wait for it.
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                template::ensure_standing(&state.volume_manager, &state.fstemplates, &template_id.to_string())
+                    .await
+            {
+                tracing::warn!("fstemplate {template_id}: no standing clone after seal: {e}");
+            }
+        });
+    }
+    match sealed {
         Ok(t) => Json(t.json()).into_response(),
         Err(e) => err(e),
     }
@@ -395,6 +413,70 @@ async fn reclaim_orphans(State(state): State<Arc<AppState>>) -> Response {
     tracing::info!("reclaimed {} orphaned template volume(s), {bytes} bytes", gone.len());
     Json(json!({ "reclaimed": gone, "count": gone.len(), "allocated_bytes": bytes }))
         .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ClaimRequest {
+    /// Grow the claimed clone. Never shrinks.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    /// Give it a label. Costs a superblock write, so the fast path is the one
+    /// that does not ask.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Take the standing clone, and mint its replacement behind the caller.
+///
+/// This is what a consumer on a start path calls instead of `clone`: the
+/// expensive part — snapshot, fresh filesystem identity, check — was done when
+/// the previous claim replenished, so what is left here is a lookup. When
+/// nothing is standing, it mints inline rather than refusing, and says so in
+/// `from_standby`.
+async fn claim_clone(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<ClaimRequest>>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "claim")
+        .increment(1);
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let spec = template::ClaimSpec { size_bytes: req.size_bytes, label: req.label };
+    match template::claim(&state.volume_manager, &state.fstemplates, &id, &spec).await {
+        Ok(c) => {
+            metrics::counter!(
+                "stormblock_fstemplate_claims_total",
+                "source" => if c.from_standby { "standby" } else { "inline" }
+            )
+            .increment(1);
+            Json(json!({
+                "volume_id": c.volume_id.0,
+                "template_id": c.template_id,
+                "fs_uuid": c.fs_uuid,
+                "size_bytes": c.size_bytes,
+                "verified": c.verified,
+                "from_standby": c.from_standby,
+            }))
+            .into_response()
+        }
+        Err(e) => err(e),
+    }
+}
+
+/// Make sure a template has a clone standing by, and say which one it is.
+/// Idempotent — this is the call a consumer makes to pre-warm.
+async fn ensure_standby(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "standby")
+        .increment(1);
+    match template::ensure_standing(&state.volume_manager, &state.fstemplates, &id).await {
+        Ok(Some(c)) => Json(json!({
+            "standing": { "volume_id": c.volume_id, "fs_uuid": c.fs_uuid, "size_bytes": c.size_bytes, "verified": c.verified }
+        }))
+        .into_response(),
+        // Not sealed yet, or a mint is already in flight for it.
+        Ok(None) => Json(json!({ "standing": null })).into_response(),
+        Err(e) => err(e),
+    }
 }
 
 /// Clone a template on behalf of `POST /api/v1/volumes {from_template}`.

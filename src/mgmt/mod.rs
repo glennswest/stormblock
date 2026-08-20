@@ -118,14 +118,16 @@ pub struct PersistedLun {
 pub struct AppState {
     pub drives: tokio::sync::RwLock<Vec<DriveInfo>>,
     pub arrays: tokio::sync::RwLock<HashMap<RaidArrayId, ArrayInfo>>,
-    pub volume_manager: tokio::sync::Mutex<VolumeManager>,
+    /// Behind an `Arc` so work that outlives a request — replenishing a
+    /// template's standing clone after a claim — can hold it (#55).
+    pub volume_manager: Arc<tokio::sync::Mutex<VolumeManager>>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
     pub slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
     pub gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     /// Control-plane state behind the /v1 CSI contract surface.
     pub v1: tokio::sync::Mutex<api::v1::V1State>,
     /// Preformatted filesystem templates — mkfs once, clone forever (#38).
-    pub fstemplates: tokio::sync::Mutex<crate::fs::TemplateStore>,
+    pub fstemplates: Arc<tokio::sync::Mutex<crate::fs::TemplateStore>>,
     /// Live per-volume ublk exports for the local CSI fast path.
     pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
     /// Volume moves, live and finished (#20). Kept so a move interrupted
@@ -178,19 +180,19 @@ impl AppState {
         AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),
             arrays: tokio::sync::RwLock::new(HashMap::new()),
-            volume_manager: tokio::sync::Mutex::new(volume_manager),
+            volume_manager: Arc::new(tokio::sync::Mutex::new(volume_manager)),
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,
             gem,
             v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
-            fstemplates: tokio::sync::Mutex::new(
+            fstemplates: Arc::new(tokio::sync::Mutex::new(
                 match config.management.data_dir.as_ref() {
                     Some(dir) => crate::fs::TemplateStore::load(std::path::Path::new(dir)),
                     // No data dir means nothing survives a restart anyway; a
                     // template that outlived its store would be unreachable.
                     None => crate::fs::TemplateStore::in_memory(),
                 },
-            ),
+            )),
             ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
             moves: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::moves::load(std::path::Path::new(dir)),
@@ -241,6 +243,25 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConf
 
 /// Start the management REST API server.
 pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()> {
+    // Give every sealed template a clone standing by (#55). Spawned: a node
+    // that is starting should serve requests now and be fast shortly, not the
+    // other way round. Templates restored from disk arrive with their
+    // `standing` field, so this only mints what is actually missing — a claim
+    // that raced ahead of it, or a template sealed by an older build.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let n = crate::fs::template::ensure_standing_all(
+                &state.volume_manager,
+                &state.fstemplates,
+            )
+            .await;
+            if n > 0 {
+                tracing::info!("{n} template(s) now have a clone standing by");
+            }
+        });
+    }
+
     let listen_addr = &state.config.management.listen_addr;
     let mut router = api::router(state.clone())
         .merge(metrics::metrics_router(state.clone()));

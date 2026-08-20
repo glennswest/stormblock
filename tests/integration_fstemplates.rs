@@ -850,3 +850,254 @@ async fn templates_can_carry_files_that_clones_inherit() {
 
     server.abort();
 }
+
+// ---------------------------------------------------------------- standing by
+
+use stormblock::fs::template::{self, ClaimSpec, TemplateSpec};
+
+/// vm + store handles, which is what the template layer takes.
+async fn parts(dir: &TempDir) -> Arc<AppState> {
+    setup(dir).await
+}
+
+/// `create` formats and seals in one call, so this is already Ready.
+async fn sealed_template(state: &AppState, name: &str) -> Uuid {
+    let spec = TemplateSpec::new(name, 64 * 1024 * 1024);
+    let t = template::create(&state.volume_manager, &state.fstemplates, &spec)
+        .await
+        .expect("create");
+    assert_eq!(t.state, stormblock::fs::TemplateState::Ready);
+    t.id
+}
+
+/// A sealed template keeps one clone waiting, and a claim takes it (#55).
+///
+/// The point of the mechanism is that the expensive part — snapshot, fresh
+/// filesystem identity, fsck — happens before anyone asks, so what a start
+/// pays is a lookup.
+#[tokio::test]
+async fn a_sealed_template_keeps_a_clone_standing_by() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+
+    // Formatted elsewhere, so this one is left unsealed: nothing stands by a
+    // template with no snapshot to clone.
+    let mut unsealed = TemplateSpec::new("standby-unformatted", 64 * 1024 * 1024);
+    unsealed.format_in_core = false;
+    let u = template::create(&state.volume_manager, &state.fstemplates, &unsealed)
+        .await
+        .expect("create");
+    assert_ne!(u.state, stormblock::fs::TemplateState::Ready);
+    assert!(template::ensure_standing(&state.volume_manager, &state.fstemplates, &u.name)
+        .await
+        .unwrap()
+        .is_none());
+
+    let spec = TemplateSpec::new("standby-base", 64 * 1024 * 1024);
+    let t = template::create(&state.volume_manager, &state.fstemplates, &spec)
+        .await
+        .expect("create");
+    let standing = template::ensure_standing(&state.volume_manager, &state.fstemplates, &t.name)
+        .await
+        .expect("mint")
+        .expect("a sealed template can have one");
+    assert!(standing.verified, "it was checked when it was minted");
+    let template_uuid = state.fstemplates.lock().await.get(&t.id).unwrap().fs_uuid;
+    assert_ne!(
+        standing.fs_uuid, template_uuid,
+        "a standing clone never shares the template's identity"
+    );
+
+    // Idempotent: asking again returns the same clone rather than minting one.
+    let again = template::ensure_standing(&state.volume_manager, &state.fstemplates, &t.name)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.volume_id, standing.volume_id);
+
+    // A claim takes it, and says the fast path was taken.
+    let claimed = template::claim(
+        &state.volume_manager,
+        &state.fstemplates,
+        &t.name,
+        &ClaimSpec::default(),
+    )
+    .await
+    .expect("claim");
+    assert!(claimed.from_standby);
+    assert_eq!(claimed.volume_id.0, standing.volume_id);
+    assert_eq!(claimed.fs_uuid, standing.fs_uuid);
+    // What it hands out is a real, clean filesystem with its own identity.
+    assert_eq!(fs_uuid_on_disk(&state, claimed.volume_id.0).await, claimed.fs_uuid.unwrap());
+}
+
+#[tokio::test]
+async fn a_claimed_clone_is_never_handed_out_twice() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let id = sealed_template(&state, "standby-once").await;
+    let standing = template::ensure_standing(&state.volume_manager, &state.fstemplates, &id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Two claims arriving together. Both must succeed — a start that waits
+    // beats a start that is refused — but only one can get the standing clone.
+    let key = id.to_string();
+    let spec = ClaimSpec::default();
+    let (a, b) = tokio::join!(
+        template::claim(&state.volume_manager, &state.fstemplates, &key, &spec),
+        template::claim(&state.volume_manager, &state.fstemplates, &key, &spec),
+    );
+    let (a, b) = (a.expect("first claim"), b.expect("second claim"));
+
+    assert_ne!(
+        a.volume_id, b.volume_id,
+        "two containers on one writable filesystem is the worst outcome available here"
+    );
+    assert_eq!(
+        [a.from_standby, b.from_standby].iter().filter(|x| **x).count(),
+        1,
+        "exactly one of them came from the standing clone"
+    );
+    let winner = if a.from_standby { &a } else { &b };
+    assert_eq!(winner.volume_id.0, standing.volume_id);
+}
+
+#[tokio::test]
+async fn claiming_with_nothing_standing_mints_inline_rather_than_refusing() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let id = sealed_template(&state, "standby-cold").await;
+
+    // No ensure_standing first: the very first claim, or one that arrived
+    // while the replacement was still being minted.
+    let claimed = template::claim(
+        &state.volume_manager,
+        &state.fstemplates,
+        &id.to_string(),
+        &ClaimSpec::default(),
+    )
+    .await
+    .expect("a cold claim still works");
+    assert!(!claimed.from_standby, "and says so, so a slow start is explainable");
+    assert!(state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume(&VolumeId(claimed.volume_id.0))
+        .is_some());
+}
+
+#[tokio::test]
+async fn the_standing_clone_belongs_to_the_template_until_it_is_claimed() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let id = sealed_template(&state, "standby-owned").await;
+    let standing = template::ensure_standing(&state.volume_manager, &state.fstemplates, &id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // It is one of the template's volumes, so deleting the template takes it
+    // along rather than leaving a volume nothing can name (#47).
+    let owned = state.fstemplates.lock().await.get(&id).unwrap().volumes();
+    assert!(owned.iter().any(|v| v.0 == standing.volume_id));
+
+    let purged = template::delete(&state.volume_manager, &state.fstemplates, &id, true, false)
+        .await
+        .unwrap();
+    assert!(purged.contains(&standing.volume_id));
+    assert!(state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume(&VolumeId(standing.volume_id))
+        .is_none());
+}
+
+#[tokio::test]
+async fn the_startup_pass_gives_every_sealed_template_one() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    for i in 0..3 {
+        sealed_template(&state, &format!("standby-boot-{i}")).await;
+    }
+    // One left unsealed: no snapshot, so it gets nothing and must not fail the
+    // pass for the others.
+    let mut unsealed = TemplateSpec::new("standby-unsealed", 64 * 1024 * 1024);
+    unsealed.format_in_core = false;
+    template::create(&state.volume_manager, &state.fstemplates, &unsealed)
+        .await
+        .unwrap();
+
+    let minted = template::ensure_standing_all(&state.volume_manager, &state.fstemplates).await;
+    assert_eq!(minted, 3);
+    assert_eq!(
+        state.fstemplates.lock().await.templates.iter().filter(|t| t.standing.is_some()).count(),
+        3
+    );
+
+    // Running it again mints nothing: the invariant is already held.
+    assert_eq!(
+        template::ensure_standing_all(&state.volume_manager, &state.fstemplates).await,
+        0
+    );
+}
+
+/// The endpoint a consumer on a start path calls.
+#[tokio::test]
+async fn claim_over_http_takes_the_standing_clone() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let (url, _server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "claimable", "size": "64M" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["template"]["id"].as_str().unwrap().to_string();
+
+    // Sealing mints one in the background; ask for it explicitly so the test
+    // asserts the mechanism rather than a race.
+    let standby: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/{id}/standby"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let waiting = standby["standing"]["volume_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no standing clone in {standby}"))
+        .to_string();
+
+    let claimed: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/{id}/claim"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claimed["from_standby"], true);
+    assert_eq!(claimed["volume_id"].as_str().unwrap(), waiting);
+
+    // And the template reports whether a start would be a lookup or a mint.
+    let listed: serde_json::Value = client
+        .get(format!("{url}/api/v1/fstemplates/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(listed.get("standing").is_some(), "in {listed}");
+}

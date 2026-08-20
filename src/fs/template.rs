@@ -42,6 +42,7 @@
 //! (stormblock-registry#10).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -210,6 +211,24 @@ impl TemplateSpec {
     }
 }
 
+/// A clone minted ahead of time and waiting to be claimed.
+///
+/// Everything expensive about provisioning — the snapshot, the fresh
+/// filesystem identity, the check — is done here, before anyone asks. What is
+/// left at start time is a lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandingClone {
+    pub volume_id: Uuid,
+    /// The identity stamped when it was minted. A claimer never shares the
+    /// template's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_uuid: Option<Uuid>,
+    pub size_bytes: u64,
+    /// Whether it was checked when it was minted, so a claim does not have to.
+    #[serde(default)]
+    pub verified: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsTemplate {
     pub id: Uuid,
@@ -254,6 +273,19 @@ pub struct FsTemplate {
     /// contents live in the filesystem, not here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seeded: Vec<String>,
+    /// One clone, minted in advance, waiting for a claim (#55).
+    ///
+    /// **One, not a pool.** A second only helps when two starts of the same
+    /// template collide, and the nodes this runs on are memory constrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing: Option<StandingClone>,
+    /// A mint is in flight for this template.
+    ///
+    /// Not persisted: a crash mid-mint must not leave a template that can
+    /// never replenish, and the orphan sweep collects what the interrupted
+    /// mint left behind.
+    #[serde(skip)]
+    pub minting: bool,
     /// The template this one was built `FROM`, if any.
     ///
     /// Recorded for lineage, not for reads: a snapshot owns a complete extent
@@ -275,11 +307,15 @@ impl FsTemplate {
     /// all of them — a template whose entry goes away while its volumes stay is
     /// space nothing can name afterwards (#47).
     pub fn volumes(&self) -> Vec<VolumeId> {
-        [self.sealed_volume_id, self.raw_volume_id]
-            .into_iter()
-            .flatten()
-            .map(VolumeId)
-            .collect()
+        [
+            self.sealed_volume_id,
+            self.raw_volume_id,
+            self.standing.as_ref().map(|s| s.volume_id),
+        ]
+        .into_iter()
+        .flatten()
+        .map(VolumeId)
+        .collect()
     }
 
     pub fn json(&self) -> serde_json::Value {
@@ -298,6 +334,13 @@ impl FsTemplate {
             "state": self.state.as_str(),
             "raw_volume_id": self.raw_volume_id,
             "sealed_volume_id": self.sealed_volume_id,
+            // Whether a start of this template is a lookup or a mint (#55).
+            "standing": self.standing.as_ref().map(|c| serde_json::json!({
+                "volume_id": c.volume_id,
+                "fs_uuid": c.fs_uuid,
+                "size_bytes": c.size_bytes,
+                "verified": c.verified,
+            })),
             "clones": self.clones,
             "seeded": self.seeded,
             // Lineage, so a consumer can ask what was built on what. Without
@@ -636,6 +679,8 @@ pub async fn create(
     // is inherited rather than restated: asking for ext2-with-no-journal on
     // top of an ext4 parent describes a filesystem that does not exist.
     let mut template = FsTemplate {
+        standing: None,
+        minting: false,
         id: Uuid::new_v4(),
         name: spec.name.clone(),
         fs: parent.as_ref().map(|p| p.fs).unwrap_or(spec.fs),
@@ -942,6 +987,11 @@ pub struct CloneResult {
     pub size_bytes: u64,
     /// Whether this clone was checked before being handed out.
     pub verified: bool,
+    /// Whether it came from the standing clone or was minted on the spot.
+    ///
+    /// Reported rather than inferred: a start that waits is correct, but a
+    /// slow one should be explainable instead of mysterious (#55).
+    pub from_standby: bool,
 }
 
 /// Mint a copy-on-write clone of a sealed template.
@@ -1079,7 +1129,224 @@ pub async fn clone_template(
         fs_uuid,
         size_bytes: size,
         verified: spec.verify,
+        from_standby: false,
     })
+}
+
+// ------------------------------------------------------------- standing by
+
+/// The name a standing clone is minted under.
+///
+/// There is no rename, so this is the name it keeps after a claim; a claimer
+/// addresses it by volume id, which is what the attach path uses anyway.
+fn standby_name(template: &FsTemplate) -> String {
+    format!("standby-{}-{}", template.name, &Uuid::new_v4().simple().to_string()[..8])
+}
+
+/// What a claim wants that a pre-minted clone might not already be.
+#[derive(Debug, Clone, Default)]
+pub struct ClaimSpec {
+    /// Grow the clone to this size. Never shrinks.
+    pub size_bytes: Option<u64>,
+    /// Give it a label. Costs one superblock write, so the fast path is the
+    /// one that does not ask.
+    pub label: Option<String>,
+}
+
+/// Make sure a sealed template has a clone standing by. Idempotent.
+///
+/// Returns the standing clone — the existing one if there already was one.
+/// Minting is a snapshot, a stamp and a check, none of which depends on when
+/// the start happens, so all of it belongs before the start rather than in it.
+pub async fn ensure_standing(
+    vm: &VmLock,
+    store: &StoreLock,
+    key: &str,
+) -> Result<Option<StandingClone>> {
+    // Claim the right to mint under the lock, so two callers arriving together
+    // produce one clone rather than two — the second would be waste that
+    // nothing ever collects, since only the template's field is a reference.
+    let template = {
+        let mut s = store.lock().await;
+        let Some(t) = s.find(key).cloned() else {
+            return Err(TemplateError::NotFound(format!("fstemplate {key} not found")));
+        };
+        if t.state != TemplateState::Ready {
+            return Ok(None);
+        }
+        if let Some(standing) = &t.standing {
+            return Ok(Some(standing.clone()));
+        }
+        if t.minting {
+            return Ok(None);
+        }
+        if let Some(m) = s.get_mut(&t.id) {
+            m.minting = true;
+        }
+        t
+    };
+
+    let spec = CloneSpec::new(standby_name(&template));
+    let minted = clone_template(vm, store, &template.id.to_string(), &spec).await;
+
+    let mut s = store.lock().await;
+    if let Some(m) = s.get_mut(&template.id) {
+        m.minting = false;
+    }
+    match minted {
+        Ok(c) => {
+            let standing = StandingClone {
+                volume_id: c.volume_id.0,
+                fs_uuid: c.fs_uuid,
+                size_bytes: c.size_bytes,
+                verified: c.verified,
+            };
+            // A claim may have arrived while this was minting and left with the
+            // previous standing clone; either way the field is empty now, and
+            // if it is not, this one would be the second — drop it rather than
+            // strand it.
+            match s.get_mut(&template.id) {
+                Some(t) if t.standing.is_none() => {
+                    t.standing = Some(standing.clone());
+                    s.persist();
+                    tracing::debug!(
+                        "fstemplate {}: clone {} standing by",
+                        template.name,
+                        standing.volume_id
+                    );
+                    Ok(Some(standing))
+                }
+                _ => {
+                    drop(s);
+                    let mut m = vm.lock().await;
+                    let _ = m.delete_volume(c.volume_id).await;
+                    Ok(None)
+                }
+            }
+        }
+        Err(e) => {
+            s.persist();
+            Err(e)
+        }
+    }
+}
+
+/// Give every sealed template a clone standing by.
+///
+/// Run at startup and after a seal. Failures are logged and skipped: a
+/// template without a standing clone still works, it is only slower.
+pub async fn ensure_standing_all(vm: &Arc<VmLock>, store: &Arc<StoreLock>) -> usize {
+    let ready: Vec<(Uuid, String)> = {
+        let s = store.lock().await;
+        s.templates
+            .iter()
+            .filter(|t| t.state == TemplateState::Ready && t.standing.is_none())
+            .map(|t| (t.id, t.name.clone()))
+            .collect()
+    };
+    let mut minted = 0;
+    for (id, name) in ready {
+        match ensure_standing(vm, store, &id.to_string()).await {
+            Ok(Some(_)) => minted += 1,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("fstemplate {name}: could not mint a standing clone: {e}"),
+        }
+    }
+    minted
+}
+
+/// Take the standing clone, and mint its replacement behind the caller.
+///
+/// The fast path is a lookup. When nothing is standing — the first claim, or
+/// two starts colliding — this mints inline rather than refusing: a start that
+/// waits beats a start that does not happen. `from_standby` says which it was.
+pub async fn claim(
+    vm: &Arc<VmLock>,
+    store: &Arc<StoreLock>,
+    key: &str,
+    spec: &ClaimSpec,
+) -> Result<CloneResult> {
+    // Take it under the lock. This is the whole of "a claimed clone is never
+    // handed out twice": two claims arriving together cannot both `take`, and
+    // the loser mints its own.
+    let (template, taken) = {
+        let mut s = store.lock().await;
+        let Some(t) = s.find(key).cloned() else {
+            return Err(TemplateError::NotFound(format!("fstemplate {key} not found")));
+        };
+        let taken = s.get_mut(&t.id).and_then(|m| m.standing.take());
+        if taken.is_some() {
+            s.persist();
+        }
+        (t, taken)
+    };
+
+    if template.state != TemplateState::Ready {
+        return Err(TemplateError::Conflict(format!(
+            "fstemplate {} is {} — seal it before claiming",
+            template.name,
+            template.state.as_str()
+        )));
+    }
+
+    let Some(standing) = taken else {
+        tracing::info!(
+            "fstemplate {}: nothing standing by, minting inline",
+            template.name
+        );
+        let mut clone_spec = CloneSpec::new(standby_name(&template));
+        clone_spec.size_bytes = spec.size_bytes;
+        clone_spec.label = spec.label.clone();
+        let result = clone_template(vm, store, key, &clone_spec).await?;
+        replenish(vm, store, template.id);
+        return Ok(result);
+    };
+
+    let mut size = standing.size_bytes;
+    let volume = VolumeId(standing.volume_id);
+
+    // Only what the caller asked for beyond what was pre-minted. A claim that
+    // asks for nothing writes nothing.
+    if let Some(want) = spec.size_bytes {
+        if want > size {
+            vm.lock()
+                .await
+                .resize_volume(volume, want)
+                .await
+                .map_err(|e| TemplateError::Internal(format!("growing claimed clone: {e}")))?;
+            size = want;
+        }
+    }
+    if let Some(label) = &spec.label {
+        if let Some(dev) = vm.lock().await.get_volume(&volume) {
+            if let Err(e) = ext4::stamp_label(&dev, label).await {
+                tracing::warn!("claimed clone {}: could not set label: {e}", volume);
+            }
+        }
+    }
+
+    replenish(vm, store, template.id);
+
+    Ok(CloneResult {
+        volume_id: volume,
+        template_id: template.id,
+        fs_uuid: standing.fs_uuid,
+        size_bytes: size,
+        verified: standing.verified,
+        from_standby: true,
+    })
+}
+
+/// Mint the replacement behind the caller — spawned, never awaited, because a
+/// claim's whole purpose is to not wait for one of these.
+fn replenish(vm: &Arc<VmLock>, store: &Arc<StoreLock>, template_id: Uuid) {
+    let vm = vm.clone();
+    let store = store.clone();
+    tokio::spawn(async move {
+        if let Err(e) = ensure_standing(&vm, &store, &template_id.to_string()).await {
+            tracing::warn!("fstemplate {template_id}: replacement clone not minted: {e}");
+        }
+    });
 }
 
 /// Remove a template, and by default the volumes it owns.

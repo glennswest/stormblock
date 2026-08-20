@@ -174,10 +174,20 @@ pub async fn sweep(
         // scratch volume rather than leaving it (stormblock#47, raised from
         // here). A template mid-create still has one, and it must stay
         // protected — which is exactly what including it here does.
+        //
+        // The standing clone belongs here too (#55): it is minted before
+        // anyone asks for it, so nothing references it yet by definition —
+        // which is exactly the shape this sweep collects. Its reference is the
+        // template's field.
         store
             .templates
             .iter()
-            .flat_map(|t| t.raw_volume_id.into_iter().chain(t.sealed_volume_id))
+            .flat_map(|t| {
+                t.raw_volume_id
+                    .into_iter()
+                    .chain(t.sealed_volume_id)
+                    .chain(t.standing.as_ref().map(|c| c.volume_id))
+            })
             .collect()
     };
     let volumes: Vec<(Uuid, String, u64, u64)> = {
