@@ -4,6 +4,7 @@
 //! Each `ThinVolume` implements `BlockDevice`, so target protocols
 //! (NVMe-oF, iSCSI) see volumes as plain block devices.
 
+pub mod chunk;
 pub mod extent;
 pub mod gem;
 pub mod metadata;
