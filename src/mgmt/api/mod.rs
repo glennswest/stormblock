@@ -48,6 +48,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
         .nest("/v1", v1::router(state.clone()));
 
+    // The serving surface (#60). Layer 2 in `docs/layering.md` — "what it
+    // takes to serve volumes to something", which is the job rather than a
+    // choice a deployment makes differently. Mounted here rather than by each
+    // profile so that a consumer calling it can rely on it being there:
+    // a surface only some profiles serve is a convention, not a guarantee.
+    let r = match state.serve.get() {
+        Some(serve) => r.merge(crate::serve::api::router(serve.clone())),
+        None => r,
+    };
+
     #[cfg(feature = "iscsi")]
     let r = r.nest("/api/v1/luns", luns::router(state.clone()));
 

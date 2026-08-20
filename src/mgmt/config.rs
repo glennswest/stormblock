@@ -37,6 +37,171 @@ pub struct StormBlockConfig {
     /// Grow the pool when it comes under physical pressure (#18).
     #[serde(default)]
     pub pressure: crate::volume::pressure::PressureConfig,
+    /// The serving surface — `/serve/v1` (#60).
+    #[serde(default)]
+    pub serve: ServeSection,
+}
+
+/// Where the stock binary gets its serving parameters from.
+///
+/// `serve::config::ServeConfig` says what serving needs to know and
+/// deliberately says nothing about where the values come from — that is a
+/// profile's job. This section is the *stock* profile: the answers a
+/// single-node server gives when nobody has configured anything, which is the
+/// situation `docs/layering.md` describes as the job rather than a choice.
+///
+/// Every field is an override. Leaving one unset takes the serving default
+/// from `ServeConfig::default()`, or derives it from the management config
+/// where a derived value is better than a constant — the advertise address
+/// and the data directory both work that way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServeSection {
+    /// Mount `/serve/v1` at all. On by default: a layer-2 surface that only
+    /// some profiles serve is the situation this exists to end (#60).
+    pub enabled: bool,
+    /// Where the export and wiring tables live. Defaults to
+    /// `<management.data_dir>/serve`.
+    ///
+    /// **Serving is skipped when neither is set.** The wiring table pins LUN
+    /// and port assignments across restarts, and without somewhere durable to
+    /// keep it a restart can hand a LUN a consumer is already attached to
+    /// over to a different volume. Refusing to serve is the safe answer, and
+    /// the log says so.
+    pub data_dir: Option<String>,
+    /// What consumers are told to attach to. Defaults to
+    /// `management.advertised_addr`, then the management listen host, then
+    /// loopback.
+    pub advertise_addr: Option<String>,
+    /// Serve the legacy shared iSCSI target. Off unless set, matching
+    /// `ServeConfig`: NVMe-TCP is the transport.
+    pub iscsi_enabled: Option<bool>,
+    /// First port of the per-export portal range, and how many it holds.
+    pub portal_base: Option<u16>,
+    pub portal_span: Option<u16>,
+    pub iqn: Option<String>,
+    pub iqn_prefix: Option<String>,
+    pub nqn: Option<String>,
+    pub nqn_prefix: Option<String>,
+    pub drain_grace_secs: Option<u64>,
+    pub reconcile_secs: Option<u64>,
+    pub orphan_export_grace_secs: Option<u64>,
+    pub reap_secs: Option<u64>,
+    pub reap_apply: Option<bool>,
+    pub reap_min_age_secs: Option<u64>,
+    pub reap_max_per_pass: Option<usize>,
+}
+
+impl Default for ServeSection {
+    fn default() -> Self {
+        ServeSection {
+            enabled: true,
+            data_dir: None,
+            advertise_addr: None,
+            iscsi_enabled: None,
+            portal_base: None,
+            portal_span: None,
+            iqn: None,
+            iqn_prefix: None,
+            nqn: None,
+            nqn_prefix: None,
+            drain_grace_secs: None,
+            reconcile_secs: None,
+            orphan_export_grace_secs: None,
+            reap_secs: None,
+            reap_apply: None,
+            reap_min_age_secs: None,
+            reap_max_per_pass: None,
+        }
+    }
+}
+
+/// Why the serving surface is not being mounted.
+///
+/// Returned rather than logged in place so the caller decides how loudly to
+/// say it — and so it can be tested without capturing logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeSkipped {
+    /// `serve.enabled = false`.
+    Disabled,
+    /// Nowhere durable to keep the wiring table.
+    NoDataDir,
+}
+
+impl std::fmt::Display for ServeSkipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServeSkipped::Disabled => write!(f, "serve.enabled is false"),
+            ServeSkipped::NoDataDir => write!(
+                f,
+                "neither serve.data_dir nor management.data_dir is set, and the wiring table \
+                 has to survive a restart: it pins which LUN and which port each volume was \
+                 given, so without it a restart can hand a LUN a consumer is already attached \
+                 to over to a different volume"
+            ),
+        }
+    }
+}
+
+impl StormBlockConfig {
+    /// Build the serving parameters for the stock binary, or say why not.
+    ///
+    /// `iscsi_bind` and `nvmeof_bind` come from wherever the targets are
+    /// actually being told to listen — CLI flag or config — because the
+    /// portal range binds the same interface as the shared NVMe-oF portal so
+    /// that one firewall rule covers it.
+    pub fn serve_config(
+        &self,
+        iscsi_bind: &str,
+        nvmeof_bind: &str,
+    ) -> Result<crate::serve::config::ServeConfig, ServeSkipped> {
+        use crate::serve::config::ServeConfig;
+
+        if !self.serve.enabled {
+            return Err(ServeSkipped::Disabled);
+        }
+
+        let data_dir = match (&self.serve.data_dir, &self.management.data_dir) {
+            (Some(d), _) => d.clone(),
+            (None, Some(d)) => std::path::Path::new(d)
+                .join("serve")
+                .to_string_lossy()
+                .to_string(),
+            (None, None) => return Err(ServeSkipped::NoDataDir),
+        };
+
+        let listen_host = nvmeof_bind.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+        let advertise_addr = self
+            .serve
+            .advertise_addr
+            .clone()
+            .unwrap_or_else(|| self.management.resolve_advertised_host(listen_host));
+
+        let d = ServeConfig::default();
+        Ok(ServeConfig {
+            data_dir,
+            advertise_addr,
+            iscsi_enabled: self.serve.iscsi_enabled.unwrap_or(d.iscsi_enabled),
+            iscsi_bind: iscsi_bind.to_string(),
+            nvmeof_bind: nvmeof_bind.to_string(),
+            iqn: self.serve.iqn.clone().unwrap_or(d.iqn),
+            iqn_prefix: self.serve.iqn_prefix.clone().unwrap_or(d.iqn_prefix),
+            nqn: self.serve.nqn.clone().unwrap_or(d.nqn),
+            nqn_prefix: self.serve.nqn_prefix.clone().unwrap_or(d.nqn_prefix),
+            portal_base: self.serve.portal_base.unwrap_or(d.portal_base),
+            portal_span: self.serve.portal_span.unwrap_or(d.portal_span),
+            drain_grace_secs: self.serve.drain_grace_secs.unwrap_or(d.drain_grace_secs),
+            reconcile_secs: self.serve.reconcile_secs.unwrap_or(d.reconcile_secs),
+            orphan_export_grace_secs: self
+                .serve
+                .orphan_export_grace_secs
+                .unwrap_or(d.orphan_export_grace_secs),
+            reap_secs: self.serve.reap_secs.unwrap_or(d.reap_secs),
+            reap_apply: self.serve.reap_apply.unwrap_or(d.reap_apply),
+            reap_min_age_secs: self.serve.reap_min_age_secs.unwrap_or(d.reap_min_age_secs),
+            reap_max_per_pass: self.serve.reap_max_per_pass.unwrap_or(d.reap_max_per_pass),
+        })
+    }
 }
 
 /// Background extent garbage collection.
@@ -96,6 +261,7 @@ impl Default for StormBlockConfig {
             stormfs: crate::stormfs::StormFsConfig::default(),
             gc: GcConfig::default(),
             pressure: crate::volume::pressure::PressureConfig::default(),
+            serve: ServeSection::default(),
         }
     }
 }
@@ -737,5 +903,155 @@ pin_cores = false
             stripe_kb: 2, // too small
         });
         assert!(cfg.validate().is_err());
+    }
+
+    // ---- the serving surface (#60) -------------------------------------
+
+    fn cfg_with_data_dir(dir: &str) -> StormBlockConfig {
+        let mut c = StormBlockConfig::default();
+        c.management.data_dir = Some(dir.to_string());
+        c
+    }
+
+    /// The point of #60: a node that configured nothing about serving still
+    /// serves, because serving volumes is the job rather than a choice.
+    #[test]
+    fn serving_is_on_by_default_once_there_is_somewhere_to_keep_state() {
+        let cfg = cfg_with_data_dir("/var/lib/stormblock");
+        let s = cfg
+            .serve_config("0.0.0.0:3260", "0.0.0.0:4420")
+            .expect("a node with a data dir serves");
+
+        assert_eq!(s.data_dir, "/var/lib/stormblock/serve");
+        assert_eq!(s.portal_base, ServeConfigDefaults::portal_base());
+        assert!(!s.iscsi_enabled, "NVMe-TCP is the transport");
+        assert_eq!(s.nvmeof_bind, "0.0.0.0:4420");
+        assert_eq!(s.iscsi_bind, "0.0.0.0:3260");
+    }
+
+    /// Without anywhere durable the wiring table cannot survive a restart,
+    /// and a restart could then hand a LUN a consumer is attached to over to
+    /// a different volume. Refusing is the safe answer.
+    #[test]
+    fn no_data_dir_anywhere_means_no_serving() {
+        let cfg = StormBlockConfig::default();
+        let err = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap_err();
+        assert_eq!(err, ServeSkipped::NoDataDir);
+        assert!(
+            err.to_string().contains("survive a restart"),
+            "the reason has to be actionable: {err}"
+        );
+    }
+
+    #[test]
+    fn serving_can_be_turned_off_outright() {
+        let mut cfg = cfg_with_data_dir("/var/lib/stormblock");
+        cfg.serve.enabled = false;
+        assert_eq!(
+            cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap_err(),
+            ServeSkipped::Disabled
+        );
+    }
+
+    /// A consumer told to attach to 0.0.0.0 cannot. The advertise address
+    /// falls back through the same ladder the NVMe-oF discovery log uses.
+    #[test]
+    fn the_advertise_address_is_never_a_wildcard_when_anything_better_exists() {
+        // Explicit wins.
+        let mut cfg = cfg_with_data_dir("/d");
+        cfg.management.advertised_addr = Some("10.0.0.5".to_string());
+        let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
+        assert_eq!(s.advertise_addr, "10.0.0.5");
+
+        // Then the target's own listen host.
+        let cfg = cfg_with_data_dir("/d");
+        let s = cfg.serve_config("0.0.0.0:3260", "10.0.0.6:4420").unwrap();
+        assert_eq!(s.advertise_addr, "10.0.0.6");
+
+        // Then the management listen host.
+        let mut cfg = cfg_with_data_dir("/d");
+        cfg.management.listen_addr = "10.0.0.7:8080".to_string();
+        let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
+        assert_eq!(s.advertise_addr, "10.0.0.7");
+
+        // Loopback only when there is genuinely nothing better — honest for a
+        // single-node server, and visible in the startup log either way.
+        let cfg = cfg_with_data_dir("/d");
+        let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
+        assert_eq!(s.advertise_addr, "127.0.0.1");
+    }
+
+    /// `serve.advertise_addr` overrides even an explicit management one: a
+    /// node can be reached at a different address for data than for control.
+    #[test]
+    fn serve_advertise_addr_overrides_the_management_one() {
+        let mut cfg = cfg_with_data_dir("/d");
+        cfg.management.advertised_addr = Some("10.0.0.5".to_string());
+        cfg.serve.advertise_addr = Some("192.168.1.9".to_string());
+        let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
+        assert_eq!(s.advertise_addr, "192.168.1.9");
+    }
+
+    #[test]
+    fn every_serving_parameter_can_be_overridden() {
+        let mut cfg = cfg_with_data_dir("/d");
+        cfg.serve.data_dir = Some("/srv/state".to_string());
+        cfg.serve.iscsi_enabled = Some(true);
+        cfg.serve.portal_base = Some(9000);
+        cfg.serve.portal_span = Some(16);
+        cfg.serve.drain_grace_secs = Some(7);
+        cfg.serve.reap_secs = Some(0);
+        cfg.serve.reap_apply = Some(false);
+        cfg.serve.nqn_prefix = Some("nqn.2026-08.example".to_string());
+
+        let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
+        assert_eq!(s.data_dir, "/srv/state");
+        assert!(s.iscsi_enabled);
+        assert_eq!(s.portal_base, 9000);
+        assert_eq!(s.portal_span, 16);
+        assert_eq!(s.drain_grace_secs, 7);
+        assert_eq!(s.reap_secs, 0, "0 disables the reaper");
+        assert!(!s.reap_apply);
+        assert_eq!(s.nqn_prefix, "nqn.2026-08.example");
+    }
+
+    /// A config file with no `[serve]` section at all must still parse and
+    /// still serve — the whole point is that nobody has to know about it.
+    #[test]
+    fn a_config_without_a_serve_section_still_serves() {
+        let toml_str = r#"
+[management]
+listen_addr = "0.0.0.0:8080"
+data_dir = "/var/lib/stormblock"
+"#;
+        let cfg: StormBlockConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.serve.enabled);
+        assert!(cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").is_ok());
+    }
+
+    #[test]
+    fn a_serve_section_round_trips() {
+        let toml_str = r#"
+[management]
+data_dir = "/var/lib/stormblock"
+
+[serve]
+enabled = true
+advertise_addr = "10.0.0.5"
+portal_base = 9000
+"#;
+        let cfg: StormBlockConfig = toml::from_str(toml_str).unwrap();
+        let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
+        assert_eq!(s.advertise_addr, "10.0.0.5");
+        assert_eq!(s.portal_base, 9000);
+    }
+
+    /// Reaches into `ServeConfig::default()` so the assertions above track it
+    /// rather than restating constants that could drift apart from it.
+    struct ServeConfigDefaults;
+    impl ServeConfigDefaults {
+        fn portal_base() -> u16 {
+            crate::serve::config::ServeConfig::default().portal_base
+        }
     }
 }

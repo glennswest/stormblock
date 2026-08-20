@@ -848,16 +848,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Phase 5: Start management API
-    tokio::spawn({
-        let state = state.clone();
-        async move {
-            if let Err(e) = mgmt::start_management_server(state).await {
-                tracing::error!("Management API error: {e}");
-            }
-        }
-    });
-
     // StormFS registration (announce volumes to StormFS metadata cluster)
     let _stormfs_handle = if config.stormfs.enabled {
         tracing::info!(
@@ -1008,6 +998,81 @@ async fn main() -> anyhow::Result<()> {
             });
         }
     }
+
+    // Phase 5: the serving surface (#60).
+    //
+    // `docs/layering.md` puts this in layer 2 — what it takes to serve volumes
+    // to something — so the stock binary mounts it rather than leaving each
+    // profile to remember. A consumer that runs against a RouterOS node and an
+    // x86 one can then rely on `/serve/v1` being there instead of probing for
+    // it.
+    //
+    // Built here, after the targets, for two reasons: the reactor pool it runs
+    // per-export portals on exists by now, and so does the shared iSCSI target
+    // it reports LUN counts from. The management API is started after it, so
+    // the router sees the context rather than racing it.
+    match config.serve_config(&cli.iscsi_addr, &cli.nvmeof_addr) {
+        Ok(serve_cfg) => {
+            if let Err(e) = std::fs::create_dir_all(&serve_cfg.data_dir) {
+                tracing::error!(
+                    "not serving /serve/v1: cannot create {} ({e}) — the wiring table has to \
+                     survive a restart",
+                    serve_cfg.data_dir
+                );
+            } else {
+                #[cfg(feature = "iscsi")]
+                let shared_iscsi = state.iscsi_target.read().await.clone();
+                #[cfg(not(feature = "iscsi"))]
+                let shared_iscsi = None;
+
+                let wiring = stormblock::serve::wiring::WiringTable::load(&serve_cfg.data_dir);
+                let status = Arc::new(stormblock::serve::status::MkStatus::new());
+                tracing::info!(
+                    "Serving /serve/v1 — advertising {}, portals {}..{}, state in {}",
+                    serve_cfg.advertise_addr,
+                    serve_cfg.portal_base,
+                    serve_cfg.portal_base.saturating_add(serve_cfg.portal_span),
+                    serve_cfg.data_dir,
+                );
+                let reconcile_secs = serve_cfg.reconcile_secs;
+                let reap_secs = serve_cfg.reap_secs;
+                let ctx = Arc::new(stormblock::serve::ctx::ServeContext::new(
+                    serve_cfg,
+                    state.clone(),
+                    status,
+                    shared_iscsi,
+                    reactor.clone(),
+                    wiring,
+                ));
+                if state.serve.set(ctx.clone()).is_err() {
+                    tracing::error!("serving context was already set — not starting a second one");
+                } else {
+                    tokio::spawn(stormblock::serve::reconcile::run(ctx.clone()));
+                    tracing::debug!("export reconciler running every {reconcile_secs}s");
+                    if reap_secs > 0 {
+                        tokio::spawn(stormblock::serve::reap::run(ctx));
+                        tracing::debug!("template reaper running every {reap_secs}s");
+                    }
+                }
+            }
+        }
+        // Not an error: a node that is not meant to serve, or has nowhere to
+        // keep the wiring table, is a legitimate configuration. But it is
+        // never silent — a consumer getting 404s from /serve/v1 has to be able
+        // to find out why from this node's log.
+        Err(why) => tracing::warn!("not serving /serve/v1: {why}"),
+    }
+
+    // Phase 6: Start management API. Last, so the router it builds sees
+    // everything above it.
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            if let Err(e) = mgmt::start_management_server(state).await {
+                tracing::error!("Management API error: {e}");
+            }
+        }
+    });
 
     if export_device.is_some() {
         tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");

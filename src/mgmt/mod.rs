@@ -129,6 +129,18 @@ pub struct AppState {
     /// StormFS chunk ownership, map versions and version pins (#49, #50).
     /// Taken **before** the volume manager wherever both are needed.
     pub stormfs: tokio::sync::Mutex<api::stormfs::StormFsState>,
+    /// The serving runtime, when this node serves volumes (#60). Unset only
+    /// when it was deliberately turned off or could not be built — the router
+    /// mounts `/serve/v1` whenever it is here, so no profile has to remember
+    /// to.
+    ///
+    /// A `OnceLock` rather than a plain field because `ServeContext` holds an
+    /// `Arc<AppState>` of its own: the state has to exist before the context
+    /// can be built, so the context is put back afterwards. That is a
+    /// reference cycle and neither side is ever dropped — which is what a
+    /// process that serves until it is killed wants anyway, but it is a cycle
+    /// and worth saying so.
+    pub serve: std::sync::OnceLock<Arc<crate::serve::ctx::ServeContext>>,
     /// Preformatted filesystem templates — mkfs once, clone forever (#38).
     pub fstemplates: Arc<tokio::sync::Mutex<crate::fs::TemplateStore>>,
     /// Live per-volume ublk exports for the local CSI fast path.
@@ -206,6 +218,7 @@ impl AppState {
                 None => HashMap::new(),
             }),
             data_dir: config.management.data_dir.as_ref().map(std::path::PathBuf::from),
+            serve: std::sync::OnceLock::new(),
             pool_pressure: None,
             config,
             discovery: None,
