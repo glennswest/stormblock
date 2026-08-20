@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.11.0] — 2026-08-20
+
 ### 2026-08-20
 - **feat:** `/api/v1/stormfs` — the data path StormFS consumes (#49). Four
   routes `docs/stormblock-spec.md` §9.1 has listed since v0.1 and nothing
