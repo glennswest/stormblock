@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### 2026-08-19
+- **feat:** `standing_report` / `standing_needed`, and
+  `GET /api/v1/fstemplates/standby` — *which templates would make a start
+  wait*, answered without minting as a side effect. A supervisor has to be able
+  to ask whether a node is warm without the asking making it true, so the check
+  and the fix are separate verbs on one path: `POST` enforces, and both are
+  idempotent and safe on every supervisor start.
+- **feat:** A take is a take. An ordinary clone now tops the template back up
+  as well, not only a claim, so the next start is fast whichever door the last
+  one came through. A standby mint is flagged as such, so it neither counts
+  against the template's `clones` — that number answers "how many went
+  somewhere" — nor triggers a top-up of itself.
+- **feat:** `stormblock pallet add-member`, `remove-member` and `copy-member`
+  expose recompose at the CLI, which until now only the library and REST could
+  reach. A sealed pallet is never edited in place, so each publishes a new
+  version and says so; the previous one stays until pruned.
+- **fix:** `clones` counts clones that were handed out, not clones that were
+  minted. **v9.7.0 shipped with one failing test** because of this: the standing
+  clone incremented the counter the moment it was minted, and
+  `every_clone_gets_its_own_filesystem_uuid` correctly disagreed. Fixed here.
+
 ## [v9.7.0] — 2026-08-19
 
 ### 2026-08-19

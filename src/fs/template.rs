@@ -1553,7 +1553,7 @@ mod tests {
     use crate::raid::RaidArrayId;
 
     /// A node with one slab, and the two locks the lifecycle takes.
-    async fn node(size: u64) -> (VmLock, StoreLock, String) {
+    async fn node(size: u64) -> (Arc<VmLock>, Arc<StoreLock>, String) {
         node_with_slots(size, 1024 * 1024).await
     }
 
@@ -1561,7 +1561,7 @@ mod tests {
     /// device and a real deployment gets 4 MiB, so the default 1 MiB here is
     /// the smaller, gentler case — anything that only goes wrong on a
     /// copy-on-write of a full-size slot needs this (#46).
-    async fn node_with_slots(size: u64, slot_size: u64) -> (VmLock, StoreLock, String) {
+    async fn node_with_slots(size: u64, slot_size: u64) -> (Arc<VmLock>, Arc<StoreLock>, String) {
         let dir = std::env::temp_dir().join("stormblock-fstemplate-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{}.slab", Uuid::new_v4().simple()));
@@ -1569,9 +1569,11 @@ mod tests {
         let dev = FileDevice::open_with_capacity(&p, size).await.unwrap();
         let mut vm = VolumeManager::new(slot_size);
         vm.add_backing_device(RaidArrayId(Uuid::new_v4()), Arc::new(dev)).await;
+        // Arc'd because the paths under test spawn: a take mints the
+        // replacement behind the caller, and a task cannot borrow.
         (
-            tokio::sync::Mutex::new(vm),
-            tokio::sync::Mutex::new(TemplateStore::in_memory()),
+            Arc::new(tokio::sync::Mutex::new(vm)),
+            Arc::new(tokio::sync::Mutex::new(TemplateStore::in_memory())),
             p,
         )
     }
@@ -2087,8 +2089,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn templates_format_concurrently() {
         let (vm, store, path) = node(4 * 1024 * 1024 * 1024).await;
-        let vm = Arc::new(vm);
-        let store = Arc::new(store);
+
 
         let mut tasks = Vec::new();
         for i in 0..4 {
@@ -2128,8 +2129,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn clones_are_minted_concurrently_with_distinct_identity() {
         let (vm, store, path) = node(2 * 1024 * 1024 * 1024).await;
-        let vm = Arc::new(vm);
-        let store = Arc::new(store);
+
         create(&vm, &store, &TemplateSpec::new("golden", 64 * 1024 * 1024))
             .await
             .unwrap();
@@ -2545,7 +2545,7 @@ mod tests {
         let (vm, _unused, path) = node(1024 * 1024 * 1024).await;
 
         let id = {
-            let store = tokio::sync::Mutex::new(TemplateStore::load(&dir));
+            let store = Arc::new(tokio::sync::Mutex::new(TemplateStore::load(&dir)));
             create(&vm, &store, &TemplateSpec::new("persisted", 64 * 1024 * 1024))
                 .await
                 .unwrap()

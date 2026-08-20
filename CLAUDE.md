@@ -563,6 +563,16 @@ version in sbregistry:
 sbregistry's interim implementation (`standing` on `CloneRec`,
 `POST /v1/clones/claim`) should be **removed**, not kept in parallel.
 
+**Check and fix are separate verbs.** `GET /api/v1/fstemplates/standby` reports
+which templates would make a start wait; `POST` on the same path mints what is
+missing. A supervisor must be able to ask whether a node is warm without the
+asking making it true. Both are idempotent — safe on every start.
+
+**A take is a take**: an ordinary clone tops the template back up too, not only
+a claim. A standby mint is flagged (`CloneSpec.standby`) so it does not count
+against `clones` — that number means "how many went somewhere" — and does not
+trigger a top-up of itself, which is what would make minting recursive.
+
 ### The format's read side is a crate (2026-08-19, #53)
 
 `crates/pallet-format` — `no_std`, no allocation, no async, no I/O, **no write
