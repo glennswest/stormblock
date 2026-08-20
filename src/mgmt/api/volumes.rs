@@ -202,12 +202,16 @@ async fn delete_volume(
 
     let vol_id = VolumeId(uuid);
 
-    // Check if volume is exported
-    {
-        let exports = state.exports.read().await;
-        if exports.iter().any(|e| e.volume_id == uuid) {
-            return ApiError::conflict("cannot delete volume with active exports".to_string());
-        }
+    // Refuse while anything is serving it. This asks the shared question
+    // rather than only checking the export table, so a volume backing a live
+    // iSCSI LUN, a ublk device, or a StormFS version pin is covered by the
+    // same answer the move guard and the template sweep use.
+    let busy = super::what_is_serving(&state, uuid).await;
+    if !busy.is_empty() {
+        return ApiError::conflict(format!(
+            "cannot delete volume {uuid}: it is still served by {}",
+            busy.join(", ")
+        ));
     }
 
     let mut vm = state.volume_manager.lock().await;

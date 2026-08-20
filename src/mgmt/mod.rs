@@ -126,6 +126,9 @@ pub struct AppState {
     pub gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     /// Control-plane state behind the /v1 CSI contract surface.
     pub v1: tokio::sync::Mutex<api::v1::V1State>,
+    /// StormFS chunk ownership, map versions and version pins (#49, #50).
+    /// Taken **before** the volume manager wherever both are needed.
+    pub stormfs: tokio::sync::Mutex<api::stormfs::StormFsState>,
     /// Preformatted filesystem templates — mkfs once, clone forever (#38).
     pub fstemplates: Arc<tokio::sync::Mutex<crate::fs::TemplateStore>>,
     /// Live per-volume ublk exports for the local CSI fast path.
@@ -185,6 +188,10 @@ impl AppState {
             slab_registry,
             gem,
             v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
+            stormfs: tokio::sync::Mutex::new(match config.management.data_dir.as_ref() {
+                Some(dir) => api::stormfs::StormFsState::load(std::path::Path::new(dir)),
+                None => api::stormfs::StormFsState::default(),
+            }),
             fstemplates: Arc::new(tokio::sync::Mutex::new(
                 match config.management.data_dir.as_ref() {
                     Some(dir) => crate::fs::TemplateStore::load(std::path::Path::new(dir)),

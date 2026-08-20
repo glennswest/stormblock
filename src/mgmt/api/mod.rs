@@ -8,6 +8,7 @@ pub mod fstemplates;
 pub mod images;
 pub mod pallets;
 pub mod slabs;
+pub mod stormfs;
 pub mod discovery;
 pub mod v1;
 pub mod moves;
@@ -42,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/images", images::router(state.clone()))
         .nest("/api/v1/fstemplates", fstemplates::router(state.clone()))
         .nest("/api/v1/moves", moves::router(state.clone()))
+        .nest("/api/v1/stormfs", stormfs::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
         .nest("/v1", v1::router(state.clone()));
@@ -113,8 +115,21 @@ impl ApiError {
 /// delete a volume something has attached (#48). Both questions are the same
 /// question, and having two implementations of it means one of them is
 /// eventually wrong.
+/// Lock order note: the StormFS state is taken **first** here, because two of
+/// its own handlers hold it while reaching for the volume manager (#49, #50).
+/// One order, stated once.
 pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<String> {
     let mut busy = Vec::new();
+
+    // A pin's snapshot is being read by a StormFS reader that has no other
+    // way of saying so — deleting it out from under them is the exact thing
+    // the pin exists to prevent.
+    {
+        let st = state.stormfs.lock().await;
+        if st.pins.is_pinned_snapshot(crate::volume::VolumeId(volume_id)) {
+            busy.push("a StormFS version pin".to_string());
+        }
+    }
 
     for e in state.exports.read().await.iter() {
         if e.volume_id == volume_id {
@@ -139,6 +154,11 @@ pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<Str
 /// The set form, for callers deciding what is safe to delete in bulk.
 pub async fn volumes_in_use(state: &AppState) -> std::collections::HashSet<uuid::Uuid> {
     let mut in_use = std::collections::HashSet::new();
+    // StormFS lock first, as above — this one goes on to take the volume
+    // manager, so the order is not optional.
+    for pin in state.stormfs.lock().await.pins.list() {
+        in_use.insert(pin.snapshot.0);
+    }
     for e in state.exports.read().await.iter() {
         in_use.insert(e.volume_id);
     }

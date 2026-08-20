@@ -441,26 +441,26 @@ async fn take_slot_on_tier(
     volume: VolumeId,
     vext: u64,
 ) -> Result<(SlabId, u32), ChunkError> {
-    // `best_slab_for_tier` skips full slabs, so the loop only re-runs when a
-    // slab reported free slots and then refused one.
-    loop {
-        let Some(slab_id) = reg.best_slab_for_tier(tier) else {
-            return Err(ChunkError::TierFull { tier, slots_needed: 1 });
-        };
-        let Some(slab) = reg.get_mut(&slab_id) else {
-            return Err(ChunkError::TierFull { tier, slots_needed: 1 });
-        };
-        match slab.allocate(volume, vext).await {
-            Ok(slot_idx) => {
-                reg.reserve(slab_id, slot_idx);
-                return Ok((slab_id, slot_idx));
-            }
-            Err(e) => {
-                // A slab that says it has room and then will not give any is
-                // not something to spin on.
-                tracing::warn!("slab {} refused an allocation: {e}", slab_id.0);
-                return Err(ChunkError::TierFull { tier, slots_needed: 1 });
-            }
+    // `best_slab_for_tier` already skips slabs with no free slots, so one
+    // attempt is the whole story: a slab that reports room and then refuses
+    // to give any is inconsistent with itself, and retrying would spin.
+    let Some(slab_id) = reg.best_slab_for_tier(tier) else {
+        return Err(ChunkError::TierFull { tier, slots_needed: 1 });
+    };
+    let Some(slab) = reg.get_mut(&slab_id) else {
+        return Err(ChunkError::TierFull { tier, slots_needed: 1 });
+    };
+    match slab.allocate(volume, vext).await {
+        Ok(slot_idx) => {
+            reg.reserve(slab_id, slot_idx);
+            Ok((slab_id, slot_idx))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "slab {} reported free slots and then refused an allocation: {e}",
+                slab_id.0
+            );
+            Err(ChunkError::TierFull { tier, slots_needed: 1 })
         }
     }
 }
