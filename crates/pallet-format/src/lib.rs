@@ -20,6 +20,20 @@
 //! - **stormuefi** compiles it for `x86_64-unknown-uefi` and reads pallets
 //!   with no allocator, no runtime and no `async`.
 //!
+//! # What is here
+//!
+//! Two things, and they are the two a boot-time consumer needs:
+//!
+//! 1. **Read one pallet** — [`Pallet`]: decode, verify, and resolve where a
+//!    member's bytes live.
+//! 2. **Choose between pallets** — [`select`]: which one to boot, and what to
+//!    boot instead when that one fails. Policy, not I/O; the same rule the
+//!    engine applies, so the two cannot disagree about which pallet is next.
+//!
+//! Finding the pallets in the first place needs no code here: UEFI hands a
+//! consumer each partition's type GUID and attribute bits through
+//! `PartitionInfo`, which is [`is_pallet_type`] and [`Attributes::from_u64`].
+//!
 //! # Shape
 //!
 //! `no_std`, no allocation on the read path, no I/O of its own. A [`Pallet`]
@@ -44,6 +58,10 @@
 
 use core::fmt;
 
+pub mod select;
+
+pub use select::Candidate;
+
 pub const MAGIC: [u8; 8] = *b"STORMPAL";
 pub const VERSION: u32 = 1;
 pub const SUPERBLOCK_LEN: usize = 4096;
@@ -63,6 +81,12 @@ pub const PALLET_TYPE_GUID: [u8; 16] = [
     0xB3, 0x38, // Data4, big-endian from here
     0x7A, 0x5B, 0x98, 0xE1, 0xB7, 0xD2,
 ];
+
+/// Is this partition a pallet? The type GUID as GPT stores it — which is what
+/// UEFI's `PartitionInfo` hands a consumer, so no GPT parser is needed.
+pub fn is_pallet_type(type_guid: &[u8; 16]) -> bool {
+    *type_guid == PALLET_TYPE_GUID
+}
 
 /// Extents are immutable: never relocate, reuse or GC them while referenced.
 pub const FLAG_SEALED: u32 = 1 << 0;

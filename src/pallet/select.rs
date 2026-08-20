@@ -1,126 +1,68 @@
-//! Selection — read-only, and deliberately dependency-free.
+//! Selection — read-only, over the shared policy.
 //!
-//! Boot-time consumers (stormuefi in firmware, an initramfs, a recovery shell)
-//! need exactly two things: *which pallets are on these disks*, and *which one
-//! do I use — and if it is bad, what do I use instead*. They must not be able
-//! to write, must not need the builder, and must not carry an allocator's
-//! worth of code to answer it.
+//! The rule itself is **not here**. It lives in
+//! [`stormblock_pallet_format::select`], `no_std` and allocation-free, because
+//! a boot-time consumer has to answer "which pallet do I use, and what instead
+//! if it is bad" with the same rule the running system applies. Two answers to
+//! that question is a node that boots the wrong image, or none.
 //!
-//! So the policy lives here as **pure functions over plain data**. No I/O, no
-//! device, no async, nothing borrowed from the writer. [`PalletBrowser`] is the
-//! thin read-only wrapper that feeds them from real drives; a `no_std`
-//! consumer feeds them from whatever it can read in firmware and gets the same
-//! answers, which is the property that matters — one selection rule, not one
-//! per consumer that then drift.
-//!
-//! The rule, from `docs/pallets.md`:
-//!
-//! ```text
-//! candidates = pallets with priority > 0, ordered by (priority desc, version desc)
-//! for p in candidates:
-//!     if p.successful == 0 and p.tries_left == 0: skip
-//!     if not verify(p): continue          # fall back
-//!     use p
-//! ```
+//! What this module adds is the part that needs a host: drives to scan, `Vec`
+//! to collect into, and async I/O to read with. [`PalletBrowser`] is the thin
+//! read-only wrapper — every method reads, and there is no method here that
+//! writes, by construction rather than by discipline.
 
 use uuid::Uuid;
 
-use super::format::{Attributes, PalletKind};
+use super::format::PalletKind;
 use super::store::{PalletLocation, PalletStore};
 use super::{Pallet, PalletError, PartitionView, Result, VerifyReport};
 
-/// The minimum a consumer needs to select between pallets.
-///
-/// Deliberately not [`PalletLocation`]: this is what a pre-kernel reader can
-/// fill in from a GPT entry and a superblock, with no notion of drive paths,
-/// indexes or anything else the running system knows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Candidate {
-    pub id: Uuid,
-    pub kind: PalletKind,
-    pub version: u64,
-    pub attributes: Attributes,
-    /// False when the superblock or a table did not check out. Such a pallet
-    /// is never selected, and never counts as a fallback.
-    pub readable: bool,
-}
+pub use stormblock_pallet_format::select::{fallback_after as raw_fallback_after, sort_candidates};
+pub use stormblock_pallet_format::Candidate;
 
-impl Candidate {
-    /// Ordering key: priority first, version second — ties in priority broken
-    /// by the monotonic version, never by disk order.
-    pub fn order_key(&self) -> (u8, u64) {
-        (self.attributes.priority, self.version)
-    }
-
-    /// Usable at all: parses, has a priority, and either was confirmed good or
-    /// still has attempts left.
-    pub fn is_candidate(&self) -> bool {
-        self.readable && self.attributes.is_candidate()
+/// A location, as the shared policy sees it.
+pub fn candidate_of(l: &PalletLocation) -> Candidate {
+    Candidate {
+        id: l.id.to_bytes_le(),
+        kind: l.kind,
+        version: l.version,
+        attributes: l.attributes,
+        readable: l.is_readable(),
     }
 }
 
-impl From<&PalletLocation> for Candidate {
-    fn from(l: &PalletLocation) -> Candidate {
-        Candidate {
-            id: l.id,
-            kind: l.kind,
-            version: l.version,
-            attributes: l.attributes,
-            readable: l.is_readable(),
-        }
-    }
+fn id_of(c: &Candidate) -> Uuid {
+    Uuid::from_bytes_le(c.id)
 }
 
 /// Candidates of one kind, in the order a consumer should try them.
 ///
-/// `kind` of `None` means "do not filter" — for a consumer that genuinely
-/// wants every pallet on the disk. A boot consumer should pass
+/// `kind` of `None` means "do not filter". A boot consumer should pass
 /// `Some(PalletKind::Boot)`: priority orders pallets that compete with each
 /// other, and an app pallet is not competing with the kernel.
 pub fn order(candidates: &[Candidate], kind: Option<PalletKind>) -> Vec<Candidate> {
-    let mut v: Vec<Candidate> = candidates
-        .iter()
-        .copied()
-        .filter(|c| c.is_candidate())
-        .filter(|c| match kind {
-            // A pallet written before `kind` existed says Unspecified, and a
-            // boot consumer should still consider it — refusing would strand a
-            // node on an older image for a field it never wrote.
-            Some(k) => c.kind == k || c.kind == PalletKind::Unspecified,
-            None => true,
-        })
-        .collect();
-    v.sort_by_key(|c| std::cmp::Reverse(c.order_key()));
+    let mut v = candidates.to_vec();
+    let n = sort_candidates(&mut v, kind);
+    v.truncate(n);
     v
 }
 
 /// The one a consumer would use right now.
 pub fn select(candidates: &[Candidate], kind: Option<PalletKind>) -> Option<Candidate> {
-    order(candidates, kind).into_iter().next()
+    stormblock_pallet_format::select::select(candidates, kind)
 }
 
 /// What to use instead of `failed` — the next one down the ladder.
-///
-/// This is the whole of rollback as a *decision*. Making it stick is an
-/// attribute write, which a read-only consumer does not do: firmware falls
-/// back by simply trying the next one, and the running system records the
-/// choice with [`super::PalletManager::rollback`].
 pub fn fallback_after(
     candidates: &[Candidate],
     failed: Uuid,
     kind: Option<PalletKind>,
 ) -> Option<Candidate> {
-    let ordered = order(candidates, kind);
-    match ordered.iter().position(|c| c.id == failed) {
-        Some(i) => ordered.into_iter().nth(i + 1),
-        // The failed pallet is not in the ladder at all (priority 0, or out of
-        // tries). Then the head of the ladder *is* the answer.
-        None => ordered.into_iter().next(),
-    }
+    raw_fallback_after(candidates, &failed.to_bytes_le(), kind)
 }
 
-/// Every candidate below the selected one, in order — the fallback chain a
-/// consumer will walk if each in turn fails to verify.
+/// Every candidate in order — the fallback chain a consumer will walk if each
+/// in turn fails to verify.
 pub fn chain(candidates: &[Candidate], kind: Option<PalletKind>) -> Vec<Candidate> {
     order(candidates, kind)
 }
@@ -154,15 +96,16 @@ impl PalletBrowser {
     }
 
     pub async fn candidates(&self, kind: Option<PalletKind>) -> Vec<Candidate> {
-        self.list().await.iter().map(Candidate::from).collect::<Vec<_>>().pipe_order(kind)
+        let all: Vec<Candidate> = self.list().await.iter().map(candidate_of).collect();
+        order(&all, kind)
     }
 
     /// The pallet a consumer would boot, with where it lives.
     pub async fn select(&self, kind: Option<PalletKind>) -> Option<PalletLocation> {
         let all = self.list().await;
-        let cands: Vec<Candidate> = all.iter().map(Candidate::from).collect();
+        let cands: Vec<Candidate> = all.iter().map(candidate_of).collect();
         let chosen = select(&cands, kind)?;
-        all.into_iter().find(|l| l.id == chosen.id)
+        all.into_iter().find(|l| l.id == id_of(&chosen))
     }
 
     /// What to boot instead, if `failed` turns out to be bad.
@@ -172,19 +115,18 @@ impl PalletBrowser {
         kind: Option<PalletKind>,
     ) -> Option<PalletLocation> {
         let all = self.list().await;
-        let cands: Vec<Candidate> = all.iter().map(Candidate::from).collect();
+        let cands: Vec<Candidate> = all.iter().map(candidate_of).collect();
         let next = fallback_after(&cands, failed, kind)?;
-        all.into_iter().find(|l| l.id == next.id)
+        all.into_iter().find(|l| l.id == id_of(&next))
     }
 
     /// The whole fallback chain, in the order it would be walked.
     pub async fn chain(&self, kind: Option<PalletKind>) -> Vec<PalletLocation> {
         let all = self.list().await;
-        let cands: Vec<Candidate> = all.iter().map(Candidate::from).collect();
-        let ordered = chain(&cands, kind);
-        ordered
+        let cands: Vec<Candidate> = all.iter().map(candidate_of).collect();
+        chain(&cands, kind)
             .into_iter()
-            .filter_map(|c| all.iter().find(|l| l.id == c.id).cloned())
+            .filter_map(|c| all.iter().find(|l| l.id == id_of(&c)).cloned())
             .collect()
     }
 
@@ -233,98 +175,68 @@ impl PalletBrowser {
     }
 }
 
-/// Small helper so `candidates()` reads as one expression.
-trait PipeOrder {
-    fn pipe_order(self, kind: Option<PalletKind>) -> Vec<Candidate>;
-}
-
-impl PipeOrder for Vec<Candidate> {
-    fn pipe_order(self, kind: Option<PalletKind>) -> Vec<Candidate> {
-        order(&self, kind)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
-    fn cand(version: u64, priority: u8, tries: u8, ok: bool, kind: PalletKind) -> Candidate {
-        Candidate {
+    /// The policy has its own tests in the crate that owns it. What is worth
+    /// asserting here is the seam: a `PalletLocation` becomes the candidate the
+    /// shared rule expects, and an answer maps back to the location it came
+    /// from.
+    fn location(name: &str, version: u64, priority: u8, kind: PalletKind) -> PalletLocation {
+        PalletLocation {
             id: Uuid::new_v4(),
+            drive: "disk0".into(),
+            drive_index: 0,
+            entry_index: 0,
+            partition_name: name.into(),
+            name: name.into(),
             kind,
             version,
-            attributes: Attributes {
+            version_label: String::new(),
+            attributes: super::super::format::Attributes {
                 priority,
-                tries_left: tries,
-                successful: ok,
+                tries_left: 1,
+                successful: false,
                 sealed: true,
                 read_only: true,
                 required: true,
             },
-            readable: true,
+            start_bytes: 0,
+            size_bytes: 0,
+            used_bytes: 0,
+            member_count: 0,
+            state: super::super::store::PalletState::Readable,
         }
     }
 
     #[test]
-    fn priority_wins_and_version_breaks_the_tie() {
-        let low = cand(9, 1, 1, true, PalletKind::Boot);
-        let old = cand(1, 5, 1, true, PalletKind::Boot);
-        let new = cand(2, 5, 1, true, PalletKind::Boot);
-        let ordered = order(&[low, old, new], Some(PalletKind::Boot));
-        assert_eq!(ordered[0].id, new.id);
-        assert_eq!(ordered[1].id, old.id);
-        assert_eq!(ordered[2].id, low.id);
+    fn a_location_carries_into_the_shared_policy_and_back() {
+        let old = location("stormcos-boot", 1, 14, PalletKind::Boot);
+        let new = location("stormcos-boot", 2, 15, PalletKind::Boot);
+        let cands: Vec<Candidate> = [&old, &new].into_iter().map(candidate_of).collect();
+
+        let chosen = select(&cands, Some(PalletKind::Boot)).unwrap();
+        assert_eq!(id_of(&chosen), new.id);
+        assert_eq!(chosen.version, 2);
+
+        let next = fallback_after(&cands, new.id, Some(PalletKind::Boot)).unwrap();
+        assert_eq!(id_of(&next), old.id);
+
+        let ladder = chain(&cands, Some(PalletKind::Boot));
+        assert_eq!(ladder.len(), 2);
+        assert_eq!(id_of(&ladder[0]), new.id);
     }
 
     #[test]
-    fn a_pallet_that_cannot_boot_is_not_in_the_ladder_at_all() {
-        let disabled = cand(3, 0, 3, true, PalletKind::Boot);
-        let spent = cand(2, 5, 0, false, PalletKind::Boot);
-        let good = cand(1, 5, 1, false, PalletKind::Boot);
-        let mut broken = cand(4, 9, 3, true, PalletKind::Boot);
-        broken.readable = false;
+    fn an_unreadable_pallet_never_becomes_a_candidate() {
+        let mut broken = location("stormcos-boot", 3, 15, PalletKind::Boot);
+        broken.state = super::super::store::PalletState::Unreadable { reason: "torn".into() };
+        let good = location("stormcos-boot", 1, 5, PalletKind::Boot);
+        let cands: Vec<Candidate> = [&broken, &good].into_iter().map(candidate_of).collect();
 
-        let ordered = order(&[disabled, spent, good, broken], Some(PalletKind::Boot));
-        assert_eq!(ordered.len(), 1);
-        assert_eq!(ordered[0].id, good.id);
-    }
-
-    #[test]
-    fn kinds_do_not_compete_but_an_unlabelled_pallet_still_counts() {
-        let boot = cand(1, 5, 1, true, PalletKind::Boot);
-        let kube = cand(9, 15, 1, true, PalletKind::Kube);
-        let legacy = cand(2, 6, 1, true, PalletKind::Unspecified);
-
-        let chosen = select(&[boot, kube, legacy], Some(PalletKind::Boot)).unwrap();
-        assert_eq!(
-            chosen.id, legacy.id,
-            "a pallet written before `kind` existed is still a boot candidate"
-        );
-        assert!(
-            !order(&[boot, kube, legacy], Some(PalletKind::Boot))
-                .iter()
-                .any(|c| c.id == kube.id),
-            "a kube pallet does not outrank boot by carrying a bigger number"
-        );
-        assert_eq!(select(&[boot, kube], Some(PalletKind::Kube)).unwrap().id, kube.id);
-    }
-
-    #[test]
-    fn falling_back_takes_the_next_one_down() {
-        let newest = cand(3, 15, 1, false, PalletKind::Boot);
-        let previous = cand(2, 14, 1, true, PalletKind::Boot);
-        let oldest = cand(1, 13, 1, true, PalletKind::Boot);
-        let all = [newest, previous, oldest];
-
-        assert_eq!(fallback_after(&all, newest.id, None).unwrap().id, previous.id);
-        assert_eq!(fallback_after(&all, previous.id, None).unwrap().id, oldest.id);
-        assert!(fallback_after(&all, oldest.id, None).is_none(), "the chain ends");
-    }
-
-    #[test]
-    fn falling_back_from_something_not_in_the_ladder_starts_at_the_top() {
-        let disabled = cand(3, 0, 1, true, PalletKind::Boot);
-        let good = cand(2, 5, 1, true, PalletKind::Boot);
-        assert_eq!(fallback_after(&[disabled, good], disabled.id, None).unwrap().id, good.id);
+        assert!(!cands[0].readable);
+        assert_eq!(id_of(&select(&cands, None).unwrap()), good.id);
     }
 }
