@@ -85,11 +85,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # still builds.
 # Pinned to the same tag fio-ext4 depends on, so cargo resolves one copy and
 # the two crates agree on the BlockDevice trait.
-mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v1.4.0", default-features = false }
+# `features = ["std"]` is required as of mkfs-ext4 2.0.0: `std` became a default
+# feature so a UEFI driver can link the crate's synchronous read path, so
+# `default-features = false` now leaves the `no_std` core rather than the whole
+# crate.
+mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v2.0.0", default-features = false, features = ["std"] }
 
 # Userspace file I/O into those filesystems — writing a template's contents
 # with no mount, no loop device and no attach.
-fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.3.2", default-features = false }
+fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.4.0", default-features = false }
 
 # Async utilities
 async-trait = "0.1"

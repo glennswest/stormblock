@@ -680,3 +680,12 @@ our target.
 - Specification document (`docs/stormblock-spec.md`)
 - Source stubs for all planned modules
 - Cargo.toml with dependency declarations (openraft 0.9, tokio, axum, io-uring, etc.)
+
+### 2026-08-19
+- **chore(deps):** mkfs-ext4 v2.0.0 (with `features = ["std"]`) and fio-ext4
+  v1.4.0. `std` became a default feature in mkfs-ext4 so a UEFI driver can link
+  its synchronous `no_std` read path — one implementation of the ext4 on-disk
+  format for hosts and firmware both, rather than a second reader in firmware
+  drifting against this one. `default-features = false` there now leaves the
+  `no_std` core, so consumers that want the formatter ask for `std` explicitly.
+  Both pins move together so cargo still resolves a single copy of mkfs-ext4.
