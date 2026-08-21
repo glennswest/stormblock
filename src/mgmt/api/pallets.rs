@@ -287,6 +287,15 @@ pub struct PublishRequest {
     pub activate: bool,
     #[serde(default)]
     pub tries: Option<u8>,
+    /// Selection order within this kind. Higher wins; **0 never boots**.
+    ///
+    /// Defaults to 1 — a candidate — which is right for a pallet published to
+    /// be used. It is wrong for a pallet published to be *examined*: a lab
+    /// boot pallet on a node that is doing real work would join that node's
+    /// ladder, and could win it. Being able to say 0 is what makes publishing
+    /// beside a live system safe rather than careful.
+    #[serde(default)]
+    pub priority: Option<u8>,
 }
 
 fn yes() -> bool {
@@ -360,6 +369,7 @@ async fn publish(State(state): State<Arc<AppState>>, Json(req): Json<PublishRequ
     if let Some(t) = req.tries {
         spec.tries = t;
     }
+    spec.priority = req.priority;
 
     match mgr.publish(spec).await {
         Ok(loc) => (axum::http::StatusCode::CREATED, Json(PalletResponse::from(&loc))).into_response(),

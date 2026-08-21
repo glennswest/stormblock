@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### 2026-08-21
+- **feat:** `priority` on `POST /api/v1/pallets`. The library has had
+  `PublishSpec.priority` all along and REST could not reach it, so every
+  published pallet was a **candidate** (the default is 1) — which is right for a
+  pallet published to be used and wrong for one published to be examined. A lab
+  boot pallet on a working node joins that node's ladder and can win it.
+  Publishing at **0 never boots**, which is what makes publishing beside a live
+  system safe rather than careful.
+
 ## [v9.11.0] — 2026-08-20
 
 ### 2026-08-20
