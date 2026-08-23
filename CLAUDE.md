@@ -14,9 +14,29 @@ cargo build --release --target x86_64-unknown-linux-musl
 # ARM64 JBOD head unit
 cargo build --release --target aarch64-unknown-linux-musl --features "arm64,iscsi,nvmeof"
 
-# MikroTik RouterOS appliance (lightweight — no VFIO, no io_uring, iSCSI only)
-cargo build --release --target aarch64-unknown-linux-musl --no-default-features --features "mikrotik,iscsi"
+# MikroTik RouterOS appliance (NVMe-TCP only — no VFIO, no io_uring, no StormFS)
+cargo build --release --target aarch64-unknown-linux-musl --no-default-features --features "mikrotik,nvmeof"
 ```
+
+**NVMe-TCP, not iSCSI.** What StormBlock serves on RouterOS is containers,
+PVCs and sbregistry, and those are 100% NVMe because **iSCSI is slow**.
+Sharing an iSCSI disk and PXE-booting a bare-metal host are **mkube's**,
+already working and unchanged by anything here — the engine does not need
+iSCSI to do its own job on this platform. Measured, aarch64 release, since
+"the binary must be small" is a real constraint:
+
+| profile | bytes |
+|---|---|
+| `mikrotik,nvmeof` | 11,034,016 |
+| `mikrotik,iscsi` | 11,398,192 |
+| `mikrotik,iscsi,nvmeof` | 11,663,136 |
+
+NVMe alone is the smallest of the three — 629 KB below carrying both — so the
+fast transport is also the cheap one. Add `iscsi` only for a node that must
+serve an iSCSI LUN or run `boot-iscsi` itself.
+
+The profile leaves out `stormfs-data` too: a node with 256 MB is not a StormFS
+data node, and a mounted surface invites being called.
 
 **Musl static build** produces an 8.8 MB statically linked, stripped PIE binary (x86_64). Uses rustls-tls (no OpenSSL dependency). Requires `musl-tools` and `musl-dev` packages on the build host. Build and test on Linux: `root@dev.g8.lo:/root/stormblock` (or `gwest@dev.g8.lo` — shared dev host).
 
@@ -26,14 +46,23 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 |----------|------|-----------|---------|-------|
 | Full node (Tier 0) | x86_64 | VFIO NVMe + io_uring SAS | NVMe-oF/TCP + iSCSI | Bare metal, buildroot image |
 | ARM64 JBOD (Tier 2) | aarch64 | io_uring SAS | NVMe-oF/TCP + iSCSI | SAS shelf head unit |
-| MikroTik RouterOS | arm64/x86 | tokio file I/O (no VFIO, no io_uring) | iSCSI | Container on RouterOS 7+, USB/SATA attached storage, small footprint |
+| MikroTik RouterOS | arm64/x86 | tokio file I/O (no VFIO, no io_uring) | NVMe-oF/TCP | Container on RouterOS 7+, USB/SATA attached storage, small footprint. iSCSI sharing and PXE boot are mkube's. |
 
 **MikroTik considerations:**
 - Runs as a container on RouterOS 7+ (or CHR VM)
 - No PCIe passthrough — no VFIO, drives are `/dev/sdX` block devices
 - No io_uring on RouterOS kernel — fall back to tokio `AsyncFd` / `spawn_blocking` with O_DIRECT
 - Memory constrained (256MB–1GB typical) — no hugepage DMA allocator
-- iSCSI target only (NVMe-oF unlikely on these networks)
+- **NVMe-TCP is the transport.** RouterOS 7 speaks it (`/disk add
+  type=nvme-tcp ...`), and containers, PVCs and sbregistry all run on it
+  because iSCSI is slow. An earlier version of this table said "iSCSI target
+  only, NVMe-oF unlikely on these networks" — that was wrong, and a RouterOS
+  node was confirmed taking writes over NVMe-TCP on 2026-08-13 (#39).
+- **iSCSI sharing and PXE boot are mkube's, not the engine's.** They already
+  work and nothing here changes them, so the engine profile does not carry
+  iSCSI to support them. That division stands until NVMe boot over iPXE is
+  *demonstrated* rather than assumed — nobody has proved it yet, and the boot
+  path is not the place to find out by guessing.
 - RAID 1 (mirror) most relevant; RAID 5/6 may be too CPU-heavy on lower-end models
 - Binary must be small — strip, LTO, minimal features
 

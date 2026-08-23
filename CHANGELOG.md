@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+### 2026-08-20
+- **feat:** the stock engine mounts `/serve/v1` (#60). `stormblock serve`
+  mounted the management and metrics routers but not `serve::api`, so the
+  serving surface existed only where a profile mounted it — stormblockmk, and
+  nothing else. A consumer running against a RouterOS node and an x86 one
+  could list drives on both and create a volume on only one.
+  `docs/layering.md` puts this in layer 2: *"what it takes to serve volumes to
+  something. None of this is a choice a deployment makes differently; it is
+  the job."* A layer-2 surface only some profiles serve is a convention rather
+  than a guarantee, which is what that document exists to end.
+- **feat:** a `[serve]` config section — the *stock profile*. Every field is
+  an override; leaving one unset takes the serving default or derives it.
+  `advertise_addr` derives through the ladder the NVMe-oF discovery log
+  already uses (explicit, then `management.advertised_addr`, then the
+  NVMe-oF listen host, then the management listen host, then loopback),
+  because a consumer told to attach to `0.0.0.0` cannot. `data_dir` defaults
+  to `<management.data_dir>/serve`.
+- **note:** one case refuses to serve rather than guessing — **no data
+  directory anywhere**. The wiring table pins which LUN and which port each
+  volume was given, and without somewhere durable to keep it a restart can
+  hand a LUN a consumer is already attached to over to a different volume,
+  which is the bug that table exists to prevent. Refused with a reason and
+  never silently, so a consumer getting 404s can find out why from the log.
+- **feat:** the StormFS data path (#49, #50) is behind a `stormfs-data`
+  feature, on by default and **out of the `mikrotik` profile**, which builds
+  `--no-default-features` and so gets the exclusion for free. A RouterOS node
+  with 256 MB is an iSCSI-only leaf, not a StormFS data node: the surface
+  would be weight in a binary meant to be small, and one that is mounted
+  invites being called. The registration client is not gated — announcing
+  volumes to a metadata server is the opposite direction and costs a periodic
+  POST.
+- **fix:** the `mikrotik` profile compiles again. It had been broken on four
+  errors: `serve/ctx.rs` and `serve/reconcile.rs` imported
+  `crate::target::nvmeof` unconditionally, and `mgmt/api/v1.rs` had a
+  `let _ = volume_id;` in a `not(nvmeof)` branch of a function with no such
+  parameter — a refactor leftover that nothing without the feature could
+  compile past. Verified against every profile `CLAUDE.md` documents:
+  `mikrotik,iscsi`, `arm64,iscsi,nvmeof`, default and all-features.
+- **fix:** a **pure-NVMe build compiles**. `--no-default-features --features
+  nvmeof` did not build while `iscsi` alone did, and the asymmetry was an
+  assumption nobody had exercised rather than a decision: every profile
+  shipped so far has iSCSI in it, so nothing ever compiled the crate without
+  it. Three structural dependencies — `drive/iscsi_dev.rs` (the iSCSI
+  *initiator* reuses the *target's* PDU parser rather than carrying a second
+  copy of RFC 7143, and takes `boot_iscsi` and the `boot-iscsi` /
+  `migrate-boot` subcommands with it), `serve/ctx.rs` (`Portal` and
+  `shared_iscsi` name `IscsiTarget` directly), and `serve/reconcile.rs`
+  (`mgmt::api::luns` plus the ensure_lun / start_portal / stop_portal path).
+  The two transports are gated symmetrically now, so the matrix holds in both
+  directions rather than only the one anyone happened to build.
+- **fix:** `ServeContext::is_blocked` covers an NVMe row in a build with no
+  NVMe-oF, not only an iSCSI row while iSCSI is off. Both are rows nothing
+  will ever pick up, and a row left at `pending` holds readiness down for
+  good. Which transport is missing decides what the operator can do about it,
+  so the two warnings do not share a sentence.
+
 ### 2026-08-21
 - **feat:** `priority` on `POST /api/v1/pallets`. The library has had
   `PublishSpec.priority` all along and REST could not reach it, so every
