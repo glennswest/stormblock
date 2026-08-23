@@ -9,6 +9,7 @@ use clap::Parser;
 
 use stormblock::drive::{self, BlockDevice};
 use stormblock::drive::slab::{Slab, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZE};
+#[cfg(feature = "iscsi")]
 use stormblock::boot_iscsi::{BootDiskLayout, IscsiBootManager};
 use stormblock::placement::topology::StorageTier;
 use stormblock::raid::{RaidArray, RaidLevel};
@@ -135,6 +136,7 @@ enum SubCommand {
         tier: String,
     },
     /// Boot from iSCSI — create partitioned disk with ublk devices
+    #[cfg(feature = "iscsi")]
     BootIscsi {
         /// iSCSI target portal (IP address)
         #[arg(long)]
@@ -191,6 +193,7 @@ enum SubCommand {
         check: bool,
     },
     /// Migrate boot volumes from iSCSI slab to local disk
+    #[cfg(feature = "iscsi")]
     MigrateBoot {
         /// iSCSI target portal (IP address)
         #[arg(long)]
@@ -566,9 +569,11 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Use the REST API POST /api/v1/volumes/{{id}}/migrate to trigger migration.");
                 return Ok(());
             }
+            #[cfg(feature = "iscsi")]
             SubCommand::BootIscsi { portal, port, iqn, layout, ublk } => {
                 return handle_boot_iscsi(portal, *port, iqn, layout, *ublk).await;
             }
+            #[cfg(feature = "iscsi")]
             SubCommand::MigrateBoot { source_portal, source_port, source_iqn, target_device, target_tier } => {
                 return handle_migrate_boot(source_portal, *source_port, source_iqn, target_device, target_tier).await;
             }
@@ -1018,8 +1023,12 @@ async fn main() -> anyhow::Result<()> {
     let nvmeof_bind = cli.nvmeof_addr.clone();
     #[cfg(not(feature = "nvmeof"))]
     let nvmeof_bind = "0.0.0.0:4420".to_string();
+    #[cfg(feature = "iscsi")]
+    let iscsi_bind = cli.iscsi_addr.clone();
+    #[cfg(not(feature = "iscsi"))]
+    let iscsi_bind = "0.0.0.0:3260".to_string();
 
-    match config.serve_config(&cli.iscsi_addr, &nvmeof_bind) {
+    match config.serve_config(&iscsi_bind, &nvmeof_bind) {
         Ok(serve_cfg) => {
             if let Err(e) = std::fs::create_dir_all(&serve_cfg.data_dir) {
                 tracing::error!(
@@ -1030,8 +1039,6 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 #[cfg(feature = "iscsi")]
                 let shared_iscsi = state.iscsi_target.read().await.clone();
-                #[cfg(not(feature = "iscsi"))]
-                let shared_iscsi = None;
 
                 let wiring = stormblock::serve::wiring::WiringTable::load(&serve_cfg.data_dir);
                 let status = Arc::new(stormblock::serve::status::MkStatus::new());
@@ -1048,6 +1055,7 @@ async fn main() -> anyhow::Result<()> {
                     serve_cfg,
                     state.clone(),
                     status,
+                    #[cfg(feature = "iscsi")]
                     shared_iscsi,
                     reactor.clone(),
                     wiring,
@@ -1669,6 +1677,7 @@ async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyh
     Ok(())
 }
 
+#[cfg(feature = "iscsi")]
 async fn handle_boot_iscsi(
     portal: &str,
     port: u16,
@@ -2094,6 +2103,7 @@ async fn handle_boot_local(
     Ok(())
 }
 
+#[cfg(feature = "iscsi")]
 async fn handle_migrate_boot(
     source_portal: &str,
     source_port: u16,

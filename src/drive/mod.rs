@@ -7,6 +7,9 @@ pub mod sas;
 pub mod dma;
 pub mod filedev;
 pub mod partition;
+// The initiator reuses the *target's* PDU parser rather than carrying a
+// second copy of RFC 7143, so it exists exactly where that does.
+#[cfg(feature = "iscsi")]
 pub mod iscsi_dev;
 pub mod slab;
 pub mod slab_registry;

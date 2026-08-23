@@ -29,14 +29,18 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+#[cfg(feature = "iscsi")]
 use crate::mgmt::api::luns;
 use crate::mgmt::{ExportEntry, ExportProtocol, ExportStatus, LunBacking};
+#[cfg(feature = "iscsi")]
 use crate::target::iscsi::{IscsiConfig, IscsiTarget};
 #[cfg(feature = "nvmeof")]
 use crate::target::nvmeof::{NvmeofConfig, NvmeofTarget};
 use crate::volume::VolumeId;
 
-use super::ctx::{Portal, ServeContext};
+use super::ctx::ServeContext;
+#[cfg(feature = "iscsi")]
+use super::ctx::Portal;
 #[cfg(feature = "nvmeof")]
 use super::ctx::Subsystem;
 use super::netstat;
@@ -290,12 +294,18 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
             continue;
         }
 
+        // An iSCSI row in a build with no iSCSI never gets here — `is_blocked`
+        // sent it to `continue` above — but the binding still has to be used.
+        #[cfg(not(feature = "iscsi"))]
+        let _ = dev;
+
         // Shared multi-LUN target, at the volume's pinned LUN id. This goes
         // through the engine's LUN table rather than straight to
         // `add_lun_dynamic`, so the table, `luns.json` and the target all
         // agree — the engine restores from that file at boot and allocates
         // fresh ids out of it, and a LUN it does not know about would be
         // handed to somebody else.
+        #[cfg(feature = "iscsi")]
         if let Err(e) = ensure_lun(ctx, &row).await {
             ctx.status.bump(&ctx.status.reconciler_errors);
             tracing::error!("export {}: attaching LUN {:?}: {e}", row.export_id, row.lun);
@@ -303,6 +313,7 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         }
 
         // Dedicated single-volume target.
+        #[cfg(feature = "iscsi")]
         match start_portal(ctx, &row, dev).await {
             Ok(()) => {
                 let mut w = ctx.wiring.lock().await;
@@ -371,9 +382,12 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
             #[cfg(feature = "nvmeof")]
             stop_subsystem(ctx, &row.export_id).await;
         } else {
-            stop_portal(ctx, &row.export_id).await;
-            if let Some(lun) = row.lun {
-                luns::detach_lun(&ctx.state, lun).await;
+            #[cfg(feature = "iscsi")]
+            {
+                stop_portal(ctx, &row.export_id).await;
+                if let Some(lun) = row.lun {
+                    luns::detach_lun(&ctx.state, lun).await;
+                }
             }
         }
         let mut w = ctx.wiring.lock().await;
@@ -442,6 +456,7 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
 /// through `POST /api/v1/exports` was wired by the engine on the way in. Only
 /// the gaps — an export mk declared itself, or one whose LUN went missing —
 /// need an attach.
+#[cfg(feature = "iscsi")]
 async fn ensure_lun(ctx: &Arc<ServeContext>, row: &Wiring) -> anyhow::Result<()> {
     let Some(lun) = row.lun else {
         return Err(anyhow::anyhow!("iscsi wiring row has no LUN id"));
@@ -474,6 +489,7 @@ async fn ensure_lun(ctx: &Arc<ServeContext>, row: &Wiring) -> anyhow::Result<()>
 /// The listener is bound here rather than inside `IscsiTarget::run` so a port
 /// clash surfaces as an error on this export instead of a task that dies
 /// silently.
+#[cfg(feature = "iscsi")]
 async fn start_portal(
     ctx: &Arc<ServeContext>,
     row: &Wiring,
@@ -518,6 +534,7 @@ async fn start_portal(
 }
 
 /// Stop an export's dedicated target and release its port.
+#[cfg(feature = "iscsi")]
 async fn stop_portal(ctx: &Arc<ServeContext>, export_id: &Uuid) {
     if let Some(p) = ctx.portals.lock().await.remove(export_id) {
         p.target.remove_lun(0).await;
@@ -625,12 +642,16 @@ pub async fn refresh_counters(ctx: &Arc<ServeContext>) {
     s.store(&s.exports_blocked, blocked);
     s.store(&s.exports_orphaned, orphaned);
     s.store(&s.exports_draining, w.count(WireState::Draining) as u64);
+    #[cfg(feature = "iscsi")]
     let luns = match &ctx.shared_iscsi {
         Some(t) => t.lun_count().await as u64,
         None => 0,
     };
+    #[cfg(not(feature = "iscsi"))]
+    let luns = 0u64;
     s.store(&s.luns_wired, luns);
     drop(w);
+    #[cfg(feature = "iscsi")]
     s.store(&s.portals, ctx.portals.lock().await.len() as u64);
     #[cfg(feature = "nvmeof")]
     s.store(&s.subsystems, ctx.subsystems.lock().await.len() as u64);

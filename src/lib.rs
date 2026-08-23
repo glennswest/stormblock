@@ -7,6 +7,7 @@ pub mod mgmt;
 pub mod serve;
 pub mod stormfs;
 pub mod boot;
+#[cfg(feature = "iscsi")]
 pub mod boot_iscsi;
 pub mod migrate;
 pub mod image;

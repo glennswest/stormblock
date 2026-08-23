@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::mgmt::{AppState, ExportEntry};
+#[cfg(feature = "iscsi")]
 use crate::target::iscsi::IscsiTarget;
 #[cfg(feature = "nvmeof")]
 use crate::target::nvmeof::NvmeofTarget;
@@ -28,6 +29,7 @@ use super::wiring::{write_atomic, WireProto, WiringTable, Wiring};
 
 /// A running per-export iSCSI target: its own IQN on its own port, with the
 /// volume at LUN 0 (issue #2 — the RouterOS initiator cannot select a LUN).
+#[cfg(feature = "iscsi")]
 pub struct Portal {
     pub target: Arc<IscsiTarget>,
     pub task: JoinHandle<()>,
@@ -54,8 +56,10 @@ pub struct ServeContext {
     /// The shared multi-LUN iSCSI target — `None` unless
     /// `STORMBLOCKMK_ENABLE_ISCSI` is set, because the legacy stack is not
     /// brought up at all by default.
+    #[cfg(feature = "iscsi")]
     pub shared_iscsi: Option<Arc<IscsiTarget>>,
     pub wiring: Mutex<WiringTable>,
+    #[cfg(feature = "iscsi")]
     pub portals: Mutex<HashMap<Uuid, Portal>>,
     #[cfg(feature = "nvmeof")]
     pub subsystems: Mutex<HashMap<Uuid, Subsystem>>,
@@ -93,7 +97,7 @@ impl ServeContext {
         cfg: ServeConfig,
         state: Arc<AppState>,
         status: Arc<MkStatus>,
-        shared_iscsi: Option<Arc<IscsiTarget>>,
+        #[cfg(feature = "iscsi")] shared_iscsi: Option<Arc<IscsiTarget>>,
         reactor: Arc<ReactorPool>,
         wiring: WiringTable,
     ) -> Self {
@@ -102,8 +106,10 @@ impl ServeContext {
             cfg,
             state,
             status,
+            #[cfg(feature = "iscsi")]
             shared_iscsi,
             wiring: Mutex::new(wiring),
+            #[cfg(feature = "iscsi")]
             portals: Mutex::new(HashMap::new()),
             #[cfg(feature = "nvmeof")]
             subsystems: Mutex::new(HashMap::new()),
