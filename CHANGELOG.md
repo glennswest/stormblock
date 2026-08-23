@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.12.0] — 2026-08-20
+
 ### 2026-08-20
 - **feat:** the stock engine mounts `/serve/v1` (#60). `stormblock serve`
   mounted the management and metrics routers but not `serve::api`, so the
@@ -28,7 +30,8 @@
 - **feat:** the StormFS data path (#49, #50) is behind a `stormfs-data`
   feature, on by default and **out of the `mikrotik` profile**, which builds
   `--no-default-features` and so gets the exclusion for free. A RouterOS node
-  with 256 MB is an iSCSI-only leaf, not a StormFS data node: the surface
+  with 256 MB serves container volumes over NVMe-TCP and is not a StormFS
+  data node: the surface
   would be weight in a binary meant to be small, and one that is mounted
   invites being called. The registration client is not gated — announcing
   volumes to a metadata server is the opposite direction and costs a periodic

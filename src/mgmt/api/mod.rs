@@ -49,8 +49,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/v1", v1::router(state.clone()));
 
     // The StormFS data path (#49, #50). Out of the `mikrotik` profile: a
-    // RouterOS node with 256 MB is an iSCSI-only leaf, not a StormFS data
-    // node, and a surface that is there invites being called.
+    // RouterOS node with 256 MB serves container volumes over NVMe-TCP; it is
+    // not a StormFS data node, and a surface that is there invites being
+    // called.
     #[cfg(feature = "stormfs-data")]
     let r = r.nest("/api/v1/stormfs", stormfs::router(state.clone()));
 

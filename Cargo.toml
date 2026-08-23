@@ -6,7 +6,7 @@ members = ["crates/pallet-format"]
 
 [package]
 name = "stormblock"
-version = "9.11.0"
+version = "9.12.0"
 edition = "2021"
 authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"
@@ -128,9 +128,10 @@ nvmeof = []
 iscsi = []
 # The StormFS data-path surface: chunk lifecycle, versioned-map commits and
 # version pins (#49, #50). Off in the `mikrotik` profile, which reaches this
-# by building --no-default-features: a RouterOS node with 256 MB is an
-# iSCSI-only leaf, not a StormFS data node, so the surface would be weight in
-# the binary and an invitation to call something that node should not serve.
+# by building --no-default-features: a RouterOS node with 256 MB serves
+# container volumes over NVMe-TCP, it is not a StormFS data node, so the
+# surface would be weight in the binary and an invitation to call something
+# that node should not serve.
 # The registration client in src/stormfs.rs is not gated — announcing this
 # node's volumes to a metadata server is the opposite direction and costs a
 # periodic POST.
