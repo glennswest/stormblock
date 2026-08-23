@@ -1011,7 +1011,15 @@ async fn main() -> anyhow::Result<()> {
     // per-export portals on exists by now, and so does the shared iSCSI target
     // it reports LUN counts from. The management API is started after it, so
     // the router sees the context rather than racing it.
-    match config.serve_config(&cli.iscsi_addr, &cli.nvmeof_addr) {
+    // A build without NVMe-oF still has to answer "which interface do the
+    // per-export portals bind?", and the answer is the same one it would have
+    // been — the range is allocated the same way whichever transport wires it.
+    #[cfg(feature = "nvmeof")]
+    let nvmeof_bind = cli.nvmeof_addr.clone();
+    #[cfg(not(feature = "nvmeof"))]
+    let nvmeof_bind = "0.0.0.0:4420".to_string();
+
+    match config.serve_config(&cli.iscsi_addr, &nvmeof_bind) {
         Ok(serve_cfg) => {
             if let Err(e) = std::fs::create_dir_all(&serve_cfg.data_dir) {
                 tracing::error!(

@@ -1,3 +1,4 @@
+#![cfg(feature = "stormfs-data")]
 //! `/api/v1/stormfs` integration tests — the data-path surface StormFS
 //! consumes (#49, #50).
 //!

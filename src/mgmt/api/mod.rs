@@ -8,6 +8,7 @@ pub mod fstemplates;
 pub mod images;
 pub mod pallets;
 pub mod slabs;
+#[cfg(feature = "stormfs-data")]
 pub mod stormfs;
 pub mod discovery;
 pub mod v1;
@@ -43,10 +44,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/images", images::router(state.clone()))
         .nest("/api/v1/fstemplates", fstemplates::router(state.clone()))
         .nest("/api/v1/moves", moves::router(state.clone()))
-        .nest("/api/v1/stormfs", stormfs::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
         .nest("/v1", v1::router(state.clone()));
+
+    // The StormFS data path (#49, #50). Out of the `mikrotik` profile: a
+    // RouterOS node with 256 MB is an iSCSI-only leaf, not a StormFS data
+    // node, and a surface that is there invites being called.
+    #[cfg(feature = "stormfs-data")]
+    let r = r.nest("/api/v1/stormfs", stormfs::router(state.clone()));
 
     // The serving surface (#60). Layer 2 in `docs/layering.md` — "what it
     // takes to serve volumes to something", which is the job rather than a
@@ -134,6 +140,7 @@ pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<Str
     // A pin's snapshot is being read by a StormFS reader that has no other
     // way of saying so — deleting it out from under them is the exact thing
     // the pin exists to prevent.
+    #[cfg(feature = "stormfs-data")]
     {
         let st = state.stormfs.lock().await;
         if st.pins.is_pinned_snapshot(crate::volume::VolumeId(volume_id)) {
@@ -166,6 +173,7 @@ pub async fn volumes_in_use(state: &AppState) -> std::collections::HashSet<uuid:
     let mut in_use = std::collections::HashSet::new();
     // StormFS lock first, as above — this one goes on to take the volume
     // manager, so the order is not optional.
+    #[cfg(feature = "stormfs-data")]
     for pin in state.stormfs.lock().await.pins.list() {
         in_use.insert(pin.snapshot.0);
     }

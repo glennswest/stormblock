@@ -847,7 +847,6 @@ fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo {
         }
         #[cfg(not(feature = "nvmeof"))]
         {
-            let _ = volume_id;
             "nqn.2024.io.stormblock:default".to_string()
         }
     };

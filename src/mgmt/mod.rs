@@ -128,6 +128,7 @@ pub struct AppState {
     pub v1: tokio::sync::Mutex<api::v1::V1State>,
     /// StormFS chunk ownership, map versions and version pins (#49, #50).
     /// Taken **before** the volume manager wherever both are needed.
+    #[cfg(feature = "stormfs-data")]
     pub stormfs: tokio::sync::Mutex<api::stormfs::StormFsState>,
     /// The serving runtime, when this node serves volumes (#60). Unset only
     /// when it was deliberately turned off or could not be built — the router
@@ -200,6 +201,7 @@ impl AppState {
             slab_registry,
             gem,
             v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
+            #[cfg(feature = "stormfs-data")]
             stormfs: tokio::sync::Mutex::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::stormfs::StormFsState::load(std::path::Path::new(dir)),
                 None => api::stormfs::StormFsState::default(),

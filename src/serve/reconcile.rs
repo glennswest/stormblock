@@ -32,10 +32,13 @@ use uuid::Uuid;
 use crate::mgmt::api::luns;
 use crate::mgmt::{ExportEntry, ExportProtocol, ExportStatus, LunBacking};
 use crate::target::iscsi::{IscsiConfig, IscsiTarget};
+#[cfg(feature = "nvmeof")]
 use crate::target::nvmeof::{NvmeofConfig, NvmeofTarget};
 use crate::volume::VolumeId;
 
-use super::ctx::{Portal, ServeContext, Subsystem};
+use super::ctx::{Portal, ServeContext};
+#[cfg(feature = "nvmeof")]
+use super::ctx::Subsystem;
 use super::netstat;
 use super::wiring::{WireProto, WireState, Wiring};
 
@@ -156,13 +159,24 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         // not wedge readiness for the exports that ARE wireable.
         if ctx.is_blocked(&row) {
             if ctx.blocked_reported.lock().await.insert(row.export_id) {
-                tracing::warn!(
-                    "export {} (volume {}) is iSCSI, but iSCSI is not served — left unwired. \
-                     Set STORMBLOCKMK_ENABLE_ISCSI=1 to bring the legacy stack up, or withdraw \
-                     the export and recreate it with protocol \"nvme-tcp\"",
-                    row.export_id,
-                    row.volume_id
-                );
+                // Which transport is missing decides what the operator can do
+                // about it, so the two cases do not share a sentence.
+                match row.protocol {
+                    WireProto::Iscsi => tracing::warn!(
+                        "export {} (volume {}) is iSCSI, but iSCSI is not served — left unwired. \
+                         Set STORMBLOCKMK_ENABLE_ISCSI=1 to bring the legacy stack up, or \
+                         withdraw the export and recreate it with protocol \"nvme-tcp\"",
+                        row.export_id,
+                        row.volume_id
+                    ),
+                    WireProto::Nvmeof => tracing::warn!(
+                        "export {} (volume {}) is NVMe-TCP, but this build has no NVMe-oF \
+                         support — left unwired. Withdraw the export and recreate it with \
+                         protocol \"iscsi\", or run a build with the nvmeof feature",
+                        row.export_id,
+                        row.volume_id
+                    ),
+                }
             }
             continue;
         }
@@ -232,6 +246,7 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         // NVMe rows get a dedicated subsystem and nothing else: there is no
         // shared-target LUN to pin, and the volume is namespace 1 of its own
         // subsystem.
+        #[cfg(feature = "nvmeof")]
         if row.protocol == WireProto::Nvmeof {
             match start_subsystem(ctx, &row, dev).await {
                 Ok(()) => {
@@ -353,6 +368,7 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         }
 
         if row.protocol == WireProto::Nvmeof {
+            #[cfg(feature = "nvmeof")]
             stop_subsystem(ctx, &row.export_id).await;
         } else {
             stop_portal(ctx, &row.export_id).await;
@@ -512,6 +528,7 @@ async fn stop_portal(ctx: &Arc<ServeContext>, export_id: &Uuid) {
 }
 
 /// Bind and run a dedicated single-volume NVMe-oF subsystem for one export.
+#[cfg(feature = "nvmeof")]
 ///
 /// One subsystem NQN per volume, the volume as namespace 1, on its own port.
 /// The discovery log page advertises the routable address rather than the
@@ -558,6 +575,7 @@ async fn start_subsystem(
 }
 
 /// Stop an export's dedicated subsystem and release its port.
+#[cfg(feature = "nvmeof")]
 async fn stop_subsystem(ctx: &Arc<ServeContext>, export_id: &Uuid) {
     if let Some(s) = ctx.subsystems.lock().await.remove(export_id) {
         s.target.remove_namespace(1).await;
@@ -614,6 +632,7 @@ pub async fn refresh_counters(ctx: &Arc<ServeContext>) {
     s.store(&s.luns_wired, luns);
     drop(w);
     s.store(&s.portals, ctx.portals.lock().await.len() as u64);
+    #[cfg(feature = "nvmeof")]
     s.store(&s.subsystems, ctx.subsystems.lock().await.len() as u64);
     s.publish_metrics();
 }

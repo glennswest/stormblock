@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::mgmt::{AppState, ExportEntry};
 use crate::target::iscsi::IscsiTarget;
+#[cfg(feature = "nvmeof")]
 use crate::target::nvmeof::NvmeofTarget;
 use crate::target::reactor::ReactorPool;
 
@@ -38,6 +39,7 @@ pub struct Portal {
 /// the volume as namespace 1. The NVMe counterpart of `Portal` — one
 /// subsystem per volume, so `nvme connect` reaches exactly one volume instead
 /// of discovering every namespace on a shared subsystem.
+#[cfg(feature = "nvmeof")]
 pub struct Subsystem {
     pub target: Arc<NvmeofTarget>,
     pub task: JoinHandle<()>,
@@ -55,6 +57,7 @@ pub struct ServeContext {
     pub shared_iscsi: Option<Arc<IscsiTarget>>,
     pub wiring: Mutex<WiringTable>,
     pub portals: Mutex<HashMap<Uuid, Portal>>,
+    #[cfg(feature = "nvmeof")]
     pub subsystems: Mutex<HashMap<Uuid, Subsystem>>,
     /// The shared reactor pool (sized from cores, issue #8). Per-export
     /// targets run on it too — building a fresh single-core pool per portal
@@ -102,6 +105,7 @@ impl ServeContext {
             shared_iscsi,
             wiring: Mutex::new(wiring),
             portals: Mutex::new(HashMap::new()),
+            #[cfg(feature = "nvmeof")]
             subsystems: Mutex::new(HashMap::new()),
             reactor,
             drain_deadlines: Mutex::new(HashMap::new()),
@@ -128,8 +132,16 @@ impl ServeContext {
     /// legacy stack is off can never be wired — it is blocked, not pending,
     /// and saying so is the difference between "mk is still working on it"
     /// and "nothing will ever happen here".
+    ///
+    /// The same is true of an NVMe row in a build without the `nvmeof`
+    /// feature — the `mikrotik` profile, where NVMe-oF is not compiled in at
+    /// all. A row that nothing will ever pick up must say so rather than sit
+    /// at `pending` forever holding readiness down.
     pub fn is_blocked(&self, w: &Wiring) -> bool {
-        w.protocol == WireProto::Iscsi && !self.cfg.iscsi_enabled
+        match w.protocol {
+            WireProto::Iscsi => !self.cfg.iscsi_enabled,
+            WireProto::Nvmeof => !cfg!(feature = "nvmeof"),
+        }
     }
 
     /// Withdraw every export entry naming `volume_id`, returning their ids.

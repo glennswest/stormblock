@@ -123,9 +123,18 @@ io-uring = "0.7"
 nix = { version = "0.29", features = ["fs", "ioctl"] }
 
 [features]
-default = ["nvmeof", "iscsi", "cluster", "ui"]
+default = ["nvmeof", "iscsi", "cluster", "ui", "stormfs-data"]
 nvmeof = []
 iscsi = []
+# The StormFS data-path surface: chunk lifecycle, versioned-map commits and
+# version pins (#49, #50). Off in the `mikrotik` profile, which reaches this
+# by building --no-default-features: a RouterOS node with 256 MB is an
+# iSCSI-only leaf, not a StormFS data node, so the surface would be weight in
+# the binary and an invitation to call something that node should not serve.
+# The registration client in src/stormfs.rs is not gated — announcing this
+# node's volumes to a metadata server is the opposite direction and costs a
+# periodic POST.
+stormfs-data = []
 cluster = ["dep:openraft"]
 ui = ["dep:askama", "dep:rust-embed", "dep:mime_guess"]
 arm64 = []
