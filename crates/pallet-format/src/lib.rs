@@ -350,6 +350,10 @@ pub enum PalletKind {
     Runtime,
     /// Data or configuration shipped as a sealed set.
     Data,
+    /// Vendor-supplied software, alternated in A/B pairs like `system`.
+    Vendor,
+    /// The node's own: one pallet, nothing to alternate with.
+    User,
     Other(u32),
 }
 
@@ -364,6 +368,8 @@ impl PalletKind {
             PalletKind::App => 5,
             PalletKind::Runtime => 6,
             PalletKind::Data => 7,
+            PalletKind::Vendor => 8,
+            PalletKind::User => 9,
             PalletKind::Other(v) => v,
         }
     }
@@ -378,6 +384,8 @@ impl PalletKind {
             5 => PalletKind::App,
             6 => PalletKind::Runtime,
             7 => PalletKind::Data,
+            8 => PalletKind::Vendor,
+            9 => PalletKind::User,
             other => PalletKind::Other(other),
         }
     }
@@ -392,6 +400,8 @@ impl PalletKind {
             PalletKind::App => "app",
             PalletKind::Runtime => "runtime",
             PalletKind::Data => "data",
+            PalletKind::Vendor => "vendor",
+            PalletKind::User => "user",
             PalletKind::Other(_) => "other",
         }
     }

@@ -104,6 +104,8 @@ pub fn parse_pallet_kind(s: &str) -> PalletKind {
         "app" | "application" => PalletKind::App,
         "runtime" => PalletKind::Runtime,
         "data" => PalletKind::Data,
+        "vendor" => PalletKind::Vendor,
+        "user" => PalletKind::User,
         other => match other.strip_prefix("other:").and_then(|v| v.parse().ok()) {
             Some(v) => PalletKind::Other(v),
             None => PalletKind::Unspecified,

@@ -64,6 +64,11 @@ from_file = "build/fw.bin"
 [slab]                          # the mutable end
 size = "rest"
 tier = "hot"
+
+  [[slab.golden]]               # what the node runs
+  name  = "stormpump"
+  from  = "pallet:system1/stormpump"    # or file = "build/goldens/root.img"
+  clone = "stormpump"           # the first clone; defaults to `name`
 ```
 
 **Order on disk is the order of the sections** — ESP, pallets as listed, raw
@@ -93,7 +98,71 @@ pallet does not verify fails; it does not warn.
 | `[esp]` | `C12A7328-…` EFI System | FAT16 or FAT32, built from a directory, copied from an image, or left formatted and empty |
 | `[[pallet]]` | `A324B90E-…` stormcos pallet | a sealed, versioned, verified pallet |
 | `[[partition]]` | as named | a file, verbatim |
-| `[slab]` | `4C9A7B2E-…` stormblock slab | a formatted slab, ready for volumes |
+| `[slab]` | `4C9A7B2E-…` stormblock slab | a formatted slab holding the goldens, a first clone of each, and its own volume metadata |
+
+## 2a. The slab is where the node actually lives
+
+An image whose slab is empty *contains* a node. An image whose slab holds the
+goldens and a clone of each **is** one. The difference is one boot: a pallet is
+sealed and read-only, so nothing can run out of one, and a slab that was
+formatted and left empty has no volume for `root=/dev/ublkb0` to be (#62).
+
+Each `[[slab.golden]]` does two things:
+
+1. **Lands the golden.** Content comes from a file, or from
+   `pallet:<pallet>/<member>` — a member of a pallet this image already
+   carries, read through its extent map, with nothing staged in between. Zero
+   runs are skipped a slab slot at a time: a filesystem image is mostly holes,
+   and writing them would cost a slot per hole and lose the thin provisioning
+   the slab exists to have.
+2. **Takes the first clone.** The clone is a copy-on-write clone sharing every
+   extent with the golden, so it costs nothing until it is written, and it is
+   read-write. **The clone is what the node runs from; the golden is never
+   used directly.** That is also the whole upgrade: publish `system2` beside
+   `system1`, take a first clone, and the previous clone is still there
+   because nothing was overwritten.
+
+| field | default | |
+|---|---|---|
+| `name` | — | base name |
+| `from` / `file` | — | content: a path, or `pallet:<pallet>/<member>` |
+| `clone` | `name` | the clone's volume name — what `stormblock.volume=` resolves to |
+| `golden_name` | `<name>.golden` | the golden's volume name |
+| `size` | content, rounded up to a slot | the volume's virtual size |
+
+Two volumes may not end up with the same name: a boot resolves a volume *by
+name*, so a collision is refused at build time rather than discovered at 3am.
+
+### volumes.dat lives in the slab
+
+There is no filesystem in an image to keep a volume record in, and the volume
+that record describes is the one that has to be exported before there is one.
+So the slab carries its own: a region between the header and the slot table,
+written as **two copies alternating by generation**, each with its own
+checksum, so a write that did not finish leaves the previous one readable.
+
+```
+stormblock slab header (4 KiB)
+volumes.dat copy A | copy B      <- meta_size, both copies
+slot table
+data: slots of slot_size
+```
+
+Sized automatically from the slab unless `[slab] meta_size` says otherwise;
+`meta_size = "0"` formats a slab that keeps no record of itself, which is
+right wherever a data directory holds one instead. A slab formatted before
+this existed reads as *no region* — the offset and size live in bytes the v1
+header left reserved, and every other offset in that header is already
+absolute, so old slabs open unchanged and new ones open on older code.
+
+`boot-local` reads it when no `--meta` is given, and writes back to it, so
+this boots with no metadata directory anywhere:
+
+```
+root=/dev/ublkb0 rd.stormblock.slab=/dev/sda4 stormblock.volume=stormpump
+```
+
+`stormblock image inspect` prints what a slab says it holds.
 
 ## 3. FAT16 or FAT32, and why both
 
@@ -224,6 +293,42 @@ members = [ ... ]
 [[pallet]]
 from_image = "stormcos-v1.img"
 ```
+
+**A node that boots itself: goldens in the slab, a clone of each**
+
+```toml
+[[pallet]]
+name = "kernel1"
+kind = "kernel"
+priority = 15
+members = [
+  { name = "kernel",    role = "kernel",    kind = "kernel",     file = "build/vmlinuz" },
+  { name = "initramfs", role = "initramfs", kind = "initramfs",  file = "build/initramfs.img" },
+  { name = "cmdline",   role = "cmdline",   kind = "bootconfig",
+    text = "root=/dev/ublkb0 rd.stormblock.slab=/dev/sda4 stormblock.volume=stormpump" },
+]
+
+[[pallet]]
+name = "system1"
+kind = "system"
+members = [ { name = "stormpump", role = "rootfs", file = "build/stormpump.img" } ]
+
+[slab]
+size = "rest"
+
+  [[slab.golden]]
+  name = "stormpump"
+  from = "pallet:system1/stormpump"
+
+  [[slab.golden]]
+  name = "stormpump-config"
+  file = "build/goldens/stormpump-config.img"
+```
+
+The initramfs is a member like any other — it is what runs `boot-local`, so an
+image without one boots to firmware and stops. Build it with
+`scripts/build-stormblock-initramfs.sh`, which bakes in the same static
+`stormblock` binary.
 
 **Look inside anything**
 

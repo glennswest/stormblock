@@ -182,6 +182,8 @@ holding application containers, and "what kernel is this node on" wants neither.
 | 5 | `app` | an application: the containers one workload needs |
 | 6 | `runtime` | dependencies shared between applications |
 | 7 | `data` | data or configuration shipped as a sealed set |
+| 8 | `vendor` | vendor-supplied software, alternated A/B like `system` |
+| 9 | `user` | everything else: pulled images and customer data. One pallet — it is not replaced, so it has nothing to alternate with |
 
 **Priority only orders pallets that compete with each other.** A `kube` pallet
 does not outrank a `boot` pallet by carrying a bigger number — it is not in the
@@ -189,7 +191,97 @@ same race. Renumbering on activation is per kind, and a consumer must filter by
 kind before comparing priority. `unspecified` is treated as a candidate for any
 kind, so a pallet written before the field existed is never stranded.
 
-### 2.6 Trust chain
+### 2.6 Containers: goldens, CoWs, and the pallet's own slab
+
+**Status: designed 2026-08-23, not yet implemented (#62).** Everything above
+this describes a pallet as sealed content and nothing else. That is what ships
+an image which *contains* a node; what makes one that **is** a node is that a
+pallet also carries the writable half.
+
+A pallet is a group of **containers** — the word for a golden or a CoW of one,
+each of which is a volume to the engine.
+
+- **A golden is a sealed member.** It is not copied anywhere. It is read-only
+  by definition: sealed, digested, and covered by the trust chain above.
+- **A CoW references a golden** and holds only the blocks written over it. It
+  is the only writable thing in a pallet. It can be thrown away and a fresh one
+  made, which is the cheapest possible reset — the golden was never touched.
+- **CoWs nest.** A CoW's base is a block device, and a CoW is one, so a CoW of
+  a CoW needs no new mechanism.
+- **The pallet has a slab**, in the partition after the member content: a pool
+  of fixed-size allocation units that the CoWs in *that* pallet allocate from.
+  A unit belongs to exactly one container and cannot come from another pallet,
+  which is what makes a pallet copyable whole and replaceable whole.
+
+The last point is the load-bearing one, and it is a **hard allocation
+boundary, not a preference.** The `user` pallet holds pulled images and
+customer data; the `system` pallet is replaced wholesale on upgrade. If a CoW
+in one could spill into the other when its own pallet filled, replacing the
+system would take customer data with it, and the spill would be silent. So a
+pallet's slab is its own pool and there is no fallback to another.
+
+```
+partition = one pallet
+  +0        superblock
+            member + extent tables
+  +data     member content            <- the goldens, sealed, read-only
+  +slab     slab: [unit][unit][unit]  <- what the CoWs allocate from, plus
+                                         expansion room
+```
+
+Reads of a CoW fall through to the golden where nothing has been written, so
+**slot size does not govern golden read throughput** — the sealed member is
+contiguous in the pallet and is read directly. It governs copy-up: the first
+write into an untouched region costs one unit. Slot size is a format-time
+field, per pallet.
+
+Nothing about the sealed half changes. Firmware reads the superblock and the
+manifest off raw disk exactly as it does today, and the goldens it verifies are
+the same bytes they always were.
+
+### 2.7 A/B, per kind
+
+The unit of replacement differs by what is being replaced, because a pallet is
+the thing you copy whole:
+
+| kind | A/B at | why |
+|---|---|---|
+| `kernel` | **container** | several kernels live in one kernel pallet; a new one is a new container, and switching is not worth copying a pallet |
+| `system` | **pallet** | two pallets, `system1`/`system2`; the platform is replaced wholesale |
+| `vendor` | **pallet** | same shape as system |
+| `user` | one pallet | everything else — pulled images and customer data. It is never replaced wholesale, so there is nothing to alternate with, and an upgrade must leave it untouched |
+
+A kernel container is an ext4 volume holding `vmlinuz`, `initramfs` and
+`cmdline` as files — the bootloader already reads ext4, and stormblock writes
+those files into a volume with no mount, no loop device and no attach
+(`src/fs/files.rs`). Changing a kernel command line is therefore one small file
+write into that container's CoW: it touches one allocation unit and leaves the
+kernel and initramfs untouched in the golden.
+
+**Container-level A/B needs its own attributes**, because GPT attribute bits
+belong to a partition and containers do not have one. They are the same three
+fields the pallet already defines — `priority`, `tries`, `successful` — one row
+per container.
+
+**They cannot live in the sealed region.** A tries counter decrements on every
+boot attempt, and both the member table and the superblock are covered by
+digests that a decrement would break. So the rows live in a **boot-state
+block** in the partition, outside `manifest_digest` and outside
+`superblock_crc`, written as two generation-alternating copies each with its
+own CRC — the same shape, and for the same reason, as the slab's own
+`volumes.dat`: a node that loses power mid-decrement must not lose the ladder.
+
+Selection is then two steps, and the second is the grub-like one: pick the
+pallet by its GPT attributes, then pick the container by its row — highest
+priority with tries left. The chosen container's CoW is what gets published,
+and what the kernel and command line are read out of.
+
+**Boot state is per node, not per copy.** `copy_pallet` resets the block: a
+pallet arriving on another drive or another node starts with full tries and
+nothing marked successful, rather than inheriting a counter that meant
+something somewhere else.
+
+### 2.8 Trust chain
 
 ```
 GPT entry            type + name + attributes   (integrity: GPT CRCs)

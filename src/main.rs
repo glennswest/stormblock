@@ -1315,6 +1315,18 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
                         _ => p.name.clone(),
                     }
                 );
+                for v in &p.volumes {
+                    println!(
+                        "      {:<12} {:>10} {:>10} mapped  {}",
+                        v.name,
+                        stormblock::mgmt::config::human_size(v.size_bytes),
+                        stormblock::mgmt::config::human_size(v.allocated_bytes),
+                        match v.clone_of {
+                            Some(g) => format!("clone of {g}"),
+                            None => "golden".to_string(),
+                        }
+                    );
+                }
             }
 
             if format != ImageFormat::Raw {
@@ -1379,6 +1391,25 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
                     p.member_count,
                     if p.is_readable() { "" } else { " UNREADABLE" }
                 );
+            }
+            for s in stormblock::image::build::slabs_in(path).await.map_err(ie)? {
+                println!(
+                    "  slab {} — {} slots of {}, {} free{}",
+                    s.name,
+                    s.total_slots,
+                    stormblock::mgmt::config::human_size(s.slot_size),
+                    s.free_slots,
+                    if s.self_describing { "" } else { " (keeps no volume metadata)" }
+                );
+                for v in &s.volumes {
+                    println!(
+                        "    volume {:<24} {:>10} {:>10} mapped  {}",
+                        v.name,
+                        stormblock::mgmt::config::human_size(v.size_bytes),
+                        stormblock::mgmt::config::human_size(v.allocated_bytes),
+                        v.id
+                    );
+                }
             }
         }
     }

@@ -835,6 +835,76 @@ pub async fn pallets_in(image: &Path) -> Result<Vec<crate::pallet::PalletLocatio
     Ok(store.scan().await)
 }
 
+/// What a slab partition in an existing image holds, according to the slab
+/// itself.
+#[derive(Debug, Clone, Serialize)]
+pub struct SlabContents {
+    pub index: usize,
+    pub name: String,
+    pub start_bytes: u64,
+    pub size_bytes: u64,
+    pub slot_size: u64,
+    pub total_slots: u64,
+    pub free_slots: u64,
+    /// False for a slab with nowhere to keep its own volumes.dat — the volume
+    /// list is then empty because there is none to read, not because the slab
+    /// is empty.
+    pub self_describing: bool,
+    pub volumes: Vec<VolumeReport>,
+}
+
+/// Every slab in an image, and the volumes each one says it holds.
+pub async fn slabs_in(image: &Path) -> Result<Vec<SlabContents>> {
+    let dev: Arc<dyn BlockDevice> = Arc::new(
+        FileDevice::open(
+            image
+                .to_str()
+                .ok_or_else(|| ImageError::Spec("path is not UTF-8".into()))?,
+        )
+        .await?,
+    );
+    let gpt = Gpt::read(&dev).await?;
+    let mut out = Vec::new();
+    for (index, entry) in gpt.partitions() {
+        if entry.type_guid != type_guid::SLAB {
+            continue;
+        }
+        let start = entry.start_bytes(gpt.block_size);
+        let size = entry.size_bytes(gpt.block_size);
+        let part = Arc::new(PartitionDevice::new(dev.clone(), start, size)?);
+        let slab = Slab::open(part).await?;
+        let mut volumes = Vec::new();
+        if let Some(bytes) = slab.read_metadata().await? {
+            let meta = crate::volume::MetadataStore::decode(&bytes)
+                .map_err(|e| ImageError::Other(format!("slab volume metadata: {e}")))?;
+            for v in meta.volumes {
+                volumes.push(VolumeReport {
+                    id: v.id.0,
+                    name: v.name,
+                    size_bytes: v.virtual_size,
+                    allocated_bytes: v.extents.len() as u64 * meta.extent_size,
+                    // Which CoW came from which golden is not in this record —
+                    // a CoW is a volume like any other once it exists.
+                    clone_of: None,
+                });
+            }
+            volumes.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        out.push(SlabContents {
+            index,
+            name: entry.name.clone(),
+            start_bytes: start,
+            size_bytes: size,
+            slot_size: slab.slot_size(),
+            total_slots: slab.total_slots(),
+            free_slots: slab.free_slots(),
+            self_describing: slab.has_metadata_region(),
+            volumes,
+        });
+    }
+    Ok(out)
+}
+
 /// The GPT of an existing image, for the same reason.
 pub async fn table_of(image: &Path) -> Result<Gpt> {
     let dev: Arc<dyn BlockDevice> = Arc::new(
