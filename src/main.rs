@@ -1848,7 +1848,31 @@ async fn handle_boot_local(
     use std::path::{Path, PathBuf};
     use stormblock::volume::MetadataStore;
 
-    // 1. Metadata: --meta, or the "meta" directory next to the first slab.
+    // 1. Open the slabs. A slab formatted by `image build` carries its own
+    //    volumes.dat, so opening it is also how the metadata is found — an
+    //    image has no filesystem to keep one in, and the "meta" directory
+    //    beside `/dev/sda4` is `/dev/meta`, which is nothing (#62).
+    for path in slab_paths {
+        // FileDevice::open would create a missing path as an empty file and
+        // die later with a misleading "bad slab magic" — name the real
+        // problem (storage driver not loaded / wrong device) instead (#14).
+        if !Path::new(path).exists() {
+            anyhow::bail!(
+                "slab device {path} does not exist — storage driver not loaded or wrong path?"
+            );
+        }
+    }
+    let mut slabs = Vec::with_capacity(slab_paths.len());
+    for path in slab_paths {
+        let dev = stormblock::drive::filedev::FileDevice::open(path).await?;
+        let slab = Slab::open(Arc::new(dev))
+            .await
+            .map_err(|e| anyhow::anyhow!("open slab {path}: {e}"))?;
+        slabs.push(slab);
+    }
+
+    // 2. Metadata: an explicit --meta wins, then the slab's own copy, then
+    //    the "meta" directory beside the first slab.
     let meta_dir: PathBuf = match meta {
         Some(m) => PathBuf::from(m),
         None => Path::new(&slab_paths[0])
@@ -1856,13 +1880,33 @@ async fn handle_boot_local(
             .unwrap_or_else(|| Path::new("."))
             .join("meta"),
     };
-    let store = MetadataStore::new(meta_dir.clone())?;
-    if !store.exists() {
-        anyhow::bail!("no volume metadata (volumes.dat) in {}", meta_dir.display());
-    }
-    let metadata = store.load()?;
+    let embedded = match meta {
+        Some(_) => None,
+        None => slabs[0]
+            .read_metadata()
+            .await
+            .map_err(|e| anyhow::anyhow!("read slab metadata from {}: {e}", slab_paths[0]))?,
+    };
+    let (metadata, source) = match embedded {
+        Some(bytes) => (
+            MetadataStore::decode(&bytes)?,
+            format!("slab {}", slab_paths[0]),
+        ),
+        None => {
+            let store = MetadataStore::new(meta_dir.clone())?;
+            if !store.exists() {
+                anyhow::bail!(
+                    "no volume metadata: slab {} carries none and there is no volumes.dat in {}",
+                    slab_paths[0],
+                    meta_dir.display()
+                );
+            }
+            (store.load()?, meta_dir.display().to_string())
+        }
+    };
+    println!("Volume metadata from {source}");
     if metadata.arrays.is_empty() {
-        anyhow::bail!("metadata in {} records no arrays", meta_dir.display());
+        anyhow::bail!("metadata from {source} records no arrays");
     }
     if slab_paths.len() > metadata.arrays.len() {
         anyhow::bail!(
@@ -1872,22 +1916,25 @@ async fn handle_boot_local(
         );
     }
 
-    // 2. Attach slabs non-destructively (no reformat) and restore volumes.
-    let mut mgr = VolumeManager::with_data_dir(metadata.extent_size, meta_dir.clone())?;
-    for (path, rec) in slab_paths.iter().zip(&metadata.arrays) {
-        // FileDevice::open would create a missing path as an empty file and
-        // die later with a misleading "bad slab magic" — name the real
-        // problem (storage driver not loaded / wrong device) instead (#14).
-        if !Path::new(path).exists() {
-            anyhow::bail!(
-                "slab device {path} does not exist — storage driver not loaded or wrong path?"
-            );
+    // 3. Attach the slabs non-destructively (no reformat) and restore volumes.
+    //    Runtime changes go back where the metadata came from.
+    let mut mgr = if source.starts_with("slab ") {
+        VolumeManager::new(metadata.extent_size)
+    } else {
+        VolumeManager::with_data_dir(metadata.extent_size, meta_dir.clone())?
+    };
+    let mut metadata_slab = None;
+    for ((path, rec), slab) in slab_paths.iter().zip(&metadata.arrays).zip(slabs) {
+        if metadata_slab.is_none() && slab.has_metadata_region() {
+            metadata_slab = Some(slab.slab_id());
         }
-        let dev = stormblock::drive::filedev::FileDevice::open(path).await?;
-        mgr.open_backing_device(rec.array_id, Arc::new(dev))
+        mgr.attach_slab(rec.array_id, slab)
             .await
             .map_err(|e| anyhow::anyhow!("attach slab {path}: {e}"))?;
         println!("Attached slab {path} (array {})", rec.array_id);
+    }
+    if let Some(id) = metadata_slab {
+        mgr.persist_to_slab(id);
     }
     mgr.restore().await?;
 

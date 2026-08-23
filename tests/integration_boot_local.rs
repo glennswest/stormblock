@@ -131,10 +131,31 @@ async fn boot_local_rejects_unknown_volume_and_missing_meta() {
     // The error must name what IS there, for debuggability at 3am in an initramfs.
     assert!(text.contains("boot-machine-c"), "no volume inventory:\n{text}");
 
+    // A file that is not a slab at all: say so, rather than blaming the
+    // metadata for a device that was never formatted.
     let empty = TempDir::new().unwrap();
     let orphan = empty.path().join("orphan.slab");
     std::fs::write(&orphan, vec![0u8; 1024 * 1024]).unwrap();
     let (ok, text) = run_boot_local(&["--slab", orphan.to_str().unwrap(), "--volume", "x"]);
     assert!(!ok);
+    assert!(text.contains("bad slab magic"), "orphan-slab error unclear:\n{text}");
+
+    // A real slab with nothing to say about itself, and no directory beside
+    // it either — the error has to name both places that were looked in.
+    let bare_dir = TempDir::new().unwrap();
+    let bare = bare_dir.path().join("bare.slab");
+    let dev = FileDevice::open_with_capacity(bare.to_str().unwrap(), 8 * 1024 * 1024)
+        .await
+        .unwrap();
+    stormblock::drive::slab::Slab::format(
+        Arc::new(dev),
+        SLOT,
+        stormblock::placement::topology::StorageTier::Hot,
+    )
+    .await
+    .unwrap();
+    let (ok, text) = run_boot_local(&["--slab", bare.to_str().unwrap(), "--volume", "x"]);
+    assert!(!ok);
     assert!(text.contains("volumes.dat"), "missing-meta error unclear:\n{text}");
+    assert!(text.contains("carries none"), "missing-meta error unclear:\n{text}");
 }

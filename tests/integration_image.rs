@@ -221,3 +221,201 @@ async fn an_iso_carries_the_partitions_and_a_gpt_over_them() {
     let gpt = stormblock::image::build::table_of(&with_slab).await.unwrap();
     assert_eq!(gpt.partitions().count(), 3);
 }
+
+// ------------------------------------------------------- goldens in the slab
+
+/// The image that *is* a node rather than one that merely contains it (#62):
+/// the goldens land in the slab, each has a first clone, and the slab says so
+/// itself — there is no filesystem in an image to keep `volumes.dat` in.
+#[tokio::test]
+async fn the_slab_ships_with_goldens_and_a_first_clone_of_each() {
+    use std::sync::Arc;
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::partition::PartitionDevice;
+    use stormblock::drive::slab::Slab;
+    use stormblock::drive::BlockDevice;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::VolumeManager;
+
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+
+    // A golden with a hole in the middle: a filesystem image is mostly holes,
+    // and writing them would cost the slab a slot per hole.
+    let mut rootfs = vec![0u8; 6 * 1024 * 1024];
+    rootfs[..1024].fill(0xAB);
+    rootfs[5 * 1024 * 1024..5 * 1024 * 1024 + 1024].fill(0xCD);
+    write(tmp.path(), "rootfs.img", &rootfs);
+    write(tmp.path(), "config.img", &vec![0x42; 512 * 1024]);
+
+    let extra = format!(
+        r#"
+[[pallet]]
+name = "system1"
+kind = "system"
+version = 1
+members = [
+  {{ name = "stormpump", role = "rootfs", file = "{rootfs}" }},
+]
+
+[slab]
+size = "rest"
+tier = "hot"
+
+  [[slab.golden]]
+  name = "stormpump"
+  from = "pallet:system1/stormpump"
+
+  [[slab.golden]]
+  name = "stormpump-config"
+  file = "{config}"
+"#,
+        rootfs = tmp.path().join("rootfs.img").display(),
+        config = tmp.path().join("config.img").display(),
+    );
+    let mut toml = spec_toml(tmp.path(), &extra);
+    toml = toml.replace("size = \"192M\"", "size = \"320M\"");
+    let spec = ImageSpec::from_toml(&toml).unwrap();
+    let out = tmp.path().join("node.img");
+    let report = ImageBuilder::new(spec).build(&out).await.expect("build");
+
+    let slab_part = report
+        .partitions
+        .iter()
+        .find(|p| p.kind == "slab")
+        .expect("a slab partition");
+
+    // Two goldens, two clones, named so a kernel cmdline can ask for the clone.
+    let names: Vec<&str> = slab_part.volumes.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "stormpump.golden",
+            "stormpump",
+            "stormpump-config.golden",
+            "stormpump-config"
+        ],
+        "{:#?}",
+        slab_part.volumes
+    );
+
+    let golden = &slab_part.volumes[0];
+    let clone = &slab_part.volumes[1];
+    assert_eq!(clone.clone_of, Some(golden.id));
+    // The hole is not stored: 6 MiB of content, two 1 MiB slots of data.
+    assert_eq!(golden.size_bytes, 6 * 1024 * 1024);
+    assert_eq!(golden.allocated_bytes, 2 * 1024 * 1024, "holes were written");
+    // The clone maps the same extents and shares every slot with the golden,
+    // so it costs the slab nothing until it writes.
+    assert_eq!(clone.allocated_bytes, golden.allocated_bytes);
+
+    // Now read the image back the way a boot does: open the slab partition,
+    // take the volume metadata *out of the slab*, and read the clone.
+    let dev: Arc<dyn BlockDevice> =
+        Arc::new(FileDevice::open(out.to_str().unwrap()).await.unwrap());
+    let part = Arc::new(
+        PartitionDevice::new(dev, slab_part.start_bytes, slab_part.size_bytes).unwrap(),
+    );
+    let slab = Slab::open(part).await.unwrap();
+    assert!(slab.has_metadata_region());
+    let slab_id = slab.slab_id();
+    let slot_size = slab.slot_size();
+
+    let mut mgr = VolumeManager::new(slot_size);
+    mgr.persist_to_slab(slab_id);
+    mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab)
+        .await
+        .unwrap();
+    mgr.restore().await.expect("metadata restores from the slab itself");
+
+    let restored = mgr.list_volumes().await;
+    assert_eq!(restored.len(), 4, "{restored:#?}");
+    let (clone_id, _, size, _) = restored
+        .iter()
+        .find(|(_, n, _, _)| n == "stormpump")
+        .expect("the clone the cmdline names")
+        .clone();
+    assert_eq!(size, 6 * 1024 * 1024);
+
+    // The clone reads the golden's content, holes and all.
+    let vol = mgr.get_volume(&clone_id).unwrap();
+    let mut buf = vec![0u8; 4096];
+    vol.read(0, &mut buf).await.unwrap();
+    assert!(buf[..1024].iter().all(|&b| b == 0xAB), "clone lost the head");
+    assert!(buf[1024..].iter().all(|&b| b == 0), "clone invented data");
+    vol.read(5 * 1024 * 1024, &mut buf).await.unwrap();
+    assert!(buf[..1024].iter().all(|&b| b == 0xCD), "clone lost the tail");
+    vol.read(3 * 1024 * 1024, &mut buf).await.unwrap();
+    assert!(buf.iter().all(|&b| b == 0), "the hole came back as data");
+
+    // …and it is writable, diverging from the golden rather than editing it.
+    vol.write(0, &vec![0x11; 4096]).await.unwrap();
+    vol.flush().await.unwrap();
+    let golden_id = restored
+        .iter()
+        .find(|(_, n, _, _)| n == "stormpump.golden")
+        .map(|(id, ..)| *id)
+        .unwrap();
+    let gvol = mgr.get_volume(&golden_id).unwrap();
+    gvol.read(0, &mut buf).await.unwrap();
+    assert!(buf[..1024].iter().all(|&b| b == 0xAB), "the golden was written through");
+}
+
+/// The same image, through the binary the initramfs actually runs: a slab
+/// path and a volume name, no metadata directory anywhere.
+#[tokio::test]
+async fn boot_local_resolves_a_shipped_clone_with_no_meta_directory() {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::process::Command;
+
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+    write(tmp.path(), "rootfs.img", &vec![0x7E; 2 * 1024 * 1024]);
+
+    let extra = format!(
+        r#"
+[slab]
+size = "rest"
+tier = "hot"
+
+  [[slab.golden]]
+  name = "stormpump"
+  file = "{rootfs}"
+  clone = "stormpump"
+"#,
+        rootfs = tmp.path().join("rootfs.img").display(),
+    );
+    let spec = ImageSpec::from_toml(&spec_toml(tmp.path(), &extra)).unwrap();
+    let out = tmp.path().join("node.img");
+    let report = ImageBuilder::new(spec).build(&out).await.expect("build");
+    let slab_part = report.partitions.iter().find(|p| p.kind == "slab").unwrap();
+
+    // Carve the slab partition out, the way the kernel presents /dev/sda4.
+    let slab_file = tmp.path().join("sda4");
+    let mut src = std::fs::File::open(&out).unwrap();
+    src.seek(SeekFrom::Start(slab_part.start_bytes)).unwrap();
+    let mut bytes = vec![0u8; slab_part.size_bytes as usize];
+    src.read_exact(&mut bytes).unwrap();
+    std::fs::write(&slab_file, &bytes).unwrap();
+
+    let cmd = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+        .args([
+            "boot-local",
+            "--slab",
+            slab_file.to_str().unwrap(),
+            "--volume",
+            "stormpump",
+            "--check",
+        ])
+        .output()
+        .expect("spawn stormblock boot-local");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&cmd.stdout),
+        String::from_utf8_lossy(&cmd.stderr)
+    );
+    assert!(cmd.status.success(), "boot-local must resolve the clone:\n{text}");
+    assert!(text.contains("Volume metadata from slab"), "{text}");
+    assert!(text.contains("Boot volume: stormpump"), "{text}");
+    assert!(text.contains("/dev/ublkb0"), "{text}");
+}

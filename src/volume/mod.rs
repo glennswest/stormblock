@@ -45,6 +45,10 @@ pub struct VolumeManager {
     array_slabs: HashMap<RaidArrayId, SlabId>,
     slot_size: u64,
     metadata_store: Option<MetadataStore>,
+    /// Slab that keeps this manager's `volumes.dat` inside itself. Set where
+    /// there is no filesystem to keep it in — an image, an appliance disk —
+    /// so the slab is the whole record of what it holds.
+    metadata_slab: Option<SlabId>,
 }
 
 impl VolumeManager {
@@ -60,6 +64,7 @@ impl VolumeManager {
             array_slabs: HashMap::new(),
             slot_size,
             metadata_store: None,
+            metadata_slab: None,
         }
     }
 
@@ -73,7 +78,24 @@ impl VolumeManager {
             array_slabs: HashMap::new(),
             slot_size,
             metadata_store: Some(store),
+            metadata_slab: None,
         })
+    }
+
+    /// Keep volume metadata inside `slab_id` instead of (or as well as) a
+    /// data directory.
+    ///
+    /// This is what makes a slab self-describing: the extent maps, the volume
+    /// names and the sizes travel with the storage rather than beside it.
+    /// An image has nowhere else to put them — there is no filesystem in the
+    /// picture until the volume this record names has been exported.
+    pub fn persist_to_slab(&mut self, slab_id: SlabId) {
+        self.metadata_slab = Some(slab_id);
+    }
+
+    /// Which slab, if any, this manager writes its metadata into.
+    pub fn metadata_slab(&self) -> Option<SlabId> {
+        self.metadata_slab
     }
 
     /// Register a RAID array as a backing device for volumes.
@@ -123,6 +145,19 @@ impl VolumeManager {
         device: Arc<dyn BlockDevice>,
     ) -> Result<(), VolumeError> {
         let slab = Slab::open(device).await.map_err(VolumeError::Drive)?;
+        self.attach_slab(array_id, slab).await
+    }
+
+    /// Register an already-open slab under `array_id`.
+    ///
+    /// The half of `open_backing_device` that does not re-read the device —
+    /// a caller that opened the slab to read its embedded metadata already
+    /// holds it, and opening it twice would read the whole slot table again.
+    pub async fn attach_slab(
+        &mut self,
+        array_id: RaidArrayId,
+        slab: Slab,
+    ) -> Result<(), VolumeError> {
         if slab.slot_size() != self.slot_size {
             return Err(VolumeError::InvalidSize(format!(
                 "slab slot size {} does not match manager slot size {}",
@@ -398,11 +433,56 @@ impl VolumeManager {
     /// COW snapshot's shared slots are recorded under the original writer,
     /// so without this file a snapshot reads as zeros after reattach (#13).
     pub async fn persist(&self) {
-        let store = match &self.metadata_store {
-            Some(s) => s,
-            None => return,
-        };
+        if self.metadata_store.is_none() && self.metadata_slab.is_none() {
+            return;
+        }
+        let meta = self.snapshot_metadata().await;
 
+        if let Some(store) = &self.metadata_store {
+            if let Err(e) = store.save(&meta) {
+                tracing::warn!("Volume metadata persist failed: {e}");
+            }
+        }
+
+        if let Some(slab_id) = self.metadata_slab {
+            match MetadataStore::encode(&meta) {
+                Ok(bytes) => {
+                    let reg = self.registry.read().await;
+                    match reg.get(&slab_id) {
+                        Some(slab) => {
+                            if let Err(e) = slab.write_metadata(&bytes).await {
+                                tracing::warn!("Slab metadata persist failed: {e}");
+                            }
+                        }
+                        None => tracing::warn!(
+                            "Slab metadata persist failed: slab {} is not attached",
+                            slab_id.0
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!("Slab metadata encode failed: {e}"),
+            }
+        }
+    }
+
+    /// The metadata the metadata slab carries, if it carries any.
+    async fn load_slab_metadata(&self) -> anyhow::Result<Option<metadata::VolumeMetadata>> {
+        let Some(slab_id) = self.metadata_slab else {
+            return Ok(None);
+        };
+        let reg = self.registry.read().await;
+        let slab = reg
+            .get(&slab_id)
+            .ok_or_else(|| anyhow::anyhow!("metadata slab {} is not attached", slab_id.0))?;
+        match slab.read_metadata().await? {
+            Some(bytes) => Ok(Some(MetadataStore::decode(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The record every persist path writes: volumes, their sizes, and the
+    /// extent maps the slot tables cannot reconstruct.
+    async fn snapshot_metadata(&self) -> metadata::VolumeMetadata {
         // Gather per-volume info before taking gem/registry locks so we never
         // hold them across a volume-handle await (I/O paths lock the volume
         // first, then gem/registry).
@@ -411,58 +491,81 @@ impl VolumeManager {
             vol_info.push((*id, handle.name().await, handle.capacity_bytes()));
         }
 
-        let meta = {
-            let gem = self.gem.read().await;
-            let reg = self.registry.read().await;
-            let arrays = self
-                .array_slabs
-                .iter()
-                .map(|(array_id, slab_id)| metadata::ArrayRecord {
-                    array_id: *array_id,
-                    total_capacity: reg
-                        .get(slab_id)
-                        .map(|s| s.total_slots() * s.slot_size())
-                        .unwrap_or(0),
-                })
-                .collect();
-            let volumes = vol_info
-                .into_iter()
-                .map(|(id, name, virtual_size)| metadata::VolumeRecord {
-                    id,
-                    name,
-                    virtual_size,
-                    array_id: None,
-                    extents: gem
-                        .get_volume_map(&id)
-                        .map(|m| m.extents.clone())
-                        .unwrap_or_default(),
-                })
-                .collect();
-            metadata::VolumeMetadata {
-                extent_size: self.slot_size,
-                arrays,
-                volumes,
-            }
-        };
-
-        if let Err(e) = store.save(&meta) {
-            tracing::warn!("Volume metadata persist failed: {e}");
+        let gem = self.gem.read().await;
+        let reg = self.registry.read().await;
+        let arrays = self
+            .array_slabs
+            .iter()
+            .map(|(array_id, slab_id)| metadata::ArrayRecord {
+                array_id: *array_id,
+                total_capacity: reg
+                    .get(slab_id)
+                    .map(|s| s.total_slots() * s.slot_size())
+                    .unwrap_or(0),
+            })
+            .collect();
+        let volumes = vol_info
+            .into_iter()
+            .map(|(id, name, virtual_size)| metadata::VolumeRecord {
+                id,
+                name,
+                virtual_size,
+                array_id: None,
+                extents: gem
+                    .get_volume_map(&id)
+                    .map(|m| m.extents.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        metadata::VolumeMetadata {
+            extent_size: self.slot_size,
+            arrays,
+            volumes,
         }
+    }
+
+    /// Persist, reporting what a background persist only logs.
+    ///
+    /// The image builder is not a running node: a metadata write that fails
+    /// there produces an image that cannot boot, so it has to fail the build
+    /// rather than warn into a log nobody reads.
+    pub async fn persist_checked(&self) -> anyhow::Result<()> {
+        let meta = self.snapshot_metadata().await;
+        if let Some(store) = &self.metadata_store {
+            store.save(&meta)?;
+        }
+        if let Some(slab_id) = self.metadata_slab {
+            let bytes = MetadataStore::encode(&meta)?;
+            let reg = self.registry.read().await;
+            let slab = reg
+                .get(&slab_id)
+                .ok_or_else(|| anyhow::anyhow!("slab {} is not attached", slab_id.0))?;
+            slab.write_metadata(&bytes).await?;
+        }
+        Ok(())
     }
 
     /// Restore volumes from persisted metadata. No-op if no data_dir or no metadata file.
     pub async fn restore(&mut self) -> anyhow::Result<()> {
-        let store = match &self.metadata_store {
-            Some(s) => s,
-            None => return Ok(()),
+        // A data directory wins where there is one: it is the record a running
+        // node has been updating. The slab's own copy is the fallback for a
+        // node that has no filesystem to keep one in.
+        let from_dir = match &self.metadata_store {
+            Some(s) if s.exists() => Some(s.load()?),
+            _ => None,
         };
-
-        if !store.exists() {
-            tracing::info!("No persisted metadata found, starting fresh");
-            return Ok(());
-        }
-
-        let meta = store.load()?;
+        let meta = match from_dir {
+            Some(m) => m,
+            None => match self.load_slab_metadata().await? {
+                Some(m) => m,
+                None => {
+                    if self.metadata_store.is_some() || self.metadata_slab.is_some() {
+                        tracing::info!("No persisted metadata found, starting fresh");
+                    }
+                    return Ok(());
+                }
+            },
+        };
 
         // Rebuild GEM from slab slot tables — authoritative for owned and
         // COW'd slots (written at allocation time, so always at least as new

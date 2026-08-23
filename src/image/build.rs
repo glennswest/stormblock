@@ -6,6 +6,7 @@
 //! sequence. It is worth being predictable here: an image is often read by
 //! something that was told where to look.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use uuid::Uuid;
 
 use crate::drive::filedev::FileDevice;
 use crate::drive::partition::PartitionDevice;
-use crate::drive::slab::{Slab, DEFAULT_SLOT_SIZE};
+use crate::drive::slab::{auto_metadata_bytes, Slab, SlabFormat, DEFAULT_SLOT_SIZE};
 use crate::drive::BlockDevice;
 use crate::mgmt::config::parse_size;
 use crate::pallet::format::{parse_member_kind, parse_pallet_kind, MemberKind, PalletKind};
@@ -23,8 +24,10 @@ use crate::pallet::{
     BytesContent, Gpt, MemberSpec, PalletManager, PalletStore, PartitionView, PALLET_TYPE_GUID,
 };
 use crate::placement::topology::StorageTier;
+use crate::raid::RaidArrayId;
+use crate::volume::{VolumeId, VolumeManager};
 
-use super::{type_guid, EspSpec, ImageError, ImageSpec, MemberEntry, PalletEntry, Result};
+use super::{type_guid, EspSpec, GoldenSpec, ImageError, ImageSpec, MemberEntry, PalletEntry, Result};
 
 /// Partitions are 1 MiB aligned, as everywhere else.
 const ALIGN: u64 = 1024 * 1024;
@@ -47,7 +50,7 @@ pub struct BuildReport {
     pub partitions: Vec<PartitionReport>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PartitionReport {
     pub index: usize,
     pub name: String,
@@ -60,6 +63,25 @@ pub struct PartitionReport {
     pub pallet_version: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified: Option<bool>,
+    /// Volumes laid down in a slab partition: a golden and its first clone
+    /// for every `[[slab.golden]]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<VolumeReport>,
+}
+
+/// A volume the build created in the slab.
+#[derive(Debug, Clone, Serialize)]
+pub struct VolumeReport {
+    pub id: Uuid,
+    pub name: String,
+    pub size_bytes: u64,
+    /// Bytes mapped to slab slots. A fresh clone maps exactly what its golden
+    /// maps and shares every slot with it, so this is what the volume can
+    /// read, not what it costs the slab.
+    pub allocated_bytes: u64,
+    /// The golden this volume was cloned from, when it is a clone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clone_of: Option<Uuid>,
 }
 
 /// Builds an image from a spec.
@@ -234,6 +256,7 @@ impl ImageBuilder {
                 pallet_id: None,
                 pallet_version: None,
                 verified: None,
+                volumes: Vec::new(),
             });
         }
 
@@ -279,6 +302,7 @@ impl ImageBuilder {
                         pallet_id: Some(loc.id),
                         pallet_version: Some(loc.version),
                         verified: Some(verdict.ok),
+                        volumes: Vec::new(),
                     });
                     if !verdict.ok {
                         return Err(ImageError::Other(format!(
@@ -331,6 +355,7 @@ impl ImageBuilder {
                 pallet_id: None,
                 pallet_version: None,
                 verified: None,
+                volumes: Vec::new(),
             });
         }
 
@@ -357,7 +382,20 @@ impl ImageBuilder {
                 .map(parse_tier)
                 .transpose()?
                 .unwrap_or(StorageTier::Hot);
-            Slab::format(part, slab.slot_size.unwrap_or(DEFAULT_SLOT_SIZE), tier).await?;
+            let slot_size = slab.slot_size.unwrap_or(DEFAULT_SLOT_SIZE);
+            // The slab keeps its own volumes.dat: an image has no filesystem
+            // to keep one in, and a slab whose contents are only described
+            // somewhere else is a slab that boots to "no volume metadata".
+            let meta_bytes = match size_of(&slab.meta_size)? {
+                Some(b) => b,
+                None => auto_metadata_bytes(len, slot_size),
+            };
+            let formatted = Slab::format_with(
+                part,
+                SlabFormat::new(slot_size, tier).with_metadata(meta_bytes),
+            )
+            .await?;
+            let volumes = self.fill_slab(&device, formatted, &slab.goldens).await?;
             report.partitions.push(PartitionReport {
                 index: slot,
                 name,
@@ -367,11 +405,180 @@ impl ImageBuilder {
                 pallet_id: None,
                 pallet_version: None,
                 verified: None,
+                volumes,
             });
         }
 
         device.flush().await?;
         Ok(report)
+    }
+
+    /// Lay the goldens into the freshly formatted slab, take the first clone
+    /// of each, and leave the slab describing itself.
+    ///
+    /// The clones are what the node runs from; a golden is never used
+    /// directly. That is what makes the upgrade story work — publishing a new
+    /// system pallet beside the old one and taking a first clone is the whole
+    /// of it, and the previous clone is still there because nothing was
+    /// overwritten (#62).
+    async fn fill_slab(
+        &self,
+        device: &Arc<dyn BlockDevice>,
+        slab: Slab,
+        goldens: &[GoldenSpec],
+    ) -> Result<Vec<VolumeReport>> {
+        let slab_id = slab.slab_id();
+        let slot_size = slab.slot_size();
+        let free_bytes = slab.free_slots() * slot_size;
+
+        let mut mgr = VolumeManager::new(slot_size);
+        mgr.attach_slab(RaidArrayId(Uuid::new_v4()), slab)
+            .await
+            .map_err(|e| ImageError::Other(format!("attach slab: {e}")))?;
+        mgr.persist_to_slab(slab_id);
+
+        let mut pallets: Option<PalletStore> = None;
+        let mut taken: HashSet<String> = HashSet::new();
+        let mut pairs: Vec<(VolumeId, VolumeId)> = Vec::new();
+        let mut need = 0u64;
+
+        for g in goldens {
+            let golden_name = g
+                .golden_name
+                .clone()
+                .unwrap_or_else(|| format!("{}.golden", g.name));
+            let clone_name = g.clone.clone().unwrap_or_else(|| g.name.clone());
+            for n in [&golden_name, &clone_name] {
+                if !taken.insert(n.clone()) {
+                    return Err(ImageError::Spec(format!(
+                        "two volumes in the slab would both be called '{n}'; a boot resolves a \
+                         volume by name, so the names have to be distinct"
+                    )));
+                }
+            }
+
+            let mut source = self.golden_source(device, g, &mut pallets).await?;
+            let content = source.byte_len();
+            let size = match size_of(&g.size)? {
+                Some(s) => s,
+                None => align_up(content, slot_size),
+            };
+            if size < content {
+                return Err(ImageError::Spec(format!(
+                    "golden '{}' is {content} bytes and its `size` is {size}",
+                    g.name
+                )));
+            }
+            need += align_up(content, slot_size);
+            if need > free_bytes {
+                return Err(ImageError::TooSmall { need, have: free_bytes });
+            }
+
+            let golden_id = mgr
+                .create_volume_any(&golden_name, size)
+                .await
+                .map_err(|e| ImageError::Other(format!("create golden '{golden_name}': {e}")))?;
+            let vol = mgr
+                .get_volume(&golden_id)
+                .ok_or_else(|| ImageError::Other("golden vanished after create".into()))?;
+            source.write_into(&vol, slot_size as usize).await?;
+            vol.flush().await?;
+
+            let clone_id = mgr
+                .create_snapshot(golden_id, &clone_name)
+                .await
+                .map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
+            pairs.push((golden_id, clone_id));
+        }
+
+        // Write volumes.dat into the slab. A failure here is the build's, not
+        // a warning in a log: an image whose slab cannot say what is in it is
+        // an image that drops to a shell.
+        mgr.persist_checked()
+            .await
+            .map_err(|e| ImageError::Other(format!("slab metadata: {e}")))?;
+
+        let clone_of: std::collections::HashMap<VolumeId, VolumeId> =
+            pairs.iter().map(|(g, c)| (*c, *g)).collect();
+        let order: Vec<VolumeId> = pairs.iter().flat_map(|(g, c)| [*g, *c]).collect();
+        let listed = mgr.list_volumes().await;
+        let mut out = Vec::with_capacity(listed.len());
+        for id in order {
+            if let Some((_, name, size, allocated)) = listed.iter().find(|(i, ..)| *i == id) {
+                out.push(VolumeReport {
+                    id: id.0,
+                    name: name.clone(),
+                    size_bytes: *size,
+                    allocated_bytes: *allocated,
+                    clone_of: clone_of.get(&id).map(|g| g.0),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Where a golden's content comes from: a file, or a member of a pallet
+    /// this image already carries.
+    async fn golden_source(
+        &self,
+        device: &Arc<dyn BlockDevice>,
+        g: &GoldenSpec,
+        pallets: &mut Option<PalletStore>,
+    ) -> Result<GoldenSource> {
+        let from = match (&g.file, &g.from) {
+            (Some(f), _) => return GoldenSource::open_file(f).await,
+            (None, Some(from)) => from.clone(),
+            (None, None) => {
+                return Err(ImageError::Spec(format!(
+                    "golden '{}' has neither `from` nor `file`",
+                    g.name
+                )))
+            }
+        };
+
+        let Some(rest) = from.strip_prefix("pallet:") else {
+            return GoldenSource::open_file(Path::new(&from)).await;
+        };
+        let (pallet_ref, member_name) = rest.split_once('/').ok_or_else(|| {
+            ImageError::Spec(format!(
+                "golden '{}': `{from}` should be pallet:<pallet>/<member>",
+                g.name
+            ))
+        })?;
+
+        if pallets.is_none() {
+            let mut store = PalletStore::default();
+            store.add_drive("image".to_string(), device.clone());
+            *pallets = Some(store);
+        }
+        let store = pallets.as_ref().expect("just filled");
+        let found = store.scan().await;
+        let by_id = Uuid::parse_str(pallet_ref).ok();
+        let mut matching: Vec<_> = found
+            .into_iter()
+            .filter(|p| match by_id {
+                Some(id) => p.id == id,
+                None => p.name == pallet_ref,
+            })
+            .collect();
+        // Several versions of a name: the newest is the one a fresh image
+        // means, and it is also the one selection would boot.
+        matching.sort_by_key(|p| std::cmp::Reverse(p.version));
+        let loc = matching.into_iter().next().ok_or_else(|| {
+            ImageError::Spec(format!(
+                "golden '{}': no pallet '{pallet_ref}' in this image",
+                g.name
+            ))
+        })?;
+        let view = store.view(&loc)?;
+        let pallet = store.open(&loc).await?;
+        let member = pallet.find(member_name).map_err(|_| {
+            ImageError::Spec(format!(
+                "golden '{}': pallet '{}' has no member '{member_name}'",
+                g.name, loc.name
+            ))
+        })?;
+        Ok(GoldenSource::Member { pallet: Box::new(pallet), view, member })
     }
 
     fn count_rest(&self) -> usize {
@@ -473,6 +680,73 @@ impl ImageBuilder {
             out.push(mgr.copy_pallet(loc.id, 0).await?.id);
         }
         Ok(out)
+    }
+}
+
+/// Content for a golden volume, wherever it comes from.
+enum GoldenSource {
+    File { file: tokio::fs::File, len: u64 },
+    Member {
+        pallet: Box<crate::pallet::Pallet>,
+        view: PartitionView,
+        member: crate::pallet::format::Member,
+    },
+}
+
+impl GoldenSource {
+    async fn open_file(path: &Path) -> Result<GoldenSource> {
+        let len = file_len(path).await?;
+        let file = tokio::fs::File::open(path).await.map_err(|e| {
+            ImageError::Spec(format!("golden content {}: {e}", path.display()))
+        })?;
+        Ok(GoldenSource::File { file, len })
+    }
+
+    fn byte_len(&self) -> u64 {
+        match self {
+            GoldenSource::File { len, .. } => *len,
+            GoldenSource::Member { member, .. } => member.byte_len,
+        }
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        match self {
+            // Read sequentially — `write_into` walks the content in order,
+            // and seeking per chunk would cost a syscall to go nowhere.
+            GoldenSource::File { file, .. } => {
+                use tokio::io::AsyncReadExt;
+                file.read_exact(buf).await?;
+                Ok(())
+            }
+            GoldenSource::Member { pallet, view, member } => {
+                pallet.read_member(member, view, offset, buf).await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Copy the content into a volume, skipping runs of zeros.
+    ///
+    /// A golden is a filesystem image and mostly holes; writing them would
+    /// allocate a slab slot per hole and cost the image the thin provisioning
+    /// it exists to have. Zero runs are measured a slot at a time, because a
+    /// slot is the unit that would be allocated.
+    async fn write_into(&mut self, vol: &Arc<dyn BlockDevice>, chunk: usize) -> Result<u64> {
+        let len = self.byte_len();
+        let chunk = chunk.clamp(4096, COPY_CHUNK);
+        let mut buf = vec![0u8; chunk];
+        let mut off = 0u64;
+        let mut written = 0u64;
+        while off < len {
+            let take = ((len - off) as usize).min(chunk);
+            self.read_at(off, &mut buf[..take]).await?;
+            if buf[..take].iter().any(|&b| b != 0) {
+                vol.write(off, &buf[..take]).await?;
+                written += take as u64;
+            }
+            off += take as u64;
+        }
+        Ok(written)
     }
 }
 

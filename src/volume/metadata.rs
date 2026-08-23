@@ -113,7 +113,11 @@ impl MetadataStore {
     }
 
     /// Serialize metadata into the binary envelope format.
-    fn encode(metadata: &VolumeMetadata) -> io::Result<Vec<u8>> {
+    ///
+    /// Public because the envelope — not the file — is the format. A slab
+    /// that carries its own metadata stores exactly these bytes, so there is
+    /// one encoder however the record is kept.
+    pub fn encode(metadata: &VolumeMetadata) -> io::Result<Vec<u8>> {
         let payload = bincode::serde::encode_to_vec(metadata, bincode::config::standard())
             .map_err(|e| io::Error::other(format!("bincode encode: {e}")))?;
 
@@ -139,7 +143,7 @@ impl MetadataStore {
     }
 
     /// Decode the binary envelope, verify magic + CRC, return payload.
-    fn decode(data: &[u8]) -> io::Result<VolumeMetadata> {
+    pub fn decode(data: &[u8]) -> io::Result<VolumeMetadata> {
         if data.len() < 32 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "metadata too short"));
         }

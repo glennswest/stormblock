@@ -192,6 +192,11 @@ pub struct RawPartition {
 }
 
 /// The mutable end of the image: a formatted slab, usually taking the rest.
+///
+/// An empty slab makes an image that *contains* a node; the goldens make one
+/// that *is* one. Each `[[slab.golden]]` lands an immutable golden volume in
+/// the slab and takes the first CoW clone of it, and the clone is what the
+/// node runs from — a golden is never used directly (#62).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlabPartition {
     #[serde(default)]
@@ -202,6 +207,38 @@ pub struct SlabPartition {
     pub slot_size: Option<u64>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Bytes reserved inside the slab for its own `volumes.dat`. Omit and the
+    /// builder sizes it from the slab; there is no filesystem in an image to
+    /// keep that record anywhere else.
+    #[serde(default)]
+    pub meta_size: Option<String>,
+    #[serde(default, rename = "golden")]
+    pub goldens: Vec<GoldenSpec>,
+}
+
+/// A golden volume in the slab, and the first clone taken of it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GoldenSpec {
+    /// Base name. The golden volume is `<name>.golden` unless `golden_name`
+    /// says otherwise, and the clone is `<name>` unless `clone` does.
+    pub name: String,
+    /// Where the content comes from: a path, or `pallet:<pallet>/<member>`
+    /// to take it from a pallet this image already carries.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// A file, spelled out. Equivalent to a `from` that is not a `pallet:`.
+    #[serde(default)]
+    pub file: Option<PathBuf>,
+    /// Name of the first clone. Defaults to `name` — this is what
+    /// `stormblock.volume=` on the kernel command line resolves to.
+    #[serde(default)]
+    pub clone: Option<String>,
+    /// Name of the golden itself. Defaults to `<name>.golden`.
+    #[serde(default)]
+    pub golden_name: Option<String>,
+    /// Volume size. Defaults to the content, rounded up to a slot.
+    #[serde(default)]
+    pub size: Option<String>,
 }
 
 impl ImageSpec {

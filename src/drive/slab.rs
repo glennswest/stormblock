@@ -31,6 +31,26 @@ const HEADER_SIZE: u64 = 4096;
 /// Slot entry size on disk (64 bytes).
 const SLOT_ENTRY_SIZE: u64 = 64;
 
+/// Magic for a copy of the slab's embedded volume metadata: "STRMVMET".
+pub const SLAB_META_MAGIC: [u8; 8] = *b"STRMVMET";
+
+/// Version of the embedded-metadata copy header.
+const SLAB_META_VERSION: u32 = 1;
+
+/// Bytes of copy header in front of an embedded metadata payload.
+const META_COPY_HEADER: u64 = 32;
+
+/// Each copy of the metadata region starts on a 4 KiB boundary.
+const META_ALIGN: u64 = 4096;
+
+/// How much metadata room an auto-sized region gets per slot, across both
+/// copies. An extent mapping costs ~45 bytes and a clone maps its source's
+/// extents again, so 256 bytes a slot leaves room for a golden plus a few
+/// dozen clones of it before the region has to be sized by hand.
+const META_BYTES_PER_SLOT: u64 = 256;
+const META_MIN: u64 = 64 * 1024;
+const META_MAX: u64 = 64 * 1024 * 1024;
+
 /// Unique identifier for a slab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SlabId(pub Uuid);
@@ -185,6 +205,14 @@ struct SlabHeader {
     update_time: u64,
     tier: StorageTier,
     flags: u8,
+    /// Byte offset of the embedded volume-metadata region, 0 when the slab
+    /// has none. Written into what v1 left reserved, so a slab formatted
+    /// before this reads as "no region" rather than as garbage, and a slab
+    /// with one still opens on older code — every other offset in the header
+    /// is absolute.
+    meta_offset: u64,
+    /// Size of that region, both copies together.
+    meta_size: u64,
     #[allow(dead_code)]
     checksum: u32,
 }
@@ -205,7 +233,10 @@ impl SlabHeader {
         buf[92..100].copy_from_slice(&self.update_time.to_le_bytes());
         buf[100] = self.tier as u8;
         buf[101] = self.flags;
-        // bytes 102..124 reserved
+        // bytes 102..104 pad
+        buf[104..112].copy_from_slice(&self.meta_offset.to_le_bytes());
+        buf[112..120].copy_from_slice(&self.meta_size.to_le_bytes());
+        // bytes 120..124 reserved
         let crc = crc32c::crc32c(&buf[..124]);
         buf[124..128].copy_from_slice(&crc.to_le_bytes());
         buf
@@ -253,6 +284,8 @@ impl SlabHeader {
             _ => StorageTier::Cold,
         };
         let flags = data[101];
+        let meta_offset = u64::from_le_bytes(data[104..112].try_into().unwrap());
+        let meta_size = u64::from_le_bytes(data[112..120].try_into().unwrap());
 
         Ok(SlabHeader {
             slab_uuid,
@@ -266,9 +299,55 @@ impl SlabHeader {
             update_time,
             tier,
             flags,
+            meta_offset,
+            meta_size,
             checksum: stored_crc,
         })
     }
+}
+
+/// What to reserve when formatting a slab.
+#[derive(Debug, Clone, Copy)]
+pub struct SlabFormat {
+    pub slot_size: u64,
+    pub tier: StorageTier,
+    /// Bytes reserved for the slab's own volume metadata, both copies
+    /// together. Zero — the default — formats a slab that is not
+    /// self-describing, which is right wherever a data directory holds
+    /// `volumes.dat` instead.
+    pub metadata_bytes: u64,
+}
+
+impl SlabFormat {
+    pub fn new(slot_size: u64, tier: StorageTier) -> Self {
+        SlabFormat { slot_size, tier, metadata_bytes: 0 }
+    }
+
+    /// Reserve an explicit number of bytes for embedded metadata.
+    pub fn with_metadata(mut self, bytes: u64) -> Self {
+        self.metadata_bytes = bytes;
+        self
+    }
+
+    /// Reserve a region sized from what the slab can hold.
+    pub fn with_auto_metadata(mut self, capacity: u64) -> Self {
+        self.metadata_bytes = auto_metadata_bytes(capacity, self.slot_size);
+        self
+    }
+}
+
+/// How large an auto-sized metadata region is for a device of this capacity.
+///
+/// Bounded on both ends: a small slab must not spend most of itself on a
+/// region it will never fill, and a very large one does not need a region
+/// that scales without limit.
+pub fn auto_metadata_bytes(capacity: u64, slot_size: u64) -> u64 {
+    let per_slot = SLOT_ENTRY_SIZE + slot_size.max(1);
+    let slots = capacity.saturating_sub(HEADER_SIZE) / per_slot;
+    let want = slots.saturating_mul(META_BYTES_PER_SLOT);
+    // Never more than an eighth of the device, so a small slab stays a slab.
+    let ceiling = (capacity / 8).clamp(2 * META_ALIGN, META_MAX);
+    align_up(want.clamp(META_MIN.min(ceiling), ceiling), 2 * META_ALIGN)
 }
 
 /// A slab manages a device as an extent store with fixed-size slots.
@@ -288,31 +367,47 @@ pub struct Slab {
 
 impl Slab {
     /// Format a device as a new slab.
+    ///
+    /// No embedded metadata region — see [`SlabFormat`] for a slab that
+    /// carries its own volume metadata.
     pub async fn format(
         device: Arc<dyn BlockDevice>,
         slot_size: u64,
         tier: StorageTier,
     ) -> DriveResult<Self> {
-        let capacity = device.capacity_bytes();
-        let table_offset = HEADER_SIZE;
+        Slab::format_with(device, SlabFormat::new(slot_size, tier)).await
+    }
 
-        // Calculate how many slots fit: we need header + table + data
+    /// Format a device as a new slab, choosing what it reserves.
+    pub async fn format_with(
+        device: Arc<dyn BlockDevice>,
+        opts: SlabFormat,
+    ) -> DriveResult<Self> {
+        let slot_size = opts.slot_size;
+        let tier = opts.tier;
+        let capacity = device.capacity_bytes();
+
+        // Two copies, each starting on a 4 KiB boundary.
+        let meta_size = align_up(opts.metadata_bytes, 2 * META_ALIGN);
+        let meta_offset = if meta_size > 0 { HEADER_SIZE } else { 0 };
+        let table_offset = HEADER_SIZE + meta_size;
+
+        // Calculate how many slots fit: we need header + metadata + table + data
         // table_size = total_slots * SLOT_ENTRY_SIZE
         // data_size = total_slots * slot_size
-        // capacity >= HEADER_SIZE + total_slots * SLOT_ENTRY_SIZE + total_slots * slot_size
-        // capacity - HEADER_SIZE >= total_slots * (SLOT_ENTRY_SIZE + slot_size)
-        let usable = capacity.saturating_sub(HEADER_SIZE);
+        // capacity >= table_offset + total_slots * (SLOT_ENTRY_SIZE + slot_size)
+        let usable = capacity.saturating_sub(table_offset);
         let per_slot = SLOT_ENTRY_SIZE + slot_size;
         if per_slot == 0 || usable < per_slot {
             return Err(DriveError::Other(anyhow::anyhow!(
-                "device too small for slab ({capacity} bytes)"
+                "device too small for slab ({capacity} bytes, {meta_size} reserved for metadata)"
             )));
         }
         let total_slots = usable / per_slot;
         let table_size = total_slots * SLOT_ENTRY_SIZE;
 
         // Align data offset to slot_size boundary
-        let raw_data_offset = HEADER_SIZE + table_size;
+        let raw_data_offset = table_offset + table_size;
         let data_offset = align_up(raw_data_offset, slot_size);
 
         // Recalculate: data region must fit
@@ -344,12 +439,22 @@ impl Slab {
             update_time: now,
             tier,
             flags: 0,
+            meta_offset,
+            meta_size,
             checksum: 0,
         };
 
         // Write header
         let header_bytes = header.to_bytes();
         device.write(0, &header_bytes).await?;
+
+        // Invalidate both metadata copies before anything can read them: a
+        // reused device could otherwise hand back a previous slab's volumes.
+        if meta_size > 0 {
+            let zero = vec![0u8; META_ALIGN as usize];
+            device.write(meta_offset, &zero).await?;
+            device.write(meta_offset + meta_size / 2, &zero).await?;
+        }
 
         // Write zeroed slot table (padded to device block_size for alignment)
         let table_bytes = total_slots as usize * SLOT_ENTRY_SIZE as usize;
@@ -907,6 +1012,162 @@ impl Slab {
         }
 
         Ok(())
+    }
+
+    // ------------------------------------------------- embedded metadata
+
+    /// Whether this slab reserves room for its own volume metadata.
+    pub fn has_metadata_region(&self) -> bool {
+        self.header.meta_size >= 2 * META_ALIGN && self.header.meta_offset > 0
+    }
+
+    /// The largest metadata payload this slab can hold.
+    pub fn metadata_capacity(&self) -> u64 {
+        if !self.has_metadata_region() {
+            return 0;
+        }
+        self.header.meta_size / 2 - META_COPY_HEADER
+    }
+
+    /// Write the slab's own copy of `volumes.dat`.
+    ///
+    /// Two copies, written alternately by generation: a slab that loses power
+    /// mid-write still has the previous one intact, which is the whole reason
+    /// a self-describing slab can be trusted without a filesystem underneath
+    /// it. The payload is opaque here — its own envelope carries the CRC that
+    /// says whether it decodes — but the copy header carries a second one, so
+    /// a torn write is caught before the payload is ever parsed.
+    pub async fn write_metadata(&self, payload: &[u8]) -> DriveResult<()> {
+        if !self.has_metadata_region() {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "slab {} has no metadata region; format it with one to keep \
+                 volume metadata in the slab",
+                self.id.0
+            )));
+        }
+        let capacity = self.metadata_capacity();
+        if payload.len() as u64 > capacity {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "volume metadata is {} bytes and this slab reserves {capacity} per copy; \
+                 format the slab with a larger metadata region",
+                payload.len()
+            )));
+        }
+
+        let (a, b) = (self.meta_copy(0).await, self.meta_copy(1).await);
+        let gen = a.map(|(g, _)| g).unwrap_or(0).max(b.map(|(g, _)| g).unwrap_or(0)) + 1;
+        // Write the copy that is invalid, or the older of the two.
+        let target = match (a, b) {
+            (None, _) => 0,
+            (_, None) => 1,
+            (Some((ga, _)), Some((gb, _))) => {
+                if ga <= gb {
+                    0
+                } else {
+                    1
+                }
+            }
+        };
+
+        let bs = self.device.block_size().max(1) as usize;
+        let total = META_COPY_HEADER as usize + payload.len();
+        let mut buf = vec![0u8; total.div_ceil(bs) * bs];
+        buf[0..8].copy_from_slice(&SLAB_META_MAGIC);
+        buf[8..12].copy_from_slice(&SLAB_META_VERSION.to_le_bytes());
+        buf[12..20].copy_from_slice(&gen.to_le_bytes());
+        buf[20..28].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        buf[META_COPY_HEADER as usize..total].copy_from_slice(payload);
+        let mut crc_input = Vec::with_capacity(28 + payload.len());
+        crc_input.extend_from_slice(&buf[0..28]);
+        crc_input.extend_from_slice(payload);
+        let crc = crc32c::crc32c(&crc_input);
+        buf[28..32].copy_from_slice(&crc.to_le_bytes());
+
+        self.device.write(self.meta_copy_offset(target), &buf).await?;
+        self.device.flush().await?;
+        Ok(())
+    }
+
+    /// Read back the newest valid copy of the slab's volume metadata.
+    ///
+    /// `None` means there is nothing to read — no region, or neither copy has
+    /// ever been written. A region whose copies are both corrupt is an error,
+    /// not an empty slab: losing the volume list is not the same as never
+    /// having had one.
+    pub async fn read_metadata(&self) -> DriveResult<Option<Vec<u8>>> {
+        if !self.has_metadata_region() {
+            return Ok(None);
+        }
+        // Newest first, then the other one: a copy that fails its checksum is
+        // a write that did not finish, and the previous generation is exactly
+        // what the second copy is for.
+        let mut copies: Vec<(u8, u64, u64)> = Vec::new();
+        for copy in [0u8, 1] {
+            if let Some((gen, len)) = self.meta_copy(copy).await {
+                copies.push((copy, gen, len));
+            }
+        }
+        if copies.is_empty() {
+            return Ok(None);
+        }
+        copies.sort_by_key(|&(_, gen, _)| std::cmp::Reverse(gen));
+
+        for &(copy, gen, len) in &copies {
+            match self.read_meta_copy(copy, len).await {
+                Ok(payload) => return Ok(Some(payload)),
+                Err(e) => tracing::warn!(
+                    "slab {}: metadata copy {copy} (generation {gen}) is unreadable: {e}",
+                    self.id.0
+                ),
+            }
+        }
+        Err(DriveError::Other(anyhow::anyhow!(
+            "slab {}: every copy of the embedded volume metadata failed its checksum",
+            self.id.0
+        )))
+    }
+
+    async fn read_meta_copy(&self, copy: u8, len: u64) -> DriveResult<Vec<u8>> {
+        let bs = self.device.block_size().max(1) as u64;
+        let want = META_COPY_HEADER + len;
+        let mut buf = vec![0u8; (want.div_ceil(bs) * bs) as usize];
+        self.device.read(self.meta_copy_offset(copy), &mut buf).await?;
+
+        let stored = u32::from_le_bytes(buf[28..32].try_into().unwrap());
+        let mut crc_input = Vec::with_capacity(want as usize);
+        crc_input.extend_from_slice(&buf[0..28]);
+        crc_input.extend_from_slice(&buf[META_COPY_HEADER as usize..want as usize]);
+        if crc32c::crc32c(&crc_input) != stored {
+            return Err(DriveError::Other(anyhow::anyhow!("checksum mismatch")));
+        }
+        Ok(buf[META_COPY_HEADER as usize..want as usize].to_vec())
+    }
+
+    fn meta_copy_offset(&self, copy: u8) -> u64 {
+        self.header.meta_offset + (copy as u64) * (self.header.meta_size / 2)
+    }
+
+    /// The generation and payload length of one copy, if its header is valid.
+    /// The payload's own checksum is left to `read_metadata`.
+    async fn meta_copy(&self, copy: u8) -> Option<(u64, u64)> {
+        let bs = self.device.block_size().max(1) as usize;
+        let mut buf = vec![0u8; (META_COPY_HEADER as usize).max(bs)];
+        self.device
+            .read(self.meta_copy_offset(copy), &mut buf)
+            .await
+            .ok()?;
+        if buf[0..8] != SLAB_META_MAGIC {
+            return None;
+        }
+        if u32::from_le_bytes(buf[8..12].try_into().unwrap()) != SLAB_META_VERSION {
+            return None;
+        }
+        let gen = u64::from_le_bytes(buf[12..20].try_into().unwrap());
+        let len = u64::from_le_bytes(buf[20..28].try_into().unwrap());
+        if len > self.metadata_capacity() {
+            return None;
+        }
+        Some((gen, len))
     }
 
     async fn persist_slot(&self, slot_idx: u32) -> DriveResult<()> {
@@ -1615,6 +1876,8 @@ mod tests {
             update_time: 1234567900,
             tier: StorageTier::Warm,
             flags: 0,
+            meta_offset: HEADER_SIZE,
+            meta_size: 128 * 1024,
             checksum: 0,
         };
         let bytes = header.to_bytes();
@@ -1625,5 +1888,89 @@ mod tests {
         assert_eq!(decoded.total_slots, 100);
         assert_eq!(decoded.free_slots, 95);
         assert_eq!(decoded.tier, StorageTier::Warm);
+        assert_eq!(decoded.meta_offset, HEADER_SIZE);
+        assert_eq!(decoded.meta_size, 128 * 1024);
+    }
+
+    /// A slab formatted before the metadata region existed has zeros where
+    /// its offset and size now live, and must read as "no region" rather than
+    /// as a region at offset 0 — which is the header itself.
+    #[tokio::test]
+    async fn slab_without_a_region_reads_as_having_none() {
+        let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
+        let slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot).await.unwrap();
+        assert!(!slab.has_metadata_region());
+        assert_eq!(slab.metadata_capacity(), 0);
+        assert!(slab.read_metadata().await.unwrap().is_none());
+        assert!(slab.write_metadata(b"anything").await.is_err());
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn embedded_metadata_survives_reopen() {
+        let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
+        let slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_metadata(64 * 1024),
+        )
+        .await
+        .unwrap();
+        assert!(slab.has_metadata_region());
+        assert!(slab.read_metadata().await.unwrap().is_none());
+
+        slab.write_metadata(b"first").await.unwrap();
+        assert_eq!(slab.read_metadata().await.unwrap().unwrap(), b"first");
+        // The second write lands in the other copy; the newest generation wins.
+        slab.write_metadata(b"second").await.unwrap();
+        assert_eq!(slab.read_metadata().await.unwrap().unwrap(), b"second");
+        slab.write_metadata(b"third").await.unwrap();
+
+        let total = slab.total_slots();
+        drop(slab);
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(reopened.total_slots(), total);
+        assert_eq!(reopened.read_metadata().await.unwrap().unwrap(), b"third");
+        cleanup(&path);
+    }
+
+    /// The region is two copies for one reason: a write that never finished
+    /// must leave the previous one readable.
+    #[tokio::test]
+    async fn a_torn_copy_falls_back_to_the_other() {
+        let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
+        let slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_metadata(64 * 1024),
+        )
+        .await
+        .unwrap();
+        slab.write_metadata(b"good").await.unwrap();
+        slab.write_metadata(b"newer").await.unwrap();
+
+        // Scribble over the copy the last write went to.
+        let target = slab.meta_copy_offset(1);
+        let mut buf = vec![0u8; 4096];
+        dev.read(target, &mut buf).await.unwrap();
+        buf[META_COPY_HEADER as usize + 1] ^= 0xFF;
+        dev.write(target, &buf).await.unwrap();
+
+        assert_eq!(slab.read_metadata().await.unwrap().unwrap(), b"good");
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn metadata_larger_than_the_region_is_refused() {
+        let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
+        let slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_metadata(16 * 1024),
+        )
+        .await
+        .unwrap();
+        let big = vec![7u8; slab.metadata_capacity() as usize + 1];
+        assert!(slab.write_metadata(&big).await.is_err());
+        // …and the region is still readable, not half-written.
+        assert!(slab.read_metadata().await.unwrap().is_none());
+        cleanup(&path);
     }
 }
