@@ -348,41 +348,51 @@ else
     echo "  Layout: $LAYOUT"
 fi
 
-# Find the hardware, the way every distro finds it.
+# Find the hardware.
 #
-# udevd reads the uevents the kernel emits, matches them against the rules, and
-# calls modprobe with the modalias each device announces. It handles the part
-# that is easy to get wrong and was: a bus driver has to bind before the
-# devices behind it exist at all, so a single sweep of /sys finds the bridge
-# and misses the NIC across it. `settle` is what waiting for that is called.
+# Two mechanisms, deliberately, because they fail differently. The walk is
+# deterministic and needs no daemon: every device names the driver it wants in
+# its modalias, and kmod resolves that through modules.alias — verified to
+# turn `virtio:d00000001v00001AF4` into net_failover + virtio_net. It repeats
+# until nothing new loads, because a bus driver creates the devices behind it
+# and one sweep finds the bridge and misses what is across it.
+#
+# udev runs after, for what rules do beyond loading modules and for anything
+# the walk did not reach. Its errors are *not* hidden: a daemon that fails to
+# start silently is how this came to load nothing at all while reporting
+# success.
 echo "Discovering hardware..."
+MODTREE=""
+for d in /lib/modules/*/; do
+    [ -f "$d/modules.dep" ] && MODTREE="$d"
+done
+LOADED=0
+if [ -n "$MODTREE" ]; then
+    PASS=0
+    while [ $PASS -lt 5 ]; do
+        PASS=$((PASS + 1)); FOUND=0
+        for ma in /sys/bus/*/devices/*/modalias; do
+            [ -f "$ma" ] || continue
+            modprobe -q "$(cat "$ma")" 2>/dev/null && FOUND=$((FOUND + 1))
+        done
+        LOADED=$((LOADED + FOUND))
+        [ "$FOUND" -eq 0 ] && break
+        sleep 1
+    done
+    echo "  $LOADED driver(s) loaded in $PASS pass(es)"
+else
+    echo "  WARNING: no module tree found under /lib/modules"
+fi
+
 mkdir -p /run/udev
 if [ -x /usr/lib/systemd/systemd-udevd ] && [ -x /usr/bin/udevadm ]; then
-    /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null
-    udevadm trigger --type=subsystems --action=add 2>/dev/null
-    udevadm trigger --type=devices --action=add 2>/dev/null
-    udevadm settle --timeout=30 2>/dev/null
-    echo "  $(lsmod 2>/dev/null | tail -n +2 | wc -l) module(s) loaded"
+    /usr/lib/systemd/systemd-udevd --daemon
+    udevadm trigger --type=subsystems --action=add
+    udevadm trigger --type=devices --action=add
+    udevadm settle --timeout=30
+    echo "  udev settled; $(lsmod 2>/dev/null | tail -n +2 | wc -l) module(s) now loaded"
 else
-    # No udev: ask each device for its driver directly, and go round until
-    # nothing new loads, because a bus driver creates the devices behind it.
-    echo "  udev unavailable — falling back to walking modalias"
-    MODTREE=""
-    for d in /lib/modules/*/; do
-        [ -f "$d/modules.dep" ] && MODTREE="$d"
-    done
-    if [ -n "$MODTREE" ]; then
-        PASS=0
-        while [ $PASS -lt 5 ]; do
-            PASS=$((PASS + 1)); FOUND=0
-            for ma in /sys/bus/*/devices/*/modalias; do
-                [ -f "$ma" ] || continue
-                modprobe -q "$(cat "$ma")" 2>/dev/null && FOUND=$((FOUND + 1))
-            done
-            [ "$FOUND" -eq 0 ] && break
-            sleep 1
-        done
-    fi
+    echo "  udev not present in this image"
 fi
 
 # The ones no device announces: filesystems, and the block driver this image
