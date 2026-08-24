@@ -232,3 +232,63 @@ async fn cow_preserves_a_slot_larger_than_one_file_transfer() {
         "copy-on-write lost the part of the slot the write did not cover",
     );
 }
+
+/// A copy-on-write clone is an audit surface, not only a cheap copy.
+///
+/// It shares every extent with its golden until something writes, and a write
+/// replaces the shared extent with one the clone owns alone. So the extents a
+/// clone does not share *are* what has been written to it — and a clone that
+/// shares all of them is provably untouched, without reading a byte.
+///
+/// That is what makes "this system root should never have been written"
+/// checkable rather than hopeful.
+#[tokio::test]
+async fn a_clone_can_prove_it_has_not_been_written() {
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::VolumeManager;
+
+    const SLOT: u64 = 64 * 1024;
+    let dir = std::env::temp_dir().join("stormblock-divergence");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("d-{}.img", uuid::Uuid::new_v4().simple()));
+    let p = path.to_str().unwrap().to_string();
+    let dev = FileDevice::open_with_capacity(&p, 16 * 1024 * 1024).await.unwrap();
+
+    let mut mgr = VolumeManager::new(SLOT);
+    let array = RaidArrayId(uuid::Uuid::new_v4());
+    mgr.add_backing_device(array, std::sync::Arc::new(dev)).await;
+
+    // A golden with content, then a clone of it.
+    let golden = mgr.create_volume("root.golden", 1024 * 1024, array).await.unwrap();
+    let gv = mgr.get_volume(&golden).unwrap();
+    gv.write(0, &vec![0xAB; SLOT as usize]).await.unwrap();
+    gv.write(SLOT, &vec![0xCD; SLOT as usize]).await.unwrap();
+    gv.flush().await.unwrap();
+
+    let clone = mgr.create_snapshot(golden, "root").await.unwrap();
+
+    // Untouched: shares everything, owns nothing.
+    let d = mgr.divergence(clone, golden).await;
+    assert!(d.pristine(), "a fresh clone must be provably untouched: {d:?}");
+    assert_eq!(d.bytes, 0);
+    assert_eq!(d.shared, 2, "both extents still shared with the golden");
+
+    // One write, and it shows — the extent it touched and nothing else.
+    let cv = mgr.get_volume(&clone).unwrap();
+    cv.write(SLOT, &vec![0x11; SLOT as usize]).await.unwrap();
+    cv.flush().await.unwrap();
+
+    let d = mgr.divergence(clone, golden).await;
+    assert!(!d.pristine(), "a written clone is not pristine");
+    assert_eq!(d.extents, vec![1], "only the extent that was written");
+    assert_eq!(d.bytes, SLOT);
+    assert_eq!(d.shared, 1, "the untouched extent is still shared");
+
+    // And the golden is untouched by any of it — the whole point.
+    let mut back = vec![0u8; SLOT as usize];
+    gv.read(SLOT, &mut back).await.unwrap();
+    assert!(back.iter().all(|&b| b == 0xCD), "the golden was written through");
+
+    let _ = std::fs::remove_file(&p);
+}

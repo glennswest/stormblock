@@ -432,6 +432,24 @@ impl VolumeManager {
         self.slot_size
     }
 
+    /// What a clone has written since it was taken from its golden.
+    ///
+    /// The audit a copy-on-write clone makes possible: a clone that shares
+    /// every extent with its golden has provably never been written, and the
+    /// answer costs a map comparison rather than a scan of either volume.
+    ///
+    /// What it does *not* say is whether the content is what it should be —
+    /// an extent can be rewritten with identical bytes. For that, compare the
+    /// files; this is the cheap check that says whether it is worth doing.
+    pub async fn divergence(
+        &self,
+        clone_id: VolumeId,
+        golden_id: VolumeId,
+    ) -> snapshot::Divergence {
+        let gem = self.gem.read().await;
+        snapshot::divergence(&gem, clone_id, golden_id, self.slot_size)
+    }
+
     /// Say whether a volume is meant to be kept or thrown away.
     ///
     /// Persisted with the volume, so the answer survives a restart and does

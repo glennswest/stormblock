@@ -216,6 +216,57 @@ pub async fn reset_to_source(
 /// where the volumes have different physical mappings.
 ///
 /// Useful for incremental backup and cold copy advancement.
+/// What a clone has written since it was taken.
+///
+/// A copy-on-write clone shares every extent with its golden until something
+/// writes, and a write replaces the shared extent with one the clone owns
+/// alone. So the extents a clone does *not* share are exactly what has been
+/// written to it — and a clone that shares all of them is **provably
+/// untouched**, without reading a byte of either.
+///
+/// That makes a CoW clone an audit surface rather than only a cheap copy: a
+/// system root that should never have been written can be checked, and the
+/// check is a map comparison rather than a scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Divergence {
+    /// Virtual extents the clone has written, in order.
+    pub extents: Vec<u64>,
+    /// What those extents cost, in bytes.
+    pub bytes: u64,
+    /// Extents the clone still shares with its golden.
+    pub shared: usize,
+}
+
+impl Divergence {
+    /// Nothing has been written to this clone.
+    pub fn pristine(&self) -> bool {
+        self.extents.is_empty()
+    }
+}
+
+/// Compare a clone against the golden it was taken from.
+///
+/// Cheap: no I/O, only the two extent maps. Intended to be called often —
+/// on every boot for a root that is supposed to be untouched, and by anything
+/// asking "has this been modified" before trusting it.
+pub fn divergence(
+    gem: &GlobalExtentMap,
+    clone_id: VolumeId,
+    golden_id: VolumeId,
+    slot_size: u64,
+) -> Divergence {
+    let extents = snapshot_diff(gem, clone_id, golden_id);
+    let total = gem
+        .get_volume_map(&clone_id)
+        .map(|m| m.extents.len())
+        .unwrap_or(0);
+    Divergence {
+        bytes: extents.len() as u64 * slot_size,
+        shared: total.saturating_sub(extents.len()),
+        extents,
+    }
+}
+
 pub fn snapshot_diff(
     gem: &GlobalExtentMap,
     a: VolumeId,
