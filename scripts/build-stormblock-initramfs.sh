@@ -65,20 +65,27 @@ trap 'rm -rf "$INITRD_DIR"' EXIT
 
 mkdir -p "$INITRD_DIR"/{bin,sbin,usr/sbin,lib/modules,dev,proc,sys,sysroot,etc,run,tmp,var}
 
-# Busybox (static) + symlinks
+# Busybox (static) + a symlink for **every applet it has**.
+#
+# Not a list. A list is a guess about what /init will need, maintained by
+# whoever remembers to update it, and it fails at the worst moment: the applet
+# is missing, the shell says "not found", and the node sits in an initramfs
+# with no network and no disks. That happened twice here — `basename`, then
+# `uname` — and the second time the *checker* for the list had the same bug as
+# the list.
+#
+# busybox knows exactly what it can do. Asking it costs a few hundred symlinks,
+# which is about 50 KB in the archive, and removes the question permanently.
 cp "$BUSYBOX" "$INITRD_DIR/bin/busybox"
 chmod 755 "$INITRD_DIR/bin/busybox"
-# Every applet /init calls. A missing one is not a warning at build time and
-# not an error until the line runs — `basename: not found` took a node to a
-# shell with no network, at the one moment nothing is left to debug it with.
-# The list is checked against the script below at build time so it cannot drift
-# again.
-for cmd in sh mount umount insmod modprobe ip cat grep cut sleep ln mkdir \
-           swapon switch_root mdev udhcpc dmesg echo printf true false test \
-           ls rm cp mv chmod chown mknod basename dirname awk sed tr head \
-           tail wc mountpoint sync uname depmod lsmod rmdir seq env; do
-    ln -s busybox "$INITRD_DIR/bin/$cmd"
+APPLETS=0
+for cmd in $("$BUSYBOX" --list); do
+    # `busybox` itself is the real binary, not a link to itself.
+    [ "$cmd" = "busybox" ] && continue
+    ln -sf busybox "$INITRD_DIR/bin/$cmd"
+    APPLETS=$((APPLETS + 1))
 done
+echo "  applets:    $APPLETS (everything this busybox provides)"
 
 # StormBlock binary
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
@@ -672,30 +679,6 @@ mount --move /run /sysroot/run 2>/dev/null || true
 exec switch_root /sysroot /sbin/init
 INITSCRIPT
 chmod +x "$INITRD_DIR/init"
-
-# The applets /init actually calls, against the ones bundled. A command that
-# is not there fails at the line that needs it — deep in a boot, with no
-# network and nothing to look at but a console.
-# Derived from the script rather than from a list someone has to remember to
-# update: every word that is followed by an argument or a pipe, checked against
-# what busybox was linked for. `uname` was missing this way — not in the list,
-# so not checked, so `$(uname -r)` came back empty at boot and the node had no
-# drivers at all.
-MISSING_APPLETS=""
-CANDIDATES=$(grep -oE '(^|[;&|`]|\$\()[[:space:]]*[a-z_]{2,12}[[:space:]]' "$INITRD_DIR/init" \
-    | tr -d ';&|`$([:space:]' | sort -u)
-for cmd in $CANDIDATES; do
-    # Only things busybox actually provides — the rest are shell keywords,
-    # variables and the two real binaries in here.
-    busybox --list 2>/dev/null | grep -qx "$cmd" || continue
-    case "$cmd" in stormblock|init) continue ;; esac
-    [ -e "$INITRD_DIR/bin/$cmd" ] || MISSING_APPLETS="$MISSING_APPLETS $cmd"
-done
-if [ -n "$MISSING_APPLETS" ]; then
-    echo "ERROR: /init calls applets this initramfs does not carry:$MISSING_APPLETS"
-    echo "       add them to the symlink list above"
-    exit 1
-fi
 
 # Build cpio archive (compressed with zstd)
 echo ""
