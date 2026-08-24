@@ -118,6 +118,34 @@ enum SubCommand {
         action: PalletAction,
     },
     /// Export a volume via ublk to the local kernel (/dev/ublkbN)
+    /// Collect everything needed to debug this node into one directory.
+    ///
+    /// The bundle someone can send you when the node is not the one in front
+    /// of you: what the kernel saw, what the storage layer thinks it has, and
+    /// the contents of the log volumes. Read-only throughout — a diagnostic
+    /// that can change what it is diagnosing is not one.
+    MustGather {
+        /// Slab device, partition or image file to read. Repeatable. With
+        /// none, the slabs this node is serving are used.
+        #[arg(long)]
+        slab: Vec<String>,
+        /// Metadata directory, if the slab does not carry its own.
+        #[arg(long)]
+        meta: Option<String>,
+        /// Where to write the bundle.
+        #[arg(long, default_value = "/tmp/stormblock-must-gather")]
+        out: String,
+        /// Also copy the contents of these volumes, by name. Repeatable.
+        /// Volumes whose name contains "log" or "data" are included anyway.
+        #[arg(long = "volume")]
+        volumes: Vec<String>,
+        /// Skip volume contents — inventory and node state only.
+        #[arg(long)]
+        no_contents: bool,
+        /// Largest file to copy out of a volume, in MB.
+        #[arg(long, default_value = "32")]
+        max_file_mb: u64,
+    },
     /// Attach a slab and export (and optionally mount) any volume in it.
     ///
     /// The debugging and rescue door: point it at a disk, an image file or a
@@ -619,6 +647,11 @@ async fn main() -> anyhow::Result<()> {
             }
             SubCommand::Pallet { drives, action } => {
                 return handle_pallet_command(drives, action).await;
+            }
+            SubCommand::MustGather { slab, meta, out, volumes, no_contents, max_file_mb } => {
+                return handle_must_gather(
+                    slab, meta.as_deref(), out, volumes, *no_contents, *max_file_mb,
+                ).await;
             }
             SubCommand::Attach { slab, meta, volumes, all, mount, ro, force } => {
                 return handle_attach(
@@ -2107,6 +2140,321 @@ async fn start_serving(
         // to find out why from this node's log.
         Err(why) => tracing::warn!("not serving /serve/v1: {why}"),
     }
+}
+
+/// `must-gather` — one directory holding everything needed to explain a node.
+///
+/// Modelled on `oc adm must-gather`, and for the same reason: the node with
+/// the problem is rarely the node in front of you, and asking someone to run
+/// eleven commands and paste the output loses the one that mattered. This
+/// collects what the kernel saw, what the storage layer thinks it has, and the
+/// contents of the log volumes, and puts them in one place.
+///
+/// **Read-only throughout.** A diagnostic that can change what it is
+/// diagnosing is not one, so the volumes are mounted `ro` and released again.
+#[cfg(target_os = "linux")]
+async fn handle_must_gather(
+    slab_paths: &[String],
+    meta: Option<&str>,
+    out: &str,
+    extra_volumes: &[String],
+    no_contents: bool,
+    max_file_mb: u64,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let root = std::path::Path::new(out);
+    std::fs::create_dir_all(root)?;
+    let mut manifest = Vec::<String>::new();
+
+    let write = |name: &str, body: &str| -> anyhow::Result<()> {
+        let mut f = std::fs::File::create(root.join(name))?;
+        f.write_all(body.as_bytes())?;
+        Ok(())
+    };
+    // A command's output, or the reason there is none. An absent file would
+    // leave the reader unable to tell "nothing to report" from "never ran".
+    let run = |cmd: &str, args: &[&str]| -> String {
+        match std::process::Command::new(cmd).args(args).output() {
+            Ok(o) => {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                if !o.stderr.is_empty() {
+                    s.push_str("\n--- stderr ---\n");
+                    s.push_str(&String::from_utf8_lossy(&o.stderr));
+                }
+                s
+            }
+            Err(e) => format!("({cmd}: {e})\n"),
+        }
+    };
+
+    // --- the node itself ---
+    let mut node = String::new();
+    node.push_str(&format!("stormblock {}\n", env!("CARGO_PKG_VERSION")));
+    for (label, path) in [
+        ("kernel", "/proc/version"),
+        ("cmdline", "/proc/cmdline"),
+        ("uptime", "/proc/uptime"),
+        ("meminfo", "/proc/meminfo"),
+        ("mounts", "/proc/mounts"),
+        ("modules", "/proc/modules"),
+        ("partitions", "/proc/partitions"),
+    ] {
+        node.push_str(&format!("\n=== {label} ({path}) ===\n"));
+        node.push_str(&std::fs::read_to_string(path).unwrap_or_else(|e| format!("({e})\n")));
+    }
+    write("node.txt", &node)?;
+    manifest.push("node.txt — kernel, command line, memory, mounts, modules".into());
+
+    write("dmesg.txt", &run("dmesg", &["-T"]))?;
+    manifest.push("dmesg.txt — the kernel's account of this boot".into());
+
+    // --- ublk: the devices, who serves them, what state they are in ---
+    let mut ublk = String::new();
+    match stormblock::drive::ublk::devices() {
+        Ok(ids) if ids.is_empty() => ublk.push_str("no ublk devices\n"),
+        Ok(ids) => {
+            for id in ids {
+                let pid = stormblock::drive::ublk::server_pid(id)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into());
+                let state = stormblock::drive::ublk::dev_state(id)
+                    .ok()
+                    .flatten()
+                    .map(|s| match s {
+                        0 => "DEAD".to_string(),
+                        1 => "LIVE".to_string(),
+                        2 => "QUIESCED".to_string(),
+                        other => format!("state {other}"),
+                    })
+                    .unwrap_or_else(|| "?".into());
+                ublk.push_str(&format!("/dev/ublkb{id}  server {pid}  {state}\n"));
+            }
+        }
+        Err(e) => ublk.push_str(&format!("(cannot enumerate: {e})\n")),
+    }
+    write("ublk.txt", &ublk)?;
+    manifest.push("ublk.txt — exported devices, their servers and their state".into());
+
+    // --- the handover record, which says what this node was serving ---
+    let hpath = std::path::Path::new(stormblock::drive::handover::DEFAULT_PATH);
+    if let Ok(body) = std::fs::read_to_string(hpath) {
+        write("handover.json", &body)?;
+        manifest.push("handover.json — slabs and volumes the boot handed over".into());
+    }
+
+    // --- the supervisor's logs, which are on tmpfs and die with the boot ---
+    let logs_src = std::path::Path::new("/run/stormpump/logs");
+    if logs_src.is_dir() {
+        let dst = root.join("stormpump-logs");
+        std::fs::create_dir_all(&dst)?;
+        let mut n = 0;
+        if let Ok(entries) = std::fs::read_dir(logs_src) {
+            for e in entries.flatten() {
+                if std::fs::copy(e.path(), dst.join(e.file_name())).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        manifest.push(format!("stormpump-logs/ — {n} supervised workload log(s)"));
+    }
+
+    // --- the storage layer ---
+    //
+    // The slabs this node is serving, unless told otherwise. Reading them is
+    // the point of the exercise: an inventory is what says whether the volume
+    // someone is asking about exists at all.
+    let slabs: Vec<String> = if !slab_paths.is_empty() {
+        slab_paths.to_vec()
+    } else {
+        stormblock::drive::handover::Record::read(hpath)
+            .map(|r| r.slabs)
+            .unwrap_or_default()
+    };
+
+    if slabs.is_empty() {
+        write("volumes.txt", "no slab given and none in the handover record\n")?;
+        manifest.push("volumes.txt — (no slab to read)".into());
+    } else {
+        let mgr = open_slabs_and_restore(&slabs, meta).await?;
+        let mut names = mgr.list_volumes().await;
+        names.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut inv = format!("slabs: {}\n\n", slabs.join(", "));
+        inv.push_str(&format!("{:<30} {:>10} {:>10}  {}\n", "volume", "size", "mapped", "id"));
+        for (id, name, size, used) in &names {
+            inv.push_str(&format!(
+                "{:<30} {:>10} {:>10}  {id}\n",
+                name,
+                stormblock::mgmt::config::human_size(*size),
+                stormblock::mgmt::config::human_size(*used),
+            ));
+        }
+        write("volumes.txt", &inv)?;
+        manifest.push(format!("volumes.txt — {} volume(s) in the slab", names.len()));
+
+        if !no_contents {
+            // Which volumes to copy out. The name is the only signal available
+            // without opening every filesystem, and it is the one the node's
+            // own convention already carries: a data container is where a
+            // workload keeps what it would otherwise lose.
+            let wanted: Vec<_> = names
+                .iter()
+                .filter(|(_, n, ..)| {
+                    let l = n.to_lowercase();
+                    (l.contains("log") || l.contains("data") || extra_volumes.contains(n))
+                        && !l.ends_with(".golden")
+                })
+                .collect();
+
+            let gathered = root.join("volumes");
+            std::fs::create_dir_all(&gathered)?;
+            let mut copied = 0usize;
+            for (id, name, ..) in wanted {
+                match gather_volume(&mgr, id, name, &gathered, max_file_mb).await {
+                    Ok(n) => {
+                        copied += 1;
+                        manifest.push(format!("volumes/{name}/ — {n} file(s)"));
+                    }
+                    Err(e) => {
+                        manifest.push(format!("volumes/{name}/ — not gathered: {e}"));
+                    }
+                }
+            }
+            println!("  gathered {copied} volume(s)");
+        }
+    }
+
+    // The index. Someone opening this directory should not have to guess what
+    // is in it or which file answers their question.
+    let mut index = String::from("stormblock must-gather\n\n");
+    for line in &manifest {
+        index.push_str(&format!("  {line}\n"));
+    }
+    index.push_str("\nEverything here was read without writing to the node.\n");
+    write("README.txt", &index)?;
+
+    println!("{}", index);
+    println!("bundle: {}", root.display());
+    println!("  tar it with: tar czf must-gather.tar.gz -C {} .", root.display());
+    Ok(())
+}
+
+/// Copy one volume's files into the bundle, read-only.
+#[cfg(target_os = "linux")]
+async fn gather_volume(
+    mgr: &stormblock::volume::VolumeManager,
+    id: &stormblock::volume::VolumeId,
+    name: &str,
+    into: &std::path::Path,
+    max_file_mb: u64,
+) -> anyhow::Result<usize> {
+    use stormblock::drive::ublk::UblkServer;
+
+    let dev = mgr
+        .get_volume(id)
+        .ok_or_else(|| anyhow::anyhow!("volume has no device"))?;
+    let dev_id = stormblock::drive::ublk::devices()?
+        .into_iter()
+        .max()
+        .map_or(0, |m| m + 1);
+
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let thread = std::thread::Builder::new()
+        .name(format!("gather-{dev_id}"))
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let _ = rt.block_on(UblkServer::new(dev).with_dev_id(dev_id).run(rx));
+        })?;
+
+    let released = |tx: tokio::sync::watch::Sender<bool>, t: std::thread::JoinHandle<()>| {
+        let _ = tx.send(true);
+        let _ = t.join();
+    };
+
+    let ids = [dev_id];
+    let pending = tokio::task::spawn_blocking(move || {
+        stormblock::drive::ublk::wait_live(&ids, std::time::Duration::from_secs(30))
+    })
+    .await??;
+    if !pending.is_empty() {
+        released(tx, thread);
+        anyhow::bail!("/dev/ublkb{dev_id} never came up");
+    }
+
+    let mnt = std::path::Path::new("/run/stormblock/gather").join(name);
+    std::fs::create_dir_all(&mnt)?;
+    let fs = match mount_volume(&format!("/dev/ublkb{dev_id}"), &mnt, true) {
+        Ok(fs) => fs,
+        Err(e) => {
+            released(tx, thread);
+            return Err(e);
+        }
+    };
+    let _ = fs;
+
+    let dst = into.join(name);
+    let n = copy_tree(&mnt, &dst, max_file_mb * 1024 * 1024).unwrap_or(0);
+
+    let c = std::ffi::CString::new(mnt.to_string_lossy().as_ref())?;
+    // SAFETY: unmounting a path this process just mounted.
+    unsafe { libc::umount(c.as_ptr()) };
+    released(tx, thread);
+    Ok(n)
+}
+
+/// Copy a directory tree, skipping anything too big to be worth sending.
+///
+/// A must-gather that fills the disk it is written to has made the problem
+/// worse, so the cap is real and what it skipped is recorded in place of the
+/// file — the reader needs to know a log was there and was too large, which is
+/// itself a fact about the node.
+#[cfg(target_os = "linux")]
+fn copy_tree(from: &std::path::Path, to: &std::path::Path, max_bytes: u64) -> std::io::Result<usize> {
+    use std::io::Write;
+    std::fs::create_dir_all(to)?;
+    let mut n = 0;
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            if name == "lost+found" {
+                continue;
+            }
+            n += copy_tree(&path, &to.join(&name), max_bytes)?;
+        } else if meta.is_file() {
+            if meta.len() > max_bytes {
+                let mut f = std::fs::File::create(to.join(format!(
+                    "{}.skipped",
+                    name.to_string_lossy()
+                )))?;
+                writeln!(f, "{} bytes — over the must-gather limit", meta.len())?;
+                continue;
+            }
+            if std::fs::copy(&path, to.join(&name)).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn handle_must_gather(
+    _slab_paths: &[String],
+    _meta: Option<&str>,
+    _out: &str,
+    _extra_volumes: &[String],
+    _no_contents: bool,
+    _max_file_mb: u64,
+) -> anyhow::Result<()> {
+    anyhow::bail!("must-gather reads volumes through ublk, which is Linux-only")
 }
 
 /// `attach` — open a slab and export, or list, what is in it.
