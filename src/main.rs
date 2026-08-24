@@ -594,6 +594,7 @@ async fn main() -> anyhow::Result<()> {
             SubCommand::AdoptUblk { slab, volumes, meta, api, data_dir } => {
                 return handle_adopt_ublk(
                     slab, volumes, meta.as_deref(), api.as_deref(), data_dir.as_deref(),
+                    &cli.config,
                 ).await;
             }
             SubCommand::BootLocal {
@@ -2057,6 +2058,7 @@ async fn handle_adopt_ublk(
     meta: Option<&str>,
     api: Option<&str>,
     data_dir: Option<&str>,
+    config_path: &str,
 ) -> anyhow::Result<()> {
     use stormblock::drive::ublk::UblkServer;
 
@@ -2264,12 +2266,33 @@ async fn handle_adopt_ublk(
     // engine that is serving its node's root and not answering questions about
     // it is an engine that is half here.
     if let Some(addr) = api {
-        let mut config = stormblock::mgmt::config::StormBlockConfig::default();
+        // The node's own config, not the defaults.
+        //
+        // The engine ships one — where to listen, where state lives, whether
+        // to serve /serve/v1 — and building a default here quietly discarded
+        // all of it. The visible symptom was the registry next door getting
+        // 404s from /serve/v1 for every template it tried to build, because
+        // the serving surface is configured and the configuration was never
+        // read. The flags stay, as overrides, because a handover may need to
+        // put the API somewhere the file does not say.
+        let mut config = match stormblock::mgmt::config::StormBlockConfig::load(
+            &config_path,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("{config_path}: {e} — using defaults");
+                stormblock::mgmt::config::StormBlockConfig::default()
+            }
+        };
         config.management.listen_addr = addr.to_string();
         // The metadata the manager was restored from is where anything the API
         // creates has to persist to, or a template minted now is gone at the
         // next boot.
-        config.management.data_dir = data_dir.map(|d| d.to_string());
+        if data_dir.is_some() {
+            config.management.data_dir = data_dir.map(|d| d.to_string());
+        }
+        let data_dir = config.management.data_dir.clone();
+        let data_dir = data_dir.as_deref();
         if let Some(d) = data_dir {
             std::fs::create_dir_all(d)
                 .map_err(|e| anyhow::anyhow!("cannot create API state directory {d}: {e}"))?;
@@ -2300,6 +2323,7 @@ async fn handle_adopt_ublk(
     _meta: Option<&str>,
     _api: Option<&str>,
     _data_dir: Option<&str>,
+    _config_path: &str,
 ) -> anyhow::Result<()> {
     anyhow::bail!("ublk is Linux-only")
 }
