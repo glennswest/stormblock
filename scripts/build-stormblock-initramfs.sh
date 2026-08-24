@@ -241,9 +241,22 @@ if [ -e /proc/sys/kernel/io_uring_disabled ]; then
     echo 0 > /proc/sys/kernel/io_uring_disabled
 fi
 
-# Network setup (iSCSI boot only — local-slab boot needs no network)
-if [ "$BOOT_MODE" = "local" ]; then
-    # Load ublk and jump straight to the local attach.
+# Network setup.
+#
+# An iSCSI boot cannot proceed without it — the root is across it. A local boot
+# does not *need* it to reach its root, which is why this used to be skipped
+# entirely; but the node it hands over to does. Nothing after switch_root
+# configures an interface: stormpump is PID 1 and starts containers, and a
+# container on host networking inherits whatever the host has, which was
+# nothing. The symptom is every service coming up healthy and unreachable —
+# "Network unreachable" from a registry talking to an engine one process away.
+#
+# So a local boot brings the network up too, when the command line asks for it
+# with `ip=dhcp` or `ip=<addr>::<gw>:<mask>::<iface>:none`. Without `ip=` it
+# stays as it was: loopback only, and nothing waits on DHCP that did not ask.
+if [ "$BOOT_MODE" = "local" ] && [ -z "$IP_CONF" ]; then
+    # No network asked for. Load ublk and jump straight to the local attach.
+    ip link set lo up 2>/dev/null || true
     :
 else
 echo "Configuring network..."
@@ -265,7 +278,7 @@ fi
 
 ip link set "$IFACE" up
 
-if [ -n "$IP_CONF" ]; then
+if [ -n "$IP_CONF" ] && [ "$IP_CONF" != "dhcp" ]; then
     # Static IP from kernel cmdline (ip=addr::gw:mask::iface:none)
     ADDR=$(echo "$IP_CONF" | cut -d: -f1)
     GW=$(echo "$IP_CONF" | cut -d: -f3)

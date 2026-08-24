@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-08-24
+- **feat:** a local boot brings the network up when the command line asks for
+  it (`ip=dhcp`, or a static `ip=addr::gw:mask::iface:none`). It used to be
+  skipped entirely on the local path, on the reasoning that a local root needs
+  no network — true of the root, false of the node. Nothing after
+  `switch_root` configures an interface: a stormpump node's PID 1 starts
+  containers, and a container on host networking inherits whatever the host
+  has. The symptom was every service on the node coming up healthy and
+  unreachable. Without `ip=` nothing changes, so no boot waits on a DHCP
+  server it never asked for.
+
+### 2026-08-24
 - **feat:** `rd.stormblock.mount=<vol>:<path>,...` — the initramfs exports
   these volumes *and mounts them* into the real root before `switch_root`.
   `rd.stormblock.writable=` writes fstab entries, which only a systemd node
