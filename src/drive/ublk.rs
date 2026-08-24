@@ -907,13 +907,45 @@ impl UblkServer {
 
         // --- Wait for shutdown signal ---
         let _ = shutdown.changed().await;
-        tracing::info!("ublk server shutting down");
         self.running.store(false, Ordering::SeqCst);
 
-        // --- STOP_DEV ---
-        let _ = submit_ctrl_cmd(
-            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0, 0,
-        );
+        // A recoverable device is **let go of**, not stopped.
+        //
+        // STOP_DEV tears the device down: the kernel shuts the block device,
+        // and every filesystem mounted on it takes write errors on the way
+        // out —
+        //
+        //     EXT4-fs (ublkb4): shut down requested (2)
+        //     I/O error, dev ublkb4, sector 120 op 0x1:(WRITE)
+        //     JBD2: I/O error when updating journal superblock
+        //
+        // — after which there is nothing left to recover and no successor can
+        // adopt anything. That is right for a server that is finished with a
+        // device and wrong for one being handed over, and asking for
+        // UBLK_F_USER_RECOVERY at creation is precisely the statement that
+        // this device outlives its server. So honour it: close the queues,
+        // release the char device, and leave. The kernel sees the server go,
+        // quiesces the device, and holds it for whoever comes next.
+        //
+        // The filesystems stay mounted throughout. They pause while the device
+        // is quiesced and resume when recovery completes, which is the whole
+        // point of a handover — a node whose root is on one of these cannot
+        // unmount it to be polite.
+        // Adopted devices too: this server inherited a device that was created
+        // recoverable, and handing it on is the same act as handing it over
+        // was. A node upgrades its engine by doing this repeatedly.
+        let recoverable = self.recoverable || self.adopt.is_some();
+        if recoverable {
+            tracing::info!(
+                "ublk: releasing /dev/ublkb{assigned_id} for recovery (not stopping it)"
+            );
+        } else {
+            tracing::info!("ublk server shutting down");
+            // --- STOP_DEV ---
+            let _ = submit_ctrl_cmd(
+                &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0, 0,
+            );
+        }
 
         // Wait for all workers to exit
         for w in workers {
@@ -924,12 +956,20 @@ impl UblkServer {
         // synchronous DEL_DEV blocks until the char device is fully released
         // (mmaps and fds), so issuing it while we still hold them deadlocks
         // the shutdown.
+        //
+        // For a recoverable device this release *is* the handover: dropping
+        // the last reference is what tells the kernel the server has gone.
         for desc_ptr in &desc_ptrs {
             unsafe {
                 libc::munmap(*desc_ptr as *mut libc::c_void, desc_buf_size);
             }
         }
         drop(char_file);
+
+        if recoverable {
+            tracing::info!("ublk device /dev/ublkb{assigned_id} released");
+            return Ok(());
+        }
 
         // --- DEL_DEV ---
         let _ = submit_ctrl_cmd(
