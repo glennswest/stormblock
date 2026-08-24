@@ -76,7 +76,7 @@ chmod 755 "$INITRD_DIR/bin/busybox"
 for cmd in sh mount umount insmod modprobe ip cat grep cut sleep ln mkdir \
            swapon switch_root mdev udhcpc dmesg echo printf true false test \
            ls rm cp mv chmod chown mknod basename dirname awk sed tr head \
-           tail wc mountpoint sync; do
+           tail wc mountpoint sync uname depmod lsmod rmdir seq env; do
     ln -s busybox "$INITRD_DIR/bin/$cmd"
 done
 
@@ -276,9 +276,16 @@ fi
 # Failures are silent on purpose: most devices on a bus are not storage or
 # network, and their drivers are deliberately not here.
 echo "Loading drivers for this machine..."
-KVER=$(uname -r)
+# Found by looking rather than by asking. There is exactly one module tree in
+# here, and `uname -r` is one more thing that has to be present and right at
+# the worst possible moment — an empty answer silently becomes
+# /lib/modules//modules.dep, which is a node with no drivers and no clue why.
+MODTREE=""
+for d in /lib/modules/*/; do
+    [ -f "$d/modules.dep" ] && MODTREE="$d"
+done
 LOADED=0
-if [ -f "/lib/modules/$KVER/modules.dep" ]; then
+if [ -n "$MODTREE" ]; then
     for ma in /sys/bus/*/devices/*/modalias; do
         [ -f "$ma" ] || continue
         if modprobe -q "$(cat "$ma")" 2>/dev/null; then
@@ -652,9 +659,19 @@ chmod +x "$INITRD_DIR/init"
 # The applets /init actually calls, against the ones bundled. A command that
 # is not there fails at the line that needs it — deep in a boot, with no
 # network and nothing to look at but a console.
+# Derived from the script rather than from a list someone has to remember to
+# update: every word that is followed by an argument or a pipe, checked against
+# what busybox was linked for. `uname` was missing this way — not in the list,
+# so not checked, so `$(uname -r)` came back empty at boot and the node had no
+# drivers at all.
 MISSING_APPLETS=""
-for cmd in $(grep -oE '\b(basename|dirname|awk|sed|tr|head|tail|wc|mountpoint|sync|blkid|readlink|stat|seq|find|xargs|expr|sort|uniq)\b' \
-        "$INITRD_DIR/init" | sort -u); do
+CANDIDATES=$(grep -oE '(^|[;&|`]|\$\()[[:space:]]*[a-z_]{2,12}[[:space:]]' "$INITRD_DIR/init" \
+    | tr -d ';&|`$([:space:]' | sort -u)
+for cmd in $CANDIDATES; do
+    # Only things busybox actually provides — the rest are shell keywords,
+    # variables and the two real binaries in here.
+    busybox --list 2>/dev/null | grep -qx "$cmd" || continue
+    case "$cmd" in stormblock|init) continue ;; esac
     [ -e "$INITRD_DIR/bin/$cmd" ] || MISSING_APPLETS="$MISSING_APPLETS $cmd"
 done
 if [ -n "$MISSING_APPLETS" ]; then
