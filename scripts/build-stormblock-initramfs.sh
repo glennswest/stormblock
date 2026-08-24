@@ -14,7 +14,11 @@
 # Defaults:
 #   stormblock-binary = target/x86_64-unknown-linux-musl/release/stormblock
 #   kernel-version    = $(uname -r)
-#   STORMBLOCK_MODULES = "virtio_scsi sd_mod erofs overlay"  (+ ublk_drv, always)
+#   STORMBLOCK_MODULES = "virtio_scsi virtio_net sd_mod erofs overlay"
+#                        (+ ublk_drv, always)
+#     virtio_net because a local boot can be asked to bring the network up, and
+#     a NIC with no driver has no /sys/class/net entry to find — the node looks
+#     like it has no interface at all.
 #     Override for other boot transports, e.g.
 #     STORMBLOCK_MODULES="ahci sd_mod ext4" ./scripts/build-stormblock-initramfs.sh
 #
@@ -32,7 +36,7 @@ set -euo pipefail
 STORMBLOCK_BIN="${1:-target/x86_64-unknown-linux-musl/release/stormblock}"
 KVER="${2:-$(uname -r)}"
 OUTPUT="${3:-/tmp/stormblock-initramfs.img}"
-MODULES="${STORMBLOCK_MODULES:-virtio_scsi sd_mod erofs overlay} ublk_drv"
+MODULES="${STORMBLOCK_MODULES:-virtio_scsi virtio_net sd_mod erofs overlay} ublk_drv"
 
 if [ ! -f "$STORMBLOCK_BIN" ]; then
     echo "ERROR: stormblock binary not found: $STORMBLOCK_BIN"
@@ -278,9 +282,19 @@ for dev in /sys/class/net/*; do
 done
 
 if [ -z "$IFACE" ]; then
-    echo "FATAL: No network interface found"
-    exec /bin/sh
+    if [ "$BOOT_MODE" = "local" ]; then
+        # The root is on this disk; the network is for what runs later. A node
+        # that boots without an address is degraded and can be looked at. One
+        # that drops to a shell in the initramfs cannot be looked at at all.
+        echo "WARNING: no network interface found — continuing without one"
+        echo "         (is the NIC's driver in STORMBLOCK_MODULES?)"
+        NO_NETWORK=1
+    else
+        echo "FATAL: No network interface found"
+        exec /bin/sh
+    fi
 fi
+if [ -z "${NO_NETWORK:-}" ]; then
 
 ip link set "$IFACE" up
 
@@ -301,6 +315,7 @@ else
 fi
 
 echo "Network: $(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')"
+fi
 fi
 
 # Start stormblock with ublk export
