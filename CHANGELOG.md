@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### 2026-08-24
+- **fix:** `image build` refuses a golden whose ext4 blocks are smaller than
+  the volume's logical sector, naming the fix (`mkfs.ext4 -b 4096`). Found by
+  booting a real image: the host's `mkfs.ext4` picks 1024-byte blocks for a
+  64 MB *file* — its size class, and a file reads as 512-byte sectors — and
+  the volume it lands in has 4096-byte sectors. Everything downstream
+  succeeded (image built, pallets verified, `boot-local` resolved the clone,
+  ublk exported it) and the kernel then said `EXT4-fs (ublkb0): bad block size
+  1024` and the node dropped to a shell. The engine knows both numbers at
+  build time, so it fails there instead (#40).
+- **fix:** `GoldenSource::read_at` seeks instead of assuming the caller reads
+  in order — a source that is only correct when read sequentially is a trap
+  for the next caller, and the block-size probe reads the front before the
+  copy walks the whole thing.
+- **verified on hardware:** #62's fix boots. Proxmox VM under OVMF, serial
+  console: stormuefi 0.5.0 reads both pallets off raw disk, verifies the
+  manifest and every member, selects `kernel1` and hands off; the initramfs
+  runs `boot-local --slab /dev/sda4 --volume stormpump`, which reports
+  **"Volume metadata from slab /dev/sda4"** — no metadata directory anywhere —
+  restores both volumes, exports the CoW clone as `/dev/ublkb0`, and the
+  kernel mounts it r/w. The remaining stop is stormpump exiting as PID 1
+  (stormpump#1), which is outside this engine.
+
 ### 2026-08-23
 - **fix:** volumes at or below 8 MiB get no journal unless one is asked for
   (`ext4::JOURNAL_FLOOR_BYTES`). 8 MiB is exactly where `mkfs-ext4`'s size

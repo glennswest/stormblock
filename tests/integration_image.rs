@@ -419,3 +419,65 @@ tier = "hot"
     assert!(text.contains("Boot volume: stormpump"), "{text}");
     assert!(text.contains("/dev/ublkb0"), "{text}");
 }
+
+/// A golden whose blocks are smaller than the volume's sectors is refused at
+/// build time, not at boot.
+///
+/// Found on real hardware: the host's `mkfs.ext4` picks 1024-byte blocks for a
+/// 64 MB *file* — its size class, and a file reads as 512-byte sectors — and
+/// the volume that golden lands in has 4096-byte sectors. Everything downstream
+/// succeeds: the image builds, both pallets verify, `boot-local` resolves the
+/// clone and exports it. Then the kernel says `EXT4-fs (ublkb0): bad block size
+/// 1024` and the node drops to a shell (#40).
+///
+/// The engine knows both numbers at build time, so this must fail there.
+#[tokio::test]
+async fn a_golden_with_blocks_smaller_than_the_volume_sector_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+
+    // An ext4 superblock claiming 1024-byte blocks: magic 0xEF53 at 1024+0x38,
+    // s_log_block_size at 1024+0x18, block size = 1024 << it.
+    let mut golden = vec![0u8; 8 * 1024 * 1024];
+    golden[1024 + 0x38] = 0x53;
+    golden[1024 + 0x39] = 0xEF;
+    golden[1024 + 0x18..1024 + 0x1C].copy_from_slice(&0u32.to_le_bytes());
+    write(tmp.path(), "small-blocks.img", &golden);
+
+    let extra = format!(
+        r#"
+[slab]
+size = "rest"
+tier = "hot"
+
+  [[slab.golden]]
+  name = "rootfs"
+  file = "{img}"
+"#,
+        img = tmp.path().join("small-blocks.img").display(),
+    );
+    let spec = ImageSpec::from_toml(&spec_toml(tmp.path(), &extra)).unwrap();
+    let err = ImageBuilder::new(spec)
+        .build(&tmp.path().join("bad.img"))
+        .await
+        .expect_err("a 1024-block golden on a 4096-byte-sector volume must not build");
+    let text = err.to_string();
+    assert!(text.contains("1024-byte blocks"), "{text}");
+    assert!(text.contains("4096-byte sectors"), "{text}");
+    assert!(text.contains("mkfs.ext4 -b 4096"), "the error must say how to fix it: {text}");
+
+    // …and the same golden at 4096-byte blocks builds.
+    let mut ok_golden = vec![0u8; 8 * 1024 * 1024];
+    ok_golden[1024 + 0x38] = 0x53;
+    ok_golden[1024 + 0x39] = 0xEF;
+    ok_golden[1024 + 0x18..1024 + 0x1C].copy_from_slice(&2u32.to_le_bytes());
+    write(tmp.path(), "right-blocks.img", &ok_golden);
+    let extra = extra.replace("small-blocks.img", "right-blocks.img");
+    let spec = ImageSpec::from_toml(&spec_toml(tmp.path(), &extra)).unwrap();
+    let report = ImageBuilder::new(spec)
+        .build(&tmp.path().join("good.img"))
+        .await
+        .expect("4096-byte blocks match the volume's sectors");
+    let slab = report.partitions.iter().find(|p| p.kind == "slab").unwrap();
+    assert_eq!(slab.volumes.len(), 2, "{:#?}", slab.volumes);
+}

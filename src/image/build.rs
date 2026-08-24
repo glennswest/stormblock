@@ -481,6 +481,24 @@ impl ImageBuilder {
             let vol = mgr
                 .get_volume(&golden_id)
                 .ok_or_else(|| ImageError::Other("golden vanished after create".into()))?;
+
+            // Refuse a filesystem whose blocks are smaller than the sectors it
+            // will be read through. This is caught here because it cannot be
+            // caught anywhere useful later: the image builds, the pallets
+            // verify, the volume attaches, and the kernel refuses the mount at
+            // boot with "bad block size" (#40).
+            if let Some(fs_block) = source.ext4_block_size().await? {
+                let sector = vol.block_size();
+                if fs_block < sector {
+                    return Err(ImageError::Spec(format!(
+                        "golden '{}' is an ext4 filesystem with {fs_block}-byte blocks, and the \
+                         volume it goes in has {sector}-byte sectors — the kernel will refuse to \
+                         mount it. Rebuild the golden with `mkfs.ext4 -b {sector}`",
+                        g.name
+                    )));
+                }
+            }
+
             source.write_into(&vol, slot_size as usize).await?;
             vol.flush().await?;
 
@@ -711,10 +729,13 @@ impl GoldenSource {
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         match self {
-            // Read sequentially — `write_into` walks the content in order,
-            // and seeking per chunk would cost a syscall to go nowhere.
             GoldenSource::File { file, .. } => {
-                use tokio::io::AsyncReadExt;
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                // Seek rather than assume the caller reads in order: the block
+                // size is probed from the front before the copy walks the
+                // whole thing, and a source that is only correct when read
+                // sequentially is a trap for the next caller.
+                file.seek(std::io::SeekFrom::Start(offset)).await?;
                 file.read_exact(buf).await?;
                 Ok(())
             }
@@ -723,6 +744,33 @@ impl GoldenSource {
                 Ok(())
             }
         }
+    }
+
+    /// The ext4 block size of this content, if it is an ext4 filesystem.
+    ///
+    /// A golden is usually a filesystem image built somewhere else, by a
+    /// `mke2fs` that sized its blocks for the *file* it was writing into: a
+    /// 64 MB file reads as 512-byte sectors, so the size class picks 1024-byte
+    /// blocks. Land that in a volume whose logical sector is 4096 and the
+    /// kernel refuses the mount outright — `EXT4-fs: bad block size 1024` —
+    /// after the image has been built, shipped and booted (#40).
+    async fn ext4_block_size(&mut self) -> Result<Option<u32>> {
+        // Superblock at byte 1024: magic 0xEF53 at +0x38, s_log_block_size at
+        // +0x18, and the block size is 1024 << that.
+        const SB_OFF: u64 = 1024;
+        if self.byte_len() < SB_OFF + 0x40 {
+            return Ok(None);
+        }
+        let mut sb = [0u8; 64];
+        self.read_at(SB_OFF, &mut sb).await?;
+        if u16::from_le_bytes([sb[0x38], sb[0x39]]) != 0xEF53 {
+            return Ok(None);
+        }
+        let log = u32::from_le_bytes(sb[0x18..0x1C].try_into().unwrap());
+        if log > 16 {
+            return Ok(None);
+        }
+        Ok(Some(1024u32 << log))
     }
 
     /// Copy the content into a volume, skipping runs of zeros.
