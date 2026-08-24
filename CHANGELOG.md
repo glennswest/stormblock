@@ -3,6 +3,59 @@
 ## [Unreleased]
 
 ### 2026-08-24
+- **fix:** the initramfs ships the **whole kernel module tree**, compressed as
+  the kernel package ships it, rather than a chosen set of subtrees. A driver's
+  dependencies are not confined to its own subtree: `net_failover` links
+  against `kernel/net/core/failover.ko`, which is under no driver directory, so
+  with `kernel/net` left out `depmod` recorded no dependency, `modprobe` loaded
+  it bare, the kernel refused it on unresolved symbols, and `virtio_net` was
+  never reached. The node came up with no network and discovery reported
+  success. 73 MB of `.ko.xz` against 137 MB for the decompressed subset it
+  replaces — complete and smaller. kmod is now required, since it is what reads
+  a compressed module.
+- **fix:** the build fails if any path `modules.dep` names is missing from the
+  image, and `/init` greps `dmesg` for "Unknown symbol" after discovery. A
+  module the kernel *rejected* is a driver that is present and broken; one that
+  matched nothing is hardware this machine does not have. `modprobe` reports
+  both identically, so ask the kernel.
+- **fix:** DHCP applies the lease it is given. `udhcpc` was run with
+  `-s /bin/true`; it configures nothing itself, so every boot took an address
+  from the server — which then appeared in the server's lease table, looking
+  exactly like success — and put none of it on the interface.
+- **fix:** a **recoverable ublk device is released on shutdown, never stopped**.
+  Asked to stand down, the incumbent ran `STOP_DEV` on all six devices, which
+  tears them down under the filesystems mounted on them (`EXT4-fs: shut down
+  requested`, `JBD2: I/O error when updating journal superblock`) — after which
+  there is nothing to quiesce and nothing to recover, and the successor cannot
+  even be restarted because its own root was among them. `UBLK_F_USER_RECOVERY`
+  at creation is the statement that the device outlives its server; releasing
+  it is what honours that.
+- **fix:** both halves of a handover wait on **device state** rather than
+  process state — QUIESCED before `START_USER_RECOVERY`, LIVE after
+  `END_USER_RECOVERY`. The old server exiting and the device being ready are
+  two events milliseconds apart, and the race was reliably lost; the first
+  write after adopting landed in the window and failed with EIO.
+- **feat:** `drive::handover` — the incumbent records the slabs it opened and
+  which volume is behind each device it created, so `adopt-ublk` needs no
+  arguments. The list was previously kept by hand in two places that had to
+  agree in order, and standing a server down stops **every** device it serves:
+  a list short by one left those devices mounted with no server, returning EIO,
+  including the engine's own root.
+- **feat:** `adopt-ublk` serves the **management API and `/serve/v1`**. The
+  process that holds the slab is the engine — one writer per volume means no
+  second process can answer for it — and an engine that serves a node's root
+  while answering nothing about it is half there.
+- **feat:** `stormblock attach` — open any slab and list, export or mount any
+  volume in it, on a disk, a partition or an image file, finding the slab
+  inside a partition table if that is what it was handed. Listing and attaching
+  are one command. Refuses to attach writable while another server is serving,
+  because two writers on one volume corrupt it silently.
+- **feat:** `stormblock must-gather` — one directory holding what the kernel
+  saw, what the storage layer has, which devices exist and who serves them, the
+  handover record, the supervisor's per-workload logs, and the contents of the
+  log and data volumes. Read-only throughout.
+
+### 2026-08-24
 - **feat:** a volume records whether it is meant to be **kept or thrown away**
   (`Retention`, metadata V3). Nothing recorded that before, so a container
   root and a customer's database looked identical to the engine, and anything
