@@ -416,6 +416,15 @@ impl VolumeManager {
         list
     }
 
+    /// The slab slot size every volume in this manager is measured in.
+    ///
+    /// Fixed when the manager is built and shared by every slab it holds:
+    /// `attach_slab` refuses one that disagrees, because an extent map means
+    /// different things at different slot sizes.
+    pub fn slot_size(&self) -> u64 {
+        self.slot_size
+    }
+
     /// Get the shared GEM.
     pub fn gem(&self) -> &Arc<tokio::sync::RwLock<GlobalExtentMap>> {
         &self.gem

@@ -52,6 +52,14 @@ const fn ublk_ctrl_cmd_read(nr: u32) -> u32 {
     (2 << 30) | ((std::mem::size_of::<UblkCtrlCmd>() as u32) << 16) | (0x75 << 8) | nr
 }
 
+/// Read the device's own record of itself into a `UblkCtrlDevInfo` at `addr`.
+/// `_IOR`, like `GET_FEATURES`.
+///
+/// What a server adopting an existing device has to ask before it can serve
+/// it: the queue count and depth are fixed at creation, and a recovering
+/// server that guesses them differently fails `END_USER_RECOVERY` — or worse,
+/// starts with fewer queues than the kernel is holding requests on.
+const UBLK_U_CMD_GET_DEV_INFO: u32 = ublk_ctrl_cmd_read(0x02);
 const UBLK_U_CMD_ADD_DEV: u32 = ublk_ctrl_cmd(0x04);
 const UBLK_U_CMD_DEL_DEV: u32 = ublk_ctrl_cmd(0x05);
 const UBLK_U_CMD_START_DEV: u32 = ublk_ctrl_cmd(0x06);
@@ -60,6 +68,12 @@ const UBLK_U_CMD_SET_PARAMS: u32 = ublk_ctrl_cmd(0x08);
 /// Reports the kernel's `UBLK_F_*` feature mask into a `__u64` at `addr`.
 /// `_IOR`, unlike every other control command here.
 const UBLK_U_CMD_GET_FEATURES: u32 = ublk_ctrl_cmd_read(0x13);
+/// Tell the kernel a new server is taking over a device whose old server has
+/// gone. The device stays; its queues are reset to await fresh `FETCH_REQ`s.
+const UBLK_U_CMD_START_USER_RECOVERY: u32 = ublk_ctrl_cmd(0x10);
+/// Finish the takeover. The new server's pid goes in `cmd->data[0]`, exactly
+/// as `START_DEV` carries it for a device being created.
+const UBLK_U_CMD_END_USER_RECOVERY: u32 = ublk_ctrl_cmd(0x11);
 /// Resize a live device. New size is in **sectors**, in `cmd->data[0]`.
 const UBLK_U_CMD_UPDATE_SIZE: u32 = ublk_ctrl_cmd(0x15);
 
@@ -96,6 +110,20 @@ const UBLK_F_CMD_IOCTL_ENCODE: u64 = 1 << 6;
 /// the kernel does not know makes ADD_DEV fail outright, so a node on an older
 /// kernel must ask for the device without it and lose only the resize (#19).
 const UBLK_F_UPDATE_SIZE: u64 = 1 << 10;
+/// The device outlives its server: if this process goes, the block device
+/// stays and another process may adopt it.
+///
+/// **Asked for at ADD_DEV and nowhere else.** A device created without it can
+/// never be recovered, so the decision belongs to whoever creates the device
+/// — which on a booting node is the initramfs, minutes before the process
+/// that will want to adopt it even exists.
+const UBLK_F_USER_RECOVERY: u64 = 1 << 3;
+/// With recovery: I/O outstanding when the old server went is **reissued** to
+/// the new one rather than failed.
+///
+/// The difference between a root filesystem that pauses across a handover and
+/// one that sees EIO in the middle of it.
+const UBLK_F_USER_RECOVERY_REISSUE: u64 = 1 << 4;
 
 /// Default max I/O buffer size (512 KB).
 const DEFAULT_MAX_IO_BYTES: u32 = 512 * 1024;
@@ -274,6 +302,14 @@ pub struct UblkServer {
     /// The capacity the kernel currently believes in, in 512-byte sectors.
     /// This is what a resize moves, and what makes a repeat resize a no-op.
     dev_sectors: Arc<AtomicU64>,
+    /// Ask the kernel to let another process adopt this device later.
+    ///
+    /// Only meaningful when creating one: the flag is fixed at ADD_DEV, so a
+    /// device made without it can never be handed over.
+    recoverable: bool,
+    /// Adopt the device that already exists at this id rather than creating
+    /// one. See [`UblkServer::adopting`].
+    adopt: Option<u32>,
 }
 
 impl UblkServer {
@@ -288,6 +324,8 @@ impl UblkServer {
             running: Arc::new(AtomicBool::new(false)),
             resizable: Arc::new(AtomicBool::new(false)),
             dev_sectors: Arc::new(AtomicU64::new(0)),
+            recoverable: false,
+            adopt: None,
         }
     }
 
@@ -295,6 +333,36 @@ impl UblkServer {
     /// If an orphaned device exists at this ID, it will be deleted first.
     pub fn with_dev_id(mut self, id: u32) -> Self {
         self.requested_dev_id = Some(id);
+        self
+    }
+
+    /// Create the device so that another process can adopt it later.
+    ///
+    /// The decision has to be made *here*, by whoever creates the device,
+    /// because `UBLK_F_USER_RECOVERY` is fixed at ADD_DEV. On a booting node
+    /// that is the initramfs — a process whose own binary is deleted by
+    /// `switch_root` and which therefore cannot be restarted, ever. Without
+    /// this flag the engine serving root is unrepeatable: if it dies the node
+    /// is gone until it reboots, and no code path anywhere could recover it.
+    ///
+    /// Ignored, with a note, on a kernel that does not offer the flag: an
+    /// unknown flag fails ADD_DEV outright, and losing the handover is better
+    /// than losing the device (#19 taught this the expensive way).
+    pub fn recoverable(mut self, yes: bool) -> Self {
+        self.recoverable = yes;
+        self
+    }
+
+    /// Serve a device that already exists, whose previous server has gone.
+    ///
+    /// The block device never disappears across this — that is the point. A
+    /// filesystem mounted on it stays mounted, and with
+    /// `UBLK_F_USER_RECOVERY_REISSUE` the I/O that was in flight when the old
+    /// server went is handed to this one rather than failed.
+    ///
+    /// The device must have been created [`recoverable`](Self::recoverable).
+    pub fn adopting(mut self, dev_id: u32) -> Self {
+        self.adopt = Some(dev_id);
         self
     }
 
@@ -426,65 +494,152 @@ impl UblkServer {
                 "io_uring create failed: {e}"
             )))?;
 
-        // --- ADD_DEV ---
-        let req_id = self.requested_dev_id.unwrap_or(u32::MAX);
+        // --- Either adopt an existing device, or create one ---
+        //
+        // Adoption is the same server doing the same job, minus the two steps
+        // that belong to creation: the device is already there and its
+        // parameters are already set. What it must not do is guess the
+        // geometry — the queue count and depth are fixed at creation, and a
+        // server that comes back with different ones leaves the kernel holding
+        // requests on queues nobody is fetching from.
+        let (assigned_id, nr_queues, queue_depth, capacity) = if let Some(id) = self.adopt {
+            let mut info = UblkCtrlDevInfo::default();
+            submit_ctrl_cmd(
+                &mut ctrl_ring,
+                ctrl_fd,
+                UBLK_U_CMD_GET_DEV_INFO,
+                id,
+                &mut info as *mut UblkCtrlDevInfo as u64,
+                std::mem::size_of::<UblkCtrlDevInfo>() as u32,
+                0,
+            )
+            .map_err(|e| {
+                DriveError::Other(anyhow::anyhow!(
+                    "ublk: cannot read /dev/ublkb{id} to adopt it: {e}"
+                ))
+            })?;
 
-        // Clean up orphaned device at the requested ID (ignore errors)
-        if req_id != u32::MAX {
-            let _ = submit_ctrl_cmd(
-                &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, req_id, 0, 0, 0,
-            );
-            let _ = submit_ctrl_cmd(
-                &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, req_id, 0, 0, 0,
-            );
-        }
+            if info.flags & UBLK_F_USER_RECOVERY == 0 {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "ublk: /dev/ublkb{id} was created without UBLK_F_USER_RECOVERY and \
+                     cannot be adopted — the flag is fixed at creation, so whoever made \
+                     this device had to ask for it"
+                )));
+            }
 
-        // Ask the kernel what it supports before asking it for anything. A
-        // flag an older kernel does not know fails ADD_DEV outright, so an
-        // unsupported UBLK_F_UPDATE_SIZE must cost the resize and not the
-        // device (#19).
-        let kernel_features = query_features(&mut ctrl_ring, ctrl_fd).unwrap_or(0);
-        let resizable = kernel_features & UBLK_F_UPDATE_SIZE != 0;
-        let mut flags = UBLK_F_URING_CMD_COMP_IN_TASK | UBLK_F_CMD_IOCTL_ENCODE;
-        if resizable {
-            flags |= UBLK_F_UPDATE_SIZE;
-        } else {
+            submit_ctrl_cmd(
+                &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_START_USER_RECOVERY, id, 0, 0, 0,
+            )
+            .map_err(|e| {
+                DriveError::Other(anyhow::anyhow!(
+                    "ublk: /dev/ublkb{id} would not begin recovery: {e} (is the previous \
+                     server really gone?)"
+                ))
+            })?;
+
+            self.dev_id.store(id as i32, Ordering::Relaxed);
+            self.resizable
+                .store(info.flags & UBLK_F_UPDATE_SIZE != 0, Ordering::Relaxed);
+            // Geometry comes from the kernel; capacity comes from the volume
+            // this server was handed. The device's parameters were set when it
+            // was created and are not touched here — an adopting server serves
+            // the same device, it does not redefine it.
             tracing::info!(
-                "ublk: this kernel does not offer UBLK_F_UPDATE_SIZE — the device \
-                 will not follow a volume resize"
+                "ublk: adopting /dev/ublkb{id} — {} queue(s), depth {}, serving {} bytes",
+                info.nr_hw_queues, info.queue_depth, capacity
             );
-        }
+            (id, info.nr_hw_queues, info.queue_depth, capacity)
+        } else {
+            let req_id = self.requested_dev_id.unwrap_or(u32::MAX);
 
-        let mut dev_info = UblkCtrlDevInfo {
-            nr_hw_queues: nr_queues,
-            queue_depth,
-            max_io_buf_bytes: DEFAULT_MAX_IO_BYTES,
-            dev_id: req_id,
-            ublksrv_pid: std::process::id() as i32,
-            flags,
-            ..Default::default()
+            // Clean up orphaned device at the requested ID (ignore errors)
+            if req_id != u32::MAX {
+                let _ = submit_ctrl_cmd(
+                    &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, req_id, 0, 0, 0,
+                );
+                let _ = submit_ctrl_cmd(
+                    &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, req_id, 0, 0, 0,
+                );
+            }
+
+            // Ask the kernel what it supports before asking it for anything. A
+            // flag an older kernel does not know fails ADD_DEV outright, so an
+            // unsupported UBLK_F_UPDATE_SIZE must cost the resize and not the
+            // device (#19).
+            let kernel_features = query_features(&mut ctrl_ring, ctrl_fd).unwrap_or(0);
+            let resizable = kernel_features & UBLK_F_UPDATE_SIZE != 0;
+            let mut flags = UBLK_F_URING_CMD_COMP_IN_TASK | UBLK_F_CMD_IOCTL_ENCODE;
+            if resizable {
+                flags |= UBLK_F_UPDATE_SIZE;
+            } else {
+                tracing::info!(
+                    "ublk: this kernel does not offer UBLK_F_UPDATE_SIZE — the device \
+                     will not follow a volume resize"
+                );
+            }
+            if self.recoverable {
+                if kernel_features & UBLK_F_USER_RECOVERY != 0 {
+                    flags |= UBLK_F_USER_RECOVERY;
+                    // Reissue rather than fail: what was in flight when the old
+                    // server went is handed to the new one. On a root
+                    // filesystem the difference is a pause versus an EIO.
+                    if kernel_features & UBLK_F_USER_RECOVERY_REISSUE != 0 {
+                        flags |= UBLK_F_USER_RECOVERY_REISSUE;
+                    }
+                } else {
+                    tracing::warn!(
+                        "ublk: this kernel does not offer UBLK_F_USER_RECOVERY — this \
+                         device cannot be handed to another process, so whatever serves \
+                         it cannot be restarted"
+                    );
+                }
+            }
+
+            let mut dev_info = UblkCtrlDevInfo {
+                nr_hw_queues: nr_queues,
+                queue_depth,
+                max_io_buf_bytes: DEFAULT_MAX_IO_BYTES,
+                dev_id: req_id,
+                ublksrv_pid: std::process::id() as i32,
+                flags,
+                ..Default::default()
+            };
+
+            submit_ctrl_cmd(
+                &mut ctrl_ring,
+                ctrl_fd,
+                UBLK_U_CMD_ADD_DEV,
+                req_id,
+                &mut dev_info as *mut UblkCtrlDevInfo as u64,
+                std::mem::size_of::<UblkCtrlDevInfo>() as u32,
+                0,
+            )?;
+
+            let assigned_id = dev_info.dev_id;
+            self.dev_id.store(assigned_id as i32, Ordering::Relaxed);
+            // What the kernel echoed back, not what was asked for.
+            self.resizable
+                .store(dev_info.flags & UBLK_F_UPDATE_SIZE != 0, Ordering::Relaxed);
+            tracing::info!(
+                "ublk device created: dev_id={}{}",
+                assigned_id,
+                if dev_info.flags & UBLK_F_USER_RECOVERY != 0 {
+                    " (recoverable)"
+                } else {
+                    ""
+                }
+            );
+            (assigned_id, nr_queues, queue_depth, capacity)
         };
 
-        submit_ctrl_cmd(
-            &mut ctrl_ring,
-            ctrl_fd,
-            UBLK_U_CMD_ADD_DEV,
-            req_id,
-            &mut dev_info as *mut UblkCtrlDevInfo as u64,
-            std::mem::size_of::<UblkCtrlDevInfo>() as u32,
-            0,
-        )?;
-
-        let assigned_id = dev_info.dev_id;
-        self.dev_id.store(assigned_id as i32, Ordering::Relaxed);
-        // What the kernel echoed back, not what was asked for.
-        self.resizable
-            .store(dev_info.flags & UBLK_F_UPDATE_SIZE != 0, Ordering::Relaxed);
-        tracing::info!("ublk device created: dev_id={}", assigned_id);
-
         // --- SET_PARAMS ---
+        //
+        // Creation only. An adopted device already has its parameters, and
+        // setting them again on a live device would be redefining something a
+        // mounted filesystem is currently using.
         let sectors = capacity / 512;
         self.dev_sectors.store(sectors, Ordering::Relaxed);
+        if self.adopt.is_none() {
         let bs_shift = block_size.trailing_zeros() as u8;
         let max_sectors = DEFAULT_MAX_IO_BYTES / 512;
 
@@ -527,6 +682,7 @@ impl UblkServer {
             "ublk params: capacity={}B, block_size={}B, sectors={}",
             capacity, block_size, sectors,
         );
+        }
 
         // --- Open /dev/ublkcN ---
         // In containers, devtmpfs may not auto-create the char device node.
@@ -654,13 +810,22 @@ impl UblkServer {
         // Wait for all workers to submit their initial FETCH_REQs
         startup_barrier.wait();
 
-        // --- START_DEV (all queues now registered with kernel) ---
-        // START_DEV: data[0] must contain the server PID (kernel checks > 0)
+        // --- The device goes live (all queues now registered with kernel) ---
+        //
+        // Creating: START_DEV. Adopting: END_USER_RECOVERY. Both carry the
+        // server's pid in data[0], and both mean the same thing to the kernel
+        // — there is a server here now, hand it the queues.
+        let (go_live, what) = if self.adopt.is_some() {
+            (UBLK_U_CMD_END_USER_RECOVERY, "recovered")
+        } else {
+            (UBLK_U_CMD_START_DEV, "started")
+        };
         submit_ctrl_cmd(
-            &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_START_DEV,
+            &mut ctrl_ring, ctrl_fd, go_live,
             assigned_id, 0, 0,
             std::process::id() as u64,
         )?;
+        tracing::debug!("ublk: /dev/ublkb{assigned_id} {what}");
         // mknod /dev/ublkbN block device if not present (container workaround)
         let blk_path = format!("/dev/ublkb{}", assigned_id);
         if !std::path::Path::new(&blk_path).exists() {
@@ -1036,6 +1201,52 @@ mod tests {
         assert_eq!(UBLK_U_CMD_UPDATE_SIZE, 0xC020_7515);
         // And the flag the resize is negotiated with.
         assert_eq!(UBLK_F_UPDATE_SIZE, 1 << 10);
+
+        // Handover. START/END are _IOWR like the rest; GET_DEV_INFO is _IOR,
+        // and encoding it as _IOWR would not reach the kernel's handler at all
+        // — the same mistake that kept UBLK_F_UPDATE_SIZE from ever being
+        // negotiated, which is why it is asserted rather than assumed.
+        assert_eq!(UBLK_U_CMD_START_USER_RECOVERY, 0xC020_7510);
+        assert_eq!(UBLK_U_CMD_END_USER_RECOVERY, 0xC020_7511);
+        assert_eq!(UBLK_U_CMD_GET_DEV_INFO, 0x8020_7502);
+        assert_ne!(UBLK_U_CMD_GET_DEV_INFO, ublk_ctrl_cmd(0x02));
+        assert_eq!(UBLK_F_USER_RECOVERY, 1 << 3);
+        assert_eq!(UBLK_F_USER_RECOVERY_REISSUE, 1 << 4);
+    }
+
+    /// The two options are independent and neither is on by default.
+    ///
+    /// `recoverable` belongs to whoever *creates* a device and is fixed at
+    /// that moment; `adopting` belongs to whoever takes one over. A server
+    /// asked to do both is creating nothing, so adoption wins.
+    #[test]
+    fn recovery_is_opt_in_at_both_ends() {
+        use crate::drive::filedev::FileDevice;
+
+        let dir = std::env::temp_dir().join("stormblock-ublk-opts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("d-{}.bin", uuid::Uuid::new_v4().simple()));
+        let p = path.to_str().unwrap().to_string();
+        let dev = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { FileDevice::open_with_capacity(&p, 1 << 20).await.unwrap() });
+        let dev: Arc<dyn BlockDevice> = Arc::new(dev);
+
+        let plain = UblkServer::new(dev.clone());
+        assert!(!plain.recoverable, "a device is not recoverable unless asked");
+        assert!(plain.adopt.is_none());
+
+        let made = UblkServer::new(dev.clone()).recoverable(true).with_dev_id(0);
+        assert!(made.recoverable);
+        assert!(made.adopt.is_none(), "creating, not adopting");
+
+        let taken = UblkServer::new(dev).adopting(7);
+        assert_eq!(taken.adopt, Some(7));
+        assert!(!taken.recoverable, "adoption does not create anything");
+
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

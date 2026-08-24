@@ -3,6 +3,29 @@
 ## [Unreleased]
 
 ### 2026-08-24
+- **feat:** ublk devices can be handed from one server to another, so the
+  engine serving root is no longer unrepeatable. `boot-local` creates its
+  devices with `UBLK_F_USER_RECOVERY` (and `_REISSUE`, so I/O in flight when
+  the old server goes is handed to the new one rather than failed), and
+  `stormblock adopt-ublk` takes them over: `GET_DEV_INFO` for the geometry the
+  device was created with, `START_USER_RECOVERY`, fresh `FETCH_REQ` on every
+  queue, `END_USER_RECOVERY`. The block device never disappears, so a
+  filesystem mounted on it stays mounted across the swap.
+- **note:** why this matters more than it sounds. `switch_root` **deletes the
+  initramfs**, so the engine it started runs from an unlinked binary —
+  `/proc/<pid>/exe` reads `(deleted)` and nothing on the node could exec it
+  again. The one process the root filesystem depends on could not be
+  restarted, by anything, for the life of the boot. Now it can be handed to a
+  process that lives in a golden, which PID 1 can supervise, restart and
+  upgrade.
+- **note:** the flag is fixed at `ADD_DEV`, so it has to be asked for by
+  whoever *creates* the device — minutes before the process that will want to
+  adopt it exists. A device made without it can never be handed over, which is
+  why `boot-local` now always asks.
+- **refactor:** `open_slabs_and_restore` — `boot-local` and `adopt-ublk` need
+  the same three things (open the slabs, find the metadata, restore what it
+  describes), and the two halves of a handover disagreeing about any of them
+  would be the worst kind of bug to have.
 - **feat:** a local boot brings the network up when the command line asks for
   it (`ip=dhcp`, or a static `ip=addr::gw:mask::iface:none`). It used to be
   skipped entirely on the local path, on the reasoning that a local root needs

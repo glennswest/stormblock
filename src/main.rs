@@ -154,6 +154,25 @@ enum SubCommand {
         #[arg(long)]
         ublk: bool,
     },
+    /// Take over the ublk devices an earlier server created, without the
+    /// block devices ever disappearing
+    ///
+    /// The handover the boot needs: the engine the initramfs started cannot be
+    /// restarted — `switch_root` deleted the filesystem its binary came from —
+    /// so the long-term owner has to be a process that lives in a golden and
+    /// can be supervised. This is how it takes the devices on.
+    AdoptUblk {
+        /// Slab device or file path(s), as `boot-local` was given them
+        #[arg(long, required = true)]
+        slab: Vec<String>,
+        /// Volume to serve on each device, in ublk device order: the first is
+        /// `/dev/ublkb0`, and so on. Must match what the previous server had.
+        #[arg(long = "volume", required = true)]
+        volumes: Vec<String>,
+        /// Metadata directory, if the slab does not carry its own
+        #[arg(long)]
+        meta: Option<String>,
+    },
     /// Boot from a local slab — attach an existing slab + metadata
     /// non-destructively and export the boot volume as /dev/ublkb0
     BootLocal {
@@ -547,6 +566,9 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("For local-slab boot use: stormblock boot-local --slab <path> --volume <id>");
                 tracing::info!("Requires Linux 6.0+ with ublk_drv module loaded");
                 return Ok(());
+            }
+            SubCommand::AdoptUblk { slab, volumes, meta } => {
+                return handle_adopt_ublk(slab, volumes, meta.as_deref()).await;
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier, check,
@@ -1873,21 +1895,16 @@ async fn resolve_boot_volume(
     )
 }
 
-/// boot-local: attach an existing local slab (no reformat, no repartition),
-/// restore volume metadata, export the boot volume as /dev/ublkb0.
-/// The local-slab → ublk-root path stormcos boots through (issue #12).
-#[allow(clippy::too_many_arguments)]
-async fn handle_boot_local(
+/// Open the slabs, find the volume metadata, and restore what it describes.
+///
+/// Shared by every path that attaches to an existing node's storage —
+/// `boot-local` at boot and `adopt-ublk` at handover — because they need
+/// exactly the same three things and disagreeing about any of them would mean
+/// the two halves of a handover had different ideas of what the node holds.
+async fn open_slabs_and_restore(
     slab_paths: &[String],
     meta: Option<&str>,
-    volume: Option<&str>,
-    boot_config: &str,
-    image_store: Option<&str>,
-    writable: &[String],
-    local_disk: Option<&str>,
-    local_tier: &str,
-    check: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<VolumeManager> {
     use std::path::{Path, PathBuf};
     use stormblock::volume::MetadataStore;
 
@@ -1981,6 +1998,122 @@ async fn handle_boot_local(
     }
     mgr.restore().await?;
 
+    Ok(mgr)
+}
+
+/// adopt-ublk: take over the ublk devices an earlier server created.
+///
+/// The handover the boot needs. The engine the initramfs started owns the slab
+/// and serves root, and it can never be restarted: `switch_root` deleted the
+/// filesystem its binary came from, so `/proc/<pid>/exe` reads `(deleted)` and
+/// nothing on the node could exec it again. That makes the one process the
+/// root filesystem depends on unrepeatable — a failure with no recovery path
+/// rather than one with a slow recovery path.
+///
+/// So the long-term owner is a process that lives in a golden, can be
+/// upgraded, and can be put back by PID 1 when it dies. It takes over here.
+///
+/// **The order matters and the caller owns it.** The previous server must be
+/// stopped before this runs: `START_USER_RECOVERY` is the kernel refusing to
+/// have two servers, not a way to have them briefly. The block device itself
+/// never goes away, so a filesystem mounted on it stays mounted throughout,
+/// and `UBLK_F_USER_RECOVERY_REISSUE` hands this server the I/O that was in
+/// flight rather than failing it.
+///
+/// The slab needs no handover of its own: `Slab::open` reads the header and
+/// the slot table from disk and derives the free bitmap, so the on-disk state
+/// *is* the allocator. Opening it here, after the old engine has stopped, is
+/// the whole transfer.
+#[cfg(target_os = "linux")]
+async fn handle_adopt_ublk(
+    slab_paths: &[String],
+    volumes: &[String],
+    meta: Option<&str>,
+) -> anyhow::Result<()> {
+    use stormblock::drive::ublk::UblkServer;
+
+    let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
+
+    // Resolve every volume before adopting anything. A name that does not
+    // resolve should cost nothing — half-adopting a set of devices leaves the
+    // node with some queues served and some not, which is worse than not
+    // starting.
+    let mut serving: Vec<(u32, String, Arc<dyn BlockDevice>)> = Vec::new();
+    for (i, selector) in volumes.iter().enumerate() {
+        let id = resolve_boot_volume(&mgr, selector).await?;
+        let name = mgr
+            .get_volume_handle(&id)
+            .expect("resolved volume exists")
+            .name()
+            .await;
+        let dev = mgr.get_volume(&id).expect("resolved volume exists");
+        serving.push((i as u32, name, dev));
+    }
+
+    for (dev_id, name, dev) in &serving {
+        println!(
+            "  adopting /dev/ublkb{dev_id} ← {name} ({})",
+            stormblock::mgmt::config::human_size(dev.capacity_bytes())
+        );
+    }
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut threads = Vec::new();
+    for (dev_id, name, dev) in serving {
+        let rx = shutdown_rx.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("ublk-adopt-{dev_id}"))
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let server = UblkServer::new(dev).adopting(dev_id);
+                if let Err(e) = rt.block_on(server.run(rx)) {
+                    tracing::error!("ublk adopt {dev_id} ({name}): {e}");
+                }
+            })?;
+        threads.push(thread);
+    }
+
+    println!("Adopted {} device(s). Serving until Ctrl+C.", threads.len());
+    tokio::signal::ctrl_c().await?;
+    let _ = shutdown_tx.send(true);
+    for t in threads {
+        let _ = t.join();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn handle_adopt_ublk(
+    _slab_paths: &[String],
+    _volumes: &[String],
+    _meta: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::bail!("ublk is Linux-only")
+}
+
+/// boot-local: attach an existing local slab (no reformat, no repartition),
+/// restore volume metadata, export the boot volume as /dev/ublkb0.
+/// The local-slab → ublk-root path stormcos boots through (issue #12).
+#[allow(clippy::too_many_arguments)]
+async fn handle_boot_local(
+    slab_paths: &[String],
+    meta: Option<&str>,
+    volume: Option<&str>,
+    boot_config: &str,
+    image_store: Option<&str>,
+    writable: &[String],
+    local_disk: Option<&str>,
+    local_tier: &str,
+    check: bool,
+) -> anyhow::Result<()> {
+    use std::path::{Path, PathBuf};
+    use stormblock::volume::MetadataStore;
+
+    let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
+
     // 3. Resolve the boot volume: --volume wins, else boot.toml.
     let selector = match volume {
         Some(v) => v.to_string(),
@@ -2057,7 +2190,7 @@ async fn handle_boot_local(
         };
         let dest_dev: Arc<dyn BlockDevice> =
             Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
-        let dest_slab = Slab::format(dest_dev, metadata.extent_size, tier)
+        let dest_slab = Slab::format(dest_dev, mgr.slot_size(), tier)
             .await
             .map_err(|e| anyhow::anyhow!("format local disk {disk}: {e}"))?;
         let dest_id = dest_slab.slab_id();
@@ -2115,7 +2248,18 @@ async fn handle_boot_local(
         let total = exports.len();
         let mut ublk_threads = Vec::new();
         for (dev_id, name, dev) in exports {
-            let server = UblkServer::new(dev).with_dev_id(dev_id);
+            // Recoverable, always, on the boot path. The process creating
+            // these devices is the one the initramfs started, and
+            // `switch_root` deletes the filesystem its binary came from — so
+            // it can never be restarted, by anything, for the life of the
+            // boot. Without this flag the engine serving root is a single
+            // point of failure with no recovery path at all; with it, another
+            // process can take the devices over, and stormpump can put the
+            // engine back if it dies.
+            //
+            // The flag is fixed at creation, so this is the only moment it can
+            // be asked for.
+            let server = UblkServer::new(dev).with_dev_id(dev_id).recoverable(true);
             let rx = shutdown_rx.clone();
             let done = done_tx.clone();
             // UblkServer::run() holds raw pointers (not Send), so run on a
