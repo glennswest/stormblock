@@ -959,6 +959,61 @@ impl UblkServer {
 /// The kernel's own record, written at `ADD_DEV`. It is the only trustworthy
 /// answer to "who has to stand down before I can take this over" — a pid file
 /// would be a guess about a process that may already have been replaced.
+/// Wait until every device is serving again, or say which are not.
+///
+/// A thread that has not exited is a thread that reached its I/O loop; it is
+/// not a device the kernel will accept reads on. Recovery finishes when
+/// END_USER_RECOVERY brings the device back to LIVE, and until then a read of
+/// a filesystem on it fails — which is how an engine that had just adopted six
+/// devices could not create a directory on one of them, and died with EIO on
+/// the filesystem it was serving itself.
+///
+/// Returns the ids that never came back, empty meaning all of them did.
+pub fn wait_live(dev_ids: &[u32], timeout: std::time::Duration) -> DriveResult<Vec<u32>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut pending = Vec::new();
+        for &id in dev_ids {
+            if dev_state(id)? != Some(UBLK_S_DEV_LIVE) {
+                pending.push(id);
+            }
+        }
+        if pending.is_empty() || std::time::Instant::now() >= deadline {
+            return Ok(pending);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The device's state, or `None` if there is no such device.
+pub fn dev_state(dev_id: u32) -> DriveResult<Option<u16>> {
+    let ctrl = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/ublk-control")
+        .map_err(|e| {
+            DriveError::Other(anyhow::anyhow!(
+                "cannot open /dev/ublk-control: {e} (is ublk_drv loaded?)"
+            ))
+        })?;
+    let mut ring: IoUring<squeue::Entry128> = IoUring::builder()
+        .build(8)
+        .map_err(|e| DriveError::Other(anyhow::anyhow!("io_uring create failed: {e}")))?;
+    let mut info = UblkCtrlDevInfo::default();
+    match submit_ctrl_cmd(
+        &mut ring,
+        ctrl.as_raw_fd(),
+        UBLK_U_CMD_GET_DEV_INFO,
+        dev_id,
+        &mut info as *mut UblkCtrlDevInfo as u64,
+        std::mem::size_of::<UblkCtrlDevInfo>() as u32,
+        0,
+    ) {
+        Ok(_) => Ok(Some(info.state)),
+        Err(_) => Ok(None),
+    }
+}
+
 pub fn server_pid(dev_id: u32) -> DriveResult<Option<i32>> {
     let ctrl = OpenOptions::new()
         .read(true)

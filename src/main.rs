@@ -2223,7 +2223,21 @@ async fn handle_adopt_ublk(
     // device(s)" in the same breath as four errors saying none of them had
     // been — the sort of report that sends the next session looking in the
     // wrong place.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Wait for the kernel to bring them back, not for the threads to look
+    // busy. A thread that has not exited has reached its I/O loop; the device
+    // is only readable once END_USER_RECOVERY has returned it to LIVE. Between
+    // those two moments a read of a filesystem on one of these devices fails,
+    // and the first thing this process does next is write to one.
+    let not_live = tokio::task::spawn_blocking({
+        let ids = dev_ids.clone();
+        move || {
+            stormblock::drive::ublk::wait_live(&ids, std::time::Duration::from_secs(30))
+        }
+    })
+    .await??;
+    for id in &not_live {
+        tracing::error!("/dev/ublkb{id} did not come back after recovery");
+    }
     let live = threads.iter().filter(|t| !t.is_finished()).count();
     if live == 0 {
         let _ = shutdown_tx.send(true);
