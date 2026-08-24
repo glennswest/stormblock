@@ -160,6 +160,26 @@ else
     echo "  WARNING: no udevd found; /init will fall back to walking modalias"
 fi
 
+# Firmware.
+#
+# A NIC or HBA that loads firmware at probe fails without it, and the failure
+# is indistinguishable from a missing driver — the device simply never
+# appears. Mellanox, Broadcom, several Intel parts and most SAS HBAs are in
+# that group, which is most of what a real server has in it.
+#
+# The whole set, because this image is written to machines nobody has seen and
+# choosing a subset means choosing which hardware it fails on. Fedora ships it
+# already compressed and the kernel reads it that way.
+FWDIR="$(ls -d /usr/lib/firmware /lib/firmware 2>/dev/null | head -1 || true)"
+if [ -n "$FWDIR" ] && [ -d "$FWDIR" ]; then
+    mkdir -p "$INITRD_DIR/lib/firmware"
+    cp -a "$FWDIR/." "$INITRD_DIR/lib/firmware/" 2>/dev/null || true
+    echo "  firmware:   $(du -sh "$INITRD_DIR/lib/firmware" | cut -f1) from $FWDIR"
+else
+    echo "  WARNING: no linux-firmware on this build host — devices that load"
+    echo "           firmware at probe will look like missing drivers"
+fi
+
 # StormBlock binary
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
