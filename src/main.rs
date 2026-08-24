@@ -1077,56 +1077,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "iscsi"))]
     let iscsi_bind = "0.0.0.0:3260".to_string();
 
-    match config.serve_config(&iscsi_bind, &nvmeof_bind) {
-        Ok(serve_cfg) => {
-            if let Err(e) = std::fs::create_dir_all(&serve_cfg.data_dir) {
-                tracing::error!(
-                    "not serving /serve/v1: cannot create {} ({e}) — the wiring table has to \
-                     survive a restart",
-                    serve_cfg.data_dir
-                );
-            } else {
-                #[cfg(feature = "iscsi")]
-                let shared_iscsi = state.iscsi_target.read().await.clone();
-
-                let wiring = stormblock::serve::wiring::WiringTable::load(&serve_cfg.data_dir);
-                let status = Arc::new(stormblock::serve::status::MkStatus::new());
-                tracing::info!(
-                    "Serving /serve/v1 — advertising {}, portals {}..{}, state in {}",
-                    serve_cfg.advertise_addr,
-                    serve_cfg.portal_base,
-                    serve_cfg.portal_base.saturating_add(serve_cfg.portal_span),
-                    serve_cfg.data_dir,
-                );
-                let reconcile_secs = serve_cfg.reconcile_secs;
-                let reap_secs = serve_cfg.reap_secs;
-                let ctx = Arc::new(stormblock::serve::ctx::ServeContext::new(
-                    serve_cfg,
-                    state.clone(),
-                    status,
-                    #[cfg(feature = "iscsi")]
-                    shared_iscsi,
-                    reactor.clone(),
-                    wiring,
-                ));
-                if state.serve.set(ctx.clone()).is_err() {
-                    tracing::error!("serving context was already set — not starting a second one");
-                } else {
-                    tokio::spawn(stormblock::serve::reconcile::run(ctx.clone()));
-                    tracing::debug!("export reconciler running every {reconcile_secs}s");
-                    if reap_secs > 0 {
-                        tokio::spawn(stormblock::serve::reap::run(ctx));
-                        tracing::debug!("template reaper running every {reap_secs}s");
-                    }
-                }
-            }
-        }
-        // Not an error: a node that is not meant to serve, or has nowhere to
-        // keep the wiring table, is a legitimate configuration. But it is
-        // never silent — a consumer getting 404s from /serve/v1 has to be able
-        // to find out why from this node's log.
-        Err(why) => tracing::warn!("not serving /serve/v1: {why}"),
-    }
+    start_serving(&config, &state, &iscsi_bind, &nvmeof_bind, &reactor).await;
 
     // Phase 6: Start management API. Last, so the router it builds sees
     // everything above it.
@@ -2051,6 +2002,73 @@ async fn open_slabs_and_restore(
 /// the slot table from disk and derives the free bitmap, so the on-disk state
 /// *is* the allocator. Opening it here, after the old engine has stopped, is
 /// the whole transfer.
+/// Mount the `/serve/v1` surface over an engine that is already assembled.
+///
+/// Shared by the two ways this binary becomes a node's engine: the ordinary
+/// serve path, and `adopt-ublk`, which takes the devices over from the
+/// initramfs and then *is* the engine. Only the first one had it, so a node
+/// that booted through a handover answered 404 to every call the registry
+/// next door made — while its management API, one port along, was answering
+/// perfectly. Layer 2 belongs to the engine, not to one of its entry points.
+async fn start_serving(
+    config: &stormblock::mgmt::config::StormBlockConfig,
+    state: &Arc<AppState>,
+    iscsi_bind: &str,
+    nvmeof_bind: &str,
+    reactor: &Arc<ReactorPool>,
+) {
+    match config.serve_config(iscsi_bind, nvmeof_bind) {
+        Ok(serve_cfg) => {
+            if let Err(e) = std::fs::create_dir_all(&serve_cfg.data_dir) {
+                tracing::error!(
+                    "not serving /serve/v1: cannot create {} ({e}) — the wiring table has to \
+                     survive a restart",
+                    serve_cfg.data_dir
+                );
+                return;
+            }
+            #[cfg(feature = "iscsi")]
+            let shared_iscsi = state.iscsi_target.read().await.clone();
+
+            let wiring = stormblock::serve::wiring::WiringTable::load(&serve_cfg.data_dir);
+            let status = Arc::new(stormblock::serve::status::MkStatus::new());
+            tracing::info!(
+                "Serving /serve/v1 — advertising {}, portals {}..{}, state in {}",
+                serve_cfg.advertise_addr,
+                serve_cfg.portal_base,
+                serve_cfg.portal_base.saturating_add(serve_cfg.portal_span),
+                serve_cfg.data_dir,
+            );
+            let reconcile_secs = serve_cfg.reconcile_secs;
+            let reap_secs = serve_cfg.reap_secs;
+            let ctx = Arc::new(stormblock::serve::ctx::ServeContext::new(
+                serve_cfg,
+                state.clone(),
+                status,
+                #[cfg(feature = "iscsi")]
+                shared_iscsi,
+                reactor.clone(),
+                wiring,
+            ));
+            if state.serve.set(ctx.clone()).is_err() {
+                tracing::error!("serving context was already set — not starting a second one");
+                return;
+            }
+            tokio::spawn(stormblock::serve::reconcile::run(ctx.clone()));
+            tracing::debug!("export reconciler running every {reconcile_secs}s");
+            if reap_secs > 0 {
+                tokio::spawn(stormblock::serve::reap::run(ctx));
+                tracing::debug!("template reaper running every {reap_secs}s");
+            }
+        }
+        // Not an error: a node that is not meant to serve, or has nowhere to
+        // keep the wiring table, is a legitimate configuration. But it is
+        // never silent — a consumer getting 404s from /serve/v1 has to be able
+        // to find out why from this node's log.
+        Err(why) => tracing::warn!("not serving /serve/v1: {why}"),
+    }
+}
+
 #[cfg(target_os = "linux")]
 async fn handle_adopt_ublk(
     slab_paths: &[String],
@@ -2299,7 +2317,16 @@ async fn handle_adopt_ublk(
         }
         let slab_registry = mgr.registry().clone();
         let gem = mgr.gem().clone();
-        let state = Arc::new(AppState::new(config, mgr, slab_registry, gem));
+        let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
+        // The serving surface too. An engine that took the devices over from
+        // the initramfs *is* this node's engine, and layer 2 belongs to the
+        // engine rather than to one of the two ways of becoming it.
+        let reactor = Arc::new(ReactorPool::new(&ReactorConfig {
+            core_count: 0,
+            pin_cores: cfg!(target_os = "linux"),
+        }));
+        start_serving(&config, &state, "0.0.0.0:3260", "0.0.0.0:4420", &reactor).await;
+
         tokio::spawn(async move {
             if let Err(e) = mgmt::start_management_server(state).await {
                 tracing::error!("management API error: {e}");
