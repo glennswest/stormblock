@@ -127,7 +127,13 @@ fi
 # their parent's driver has bound, and the device nodes. What was a hand-rolled
 # sweep with a settle loop becomes `udevadm trigger` and `udevadm settle`, run
 # by the code every other distro runs.
-UDEVD="$(ls /usr/lib/systemd/systemd-udevd /lib/systemd/systemd-udevd /sbin/udevd 2>/dev/null | head -1)"
+# `ls` returns non-zero for the paths that do not exist, and with `pipefail`
+# that fails the assignment and `set -e` ends the build — silently, because
+# the failing command printed nothing. Hence the `|| true`.
+UDEVD=""
+for cand in /usr/lib/systemd/systemd-udevd /lib/systemd/systemd-udevd /sbin/udevd; do
+    [ -x "$cand" ] && { UDEVD="$cand"; break; }
+done
 UDEVADM="$(command -v udevadm || true)"
 if [ -x "$UDEVD" ] && [ -x "$UDEVADM" ]; then
     mkdir -p "$INITRD_DIR/usr/lib/systemd" "$INITRD_DIR/usr/bin" \
