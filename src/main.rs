@@ -2057,6 +2057,29 @@ async fn handle_adopt_ublk(
         );
     }
 
+    // Lock this process into RAM before anything else.
+    //
+    // The engine is about to stop the server that is exporting **its own
+    // root**. Between that moment and the end of recovery there is no backing
+    // store for this binary: a page fault on code not yet resident would wait
+    // for a device this process is on its way to serving, and wait forever.
+    // Locking first makes the window survivable — the pages cannot be
+    // reclaimed while it is open.
+    //
+    // Best effort: a node where mlockall is refused still works, it is simply
+    // relying on those pages happening to stay resident.
+    // SAFETY: mlockall takes flags and touches nothing of ours.
+    let locked = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } == 0;
+    if locked {
+        tracing::info!("adopt: locked into memory for the handover");
+    } else {
+        tracing::warn!(
+            "adopt: could not lock memory ({}) — the handover relies on this \
+             binary's pages staying resident",
+            std::io::Error::last_os_error()
+        );
+    }
+
     // The incumbent stands down before anything is adopted. The kernel runs
     // one server per device, so this is the handover's first step rather than
     // an afterthought — and the kernel is asked who the incumbent is, because
