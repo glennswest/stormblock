@@ -166,6 +166,7 @@ VOLUME=""
 OVERLAY=""
 IMAGE_STORE=""
 WRITABLE=""
+MOUNTS=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -180,6 +181,8 @@ for param in $(cat /proc/cmdline); do
         # Writable thin volumes, comma-separated name:mount pairs, e.g.
         # rd.stormblock.writable=var-...:/var,containers-...:/var/lib/containers
         rd.stormblock.writable=*)    WRITABLE="${param#*=}" ;;
+        # Volumes this init mounts itself, for a PID 1 that is not systemd
+        rd.stormblock.mount=*)       MOUNTS="${param#*=}" ;;
         stormblock.volume=*)         VOLUME="${param#*=}" ;;
         ip=*)                        IP_CONF="${param#*=}" ;;
     esac
@@ -326,6 +329,36 @@ if [ "$BOOT_MODE" = "local" ]; then
         IFS=$OIFS
     fi
 
+    # Volumes this init **mounts**, rather than leaving to the real root's
+    # init. `rd.stormblock.writable=` writes fstab, which only helps a node
+    # whose PID 1 is systemd; a stormpump node never reads it, and its boot
+    # manifest registers *directories* — so a container's volume has to be
+    # mounted before PID 1 starts or there is nothing for it to chroot into.
+    #
+    #   rd.stormblock.mount=stormblock:/pallets/stormblock,fedora:/pallets/fedora
+    #
+    # Same ublk numbering as the writables, continuing after them, and the map
+    # is built in the same pass so the indices cannot drift apart.
+    MOUNT_MAP=""
+    if [ -n "$MOUNTS" ]; then
+        OIFS=$IFS; IFS=,
+        for entry in $MOUNTS; do
+            IFS=$OIFS
+            mname="${entry%%:*}"
+            mmnt="${entry#*:}"
+            if [ -z "$mname" ] || [ "$mname" = "$entry" ]; then
+                echo "  WARNING: rd.stormblock.mount entry '$entry' has no :<path> — ignored"
+                IFS=,; continue
+            fi
+            WR_ARGS="$WR_ARGS --writable $mname"
+            MOUNT_MAP="$MOUNT_MAP/dev/ublkb$WR_IDX $mmnt
+"
+            WR_IDX=$((WR_IDX + 1))
+            IFS=,
+        done
+        IFS=$OIFS
+    fi
+
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
     # Volume comes from --volume if given, else /etc/stormblock/boot.toml.
     # shellcheck disable=SC2086
@@ -437,6 +470,33 @@ fi
 # empty volume on first boot, x-systemd.growfs grows the fs after auto-expand,
 # and the mounts land over the read-only erofs root. Writing /sysroot/etc/fstab
 # copies-up into the overlay upper (regenerated every boot, which is fine).
+# Mount what this init was told to mount, into the real root, before PID 1
+# starts. A stormpump node's boot manifest registers directories, so a
+# container's volume has to be a mounted directory by the time PID 1 reads the
+# manifest — there is no later moment, and nothing else on the node will do it.
+#
+# A volume that will not mount is reported and skipped rather than fatal: one
+# container that cannot start is worth less than a node that does not boot, and
+# the supervisor says which one is missing.
+if [ -n "$MOUNT_MAP" ]; then
+    echo "Mounting container volumes..."
+    printf '%s' "$MOUNT_MAP" | while read -r mdev mmnt; do
+        [ -z "$mdev" ] && continue
+        n=0
+        while [ ! -b "$mdev" ] && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
+        if [ ! -b "$mdev" ]; then
+            echo "  WARNING: $mdev never appeared; $mmnt will be empty"
+            continue
+        fi
+        mkdir -p "/sysroot$mmnt"
+        if mount "$mdev" "/sysroot$mmnt" 2>/dev/null; then
+            echo "  mounted: $mdev -> $mmnt"
+        else
+            echo "  WARNING: $mdev would not mount at $mmnt"
+        fi
+    done
+fi
+
 if [ -n "$WRITABLE_MAP" ]; then
     echo "Registering writable thin volumes in fstab..."
     printf '%s' "$WRITABLE_MAP" | while read -r wdev wmnt; do
@@ -516,3 +576,5 @@ echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
 echo "         [rd.stormblock.overlay=tmpfs[:SIZE]|<blockdev>]  — writable overlay over a read-only (erofs) root"
+echo "         [rd.stormblock.mount=<vol>:<path>,...]  — export and MOUNT these into the real root"
+echo "                 for a PID 1 that is not systemd (stormpump reads directories, not fstab)"

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-08-24
+- **feat:** `rd.stormblock.mount=<vol>:<path>,...` — the initramfs exports
+  these volumes *and mounts them* into the real root before `switch_root`.
+  `rd.stormblock.writable=` writes fstab entries, which only a systemd node
+  ever reads; a stormpump node's PID 1 reads a boot manifest that registers
+  **directories**, so a container's volume has to be a mounted directory by the
+  time PID 1 starts. There is no later moment and nothing else on the node
+  would do it. A volume that will not mount is reported and skipped rather than
+  fatal — one container that cannot start beats a node that does not boot.
+
 ## [v9.13.0] — 2026-08-24
 
 ### 2026-08-24
