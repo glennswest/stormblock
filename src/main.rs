@@ -118,6 +118,41 @@ enum SubCommand {
         action: PalletAction,
     },
     /// Export a volume via ublk to the local kernel (/dev/ublkbN)
+    /// Attach a slab and export (and optionally mount) any volume in it.
+    ///
+    /// The debugging and rescue door: point it at a disk, an image file or a
+    /// partition and look at what is inside without booting the node that
+    /// owns it. With no --volume it lists what is there, so finding out and
+    /// getting in are the same command.
+    Attach {
+        /// Slab device, partition or image file. Repeatable.
+        #[arg(long, required = true)]
+        slab: Vec<String>,
+        /// Metadata directory, if the slab does not carry its own.
+        #[arg(long)]
+        meta: Option<String>,
+        /// Volume to export, by name or UUID. Repeatable. With none, the
+        /// volumes are listed and nothing is attached.
+        #[arg(long = "volume")]
+        volumes: Vec<String>,
+        /// Export every volume in the slab.
+        #[arg(long)]
+        all: bool,
+        /// Mount each exported volume under this directory, by name.
+        #[arg(long)]
+        mount: Option<String>,
+        /// Read-only: mount `ro`, and refuse anything that would write.
+        ///
+        /// The right default for looking at a node's disk while something
+        /// else may still own it.
+        #[arg(long)]
+        ro: bool,
+        /// Attach even though the kernel says another server is serving this
+        /// volume. Two writers on one volume corrupt it silently, so this is
+        /// never the first thing to try.
+        #[arg(long)]
+        force: bool,
+    },
     Ublk {
         /// Volume UUID to export
         #[arg(long)]
@@ -584,6 +619,11 @@ async fn main() -> anyhow::Result<()> {
             }
             SubCommand::Pallet { drives, action } => {
                 return handle_pallet_command(drives, action).await;
+            }
+            SubCommand::Attach { slab, meta, volumes, all, mount, ro, force } => {
+                return handle_attach(
+                    slab, meta.as_deref(), volumes, *all, mount.as_deref(), *ro, *force,
+                ).await;
             }
             SubCommand::Ublk { volume: _, queues: _ } => {
                 tracing::info!("ublk export mode — requires running storage engine");
@@ -2067,6 +2107,212 @@ async fn start_serving(
         // to find out why from this node's log.
         Err(why) => tracing::warn!("not serving /serve/v1: {why}"),
     }
+}
+
+/// `attach` — open a slab and export, or list, what is in it.
+///
+/// Everything a node does with its storage happens through a volume it has
+/// already opened, which is fine until the node will not boot. Then the disk
+/// is a slab full of volumes and there is nothing that can look inside one:
+/// not `mount`, which sees an extent store rather than a filesystem, and not
+/// the engine, which only opens the volumes its own configuration names. This
+/// is the door — the same code paths the boot uses, pointed anywhere.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+async fn handle_attach(
+    slab_paths: &[String],
+    meta: Option<&str>,
+    volumes: &[String],
+    all: bool,
+    mount_at: Option<&str>,
+    read_only: bool,
+    force: bool,
+) -> anyhow::Result<()> {
+    use stormblock::drive::ublk::UblkServer;
+
+    let mgr = open_slabs_and_restore(slab_paths, meta).await?;
+
+    // Listing and attaching are the same command, because when a node will not
+    // boot the first question is what is on the disk at all, and having to
+    // know a volume's name before being allowed to ask is the wrong way round.
+    let mut names = mgr.list_volumes().await;
+    names.sort_by(|a, b| a.1.cmp(&b.1));
+
+    if volumes.is_empty() && !all {
+        println!("{} volume(s) in {}:", names.len(), slab_paths.join(", "));
+        for (id, name, size, used) in &names {
+            println!(
+                "  {:<28} {:>10} {:>10} mapped  {id}",
+                name,
+                stormblock::mgmt::config::human_size(*size),
+                stormblock::mgmt::config::human_size(*used),
+            );
+        }
+        println!("\nAttach one with --volume <name>, or all of them with --all.");
+        return Ok(());
+    }
+
+    let wanted: Vec<(stormblock::volume::VolumeId, String)> = if all {
+        names.iter().map(|(id, n, ..)| (*id, n.clone())).collect()
+    } else {
+        let mut v = Vec::new();
+        for sel in volumes {
+            let id = resolve_boot_volume(&mgr, sel).await?;
+            let name = names
+                .iter()
+                .find(|(i, ..)| *i == id)
+                .map(|(_, n, ..)| n.clone())
+                .unwrap_or_else(|| sel.clone());
+            v.push((id, name));
+        }
+        v
+    };
+
+    // Whoever is already serving this volume is still serving it. Two writers
+    // on one volume corrupt it, and the corruption is silent — each believes
+    // its own copy-on-write mapping — so the check is on by default and the
+    // override has to be typed.
+    if !force && !read_only {
+        let live = stormblock::drive::ublk::devices()?;
+        let mut busy = Vec::new();
+        for id in &live {
+            if let Some(pid) = stormblock::drive::ublk::server_pid(*id)? {
+                if pid > 0 && pid != std::process::id() as i32 {
+                    busy.push(format!("/dev/ublkb{id} (server {pid})"));
+                }
+            }
+        }
+        if !busy.is_empty() {
+            anyhow::bail!(
+                "this node is already serving {} — attaching writable would put two \
+                 writers on one volume, which corrupts it silently. Use --ro to look, \
+                 or --force if you know the other server is not touching what you want.",
+                busy.join(", ")
+            );
+        }
+    }
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut threads = Vec::new();
+    let mut attached: Vec<(u32, String)> = Vec::new();
+    let base = stormblock::drive::ublk::devices()?.into_iter().max().map_or(0, |m| m + 1);
+
+    for (i, (id, name)) in wanted.iter().enumerate() {
+        let Some(dev) = mgr.get_volume(id) else {
+            eprintln!("  {name}: no such volume");
+            continue;
+        };
+        let dev_id = base + i as u32;
+        let rx = shutdown_rx.clone();
+        let label = name.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("ublk-attach-{dev_id}"))
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let server = UblkServer::new(dev).with_dev_id(dev_id);
+                if let Err(e) = rt.block_on(server.run(rx)) {
+                    tracing::error!("attach {label} on /dev/ublkb{dev_id}: {e}");
+                }
+            })?;
+        threads.push(thread);
+        attached.push((dev_id, name.clone()));
+    }
+
+    // Give the devices a moment to appear before anything tries to mount one.
+    let ids: Vec<u32> = attached.iter().map(|(d, _)| *d).collect();
+    let _ = tokio::task::spawn_blocking({
+        let ids = ids.clone();
+        move || stormblock::drive::ublk::wait_live(&ids, std::time::Duration::from_secs(30))
+    })
+    .await?;
+
+    let mut mounted: Vec<String> = Vec::new();
+    for (dev_id, name) in &attached {
+        let path = format!("/dev/ublkb{dev_id}");
+        match mount_at {
+            None => println!("  {name:<28} {path}"),
+            Some(dir) => {
+                let target = std::path::Path::new(dir).join(name);
+                std::fs::create_dir_all(&target)?;
+                match mount_volume(&path, &target, read_only) {
+                    Ok(fs) => {
+                        println!(
+                            "  {name:<28} {path} -> {} ({fs}{})",
+                            target.display(),
+                            if read_only { ", ro" } else { "" }
+                        );
+                        mounted.push(target.to_string_lossy().into_owned());
+                    }
+                    // Not fatal, and worth being precise about: a volume that
+                    // holds no filesystem is a perfectly good thing to attach,
+                    // and the block device is still there to look at.
+                    Err(e) => println!("  {name:<28} {path} (not mounted: {e})"),
+                }
+            }
+        }
+    }
+
+    println!("\nAttached {}. Ctrl+C to release.", attached.len());
+    tokio::signal::ctrl_c().await?;
+
+    for m in mounted.iter().rev() {
+        let c = std::ffi::CString::new(m.as_str()).unwrap_or_default();
+        // SAFETY: unmounting a path this process mounted.
+        if unsafe { libc::umount(c.as_ptr()) } != 0 {
+            eprintln!("could not unmount {m}: {}", std::io::Error::last_os_error());
+        }
+    }
+    let _ = shutdown_tx.send(true);
+    for t in threads {
+        let _ = t.join();
+    }
+    Ok(())
+}
+
+/// Mount a block device without being told what is on it.
+///
+/// There is no `blkid` here and no reason to need one: the kernel refuses a
+/// filesystem it does not recognise, so trying the handful this node can
+/// produce and reporting which one worked is both the probe and the mount.
+#[cfg(target_os = "linux")]
+fn mount_volume(
+    dev: &str,
+    target: &std::path::Path,
+    read_only: bool,
+) -> anyhow::Result<&'static str> {
+    let src = std::ffi::CString::new(dev)?;
+    let dst = std::ffi::CString::new(target.to_string_lossy().as_ref())?;
+    let flags = if read_only { libc::MS_RDONLY } else { 0 };
+    let mut last = 0;
+    for fs in ["ext4", "erofs", "vfat", "xfs", "ext2"] {
+        let t = std::ffi::CString::new(fs)?;
+        // SAFETY: all four pointers are valid NUL-terminated strings.
+        let rc = unsafe {
+            libc::mount(src.as_ptr(), dst.as_ptr(), t.as_ptr(), flags, std::ptr::null())
+        };
+        if rc == 0 {
+            return Ok(fs);
+        }
+        last = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    }
+    anyhow::bail!("no filesystem the kernel recognises ({})", std::io::Error::from_raw_os_error(last))
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+async fn handle_attach(
+    _slab_paths: &[String],
+    _meta: Option<&str>,
+    _volumes: &[String],
+    _all: bool,
+    _mount_at: Option<&str>,
+    _read_only: bool,
+    _force: bool,
+) -> anyhow::Result<()> {
+    anyhow::bail!("attach exports volumes through ublk, which is Linux-only")
 }
 
 #[cfg(target_os = "linux")]
