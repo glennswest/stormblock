@@ -112,7 +112,13 @@ if [ -x "$KMOD" ]; then
     cp -L /lib64/ld-linux-x86-64.so.2 "$INITRD_DIR/lib64/" 2>/dev/null || true
     echo "  modprobe:   kmod $("$KMOD" --version 2>/dev/null | head -1 | awk '{print $NF}')"
 else
-    echo "  WARNING: no kmod modprobe found; falling back to busybox's"
+    # Not a warning. The module tree ships compressed, and busybox's insmod
+    # cannot read a compressed module — it would fail on every driver, one at
+    # a time, silently, and surface as hardware that does not exist.
+    echo "ERROR: no kmod modprobe on this build host."
+    echo "       The module tree is bundled compressed, as the kernel package"
+    echo "       ships it, and only kmod can load that. Install kmod."
+    exit 1
 fi
 
 # udev, and the rules it runs on.
@@ -184,20 +190,27 @@ fi
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
 
-# Kernel modules.
+# Kernel modules — the whole tree, exactly as the kernel package ships it.
 #
-# **Every storage and network driver, not a list someone guessed.** This image
-# is written to real machines, and the machine decides what is in it: an HBA
-# from one vendor, a NIC from another, NVMe behind a switch. A hand-picked list
-# boots the hypervisor it was tested on and leaves a real server sitting in an
-# initramfs shell saying it has no disks — which is exactly what happened here
-# with a NIC whose driver was not bundled.
+# **Not a list, and not a set of subtrees either.** Both are the same mistake
+# at different scales, and both have now cost a boot here. A hand-picked list
+# missed `virtio_net`. Picking subtrees — drivers/{net,scsi,nvme,...} — then
+# missed `kernel/net/core/failover.ko`, which is not a driver and lives under
+# no driver directory, but is what `net_failover` links against. `depmod` can
+# only record dependencies between modules it can *see*, so with that one file
+# absent the tables said `net_failover` needed nothing, `modprobe` loaded it
+# bare, the kernel refused it on unresolved symbols, and `virtio_net` — which
+# depends on it — was never reached. The node came up with no network and a
+# discovery pass that reported success.
 #
-# So the whole of drivers/{net,scsi,nvme,ata,block,virtio,usb/storage,md} comes
-# along, plus the filesystems, and `depmod` builds the dependency and alias
-# tables. At boot /init walks every device's `modalias` and asks for the driver
-# it names — the coldplug udev would do, without udev. About 18 MB compressed,
-# against a 32 GB image.
+# The lesson is that a module's dependencies are not confined to its own
+# subtree, so no subtree selection is safe. Ship `kernel/` whole.
+#
+# Compressed, as shipped. Fedora's whole tree is 73 MB of .ko.xz against 137 MB
+# for the decompressed *subset* it replaces — complete and smaller, because xz
+# is worth more than the subsetting was. Decompressing was only ever to appease
+# busybox's `insmod`, which cannot read a compressed module; kmod can, and is
+# required below for exactly this reason.
 MODDIR="/lib/modules/$KVER"
 DEST="$INITRD_DIR/lib/modules/$KVER"
 mkdir -p "$DEST"
@@ -207,52 +220,10 @@ if [ ! -d "$MODDIR/kernel" ]; then
     exit 1
 fi
 
-# Decompress on the way in: busybox insmod cannot read .ko.xz, and a module
-# that silently fails to load surfaces later as missing hardware (#14).
-copy_tree() {
-    local rel="$1"
-    [ -d "$MODDIR/$rel" ] || return 0
-    local n=0
-    while IFS= read -r src; do
-        local out="$DEST/${src#$MODDIR/}"
-        out="${out%.xz}"; out="${out%.zst}"; out="${out%.gz}"
-        mkdir -p "$(dirname "$out")"
-        case "$src" in
-            *.xz)  xz -dc  "$src" > "$out" ;;
-            *.zst) zstd -qdc "$src" > "$out" ;;
-            *.gz)  gzip -dc "$src" > "$out" ;;
-            *)     cp "$src" "$out" ;;
-        esac
-        n=$((n + 1))
-    done <<EOF
-$(find "$MODDIR/$rel" -name '*.ko*' 2>/dev/null)
-EOF
-    [ "$n" -gt 0 ] && printf '  modules:    %-26s %4d\n' "$rel" "$n"
-    return 0
-}
-
-for tree in kernel/drivers/net kernel/drivers/scsi kernel/drivers/nvme \
-            kernel/drivers/ata kernel/drivers/block kernel/drivers/virtio \
-            kernel/drivers/usb/storage kernel/drivers/md kernel/drivers/messages \
-            kernel/drivers/pci/controller kernel/fs kernel/lib kernel/crypto; do
-    copy_tree "$tree"
-done
-
-# ublk_drv is the one module this image cannot boot without, wherever it lives.
-while IFS= read -r src; do
-    [ -n "$src" ] || continue
-    out="$DEST/${src#$MODDIR/}"
-    out="${out%.xz}"; out="${out%.zst}"; out="${out%.gz}"
-    mkdir -p "$(dirname "$out")"
-    case "$src" in
-        *.xz)  xz -dc "$src" > "$out" ;;
-        *.zst) zstd -qdc "$src" > "$out" ;;
-        *)     cp "$src" "$out" ;;
-    esac
-    echo "  modules:    ublk_drv"
-done <<EOF
-$(find "$MODDIR" -name 'ublk_drv.ko*' 2>/dev/null)
-EOF
+cp -a "$MODDIR/kernel" "$DEST/kernel"
+printf '  modules:    %d files, %s as shipped\n' \
+    "$(find "$DEST/kernel" -name '*.ko*' | wc -l)" \
+    "$(du -sh "$DEST/kernel" | cut -f1)"
 
 # What depmod needs to know which names are already in the kernel, so /init
 # does not spend the boot asking for modules that cannot be loaded because
@@ -267,7 +238,25 @@ if ! depmod -b "$INITRD_DIR" "$KVER" 2>/dev/null; then
     echo "ERROR: depmod failed; /init could not resolve drivers by modalias"
     exit 1
 fi
-echo "  modules:    $(find "$DEST" -name '*.ko' | wc -l) total, $(du -sh "$DEST" | cut -f1) uncompressed"
+# A dependency that resolves to a file that is not here is the failure this
+# whole section exists to prevent, and it is silent at boot: modprobe loads
+# what it can, the kernel rejects it on unresolved symbols, and the driver that
+# needed it never loads. modules.dep names every dependency by path, so the
+# check is just: does each path exist. Cheap, and it fails the build instead of
+# the node.
+MISSING=0
+while IFS= read -r dep; do
+    [ -f "$DEST/$dep" ] || { echo "  MISSING dependency: $dep"; MISSING=$((MISSING + 1)); }
+done <<EOF
+$(awk -F: '{ print substr($1,1); n=split($2,d," "); for (i=1;i<=n;i++) print d[i] }' \
+    "$DEST/modules.dep" | sort -u)
+EOF
+if [ "$MISSING" -gt 0 ]; then
+    echo "ERROR: $MISSING module(s) named by modules.dep are not in the image."
+    echo "       Every one is a driver that will fail to load at boot."
+    exit 1
+fi
+echo "  modules:    $(find "$DEST" -name '*.ko*' | wc -l) total, $(du -sh "$DEST" | cut -f1), dependencies complete"
 
 # Minimal /etc
 cat > "$INITRD_DIR/etc/mdev.conf" << 'MDEV'
@@ -400,6 +389,18 @@ if [ -n "$MODTREE" ]; then
         sleep 1
     done
     echo "  $LOADED driver(s) loaded in $PASS pass(es)"
+
+    # A module the kernel *rejected* is not a module that failed to match, and
+    # the difference matters: the first means the driver is here and broken,
+    # the second means this machine does not need it. modprobe reports both the
+    # same way, so ask the kernel instead. This is how a missing dependency
+    # announced itself for a whole boot while discovery reported success.
+    REJECTED="$(dmesg 2>/dev/null | grep -c 'Unknown symbol' || true)"
+    if [ "${REJECTED:-0}" -gt 0 ]; then
+        echo "  WARNING: the kernel rejected $REJECTED module load(s) on unresolved"
+        echo "           symbols — a driver is present but its dependency is not:"
+        dmesg | grep 'Unknown symbol' | sed 's/^/    /' | head -5
+    fi
 else
     echo "  WARNING: no module tree found under /lib/modules"
 fi
