@@ -1298,11 +1298,23 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
 
             let report = ImageBuilder::new(image_spec).build(&raw_path).await.map_err(ie)?;
             println!(
-                "{} — {} in {} partitions",
+                "{} — {} in {} partitions, GPT in {}-byte LBAs",
                 raw_path.display(),
                 stormblock::mgmt::config::human_size(report.size_bytes),
-                report.partitions.len()
+                report.partitions.len(),
+                report.block_size
             );
+            // Firmware parses the GPT using the *media's* block size, and does
+            // not probe for it the way `Gpt::read` does. A 512-LBA image
+            // written to a 4Kn drive puts the header where firmware will not
+            // look, and the symptom is a disk that simply does not boot — so
+            // say which one was written whenever the image is meant to.
+            if report.block_size == 512 && report.partitions.iter().any(|p| p.kind == "esp") {
+                println!(
+                    "  note: bootable image at 512-byte LBAs. A 4Kn target needs \
+                     `block_size = 4096` in the spec, or firmware will not find the GPT."
+                );
+            }
             for p in &report.partitions {
                 println!(
                     "  {:<14} {:>10} at {:<12} {}",

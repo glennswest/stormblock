@@ -76,6 +76,16 @@ partitions, slab — because allocation is first-fit out of measured free runs
 and the builder fills them in that sequence. An image is often read by
 something that was told where to look, so being predictable matters.
 
+**Block size, on a 4Kn target.** Images are written with 512-byte LBAs,
+because that is what every tool and every firmware assumes of an image file
+(see [docs/pallets.md](pallets.md) §2.4). stormblock discovers the LBA size on
+read by probing where each candidate puts the header; **firmware does not** —
+UEFI parses the GPT using the media's own block size. So a 512-LBA image
+written to a 4Kn drive puts the header at byte 512, firmware looks at byte
+4096, and the disk does not boot. Set `block_size = 4096` in the spec when the
+target drive is 4Kn. `image build` prints which one it wrote, and says so
+whenever a bootable image is built at 512.
+
 **Sizing.** Omit the image's `size` and it is computed from the contents; every
 estimate is an upper bound, because an image that turns out roomier than it
 needed costs nothing on a sparse file, and one that turns out too small costs
