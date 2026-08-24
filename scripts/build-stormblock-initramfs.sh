@@ -258,6 +258,42 @@ if [ "$MISSING" -gt 0 ]; then
 fi
 echo "  modules:    $(find "$DEST" -name '*.ko*' | wc -l) total, $(du -sh "$DEST" | cut -f1), dependencies complete"
 
+# The DHCP client's script.
+#
+# udhcpc configures nothing itself — it obtains a lease and execs a script with
+# the values in the environment. Without one, a node takes an address from the
+# server (which then shows in the server's lease table, looking exactly like
+# success) and never puts it on the interface.
+mkdir -p "$INITRD_DIR/usr/share/udhcpc"
+cat > "$INITRD_DIR/usr/share/udhcpc/default.script" << 'DHCPSCRIPT'
+#!/bin/sh
+# Apply what the DHCP server offered. Called by udhcpc with $1 as the reason
+# and the lease in the environment.
+case "$1" in
+    bound|renew)
+        ip addr flush dev "$interface" 2>/dev/null
+        ip addr add "$ip/${mask:-24}" dev "$interface"
+        ip link set "$interface" up
+        # Only the first router: a node with two default routes has one it did
+        # not choose, and the failure is intermittent.
+        for r in $router; do
+            ip route add default via "$r" dev "$interface" 2>/dev/null && break
+        done
+        : > /etc/resolv.conf
+        [ -n "$domain" ] && echo "search $domain" >> /etc/resolv.conf
+        for d in $dns; do
+            echo "nameserver $d" >> /etc/resolv.conf
+        done
+        ;;
+    deconfig)
+        ip addr flush dev "$interface" 2>/dev/null
+        ip link set "$interface" up
+        ;;
+esac
+exit 0
+DHCPSCRIPT
+chmod 755 "$INITRD_DIR/usr/share/udhcpc/default.script"
+
 # Minimal /etc
 cat > "$INITRD_DIR/etc/mdev.conf" << 'MDEV'
 ublk[bc].* 0:0 0660
@@ -496,15 +532,28 @@ if [ -n "$IP_CONF" ] && [ "$IP_CONF" != "dhcp" ]; then
     ip addr add "$ADDR/$MASK" dev "$IFACE"
     [ -n "$GW" ] && ip route add default via "$GW"
 else
-    # DHCP
-    udhcpc -i "$IFACE" -s /bin/true -q -n -t 10 2>/dev/null
-    if [ $? -ne 0 ]; then
+    # DHCP.
+    #
+    # udhcpc does not configure anything itself: it obtains a lease and hands
+    # the values to a script, and everything an interface needs happens there.
+    # This was `-s /bin/true`, so every boot took a lease from the server —
+    # visible in the server's lease table, which made it look like it had
+    # worked — and applied none of it. The node came up with an address
+    # allocated to it and no address on it.
+    if ! udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t 10; then
         echo "WARNING: DHCP failed, trying link-local..."
         ip addr add 169.254.1.1/16 dev "$IFACE"
     fi
 fi
 
-echo "Network: $(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')"
+NETADDR="$(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')"
+if [ -n "$NETADDR" ]; then
+    echo "Network: $IFACE $NETADDR $(ip route show default | head -1)"
+else
+    # An empty summary is the symptom that hid a broken DHCP script for as
+    # long as it did; say what it means instead of printing a blank.
+    echo "WARNING: $IFACE has no address — nothing on this node will be reachable"
+fi
 fi
 fi
 
@@ -764,6 +813,13 @@ if [ ! -x /sysroot/sbin/init ] && [ ! -x /sysroot/usr/lib/systemd/systemd ]; the
 fi
 
 echo "Switching to real root..."
+
+# What the initramfs learned about the network, handed to the root that will
+# use it. Nothing after switch_root runs a DHCP client, so a node whose
+# resolver was configured here and not carried over resolves nothing.
+if [ -s /etc/resolv.conf ] && [ -d /sysroot/etc ]; then
+    cp /etc/resolv.conf /sysroot/etc/resolv.conf 2>/dev/null || true
+fi
 
 # Move virtual filesystems
 mount --move /proc /sysroot/proc
