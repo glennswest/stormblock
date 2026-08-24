@@ -162,12 +162,21 @@ enum SubCommand {
     /// so the long-term owner has to be a process that lives in a golden and
     /// can be supervised. This is how it takes the devices on.
     AdoptUblk {
-        /// Slab device or file path(s), as `boot-local` was given them
-        #[arg(long, required = true)]
+        /// Slab device or file path(s), as `boot-local` was given them.
+        ///
+        /// Optional: the server being taken over wrote down which slabs it
+        /// opened, and that record is the default.
+        #[arg(long)]
         slab: Vec<String>,
         /// Volume to serve on each device, in ublk device order: the first is
         /// `/dev/ublkb0`, and so on. Must match what the previous server had.
-        #[arg(long = "volume", required = true)]
+        ///
+        /// Optional, and better left out. The incumbent recorded exactly which
+        /// volume is behind each device it created, so this is derived rather
+        /// than repeated — a list kept by hand in two places is one that
+        /// disagrees with itself the first time the node gains a volume, and
+        /// standing a server down abandons every device left off it.
+        #[arg(long = "volume")]
         volumes: Vec<String>,
         /// Metadata directory, if the slab does not carry its own
         #[arg(long)]
@@ -2051,6 +2060,62 @@ async fn handle_adopt_ublk(
 ) -> anyhow::Result<()> {
     use stormblock::drive::ublk::UblkServer;
 
+    // What to adopt: the incumbent's own record, unless told otherwise.
+    //
+    // The kernel knows the devices exist and who serves them; only the server
+    // that created them knows which volume is behind each. It writes that
+    // down, so a handover needs no arguments at all — and cannot be given a
+    // list that is short by one, which leaves the devices left off it mounted
+    // with no server and the node unable to restart the engine, because its
+    // own root is among them.
+    let record = stormblock::drive::handover::Record::read(std::path::Path::new(
+        stormblock::drive::handover::DEFAULT_PATH,
+    ));
+
+    let from_record = record.as_ref().map(|r| r.volumes_in_device_order());
+    let volumes: &[String] = if !volumes.is_empty() {
+        if let Some(recorded) = from_record.as_deref() {
+            if recorded != volumes {
+                // Explicit wins — someone may be recovering a node by hand —
+                // but disagreeing with the incumbent is worth saying out loud,
+                // because the usual cause is a list that has drifted.
+                tracing::warn!(
+                    "the volumes given differ from what the previous server recorded \
+                     ({} given, {} recorded): using the ones given",
+                    volumes.len(),
+                    recorded.len()
+                );
+            }
+        }
+        volumes
+    } else {
+        match from_record.as_deref() {
+            Some(v) if !v.is_empty() => {
+                tracing::info!("adopting {} volume(s) from the handover record", v.len());
+                v
+            }
+            _ => anyhow::bail!(
+                "nothing to adopt: no volumes were given and no handover record at {} \
+                 — the server being taken over is older than the record, so name its \
+                 volumes with --volume, in device order",
+                stormblock::drive::handover::DEFAULT_PATH
+            ),
+        }
+    };
+
+    let slab_paths: &[String] = if !slab_paths.is_empty() {
+        slab_paths
+    } else {
+        match record.as_ref().map(|r| r.slabs.as_slice()) {
+            Some(s) if !s.is_empty() => s,
+            _ => anyhow::bail!(
+                "no slab given and none in the handover record at {}",
+                stormblock::drive::handover::DEFAULT_PATH
+            ),
+        }
+    };
+    let meta = meta.or(record.as_ref().and_then(|r| r.meta.as_deref()));
+
     let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
 
     // Resolve every volume before adopting anything. A name that does not
@@ -2297,6 +2362,40 @@ async fn handle_boot_local(
     }
 
     println!("Boot volume: {root_name} ({})", root_id.0);
+    // Write down what the next server will need. See drive::handover: the
+    // kernel remembers the device but not the volume behind it, and two
+    // hand-written lists that must agree in order is a defect waiting for the
+    // day a node gains a volume.
+    {
+        let record = stormblock::drive::handover::Record {
+            slabs: slab_paths.to_vec(),
+            meta: meta.map(|m| m.to_string()),
+            devices: exports
+                .iter()
+                .map(|(dev_id, name, _)| stormblock::drive::handover::Device {
+                    dev_id: *dev_id,
+                    volume: name.clone(),
+                })
+                .collect(),
+        };
+        let path = std::path::Path::new(stormblock::drive::handover::DEFAULT_PATH);
+        match record.write(path) {
+            Ok(()) => tracing::info!(
+                "handover record written to {} ({} device(s))",
+                path.display(),
+                record.devices.len()
+            ),
+            // Not fatal: the successor can still be told explicitly. But it is
+            // the difference between a handover that needs no arguments and
+            // one that needs the right ones, so it is never silent.
+            Err(e) => tracing::warn!(
+                "could not write the handover record to {}: {e} — a successor will \
+                 have to be given --slab and --volume explicitly",
+                path.display()
+            ),
+        }
+    }
+
     for (dev_id, name, dev) in &exports {
         println!(
             "  /dev/ublkb{dev_id} ← {} ({})",
