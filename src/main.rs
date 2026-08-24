@@ -1952,6 +1952,41 @@ async fn resolve_boot_volume(
 /// `boot-local` at boot and `adopt-ublk` at handover — because they need
 /// exactly the same three things and disagreeing about any of them would mean
 /// the two halves of a handover had different ideas of what the node holds.
+/// Find the slab inside a partitioned disk.
+///
+/// Returns `None` when there is no partition table, or none of its partitions
+/// holds a slab — in which case the caller's original error is the honest one
+/// to report, since "this is not a slab" beats "and it has no GPT either".
+async fn slab_in_partition(
+    dev: &Arc<dyn BlockDevice>,
+    path: &str,
+) -> anyhow::Result<Option<Slab>> {
+    use stormblock::drive::partition::PartitionDevice;
+
+    let Ok(gpt) = stormblock::pallet::gpt::Gpt::read(dev).await else {
+        return Ok(None);
+    };
+    let lba = gpt.block_size as u64;
+    for (i, e) in gpt.entries.iter().enumerate() {
+        if e.first_lba == 0 || e.last_lba < e.first_lba {
+            continue;
+        }
+        let start = e.first_lba * lba;
+        let len = (e.last_lba + 1 - e.first_lba) * lba;
+        let Ok(part) = PartitionDevice::new(dev.clone(), start, len) else { continue };
+        if let Ok(s) = Slab::open(Arc::new(part)).await {
+            let label = if e.name.is_empty() {
+                format!("partition {}", i + 1)
+            } else {
+                format!("partition {} ({})", i + 1, e.name)
+            };
+            println!("  {path}: slab found in {label}");
+            return Ok(Some(s));
+        }
+    }
+    Ok(None)
+}
+
 async fn open_slabs_and_restore(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -1975,10 +2010,21 @@ async fn open_slabs_and_restore(
     }
     let mut slabs = Vec::with_capacity(slab_paths.len());
     for path in slab_paths {
-        let dev = stormblock::drive::filedev::FileDevice::open(path).await?;
-        let slab = Slab::open(Arc::new(dev))
-            .await
-            .map_err(|e| anyhow::anyhow!("open slab {path}: {e}"))?;
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(stormblock::drive::filedev::FileDevice::open(path).await?);
+        let slab = match Slab::open(dev.clone()).await {
+            Ok(s) => s,
+            // A whole disk, or a disk image, rather than the partition the
+            // slab is in. Both are the ordinary thing to be handed — a disk
+            // image is what `image build` produces and what someone copies off
+            // a node — and requiring the offset to be worked out by hand is
+            // how a debugging tool ends up unused. The table says where the
+            // partitions are; try each one.
+            Err(first) => match slab_in_partition(&dev, path).await? {
+                Some(s) => s,
+                None => return Err(anyhow::anyhow!("open slab {path}: {first}")),
+            },
+        };
         slabs.push(slab);
     }
 
