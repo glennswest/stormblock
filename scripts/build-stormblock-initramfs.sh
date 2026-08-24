@@ -14,18 +14,15 @@
 # Defaults:
 #   stormblock-binary = target/x86_64-unknown-linux-musl/release/stormblock
 #   kernel-version    = $(uname -r)
-#   STORMBLOCK_MODULES = "virtio_scsi virtio_net sd_mod erofs overlay"
-#                        (+ ublk_drv, always)
-#     virtio_net because a local boot can be asked to bring the network up, and
-#     a NIC with no driver has no /sys/class/net entry to find — the node looks
-#     like it has no interface at all.
-#     Override for other boot transports, e.g.
-#     STORMBLOCK_MODULES="ahci sd_mod ext4" ./scripts/build-stormblock-initramfs.sh
+# Modules: **every storage and network driver**, not a list. This image is
+# written to real machines and the machine decides what is in it. /init asks
+# each device for the driver it names, so the same image boots a hypervisor and
+# a server with an HBA it has never seen.
 #
-# Modules are resolved with their full dependency chains (modprobe
-# --show-depends) and decompressed at build time — busybox insmod cannot
-# load .ko.xz, and a silently-failed storage driver surfaces later as a
-# misleading "bad slab magic" (#14).
+# Modules are decompressed at build time — busybox cannot read .ko.xz — and
+# `depmod` builds the dependency and alias tables /init resolves against. A
+# silently-failed storage driver surfaces later as a misleading "bad slab
+# magic" (#14), so a depmod failure fails the build.
 #
 # Output: /tmp/stormblock-initramfs.img (zstd-compressed cpio)
 #
@@ -36,7 +33,6 @@ set -euo pipefail
 STORMBLOCK_BIN="${1:-target/x86_64-unknown-linux-musl/release/stormblock}"
 KVER="${2:-$(uname -r)}"
 OUTPUT="${3:-/tmp/stormblock-initramfs.img}"
-MODULES="${STORMBLOCK_MODULES:-virtio_scsi virtio_net sd_mod erofs overlay} ublk_drv"
 
 if [ ! -f "$STORMBLOCK_BIN" ]; then
     echo "ERROR: stormblock binary not found: $STORMBLOCK_BIN"
@@ -88,52 +84,90 @@ done
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
 
-# Kernel modules: resolve full dependency chains, decompress, number for
-# load order. busybox insmod has no decompression and no dep resolution, so
-# both must happen here at build time (#14).
-copy_module() {
-    # $1 = path to .ko / .ko.xz / .ko.zst / .ko.gz ; $2 = NN order prefix
-    local src="$1" idx="$2" base
-    base=$(basename "$src")
-    base="${base%.xz}"; base="${base%.zst}"; base="${base%.gz}"
-    local dst="$INITRD_DIR/lib/modules/${idx}-${base}"
-    [ -f "$dst" ] && return 0
-    # Skip if this module (any order prefix) is already bundled
-    if ls "$INITRD_DIR/lib/modules/"*"-${base}" >/dev/null 2>&1; then
-        return 0
-    fi
-    case "$src" in
-        *.xz)  xz -dc "$src" > "$dst" ;;
-        *.zst) zstd -qdc "$src" > "$dst" ;;
-        *.gz)  gzip -dc "$src" > "$dst" ;;
-        *)     cp "$src" "$dst" ;;
-    esac
-    echo "  module:     ${idx}-${base}  ($src)"
+# Kernel modules.
+#
+# **Every storage and network driver, not a list someone guessed.** This image
+# is written to real machines, and the machine decides what is in it: an HBA
+# from one vendor, a NIC from another, NVMe behind a switch. A hand-picked list
+# boots the hypervisor it was tested on and leaves a real server sitting in an
+# initramfs shell saying it has no disks — which is exactly what happened here
+# with a NIC whose driver was not bundled.
+#
+# So the whole of drivers/{net,scsi,nvme,ata,block,virtio,usb/storage,md} comes
+# along, plus the filesystems, and `depmod` builds the dependency and alias
+# tables. At boot /init walks every device's `modalias` and asks for the driver
+# it names — the coldplug udev would do, without udev. About 18 MB compressed,
+# against a 32 GB image.
+MODDIR="/lib/modules/$KVER"
+DEST="$INITRD_DIR/lib/modules/$KVER"
+mkdir -p "$DEST"
+
+if [ ! -d "$MODDIR/kernel" ]; then
+    echo "ERROR: no modules for kernel $KVER at $MODDIR"
+    exit 1
+fi
+
+# Decompress on the way in: busybox insmod cannot read .ko.xz, and a module
+# that silently fails to load surfaces later as missing hardware (#14).
+copy_tree() {
+    local rel="$1"
+    [ -d "$MODDIR/$rel" ] || return 0
+    local n=0
+    while IFS= read -r src; do
+        local out="$DEST/${src#$MODDIR/}"
+        out="${out%.xz}"; out="${out%.zst}"; out="${out%.gz}"
+        mkdir -p "$(dirname "$out")"
+        case "$src" in
+            *.xz)  xz -dc  "$src" > "$out" ;;
+            *.zst) zstd -qdc "$src" > "$out" ;;
+            *.gz)  gzip -dc "$src" > "$out" ;;
+            *)     cp "$src" "$out" ;;
+        esac
+        n=$((n + 1))
+    done <<EOF
+$(find "$MODDIR/$rel" -name '*.ko*' 2>/dev/null)
+EOF
+    [ "$n" -gt 0 ] && printf '  modules:    %-26s %4d\n' "$rel" "$n"
+    return 0
 }
 
-MOD_IDX=0
-MISSING_MODS=""
-for mod in $MODULES; do
-    # Dep-ordered list of module paths; "builtin" lines mean nothing to load.
-    deps=$(modprobe --show-depends -S "$KVER" "$mod" 2>/dev/null \
-        | awk '$1 == "insmod" {print $2}') || true
-    if [ -z "$deps" ]; then
-        if modprobe --show-depends -S "$KVER" "$mod" 2>/dev/null | grep -q builtin; then
-            echo "  module:     $mod is builtin, skipping"
-        else
-            MISSING_MODS="$MISSING_MODS $mod"
-            echo "  WARNING: module $mod not found for kernel $KVER"
-        fi
-        continue
-    fi
-    for dep in $deps; do
-        MOD_IDX=$((MOD_IDX + 1))
-        copy_module "$dep" "$(printf '%02d' "$MOD_IDX")"
-    done
+for tree in kernel/drivers/net kernel/drivers/scsi kernel/drivers/nvme \
+            kernel/drivers/ata kernel/drivers/block kernel/drivers/virtio \
+            kernel/drivers/usb/storage kernel/drivers/md kernel/drivers/messages \
+            kernel/drivers/pci/controller kernel/fs kernel/lib kernel/crypto; do
+    copy_tree "$tree"
 done
-if [ -n "$MISSING_MODS" ]; then
-    echo "  WARNING: missing modules:$MISSING_MODS — /init will try modprobe at boot"
+
+# ublk_drv is the one module this image cannot boot without, wherever it lives.
+while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    out="$DEST/${src#$MODDIR/}"
+    out="${out%.xz}"; out="${out%.zst}"; out="${out%.gz}"
+    mkdir -p "$(dirname "$out")"
+    case "$src" in
+        *.xz)  xz -dc "$src" > "$out" ;;
+        *.zst) zstd -qdc "$src" > "$out" ;;
+        *)     cp "$src" "$out" ;;
+    esac
+    echo "  modules:    ublk_drv"
+done <<EOF
+$(find "$MODDIR" -name 'ublk_drv.ko*' 2>/dev/null)
+EOF
+
+# What depmod needs to know which names are already in the kernel, so /init
+# does not spend the boot asking for modules that cannot be loaded because
+# they are already there.
+for f in modules.builtin modules.builtin.modinfo modules.order; do
+    [ -f "$MODDIR/$f" ] && cp "$MODDIR/$f" "$DEST/$f"
+done
+
+# The dependency and alias tables. Without these, modprobe by modalias — which
+# is the whole point — has nothing to resolve against.
+if ! depmod -b "$INITRD_DIR" "$KVER" 2>/dev/null; then
+    echo "ERROR: depmod failed; /init could not resolve drivers by modalias"
+    exit 1
 fi
+echo "  modules:    $(find "$DEST" -name '*.ko' | wc -l) total, $(du -sh "$DEST" | cut -f1) uncompressed"
 
 # Minimal /etc
 cat > "$INITRD_DIR/etc/mdev.conf" << 'MDEV'
@@ -231,14 +265,41 @@ else
     echo "  Layout: $LAYOUT"
 fi
 
-# Load bundled kernel modules — decompressed and NN- ordered at build time,
-# so plain insmod works and dependencies load first (#14).
-for ko in /lib/modules/*.ko; do
-    [ -f "$ko" ] || continue
-    insmod "$ko" 2>/dev/null || true
+# Load the drivers this machine actually needs.
+#
+# Every device on every bus names the driver it wants in its `modalias`, and
+# the initramfs carries the whole of the storage and network trees with the
+# alias table `depmod` built. So this asks the hardware rather than being told
+# — the coldplug udev does, without udev — and the same image boots a
+# hypervisor, a server with an HBA and a server with NVMe behind a switch.
+#
+# Failures are silent on purpose: most devices on a bus are not storage or
+# network, and their drivers are deliberately not here.
+echo "Loading drivers for this machine..."
+KVER=$(uname -r)
+LOADED=0
+if [ -f "/lib/modules/$KVER/modules.dep" ]; then
+    for ma in /sys/bus/*/devices/*/modalias; do
+        [ -f "$ma" ] || continue
+        if modprobe -q "$(cat "$ma")" 2>/dev/null; then
+            LOADED=$((LOADED + 1))
+        fi
+    done
+else
+    echo "  WARNING: no modules.dep — drivers cannot be resolved by modalias"
+fi
+
+# The ones no device announces: filesystems, and the block driver this image
+# exports its root through.
+for m in ublk_drv erofs overlay ext4 xfs vfat; do
+    modprobe -q "$m" 2>/dev/null || true
 done
-# Fallback for anything the build couldn't bundle
-modprobe ublk_drv 2>/dev/null || true
+echo "  loaded $LOADED driver(s) by modalias"
+
+# Give the buses a moment to present what those drivers found. A disk that
+# appears half a second after its HBA is normal, and the wait below for the
+# slab device covers the rest.
+sleep 1
 
 if [ ! -c /dev/ublk-control ]; then
     echo "WARNING: /dev/ublk-control not found — ublk_drv may not be loaded"
