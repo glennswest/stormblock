@@ -172,6 +172,21 @@ enum SubCommand {
         /// Metadata directory, if the slab does not carry its own
         #[arg(long)]
         meta: Option<String>,
+        /// Also serve the management API here (e.g. `127.0.0.1:9090`).
+        ///
+        /// The process that holds the slab is the engine, and it is the only
+        /// one that can be: the slab has a single writer, so a second process
+        /// cannot open it to answer for it. Without this the node serves its
+        /// root and nothing can ask it for a volume, a template or a clone —
+        /// which reads, from the other side, as connection refused.
+        #[arg(long)]
+        api: Option<String>,
+        /// Where the API keeps the state that is not the slab's — templates,
+        /// the /v1 record, the wiring table. The slab carries its own volume
+        /// metadata, but nothing else has anywhere to live, and without this
+        /// a template minted now is gone at the next boot.
+        #[arg(long)]
+        data_dir: Option<String>,
     },
     /// Boot from a local slab — attach an existing slab + metadata
     /// non-destructively and export the boot volume as /dev/ublkb0
@@ -567,8 +582,10 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Requires Linux 6.0+ with ublk_drv module loaded");
                 return Ok(());
             }
-            SubCommand::AdoptUblk { slab, volumes, meta } => {
-                return handle_adopt_ublk(slab, volumes, meta.as_deref()).await;
+            SubCommand::AdoptUblk { slab, volumes, meta, api, data_dir } => {
+                return handle_adopt_ublk(
+                    slab, volumes, meta.as_deref(), api.as_deref(), data_dir.as_deref(),
+                ).await;
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier, check,
@@ -2029,6 +2046,8 @@ async fn handle_adopt_ublk(
     slab_paths: &[String],
     volumes: &[String],
     meta: Option<&str>,
+    api: Option<&str>,
+    data_dir: Option<&str>,
 ) -> anyhow::Result<()> {
     use stormblock::drive::ublk::UblkServer;
 
@@ -2134,6 +2153,34 @@ async fn handle_adopt_ublk(
         );
     }
     println!("Adopted {live} device(s). Serving until Ctrl+C.");
+
+    // The management API, in this process, over the manager that owns the
+    // slab. There is nowhere else to put it: one writer per volume means a
+    // second process cannot open the same slab to answer on its behalf, so an
+    // engine that is serving its node's root and not answering questions about
+    // it is an engine that is half here.
+    if let Some(addr) = api {
+        let mut config = stormblock::mgmt::config::StormBlockConfig::default();
+        config.management.listen_addr = addr.to_string();
+        // The metadata the manager was restored from is where anything the API
+        // creates has to persist to, or a template minted now is gone at the
+        // next boot.
+        config.management.data_dir = data_dir.map(|d| d.to_string());
+        if let Some(d) = data_dir {
+            std::fs::create_dir_all(d)
+                .map_err(|e| anyhow::anyhow!("cannot create API state directory {d}: {e}"))?;
+        }
+        let slab_registry = mgr.registry().clone();
+        let gem = mgr.gem().clone();
+        let state = Arc::new(AppState::new(config, mgr, slab_registry, gem));
+        tokio::spawn(async move {
+            if let Err(e) = mgmt::start_management_server(state).await {
+                tracing::error!("management API error: {e}");
+            }
+        });
+        println!("  management API on {addr}");
+    }
+
     tokio::signal::ctrl_c().await?;
     let _ = shutdown_tx.send(true);
     for t in threads {
@@ -2147,6 +2194,8 @@ async fn handle_adopt_ublk(
     _slab_paths: &[String],
     _volumes: &[String],
     _meta: Option<&str>,
+    _api: Option<&str>,
+    _data_dir: Option<&str>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("ublk is Linux-only")
 }
