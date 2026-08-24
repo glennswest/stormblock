@@ -892,6 +892,100 @@ impl UblkServer {
 ///
 /// Older kernels do not implement `GET_FEATURES` at all; that is not an error
 /// here, it just means no optional feature can be negotiated.
+/// Who is serving `/dev/ublkbN`, according to the kernel.
+///
+/// `None` if there is no such device; `Some(0)` if it exists with no server,
+/// which is what an orphan looks like after its server died.
+///
+/// The kernel's own record, written at `ADD_DEV`. It is the only trustworthy
+/// answer to "who has to stand down before I can take this over" — a pid file
+/// would be a guess about a process that may already have been replaced.
+pub fn server_pid(dev_id: u32) -> DriveResult<Option<i32>> {
+    let ctrl = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/ublk-control")
+        .map_err(|e| {
+            DriveError::Other(anyhow::anyhow!(
+                "cannot open /dev/ublk-control: {e} (is ublk_drv loaded?)"
+            ))
+        })?;
+    let mut ring: IoUring<squeue::Entry128> = IoUring::builder()
+        .build(8)
+        .map_err(|e| DriveError::Other(anyhow::anyhow!("io_uring create failed: {e}")))?;
+    let mut info = UblkCtrlDevInfo::default();
+    match submit_ctrl_cmd(
+        &mut ring,
+        ctrl.as_raw_fd(),
+        UBLK_U_CMD_GET_DEV_INFO,
+        dev_id,
+        &mut info as *mut UblkCtrlDevInfo as u64,
+        std::mem::size_of::<UblkCtrlDevInfo>() as u32,
+        0,
+    ) {
+        Ok(_) => Ok(Some(info.ublksrv_pid)),
+        // No such device is an answer, not a failure.
+        Err(_) => Ok(None),
+    }
+}
+
+/// Ask whoever is serving these devices to stand down, and wait until it has.
+///
+/// **This is the handover, not a hunt.** The kernel will not run two servers
+/// for one device, so a takeover begins by ending the one in place — and the
+/// kernel is asked who that is rather than guessed at. `SIGTERM` first,
+/// because the outgoing server has a slab to flush; `SIGKILL` only if it will
+/// not leave, because a device held by a half-dead server is worse than one
+/// whose server was shot.
+///
+/// Several devices usually share a server — the initramfs engine serves four
+/// from one process — so the pids are collected and asked once.
+pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()> {
+    let mut pids: Vec<i32> = Vec::new();
+    for &id in dev_ids {
+        if let Some(pid) = server_pid(id)? {
+            // Zero is an already-orphaned device; ourselves would be the
+            // handover ending itself.
+            if pid > 0 && pid != std::process::id() as i32 && !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    for &pid in &pids {
+        tracing::info!("ublk: asking server {pid} to stand down");
+        // SAFETY: kill on a pid the kernel just reported.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        // SAFETY: signal 0 asks whether it is there without touching it.
+        let alive: Vec<i32> = pids
+            .iter()
+            .copied()
+            .filter(|&p| unsafe { libc::kill(p, 0) == 0 })
+            .collect();
+        if alive.is_empty() {
+            tracing::info!("ublk: previous server has stood down");
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            for pid in alive {
+                tracing::warn!("ublk: server {pid} did not stand down in time; killing it");
+                // SAFETY: as above.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn query_features(
     ring: &mut IoUring<squeue::Entry128>,
     ctrl_fd: RawFd,

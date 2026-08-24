@@ -2057,6 +2057,13 @@ async fn handle_adopt_ublk(
         );
     }
 
+    // The incumbent stands down before anything is adopted. The kernel runs
+    // one server per device, so this is the handover's first step rather than
+    // an afterthought — and the kernel is asked who the incumbent is, because
+    // it is the only party that actually knows.
+    let dev_ids: Vec<u32> = serving.iter().map(|(id, ..)| *id).collect();
+    stormblock::drive::ublk::stand_down(&dev_ids, std::time::Duration::from_secs(15))?;
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut threads = Vec::new();
     for (dev_id, name, dev) in serving {

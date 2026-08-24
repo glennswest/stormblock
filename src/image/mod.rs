@@ -233,6 +233,12 @@ pub struct GoldenSpec {
     /// `stormblock.volume=` on the kernel command line resolves to.
     #[serde(default)]
     pub clone: Option<String>,
+    /// Several clones of one golden, for a golden that exists to be cloned
+    /// repeatedly — a blank filesystem every data container starts from, say.
+    /// Each name becomes its own CoW clone sharing the golden's extents, so
+    /// ten data containers cost the golden once.
+    #[serde(default)]
+    pub clones: Vec<String>,
     /// Name of the golden itself. Defaults to `<name>.golden`.
     #[serde(default)]
     pub golden_name: Option<String>,

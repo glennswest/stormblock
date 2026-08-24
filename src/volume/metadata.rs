@@ -23,7 +23,12 @@ const MAGIC: [u8; 8] = *b"STRMVOL\0";
 /// V2 persists each volume's slab extent map — the piece slot tables cannot
 /// express for COW snapshots (shared slots are recorded under the original
 /// writer, so a snapshot's view exists only in this file). See issue #13.
-const VERSION: u32 = 2;
+///
+/// V3 adds [`Retention`]: whether a volume is meant to be kept or thrown
+/// away. Nothing recorded that before, so a container's root and a customer's
+/// data looked identical to the engine, and anything acting on one had to be
+/// told which it was by whoever happened to mount it.
+const VERSION: u32 = 3;
 
 /// Metadata filename.
 const METADATA_FILE: &str = "volumes.dat";
@@ -56,6 +61,105 @@ pub struct VolumeRecord {
     /// Virtual extent index → slab location. Authoritative for mappings the
     /// slot tables can't reconstruct (a snapshot's shared slots).
     pub extents: BTreeMap<u64, ExtentLocation>,
+    /// Whether this volume is meant to survive. See [`Retention`].
+    #[serde(default)]
+    pub retention: Retention,
+}
+
+/// What is supposed to happen to a volume's divergence from its golden.
+///
+/// Every container is a copy-on-write clone of a golden, so what separates a
+/// scratch filesystem from a customer's data is not how it is made — it is
+/// whether anyone intends to keep it. Nothing recorded that, which left the
+/// engine unable to tell a container root from a database, and left every
+/// consumer to decide for itself from context it did not have.
+///
+/// It belongs to the volume rather than to whoever mounted it: the same
+/// volume may be mounted by different things over its life, and the answer
+/// must not change when it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Retention {
+    /// Keep it. The default, deliberately: too much kept is a cleanup, and
+    /// something thrown away that should not have been is unrecoverable.
+    ///
+    /// Survives restarts, and an upgrade must carry it forward rather than
+    /// removing it with the generation it happened to be created under.
+    #[default]
+    Keep,
+    /// Throw it away. Equivalent to a tmpfs in intent, but backed by the same
+    /// copy-on-write machinery as everything else — so it costs nothing until
+    /// written, it can be reset to its golden instead of recreated, and the
+    /// golden is still there as the fallback.
+    ///
+    /// Reset when whatever uses it starts.
+    Ephemeral,
+}
+
+impl Retention {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Retention::Keep => "keep",
+            Retention::Ephemeral => "ephemeral",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Retention> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "keep" | "kept" | "persist" | "persistent" => Retention::Keep,
+            "ephemeral" | "throwaway" | "throw-away" | "scratch" => Retention::Ephemeral,
+            _ => return None,
+        })
+    }
+}
+
+/// V2 payload shapes — decode-only, converted on load.
+///
+/// **bincode is not self-describing**, so a field added to a struct is not
+/// something an older payload can be read *around*: the decoder would run off
+/// the end of the record or, worse, read the next record's bytes as this
+/// one's. `#[serde(default)]` does nothing here. Every version that ever
+/// existed therefore keeps its own shape, and conversion happens on load.
+mod v2 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: Option<RaidArrayId>,
+        pub extents: BTreeMap<u64, ExtentLocation>,
+    }
+}
+
+impl From<v2::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v2::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: v.array_id,
+                    extents: v.extents,
+                    // V2 did not ask. Silence means keep — a volume discarded
+                    // because its record predates the question is gone.
+                    retention: Retention::Keep,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// V1 payload shapes — decode-only, converted on load.
@@ -95,6 +199,10 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     // V1 never persisted slab extents; the GEM rebuild from
                     // slot tables covers everything V1 could express.
                     extents: BTreeMap::new(),
+                    // Nothing older than V3 said, and the safe reading of
+                    // silence is "keep": a volume thrown away because a format
+                    // predates the question is not recoverable.
+                    retention: Retention::Keep,
                 })
                 .collect(),
         }
@@ -153,9 +261,10 @@ impl MetadataStore {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
         }
 
-        // Check version (V1 is decoded via its legacy shapes and converted)
+        // Every version that ever existed is decoded through its own shapes
+        // and converted; see the note on `mod v2`.
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != 1 && version != VERSION {
+        if version != 1 && version != 2 && version != VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported metadata version {version}"),
@@ -189,6 +298,12 @@ impl MetadataStore {
             let (old, _): (v1::VolumeMetadata, _) =
                 bincode::serde::decode_from_slice(payload, bincode::config::standard())
                     .map_err(|e| io::Error::other(format!("bincode decode (v1): {e}")))?;
+            return Ok(old.into());
+        }
+        if version == 2 {
+            let (old, _): (v2::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v2): {e}")))?;
             return Ok(old.into());
         }
         let (metadata, _): (VolumeMetadata, _) =
@@ -300,6 +415,7 @@ mod tests {
                 virtual_size: 100 * 1024 * 1024,
                 array_id: Some(array_id),
                 extents,
+                retention: Retention::Keep,
             }],
         }
     }
@@ -438,5 +554,90 @@ mod tests {
         let err = store.load().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    fn v3_record(retention: Retention) -> VolumeMetadata {
+        VolumeMetadata {
+            extent_size: 1 << 20,
+            arrays: vec![],
+            volumes: vec![VolumeRecord {
+                id: VolumeId(uuid::Uuid::from_u128(7)),
+                name: "data".into(),
+                virtual_size: 1 << 30,
+                array_id: None,
+                extents: BTreeMap::new(),
+                retention,
+            }],
+        }
+    }
+
+    #[test]
+    fn retention_survives_the_round_trip() {
+        for r in [Retention::Keep, Retention::Ephemeral] {
+            let bytes = MetadataStore::encode(&v3_record(r)).unwrap();
+            let back = MetadataStore::decode(&bytes).unwrap();
+            assert_eq!(back.volumes[0].retention, r);
+        }
+    }
+
+    /// A record written before the question existed must still load, and must
+    /// load as **keep**. bincode is not self-describing, so this is not a
+    /// matter of a defaulted field — the older shape has to be decoded as
+    /// itself and converted, or the decoder reads past the end of the record.
+    #[test]
+    fn a_v2_record_still_loads_and_is_kept() {
+        // Encode a genuine V2 payload: the old shape, with the old version.
+        let old = v2::VolumeMetadata {
+            extent_size: 1 << 20,
+            arrays: vec![],
+            volumes: vec![v2::VolumeRecord {
+                id: VolumeId(uuid::Uuid::from_u128(9)),
+                name: "from-before".into(),
+                virtual_size: 4096,
+                array_id: None,
+                extents: BTreeMap::new(),
+            }],
+        };
+        let payload =
+            bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&payload);
+        let crc = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+
+        let back = MetadataStore::decode(&buf).expect("a V2 record must still load");
+        assert_eq!(back.volumes[0].name, "from-before");
+        assert_eq!(
+            back.volumes[0].retention,
+            Retention::Keep,
+            "silence must not throw data away"
+        );
+    }
+
+    #[test]
+    fn silence_means_keep() {
+        assert_eq!(Retention::default(), Retention::Keep);
+    }
+
+    #[test]
+    fn every_spelling_an_operator_might_write() {
+        assert_eq!(Retention::parse("keep"), Some(Retention::Keep));
+        assert_eq!(Retention::parse("persistent"), Some(Retention::Keep));
+        assert_eq!(Retention::parse("Ephemeral"), Some(Retention::Ephemeral));
+        assert_eq!(Retention::parse("throw-away"), Some(Retention::Ephemeral));
+        assert_eq!(Retention::parse("scratch"), Some(Retention::Ephemeral));
+        assert_eq!(Retention::parse("maybe"), None);
+        for r in [Retention::Keep, Retention::Ephemeral] {
+            assert_eq!(Retention::parse(r.as_str()), Some(r));
+        }
     }
 }

@@ -28,7 +28,7 @@ use crate::placement::topology::StorageTier;
 use crate::raid::RaidArrayId;
 
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
-pub use metadata::MetadataStore;
+pub use metadata::{MetadataStore, Retention};
 pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy};
 pub use gem::GlobalExtentMap;
 
@@ -49,6 +49,11 @@ pub struct VolumeManager {
     /// there is no filesystem to keep it in — an image, an appliance disk —
     /// so the slab is the whole record of what it holds.
     metadata_slab: Option<SlabId>,
+    /// What each volume is for: kept, or thrown away. Held here rather than
+    /// on the volume handle because it is a fact about the data, not about
+    /// the I/O path, and every consumer of a handle would otherwise have to
+    /// carry it around to be able to ask.
+    retentions: HashMap<VolumeId, Retention>,
 }
 
 impl VolumeManager {
@@ -65,6 +70,7 @@ impl VolumeManager {
             slot_size,
             metadata_store: None,
             metadata_slab: None,
+            retentions: HashMap::new(),
         }
     }
 
@@ -79,6 +85,7 @@ impl VolumeManager {
             slot_size,
             metadata_store: Some(store),
             metadata_slab: None,
+            retentions: HashMap::new(),
         })
     }
 
@@ -425,6 +432,33 @@ impl VolumeManager {
         self.slot_size
     }
 
+    /// Say whether a volume is meant to be kept or thrown away.
+    ///
+    /// Persisted with the volume, so the answer survives a restart and does
+    /// not depend on whoever happens to mount it next.
+    pub async fn set_retention(&mut self, id: VolumeId, retention: Retention) {
+        self.retentions.insert(id, retention);
+        self.persist().await;
+    }
+
+    /// What a volume is for. [`Retention::Keep`] unless something said
+    /// otherwise — silence must not throw data away.
+    pub fn retention(&self, id: &VolumeId) -> Retention {
+        self.retentions.get(id).copied().unwrap_or_default()
+    }
+
+    /// Every volume that is meant to be thrown away.
+    ///
+    /// What a node reads at boot to know which containers start from their
+    /// golden again rather than from where they were left.
+    pub fn ephemeral(&self) -> Vec<VolumeId> {
+        self.retentions
+            .iter()
+            .filter(|(_, r)| **r == Retention::Ephemeral)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Get the shared GEM.
     pub fn gem(&self) -> &Arc<tokio::sync::RwLock<GlobalExtentMap>> {
         &self.gem
@@ -520,6 +554,7 @@ impl VolumeManager {
                 name,
                 virtual_size,
                 array_id: None,
+                retention: self.retentions.get(&id).copied().unwrap_or_default(),
                 extents: gem
                     .get_volume_map(&id)
                     .map(|m| m.extents.clone())
@@ -617,6 +652,7 @@ impl VolumeManager {
                 }
             }
 
+            self.retentions.insert(vrec.id, vrec.retention);
             let vol = ThinVolume::restore(
                 vrec.id,
                 vrec.name.clone(),

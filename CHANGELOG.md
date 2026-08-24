@@ -3,6 +3,26 @@
 ## [Unreleased]
 
 ### 2026-08-24
+- **feat:** a volume records whether it is meant to be **kept or thrown away**
+  (`Retention`, metadata V3). Nothing recorded that before, so a container
+  root and a customer's database looked identical to the engine, and anything
+  acting on one had to be told which it was by whoever happened to mount it —
+  context the mounter often does not have. It belongs to the volume because
+  the same volume may be mounted by different things over its life and the
+  answer must not change when it is.
+- **note:** the default is **keep**, deliberately. Too much kept is a cleanup;
+  something thrown away that should not have been is unrecoverable. A record
+  written before the question existed loads as kept.
+- **note:** `Ephemeral` is a tmpfs in intent and a CoW clone in mechanism — it
+  costs nothing until written, resets to its golden rather than being
+  recreated, and the golden is still there as the fallback. `reset_volume`
+  already does the reset; what was missing was the marking.
+- **fix:** metadata V2 records decode through their own shape rather than
+  being read as V3 with a defaulted field. **bincode is not self-describing**,
+  so `#[serde(default)]` does nothing for it: a V3 decoder reading a V2
+  payload runs off the end of the record, or reads the next record's bytes as
+  this one's. Every version that ever existed keeps its shape and converts on
+  load, as V1 already did.
 - **feat:** ublk devices can be handed from one server to another, so the
   engine serving root is no longer unrepeatable. `boot-local` creates its
   devices with `UBLK_F_USER_RECOVERY` (and `_REISSUE`, so I/O in flight when
