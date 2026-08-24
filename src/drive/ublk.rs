@@ -999,6 +999,63 @@ pub fn server_pid(dev_id: u32) -> DriveResult<Option<i32>> {
 ///
 /// Several devices usually share a server — the initramfs engine serves four
 /// from one process — so the pids are collected and asked once.
+/// Every ublk device the kernel currently has, by id.
+///
+/// Read from sysfs, because the kernel is the only party that knows: a device
+/// outlives the process that created it, which is the whole basis of the
+/// handover.
+pub fn devices() -> DriveResult<Vec<u32>> {
+    let mut ids = Vec::new();
+    let dir = match std::fs::read_dir("/sys/class/ublk-char") {
+        Ok(d) => d,
+        // No ublk driver loaded, or no devices: not an error, just none.
+        Err(_) => return Ok(ids),
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(n) = name.strip_prefix("ublkc") {
+            if let Ok(id) = n.parse::<u32>() {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+/// Devices served by the same processes as `dev_ids`, but not in that list.
+///
+/// Standing a server down stops **every** device it serves, not the ones the
+/// caller happened to name. Anything here is a device that would be left with
+/// no server at all — its filesystem stays mounted and every I/O to it returns
+/// EIO, at a moment when the node has no way to recover it.
+pub fn also_served_by(dev_ids: &[u32]) -> DriveResult<Vec<u32>> {
+    let mut pids: Vec<i32> = Vec::new();
+    for &id in dev_ids {
+        if let Some(pid) = server_pid(id)? {
+            if pid > 0 && pid != std::process::id() as i32 && !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    if pids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut orphans = Vec::new();
+    for id in devices()? {
+        if dev_ids.contains(&id) {
+            continue;
+        }
+        if let Some(pid) = server_pid(id)? {
+            if pids.contains(&pid) {
+                orphans.push(id);
+            }
+        }
+    }
+    Ok(orphans)
+}
+
 pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()> {
     let mut pids: Vec<i32> = Vec::new();
     for &id in dev_ids {

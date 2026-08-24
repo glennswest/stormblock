@@ -2104,6 +2104,31 @@ async fn handle_adopt_ublk(
     // an afterthought — and the kernel is asked who the incumbent is, because
     // it is the only party that actually knows.
     let dev_ids: Vec<u32> = serving.iter().map(|(id, ..)| *id).collect();
+
+    // Refuse a handover that would abandon devices.
+    //
+    // Standing a server down stops every device that server has, not the ones
+    // named here. A list that is short by one leaves that device mounted with
+    // nothing behind it, and every I/O to it returns EIO — which is how a node
+    // came up having adopted its root and lost its data volume, reporting
+    // "Adopted 4 device(s)" and then failing to write to /data.
+    //
+    // The kernel knows which devices exist and who serves them, so this is
+    // checkable before anything is stopped rather than discoverable afterwards.
+    let orphans = stormblock::drive::ublk::also_served_by(&dev_ids)?;
+    if !orphans.is_empty() {
+        let names: Vec<String> =
+            orphans.iter().map(|id| format!("/dev/ublkb{id}")).collect();
+        anyhow::bail!(
+            "the server being taken over also serves {} — adopting only the {} volume(s) \
+             named here would leave {} with no server at all, mounted and returning EIO. \
+             Name every volume it serves, in device order.",
+            names.join(", "),
+            dev_ids.len(),
+            if orphans.len() == 1 { "it" } else { "them" }
+        );
+    }
+
     stormblock::drive::ublk::stand_down(&dev_ids, std::time::Duration::from_secs(15))?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
