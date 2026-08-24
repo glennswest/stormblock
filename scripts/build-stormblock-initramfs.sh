@@ -115,6 +115,45 @@ else
     echo "  WARNING: no kmod modprobe found; falling back to busybox's"
 fi
 
+# udev, and the rules it runs on.
+#
+# **This is not a rescue shell, it is a node.** Device discovery on hardware
+# nobody has seen is exactly the problem udev exists to solve, and every
+# distro that boots on arbitrary machines ships it in the initramfs. Walking
+# /sys and calling modprobe by hand gets the easy half and then quietly misses
+# a NIC — which is what happened here, twice, before this.
+#
+# udevd handles the ordering, the retries, the buses that only appear once
+# their parent's driver has bound, and the device nodes. What was a hand-rolled
+# sweep with a settle loop becomes `udevadm trigger` and `udevadm settle`, run
+# by the code every other distro runs.
+UDEVD="$(ls /usr/lib/systemd/systemd-udevd /lib/systemd/systemd-udevd /sbin/udevd 2>/dev/null | head -1)"
+UDEVADM="$(command -v udevadm || true)"
+if [ -x "$UDEVD" ] && [ -x "$UDEVADM" ]; then
+    mkdir -p "$INITRD_DIR/usr/lib/systemd" "$INITRD_DIR/usr/bin" \
+             "$INITRD_DIR/usr/lib/udev/rules.d" "$INITRD_DIR/run/udev"
+    cp -L "$UDEVADM" "$INITRD_DIR/usr/bin/udevadm"
+    cp -L "$UDEVD"   "$INITRD_DIR/usr/lib/systemd/systemd-udevd"
+    for b in "$UDEVADM" "$UDEVD"; do
+        for lib in $(ldd "$b" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*'); do
+            cp -L "$lib" "$INITRD_DIR/lib64/" 2>/dev/null || true
+        done
+    done
+    # The rules, and the helpers they invoke. Rules that call a helper which is
+    # not there fail silently, which is the worst way for this to go wrong.
+    cp -a /usr/lib/udev/rules.d/. "$INITRD_DIR/usr/lib/udev/rules.d/" 2>/dev/null || true
+    for h in /usr/lib/udev/*_id /usr/lib/udev/*-id /usr/lib/udev/mtd_probe; do
+        [ -x "$h" ] || continue
+        cp -L "$h" "$INITRD_DIR/usr/lib/udev/" 2>/dev/null || true
+        for lib in $(ldd "$h" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*'); do
+            cp -L "$lib" "$INITRD_DIR/lib64/" 2>/dev/null || true
+        done
+    done
+    echo "  udev:       $("$UDEVADM" --version 2>/dev/null | head -1), $(ls "$INITRD_DIR/usr/lib/udev/rules.d" | wc -l) rules"
+else
+    echo "  WARNING: no udevd found; /init will fall back to walking modalias"
+fi
+
 # StormBlock binary
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
@@ -303,52 +342,41 @@ else
     echo "  Layout: $LAYOUT"
 fi
 
-# Load the drivers this machine actually needs.
+# Find the hardware, the way every distro finds it.
 #
-# Every device on every bus names the driver it wants in its `modalias`, and
-# the initramfs carries the whole of the storage and network trees with the
-# alias table `depmod` built. So this asks the hardware rather than being told
-# — the coldplug udev does, without udev — and the same image boots a
-# hypervisor, a server with an HBA and a server with NVMe behind a switch.
-#
-# Failures are silent on purpose: most devices on a bus are not storage or
-# network, and their drivers are deliberately not here.
-echo "Loading drivers for this machine..."
-# Found by looking rather than by asking. There is exactly one module tree in
-# here, and `uname -r` is one more thing that has to be present and right at
-# the worst possible moment — an empty answer silently becomes
-# /lib/modules//modules.dep, which is a node with no drivers and no clue why.
-MODTREE=""
-for d in /lib/modules/*/; do
-    [ -f "$d/modules.dep" ] && MODTREE="$d"
-done
-LOADED=0
-if [ -n "$MODTREE" ]; then
-    # Round and round until nothing new loads.
-    #
-    # One pass is not enough, and the reason is structural: loading a bus
-    # driver *creates* the devices behind it. virtio_pci has to bind before
-    # /sys/bus/virtio exists, and only then does the NIC have a modalias to
-    # read — so a single sweep finds the bridge and misses everything across
-    # it. This is what `udevadm settle` is doing when it looks like it is
-    # waiting for nothing.
-    PASS=0
-    while [ $PASS -lt 5 ]; do
-        PASS=$((PASS + 1))
-        FOUND=0
-        for ma in /sys/bus/*/devices/*/modalias; do
-            [ -f "$ma" ] || continue
-            if modprobe -q "$(cat "$ma")" 2>/dev/null; then
-                FOUND=$((FOUND + 1))
-            fi
-        done
-        LOADED=$((LOADED + FOUND))
-        [ "$FOUND" -eq 0 ] && break
-        # Let what just loaded present its children before looking again.
-        sleep 1
-    done
+# udevd reads the uevents the kernel emits, matches them against the rules, and
+# calls modprobe with the modalias each device announces. It handles the part
+# that is easy to get wrong and was: a bus driver has to bind before the
+# devices behind it exist at all, so a single sweep of /sys finds the bridge
+# and misses the NIC across it. `settle` is what waiting for that is called.
+echo "Discovering hardware..."
+mkdir -p /run/udev
+if [ -x /usr/lib/systemd/systemd-udevd ] && [ -x /usr/bin/udevadm ]; then
+    /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null
+    udevadm trigger --type=subsystems --action=add 2>/dev/null
+    udevadm trigger --type=devices --action=add 2>/dev/null
+    udevadm settle --timeout=30 2>/dev/null
+    echo "  $(lsmod 2>/dev/null | tail -n +2 | wc -l) module(s) loaded"
 else
-    echo "  WARNING: no modules.dep — drivers cannot be resolved by modalias"
+    # No udev: ask each device for its driver directly, and go round until
+    # nothing new loads, because a bus driver creates the devices behind it.
+    echo "  udev unavailable — falling back to walking modalias"
+    MODTREE=""
+    for d in /lib/modules/*/; do
+        [ -f "$d/modules.dep" ] && MODTREE="$d"
+    done
+    if [ -n "$MODTREE" ]; then
+        PASS=0
+        while [ $PASS -lt 5 ]; do
+            PASS=$((PASS + 1)); FOUND=0
+            for ma in /sys/bus/*/devices/*/modalias; do
+                [ -f "$ma" ] || continue
+                modprobe -q "$(cat "$ma")" 2>/dev/null && FOUND=$((FOUND + 1))
+            done
+            [ "$FOUND" -eq 0 ] && break
+            sleep 1
+        done
+    fi
 fi
 
 # The ones no device announces: filesystems, and the block driver this image
@@ -356,12 +384,6 @@ fi
 for m in ublk_drv erofs overlay ext4 xfs vfat; do
     modprobe -q "$m" 2>/dev/null || true
 done
-echo "  loaded $LOADED driver(s) in $PASS pass(es)"
-
-# Give the buses a moment to present what those drivers found. A disk that
-# appears half a second after its HBA is normal, and the wait below for the
-# slab device covers the rest.
-sleep 1
 
 if [ ! -c /dev/ublk-control ]; then
     echo "WARNING: /dev/ublk-control not found — ublk_drv may not be loaded"
