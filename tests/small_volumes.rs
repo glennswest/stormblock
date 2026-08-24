@@ -27,19 +27,28 @@ async fn volume(bytes: u64, name: &str) -> (Arc<dyn BlockDevice>, String) {
 #[tokio::test]
 async fn the_small_end_formats_and_checks() {
     // (size, journal) — None lets the profile and size class decide.
-    let cases: [(u64, Option<bool>); 7] = [
-        (1024 * 1024, None),
-        (2 * 1024 * 1024, None),
-        (4 * 1024 * 1024, None),
-        (8 * 1024 * 1024, None),
-        (8 * 1024 * 1024, Some(false)),
-        (16 * 1024 * 1024, None),
-        (64 * 1024 * 1024, None),
+    // Every megabyte from 1 to 7, because that is where the metadata floor
+    // moves fastest, then 8 both ways because it is the first size that gets a
+    // journal, then the sizes a real container is built at.
+    const MB: u64 = 1024 * 1024;
+    let cases: [(u64, Option<bool>); 12] = [
+        (MB, None),
+        (2 * MB, None),
+        (3 * MB, None),
+        (4 * MB, None),
+        (5 * MB, None),
+        (6 * MB, None),
+        (7 * MB, None),
+        (8 * MB, None),
+        (8 * MB, Some(false)),
+        (16 * MB, None),
+        (32 * MB, None),
+        (64 * MB, None),
     ];
 
     println!(
-        "{:>8}  {:>5}  {:>7}  {:>7}  {:>8}  {:>8}  {:>6}",
-        "size", "bs", "blocks", "journal", "usable", "overhead", "inodes"
+        "{:>8}  {:>5}  {:>7}  {:>8}  {:>10}  {:>10}  {:>6}  {:>5}",
+        "size", "bs", "blocks", "journal", "usable", "overhead", "inodes", "over%"
     );
 
     for (bytes, journal) in cases {
@@ -55,14 +64,15 @@ async fn the_small_end_formats_and_checks() {
         };
         let usable = report.free_blocks * report.block_size as u64;
         println!(
-            "{:>8}  {:>5}  {:>7}  {:>7}  {:>8}  {:>8}  {:>6}",
+            "{:>8}  {:>5}  {:>7}  {:>8}  {:>10}  {:>10}  {:>6}  {:>4.0}%",
             human(bytes),
             report.block_size,
             report.blocks,
-            report.journal_blocks,
+            human(report.journal_blocks as u64 * report.block_size as u64),
             human(usable),
             human(bytes - usable),
             report.inodes,
+            (bytes - usable) as f64 * 100.0 / bytes as f64,
         );
 
         // The number only means something if the filesystem is sound.
@@ -103,8 +113,12 @@ async fn a_one_megabyte_golden_is_usable() {
 }
 
 fn human(b: u64) -> String {
-    if b >= 1024 * 1024 {
+    if b == 0 {
+        "-".to_string()
+    } else if b >= 1024 * 1024 && b % (1024 * 1024) == 0 {
         format!("{} MB", b / (1024 * 1024))
+    } else if b >= 1024 * 1024 {
+        format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
     } else {
         format!("{} KB", b / 1024)
     }
