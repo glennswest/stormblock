@@ -2106,7 +2106,34 @@ async fn handle_adopt_ublk(
         threads.push(thread);
     }
 
-    println!("Adopted {} device(s). Serving until Ctrl+C.", threads.len());
+    // Report what is actually being served, not what was attempted.
+    //
+    // Every adopt runs on its own thread and an adopt that fails does so
+    // early, before serving; a thread still alive after the settle is one that
+    // reached its I/O loop. Counting the spawns instead announced "Adopted 4
+    // device(s)" in the same breath as four errors saying none of them had
+    // been — the sort of report that sends the next session looking in the
+    // wrong place.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let live = threads.iter().filter(|t| !t.is_finished()).count();
+    if live == 0 {
+        let _ = shutdown_tx.send(true);
+        for t in threads {
+            let _ = t.join();
+        }
+        anyhow::bail!(
+            "adopted none of {} device(s) — the errors above are the reason; the root \
+             filesystem is still served by whoever had it before this ran",
+            dev_ids.len()
+        );
+    }
+    if live < threads.len() {
+        tracing::warn!(
+            "adopted {live} of {} device(s); the rest are named in the errors above",
+            threads.len()
+        );
+    }
+    println!("Adopted {live} device(s). Serving until Ctrl+C.");
     tokio::signal::ctrl_c().await?;
     let _ = shutdown_tx.send(true);
     for t in threads {

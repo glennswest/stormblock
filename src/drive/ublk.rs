@@ -125,6 +125,17 @@ const UBLK_F_USER_RECOVERY: u64 = 1 << 3;
 /// one that sees EIO in the middle of it.
 const UBLK_F_USER_RECOVERY_REISSUE: u64 = 1 << 4;
 
+/// Device states, as the kernel reports them in `ublksrv_ctrl_dev_info.state`.
+///
+/// Only QUIESCED is used here, and only because it is the gate on adoption:
+/// the kernel moves a device LIVE -> QUIESCED once it has noticed the server
+/// is gone and stopped the queues, and refuses START_USER_RECOVERY until then.
+#[allow(dead_code)]
+const UBLK_S_DEV_DEAD: u16 = 0;
+#[allow(dead_code)]
+const UBLK_S_DEV_LIVE: u16 = 1;
+const UBLK_S_DEV_QUIESCED: u16 = 2;
+
 /// Default max I/O buffer size (512 KB).
 const DEFAULT_MAX_IO_BYTES: u32 = 512 * 1024;
 
@@ -525,6 +536,54 @@ impl UblkServer {
                      cannot be adopted — the flag is fixed at creation, so whoever made \
                      this device had to ask for it"
                 )));
+            }
+
+            // Wait for the kernel to quiesce the device before asking to
+            // recover it.
+            //
+            // The old server standing down is not the same event as the device
+            // being ready to hand over. The kernel notices the server's
+            // io_uring context is gone, stops the queues and only then moves
+            // the device LIVE -> QUIESCED; START_USER_RECOVERY before that
+            // returns EBUSY. The two are milliseconds apart and the race is
+            // reliably lost, because the adopting server asks the instant the
+            // old one exits — which read as "is the previous server really
+            // gone?" when it was gone and the kernel had not caught up.
+            //
+            // So poll the state rather than the process. Bounded, because a
+            // device that never quiesces is a real failure and waiting forever
+            // for it would hold the boot.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let mut cur = UblkCtrlDevInfo::default();
+                submit_ctrl_cmd(
+                    &mut ctrl_ring,
+                    ctrl_fd,
+                    UBLK_U_CMD_GET_DEV_INFO,
+                    id,
+                    &mut cur as *mut UblkCtrlDevInfo as u64,
+                    std::mem::size_of::<UblkCtrlDevInfo>() as u32,
+                    0,
+                )
+                .map_err(|e| {
+                    DriveError::Other(anyhow::anyhow!(
+                        "ublk: cannot read /dev/ublkb{id} while waiting to adopt it: {e}"
+                    ))
+                })?;
+
+                if cur.state == UBLK_S_DEV_QUIESCED {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(DriveError::Other(anyhow::anyhow!(
+                        "ublk: /dev/ublkb{id} never quiesced (state {}, wanted {}): the \
+                         previous server has stood down but the kernel still holds the \
+                         device — it may still have I/O in flight",
+                        cur.state,
+                        UBLK_S_DEV_QUIESCED
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
 
             submit_ctrl_cmd(
