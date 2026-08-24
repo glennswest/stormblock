@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.13.0] — 2026-08-24
+
 ### 2026-08-24
 - **fix:** `image build` refuses a golden whose ext4 blocks are smaller than
   the volume's logical sector, naming the fix (`mkfs.ext4 -b 4096`). Found by
