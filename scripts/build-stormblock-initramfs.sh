@@ -68,9 +68,15 @@ mkdir -p "$INITRD_DIR"/{bin,sbin,usr/sbin,lib/modules,dev,proc,sys,sysroot,etc,r
 # Busybox (static) + symlinks
 cp "$BUSYBOX" "$INITRD_DIR/bin/busybox"
 chmod 755 "$INITRD_DIR/bin/busybox"
+# Every applet /init calls. A missing one is not a warning at build time and
+# not an error until the line runs — `basename: not found` took a node to a
+# shell with no network, at the one moment nothing is left to debug it with.
+# The list is checked against the script below at build time so it cannot drift
+# again.
 for cmd in sh mount umount insmod modprobe ip cat grep cut sleep ln mkdir \
            swapon switch_root mdev udhcpc dmesg echo printf true false test \
-           ls rm cp mv chmod chown mknod; do
+           ls rm cp mv chmod chown mknod basename dirname awk sed tr head \
+           tail wc mountpoint sync; do
     ln -s busybox "$INITRD_DIR/bin/$cmd"
 done
 
@@ -566,6 +572,20 @@ mount --move /run /sysroot/run 2>/dev/null || true
 exec switch_root /sysroot /sbin/init
 INITSCRIPT
 chmod +x "$INITRD_DIR/init"
+
+# The applets /init actually calls, against the ones bundled. A command that
+# is not there fails at the line that needs it — deep in a boot, with no
+# network and nothing to look at but a console.
+MISSING_APPLETS=""
+for cmd in $(grep -oE '\b(basename|dirname|awk|sed|tr|head|tail|wc|mountpoint|sync|blkid|readlink|stat|seq|find|xargs|expr|sort|uniq)\b' \
+        "$INITRD_DIR/init" | sort -u); do
+    [ -e "$INITRD_DIR/bin/$cmd" ] || MISSING_APPLETS="$MISSING_APPLETS $cmd"
+done
+if [ -n "$MISSING_APPLETS" ]; then
+    echo "ERROR: /init calls applets this initramfs does not carry:$MISSING_APPLETS"
+    echo "       add them to the symlink list above"
+    exit 1
+fi
 
 # Build cpio archive (compressed with zstd)
 echo ""
