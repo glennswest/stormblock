@@ -286,11 +286,28 @@ for d in /lib/modules/*/; do
 done
 LOADED=0
 if [ -n "$MODTREE" ]; then
-    for ma in /sys/bus/*/devices/*/modalias; do
-        [ -f "$ma" ] || continue
-        if modprobe -q "$(cat "$ma")" 2>/dev/null; then
-            LOADED=$((LOADED + 1))
-        fi
+    # Round and round until nothing new loads.
+    #
+    # One pass is not enough, and the reason is structural: loading a bus
+    # driver *creates* the devices behind it. virtio_pci has to bind before
+    # /sys/bus/virtio exists, and only then does the NIC have a modalias to
+    # read — so a single sweep finds the bridge and misses everything across
+    # it. This is what `udevadm settle` is doing when it looks like it is
+    # waiting for nothing.
+    PASS=0
+    while [ $PASS -lt 5 ]; do
+        PASS=$((PASS + 1))
+        FOUND=0
+        for ma in /sys/bus/*/devices/*/modalias; do
+            [ -f "$ma" ] || continue
+            if modprobe -q "$(cat "$ma")" 2>/dev/null; then
+                FOUND=$((FOUND + 1))
+            fi
+        done
+        LOADED=$((LOADED + FOUND))
+        [ "$FOUND" -eq 0 ] && break
+        # Let what just loaded present its children before looking again.
+        sleep 1
     done
 else
     echo "  WARNING: no modules.dep — drivers cannot be resolved by modalias"
@@ -301,7 +318,7 @@ fi
 for m in ublk_drv erofs overlay ext4 xfs vfat; do
     modprobe -q "$m" 2>/dev/null || true
 done
-echo "  loaded $LOADED driver(s) by modalias"
+echo "  loaded $LOADED driver(s) in $PASS pass(es)"
 
 # Give the buses a moment to present what those drivers found. A disk that
 # appears half a second after its HBA is normal, and the wait below for the
