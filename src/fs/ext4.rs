@@ -276,6 +276,18 @@ pub struct Ext4Report {
     pub label: String,
 }
 
+/// Volumes this size and under get no journal unless one is asked for.
+///
+/// 8 MiB is exactly where `mkfs-ext4`'s size class starts adding its 4 MB
+/// journal, and it is the one size at which doing so makes a volume hold
+/// *less* than a smaller one: 3.3 MB usable against 6.4 MB at 7 MB. Measured
+/// in `tests/small_volumes.rs`.
+///
+/// Below 8 MiB this changes nothing any more — `mkfs-ext4` v2.0.4 declines the
+/// journal there itself, and clears the feature with it (mkfs.ext4.rs#3).
+/// The rule exists for the cliff at 8 MiB alone.
+pub const JOURNAL_FLOOR_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Write a blank filesystem over the whole device.
 pub async fn format(dev: &Arc<dyn BlockDevice>, params: &Ext4Params) -> anyhow::Result<Ext4Report> {
     let target = if params.assume_blank {
@@ -283,6 +295,22 @@ pub async fn format(dev: &Arc<dyn BlockDevice>, params: &Ext4Params) -> anyhow::
     } else {
         VolumeDevice::opaque(dev.clone())
     };
+
+    // At the floor, the default journal is worse than none: measured in
+    // `tests/small_volumes.rs`, an 8 MB volume with the default 4 MB journal
+    // has 3.3 MB usable, while a 7 MB one with no journal has 6.4 MB — the
+    // larger volume holds less. `mkfs-ext4` turns the journal on from 2048
+    // blocks up, which lands exactly on the wrong side of that. Above the
+    // floor it amortises (32% at 16 MB, 13% at 64 MB) and is kept, because a
+    // consumer with no clean unmount needs it.
+    //
+    // Only when the caller has not decided: an explicit `journal` is obeyed.
+    let mut params = params.clone();
+    if params.journal.is_none() && dev.capacity_bytes() <= JOURNAL_FLOOR_BYTES {
+        params.journal = Some(false);
+    }
+    let params = &params;
+
     let report = mkfs_ext4::format::format(&target, &params.build())
         .await
         .map_err(|e| anyhow::anyhow!("formatting {}: {e}", params.profile.name()))?;

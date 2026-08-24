@@ -174,7 +174,11 @@ mod tests {
     fn persist_and_reload() {
         let dir = std::env::temp_dir().join("stormblock-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test-journal.bin");
+        // Unique per run: `cargo test` runs the lib and every integration
+        // binary concurrently, and a fixed name in a shared directory is a
+        // flake waiting for the two halves of this test to straddle another
+        // test's cleanup.
+        let path = dir.join(format!("test-journal-{}.bin", uuid::Uuid::new_v4().simple()));
         let _ = std::fs::remove_file(&path);
 
         // Create journal, mark some dirty, flush

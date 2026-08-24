@@ -86,6 +86,65 @@ async fn the_small_end_formats_and_checks() {
     }
 }
 
+/// The other end: what a data or system container costs.
+///
+/// Sparse-backed and `assume_blank`, so a zeroed region is a discard rather
+/// than a write — a 2 TB filesystem costs its metadata on disk, not 2 TB.
+/// That is also true of a thin volume, which is what these stand in for.
+#[tokio::test]
+async fn the_large_end_formats_and_checks() {
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * MB;
+    let cases: [u64; 6] = [128 * MB, 256 * MB, 512 * MB, GB, 1024 * GB, 2048 * GB];
+
+    println!(
+        "{:>8}  {:>5}  {:>11}  {:>8}  {:>10}  {:>10}  {:>11}  {:>5}  {:>9}",
+        "size", "bs", "blocks", "journal", "usable", "overhead", "inodes", "over%", "on disk"
+    );
+
+    for bytes in cases {
+        let (dev, path) = volume(bytes, "large").await;
+        let report = match ext4::format(&dev, &Ext4Params::default()).await {
+            Ok(r) => r,
+            Err(e) => {
+                println!("{:>8}  REFUSED: {e}", human(bytes));
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+        };
+        let usable = report.free_blocks * report.block_size as u64;
+        // What the format actually cost the backing store — the number that
+        // decides whether a big thin container is affordable to create.
+        let on_disk = allocated_bytes(&path);
+        println!(
+            "{:>8}  {:>5}  {:>11}  {:>8}  {:>10}  {:>10}  {:>11}  {:>4.0}%  {:>9}",
+            human(bytes),
+            report.block_size,
+            report.blocks,
+            human(report.journal_blocks as u64 * report.block_size as u64),
+            human(usable),
+            human(bytes - usable),
+            report.inodes,
+            (bytes - usable) as f64 * 100.0 / bytes as f64,
+            human(on_disk),
+        );
+
+        let verdict = ext4::check(&dev).await.expect("fsck runs");
+        assert!(
+            verdict.problems.is_empty(),
+            "{} did not check out: {verdict:?}",
+            human(bytes)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Blocks actually allocated to the file, not its apparent length.
+fn allocated_bytes(path: &str) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map(|m| m.blocks() * 512).unwrap_or(0)
+}
+
 /// A 1 MB golden is the smallest thing worth having — a rendered config, a
 /// kernel command line. It must format on a 4 KiB-sector volume, check clean,
 /// and leave enough room to be worth the trouble.
@@ -122,4 +181,49 @@ fn human(b: u64) -> String {
     } else {
         format!("{} KB", b / 1024)
     }
+}
+
+/// A filesystem must not claim a journal it does not have.
+///
+/// `mkfs-ext4` takes `has_journal` from the ext4 profile and the journal
+/// *size* from a size class — and below 2048 blocks that class returns "no
+/// journal". The two decisions are made independently, so the feature bit
+/// survives while the journal does not, and the result is a superblock
+/// advertising a journal with nothing behind it. Our own `fsck` passes it.
+///
+/// This is the [`ext4::JOURNAL_FLOOR_BYTES`] rule's real justification: the
+/// saved space was an orphan file that should never have been written, and the
+/// filesystem underneath it was one a kernel would refuse.
+#[tokio::test]
+async fn a_small_volume_never_claims_a_journal_it_does_not_have() {
+    const HAS_JOURNAL: u32 = 0x0004;
+    // Superblock at byte 1024; s_feature_compat at +0x5C.
+    async fn compat_features(dev: &Arc<dyn BlockDevice>) -> u32 {
+        let mut buf = vec![0u8; 4096];
+        dev.read(0, &mut buf).await.unwrap();
+        u32::from_le_bytes(buf[1024 + 0x5C..1024 + 0x60].try_into().unwrap())
+    }
+
+    // What the defaults now do.
+    let (dev, path) = volume(1024 * 1024, "nojournal").await;
+    let report = ext4::format(&dev, &Ext4Params::default()).await.unwrap();
+    assert_eq!(report.journal_blocks, 0);
+    assert_eq!(
+        compat_features(&dev).await & HAS_JOURNAL,
+        0,
+        "1 MB filesystem claims has_journal with no journal behind it"
+    );
+    let _ = std::fs::remove_file(&path);
+
+    // And what asking for one anyway does — the shape the floor rule guards
+    // against, kept here so a change in the crate is noticed.
+    let (dev, path) = volume(1024 * 1024, "askedfor").await;
+    let params = Ext4Params { journal: Some(true), ..Default::default() };
+    let report = ext4::format(&dev, &params).await.unwrap();
+    let claims = compat_features(&dev).await & HAS_JOURNAL != 0;
+    println!(
+        "1 MB with journal=Some(true): journal_blocks={}, has_journal={claims}",
+        report.journal_blocks
+    );
+    let _ = std::fs::remove_file(&path);
 }

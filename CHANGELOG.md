@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### 2026-08-23
+- **fix:** volumes at or below 8 MiB get no journal unless one is asked for
+  (`ext4::JOURNAL_FLOOR_BYTES`). 8 MiB is exactly where `mkfs-ext4`'s size
+  class starts adding its 4 MB journal, and it is the one size where doing so
+  makes a volume hold *less* than a smaller one: 3.3 MB usable against 6.4 MB
+  at 7 MB. Above the floor the journal amortises — 32% at 16 MB, 13% at 64 MB
+  — and is kept, because a consumer with no clean unmount needs it.
+- **test:** `tests/small_volumes.rs` measures the whole range rather than
+  reasoning about it: every megabyte to 8, then 16/32/64 MB, then 128 MB to
+  2 TB, each formatted and `fsck`-checked on a 4 KiB-sector volume. A 1 MB
+  golden works — 956 KB usable, 128 inodes. A 2 TB filesystem costs 42.6 MB on
+  the backing store, so a large thin container is cheap to create.
+- **fix:** found and fixed upstream while measuring the above
+  (mkfs.ext4.rs#3): every ext4 filesystem below the journal size class's floor
+  advertised a journal it did not have — `has_journal` set, zero journal
+  blocks, no journal inode. `mke2fs` never emits that shape and a kernel
+  refuses to mount it, and our own `fsck` passed it, which is why it survived
+  a release. Fixed in mkfs-ext4 v2.0.4, which also reports the shape as
+  `journal-advertised-but-absent`.
+- **chore(deps):** mkfs-ext4 v2.0.0 → v2.0.4, fio-ext4 v1.4.0 → v1.4.1. Both
+  pins move together, as always: fio-ext4 pins mkfs-ext4 by tag, and two tags
+  are two cargo source ids, so a mismatched pair resolves two copies and the
+  `BlockDevice` trait from one does not satisfy the other.
+- **feat:** `image build` prints the GPT LBA size, and says so when a bootable
+  image is written at 512 bytes. Firmware parses the GPT with the media's own
+  block size and does not probe for it the way `Gpt::read` does, so a 512-LBA
+  image on a 4Kn drive puts the header where firmware will not look. Set
+  `block_size = 4096` in the spec for a 4Kn target.
+- **fix:** `raid::journal::persist_and_reload` used a fixed temp filename, and
+  `cargo test` runs the lib and every integration binary concurrently.
+
 ## [v9.12.0] — 2026-08-20
 
 ### 2026-08-20
