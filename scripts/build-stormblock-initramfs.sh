@@ -379,7 +379,15 @@ if [ -z "$IFACE" ]; then
         # that boots without an address is degraded and can be looked at. One
         # that drops to a shell in the initramfs cannot be looked at at all.
         echo "WARNING: no network interface found — continuing without one"
-        echo "         (is the NIC's driver in STORMBLOCK_MODULES?)"
+        # What it did see, because "not found" on its own is not a diagnosis
+        # and this console is all anyone gets on a machine that will not boot.
+        echo "  /sys/class/net: $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
+        echo "  net drivers loaded: $(lsmod 2>/dev/null | grep -cE '^(virtio_net|e1000|e1000e|igb|ixgbe|bnx2|tg3|r8169|mlx)')"
+        echo "  network PCI devices:"
+        for d in /sys/bus/pci/devices/*/; do
+            cls=$(cat "$d/class" 2>/dev/null)
+            case "$cls" in 0x02*) echo "    $(basename "$d") $(cat "$d/modalias" 2>/dev/null)" ;; esac
+        done
         NO_NETWORK=1
     else
         echo "FATAL: No network interface found"
