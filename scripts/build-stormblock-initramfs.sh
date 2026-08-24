@@ -87,6 +87,34 @@ for cmd in $("$BUSYBOX" --list); do
 done
 echo "  applets:    $APPLETS (everything this busybox provides)"
 
+# The real modprobe, with its libraries.
+#
+# busybox has one, and it is not the one a distro uses. Everything else in
+# here is busybox on purpose, but module loading is where the initramfs earns
+# its keep: it has to resolve an alias like
+# `virtio:d00000001v00001AF4` through modules.alias, follow modules.dep, and
+# decompress whatever the module is compressed with. kmod is what every distro
+# trusts to do that, and this image is written to machines whose hardware we
+# have never seen.
+#
+# It is dynamically linked, so its libraries and the loader come too — about
+# 5 MB, against 27 MB of drivers those libraries exist to load.
+KMOD="$(command -v modprobe || echo /usr/sbin/modprobe)"
+if [ -x "$KMOD" ]; then
+    mkdir -p "$INITRD_DIR/usr/sbin" "$INITRD_DIR/lib64"
+    cp -L "$KMOD" "$INITRD_DIR/usr/sbin/modprobe"
+    # depmod is the same binary; carry it under its own name so a rebuild of
+    # the tables is possible from inside a running node.
+    cp -L "$KMOD" "$INITRD_DIR/usr/sbin/depmod"
+    for lib in $(ldd "$KMOD" | grep -oE '/[^ ]+\.so[^ ]*'); do
+        cp -L "$lib" "$INITRD_DIR/lib64/" 2>/dev/null || true
+    done
+    cp -L /lib64/ld-linux-x86-64.so.2 "$INITRD_DIR/lib64/" 2>/dev/null || true
+    echo "  modprobe:   kmod $("$KMOD" --version 2>/dev/null | head -1 | awk '{print $NF}')"
+else
+    echo "  WARNING: no kmod modprobe found; falling back to busybox's"
+fi
+
 # StormBlock binary
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
@@ -194,7 +222,10 @@ cat > "$INITRD_DIR/init" << 'INITSCRIPT'
 #   iSCSI:            rd.stormblock.portal= rd.stormblock.iqn= rd.stormblock.layout=
 #                     — provisions the partitioned boot disk over the network.
 
-export PATH=/bin:/sbin:/usr/sbin
+# /usr/sbin first: the real modprobe lives there and busybox's link to itself
+# is in /bin. Which one resolves an alias is the difference between a node
+# that finds its hardware and one that reports having none.
+export PATH=/usr/sbin:/bin:/sbin
 
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
