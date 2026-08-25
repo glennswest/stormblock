@@ -257,37 +257,84 @@ for f in modules.builtin modules.builtin.modinfo modules.order; do
     [ -f "$MODDIR/$f" ] && cp "$MODDIR/$f" "$DEST/$f"
 done
 
-# Close the dependency set: depmod, then pull in anything it names that is not
-# here, and repeat until it is closed. Bounded, because each round only adds
-# files and the source tree is finite.
-round=0
-while :; do
-    round=$((round + 1))
-    if ! depmod -b "$INITRD_DIR" "$KVER" 2>/dev/null; then
-        echo "ERROR: depmod failed; /init could not resolve drivers by modalias"
+# Close the dependency set over the **source** tree's map, not this one's.
+#
+# This is subtle and it has already cost a boot twice. `depmod` records
+# dependencies only between modules it can *see*: run it against a subset that
+# is missing `failover.ko` and it does not report that `net_failover` needs it
+# — it cannot name a file that is not there — so the generated modules.dep is
+# self-consistent, complete-looking, and wrong. A closure computed from it adds
+# nothing, and the node boots with no network because virtio_net's dependency
+# never loaded.
+#
+# The full tree's modules.dep knows the real graph. Seed it with what was
+# selected above and take the transitive closure there, then copy the result.
+FULL_DEP="$MODDIR/modules.dep"
+if [ ! -f "$FULL_DEP" ]; then
+    echo "ERROR: $FULL_DEP is missing — cannot close the dependency set"
+    exit 1
+fi
+
+SEED=$(mktemp)
+( cd "$DEST" && find kernel -name '*.ko*' 2>/dev/null ) | sed "s|^|kernel/|;s|^kernel/kernel/|kernel/|" > "$SEED"
+
+WANT=$(mktemp)
+awk -F: '
+    NR == FNR { gsub(/^[ \t]+/, "", $2); deps[$1] = $2; next }
+    { want[$0] = 1 }
+    END {
+        changed = 1
+        while (changed) {
+            changed = 0
+            for (m in want) {
+                n = split(deps[m], d, " ")
+                for (i = 1; i <= n; i++) {
+                    if (!(d[i] in want)) { want[d[i]] = 1; changed = 1 }
+                }
+            }
+        }
+        for (m in want) print m
+    }
+' "$FULL_DEP" "$SEED" > "$WANT"
+
+pulled=0
+while IFS= read -r dep; do
+    [ -n "$dep" ] || continue
+    [ -f "$DEST/$dep" ] && continue
+    if [ -f "$MODDIR/$dep" ]; then
+        mkdir -p "$DEST/$(dirname "$dep")"
+        cp -a "$MODDIR/$dep" "$DEST/$dep"
+        pulled=$((pulled + 1))
+    else
+        echo "ERROR: $dep is required but is not in $MODDIR either"
         exit 1
     fi
-    added=0
-    while IFS= read -r dep; do
-        [ -n "$dep" ] || continue
-        [ -f "$DEST/$dep" ] && continue
-        if [ -f "$MODDIR/$dep" ]; then
-            mkdir -p "$DEST/$(dirname "$dep")"
-            cp -a "$MODDIR/$dep" "$DEST/$dep"
-            added=$((added + 1))
-        else
-            echo "ERROR: modules.dep names $dep, which is not in $MODDIR either"
-            exit 1
-        fi
-    done <<EOF
-$(awk -F: '{ n = split($2, d, " "); for (i = 1; i <= n; i++) print d[i] }' "$DEST/modules.dep" | sort -u)
+done < "$WANT"
+rm -f "$SEED" "$WANT"
+[ "$pulled" -gt 0 ] && echo "  modules:    $pulled dependency module(s) pulled in from outside the chosen trees"
+
+if ! depmod -b "$INITRD_DIR" "$KVER" 2>/dev/null; then
+    echo "ERROR: depmod failed; /init could not resolve drivers by modalias"
+    exit 1
+fi
+
+# And prove it: every module the *source* tree says is needed must be here.
+# A tree that is complete against its own depmod can still be missing what it
+# needs, which is the whole reason this check reads the full map.
+missing=0
+while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    [ -f "$DEST/$m" ] || { echo "  MISSING dependency: $m"; missing=$((missing + 1)); }
+done <<EOF
+$(awk -F: -v d="$DEST" '
+    { gsub(/^[ \t]+/, "", $2)
+      if (system("test -f " d "/" $1) == 0) { n = split($2, x, " "); for (i=1;i<=n;i++) print x[i] } }
+' "$FULL_DEP" | sort -u)
 EOF
-    [ "$added" -eq 0 ] && break
-    if [ "$round" -gt 8 ]; then
-        echo "ERROR: dependency closure did not settle after $round rounds"
-        exit 1
-    fi
-done
+if [ "$missing" -gt 0 ]; then
+    echo "ERROR: $missing module(s) required by what this image carries are absent."
+    exit 1
+fi
 
 printf '  modules:    %d files, %s (of %s; the rest is in the modules golden)\n' \
     "$(find "$DEST" -name '*.ko*' | wc -l)" \
