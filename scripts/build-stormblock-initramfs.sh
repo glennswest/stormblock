@@ -166,21 +166,41 @@ else
     echo "  WARNING: no udevd found; /init will fall back to walking modalias"
 fi
 
-# Firmware.
+# Firmware — what a *server* needs to reach its root and its network.
 #
 # A NIC or HBA that loads firmware at probe fails without it, and the failure
-# is indistinguishable from a missing driver — the device simply never
-# appears. Mellanox, Broadcom, several Intel parts and most SAS HBAs are in
-# that group, which is most of what a real server has in it.
+# is indistinguishable from a missing driver: the device simply never appears.
+# Mellanox, Broadcom, several Intel parts and most FC HBAs are in that group,
+# which is most of what a real server has in it. So this cannot be a guessed
+# list of models.
 #
-# The whole set, because this image is written to machines nobody has seen and
-# choosing a subset means choosing which hardware it fails on. Fedora ships it
-# already compressed and the kernel reads it that way.
+# It can, though, be a statement about what a storage node *is not*. The full
+# set is 310 MB, and 215 MB of that is GPU, WiFi, Bluetooth and phone-SoC
+# firmware — 103 MB of nvidia, 32 MB of mediatek, 27 MB of amdgpu, 35 MB of
+# ath11k/ath12k — on a machine that has none of it and never will. Excluding
+# those classes leaves 49 MB and removes nothing a server can use.
+#
+# The complete set still ships, in the kernel pallet's `modules` golden, and is
+# mounted over this one once the root filesystem is up. So a machine that turns
+# out to have an exotic device is not stuck: it is only missing the firmware
+# for the few seconds before its root is mounted, and the only devices that
+# matter in that window are the disk it boots from and the NIC it may DHCP on.
 FWDIR="$(ls -d /usr/lib/firmware /lib/firmware 2>/dev/null | head -1 || true)"
+# Categories a storage node does not have. Named by what they are rather than
+# by which models exist, because the model list changes every release and the
+# category list does not.
+FW_EXCLUDE="nvidia amdgpu radeon i915 xe mediatek ath9k_htc ath10k ath11k ath12k
+            ath6k ar3k brcm cypress rtw88 rtw89 rtlwifi iwlwifi cirrus qca
+            ti-connectivity mrvl libertas mwl8k rsi wfx av7110 cpia2 as102
+            ene-ubox go7007 s2250 s5p-mfc vpu mt76 rockchip amlogic sun8i-a83t
+            meson tegra"
 if [ -n "$FWDIR" ] && [ -d "$FWDIR" ]; then
     mkdir -p "$INITRD_DIR/lib/firmware"
     cp -a "$FWDIR/." "$INITRD_DIR/lib/firmware/" 2>/dev/null || true
-    echo "  firmware:   $(du -sh "$INITRD_DIR/lib/firmware" | cut -f1) from $FWDIR"
+    for d in $FW_EXCLUDE; do
+        rm -rf "$INITRD_DIR/lib/firmware/$d" 2>/dev/null || true
+    done
+    echo "  firmware:   $(du -sh "$INITRD_DIR/lib/firmware" | cut -f1) (of $(du -sh "$FWDIR" | cut -f1); the rest is in the modules golden)"
 else
     echo "  WARNING: no linux-firmware on this build host — devices that load"
     echo "           firmware at probe will look like missing drivers"
@@ -849,6 +869,30 @@ if [ ! -x /sysroot/sbin/init ] && [ ! -x /sysroot/usr/lib/systemd/systemd ]; the
 fi
 
 echo "Switching to real root..."
+
+# The kernel's own drivers and firmware, from the golden that carries them.
+#
+# The initramfs holds only what is needed to *reach* the root. Everything else
+# — the full module tree and the firmware for anything this machine turns out
+# to have — is a golden in the kernel pallet, mounted by the command line at
+# /usr/lib/kernel. Binding it over /lib/modules and /lib/firmware is what makes
+# the root filesystem find it: the kernel's firmware loader and modprobe both
+# look there, and neither knows or cares that it came from a separate volume.
+#
+# Best effort. A node whose modules golden did not mount still has whatever the
+# initramfs brought, which is enough to be running and to be fixed.
+if [ -d /sysroot/usr/lib/kernel/lib/modules ]; then
+    mkdir -p /sysroot/lib/modules /sysroot/lib/firmware
+    mount --bind /sysroot/usr/lib/kernel/lib/modules /sysroot/lib/modules 2>/dev/null \
+        && echo "  modules: /usr/lib/kernel -> /lib/modules"
+    if [ -d /sysroot/usr/lib/kernel/lib/firmware ]; then
+        mount --bind /sysroot/usr/lib/kernel/lib/firmware /sysroot/lib/firmware 2>/dev/null \
+            && echo "  firmware: /usr/lib/kernel -> /lib/firmware"
+    fi
+else
+    echo "  WARNING: no modules golden at /usr/lib/kernel — this node has only the"
+    echo "           drivers the initramfs carried"
+fi
 
 # What the initramfs learned about the network, handed to the root that will
 # use it. Nothing after switch_root runs a DHCP client, so a node whose
