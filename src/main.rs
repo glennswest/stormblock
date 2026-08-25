@@ -2875,7 +2875,7 @@ async fn handle_golden(
 
     if fsck {
         let check = stormblock::fs::ext4::check(&dev).await?;
-        if !check.clean() {
+        if !check.is_clean() {
             anyhow::bail!(
                 "{name} does not check out after {files} entries — {} problem(s); \
                  not shipping a golden every clone would inherit",
