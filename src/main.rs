@@ -2210,6 +2210,167 @@ async fn start_serving(
     }
 }
 
+/// Every block device this node has, with identity, firmware and health.
+///
+/// From sysfs where sysfs knows, and from the drive itself where it does not:
+/// NVMe endurance and temperature live in a SMART log page reached by an admin
+/// command, not in a sysfs file, so a report built only from sysfs silently
+/// omits the two numbers most worth having.
+#[cfg(target_os = "linux")]
+fn collect_devices() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    let read = |p: String| -> String {
+        std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_default()
+    };
+
+    let Ok(blocks) = std::fs::read_dir("/sys/block") else {
+        return "cannot read /sys/block\n".into();
+    };
+    let mut names: Vec<String> = blocks
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        // Virtual devices are this node's own doing and say nothing about its
+        // media; ublk especially, since those are volumes we serve.
+        .filter(|n| !n.starts_with("loop") && !n.starts_with("ram") && !n.starts_with("ublk"))
+        .collect();
+    names.sort();
+
+    for n in names {
+        let base = format!("/sys/block/{n}");
+        let sectors: u64 = read(format!("{base}/size")).parse().unwrap_or(0);
+        let bytes = sectors * 512;
+        let rotational = read(format!("{base}/queue/rotational"));
+        let model = {
+            let m = read(format!("{base}/device/model"));
+            if m.is_empty() { read(format!("{base}/device/name")) } else { m }
+        };
+        let _ = writeln!(
+            out,
+            "{n}: {} {}  {}  {}",
+            read(format!("{base}/device/vendor")),
+            model,
+            stormblock::mgmt::config::human_size(bytes),
+            if rotational == "1" { "rotational" } else { "solid state" },
+        );
+        for (label, path) in [
+            ("serial", format!("{base}/device/serial")),
+            ("firmware", format!("{base}/device/firmware_rev")),
+            ("firmware", format!("{base}/device/rev")),
+            ("wwid", format!("{base}/device/wwid")),
+            ("queue depth", format!("{base}/device/queue_depth")),
+            ("scheduler", format!("{base}/queue/scheduler")),
+            ("logical block", format!("{base}/queue/logical_block_size")),
+            ("physical block", format!("{base}/queue/physical_block_size")),
+        ] {
+            let v = read(path);
+            if !v.is_empty() {
+                let _ = writeln!(out, "    {label:<16} {v}");
+            }
+        }
+        // Temperature, where the kernel exposes it without an admin command.
+        for hw in ["device/hwmon", "device/device/hwmon"] {
+            if let Ok(rd) = std::fs::read_dir(format!("{base}/{hw}")) {
+                for e in rd.flatten() {
+                    let t = read(format!("{}/temp1_input", e.path().display()));
+                    if let Ok(milli) = t.parse::<i64>() {
+                        let _ = writeln!(out, "    {:<16} {}°C", "temperature", milli / 1000);
+                    }
+                }
+            }
+        }
+        if n.starts_with("nvme") {
+            let ctrl = n.split('n').next().unwrap_or(&n).to_owned();
+            let _ = write!(out, "{}", nvme_smart(&format!("/dev/{ctrl}")));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// NVMe SMART / Health Information (log page 0x02), by admin passthrough.
+///
+/// The numbers here are the ones a sysfs-only report cannot have: endurance
+/// used, spare remaining, media errors, unsafe shutdowns. A drive at 95% of
+/// its endurance explains a class of behaviour that looks like a software
+/// problem right up until someone reads this counter.
+#[cfg(target_os = "linux")]
+fn nvme_smart(dev: &str) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::io::AsRawFd;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct AdminCmd {
+        opcode: u8,
+        flags: u8,
+        rsvd1: u16,
+        nsid: u32,
+        cdw2: u32,
+        cdw3: u32,
+        metadata: u64,
+        addr: u64,
+        metadata_len: u32,
+        data_len: u32,
+        cdw10: u32,
+        cdw11: u32,
+        cdw12: u32,
+        cdw13: u32,
+        cdw14: u32,
+        cdw15: u32,
+        timeout_ms: u32,
+        result: u32,
+    }
+    // _IOWR('N', 0x41, struct nvme_admin_cmd), sizeof == 72.
+    // musl types the request as c_int; the value is the same either way.
+    const NVME_IOCTL_ADMIN_CMD: libc::c_int =
+        ((3u32 << 30) | (72u32 << 16) | ((b'N' as u32) << 8) | 0x41) as libc::c_int;
+
+    let Ok(f) = std::fs::File::open(dev) else {
+        return format!("    (no SMART: cannot open {dev})\n");
+    };
+    let mut buf = [0u8; 512];
+    let mut cmd = AdminCmd {
+        opcode: 0x02, // Get Log Page
+        nsid: 0xffff_ffff,
+        addr: buf.as_mut_ptr() as u64,
+        data_len: buf.len() as u32,
+        // Log id 0x02, number of dwords - 1 in the top half.
+        cdw10: 0x02 | (((buf.len() / 4 - 1) as u32) << 16),
+        ..Default::default()
+    };
+    // SAFETY: an ioctl on a file this process opened, with a buffer it owns.
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), NVME_IOCTL_ADMIN_CMD, &mut cmd) };
+    if rc != 0 {
+        return format!("    (no SMART from {dev}: {})\n", std::io::Error::last_os_error());
+    }
+
+    let u16le = |o: usize| u16::from_le_bytes([buf[o], buf[o + 1]]);
+    let u128le = |o: usize| {
+        let mut v = [0u8; 16];
+        v.copy_from_slice(&buf[o..o + 16]);
+        u128::from_le_bytes(v)
+    };
+    let mut out = String::new();
+    // Composite temperature is in kelvin.
+    let kelvin = u16le(1);
+    let _ = writeln!(out, "    {:<16} {}°C", "temperature", kelvin as i32 - 273);
+    let _ = writeln!(out, "    {:<16} {}%", "spare left", buf[3]);
+    let _ = writeln!(out, "    {:<16} {}% (endurance consumed)", "wear", buf[5]);
+    let _ = writeln!(out, "    {:<16} {}", "critical warning", buf[0]);
+    let _ = writeln!(out, "    {:<16} {}", "power-on hours", u128le(128));
+    let _ = writeln!(out, "    {:<16} {}", "unsafe shutdowns", u128le(160));
+    let _ = writeln!(out, "    {:<16} {}", "media errors", u128le(176));
+    let _ = writeln!(out, "    {:<16} {}", "error log entries", u128le(192));
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn collect_devices() -> String {
+    "device inventory is read from sysfs and NVMe admin commands, which are Linux-only\n".into()
+}
+
 /// `must-gather` — one directory holding everything needed to explain a node.
 ///
 /// Modelled on `oc adm must-gather`, and for the same reason: the node with
@@ -2305,6 +2466,44 @@ async fn handle_must_gather(
     }
     write("ublk.txt", &ublk)?;
     manifest.push("ublk.txt — exported devices, their servers and their state".into());
+
+    // --- the node's configuration, as it actually is on disk ---
+    //
+    // Not as it was meant to be. Half the questions a bundle answers are
+    // "what was this node configured to do", and the answer is a file someone
+    // edited, a unit that was generated, or a default that was never
+    // overridden — and which of those it is only shows in the file itself.
+    {
+        let dst = root.join("config");
+        let mut n = 0;
+        for dir in ["/etc/stormblock", "/etc/stormpump", "/etc/sbregistry", "/etc/registry"] {
+            let src = std::path::Path::new(dir);
+            if src.is_dir() {
+                n += copy_tree(src, &dst.join(dir.trim_start_matches('/')), 1024 * 1024)
+                    .unwrap_or(0);
+            }
+        }
+        for f in ["/proc/cmdline", "/etc/fstab", "/etc/resolv.conf"] {
+            let p = std::path::Path::new(f);
+            if p.is_file() {
+                let _ = std::fs::create_dir_all(&dst);
+                if std::fs::copy(p, dst.join(f.trim_start_matches('/').replace('/', "_"))).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        manifest.push(format!("config/ — {n} configuration file(s) as they are on this node"));
+    }
+
+    // --- the drives themselves: what they are, and how worn ---
+    //
+    // A storage node's most useful fact about itself is often the state of its
+    // media. Model and firmware because a fault is frequently a firmware
+    // revision rather than a drive; wear and temperature because a drive at
+    // 95% endurance or 70°C explains a class of behaviour that looks like a
+    // software problem right up until someone reads the counter.
+    write("devices.txt", &collect_devices())?;
+    manifest.push("devices.txt — every drive, its firmware, and its wear and temperature".into());
 
     // --- what the last crash left behind ---
     //

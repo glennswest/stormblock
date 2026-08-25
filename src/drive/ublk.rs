@@ -1157,6 +1157,22 @@ pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()
         if let Some(pid) = server_pid(id)? {
             // Zero is an already-orphaned device; ourselves would be the
             // handover ending itself.
+            //
+            // And never pid 1. A ublk server is never init, so a device
+            // reporting init as its server is reporting something stale or
+            // wrong — and SIGTERM to init is not a signal, it is a shutdown
+            // request. On this node that means PID 1 begins powering the
+            // machine off in the middle of a storage handover, which presents
+            // as "Kernel panic - Attempted to kill init" at the exact moment
+            // the devices change hands, with nothing in any log to say why.
+            if pid == 1 {
+                tracing::error!(
+                    "ublk: /dev/ublkb{id} names pid 1 as its server, which cannot be true \
+                     — not signalling it. The handover will wait for this device instead \
+                     of shutting the node down."
+                );
+                continue;
+            }
             if pid > 0 && pid != std::process::id() as i32 && !pids.contains(&pid) {
                 pids.push(pid);
             }
