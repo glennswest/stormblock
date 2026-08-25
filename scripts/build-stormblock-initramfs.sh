@@ -284,6 +284,10 @@ case "$1" in
         for d in $dns; do
             echo "nameserver $d" >> /etc/resolv.conf
         done
+        # The lease usually carries NTP servers (DHCP option 42). Written down
+        # rather than used here, because the clock is set once, after the
+        # network is up, and not on every renewal.
+        [ -n "$ntpsrv" ] && echo "$ntpsrv" > /run/ntp-servers
         ;;
     deconfig)
         ip addr flush dev "$interface" 2>/dev/null
@@ -553,6 +557,38 @@ else
     # An empty summary is the symptom that hid a broken DHCP script for as
     # long as it did; say what it means instead of printing a blank.
     echo "WARNING: $IFACE has no address — nothing on this node will be reachable"
+fi
+
+# The clock, before anything timestamps anything.
+#
+# A node boots with whatever the RTC says, and a virtual machine or a board
+# without a battery starts near the epoch. Every log line, every syslog frame
+# and every file this node writes carries that time, and a viewer that orders
+# by timestamp puts a whole boot in 1970 — or worse, plausibly wrong. Setting
+# it here, before the root filesystem is even mounted, means the node's own
+# account of its boot is orderable against everything else.
+#
+# One shot, from the lease's NTP servers or whatever the command line named.
+# Bounded and non-fatal: a node with no time source still boots, it just says
+# so, and the syslog frames carry a nil timestamp rather than a lie.
+NTP_SERVERS="$(cat /run/ntp-servers 2>/dev/null || true)"
+for t in $(cat /proc/cmdline); do
+    case "$t" in rd.stormblock.ntp=*) NTP_SERVERS="${t#rd.stormblock.ntp=}" ;; esac
+done
+if [ -n "$NTP_SERVERS" ]; then
+    NTP_ARGS=""
+    for srv in $(echo "$NTP_SERVERS" | tr ',' ' '); do
+        NTP_ARGS="$NTP_ARGS -p $srv"
+    done
+    # -q: set the clock once and exit. -n: stay in the foreground so the wait
+    # is this script's, not a stray daemon's.
+    if ntpd -n -q -N $NTP_ARGS >/dev/null 2>&1; then
+        echo "Clock:   $(date -u '+%Y-%m-%dT%H:%M:%SZ') (ntp: $NTP_SERVERS)"
+    else
+        echo "WARNING: could not set the clock from $NTP_SERVERS — timestamps will be wrong"
+    fi
+else
+    echo "WARNING: no NTP server offered or configured — timestamps will be wrong"
 fi
 fi
 fi
