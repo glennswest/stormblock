@@ -135,6 +135,31 @@ pub async fn list_dir(dev: &Arc<dyn BlockDevice>, path: &str) -> anyhow::Result<
     Ok(out)
 }
 
+/// Remove one file from a volume's filesystem.
+///
+/// A path that is not there is success: the caller wanted it gone, and it is.
+/// Anything else — a path that is a directory, a filesystem that will not open
+/// — is an error, because those are not the same thing as "already removed".
+pub async fn remove_file(dev: &Arc<dyn BlockDevice>, path: &str) -> anyhow::Result<()> {
+    if !exists(dev, path).await? {
+        return Ok(());
+    }
+    let mut vol = Volume::open(VolumeDevice::opaque(dev.clone()))
+        .await
+        .map_err(|e| anyhow::anyhow!("opening the filesystem: {e}"))?;
+    vol.unlink(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("removing {path}: {e}"))?;
+    vol.flush()
+        .await
+        .map_err(|e| anyhow::anyhow!("flushing the filesystem: {e}"))?;
+    drop(vol);
+    dev.flush()
+        .await
+        .map_err(|e| anyhow::anyhow!("flushing the volume: {e}"))?;
+    Ok(())
+}
+
 /// Whether a path exists inside a volume's filesystem.
 pub async fn exists(dev: &Arc<dyn BlockDevice>, path: &str) -> anyhow::Result<bool> {
     let vol = Volume::open(VolumeDevice::opaque(dev.clone()))

@@ -1,84 +1,76 @@
 //! Where the engine keeps what it must remember.
 //!
-//! # Not on a filesystem it serves
+//! # Not through a filesystem it serves
 //!
-//! The engine used to write its own state — the export table, the LUN map, the
-//! `/v1` fencing epochs, the filesystem templates — as files under a
-//! `--data-dir`. On a node that is fine right up until the directory happens to
-//! sit on a volume the engine itself exports, and then it is a cycle: every
-//! volume create and delete ends in a metadata write, taken while the
-//! volume-manager lock is held, and that write goes out through the VFS, into
-//! ext4, down to a ublk device, and back into the same process that is holding
-//! the lock.
+//! The engine writes its own state — the export table, the LUN map, the `/v1`
+//! fencing epochs, the filesystem templates — and it used to write it as
+//! ordinary files under a `--data-dir`. That is fine right up until the
+//! directory sits on a volume the engine itself exports, and then it is a
+//! cycle: every volume create and delete ends in a metadata write, taken while
+//! the volume-manager lock is held, and that write goes out through the VFS,
+//! into ext4, down to a ublk device, and back into the same process that is
+//! holding the lock.
 //!
-//! A stormcos node did exactly this and wedged four seconds into every boot.
+//! A stormcos node did exactly that and wedged four seconds into every boot.
 //! One lock held forever, every container's disk I/O queued behind it, and the
 //! registry, four supervisors, sshd and the console shell all accepting
 //! connections they would never answer. The engine's own API kept replying in a
 //! millisecond, which is what made it read as a network fault rather than a
 //! storage one.
 //!
-//! # The slab is not a filesystem
+//! # The same trick the kernel golden uses
 //!
-//! So state goes in the slab, which is not a filesystem and is not mounted: it
-//! is the engine's own on-disk format in a raw partition — superblock, this
-//! metadata region, a slot table, then the slots. Writing to it is
-//! `device.write(offset, buf)` against a disk the engine already holds open.
-//! Nothing in that path can come back around to the engine, because there is
-//! no filesystem, no block device and no other process in it.
+//! The state still lives in a filesystem, and it is still files — that is worth
+//! keeping, because `must-gather` collects them, a person can read them out of
+//! an image, and nothing has to learn a new on-disk format. What changes is who
+//! reads it.
 //!
-//! `volumes.dat` has lived there since the slab became self-describing, with
-//! two copies written alternately by generation and a CRC on each, so a torn
-//! write costs the newer copy and never the record. This puts everything else
-//! beside it, under keys, in the same two copies.
+//! [`crate::fs::files`] reads and writes ext4 *directly*, against a
+//! [`BlockDevice`], through the same library that builds a golden: no mount, no
+//! loop device, no ublk export, no kernel filesystem at all. So the engine
+//! opens the volume it already has a handle for and reads its own files out of
+//! it in-process. The path is engine → ext4 library → slab → disk, and there is
+//! nothing in it that can come back around to the engine, because the kernel's
+//! block layer is not involved.
 //!
-//! # One writer
-//!
-//! The region has a single owner. `volumes.dat` is a key like any other rather
-//! than a second writer racing for the same bytes, and the lock taken here is
-//! this store's own — never the volume manager's, which is what made the
-//! original cycle fatal instead of merely slow.
+//! It is the same move as mounting the kernel's modules from a golden rather
+//! than carrying them in the initramfs: the filesystem is a container for
+//! files, and reading one does not require the kernel's help.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::drive::slab::Slab;
+use crate::drive::BlockDevice;
 
-/// The keyed container written into a slab's metadata region.
-///
-/// Distinct from `STRMVOL\0`, which is what a bare `volumes.dat` payload starts
-/// with — so a slab written before this reads back as a container holding that
-/// one key, and no slab has to be reformatted.
-const MAGIC: [u8; 8] = *b"STRMSTAT";
-const VERSION: u32 = 1;
-
-/// The volume metadata, which was the region's only occupant.
+/// The volume metadata, which is the largest and most important of these.
 pub const VOLUMES: &str = "volumes.dat";
 
-/// What the old, single-payload form starts with.
-const VOLUMES_MAGIC: [u8; 8] = *b"STRMVOL\0";
+/// Where files live inside the state volume.
+///
+/// A directory rather than the root, so the volume is recognisable for what it
+/// is when someone opens it, and so anything else that ever needs a corner of
+/// it has somewhere to go.
+const ROOT: &str = "/engine";
 
-/// Hand-written rather than derived, because this crate has no `thiserror` and
-/// one more dependency for four lines is not a trade worth making.
+/// Hand-written rather than derived: this crate has no `thiserror`, and one
+/// more dependency for four lines is not a trade worth making.
 #[derive(Debug)]
 pub enum StateError {
     Io(std::io::Error),
-    Device(crate::drive::DriveError),
-    /// The bytes in the region are not a container this version understands.
-    /// Reported rather than treated as an empty store: losing the record of
-    /// what a node holds is not the same as never having had one.
-    Malformed(String),
+    /// The filesystem in the state volume would not open, or a read or write
+    /// through it failed. Reported rather than treated as an empty store:
+    /// losing the record of what a node holds is not the same as never having
+    /// had one.
+    Fs(String),
 }
 
 impl std::fmt::Display for StateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StateError::Io(e) => write!(f, "state store: {e}"),
-            StateError::Device(e) => write!(f, "state store: {e:?}"),
-            StateError::Malformed(w) => write!(f, "state store: malformed container: {w}"),
+            StateError::Fs(w) => write!(f, "state store: {w}"),
         }
     }
 }
@@ -91,276 +83,195 @@ impl From<std::io::Error> for StateError {
     }
 }
 
-impl From<crate::drive::DriveError> for StateError {
-    fn from(e: crate::drive::DriveError) -> Self {
-        StateError::Device(e)
-    }
-}
-
 /// Where the bytes actually go.
 enum Backing {
-    /// A slab's metadata region: a raw offset on a disk the engine holds open.
-    Slab(Arc<Slab>),
-    /// A directory, one file per key.
+    /// An ext4 filesystem in a volume, read and written by the library rather
+    /// than by the kernel.
+    Volume(Arc<dyn BlockDevice>),
+    /// A directory on whatever filesystem the process is already running on.
     ///
-    /// What a CLI run, a test and a single-drive development node use. Kept
-    /// because those have no slab to write into and nothing to deadlock
-    /// against — the cycle only exists when the directory is on storage this
-    /// engine is responsible for, which is a property of the deployment and
-    /// not of the code.
+    /// What a CLI run, a test and a development node use. Kept because those
+    /// have no state volume and nothing to deadlock against — the cycle exists
+    /// only when the directory is on storage this engine is responsible for,
+    /// which is a property of the deployment rather than of the code.
     Dir(PathBuf),
 }
 
-struct Inner {
-    blobs: BTreeMap<String, Vec<u8>>,
-    backing: Backing,
-}
-
+/// The engine's own durable state.
 pub struct StateStore {
-    inner: Mutex<Inner>,
+    backing: Backing,
+    /// One writer at a time.
+    ///
+    /// Two concurrent `write_files` calls would each open the filesystem, each
+    /// allocate from the same free space, and each flush a superblock that
+    /// disagrees with the other's. This is the store's own lock and is never
+    /// the volume manager's — holding *that* across I/O is what made the
+    /// original cycle fatal rather than merely slow.
+    gate: Mutex<()>,
 }
 
 impl StateStore {
-    /// Open the store held in a slab, reading what is already there.
-    pub async fn open_slab(slab: Arc<Slab>) -> Result<StateStore, StateError> {
-        let blobs = match slab.read_metadata().await? {
-            Some(bytes) => decode(&bytes)?,
-            None => BTreeMap::new(),
-        };
-        Ok(StateStore { inner: Mutex::new(Inner { blobs, backing: Backing::Slab(slab) }) })
+    /// Keep state in an ext4 volume, read through the library.
+    ///
+    /// The volume must already hold a filesystem; the engine does not format
+    /// it, because a state store that formats what it finds would erase a node
+    /// the first time it failed to read one.
+    pub fn on_volume(dev: Arc<dyn BlockDevice>) -> StateStore {
+        StateStore { backing: Backing::Volume(dev), gate: Mutex::new(()) }
     }
 
-    /// Open the store held in a directory.
-    pub fn open_dir(dir: impl Into<PathBuf>) -> StateStore {
-        let dir = dir.into();
-        let mut blobs = BTreeMap::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let Some(name) = e.file_name().to_str().map(str::to_owned) else { continue };
-                if let Ok(bytes) = std::fs::read(e.path()) {
-                    blobs.insert(name, bytes);
-                }
-            }
-        }
-        StateStore { inner: Mutex::new(Inner { blobs, backing: Backing::Dir(dir) }) }
+    /// Keep state in a directory.
+    pub fn in_dir(dir: impl Into<PathBuf>) -> StateStore {
+        StateStore { backing: Backing::Dir(dir.into()), gate: Mutex::new(()) }
     }
 
     /// What is stored under `key`, if anything.
+    ///
+    /// A key that is not there is `None`, not an error: a node that has never
+    /// exported anything has no export table, and that is an ordinary state to
+    /// be in rather than a fault.
     pub async fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.inner.lock().await.blobs.get(key).cloned()
+        match &self.backing {
+            Backing::Dir(dir) => std::fs::read(dir.join(key)).ok(),
+            Backing::Volume(dev) => {
+                let path = format!("{ROOT}/{key}");
+                match crate::fs::files::exists(dev, &path).await {
+                    Ok(true) => crate::fs::files::read_file(dev, &path).await.ok(),
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// Store `bytes` under `key`, durably.
-    ///
-    /// The whole container is rewritten for a slab, because that is what a
-    /// two-copy generational region *is*: a copy is valid or it is not, and
-    /// there is no partial update of one. For a directory only the one file is
-    /// written, which is both cheaper and what was always there.
     pub async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), StateError> {
-        let mut inner = self.inner.lock().await;
-        inner.blobs.insert(key.to_owned(), bytes);
-        inner.flush(Some(key)).await
+        let _gate = self.gate.lock().await;
+        match &self.backing {
+            Backing::Dir(dir) => {
+                std::fs::create_dir_all(dir)?;
+                // Through a temporary and a rename: a half-written file is
+                // indistinguishable from a truncated one, and this is the
+                // record that says what the node holds.
+                let tmp = dir.join(format!(".{key}.tmp"));
+                std::fs::write(&tmp, &bytes)?;
+                std::fs::rename(&tmp, dir.join(key))?;
+                Ok(())
+            }
+            Backing::Volume(dev) => {
+                let file = crate::fs::files::SeedFile::new(format!("{ROOT}/{key}"), bytes);
+                crate::fs::files::write_files(dev, std::slice::from_ref(&file))
+                    .await
+                    .map_err(|e| StateError::Fs(format!("writing {key}: {e}")))
+            }
+        }
     }
 
-    /// Forget `key`.
+    /// Forget `key`. Absent is success — the caller wanted it gone.
     pub async fn remove(&self, key: &str) -> Result<(), StateError> {
-        let mut inner = self.inner.lock().await;
-        if inner.blobs.remove(key).is_none() {
-            return Ok(());
-        }
-        match &inner.backing {
+        let _gate = self.gate.lock().await;
+        match &self.backing {
             Backing::Dir(dir) => {
                 let _ = std::fs::remove_file(dir.join(key));
                 Ok(())
             }
-            Backing::Slab(_) => inner.flush(None).await,
+            Backing::Volume(dev) => {
+                crate::fs::files::remove_file(dev, &format!("{ROOT}/{key}"))
+                    .await
+                    .map_err(|e| StateError::Fs(format!("removing {key}: {e}")))
+            }
         }
     }
 
-    /// Every key held, in order.
+    /// Every key held, in name order.
     pub async fn keys(&self) -> Vec<String> {
-        self.inner.lock().await.blobs.keys().cloned().collect()
-    }
-
-    /// Where this store writes, for a diagnostic.
-    pub async fn describe(&self) -> String {
-        match &self.inner.lock().await.backing {
-            Backing::Slab(s) => format!("slab {}", s.id().0),
-            Backing::Dir(d) => format!("directory {}", d.display()),
-        }
-    }
-}
-
-impl Inner {
-    async fn flush(&self, only: Option<&str>) -> Result<(), StateError> {
         match &self.backing {
             Backing::Dir(dir) => {
-                std::fs::create_dir_all(dir)?;
-                let write = |k: &String, v: &Vec<u8>| -> std::io::Result<()> {
-                    // Through a temporary and a rename: a half-written file is
-                    // indistinguishable from a truncated one, and this is the
-                    // record that says what the node holds.
-                    let tmp = dir.join(format!(".{k}.tmp"));
-                    std::fs::write(&tmp, v)?;
-                    std::fs::rename(&tmp, dir.join(k))
-                };
-                match only {
-                    Some(k) => {
-                        if let Some(v) = self.blobs.get(k) {
-                            write(&k.to_string(), v)?;
-                        }
-                    }
-                    None => {
-                        for (k, v) in &self.blobs {
-                            write(k, v)?;
-                        }
-                    }
-                }
-                Ok(())
+                let mut names: Vec<String> = std::fs::read_dir(dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                    .filter(|n| !n.starts_with('.'))
+                    .collect();
+                names.sort();
+                names
             }
-            Backing::Slab(slab) => {
-                let bytes = encode(&self.blobs);
-                slab.write_metadata(&bytes).await?;
-                Ok(())
+            Backing::Volume(dev) => {
+                let mut names: Vec<String> = crate::fs::files::list_dir(dev, ROOT)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|e| !e.is_dir)
+                    .map(|e| e.name)
+                    .collect();
+                names.sort();
+                names
             }
         }
     }
-}
 
-/// `MAGIC | version | count | (klen, key, vlen, value)*`
-///
-/// Lengths ahead of their bytes so a reader never has to scan, and keys in
-/// order so the same set of blobs always encodes to the same bytes — which
-/// makes a write that changes nothing visibly a write that changes nothing.
-fn encode(blobs: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64 + blobs.values().map(|v| v.len() + 16).sum::<usize>());
-    out.extend_from_slice(&MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&(blobs.len() as u32).to_le_bytes());
-    for (k, v) in blobs {
-        out.extend_from_slice(&(k.len() as u32).to_le_bytes());
-        out.extend_from_slice(k.as_bytes());
-        out.extend_from_slice(&(v.len() as u64).to_le_bytes());
-        out.extend_from_slice(v);
-    }
-    out
-}
-
-fn decode(data: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, StateError> {
-    // A slab written before this held one payload and no keys. It is not a
-    // malformed container, it is the previous format, and it means exactly one
-    // thing.
-    if data.len() >= 8 && data[0..8] == VOLUMES_MAGIC {
-        let mut m = BTreeMap::new();
-        m.insert(VOLUMES.to_string(), data.to_vec());
-        return Ok(m);
-    }
-    if data.len() < 16 || data[0..8] != MAGIC {
-        return Err(StateError::Malformed("not a state container".into()));
-    }
-    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-    if version != VERSION {
-        return Err(StateError::Malformed(format!("version {version}")));
-    }
-    let count = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-
-    let mut blobs = BTreeMap::new();
-    let mut at = 16usize;
-    let need = |at: usize, n: usize, len: usize| -> Result<(), StateError> {
-        if at + n > len {
-            return Err(StateError::Malformed("truncated".into()));
+    /// Where this store writes, for a diagnostic. A node that cannot say where
+    /// its own state lives is a node nobody can reason about.
+    pub fn describe(&self) -> String {
+        match &self.backing {
+            Backing::Volume(_) => "a state volume, read through the ext4 library".to_string(),
+            Backing::Dir(d) => format!("the directory {}", d.display()),
         }
-        Ok(())
-    };
-    for _ in 0..count {
-        need(at, 4, data.len())?;
-        let klen = u32::from_le_bytes(data[at..at + 4].try_into().unwrap()) as usize;
-        at += 4;
-        need(at, klen, data.len())?;
-        let key = String::from_utf8(data[at..at + klen].to_vec())
-            .map_err(|_| StateError::Malformed("key is not utf-8".into()))?;
-        at += klen;
-        need(at, 8, data.len())?;
-        let vlen = u64::from_le_bytes(data[at..at + 8].try_into().unwrap()) as usize;
-        at += 8;
-        need(at, vlen, data.len())?;
-        blobs.insert(key, data[at..at + vlen].to_vec());
-        at += vlen;
     }
-    Ok(blobs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_container_round_trips() {
-        let mut m = BTreeMap::new();
-        m.insert("volumes.dat".to_string(), vec![1, 2, 3]);
-        m.insert("luns.json".to_string(), b"{\"a\":1}".to_vec());
-        m.insert("empty".to_string(), Vec::new());
-        let back = decode(&encode(&m)).unwrap();
-        assert_eq!(back, m);
-    }
-
-    #[test]
-    fn the_encoding_is_stable() {
-        // Same blobs, same bytes — so a rewrite that changes nothing writes
-        // the same thing, and a diff of two slabs means something.
-        let mut a = BTreeMap::new();
-        a.insert("b".to_string(), vec![2]);
-        a.insert("a".to_string(), vec![1]);
-        let mut b = BTreeMap::new();
-        b.insert("a".to_string(), vec![1]);
-        b.insert("b".to_string(), vec![2]);
-        assert_eq!(encode(&a), encode(&b));
-    }
-
-    #[test]
-    fn a_slab_from_before_this_reads_as_one_key() {
-        // The previous format: a bare volumes.dat payload, no container. It is
-        // not corrupt and must not be read as corrupt.
-        let mut old = VOLUMES_MAGIC.to_vec();
-        old.extend_from_slice(&[9u8; 40]);
-        let back = decode(&old).unwrap();
-        assert_eq!(back.len(), 1);
-        assert_eq!(back.get(VOLUMES).unwrap(), &old);
-    }
-
-    #[test]
-    fn rubbish_is_refused_rather_than_guessed() {
-        assert!(decode(b"").is_err());
-        assert!(decode(b"NOTAMAGIC-and-then-some").is_err());
-        // A truncated container: the count says two, the bytes hold one.
-        let mut m = BTreeMap::new();
-        m.insert("a".to_string(), vec![1, 2, 3]);
-        let mut bytes = encode(&m);
-        bytes[12..16].copy_from_slice(&2u32.to_le_bytes());
-        assert!(decode(&bytes).is_err());
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("stormblock-state-{tag}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
     }
 
     #[tokio::test]
-    async fn a_directory_store_keeps_one_file_per_key() {
-        let dir = std::env::temp_dir().join("stormblock-state-dir-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    async fn a_directory_store_round_trips() {
+        let dir = temp("dir");
+        let s = StateStore::in_dir(&dir);
 
-        let s = StateStore::open_dir(&dir);
+        assert!(s.get("luns.json").await.is_none(), "absent is None, not an error");
+
         s.put("luns.json", b"[]".to_vec()).await.unwrap();
         s.put(VOLUMES, vec![7, 7, 7]).await.unwrap();
-        assert_eq!(std::fs::read(dir.join("luns.json")).unwrap(), b"[]");
+        assert_eq!(s.get("luns.json").await.unwrap(), b"[]");
 
-        // And it is read back by a store opened fresh on the same directory,
-        // which is what a restart is.
-        let again = StateStore::open_dir(&dir);
-        assert_eq!(again.get("luns.json").await.unwrap(), b"[]");
+        // Read back by a store opened fresh on the same directory, which is
+        // what a restart is.
+        let again = StateStore::in_dir(&dir);
         assert_eq!(again.get(VOLUMES).await.unwrap(), vec![7, 7, 7]);
+        assert_eq!(again.keys().await, vec!["luns.json".to_string(), VOLUMES.to_string()]);
 
         again.remove("luns.json").await.unwrap();
-        assert!(!dir.join("luns.json").exists());
         assert!(again.get("luns.json").await.is_none());
+        // Removing what is not there is success: the caller wanted it gone.
+        again.remove("luns.json").await.unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_replaces_rather_than_appends() {
+        let dir = temp("rewrite");
+        let s = StateStore::in_dir(&dir);
+        s.put("v1_state.json", b"aaaaaaaaaa".to_vec()).await.unwrap();
+        s.put("v1_state.json", b"bb".to_vec()).await.unwrap();
+        assert_eq!(s.get("v1_state.json").await.unwrap(), b"bb");
+    }
+
+    #[tokio::test]
+    async fn no_temporary_file_survives_a_write() {
+        // The rename is what makes a torn write impossible to read; a leftover
+        // temporary would also show up in `keys`.
+        let dir = temp("tmp");
+        let s = StateStore::in_dir(&dir);
+        s.put("exports.json", b"[]".to_vec()).await.unwrap();
+        assert_eq!(s.keys().await, vec!["exports.json".to_string()]);
     }
 }
