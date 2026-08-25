@@ -210,27 +210,26 @@ fi
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
 
-# Kernel modules — the whole tree, exactly as the kernel package ships it.
+# Kernel modules — what is needed to reach the root, and nothing else.
 #
-# **Not a list, and not a set of subtrees either.** Both are the same mistake
-# at different scales, and both have now cost a boot here. A hand-picked list
-# missed `virtio_net`. Picking subtrees — drivers/{net,scsi,nvme,...} — then
-# missed `kernel/net/core/failover.ko`, which is not a driver and lives under
-# no driver directory, but is what `net_failover` links against. `depmod` can
-# only record dependencies between modules it can *see*, so with that one file
-# absent the tables said `net_failover` needed nothing, `modprobe` loaded it
-# bare, the kernel refused it on unresolved symbols, and `virtio_net` — which
-# depends on it — was never reached. The node came up with no network and a
-# discovery pass that reported success.
+# The initramfs is loaded into RAM in full on every boot, so everything in it
+# is paid for every time by every node. What it actually needs is narrow: the
+# drivers that reach the disk this node boots from, and the drivers for the NIC
+# it may DHCP on. Everything else — the whole 73 MB tree — is in the kernel
+# pallet's `modules` golden and is bound over /lib/modules the moment the root
+# is up, which is before any of it is wanted.
 #
-# The lesson is that a module's dependencies are not confined to its own
-# subtree, so no subtree selection is safe. Ship `kernel/` whole.
+# Chosen by *purpose*, not by model. Whole subtrees, so there is no list of
+# drivers to keep current and no chance of missing the one card this machine
+# has: every storage driver and every network driver, not a selection of them.
 #
-# Compressed, as shipped. Fedora's whole tree is 73 MB of .ko.xz against 137 MB
-# for the decompressed *subset* it replaces — complete and smaller, because xz
-# is worth more than the subsetting was. Decompressing was only ever to appease
-# busybox's `insmod`, which cannot read a compressed module; kmod can, and is
-# required below for exactly this reason.
+# The dependency closure below is what makes that safe. A driver's dependencies
+# are not confined to its own subtree — `net_failover` links against
+# `kernel/net/core/failover.ko`, which is under no driver directory at all —
+# and a missing one is silent: modprobe loads what it can, the kernel refuses
+# it on unresolved symbols, and the driver that needed it never appears. So
+# rather than guess which extra directories to add, ask depmod and copy what it
+# names, until it names nothing that is not here.
 MODDIR="/lib/modules/$KVER"
 DEST="$INITRD_DIR/lib/modules/$KVER"
 mkdir -p "$DEST"
@@ -240,10 +239,60 @@ if [ ! -d "$MODDIR/kernel" ]; then
     exit 1
 fi
 
-cp -a "$MODDIR/kernel" "$DEST/kernel"
-printf '  modules:    %d files, %s as shipped\n' \
-    "$(find "$DEST/kernel" -name '*.ko*' | wc -l)" \
-    "$(du -sh "$DEST/kernel" | cut -f1)"
+# Reaching the root, and being reachable.
+for tree in \
+    kernel/drivers/scsi kernel/drivers/nvme kernel/drivers/ata \
+    kernel/drivers/block kernel/drivers/virtio kernel/drivers/md \
+    kernel/drivers/usb/storage kernel/drivers/message \
+    kernel/drivers/pci/controller kernel/drivers/nvdimm \
+    kernel/drivers/net \
+    kernel/fs kernel/lib kernel/crypto
+do
+    [ -d "$MODDIR/$tree" ] || continue
+    mkdir -p "$DEST/$(dirname "$tree")"
+    cp -a "$MODDIR/$tree" "$DEST/$(dirname "$tree")/"
+done
+
+for f in modules.builtin modules.builtin.modinfo modules.order; do
+    [ -f "$MODDIR/$f" ] && cp "$MODDIR/$f" "$DEST/$f"
+done
+
+# Close the dependency set: depmod, then pull in anything it names that is not
+# here, and repeat until it is closed. Bounded, because each round only adds
+# files and the source tree is finite.
+round=0
+while :; do
+    round=$((round + 1))
+    if ! depmod -b "$INITRD_DIR" "$KVER" 2>/dev/null; then
+        echo "ERROR: depmod failed; /init could not resolve drivers by modalias"
+        exit 1
+    fi
+    added=0
+    while IFS= read -r dep; do
+        [ -n "$dep" ] || continue
+        [ -f "$DEST/$dep" ] && continue
+        if [ -f "$MODDIR/$dep" ]; then
+            mkdir -p "$DEST/$(dirname "$dep")"
+            cp -a "$MODDIR/$dep" "$DEST/$dep"
+            added=$((added + 1))
+        else
+            echo "ERROR: modules.dep names $dep, which is not in $MODDIR either"
+            exit 1
+        fi
+    done <<EOF
+$(awk -F: '{ n = split($2, d, " "); for (i = 1; i <= n; i++) print d[i] }' "$DEST/modules.dep" | sort -u)
+EOF
+    [ "$added" -eq 0 ] && break
+    if [ "$round" -gt 8 ]; then
+        echo "ERROR: dependency closure did not settle after $round rounds"
+        exit 1
+    fi
+done
+
+printf '  modules:    %d files, %s (of %s; the rest is in the modules golden)\n' \
+    "$(find "$DEST" -name '*.ko*' | wc -l)" \
+    "$(du -sh "$DEST" | cut -f1)" \
+    "$(du -sh "$MODDIR/kernel" | cut -f1)"
 
 # What depmod needs to know which names are already in the kernel, so /init
 # does not spend the boot asking for modules that cannot be loaded because
@@ -252,31 +301,6 @@ for f in modules.builtin modules.builtin.modinfo modules.order; do
     [ -f "$MODDIR/$f" ] && cp "$MODDIR/$f" "$DEST/$f"
 done
 
-# The dependency and alias tables. Without these, modprobe by modalias — which
-# is the whole point — has nothing to resolve against.
-if ! depmod -b "$INITRD_DIR" "$KVER" 2>/dev/null; then
-    echo "ERROR: depmod failed; /init could not resolve drivers by modalias"
-    exit 1
-fi
-# A dependency that resolves to a file that is not here is the failure this
-# whole section exists to prevent, and it is silent at boot: modprobe loads
-# what it can, the kernel rejects it on unresolved symbols, and the driver that
-# needed it never loads. modules.dep names every dependency by path, so the
-# check is just: does each path exist. Cheap, and it fails the build instead of
-# the node.
-MISSING=0
-while IFS= read -r dep; do
-    [ -f "$DEST/$dep" ] || { echo "  MISSING dependency: $dep"; MISSING=$((MISSING + 1)); }
-done <<EOF
-$(awk -F: '{ print substr($1,1); n=split($2,d," "); for (i=1;i<=n;i++) print d[i] }' \
-    "$DEST/modules.dep" | sort -u)
-EOF
-if [ "$MISSING" -gt 0 ]; then
-    echo "ERROR: $MISSING module(s) named by modules.dep are not in the image."
-    echo "       Every one is a driver that will fail to load at boot."
-    exit 1
-fi
-echo "  modules:    $(find "$DEST" -name '*.ko*' | wc -l) total, $(du -sh "$DEST" | cut -f1), dependencies complete"
 
 # The DHCP client's script.
 #
@@ -407,6 +431,24 @@ if [ "$BOOT_MODE" = "iscsi" ] && { [ -z "$PORTAL" ] || [ -z "$IQN" ] || [ -z "$L
 fi
 
 echo "StormBlock LinuxBoot init ($BOOT_MODE)"
+
+# Where the boot time goes.
+#
+# A number nobody can break down is a number nobody can improve. Each stage
+# prints what it cost and where it sits in the boot, from /proc/uptime — which
+# starts at kernel entry, so the first stamp also says what firmware and the
+# kernel spent before this script existed.
+#
+# Permanent, not instrumentation added for one investigation: the cost of a
+# boot changes when a driver is added or a golden grows, and the only way that
+# is noticed is if every boot says so.
+T_LAST=0
+stamp() {
+    read -r up _ < /proc/uptime
+    echo "  [+$(awk -v a="$up" -v b="$T_LAST" 'BEGIN{printf "%.1f", a-b}')s | ${up}s] $*"
+    T_LAST="$up"
+}
+stamp "kernel handed over (firmware + kernel init before this)"
 if [ "$BOOT_MODE" = "local" ]; then
     echo "  Slab:   $SLAB"
     [ -n "$META" ] && echo "  Meta:   $META"
@@ -449,6 +491,7 @@ if [ -n "$MODTREE" ]; then
         sleep 1
     done
     echo "  $LOADED driver(s) loaded in $PASS pass(es)"
+    stamp "drivers discovered"
 
     # A module the kernel *rejected* is not a module that failed to match, and
     # the difference matters: the first means the driver is here and broken,
@@ -472,6 +515,7 @@ if [ -x /usr/lib/systemd/systemd-udevd ] && [ -x /usr/bin/udevadm ]; then
     udevadm trigger --type=devices --action=add
     udevadm settle --timeout=30
     echo "  udev settled; $(lsmod 2>/dev/null | tail -n +2 | wc -l) module(s) now loaded"
+    stamp "udev settled"
 else
     echo "  udev not present in this image"
 fi
@@ -573,6 +617,7 @@ fi
 NETADDR="$(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')"
 if [ -n "$NETADDR" ]; then
     echo "Network: $IFACE $NETADDR $(ip route show default | head -1)"
+    stamp "network up"
 else
     # An empty summary is the symptom that hid a broken DHCP script for as
     # long as it did; say what it means instead of printing a blank.
@@ -595,6 +640,17 @@ NTP_SERVERS="$(cat /run/ntp-servers 2>/dev/null || true)"
 for t in $(cat /proc/cmdline); do
     case "$t" in rd.stormblock.ntp=*) NTP_SERVERS="${t#rd.stormblock.ntp=}" ;; esac
 done
+# A fallback, so a node without a DHCP option 42 still knows what time it is.
+#
+# Anycast addresses as well as a name: a node whose DHCP offered no NTP server
+# may well have offered no usable DNS either, and a clock that depends on
+# resolution is a clock that fails in exactly the situation it is needed. The
+# names are tried first because a site that runs its own pool should win.
+if [ -z "$NTP_SERVERS" ]; then
+    NTP_SERVERS="pool.ntp.org,time.cloudflare.com,162.159.200.1,216.239.35.0"
+    NTP_FALLBACK=yes
+fi
+
 if [ -n "$NTP_SERVERS" ]; then
     NTP_ARGS=""
     for srv in $(echo "$NTP_SERVERS" | tr ',' ' '); do
@@ -603,9 +659,11 @@ if [ -n "$NTP_SERVERS" ]; then
     # -q: set the clock once and exit. -n: stay in the foreground so the wait
     # is this script's, not a stray daemon's.
     if ntpd -n -q -N $NTP_ARGS >/dev/null 2>&1; then
-        echo "Clock:   $(date -u '+%Y-%m-%dT%H:%M:%SZ') (ntp: $NTP_SERVERS)"
+        echo "Clock:   $(date -u '+%Y-%m-%dT%H:%M:%SZ') (ntp: $NTP_SERVERS${NTP_FALLBACK:+, fallback})"
+        stamp "clock set"
     else
         echo "WARNING: could not set the clock from $NTP_SERVERS — timestamps will be wrong"
+        stamp "clock not set"
     fi
 else
     echo "WARNING: no NTP server offered or configured — timestamps will be wrong"
@@ -868,6 +926,7 @@ if [ ! -x /sysroot/sbin/init ] && [ ! -x /sysroot/usr/lib/systemd/systemd ]; the
     exec /bin/sh
 fi
 
+stamp "root ready"
 echo "Switching to real root..."
 
 # The kernel's own drivers and firmware, from the golden that carries them.
