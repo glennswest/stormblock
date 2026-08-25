@@ -120,6 +120,37 @@ impl StateStore {
         StateStore { backing: Backing::Volume(dev), gate: Mutex::new(()) }
     }
 
+    /// Open a state volume, checking it first.
+    ///
+    /// The engine writes this volume and can be killed between the data and
+    /// the metadata — a node loses power, a supervisor's patience runs out, a
+    /// kernel panics — and there is no unmount to make that tidy because
+    /// nothing ever mounted it. So it is checked on the way in, and repaired
+    /// if the check says so, using the same `fsck` the engine already offers
+    /// for any other volume.
+    ///
+    /// A volume that will not come clean is still opened, and said so loudly.
+    /// The alternative is a node that refuses to start because the file
+    /// recording what it exports is damaged — which throws away every export
+    /// that was fine in order to protect the one that was not.
+    pub async fn open_volume(dev: Arc<dyn BlockDevice>) -> StateStore {
+        match crate::fs::ext4::check(&dev).await {
+            Ok(r) if r.is_clean() => {}
+            Ok(_) => match crate::fs::ext4::repair(&dev).await {
+                Ok(r) if r.is_clean() => {
+                    tracing::warn!("state volume was not clean and has been repaired")
+                }
+                Ok(_) => tracing::error!(
+                    "state volume is damaged and would not repair — the engine's own \
+                     records may be incomplete"
+                ),
+                Err(e) => tracing::error!("state volume repair failed: {e}"),
+            },
+            Err(e) => tracing::error!("state volume check failed: {e}"),
+        }
+        StateStore::on_volume(dev)
+    }
+
     /// Keep state in a directory.
     pub fn in_dir(dir: impl Into<PathBuf>) -> StateStore {
         StateStore { backing: Backing::Dir(dir.into()), gate: Mutex::new(()) }
@@ -293,6 +324,33 @@ mod tests {
         // The filesystem is still sound after all of that.
         let report = crate::fs::ext4::check(&dev).await.expect("fsck runs");
         assert!(report.is_clean(), "the state volume must still check out: {report:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A damaged state volume is repaired on the way in, not refused.
+    #[tokio::test]
+    async fn a_state_volume_is_checked_when_it_is_opened() {
+        use crate::drive::filedev::FileDevice;
+
+        let dir = temp("fsck");
+        let img = dir.join("state.img");
+        let dev: Arc<dyn BlockDevice> = Arc::new(
+            FileDevice::open_with_capacity(img.to_str().unwrap(), 64 * 1024 * 1024)
+                .await
+                .expect("a backing file"),
+        );
+        crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default())
+            .await
+            .expect("format");
+
+        let s = StateStore::open_volume(dev.clone()).await;
+        s.put("exports.json", b"[]".to_vec()).await.unwrap();
+
+        // Opening it again checks it again, and what was written is still
+        // there — a check must not cost the caller its data.
+        let again = StateStore::open_volume(dev.clone()).await;
+        assert_eq!(again.get("exports.json").await.unwrap(), b"[]");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
