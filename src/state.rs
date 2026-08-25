@@ -256,6 +256,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The one that matters: a real ext4 filesystem, read and written with no
+    /// mount and no kernel filesystem in the path.
+    ///
+    /// The directory backing above is ordinary file I/O and would pass whatever
+    /// the library did. This is the backing a node actually uses, and the whole
+    /// claim of this module is that it works without the kernel's help.
+    #[tokio::test]
+    async fn a_volume_store_round_trips_through_the_library() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::BlockDevice;
+
+        let dir = temp("volume");
+        let img = dir.join("state.img");
+        // 64 MiB, which is what a node's state volume is sized at.
+        let dev: Arc<dyn BlockDevice> = Arc::new(
+            FileDevice::open_with_capacity(img.to_str().unwrap(), 64 * 1024 * 1024)
+                .await
+                .expect("a backing file"),
+        );
+        crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default())
+            .await
+            .expect("format");
+
+        let s = StateStore::on_volume(dev.clone());
+        assert!(s.get(VOLUMES).await.is_none(), "a fresh volume holds nothing");
+
+        // A payload of the shape this really carries: a volume table is tens of
+        // kilobytes on a node with fifty volumes.
+        let big: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+        s.put(VOLUMES, big.clone()).await.unwrap();
+        s.put("luns.json", b"[{\"lun\":1}]".to_vec()).await.unwrap();
+
+        assert_eq!(s.get(VOLUMES).await.unwrap(), big);
+        assert_eq!(s.get("luns.json").await.unwrap(), b"[{\"lun\":1}]");
+        assert_eq!(s.keys().await, vec!["luns.json".to_string(), VOLUMES.to_string()]);
+
+        // Rewritten in place, not appended to.
+        s.put(VOLUMES, vec![1, 2, 3]).await.unwrap();
+        assert_eq!(s.get(VOLUMES).await.unwrap(), vec![1, 2, 3]);
+
+        s.remove("luns.json").await.unwrap();
+        assert!(s.get("luns.json").await.is_none());
+
+        // And a store opened fresh on the same volume sees it — which is what
+        // a restart is, and the only reason any of this is durable.
+        let again = StateStore::on_volume(dev.clone());
+        assert_eq!(again.get(VOLUMES).await.unwrap(), vec![1, 2, 3]);
+        assert_eq!(again.keys().await, vec![VOLUMES.to_string()]);
+
+        // The filesystem is still sound after all of that.
+        let report = crate::fs::ext4::check(&dev).await.expect("fsck runs");
+        assert!(report.clean(), "the state volume must still check out: {report:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_rewrite_replaces_rather_than_appends() {
         let dir = temp("rewrite");
