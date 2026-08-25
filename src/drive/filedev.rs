@@ -35,7 +35,7 @@ impl FileDevice {
     pub async fn open(path: &str) -> DriveResult<Self> {
         let pb = PathBuf::from(path);
 
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -56,7 +56,25 @@ impl FileDevice {
                 false
             }
         };
-        let capacity = metadata.len();
+        // A block device node has `st_size` 0 — its size is the *device's*, not
+        // the inode's, and `stat` does not know it. Seeking to the end does:
+        // the kernel answers a block device's `lseek(END)` with its capacity.
+        //
+        // Taking `metadata.len()` for a block device therefore reported zero
+        // bytes, and the failure that produced was not "capacity is wrong" but
+        // "this disk has no GPT": `Gpt::read` tries each candidate LBA size and
+        // skips any device too small to hold a header, so a capacity of zero
+        // skipped every one of them. The node booted anyway for as long as the
+        // command line named the slab's partition directly and nothing had to
+        // read the table — and stopped booting the moment a pallet was added
+        // and the slab had to be *found*.
+        let capacity = if is_block_device {
+            let size = file.seek(SeekFrom::End(0)).await.map_err(DriveError::Io)?;
+            file.seek(SeekFrom::Start(0)).await.map_err(DriveError::Io)?;
+            size
+        } else {
+            metadata.len()
+        };
 
         let id = DeviceId {
             uuid: Uuid::new_v4(),
