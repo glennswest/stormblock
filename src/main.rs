@@ -2306,6 +2306,52 @@ async fn handle_must_gather(
     write("ublk.txt", &ublk)?;
     manifest.push("ublk.txt — exported devices, their servers and their state".into());
 
+    // --- what the last crash left behind ---
+    //
+    // A panic that takes the kernel down cannot be logged by anything running
+    // on it: the log service is gone with everything else, the file it was
+    // writing may be short by whatever was still in the page cache, and the
+    // network stack that would have carried it out is dead. What survives is
+    // pstore — the kernel's own crash record, written to firmware-backed
+    // storage on the way down and still there on the next boot.
+    //
+    // So this is the one part of a bundle that is about the *previous* boot,
+    // and it is often the only account of the failure anyone will get.
+    {
+        let pstore = std::path::Path::new("/sys/fs/pstore");
+        let mut found = 0;
+        if pstore.is_dir() {
+            let dst = root.join("crash");
+            let _ = std::fs::create_dir_all(&dst);
+            if let Ok(entries) = std::fs::read_dir(pstore) {
+                for e in entries.flatten() {
+                    if std::fs::copy(e.path(), dst.join(e.file_name())).is_ok() {
+                        found += 1;
+                    }
+                }
+            }
+        }
+        if found > 0 {
+            manifest.push(format!(
+                "crash/ — {found} record(s) the kernel wrote on its way down in a previous boot"
+            ));
+        } else {
+            // Said explicitly, because "no crash directory" and "a crash with
+            // nothing recorded" are very different findings and both look like
+            // an absent directory.
+            write(
+                "crash.txt",
+                if pstore.is_dir() {
+                    "/sys/fs/pstore is mounted and empty: no crash record from a previous boot\n"
+                } else {
+                    "/sys/fs/pstore is not mounted: this kernel keeps no crash record, so a \
+                     panic leaves nothing behind. Mount pstore to change that.\n"
+                },
+            )?;
+            manifest.push("crash.txt — whether this node can record a kernel crash at all".into());
+        }
+    }
+
     // --- the handover record, which says what this node was serving ---
     let hpath = std::path::Path::new(stormblock::drive::handover::DEFAULT_PATH);
     if let Ok(body) = std::fs::read_to_string(hpath) {
