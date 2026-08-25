@@ -700,7 +700,16 @@ if [ -z "$NTP_SERVERS" ]; then
     # trip on a path that has not been proven, and this is the one place where
     # waiting delays everything behind it. It belongs after the root is up,
     # where a retry costs nothing and can keep trying.
-    NTP_SERVERS="pool.ntp.org,time.cloudflare.com,162.159.200.1,216.239.35.0"
+    # Addresses, not names. busybox ntpd sets the clock from these in about a
+    # second — measured — but given a *name* it waits on a resolver that has
+    # existed for a fraction of a second, and that wait was 50 seconds of a
+    # 74-second boot. There is no DNS to depend on here and no reason to: an
+    # anycast address for a public time service is as stable as its name.
+    #
+    #   time.cloudflare.com  162.159.200.1     time.google.com  216.239.35.0
+    #   pool.ntp.org and 1.amazon.pool.ntp.org rotate, so they are names only
+    #   and belong to the after-boot retry, not here.
+    NTP_SERVERS="162.159.200.1,216.239.35.0"
     NTP_FALLBACK=yes
     NTP_TIMEOUT=3
 fi
