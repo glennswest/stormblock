@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### 2026-08-25
+- **perf:** boot is **10 s** power-to-serving, from ~150 s. Ours is 4.6 s of
+  it; the rest is OVMF's silent platform phase. See
+  `stormcos/docs/BOOT-TIMING.md` for the breakdown and the rules it produced.
+- **fix:** the initramfs closes its dependency set over the **source** tree's
+  `modules.dep`, not its own. `depmod` records dependencies only between
+  modules it can see, so a subset missing `failover.ko` produces a
+  self-consistent, complete-looking and wrong map — and the node boots with no
+  network because `virtio_net`'s dependency never loaded. Cost two boots.
+- **feat:** the initramfs carries only what reaches the root — every storage
+  and network driver, plus firmware for storage adapters that load it at probe.
+  The rest is a golden in the kernel pallet, bound over `/lib/modules` and
+  `/lib/firmware` once root is up. 373 MB → 49 MB.
+- **fix:** a ublk handover waits for the *devices* to quiesce, not for the old
+  process to exit. It was burning a full 15-second grace on a process that had
+  released everything and was holding nothing. 17 s → 0.24 s.
+- **fix:** an idle ublk worker notices a shutdown. `submit_and_wait(1)` sleeps
+  until the kernel has something to say, so a device with no traffic never
+  looked at its shutdown flag — six of seven devices released, the seventh hung
+  the handover.
+- **fix:** the export reconciler asks the NVMe-oF target how many connections it
+  has instead of counting sockets in `/proc`, and stops the target accepting
+  before it asks — so a count of zero means finished rather than not-started.
+  It had been releasing an export 26 ms after two controllers attached and
+  deleting the volume mid-write.
+- **fix:** per-export portal ports cycle through the range instead of always
+  taking the lowest free one, which had two targets briefly sharing a port.
+- **fix:** readiness reports what the engine has done. Four blockers were fields
+  inherited from stormblockmk with nobody left to set them, so every node
+  reported "slab not open" while serving.
+- **feat:** `stormblock attach` — open any slab and list, export or mount any
+  volume in it, on a disk, a partition or an image file.
+- **feat:** `stormblock must-gather` — kernel state, storage inventory, device
+  firmware and NVMe wear/temperature, pstore crash records, the handover record
+  and the supervisor's logs, in one directory. Read-only throughout.
+- **feat:** `drive::handover` — the incumbent records which volume is behind
+  each device it created, so `adopt-ublk` needs no arguments and cannot be given
+  a list that is short by one.
+- **feat:** `adopt-ublk` serves the management API and `/serve/v1`; the process
+  that holds the slab is the engine, and nothing else can answer for it.
+- **feat:** the initramfs sets a hostname (DHCP's, else `storm-<mac>`), applies
+  its DHCP lease, and prints per-stage timing from `/proc/uptime`.
+
 ### 2026-08-24
 - **fix:** the initramfs ships the **whole kernel module tree**, compressed as
   the kernel package ships it, rather than a chosen set of subtrees. A driver's
