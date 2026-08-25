@@ -530,14 +530,27 @@ done
 LOADED=0
 if [ -n "$MODTREE" ]; then
     PASS=0
+    BEFORE=$(lsmod 2>/dev/null | tail -n +2 | wc -l)
+    NOW_BEFORE="$BEFORE"
     while [ $PASS -lt 5 ]; do
-        PASS=$((PASS + 1)); FOUND=0
+        PASS=$((PASS + 1))
         for ma in /sys/bus/*/devices/*/modalias; do
             [ -f "$ma" ] || continue
-            modprobe -q "$(cat "$ma")" 2>/dev/null && FOUND=$((FOUND + 1))
+            modprobe -q "$(cat "$ma")" 2>/dev/null || true
         done
-        LOADED=$((LOADED + FOUND))
-        [ "$FOUND" -eq 0 ] && break
+        AFTER=$(lsmod 2>/dev/null | tail -n +2 | wc -l)
+        LOADED=$((AFTER - BEFORE))
+        # Stop when a pass loads nothing new.
+        #
+        # The previous test counted modprobe *successes*, and modprobe succeeds
+        # for a module that is already loaded — so every pass "found" something
+        # and the loop always ran its full five, sleeping a second between each.
+        # Four seconds of a thirteen-second initramfs, spent asking for drivers
+        # that were already there. The count of loaded modules is the honest
+        # measure of whether another pass is worth taking.
+        [ "$AFTER" -eq "$NOW_BEFORE" ] && break
+        NOW_BEFORE="$AFTER"
+        [ $PASS -ge 5 ] && break
         sleep 1
     done
     echo "  $LOADED driver(s) loaded in $PASS pass(es)"
@@ -691,79 +704,22 @@ else
     echo "WARNING: $IFACE has no address — nothing on this node will be reachable"
 fi
 
-# The clock, before anything timestamps anything.
+# The clock is not set here.
 #
-# A node boots with whatever the RTC says, and a virtual machine or a board
-# without a battery starts near the epoch. Every log line, every syslog frame
-# and every file this node writes carries that time, and a viewer that orders
-# by timestamp puts a whole boot in 1970 — or worse, plausibly wrong. Setting
-# it here, before the root filesystem is even mounted, means the node's own
-# account of its boot is orderable against everything else.
+# It used to be, and it cost 50 seconds when the name it was given would not
+# resolve, then 5 seconds once bounded — for a machine whose RTC is already
+# close enough that nothing in this script would read a different value.
+# Meanwhile the only consumer of these timestamps is the console text, which
+# carries kernel-relative times anyway.
 #
-# One shot, from the lease's NTP servers or whatever the command line named.
-# Bounded and non-fatal: a node with no time source still boots, it just says
-# so, and the syslog frames carry a nil timestamp rather than a lie.
-NTP_SERVERS="$(cat /run/ntp-servers 2>/dev/null || true)"
-for t in $(cat /proc/cmdline); do
-    case "$t" in rd.stormblock.ntp=*) NTP_SERVERS="${t#rd.stormblock.ntp=}" ;; esac
-done
-# A fallback, so a node without a DHCP option 42 still knows what time it is.
+# So it moved to where it belongs: `timesync` is a supervised service on the
+# node, started immediately after the root is up, and it keeps the clock rather
+# than setting it once. Nothing waits on it, and a time server that is slow or
+# gone delays nothing.
 #
-# Anycast addresses as well as a name: a node whose DHCP offered no NTP server
-# may well have offered no usable DNS either, and a clock that depends on
-# resolution is a clock that fails in exactly the situation it is needed. The
-# names are tried first because a site that runs its own pool should win.
-# How long the boot is willing to spend on this, total.
-NTP_TIMEOUT=5
-if [ -z "$NTP_SERVERS" ]; then
-    # The public fallback is deliberately *not* used here: it is a WAN round
-    # trip on a path that has not been proven, and this is the one place where
-    # waiting delays everything behind it. It belongs after the root is up,
-    # where a retry costs nothing and can keep trying.
-    # Addresses, not names. busybox ntpd sets the clock from these in about a
-    # second — measured — but given a *name* it waits on a resolver that has
-    # existed for a fraction of a second, and that wait was 50 seconds of a
-    # 74-second boot. There is no DNS to depend on here and no reason to: an
-    # anycast address for a public time service is as stable as its name.
-    #
-    #   time.cloudflare.com  162.159.200.1     time.google.com  216.239.35.0
-    #   pool.ntp.org and 1.amazon.pool.ntp.org rotate, so they are names only
-    #   and belong to the after-boot retry, not here.
-    NTP_SERVERS="162.159.200.1,216.239.35.0"
-    NTP_FALLBACK=yes
-    NTP_TIMEOUT=3
-fi
+# What the lease offered is written down for that service to use:
+#   /run/ntp-servers   DHCP option 42, if any
 
-if [ -n "$NTP_SERVERS" ]; then
-    NTP_ARGS=""
-    for srv in $(echo "$NTP_SERVERS" | tr ',' ' '); do
-        NTP_ARGS="$NTP_ARGS -p $srv"
-    done
-    # -q: set the clock once and exit. -n: stay in the foreground so the wait
-    # is this script's, not a stray daemon's.
-    # Bounded, hard.
-    #
-    # An unreachable NTP server costs whatever the client is willing to wait,
-    # and busybox ntpd is willing to wait a long time: the public fallback took
-    # **50 seconds** of a 74-second boot before giving up. Nothing before the
-    # root filesystem needs the clock except the timestamps on these very
-    # lines, and a boot that is a minute slower to fix them has made a poor
-    # trade.
-    #
-    # So: a few seconds against whatever DHCP offered, which on a working
-    # network answers in milliseconds, and no more. A node that could not set
-    # its clock here says so and carries on; the fix for that is a retry after
-    # the root is up, where waiting costs nothing.
-    if timeout "$NTP_TIMEOUT" ntpd -n -q -N $NTP_ARGS >/dev/null 2>&1; then
-        echo "Clock:   $(date -u '+%Y-%m-%dT%H:%M:%SZ') (ntp: $NTP_SERVERS${NTP_FALLBACK:+, fallback})"
-        stamp "clock set"
-    else
-        echo "WARNING: could not set the clock from $NTP_SERVERS — timestamps will be wrong"
-        stamp "clock not set"
-    fi
-else
-    echo "WARNING: no NTP server offered or configured — timestamps will be wrong"
-fi
 fi
 fi
 
