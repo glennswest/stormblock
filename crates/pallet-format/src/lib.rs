@@ -892,6 +892,29 @@ mod verify {
         /// Verify a member against the digest recorded in **this manifest** —
         /// never against any other index. A descriptor is an unsigned map of
         /// where bytes live; the manifest is signed policy.
+        /// Check bytes already in hand against a member's recorded digest.
+        ///
+        /// The point of use, rather than a separate pass. A loader that hashes
+        /// one read of a member and then executes a *second* read of it has
+        /// verified nothing about what it ran: the two reads are separated in
+        /// time, and on a device that can change underneath — removable media,
+        /// a shared LUN, anything with its own firmware — they need not agree.
+        /// It also reads everything twice.
+        ///
+        /// So: read once, check what you read, run what you checked.
+        pub fn verify_bytes(&self, m: &Member, bytes: &[u8]) -> Result<()> {
+            if !m.has_digest() {
+                return Err(Error::NoDigest);
+            }
+            let mut h = Sha256::new();
+            h.update(bytes);
+            let got: [u8; 32] = h.finalize().into();
+            if !same(&got, &m.digest) {
+                return Err(Error::DigestMismatch);
+            }
+            Ok(())
+        }
+
         pub fn verify_member(
             &self,
             m: &Member,
