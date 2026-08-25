@@ -23,13 +23,6 @@
 //!   ephemeral clone garbage-collected.
 
 use std::collections::HashSet;
-/// The shortest a drain may last before its first session count.
-///
-/// A count is a sample, and an initiator connecting while the sample is in
-/// flight does not appear in it. Without a floor the reconciler can decide an
-/// export is idle in the same millisecond a consumer attaches to it.
-const MIN_DRAIN: Duration = Duration::from_secs(3);
-
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -361,49 +354,39 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
             let deadlines = ctx.drain_deadlines.lock().await;
             deadlines.get(&row.export_id).map(|d| Instant::now() >= *d).unwrap_or(true)
         };
-        // The dedicated portal serves exactly this one volume, so an
-        // established connection to its port is this export's initiator.
+        // Ask the target how many connections it is serving.
         //
-        // Counted twice, with a moment between, and never within the first
-        // seconds of the drain. A count is a sample, and an initiator that
-        // connects while the sample is in flight is invisible to it: the
-        // engine withdrew an export 26 ms after two controllers attached,
-        // announcing a 120-second grace it did not take, and then deleted the
-        // volume underneath a consumer that was mid-write. It hung forever on
-        // a device that no longer existed.
+        // The target is the only thing that knows. Everything else infers, and
+        // this used to infer from /proc/net/tcp — a *sample* of a fact this
+        // process owns exactly, and a sample taken while an initiator is
+        // connecting does not contain it. That is how an export was released
+        // 26 ms after two controllers attached, taking the volume with it and
+        // hanging a consumer that was mid-write.
         //
-        // The floor costs a few seconds on a genuinely idle export and is the
-        // difference between "nobody is attached" and "nobody had attached
-        // yet".
-        let began = {
-            let deadlines = ctx.drain_deadlines.lock().await;
-            let grace = Duration::from_secs(ctx.cfg.drain_grace_secs);
-            deadlines
-                .get(&row.export_id)
-                .map(|d| d.checked_sub(grace).unwrap_or_else(Instant::now))
-        };
-        let too_soon = began
-            .map(|b| b.elapsed() < MIN_DRAIN)
-            .unwrap_or(false);
-        if too_soon {
-            tracing::debug!(
-                "export {}: drain started {:?} ago, below the {}s floor — not sampling yet",
-                row.export_id,
-                began.map(|b| b.elapsed()).unwrap_or_default(),
-                MIN_DRAIN.as_secs()
-            );
-            continue;
-        }
-        let conns = match netstat::established_on_port(row.portal_port) {
-            // Zero is the only answer worth confirming: it is the one that
-            // ends the export, and the one a race produces.
-            Some(0) => {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                netstat::established_on_port(row.portal_port)
+        // Draining stops the target accepting first, and that is the part that
+        // matters: with the listener closed nothing new can attach, so a count
+        // of zero means *finished* rather than *not started yet*. No timing,
+        // no second look, no window to lose. The grace remains as the bound on
+        // an initiator that never lets go.
+        let live = match row.protocol {
+            #[cfg(feature = "nvmeof")]
+            WireProto::Nvmeof => {
+                let subs = ctx.subsystems.lock().await;
+                match subs.get(&row.export_id) {
+                    Some(s) => {
+                        s.target.stop_accepting();
+                        Some(s.target.live_connections())
+                    }
+                    // Nothing is attached to a target that no longer exists.
+                    None => Some(0),
+                }
             }
-            other => other,
+            // iSCSI keeps the old inference for now: its target has a session
+            // registry of its own, and the same fix belongs there rather than
+            // in a second reading of /proc.
+            _ => netstat::established_on_port(row.portal_port),
         };
-        let withdraw = match conns {
+        let withdraw = match live {
             Some(0) => true,
             Some(n) if expired => {
                 tracing::warn!(
@@ -417,8 +400,7 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
                 tracing::debug!("export {}: {n} session(s) still attached, waiting", row.export_id);
                 false
             }
-            // /proc unreadable: unknown is not "idle", so only the timeout
-            // may release it.
+            // Unknown is not idle, so only the timeout may release it.
             None => expired,
         };
         if !withdraw {

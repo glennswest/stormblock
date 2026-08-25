@@ -89,6 +89,23 @@ pub struct NvmeofTarget {
     /// no new TCP session per container.
     ns_changed: tokio::sync::broadcast::Sender<u32>,
     next_cntlid: AtomicU16,
+    /// Connections currently being served.
+    ///
+    /// The target is the only thing that knows this. Everything else has to
+    /// infer it — the reconciler was reading /proc/net/tcp and counting
+    /// sockets on the portal's port, which is a *sample* of a fact this
+    /// process owns exactly, and a sample taken while an initiator is
+    /// connecting does not contain it.
+    live: std::sync::atomic::AtomicUsize,
+    /// Whether new connections are still being accepted.
+    ///
+    /// Cleared to drain: established connections keep running and the listener
+    /// stops. That is what makes a count of zero *final* rather than a guess —
+    /// once nothing new can attach, the count can only fall.
+    accepting: std::sync::atomic::AtomicBool,
+    /// Wakes the accept loop when `accepting` is cleared, so a drain does not
+    /// wait for one last connection to arrive before noticing.
+    stop_accept: tokio::sync::Notify,
 }
 
 impl NvmeofTarget {
@@ -101,6 +118,9 @@ impl NvmeofTarget {
             namespaces: tokio::sync::RwLock::new(HashMap::new()),
             ns_changed,
             next_cntlid: AtomicU16::new(1),
+            live: std::sync::atomic::AtomicUsize::new(0),
+            accepting: std::sync::atomic::AtomicBool::new(true),
+            stop_accept: tokio::sync::Notify::new(),
         }
     }
 
@@ -170,19 +190,58 @@ impl NvmeofTarget {
     /// Accept connections on a pre-bound listener. Useful for tests with ephemeral ports.
     pub async fn run_with_listener(self: Arc<Self>, listener: TcpListener, reactor: &ReactorPool) -> std::io::Result<()> {
         loop {
-            let (stream, peer) = listener.accept().await?;
+            let (stream, peer) = tokio::select! {
+                r = listener.accept() => r?,
+                // Draining: stop taking new connections and drop the listener,
+                // leaving everything already established to finish. From here
+                // the live count can only fall, which is what lets a drain end
+                // on a fact rather than on a timer.
+                _ = self.stop_accept.notified() => {
+                    tracing::debug!("NVMe-oF {} stopped accepting", self.config.nqn);
+                    return Ok(());
+                }
+            };
+            if !self.is_accepting() {
+                return Ok(());
+            }
             stream.set_nodelay(true)?;
             let target = self.clone();
+            // Counted before the connection is handed off, so a drain that
+            // samples immediately after an accept still sees it.
+            target.live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Dispatch onto the reactor pool rather than the ambient runtime.
             // The pool was previously accepted and ignored, which is what made
             // --reactor-cores a no-op.
             reactor.dispatch(async move {
                 tracing::debug!("NVMe-oF connection from {peer}");
-                if let Err(e) = target.handle_connection(stream, peer).await {
+                let r = target.handle_connection(stream, peer).await;
+                target.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                if let Err(e) = r {
                     tracing::debug!("NVMe-oF connection {peer} closed: {e}");
                 }
             });
         }
+    }
+
+    /// How many connections this target is serving right now.
+    ///
+    /// Authoritative: this is the count the target keeps as it accepts and
+    /// finishes connections, not an inference from somewhere else.
+    pub fn live_connections(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn is_accepting(&self) -> bool {
+        self.accepting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Begin draining: refuse new connections, keep serving the ones in hand.
+    ///
+    /// Idempotent, and the only thing that makes `live_connections() == 0`
+    /// mean "finished" instead of "not started yet".
+    pub fn stop_accepting(&self) {
+        self.accepting.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.stop_accept.notify_waiters();
     }
 
     async fn handle_connection(&self, stream: TcpStream, peer: SocketAddr) -> std::io::Result<()> {
