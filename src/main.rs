@@ -2862,11 +2862,15 @@ async fn handle_golden(
         // The compression is read from the name, so a caller can hand over
         // .tar, .tar.gz or .tar.zst without saying which.
         let comp = stormblock::serve::tarfs::parse_compression(Some(t.as_str()))
-            .unwrap_or(stormblock::serve::tarfs::Compression::None);
+            .map_err(|e| anyhow::anyhow!("{t}: {e}"))?;
         let r =
             stormblock::serve::tarfs::unpack(&dev, src, "/", comp, whiteouts).await?;
-        println!("  {name}: {} entries from {t}", r.entries);
-        files += r.entries as u64;
+        let n = r.files + r.directories + r.symlinks + r.hard_links + r.devices;
+        println!(
+            "  {name}: {} file(s), {} dir(s), {} link(s) from {t}",
+            r.files, r.directories, r.symlinks + r.hard_links
+        );
+        files += n as u64;
     }
 
     if fsck {
