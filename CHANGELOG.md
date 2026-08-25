@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-08-25
+- **feat:** `state::StateStore` — the engine's own durable state, kept in an
+  ext4 volume it reads *itself*. `fs::files` already reads and writes ext4
+  directly against a `BlockDevice`, with no mount, no loop device and no ublk
+  export, so the engine opens the volume in-process the same way a golden is
+  built. Its writers go on doing synchronous file I/O into a working directory
+  that is tmpfs on a node — fast, unable to block, and unable to reach any
+  volume the engine serves — and the volume is restored into that directory at
+  start and captured back on a timer and at shutdown. Only what changed is
+  written. The volume is fsck'd when opened, because the engine can be killed
+  between the data and the metadata and nothing ever mounted it to make that
+  tidy. Verified on a node: state survives a reboot.
 - **fix:** a block device's capacity is not its inode's size. `FileDevice` took
   it from `metadata.len()`, which is 0 for a block device node, so `Gpt::read`
   skipped every candidate LBA size as "device too small" and reported that a
