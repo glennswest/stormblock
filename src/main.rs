@@ -2859,9 +2859,9 @@ async fn handle_golden(
         } else {
             Box::new(tokio::fs::File::open(t).await?)
         };
-        // The compression is read from the name, so a caller can hand over
-        // .tar, .tar.gz or .tar.zst without saying which.
-        let comp = stormblock::serve::tarfs::parse_compression(Some(t.as_str()))
+        // Sniffed from the content, so a caller can hand over .tar or .tar.gz
+        // — or a pipe, where there is no name to go on — without saying which.
+        let comp = stormblock::serve::tarfs::parse_compression(None)
             .map_err(|e| anyhow::anyhow!("{t}: {e}"))?;
         let r =
             stormblock::serve::tarfs::unpack(&dev, src, "/", comp, whiteouts).await?;
