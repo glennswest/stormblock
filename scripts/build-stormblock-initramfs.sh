@@ -166,44 +166,34 @@ else
     echo "  WARNING: no udevd found; /init will fall back to walking modalias"
 fi
 
-# Firmware — what a *server* needs to reach its root and its network.
+# Firmware — only what is needed to reach the root.
 #
-# A NIC or HBA that loads firmware at probe fails without it, and the failure
-# is indistinguishable from a missing driver: the device simply never appears.
-# Mellanox, Broadcom, several Intel parts and most FC HBAs are in that group,
-# which is most of what a real server has in it. So this cannot be a guessed
-# list of models.
+# An HBA that loads firmware at probe cannot find the disk without it, and the
+# disk is where every other piece of firmware lives. That is the whole of what
+# has to be here: 7.7 MB of Fibre Channel and converged-adapter blobs.
 #
-# It can, though, be a statement about what a storage node *is not*. The full
-# set is 310 MB, and 215 MB of that is GPU, WiFi, Bluetooth and phone-SoC
-# firmware — 103 MB of nvidia, 32 MB of mediatek, 27 MB of amdgpu, 35 MB of
-# ath11k/ath12k — on a machine that has none of it and never will. Excluding
-# those classes leaves 49 MB and removes nothing a server can use.
-#
-# The complete set still ships, in the kernel pallet's `modules` golden, and is
-# mounted over this one once the root filesystem is up. So a machine that turns
-# out to have an exotic device is not stuck: it is only missing the firmware
-# for the few seconds before its root is mounted, and the only devices that
-# matter in that window are the disk it boots from and the NIC it may DHCP on.
+# Everything else went to the kernel pallet's `modules` golden — 40 MB of NIC,
+# Bluetooth, SoC and vendor firmware that the root filesystem mounts moments
+# later. A NIC whose firmware moved cannot come up before the root does, so
+# `/init` brings the network up again after the golden is bound, for the
+# machines where that matters. A disk that cannot be reached has no such second
+# chance, which is why these stay.
 FWDIR="$(ls -d /usr/lib/firmware /lib/firmware 2>/dev/null | head -1 || true)"
-# Categories a storage node does not have. Named by what they are rather than
-# by which models exist, because the model list changes every release and the
-# category list does not.
-FW_EXCLUDE="nvidia amdgpu radeon i915 xe mediatek ath9k_htc ath10k ath11k ath12k
-            ath6k ar3k brcm cypress rtw88 rtw89 rtlwifi iwlwifi cirrus qca
-            ti-connectivity mrvl libertas mwl8k rsi wfx av7110 cpia2 as102
-            ene-ubox go7007 s2250 s5p-mfc vpu mt76 rockchip amlogic sun8i-a83t
-            meson tegra"
+# Named by adapter family. Storage adapters are a small and slow-moving set —
+# unlike NIC model numbers, which is why the split is drawn here.
+FW_STORAGE="ql2*_fw.bin* qla*.bin* lpfc* aic94xx* mpt* qed* bnx2 bnx2x cxgb4
+            phanfw.bin* vxge qlogic emulex advansys"
 if [ -n "$FWDIR" ] && [ -d "$FWDIR" ]; then
     mkdir -p "$INITRD_DIR/lib/firmware"
-    cp -a "$FWDIR/." "$INITRD_DIR/lib/firmware/" 2>/dev/null || true
-    for d in $FW_EXCLUDE; do
-        rm -rf "$INITRD_DIR/lib/firmware/$d" 2>/dev/null || true
+    for pat in $FW_STORAGE; do
+        for e in "$FWDIR"/$pat; do
+            [ -e "$e" ] && cp -a "$e" "$INITRD_DIR/lib/firmware/" 2>/dev/null || true
+        done
     done
-    echo "  firmware:   $(du -sh "$INITRD_DIR/lib/firmware" | cut -f1) (of $(du -sh "$FWDIR" | cut -f1); the rest is in the modules golden)"
+    echo "  firmware:   $(du -sh "$INITRD_DIR/lib/firmware" | cut -f1) — storage adapters only (of $(du -sh "$FWDIR" | cut -f1); the rest is in the modules golden)"
 else
-    echo "  WARNING: no linux-firmware on this build host — devices that load"
-    echo "           firmware at probe will look like missing drivers"
+    echo "  WARNING: no linux-firmware on this build host — an HBA that loads"
+    echo "           firmware at probe will look like a missing driver"
 fi
 
 # StormBlock binary
@@ -1003,6 +993,32 @@ if [ -d /sysroot/usr/lib/kernel/lib/modules ]; then
 else
     echo "  WARNING: no modules golden at /usr/lib/kernel — this node has only the"
     echo "           drivers the initramfs carried"
+fi
+
+# A second chance at the network, now that all the firmware is here.
+#
+# The initramfs carries only the firmware that reaches the *root*; a NIC whose
+# blob lives in the modules golden could not come up before the golden was
+# mounted, and it has just been mounted. Binding it over the initramfs's own
+# /lib/firmware as well is what lets the kernel find it, and then one more
+# discovery pass and one more DHCP attempt is all it takes.
+#
+# Only when there is no address: on the overwhelming majority of machines the
+# network came up long ago and this does nothing.
+if [ -z "$(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ')" ] \
+   && [ -d /sysroot/usr/lib/kernel/lib/firmware ]; then
+    echo "No address yet — retrying with the full firmware set"
+    mount --bind /sysroot/usr/lib/kernel/lib/firmware /lib/firmware 2>/dev/null || true
+    for ma in /sys/bus/*/devices/*/modalias; do
+        [ -f "$ma" ] || continue
+        modprobe -q "$(cat "$ma")" 2>/dev/null || true
+    done
+    for dev in /sys/class/net/*; do
+        n=$(basename "$dev"); [ "$n" = "lo" ] && continue
+        ip link set "$n" up 2>/dev/null
+        udhcpc -i "$n" -s /usr/share/udhcpc/default.script -q -n -t 5 >/dev/null 2>&1 && break
+    done
+    stamp "network retried: $(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ' | awk '{print $2}')"
 fi
 
 # What the initramfs learned about the network, handed to the root that will
