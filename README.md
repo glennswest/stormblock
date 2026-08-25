@@ -4,6 +4,12 @@
 
 StormBlock turns raw physical drives — NVMe SSDs, SAS SSDs, SAS HDDs — into network-accessible logical volumes over NVMe-oF/TCP and iSCSI. It is the block-layer foundation of the Storm ecosystem.
 
+> **Build on `root@dev.g8.lo`, never on a Mac.** The workstation is macOS and
+> the target is Linux: `libc`, `io_uring`, `ublk`, `/dev/kmsg` and the whole
+> storage path are behind `cfg(target_os = "linux")`, so a macOS build skips
+> exactly the code most likely to be wrong. `cargo test` runs 258 tests there
+> and 303 on dev. Commit, push, pull on dev, build there.
+
 ## Architecture
 
 ```

@@ -6,6 +6,32 @@ Pure Rust enterprise block storage engine. Turns raw NVMe/SAS drives into networ
 ## Design Principle: Single-node first, scale-out later
 StormBlock must be fully functional as a **standalone single-node** storage engine — no cluster requirement. A single node handles its own drives, RAID, volumes, and exports independently. Clustering (replication, Raft) is layered on top and strictly optional. New nodes can be added to an existing deployment at any time without disrupting running nodes.
 
+## Build on dev, never on this Mac
+
+**Every `cargo build`, `cargo test`, `cargo check` and every image build runs on
+`root@dev.g8.lo`.** Not on the workstation, not "just to check quickly".
+
+The workstation is macOS and the target is Linux, so the two builds do not
+compile the same code. `libc` is a Linux-only dependency here; `io_uring`,
+`ublk`, `/dev/kmsg`, `mlockall` and the whole storage path are behind
+`cfg(target_os = "linux")`. A macOS build therefore *skips* the code most
+likely to be wrong, and it passes while the node's build fails — and the
+reverse, where a change that only breaks macOS is pushed because the node built
+fine. Both have happened here in one session.
+
+The numbers say it plainly: `cargo test` runs **258** tests on the Mac and
+**303** on dev. The 45 that only exist on Linux are the ones covering the parts
+that touch hardware.
+
+The workflow is therefore:
+
+```
+commit  →  push  →  pull on dev  →  build and test on dev
+```
+
+and never a build whose result was not produced on the machine the code runs
+on. Editing on the Mac is fine; believing it is not.
+
 ## Build
 ```bash
 # Full node (x86_64 — VFIO, io_uring, all features)
