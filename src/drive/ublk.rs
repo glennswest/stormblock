@@ -1368,9 +1368,35 @@ fn queue_worker(
     startup_barrier.wait();
 
     // I/O loop (START_DEV has been called by main thread after barrier)
+    //
+    // Bounded wait, not an indefinite one.
+    //
+    // `submit_and_wait(1)` sleeps until the kernel has something to say. On a
+    // busy device that is the right thing and costs nothing; on an *idle* one
+    // it means the worker never looks at `running` again, and a shutdown is
+    // noticed only when some I/O happens to arrive. During a handover that is
+    // the difference between releasing a device and never releasing it: six
+    // devices with traffic stood down in seconds, the seventh — a
+    // freshly-mounted, idle volume — never did, so the process could not exit,
+    // and the successor spent its entire fifteen-second grace waiting before
+    // killing it.
+    //
+    // A tenth of a second bounds how long a shutdown can go unnoticed. Ten
+    // wakeups a second on a queue that is doing nothing is not a cost worth
+    // measuring against a storage handover that hangs.
+    let idle_wait = types::Timespec::new().sec(0).nsec(100_000_000);
+    let wait_args = types::SubmitArgs::new().timespec(&idle_wait);
     while running.load(Ordering::Relaxed) {
-        match ring.submit_and_wait(1) {
+        match ring.submitter().submit_with_args(1, &wait_args) {
             Ok(_) => {}
+            // The wait expired with nothing to do: go round, which is where
+            // `running` is looked at.
+            Err(ref e) if e.raw_os_error() == Some(libc::ETIME) => {
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
             Err(ref e) if e.raw_os_error() == Some(libc::EINTR) => continue,
             Err(e) => {
                 if running.load(Ordering::Relaxed) {
