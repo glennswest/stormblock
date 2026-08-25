@@ -3,6 +3,24 @@
 ## [Unreleased]
 
 ### 2026-08-25
+- **fix:** a block device's capacity is not its inode's size. `FileDevice` took
+  it from `metadata.len()`, which is 0 for a block device node, so `Gpt::read`
+  skipped every candidate LBA size as "device too small" and reported that a
+  real disk had no partition table. Nothing noticed for as long as the kernel
+  command line named the slab's partition directly; the first boot that had to
+  *find* the slab failed with "bad slab magic".
+- **note:** a node wedged four seconds into every boot with the engine's
+  `--data-dir` pointing at a volume the engine itself served over ublk. Every
+  volume delete ends in a synchronous metadata write under the volume-manager
+  lock, so the engine blocked on storage only it could provide, and every
+  container's disk I/O queued behind that lock. Worked around in the stormcos
+  boot manifest by moving engine state to tmpfs; the durable fix is for engine
+  state to live in the slab rather than in a file on a filesystem the engine
+  is responsible for. `VolumeManager::persist` also does synchronous file I/O
+  inside an async fn while holding that lock, which blocks a runtime worker as
+  well as the lock.
+
+### 2026-08-25
 - **perf:** boot is **10 s** power-to-serving, from ~150 s. Ours is 4.6 s of
   it; the rest is OVMF's silent platform phase. See
   `stormcos/docs/BOOT-TIMING.md` for the breakdown and the rules it produced.
