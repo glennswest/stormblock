@@ -23,6 +23,14 @@
 //!   ephemeral clone garbage-collected.
 
 use std::collections::HashSet;
+/// The shortest a drain may last before its first session count.
+///
+/// A count is a sample, and an initiator connecting while the sample is in
+/// flight does not appear in it. Without a floor the reconciler can decide an
+/// export is idle in the same millisecond a consumer attaches to it.
+const MIN_DRAIN: Duration = Duration::from_secs(3);
+
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -355,7 +363,46 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         };
         // The dedicated portal serves exactly this one volume, so an
         // established connection to its port is this export's initiator.
-        let conns = netstat::established_on_port(row.portal_port);
+        //
+        // Counted twice, with a moment between, and never within the first
+        // seconds of the drain. A count is a sample, and an initiator that
+        // connects while the sample is in flight is invisible to it: the
+        // engine withdrew an export 26 ms after two controllers attached,
+        // announcing a 120-second grace it did not take, and then deleted the
+        // volume underneath a consumer that was mid-write. It hung forever on
+        // a device that no longer existed.
+        //
+        // The floor costs a few seconds on a genuinely idle export and is the
+        // difference between "nobody is attached" and "nobody had attached
+        // yet".
+        let began = {
+            let deadlines = ctx.drain_deadlines.lock().await;
+            let grace = Duration::from_secs(ctx.cfg.drain_grace_secs);
+            deadlines
+                .get(&row.export_id)
+                .map(|d| d.checked_sub(grace).unwrap_or_else(Instant::now))
+        };
+        let too_soon = began
+            .map(|b| b.elapsed() < MIN_DRAIN)
+            .unwrap_or(false);
+        if too_soon {
+            tracing::debug!(
+                "export {}: drain started {:?} ago, below the {}s floor — not sampling yet",
+                row.export_id,
+                began.map(|b| b.elapsed()).unwrap_or_default(),
+                MIN_DRAIN.as_secs()
+            );
+            continue;
+        }
+        let conns = match netstat::established_on_port(row.portal_port) {
+            // Zero is the only answer worth confirming: it is the one that
+            // ends the export, and the one a race produces.
+            Some(0) => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                netstat::established_on_port(row.portal_port)
+            }
+            other => other,
+        };
         let withdraw = match conns {
             Some(0) => true,
             Some(n) if expired => {
