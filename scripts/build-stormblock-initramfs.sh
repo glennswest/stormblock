@@ -220,7 +220,14 @@ chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
 # it on unresolved symbols, and the driver that needed it never appears. So
 # rather than guess which extra directories to add, ask depmod and copy what it
 # names, until it names nothing that is not here.
-MODDIR="/lib/modules/$KVER"
+# Where this kernel's modules live.
+#
+# `MODROOT` so an image can be built for a kernel the build host is not running.
+# Without it the image inherits whatever the box happens to have booted, which
+# makes the kernel in a release an accident of scheduling rather than a choice —
+# and means two builds of the same commit can ship different kernels.
+MODROOT="${MODROOT:-}"
+MODDIR="$MODROOT/lib/modules/$KVER"
 DEST="$INITRD_DIR/lib/modules/$KVER"
 mkdir -p "$DEST"
 
