@@ -131,6 +131,13 @@ pub struct WiringTable {
     pub version: u32,
     /// Monotonic LUN allocator. Never decreases, never reuses.
     pub next_lun: u64,
+    /// Where to start looking for the next per-export portal port.
+    ///
+    /// Cycles the range so a port is not handed out again the instant its
+    /// previous target releases it — see `insert`. Persisted, so a restart
+    /// does not immediately reuse the port it was last serving on.
+    #[serde(default)]
+    pub next_portal: u16,
     pub exports: Vec<Wiring>,
     #[serde(skip)]
     path: PathBuf,
@@ -164,7 +171,7 @@ impl WiringTable {
     }
 
     fn empty(path: PathBuf) -> Self {
-        WiringTable { version: 1, next_lun: 0, exports: Vec::new(), path }
+        WiringTable { version: 1, next_lun: 0, next_portal: 0, exports: Vec::new(), path }
     }
 
     /// Demote wiring that only existed in the previous process.
@@ -223,9 +230,27 @@ impl WiringTable {
         portal_span: u16,
         ephemeral: bool,
     ) -> anyhow::Result<Wiring> {
+        // Round-robin through the range rather than always taking the lowest
+        // free port.
+        //
+        // A withdrawn export frees its port the moment its row goes, but the
+        // target that was serving it is still shutting its listener down. The
+        // next export then binds the same port, and for a moment two targets
+        // exist on it: an initiator can land on the outgoing one while the
+        // reconciler asks the incoming one how many connections it has. The
+        // answer is honestly zero, so the fresh export is drained and its
+        // volume deleted seconds after it was created — which is precisely
+        // what was happening, every export, on port 3261.
+        //
+        // Cycling means a port is only revisited after the whole span has been
+        // used, by which time nothing is left holding it. It costs nothing:
+        // the range exists to be spread across.
         let used: HashSet<u16> = self.exports.iter().map(|w| w.portal_port).collect();
-        let portal_port = (0..portal_span)
-            .map(|i| portal_base.saturating_add(i))
+        let span = portal_span.max(1) as u32;
+        let from = self.next_portal.max(portal_base);
+        let offset = u32::from(from.saturating_sub(portal_base)) % span;
+        let portal_port = (0..span)
+            .map(|i| portal_base.saturating_add(((offset + i) % span) as u16))
             .find(|p| !used.contains(p))
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -235,6 +260,10 @@ impl WiringTable {
                     used.len()
                 )
             })?;
+
+        // Next time, start after this one.
+        self.next_portal = portal_base
+            .saturating_add((((u32::from(portal_port.saturating_sub(portal_base)) + 1) % span) as u16));
 
         // Only iSCSI rows consume a LUN id; burning one for an NVMe export
         // would imply a shared-target LUN that is never created.
