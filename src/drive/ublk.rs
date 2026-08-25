@@ -1188,28 +1188,63 @@ pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()
         unsafe { libc::kill(pid, libc::SIGTERM) };
     }
 
+    // Wait for the *devices*, not for the process.
+    //
+    // What adoption needs is every device quiesced, and the kernel says so
+    // directly. Whether the old server has finished exiting afterwards is its
+    // own business: a process that has released every char device is holding
+    // nothing, and waiting for it to tidy up is waiting for nothing.
+    //
+    // That distinction was fifteen seconds of a thirty-nine second boot. The
+    // incumbent released all seven devices in under seven seconds and then sat
+    // there; stand_down burned its entire grace on the pid, killed it, and
+    // recovery itself took 0.6s. The node was waiting on a formality.
     let deadline = std::time::Instant::now() + grace;
+    let mut killed = false;
     loop {
-        // SAFETY: signal 0 asks whether it is there without touching it.
-        let alive: Vec<i32> = pids
+        let pending: Vec<u32> = dev_ids
             .iter()
             .copied()
-            .filter(|&p| unsafe { libc::kill(p, 0) == 0 })
+            .filter(|&id| !matches!(dev_state(id), Ok(Some(UBLK_S_DEV_QUIESCED)) | Ok(None)))
             .collect();
-        if alive.is_empty() {
-            tracing::info!("ublk: previous server has stood down");
+        if pending.is_empty() {
+            tracing::info!("ublk: {} device(s) quiesced and ready to adopt", dev_ids.len());
             return Ok(());
         }
+
         if std::time::Instant::now() >= deadline {
-            for pid in alive {
-                tracing::warn!("ublk: server {pid} did not stand down in time; killing it");
-                // SAFETY: as above.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
+            // SAFETY: signal 0 asks whether it is there without touching it.
+            let alive: Vec<i32> = pids
+                .iter()
+                .copied()
+                .filter(|&p| unsafe { libc::kill(p, 0) == 0 })
+                .collect();
+            if !killed && !alive.is_empty() {
+                // Only now, and only because a device is still not quiesced —
+                // which is the one thing that actually blocks the handover.
+                for pid in alive {
+                    tracing::warn!(
+                        "ublk: {} device(s) still not quiesced and server {pid} is still \
+                         running; killing it",
+                        pending.len()
+                    );
+                    // SAFETY: as above.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+                killed = true;
+                // A short second chance: SIGKILL closes the char devices, and
+                // the kernel quiesces on that.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                continue;
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            tracing::warn!(
+                "ublk: {} device(s) never quiesced: {}",
+                pending.len(),
+                pending.iter().map(|d| format!("/dev/ublkb{d}")).collect::<Vec<_>>().join(", ")
+            );
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
