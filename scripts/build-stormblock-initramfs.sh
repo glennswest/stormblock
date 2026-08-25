@@ -693,9 +693,16 @@ done
 # may well have offered no usable DNS either, and a clock that depends on
 # resolution is a clock that fails in exactly the situation it is needed. The
 # names are tried first because a site that runs its own pool should win.
+# How long the boot is willing to spend on this, total.
+NTP_TIMEOUT=5
 if [ -z "$NTP_SERVERS" ]; then
+    # The public fallback is deliberately *not* used here: it is a WAN round
+    # trip on a path that has not been proven, and this is the one place where
+    # waiting delays everything behind it. It belongs after the root is up,
+    # where a retry costs nothing and can keep trying.
     NTP_SERVERS="pool.ntp.org,time.cloudflare.com,162.159.200.1,216.239.35.0"
     NTP_FALLBACK=yes
+    NTP_TIMEOUT=3
 fi
 
 if [ -n "$NTP_SERVERS" ]; then
@@ -705,7 +712,20 @@ if [ -n "$NTP_SERVERS" ]; then
     done
     # -q: set the clock once and exit. -n: stay in the foreground so the wait
     # is this script's, not a stray daemon's.
-    if ntpd -n -q -N $NTP_ARGS >/dev/null 2>&1; then
+    # Bounded, hard.
+    #
+    # An unreachable NTP server costs whatever the client is willing to wait,
+    # and busybox ntpd is willing to wait a long time: the public fallback took
+    # **50 seconds** of a 74-second boot before giving up. Nothing before the
+    # root filesystem needs the clock except the timestamps on these very
+    # lines, and a boot that is a minute slower to fix them has made a poor
+    # trade.
+    #
+    # So: a few seconds against whatever DHCP offered, which on a working
+    # network answers in milliseconds, and no more. A node that could not set
+    # its clock here says so and carries on; the fix for that is a retry after
+    # the root is up, where waiting costs nothing.
+    if timeout "$NTP_TIMEOUT" ntpd -n -q -N $NTP_ARGS >/dev/null 2>&1; then
         echo "Clock:   $(date -u '+%Y-%m-%dT%H:%M:%SZ') (ntp: $NTP_SERVERS${NTP_FALLBACK:+, fallback})"
         stamp "clock set"
     else
