@@ -231,6 +231,73 @@ impl StateStore {
         }
     }
 
+    /// Copy everything in the store out into `dir`.
+    ///
+    /// Called once, before anything reads its state. The engine's own writers
+    /// go on doing synchronous file I/O into a working directory — which is
+    /// tmpfs on a node, so it is fast, cannot block, and cannot reach a volume
+    /// this engine is responsible for. This is what makes that directory
+    /// survive a reboot.
+    ///
+    /// A file already in `dir` is left alone. Whatever is there is newer than
+    /// what is here by definition: the only way it exists is that this boot
+    /// wrote it.
+    pub async fn restore_into(&self, dir: &std::path::Path) -> Result<usize, StateError> {
+        std::fs::create_dir_all(dir)?;
+        let mut n = 0;
+        for key in self.keys().await {
+            let dest = dir.join(&key);
+            if dest.exists() {
+                continue;
+            }
+            if let Some(bytes) = self.get(&key).await {
+                std::fs::write(&dest, bytes)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Copy everything in `dir` into the store.
+    ///
+    /// The durable half. Called on a timer and again on the way down, because
+    /// a node that is asked to stop should not lose the last thing it was
+    /// told — and because the timer is what covers a node that is not asked
+    /// but simply stops.
+    ///
+    /// Only what has changed is written: the volume is read back and compared
+    /// first. A node whose state is not moving writes nothing at all, which is
+    /// what makes running this on a short timer reasonable.
+    pub async fn capture_from(&self, dir: &std::path::Path) -> Result<usize, StateError> {
+        let mut n = 0;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            // Nothing to capture yet is not a failure. A node that has just
+            // started has written nothing.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries.flatten() {
+            let Some(key) = entry.file_name().to_str().map(str::to_owned) else { continue };
+            // A temporary from a write that is still in flight, or was
+            // interrupted. Not state, and copying it would make it look like
+            // state on the next boot.
+            if key.starts_with('.') {
+                continue;
+            }
+            if entry.file_type().map(|t| !t.is_file()).unwrap_or(true) {
+                continue;
+            }
+            let bytes = std::fs::read(entry.path())?;
+            if self.get(&key).await.as_deref() == Some(bytes.as_slice()) {
+                continue;
+            }
+            self.put(&key, bytes).await?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// Where this store writes, for a diagnostic. A node that cannot say where
     /// its own state lives is a node nobody can reason about.
     pub fn describe(&self) -> String {
@@ -351,6 +418,55 @@ mod tests {
         // there — a check must not cost the caller its data.
         let again = StateStore::open_volume(dev.clone()).await;
         assert_eq!(again.get("exports.json").await.unwrap(), b"[]");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pattern a node actually runs: a working directory that is fast and
+    /// cannot deadlock, and a volume that makes it survive a reboot.
+    #[tokio::test]
+    async fn a_working_directory_is_captured_and_restored() {
+        use crate::drive::filedev::FileDevice;
+
+        let dir = temp("mirror");
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let img = dir.join("state.img");
+        let dev: Arc<dyn BlockDevice> = Arc::new(
+            FileDevice::open_with_capacity(img.to_str().unwrap(), 64 * 1024 * 1024)
+                .await
+                .expect("a backing file"),
+        );
+        crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default())
+            .await
+            .expect("format");
+
+        // A boot: the engine writes its files the way it always has.
+        std::fs::write(work.join("exports.json"), b"[1]").unwrap();
+        std::fs::write(work.join("luns.json"), b"[2]").unwrap();
+        // ...including a temporary from a write still in flight, which is not
+        // state and must not become state.
+        std::fs::write(work.join(".luns.json.tmp"), b"half").unwrap();
+
+        let s = StateStore::open_volume(dev.clone()).await;
+        assert_eq!(s.capture_from(&work).await.unwrap(), 2);
+        // Nothing moved, so nothing is written the second time.
+        assert_eq!(s.capture_from(&work).await.unwrap(), 0);
+        assert_eq!(s.keys().await, vec!["exports.json".to_string(), "luns.json".to_string()]);
+
+        // A reboot: an empty working directory, filled from the volume.
+        let work2 = dir.join("work2");
+        let fresh = StateStore::open_volume(dev.clone()).await;
+        assert_eq!(fresh.restore_into(&work2).await.unwrap(), 2);
+        assert_eq!(std::fs::read(work2.join("exports.json")).unwrap(), b"[1]");
+        assert_eq!(std::fs::read(work2.join("luns.json")).unwrap(), b"[2]");
+        assert!(!work2.join(".luns.json.tmp").exists());
+
+        // Restoring over what this boot already wrote leaves it alone: the
+        // only way a file is there is that this boot put it there.
+        std::fs::write(work2.join("exports.json"), b"[9]").unwrap();
+        fresh.restore_into(&work2).await.unwrap();
+        assert_eq!(std::fs::read(work2.join("exports.json")).unwrap(), b"[9]");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
