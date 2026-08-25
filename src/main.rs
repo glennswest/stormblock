@@ -1955,6 +1955,13 @@ struct BootTomlSection {
 }
 
 /// Resolve a volume selector (UUID or name) against restored metadata.
+/// The volume the engine keeps its own state in.
+///
+/// A well-known name rather than a flag: every node that has one wants it used,
+/// and a node that has not got one carries on without. Never exported and never
+/// mounted — the engine reads it in-process with the ext4 library.
+const STATE_VOLUME: &str = "stormblock-state";
+
 async fn resolve_boot_volume(
     mgr: &VolumeManager,
     selector: &str,
@@ -3308,6 +3315,11 @@ async fn handle_adopt_ublk(
     }
     println!("Adopted {live} device(s). Serving until Ctrl+C.");
 
+    // Held out here so the capture on the way down can reach them; set inside
+    // the block below, where the volume manager still exists.
+    let mut state_store_final: Option<Arc<stormblock::state::StateStore>> = None;
+    let mut data_dir_final: Option<String> = None;
+
     // The management API, in this process, over the manager that owns the
     // slab. There is nowhere else to put it: one writer per volume means a
     // second process cannot open the same slab to answer on its behalf, so an
@@ -3345,6 +3357,57 @@ async fn handle_adopt_ublk(
             std::fs::create_dir_all(d)
                 .map_err(|e| anyhow::anyhow!("cannot create API state directory {d}: {e}"))?;
         }
+        // The engine's own durable state.
+        //
+        // Its writers — the wiring table, the LUN map, the /v1 epochs, the
+        // filesystem templates — go on doing synchronous file I/O into
+        // `data_dir`, which on a node is tmpfs: fast, unable to block, and
+        // unable to reach any volume this engine is responsible for. That last
+        // property is the whole point; a data_dir on a served volume is a
+        // cycle, and it wedged this node four seconds into every boot.
+        //
+        // What makes tmpfs survive a reboot is this volume. It is opened by
+        // name, never exported and never mounted — read and written by the
+        // ext4 library in-process, the same way a golden is built. See
+        // `stormblock::state`.
+        let state_store: Option<Arc<stormblock::state::StateStore>> = match data_dir {
+            Some(dir) => match resolve_boot_volume(&mgr, STATE_VOLUME).await {
+                Ok(id) => match mgr.get_volume(&id) {
+                    Some(dev) => {
+                        let store = Arc::new(
+                            stormblock::state::StateStore::open_volume(dev).await,
+                        );
+                        match store.restore_into(std::path::Path::new(dir)).await {
+                            Ok(0) => tracing::info!(
+                                "state volume {STATE_VOLUME} is empty — this node has not written any yet"
+                            ),
+                            Ok(n) => tracing::info!(
+                                "restored {n} state file(s) from volume {STATE_VOLUME}"
+                            ),
+                            Err(e) => tracing::error!("restoring state: {e}"),
+                        }
+                        Some(store)
+                    }
+                    None => None,
+                },
+                // No such volume: an image built before this, or a deployment
+                // that keeps its data_dir somewhere already durable. Neither
+                // is an error — say so once and carry on, because a node that
+                // refuses to start over where it files its paperwork is worse
+                // than one that files it somewhere less permanent.
+                Err(_) => {
+                    tracing::info!(
+                        "no {STATE_VOLUME} volume — engine state stays in {dir} and does not survive a reboot"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        state_store_final = state_store.clone();
+        data_dir_final = data_dir.map(str::to_owned);
+
         let slab_registry = mgr.registry().clone();
         let gem = mgr.gem().clone();
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
@@ -3357,6 +3420,24 @@ async fn handle_adopt_ublk(
         }));
         start_serving(&config, &state, "0.0.0.0:3260", "0.0.0.0:4420", &reactor).await;
 
+        // Push the working directory down to the volume, on a timer.
+        //
+        // Only what changed is written, so a node whose state is not moving
+        // writes nothing — which is what makes ten seconds a reasonable
+        // interval rather than an expensive one. The interval bounds what a
+        // node that stops without being asked can lose.
+        if let (Some(store), Some(dir)) = (state_store.clone(), data_dir) {
+            let dir = std::path::PathBuf::from(dir);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    if let Err(e) = store.capture_from(&dir).await {
+                        tracing::warn!("capturing state: {e}");
+                    }
+                }
+            });
+        }
+
         tokio::spawn(async move {
             if let Err(e) = mgmt::start_management_server(state).await {
                 tracing::error!("management API error: {e}");
@@ -3366,6 +3447,15 @@ async fn handle_adopt_ublk(
     }
 
     tokio::signal::ctrl_c().await?;
+    // Once more on the way down: a node asked to stop should not lose the last
+    // thing it was told.
+    if let (Some(store), Some(dir)) = (state_store_final.clone(), data_dir_final.as_deref()) {
+        match store.capture_from(std::path::Path::new(dir)).await {
+            Ok(n) if n > 0 => tracing::info!("captured {n} state file(s) before stopping"),
+            Ok(_) => {}
+            Err(e) => tracing::error!("capturing state before stopping: {e}"),
+        }
+    }
     let _ = shutdown_tx.send(true);
     for t in threads {
         let _ = t.join();
