@@ -13,5 +13,6 @@ pub mod migrate;
 pub mod image;
 pub mod pallet;
 pub mod placement;
+pub mod state;
 #[cfg(feature = "cluster")]
 pub mod cluster;
