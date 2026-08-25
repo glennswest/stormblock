@@ -2169,6 +2169,28 @@ async fn start_serving(
                 reactor.clone(),
                 wiring,
             ));
+            // Readiness reflects what this engine has actually done.
+            //
+            // These flags were set by the profile that owned the serving layer
+            // before it was promoted into the engine (#60); the fields came
+            // across and the code that set them did not. Nothing set them
+            // afterwards, so every node reported "slab not open", "volume
+            // metadata not restored" and "management API not listening" while
+            // demonstrably doing all three — and a registry asking whether the
+            // storage was ready was told no, forever.
+            //
+            // Both are true by construction here: `start_serving` is only
+            // reached with a volume manager built over attached slabs, in
+            // either of the two ways this binary becomes a node's engine.
+            ctx.status.set(&ctx.status.slab_open, true);
+            ctx.status.set(&ctx.status.volumes_restored, true);
+            // The transport, in the sense this layer means it: portals are
+            // bound per export from the range above rather than one listener
+            // held open, so what readiness can say is that the node is able to
+            // bind them. A portal that then fails to bind surfaces as that
+            // export staying pending, which is where it belongs.
+            ctx.status.set(&ctx.status.nvmeof_listening, true);
+
             if state.serve.set(ctx.clone()).is_err() {
                 tracing::error!("serving context was already set — not starting a second one");
                 return;

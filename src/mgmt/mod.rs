@@ -308,6 +308,12 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
         let tls_config = load_tls_config(cert_path, key_path)?;
         let acceptor = TlsAcceptor::from(Arc::new(tls_config));
         tracing::info!("Management API listening on {listen_addr} (HTTPS)");
+        // Readiness asks whether this is listening, and only this code knows.
+        // Set through the serving context when there is one — a node that is
+        // not serving /serve/v1 has nobody to tell.
+        if let Some(ctx) = state.serve.get() {
+            ctx.status.set(&ctx.status.mgmt_listening, true);
+        }
 
         loop {
             let (tcp_stream, _peer) = listener.accept().await?;
@@ -338,6 +344,12 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
         }
     } else {
         tracing::info!("Management API listening on {listen_addr} (HTTP)");
+        // Readiness asks whether this is listening, and only this code knows.
+        // Set through the serving context when there is one — a node that is
+        // not serving /serve/v1 has nobody to tell.
+        if let Some(ctx) = state.serve.get() {
+            ctx.status.set(&ctx.status.mgmt_listening, true);
+        }
         axum::serve(listener, router)
             .await
             .map_err(|e| anyhow::anyhow!("management server error: {e}"))?;
