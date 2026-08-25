@@ -61,14 +61,40 @@ pub const VOLUMES: &str = "volumes.dat";
 /// What the old, single-payload form starts with.
 const VOLUMES_MAGIC: [u8; 8] = *b"STRMVOL\0";
 
-#[derive(Debug, thiserror::Error)]
+/// Hand-written rather than derived, because this crate has no `thiserror` and
+/// one more dependency for four lines is not a trade worth making.
+#[derive(Debug)]
 pub enum StateError {
-    #[error("state store: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("state store: {0}")]
-    Device(#[from] crate::drive::DriveError),
-    #[error("state store: malformed container: {0}")]
+    Io(std::io::Error),
+    Device(crate::drive::DriveError),
+    /// The bytes in the region are not a container this version understands.
+    /// Reported rather than treated as an empty store: losing the record of
+    /// what a node holds is not the same as never having had one.
     Malformed(String),
+}
+
+impl std::fmt::Display for StateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StateError::Io(e) => write!(f, "state store: {e}"),
+            StateError::Device(e) => write!(f, "state store: {e:?}"),
+            StateError::Malformed(w) => write!(f, "state store: malformed container: {w}"),
+        }
+    }
+}
+
+impl std::error::Error for StateError {}
+
+impl From<std::io::Error> for StateError {
+    fn from(e: std::io::Error) -> Self {
+        StateError::Io(e)
+    }
+}
+
+impl From<crate::drive::DriveError> for StateError {
+    fn from(e: crate::drive::DriveError) -> Self {
+        StateError::Device(e)
+    }
 }
 
 /// Where the bytes actually go.
