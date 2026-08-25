@@ -166,23 +166,13 @@ impl StateStore {
         }
     }
 
-    /// Forget `key`. Absent is success — the caller wanted it gone.
-    pub async fn remove(&self, key: &str) -> Result<(), StateError> {
-        let _gate = self.gate.lock().await;
-        match &self.backing {
-            Backing::Dir(dir) => {
-                let _ = std::fs::remove_file(dir.join(key));
-                Ok(())
-            }
-            Backing::Volume(dev) => {
-                crate::fs::files::remove_file(dev, &format!("{ROOT}/{key}"))
-                    .await
-                    .map_err(|e| StateError::Fs(format!("removing {key}: {e}")))
-            }
-        }
-    }
-
     /// Every key held, in name order.
+    ///
+    /// There is deliberately no `remove`. Nothing here is ever deleted: an
+    /// export table with nothing in it is `[]`, not a missing file, and a node
+    /// that has stopped exporting has said so rather than gone quiet. A delete
+    /// would be one more operation to get wrong, on the one record that says
+    /// what the node holds.
     pub async fn keys(&self) -> Vec<String> {
         match &self.backing {
             Backing::Dir(dir) => {
@@ -248,11 +238,6 @@ mod tests {
         assert_eq!(again.get(VOLUMES).await.unwrap(), vec![7, 7, 7]);
         assert_eq!(again.keys().await, vec!["luns.json".to_string(), VOLUMES.to_string()]);
 
-        again.remove("luns.json").await.unwrap();
-        assert!(again.get("luns.json").await.is_none());
-        // Removing what is not there is success: the caller wanted it gone.
-        again.remove("luns.json").await.unwrap();
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -296,18 +281,18 @@ mod tests {
         s.put(VOLUMES, vec![1, 2, 3]).await.unwrap();
         assert_eq!(s.get(VOLUMES).await.unwrap(), vec![1, 2, 3]);
 
-        s.remove("luns.json").await.unwrap();
-        assert!(s.get("luns.json").await.is_none());
-
         // And a store opened fresh on the same volume sees it — which is what
         // a restart is, and the only reason any of this is durable.
         let again = StateStore::on_volume(dev.clone());
         assert_eq!(again.get(VOLUMES).await.unwrap(), vec![1, 2, 3]);
-        assert_eq!(again.keys().await, vec![VOLUMES.to_string()]);
+        assert_eq!(
+            again.keys().await,
+            vec!["luns.json".to_string(), VOLUMES.to_string()]
+        );
 
         // The filesystem is still sound after all of that.
         let report = crate::fs::ext4::check(&dev).await.expect("fsck runs");
-        assert!(report.clean(), "the state volume must still check out: {report:?}");
+        assert!(report.is_clean(), "the state volume must still check out: {report:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
