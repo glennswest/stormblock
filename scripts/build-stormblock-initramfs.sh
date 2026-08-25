@@ -379,6 +379,9 @@ case "$1" in
         # rather than used here, because the clock is set once, after the
         # network is up, and not on every renewal.
         [ -n "$ntpsrv" ] && echo "$ntpsrv" > /run/ntp-servers
+        # DHCP option 12, if the server has an opinion about what this machine
+        # is called. It usually knows better than the machine does.
+        [ -n "$hostname" ] && echo "$hostname" > /run/dhcp-hostname
         ;;
     deconfig)
         ip addr flush dev "$interface" 2>/dev/null
@@ -665,6 +668,23 @@ NETADDR="$(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')"
 if [ -n "$NETADDR" ]; then
     echo "Network: $IFACE $NETADDR $(ip route show default | head -1)"
     stamp "network up"
+
+    # A name, so this node is distinguishable from the next one.
+    #
+    # Without it the kernel's hostname is "(none)", and every node on the
+    # multicast stream says so — which is fine for one node and useless for
+    # the second. DHCP's own name wins when it offers one, because a site that
+    # names its machines has already decided; otherwise the MAC, which is the
+    # one identifier a machine has before anyone has configured anything.
+    NODE_NAME="$(cat /run/dhcp-hostname 2>/dev/null || true)"
+    if [ -z "$NODE_NAME" ]; then
+        MAC="$(cat "/sys/class/net/$IFACE/address" 2>/dev/null | tr -d ':')"
+        [ -n "$MAC" ] && NODE_NAME="storm-$(echo "$MAC" | tail -c 7)"
+    fi
+    if [ -n "$NODE_NAME" ]; then
+        echo "$NODE_NAME" > /proc/sys/kernel/hostname 2>/dev/null || true
+        echo "  hostname: $NODE_NAME"
+    fi
 else
     # An empty summary is the symptom that hid a broken DHCP script for as
     # long as it did; say what it means instead of printing a blank.
@@ -1032,6 +1052,9 @@ fi
 # What the initramfs learned about the network, handed to the root that will
 # use it. Nothing after switch_root runs a DHCP client, so a node whose
 # resolver was configured here and not carried over resolves nothing.
+if [ -n "$NODE_NAME" ] && [ -d /sysroot/etc ]; then
+    echo "$NODE_NAME" > /sysroot/etc/hostname 2>/dev/null || true
+fi
 if [ -s /etc/resolv.conf ] && [ -d /sysroot/etc ]; then
     cp /etc/resolv.conf /sysroot/etc/resolv.conf 2>/dev/null || true
 fi
