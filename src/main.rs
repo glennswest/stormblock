@@ -146,6 +146,39 @@ enum SubCommand {
         #[arg(long, default_value = "32")]
         max_file_mb: u64,
     },
+    /// Build a golden filesystem image from a tar archive.
+    ///
+    /// The conversion a node's build has always needed and has been doing with
+    /// `mkfs`, a loop mount and `tar -x` as root. Every piece of it already
+    /// exists here — the same code the registry uses to lay an image's layers
+    /// into a volume — and none of it needs a mount, a loop device or
+    /// privileges: the filesystem is written directly through the ext4 writer.
+    ///
+    ///   podman export "$cid" | stormblock golden --out fedora.img --size 512M
+    Golden {
+        /// Where to write the image.
+        #[arg(long)]
+        out: String,
+        /// How big to make it, e.g. `512M`, `2G`.
+        #[arg(long)]
+        size: String,
+        /// Filesystem label. Defaults to the output file's stem.
+        #[arg(long)]
+        label: Option<String>,
+        /// Archive to unpack, or `-` for standard input. Repeatable, applied
+        /// in order — which is how a container image's layers go on.
+        #[arg(long = "tar")]
+        tars: Vec<String>,
+        /// Honour OCI whiteouts (`.wh.` entries) while unpacking. On by
+        /// default, because layers are the usual source and a flattened export
+        /// simply has none.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        whiteouts: bool,
+        /// Check the result before writing it out. A golden that does not
+        /// check out is one every clone of it inherits.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        fsck: bool,
+    },
     /// Attach a slab and export (and optionally mount) any volume in it.
     ///
     /// The debugging and rescue door: point it at a disk, an image file or a
@@ -652,6 +685,9 @@ async fn main() -> anyhow::Result<()> {
                 return handle_must_gather(
                     slab, meta.as_deref(), out, volumes, *no_contents, *max_file_mb,
                 ).await;
+            }
+            SubCommand::Golden { out, size, label, tars, whiteouts, fsck } => {
+                return handle_golden(out, size, label.as_deref(), tars, *whiteouts, *fsck).await;
             }
             SubCommand::Attach { slab, meta, volumes, all, mount, ro, force } => {
                 return handle_attach(
@@ -2768,6 +2804,89 @@ async fn handle_must_gather(
     _max_file_mb: u64,
 ) -> anyhow::Result<()> {
     anyhow::bail!("must-gather reads volumes through ublk, which is Linux-only")
+}
+
+/// `golden` — a filesystem image from a tar, without a mount.
+///
+/// This is the build step every node image needs, and it has been done with
+/// `mkfs.ext4`, a loop mount, `tar -x` and root. All three requirements come
+/// from using the kernel to write the filesystem; none of them are necessary,
+/// because the ext4 writer here can do it directly — which is exactly how the
+/// registry lays a container image's layers into a volume.
+async fn handle_golden(
+    out: &str,
+    size: &str,
+    label: Option<&str>,
+    tars: &[String],
+    whiteouts: bool,
+    fsck: bool,
+) -> anyhow::Result<()> {
+    use stormblock::fs::ext4::{Ext4Params, FsProfile};
+
+    let bytes = stormblock::mgmt::config::parse_size(size)
+        .map_err(|e| anyhow::anyhow!("--size {size}: {e}"))?;
+    let name = label
+        .map(|l| l.to_string())
+        .or_else(|| {
+            std::path::Path::new(out)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "golden".into());
+
+    // A fresh file every time: a golden built over the remains of an older one
+    // inherits whatever the older one had past the new end.
+    let _ = std::fs::remove_file(out);
+    let dev: Arc<dyn BlockDevice> =
+        Arc::new(stormblock::drive::filedev::FileDevice::open_with_capacity(out, bytes).await?);
+
+    let params = Ext4Params {
+        profile: FsProfile::Ext4,
+        label: name.clone(),
+        uuid: uuid::Uuid::new_v4(),
+        ..Default::default()
+    };
+    let report = stormblock::fs::ext4::format(&dev, &params).await?;
+    println!(
+        "  {name}: {} blocks of {} bytes, {} inodes",
+        report.blocks, report.block_size, report.inodes
+    );
+
+    let mut files = 0u64;
+    for t in tars {
+        let src: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if t == "-" {
+            Box::new(tokio::io::stdin())
+        } else {
+            Box::new(tokio::fs::File::open(t).await?)
+        };
+        // The compression is read from the name, so a caller can hand over
+        // .tar, .tar.gz or .tar.zst without saying which.
+        let comp = stormblock::serve::tarfs::parse_compression(Some(t.as_str()))
+            .unwrap_or(stormblock::serve::tarfs::Compression::None);
+        let r =
+            stormblock::serve::tarfs::unpack(&dev, src, "/", comp, whiteouts).await?;
+        println!("  {name}: {} entries from {t}", r.entries);
+        files += r.entries as u64;
+    }
+
+    if fsck {
+        let check = stormblock::fs::ext4::check(&dev).await?;
+        if !check.clean() {
+            anyhow::bail!(
+                "{name} does not check out after {files} entries — {} problem(s); \
+                 not shipping a golden every clone would inherit",
+                check.problems.len()
+            );
+        }
+        println!("  {name}: checks out");
+    }
+
+    dev.flush().await?;
+    println!(
+        "built: {out} ({}, {files} entries)",
+        stormblock::mgmt::config::human_size(bytes)
+    );
+    Ok(())
 }
 
 /// `attach` — open a slab and export, or list, what is in it.
