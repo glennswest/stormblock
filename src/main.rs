@@ -2366,9 +2366,11 @@ fn nvme_smart(dev: &str) -> String {
         result: u32,
     }
     // _IOWR('N', 0x41, struct nvme_admin_cmd), sizeof == 72.
-    // musl types the request as c_int; the value is the same either way.
-    const NVME_IOCTL_ADMIN_CMD: libc::c_int =
-        ((3u32 << 30) | (72u32 << 16) | ((b'N' as u32) << 8) | 0x41) as libc::c_int;
+    // libc's ioctl request type differs by target (c_ulong on glibc,
+    // c_int on musl) and has changed across libc releases — keep the raw
+    // value and cast at the call site.
+    const NVME_IOCTL_ADMIN_CMD: u32 =
+        (3u32 << 30) | (72u32 << 16) | ((b'N' as u32) << 8) | 0x41;
 
     let Ok(f) = std::fs::File::open(dev) else {
         return format!("    (no SMART: cannot open {dev})\n");
@@ -2384,7 +2386,7 @@ fn nvme_smart(dev: &str) -> String {
         ..Default::default()
     };
     // SAFETY: an ioctl on a file this process opened, with a buffer it owns.
-    let rc = unsafe { libc::ioctl(f.as_raw_fd(), NVME_IOCTL_ADMIN_CMD, &mut cmd) };
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), NVME_IOCTL_ADMIN_CMD as _, &mut cmd) };
     if rc != 0 {
         return format!("    (no SMART from {dev}: {})\n", std::io::Error::last_os_error());
     }
