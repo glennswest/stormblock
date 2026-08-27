@@ -468,15 +468,10 @@ impl NvmeofDevice {
         })
     }
 
-    /// Run `op` on the I/O connection, establishing it if needed and
-    /// dropping it on error so the next call reconnects.
-    async fn with_conn<T, F>(&self, op: F) -> DriveResult<T>
-    where
-        F: for<'c> FnOnce(
-            &'c mut Conn,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<T>> + Send + 'c>>,
-    {
+    /// Lock the I/O connection, establishing it first if the last
+    /// operation dropped it. The caller runs one operation and, on error,
+    /// clears the slot so the next call reconnects.
+    async fn lock_conn(&self) -> DriveResult<tokio::sync::MutexGuard<'_, Option<Conn>>> {
         let mut guard = self.conn.lock().await;
         if guard.is_none() {
             *guard = Some(
@@ -486,14 +481,7 @@ impl NvmeofDevice {
             );
             tracing::info!("NVMe-TCP initiator: reconnected to {}", self.spec.addr);
         }
-        let conn = guard.as_mut().expect("just established");
-        match op(conn).await {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                *guard = None; // next op reconnects
-                Err(DriveError::Io(e))
-            }
-        }
+        Ok(guard)
     }
 
     fn check_aligned(&self, offset: u64, len: usize) -> DriveResult<()> {
@@ -546,10 +534,15 @@ impl BlockDevice for NvmeofDevice {
             let chunk = (buf.len() - done).min(MAX_CHUNK);
             let slba = (offset + done as u64) / bs;
             let nlb = (chunk as u64 / bs) as u16;
-            let data = self
-                .with_conn(|c| Box::pin(c.io_read(nsid, slba, nlb, chunk)))
-                .await?;
-            buf[done..done + chunk].copy_from_slice(&data);
+            let mut guard = self.lock_conn().await?;
+            let conn = guard.as_mut().expect("lock_conn established");
+            match conn.io_read(nsid, slba, nlb, chunk).await {
+                Ok(data) => buf[done..done + chunk].copy_from_slice(&data),
+                Err(e) => {
+                    *guard = None;
+                    return Err(DriveError::Io(e));
+                }
+            }
             done += chunk;
         }
         Ok(done)
@@ -564,9 +557,12 @@ impl BlockDevice for NvmeofDevice {
             let chunk = (buf.len() - done).min(MAX_CHUNK);
             let slba = (offset + done as u64) / bs;
             let nlb = (chunk as u64 / bs) as u16;
-            let data = &buf[done..done + chunk];
-            self.with_conn(|c| Box::pin(c.io_write(nsid, slba, nlb, data)))
-                .await?;
+            let mut guard = self.lock_conn().await?;
+            let conn = guard.as_mut().expect("lock_conn established");
+            if let Err(e) = conn.io_write(nsid, slba, nlb, &buf[done..done + chunk]).await {
+                *guard = None;
+                return Err(DriveError::Io(e));
+            }
             done += chunk;
         }
         Ok(done)
@@ -574,7 +570,13 @@ impl BlockDevice for NvmeofDevice {
 
     async fn flush(&self) -> DriveResult<()> {
         let nsid = self.spec.nsid;
-        self.with_conn(|c| Box::pin(c.io_flush(nsid))).await
+        let mut guard = self.lock_conn().await?;
+        let conn = guard.as_mut().expect("lock_conn established");
+        if let Err(e) = conn.io_flush(nsid).await {
+            *guard = None;
+            return Err(DriveError::Io(e));
+        }
+        Ok(())
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
@@ -588,8 +590,12 @@ impl BlockDevice for NvmeofDevice {
         let mut blocks = len / bs;
         while blocks > 0 {
             let nlb = blocks.min(u32::MAX as u64) as u32;
-            self.with_conn(|c| Box::pin(c.io_deallocate(nsid, slba, nlb)))
-                .await?;
+            let mut guard = self.lock_conn().await?;
+            let conn = guard.as_mut().expect("lock_conn established");
+            if let Err(e) = conn.io_deallocate(nsid, slba, nlb).await {
+                *guard = None;
+                return Err(DriveError::Io(e));
+            }
             slba += nlb as u64;
             blocks -= nlb as u64;
         }

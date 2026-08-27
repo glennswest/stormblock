@@ -76,7 +76,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # System (cross-platform)
 libc = "0.2"
 bitvec = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Filesystem creation and checking for preformatted templates (#38, #39).
 # A from-scratch async mke2fs/e2fsck: the engine formats its own thin volumes
