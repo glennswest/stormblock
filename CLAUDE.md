@@ -723,3 +723,38 @@ cannot find — so the check that counts is an external one, byte by byte.
 Not covered here, and still open on #51: volume-level sealed/read-only attach
 refusal, and per-leg physical offsets for a read-only consumer that must not
 reconstruct RAID.
+
+---
+
+## Session 2026-08-26 — NVMe-TCP initiator (#73) — DONE
+
+The engine can now *attach* NVMe-TCP, not just serve it.
+`drive/nvmeof_dev.rs` is an initiator `BlockDevice`;
+`nvme-tcp://host:port/<nqn>?nsid=N` (and `iscsi://host:port/iqn`) are
+accepted everywhere a device path is — `[[drives]]`, `POST /api/v1/drives`,
+RAID `add_member`. Proven on dev end to end: engine A attached engine B's
+namespace through the API and created a RAID-1 across a local drive and the
+remote leg, both members active. This is the cross-node RAID-leg transport
+stormstorage's DistVolume model orchestrates.
+
+Worth not re-deriving:
+
+- **Reuse the test initiator's framing.** `tests/common/nvmeof_initiator.rs`
+  already carried the initiator direction, proven against this target *and*
+  the Linux kernel (the FCTYPE-at-byte-4 lesson lives there). The device is
+  that wire logic productionized: admin conn (QID 0) identifies at open and
+  is dropped; one I/O conn (QID 1) behind a Mutex, cleared on error so the
+  next op reconnects — a bounced remote degrades to per-op errors RAID can
+  see (#69 is where those errors should start flipping member state).
+- **`DeviceId.uuid` is uuid5 of the attach URI** — stable across reopens.
+  Do this for every new backend; #65 is the cost of not doing it.
+- **libc's ioctl request type moves.** c_ulong on glibc, c_int on musl, and
+  it has changed across libc releases — keep raw u32 consts and cast
+  `as _` at the call site (`nvme_smart` broke exactly this way when the
+  lockfile advanced).
+- **The TOML `[iscsi]`/`[nvmeof]` sections are dead** — targets read the
+  CLI values with clap defaults (#75). Two engines on one host need
+  `--iscsi-addr/--nvmeof-addr/--nvmeof-nqn` until that's fixed.
+- The NVMe-oF target only starts when an `export_device` exists at boot
+  (`main.rs:1128`); dynamic namespaces exist (#26) but no boot device means
+  no listener at all.
