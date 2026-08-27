@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### 2026-08-26
+- **feat:** NVMe-TCP initiator `BlockDevice` (#73) — `drive/nvmeof_dev.rs`
+  attaches a remote NVMe-TCP namespace as a local drive via
+  `nvme-tcp://host:port/<nqn>?nsid=N`, accepted everywhere a device path
+  is: `[[drives]]` config, `POST /api/v1/drives`, and RAID members
+  (`add_member`), which makes a cross-node RAID1 leg possible over the
+  fleet fabric. Reuses the target's PDU types (same rule as the iSCSI
+  initiator); admin connection (QID 0) identifies at open, one I/O
+  connection (QID 1) serialized behind a Mutex, dropped-and-reconnected
+  on error so a bounced remote degrades to per-op errors RAID can see.
+  `DeviceId.uuid` is uuid5 of the attach URI — stable across reopens (the
+  #65 lesson, applied). New `DriveType::NvmeTcp`.
+- **feat:** `iscsi://host:port/iqn` accepted by `open_one_drive` too — the
+  existing initiator was only reachable from boot-iscsi before.
+- **test:** `nvme_tcp_uri_attaches_as_block_device` — URI attach against
+  the in-process target: identity stability, block-boundary and
+  chunk-crossing round-trips, discard, alignment enforcement.
+
 ### 2026-08-25
 - **feat:** `state::StateStore` — the engine's own durable state, kept in an
   ext4 volume it reads *itself*. `fs::files` already reads and writes ext4

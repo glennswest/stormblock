@@ -8,10 +8,13 @@ pub mod dma;
 pub mod filedev;
 pub mod handover;
 pub mod partition;
-// The initiator reuses the *target's* PDU parser rather than carrying a
-// second copy of RFC 7143, so it exists exactly where that does.
+// The initiators reuse the *target's* PDU parsers rather than carrying a
+// second copy of RFC 7143 / the NVMe-TCP spec, so each exists exactly
+// where its target does.
 #[cfg(feature = "iscsi")]
 pub mod iscsi_dev;
+#[cfg(feature = "nvmeof")]
+pub mod nvmeof_dev;
 pub mod slab;
 pub mod slab_registry;
 #[cfg(target_os = "linux")]
@@ -51,6 +54,9 @@ pub enum DriveType {
     SasHdd,
     File,  // loopback / MikroTik / dev testing
     Iscsi, // remote iSCSI target
+    /// Remote NVMe-TCP namespace attached as a drive — the cross-node
+    /// RAID-leg transport (#73).
+    NvmeTcp,
 }
 
 impl fmt::Display for DriveType {
@@ -61,6 +67,7 @@ impl fmt::Display for DriveType {
             DriveType::SasHdd => write!(f, "SAS-HDD"),
             DriveType::File => write!(f, "File"),
             DriveType::Iscsi => write!(f, "iSCSI"),
+            DriveType::NvmeTcp => write!(f, "NVMe-TCP"),
         }
     }
 }
@@ -204,6 +211,26 @@ pub async fn open_drives(paths: &[String]) -> Vec<(String, DriveResult<Box<dyn B
 }
 
 pub async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
+    // Fabric URIs first — a remote namespace attached as a drive
+    // (stormblock#73). The same string works everywhere a device path
+    // does: config `[[drives]]`, POST /api/v1/drives, RAID members.
+    #[cfg(feature = "nvmeof")]
+    if let Some(spec) = nvmeof_dev::NvmeTcpSpec::parse(path) {
+        let dev = nvmeof_dev::NvmeofDevice::connect(&spec).await?;
+        return Ok(Box::new(dev));
+    }
+    #[cfg(feature = "iscsi")]
+    if let Some((portal, port, iqn)) = parse_iscsi_uri(path) {
+        let dev = iscsi_dev::IscsiDevice::connect(&portal, port, &iqn).await?;
+        return Ok(Box::new(dev));
+    }
+    if path.contains("://") {
+        return Err(DriveError::Other(anyhow::anyhow!(
+            "unsupported drive URI {path:?} (this build understands: {})",
+            supported_uri_schemes()
+        )));
+    }
+
     // Check if it's a block device on Linux
     #[cfg(target_os = "linux")]
     {
@@ -219,4 +246,42 @@ pub async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
     // Fallback: open as file device (regular file or anything else)
     let dev = filedev::FileDevice::open(path).await?;
     Ok(Box::new(dev))
+}
+
+fn supported_uri_schemes() -> &'static str {
+    #[cfg(all(feature = "nvmeof", feature = "iscsi"))]
+    return "nvme-tcp://host:port/nqn?nsid=N, iscsi://host:port/iqn";
+    #[cfg(all(feature = "nvmeof", not(feature = "iscsi")))]
+    return "nvme-tcp://host:port/nqn?nsid=N";
+    #[cfg(all(not(feature = "nvmeof"), feature = "iscsi"))]
+    return "iscsi://host:port/iqn";
+    #[cfg(all(not(feature = "nvmeof"), not(feature = "iscsi")))]
+    return "none (built without fabric features)";
+}
+
+/// Parse `iscsi://host:port/iqn` into (host, port, iqn).
+#[cfg(feature = "iscsi")]
+fn parse_iscsi_uri(uri: &str) -> Option<(String, u16, String)> {
+    let rest = uri.strip_prefix("iscsi://")?;
+    let (addr, iqn) = rest.split_once('/')?;
+    let (host, port) = addr.split_once(':')?;
+    if host.is_empty() || iqn.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port.parse().ok()?, iqn.to_string()))
+}
+
+#[cfg(all(test, feature = "iscsi"))]
+mod uri_tests {
+    use super::*;
+
+    #[test]
+    fn iscsi_uri_parses() {
+        let (h, p, iqn) = parse_iscsi_uri("iscsi://10.0.0.1:3260/iqn.2024.io.stormblock:v1").unwrap();
+        assert_eq!(h, "10.0.0.1");
+        assert_eq!(p, 3260);
+        assert_eq!(iqn, "iqn.2024.io.stormblock:v1");
+        assert!(parse_iscsi_uri("iscsi://noport/iqn").is_none());
+        assert!(parse_iscsi_uri("nvme-tcp://h:4420/nqn").is_none());
+    }
 }

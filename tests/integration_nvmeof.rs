@@ -5,6 +5,7 @@
 mod common;
 
 
+use stormblock::drive::{open_one_drive, DriveType};
 use stormblock::target::nvmeof::NvmeofConfig;
 use common::nvmeof_initiator::NvmeofInitiator;
 
@@ -124,6 +125,54 @@ async fn nvmeof_reconnect_persistence() {
         let data = io.read(1, 0, 1).await.unwrap();
         assert_eq!(data, vec![0xEE_u8; 4096], "data should persist across sessions");
     }
+
+    server.abort();
+}
+
+/// stormblock#73: a remote NVMe-TCP namespace attached as a local drive
+/// via the `nvme-tcp://` URI — the cross-node RAID-leg transport.
+#[tokio::test]
+async fn nvme_tcp_uri_attaches_as_block_device() {
+    let (_dir, vol, _vm) = common::setup_raid1_volume(
+        64 * 1024 * 1024,
+        32 * 1024 * 1024,
+    ).await;
+    let (addr, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+
+    let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev = open_one_drive(&uri).await.expect("URI attach");
+    assert_eq!(dev.device_type(), DriveType::NvmeTcp);
+    assert_eq!(dev.id().path, uri);
+    assert!(dev.capacity_bytes() > 0);
+    let bs = dev.block_size() as usize;
+    assert!(bs == 512 || bs == 4096);
+
+    // Identity is stable across reopens of the same spec (#65 lesson).
+    let dev2 = open_one_drive(&uri).await.expect("second attach");
+    assert_eq!(dev.id().uuid, dev2.id().uuid);
+    drop(dev2);
+
+    // Small write/read at a block boundary.
+    let data = vec![0x5A_u8; bs * 2];
+    assert_eq!(dev.write(bs as u64, &data).await.unwrap(), data.len());
+    dev.flush().await.unwrap();
+    let mut back = vec![0u8; data.len()];
+    assert_eq!(dev.read(bs as u64, &mut back).await.unwrap(), back.len());
+    assert_eq!(back, data);
+
+    // Large I/O crossing the 128 KiB chunking boundary.
+    let big: Vec<u8> = (0..384 * 1024).map(|i| (i % 251) as u8).collect();
+    dev.write(0, &big).await.unwrap();
+    let mut big_back = vec![0u8; big.len()];
+    dev.read(0, &mut big_back).await.unwrap();
+    assert_eq!(big_back, big, "chunked round-trip must be byte-exact");
+
+    // Discard is accepted (thin target reclaims).
+    dev.discard(0, (bs * 8) as u64).await.unwrap();
+
+    // Alignment is enforced.
+    let mut small = vec![0u8; bs];
+    assert!(dev.read(1, &mut small).await.is_err(), "unaligned offset must fail");
 
     server.abort();
 }
