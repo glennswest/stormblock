@@ -69,6 +69,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **iSCSI target** — RFC 7143, CHAP authentication, MPIO/ALUA. Thin volumes export directly as LUNs, added and removed at runtime, and scale to thousands per target.
 - **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
 - **REST API** — axum-based management (drives, arrays, volumes, exports, slabs, filesystem templates) with optional TLS.
+- **Kubernetes-shaped resources** — `/apis/storage.storm.io/v1/{volumes,slabs,drives,nodes}` with discovery, label selectors and `?watch=1`, served by the engine itself; stormdrive serves `drives`/`enclosures` in the same group. `kubectl`-shaped, no second store.
 - **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
 - **312 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
 

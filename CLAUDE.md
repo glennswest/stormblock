@@ -958,4 +958,4 @@ the uuid — engine names are not unique — with the human name in
 Read-mostly projections of the same state the REST API serves: no second
 store.
 
-- [ ] `src/mgmt/api/kube.rs` + tests
+- [x] `src/mgmt/api/kube.rs` + tests (v12.3.0); stormdrive 0.6.0 serves `drives`/`enclosures`

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### 2026-08-28
+- **feat:** Kubernetes-shaped resources served by the engine (#80):
+  `/apis/storage.storm.io/v1/{volumes,slabs,drives,nodes}` in the
+  `apiVersion/kind/metadata/spec/status` shape, API discovery at `/apis`,
+  `/apis/storage.storm.io` and `/apis/storage.storm.io/v1`
+  (APIResourceList), `labelSelector`, `?watch=1` as a newline-delimited
+  `{type, object}` stream, Kubernetes `Status` error bodies. Writes:
+  `PATCH volumes/{name}` `spec.{redundancy,sealed,retention,resync}`,
+  `DELETE volumes/{name}` (refused while exported), `PATCH drives/{name}`
+  `spec.{labels,drain}`. `metadata.name` is the uuid; the human name is
+  `spec.name` / label `storm.io/name`; get accepts either. Projections of
+  the state the REST API serves — no second store. stormdrive serves
+  `drives`/`enclosures` in the same group.
+
 ## [v12.2.0] — 2026-08-28
 
 ### 2026-08-28
