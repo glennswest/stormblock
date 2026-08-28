@@ -35,6 +35,15 @@ use super::{Pallet, PalletError, PartitionView, Result};
 pub struct DriveRef {
     pub path: String,
     pub device: Arc<dyn BlockDevice>,
+    /// Where the drive is, when registered with labels (#70). Empty otherwise.
+    pub labels: crate::placement::domain::FailureDomain,
+}
+
+impl DriveRef {
+    /// What fails with this drive: its identity under its labels.
+    pub fn domain(&self) -> crate::placement::domain::FailureDomain {
+        crate::placement::domain::FailureDomain::from_device(self.device.id()).merged_under(&self.labels)
+    }
 }
 
 /// Why a pallet partition could not be read as a pallet.
@@ -108,7 +117,16 @@ impl PalletStore {
     }
 
     pub fn add_drive(&mut self, path: impl Into<String>, device: Arc<dyn BlockDevice>) {
-        self.drives.push(DriveRef { path: path.into(), device });
+        self.add_drive_labelled(path, device, Default::default());
+    }
+
+    pub fn add_drive_labelled(
+        &mut self,
+        path: impl Into<String>,
+        device: Arc<dyn BlockDevice>,
+        labels: crate::placement::domain::FailureDomain,
+    ) {
+        self.drives.push(DriveRef { path: path.into(), device, labels });
     }
 
     pub fn drives(&self) -> &[DriveRef] {

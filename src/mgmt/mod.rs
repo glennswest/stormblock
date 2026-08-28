@@ -156,6 +156,9 @@ pub struct AppState {
     pub moves: tokio::sync::RwLock<HashMap<Uuid, crate::volume::relocate::VolumeMove>>,
     /// Where persisted management state lives, when there is anywhere.
     pub data_dir: Option<std::path::PathBuf>,
+    /// Pallet name → drives it should be on (#56). Persisted as
+    /// `<data_dir>/pallet_mirrors.json`; the drives carry no record of it.
+    pub pallet_mirrors: tokio::sync::RwLock<HashMap<String, u8>>,
     /// Latest pool-pressure sample, kept current by the watcher (#18).
     pub pool_pressure: Option<std::sync::Arc<tokio::sync::RwLock<Option<crate::volume::pressure::PressureStatus>>>>,
     pub config: StormBlockConfig,
@@ -223,6 +226,10 @@ impl AppState {
                 None => HashMap::new(),
             }),
             data_dir: config.management.data_dir.as_ref().map(std::path::PathBuf::from),
+            pallet_mirrors: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
+                Some(dir) => api::pallets::load_mirrors(std::path::Path::new(dir)),
+                None => HashMap::new(),
+            }),
             serve: std::sync::OnceLock::new(),
             pool_pressure: None,
             config,

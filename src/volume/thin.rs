@@ -1585,7 +1585,7 @@ impl ThinVolumeHandle {
             };
             // Data legs on missing/failed slabs: rewrite onto fresh ones.
             let mut moves: HashMap<Leg, Leg> = HashMap::new();
-            for i in 0..width {
+            for (i, member) in members.iter().enumerate() {
                 let vext = stripe * width as u64 + i as u64;
                 let loc = { let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() };
                 let Some(loc) = loc else { continue };
@@ -1607,7 +1607,7 @@ impl ThinVolumeHandle {
                         }
                     }
                 };
-                if let Err(e) = self.write_leg(new, 0, &members[i]).await {
+                if let Err(e) = self.write_leg(new, 0, member).await {
                     self.give_back(&[new]).await;
                     report.errors.push(format!("stripe {stripe} member {i}: {e}"));
                     continue;

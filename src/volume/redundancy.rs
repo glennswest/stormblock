@@ -14,21 +14,16 @@ use serde::{Deserialize, Serialize};
 use crate::placement::domain::{DEFAULT_RUNG, RUNGS};
 
 /// How a volume is protected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Redundancy {
     /// One copy. What every volume was before this existed.
+    #[default]
     None,
     /// `copies` full copies of every extent, each on its own domain.
     Mirror { copies: u8 },
     /// Stripes of `data` extents protected by `parity` parity legs
     /// (1 = RAID 5, 2 = RAID 6), every member on its own domain.
     Parity { data: u8, parity: u8 },
-}
-
-impl Default for Redundancy {
-    fn default() -> Self {
-        Redundancy::None
-    }
 }
 
 impl Redundancy {

@@ -722,3 +722,70 @@ async fn firmware_reads_what_the_engine_wrote() {
         fw::Error::DigestMismatch
     );
 }
+
+/// #56: a pallet published with `copies: 2` is the same pallet on two drives,
+/// each leg a complete candidate; losing one drive degrades the group, and a
+/// resync onto a replacement fills it back in — at priority 0 until it has
+/// verified.
+#[tokio::test]
+async fn a_mirrored_pallet_is_one_pallet_on_two_drives_and_resyncs() {
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0", "disk1", "disk2"]).await;
+
+    let mut spec = boot_spec("boot", b"kernel-bytes", b"initramfs-bytes");
+    spec.copies = 2;
+    spec.activate = true;
+    let primary = mgr.publish(spec).await.expect("publish mirrored");
+
+    let legs = mgr.legs_of("boot", primary.version).await;
+    assert_eq!(legs.len(), 2, "two legs");
+    assert_ne!(legs[0].drive_index, legs[1].drive_index, "on two different drives");
+    assert_ne!(legs[0].id, legs[1].id, "each leg is its own partition");
+    for l in &legs {
+        assert!(l.attributes.is_candidate(), "each leg is a candidate on its own");
+        assert_eq!(l.attributes.priority, primary.attributes.priority, "same attributes");
+        assert!(mgr.verify(l.id).await.unwrap().ok, "each leg verifies alone");
+    }
+
+    // Without a policy for the name, the group is still reported: it has two legs.
+    let status = mgr.status(Some(PalletKind::Boot)).await;
+    assert_eq!(status.mirrors.len(), 1);
+    assert_eq!(status.mirrors[0].legs.len(), 2);
+    assert!(!status.mirrors[0].degraded, "no policy says it wants more than it has");
+
+    // A node that says "boot lives on two drives", and then loses one.
+    let survivor = legs[0].drive_index;
+    let lost = legs[1].drive_index;
+    let mut store = PalletStore::default();
+    for (i, n) in ["disk0", "disk1", "disk2"].iter().enumerate() {
+        if i != lost {
+            store.add_drive(*n, drive(&dir, n).await);
+        }
+    }
+    let mut mirrors = std::collections::HashMap::new();
+    mirrors.insert("boot".to_string(), 2u8);
+    let mgr = PalletManager::with_mirrors(store, mirrors);
+    let _ = survivor;
+
+    let status = mgr.status(Some(PalletKind::Boot)).await;
+    assert_eq!(status.mirrors.len(), 1);
+    assert!(status.mirrors[0].degraded, "one leg of two");
+    assert_eq!(status.mirrors[0].legs.len(), 1);
+    assert!(status.active.is_some(), "still boots from the surviving leg");
+
+    let report = mgr.resync().await;
+    assert_eq!(report.legs_added.len(), 1, "{report:?}");
+    assert!(report.still_degraded.is_empty(), "{report:?}");
+    let legs = mgr.legs_of("boot", primary.version).await;
+    assert_eq!(legs.len(), 2);
+    assert_ne!(legs[0].drive_index, legs[1].drive_index);
+    let added = &report.legs_added[0];
+    assert!(added.attributes.is_candidate(), "the rebuilt leg is a candidate once verified");
+    assert_eq!(added.attributes.priority, legs.iter().find(|l| l.id != added.id).unwrap().attributes.priority);
+    assert!(mgr.verify(added.id).await.unwrap().ok);
+    assert!(!mgr.status(Some(PalletKind::Boot)).await.mirrors[0].degraded);
+
+    // Nothing more to do: a second resync is a no-op.
+    let again = mgr.resync().await;
+    assert!(again.legs_added.is_empty());
+}

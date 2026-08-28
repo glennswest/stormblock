@@ -698,8 +698,11 @@ impl GlobalExtentMap {
     ) -> Self {
         let mut gem = GlobalExtentMap::new();
         // (volume, vext) → [(generation, leg, ref_count)]
-        let mut seen: HashMap<(VolumeId, u64), Vec<(u64, Leg, u32)>> = HashMap::new();
-        let mut parity: HashMap<(VolumeId, u64), Vec<(u8, Leg, u32, u64)>> = HashMap::new();
+        type Seen = HashMap<(VolumeId, u64), Vec<(u64, Leg, u32)>>;
+        // (volume, stripe) → [(parity leg, leg, ref_count, generation)]
+        type SeenParity = HashMap<(VolumeId, u64), Vec<(u8, Leg, u32, u64)>>;
+        let mut seen: Seen = HashMap::new();
+        let mut parity: SeenParity = HashMap::new();
 
         for (_, slab) in slabs {
             let cid = slab.slab_id();
@@ -723,7 +726,7 @@ impl GlobalExtentMap {
         }
 
         for ((vol, vext), mut legs) in seen {
-            legs.sort_by(|a, b| b.0.cmp(&a.0));
+            legs.sort_by_key(|l| std::cmp::Reverse(l.0));
             let (gen, primary, ref_count) = legs[0];
             let mirrors = legs[1..]
                 .iter()

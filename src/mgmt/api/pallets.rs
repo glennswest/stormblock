@@ -30,13 +30,36 @@ use crate::pallet::{
 async fn store(state: &AppState) -> PalletStore {
     let mut s = PalletStore::default();
     for d in state.drives.read().await.iter() {
-        s.add_drive(d.path.clone(), d.device.clone());
+        s.add_drive_labelled(d.path.clone(), d.device.clone(), d.labels.clone());
     }
     s
 }
 
 async fn manager(state: &AppState) -> PalletManager {
-    PalletManager::new(store(state).await)
+    let mirrors = state.pallet_mirrors.read().await.clone();
+    PalletManager::with_mirrors(store(state).await, mirrors)
+}
+
+const MIRRORS_FILE: &str = "pallet_mirrors.json";
+
+/// The node's pallet mirror policy, from `<data_dir>/pallet_mirrors.json`.
+pub fn load_mirrors(dir: &std::path::Path) -> std::collections::HashMap<String, u8> {
+    match std::fs::read(dir.join(MIRRORS_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+async fn save_mirrors(state: &AppState) {
+    let Some(dir) = state.data_dir.as_ref() else { return };
+    let map = state.pallet_mirrors.read().await.clone();
+    let _ = std::fs::create_dir_all(dir);
+    let tmp = dir.join(format!("{MIRRORS_FILE}.tmp"));
+    if let Ok(bytes) = serde_json::to_vec_pretty(&map) {
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, dir.join(MIRRORS_FILE));
+        }
+    }
 }
 
 fn err(e: PalletError) -> Response {
@@ -169,10 +192,20 @@ async fn status(State(state): State<Arc<AppState>>, Query(q): Query<KindQuery>) 
         reason: String,
     }
     #[derive(Serialize)]
+    struct Mirror {
+        name: String,
+        kind: String,
+        version: u64,
+        copies_wanted: u8,
+        degraded: bool,
+        legs: Vec<PalletResponse>,
+    }
+    #[derive(Serialize)]
     struct StatusResponse {
         active: Option<PalletResponse>,
         available: Vec<PalletResponse>,
         failed: Vec<Failed>,
+        mirrors: Vec<Mirror>,
     }
 
     let s = manager(&state).await.status(q.parsed()).await;
@@ -187,7 +220,58 @@ async fn status(State(state): State<Arc<AppState>>, Query(q): Query<KindQuery>) 
                 reason: f.reason.clone(),
             })
             .collect(),
+        mirrors: s
+            .mirrors
+            .iter()
+            .map(|m| Mirror {
+                name: m.name.clone(),
+                kind: m.kind.to_string(),
+                version: m.version,
+                copies_wanted: m.copies_wanted,
+                degraded: m.degraded,
+                legs: m.legs.iter().map(PalletResponse::from).collect(),
+            })
+            .collect(),
     })
+    .into_response()
+}
+
+/// `GET /api/v1/pallets/mirrors` — the node's mirror policy, name → copies.
+async fn get_mirrors(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.pallet_mirrors.read().await.clone()).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MirrorRequest {
+    pub name: String,
+    /// Drives the pallet should be on. 1 (or 0) removes the policy.
+    pub copies: u8,
+}
+
+/// `PUT /api/v1/pallets/mirrors` — say how many drives a pallet name should
+/// be on. Takes effect at the next resync (or publish of that name).
+async fn set_mirror(State(state): State<Arc<AppState>>, Json(req): Json<MirrorRequest>) -> Response {
+    {
+        let mut m = state.pallet_mirrors.write().await;
+        if req.copies <= 1 {
+            m.remove(&req.name);
+        } else {
+            m.insert(req.name.clone(), req.copies);
+        }
+    }
+    save_mirrors(&state).await;
+    Json(state.pallet_mirrors.read().await.clone()).into_response()
+}
+
+/// `POST /api/v1/pallets/resync` — put every mirrored pallet on the drives
+/// it should be on; what a node does after a drive is replaced.
+async fn resync(State(state): State<Arc<AppState>>) -> Response {
+    let report = manager(&state).await.resync().await;
+    Json(serde_json::json!({
+        "legs_added": report.legs_added.iter().map(PalletResponse::from).collect::<Vec<_>>(),
+        "still_degraded": report.still_degraded,
+        "errors": report.errors,
+    }))
     .into_response()
 }
 
@@ -296,6 +380,10 @@ pub struct PublishRequest {
     /// beside a live system safe rather than careful.
     #[serde(default)]
     pub priority: Option<u8>,
+    /// Drives to put the pallet on (#56). More than one records a mirror
+    /// policy for this name, so a replaced drive is refilled by `resync`.
+    #[serde(default)]
+    pub copies: Option<u8>,
 }
 
 fn yes() -> bool {
@@ -370,6 +458,14 @@ async fn publish(State(state): State<Arc<AppState>>, Json(req): Json<PublishRequ
         spec.tries = t;
     }
     spec.priority = req.priority;
+    if let Some(c) = req.copies {
+        spec.copies = c.max(1);
+        if c > 1 {
+            state.pallet_mirrors.write().await.insert(spec.name.clone(), c);
+            save_mirrors(&state).await;
+        }
+    }
+    let mgr = manager(&state).await;
 
     match mgr.publish(spec).await {
         Ok(loc) => (axum::http::StatusCode::CREATED, Json(PalletResponse::from(&loc))).into_response(),
@@ -734,6 +830,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(list).post(publish))
         // Verbs before "/{id}": none of these are pallet ids.
         .route("/status", get(status))
+        .route("/mirrors", get(get_mirrors).put(set_mirror))
+        .route("/resync", post(resync))
         .route("/chain", get(chain))
         .route("/rollback", post(rollback))
         .route("/prune", post(prune))

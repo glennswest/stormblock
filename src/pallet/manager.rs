@@ -107,6 +107,23 @@ pub struct FailedPallet {
     pub reason: String,
 }
 
+/// One pallet as a set of legs: the same name and version on several drives.
+///
+/// The legs are independently valid pallets — firmware needs no notion of a
+/// mirror, its boot order is the failover — so a group is derived from what
+/// the drives hold, never recorded as a thing of its own (#56).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MirrorGroup {
+    pub name: String,
+    pub kind: PalletKind,
+    pub version: u64,
+    /// Drives the pallet should be on, from the node's mirror policy.
+    pub copies_wanted: u8,
+    pub legs: Vec<PalletLocation>,
+    /// Fewer readable legs than wanted.
+    pub degraded: bool,
+}
+
 /// What the node has: what is selected, what it could fall back to, and what
 /// it will not use.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -115,6 +132,17 @@ pub struct PalletStatus {
     pub active: Option<PalletLocation>,
     pub available: Vec<PalletLocation>,
     pub failed: Vec<FailedPallet>,
+    /// Pallets that are, or should be, on more than one drive.
+    #[serde(default)]
+    pub mirrors: Vec<MirrorGroup>,
+}
+
+/// What a pallet resync did.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PalletResyncReport {
+    pub legs_added: Vec<PalletLocation>,
+    pub still_degraded: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 // -------------------------------------------------------------------- specs
@@ -144,6 +172,12 @@ pub struct PublishSpec {
     pub priority: Option<u8>,
     /// Verify and make this the selected pallet in one step.
     pub activate: bool,
+    /// How many drives the pallet should be on — a pallet-level mirror (#56).
+    /// Each extra copy lands on a drive that does not already hold one, at
+    /// priority 0 until it verifies, then with the original's attributes.
+    /// Fewer drives than copies is not an error: the pallet is published and
+    /// reported degraded, and a later `resync` fills in the rest.
+    pub copies: u8,
 }
 
 impl PublishSpec {
@@ -162,6 +196,7 @@ impl PublishSpec {
             tries: DEFAULT_TRIES,
             priority: None,
             activate: false,
+            copies: 1,
         }
     }
 
@@ -231,6 +266,9 @@ pub struct ConvertReport {
 /// Owns pallet lifecycle over a set of drives.
 pub struct PalletManager {
     store: PalletStore,
+    /// Pallet name → drives it should be on (#56). Node policy, kept by the
+    /// caller; the drives themselves carry no record of it.
+    mirrors: std::collections::HashMap<String, u8>,
 }
 
 fn align_up(v: u64, a: u64) -> u64 {
@@ -239,7 +277,34 @@ fn align_up(v: u64, a: u64) -> u64 {
 
 impl PalletManager {
     pub fn new(store: PalletStore) -> Self {
-        PalletManager { store }
+        Self::with_mirrors(store, std::collections::HashMap::new())
+    }
+
+    /// A manager that knows how many drives each pallet name should be on.
+    pub fn with_mirrors(store: PalletStore, mirrors: std::collections::HashMap<String, u8>) -> Self {
+        let mut m = Self::new_bare(store);
+        m.mirrors = mirrors;
+        m
+    }
+
+    pub fn mirrors(&self) -> &std::collections::HashMap<String, u8> {
+        &self.mirrors
+    }
+
+    pub fn set_mirror(&mut self, name: &str, copies: u8) {
+        if copies <= 1 {
+            self.mirrors.remove(name);
+        } else {
+            self.mirrors.insert(name.to_string(), copies);
+        }
+    }
+
+    fn copies_wanted(&self, name: &str) -> u8 {
+        self.mirrors.get(name).copied().unwrap_or(1).max(1)
+    }
+
+    fn new_bare(store: PalletStore) -> Self {
+        PalletManager { store, mirrors: std::collections::HashMap::new() }
     }
 
     pub fn store(&self) -> &PalletStore {
@@ -319,7 +384,117 @@ impl PalletManager {
         }
         usable.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
         let active = usable.first().cloned();
-        PalletStatus { active, available: usable, failed }
+        let mirrors = self.mirror_groups(kind).await;
+        PalletStatus { active, available: usable, failed, mirrors }
+    }
+
+    /// Every (name, version) that is or should be on more than one drive.
+    pub async fn mirror_groups(&self, kind: Option<PalletKind>) -> Vec<MirrorGroup> {
+        let all = self.store.scan().await;
+        let mut groups: std::collections::BTreeMap<(String, u64), Vec<PalletLocation>> =
+            std::collections::BTreeMap::new();
+        for p in all {
+            if kind.is_some_and(|k| p.kind != k) {
+                continue;
+            }
+            groups.entry((p.name.clone(), p.version)).or_default().push(p);
+        }
+        let mut out = Vec::new();
+        for ((name, version), legs) in groups {
+            let wanted = self.copies_wanted(&name);
+            if wanted <= 1 && legs.len() <= 1 {
+                continue;
+            }
+            let readable = legs.iter().filter(|l| l.is_readable()).count();
+            let kind = legs[0].kind;
+            out.push(MirrorGroup {
+                name,
+                kind,
+                version,
+                copies_wanted: wanted,
+                degraded: readable < wanted as usize,
+                legs,
+            });
+        }
+        out
+    }
+
+    /// The readable legs of one pallet — its name and version on every drive.
+    pub async fn legs_of(&self, name: &str, version: u64) -> Vec<PalletLocation> {
+        self.store
+            .scan()
+            .await
+            .into_iter()
+            .filter(|p| p.name == name && p.version == version && p.is_readable())
+            .collect()
+    }
+
+    /// Put one more leg of a pallet on a drive that does not hold one.
+    ///
+    /// Drives are told apart by failure domain (their identity, under any
+    /// labels the caller gave them), so two legs never share a drive. The
+    /// copy lands at priority 0 and takes the source's attributes only once
+    /// it has verified — a half-copied leg is invisible to the boot ladder
+    /// rather than a candidate that fails (#56).
+    pub async fn add_leg(&self, id: Uuid) -> Result<PalletLocation> {
+        let src = self.store.find(id).await?;
+        let legs = self.legs_of(&src.name, src.version).await;
+        let taken: Vec<crate::placement::domain::FailureDomain> = legs
+            .iter()
+            .filter_map(|l| self.store.drive(l.drive_index).ok())
+            .map(|d| d.domain())
+            .collect();
+        let need = align_up(src.used_bytes.max(ALIGN_BYTES), ALIGN_BYTES);
+        let mut best: Option<(usize, u64)> = None;
+        for (i, d) in self.store.drives().iter().enumerate() {
+            let dom = d.domain();
+            if taken.iter().any(|t| t.same_at(&dom, crate::placement::domain::DEFAULT_RUNG)) {
+                continue;
+            }
+            let Ok(gpt) = Gpt::read(&d.device).await else { continue };
+            let free = gpt.largest_free_bytes();
+            if free < need {
+                continue;
+            }
+            if best.is_none_or(|(_, f)| free > f) {
+                best = Some((i, free));
+            }
+        }
+        let Some((dest, _)) = best else {
+            return Err(PalletError::NoSpace { need, largest_free: 0 });
+        };
+        self.copy_pallet(id, dest).await
+    }
+
+    /// Bring every mirrored pallet up to the drives it should be on.
+    pub async fn resync(&self) -> PalletResyncReport {
+        let mut report = PalletResyncReport::default();
+        for g in self.mirror_groups(None).await {
+            let mut legs: Vec<PalletLocation> = g.legs.iter().filter(|l| l.is_readable()).cloned().collect();
+            let Some(source) = legs.first().cloned() else {
+                report.still_degraded.push(format!("{} v{}: no readable leg", g.name, g.version));
+                continue;
+            };
+            while legs.len() < g.copies_wanted as usize {
+                match self.add_leg(source.id).await {
+                    Ok(loc) => {
+                        legs.push(loc.clone());
+                        report.legs_added.push(loc);
+                    }
+                    Err(e) => {
+                        report.errors.push(format!("{} v{}: {e}", g.name, g.version));
+                        break;
+                    }
+                }
+            }
+            if legs.len() < g.copies_wanted as usize {
+                report.still_degraded.push(format!(
+                    "{} v{}: {} of {} legs",
+                    g.name, g.version, legs.len(), g.copies_wanted
+                ));
+            }
+        }
+        report
     }
 
     /// The pallet a consumer of this kind would select.
@@ -424,6 +599,17 @@ impl PalletManager {
 
             if spec.activate {
                 self.activate(id).await?;
+            }
+            for n in 1..spec.copies {
+                if let Err(e) = self.add_leg(id).await {
+                    tracing::warn!(
+                        pallet = %spec.name, "leg {} of {} not placed — published degraded: {e}",
+                        n + 1, spec.copies
+                    );
+                    break;
+                }
+            }
+            if spec.activate || spec.copies > 1 {
                 return self.store.find(id).await;
             }
             return Ok(loc);
@@ -927,7 +1113,11 @@ impl PalletManager {
         } else {
             src.partition_name.clone()
         };
-        let slot = gpt.allocate(&part_name, PALLET_TYPE_GUID, want, src.attributes.to_u64())?;
+        // Invisible to the ladder until it has verified: a half-copied leg
+        // at the source's priority would burn a boot attempt to be found out.
+        let mut quiet = src.attributes;
+        quiet.priority = 0;
+        let slot = gpt.allocate(&part_name, PALLET_TYPE_GUID, want, quiet.to_u64())?;
         gpt.write(&dest.device).await?;
         let dest_view = gpt.view(&dest.device, slot)?;
 
@@ -960,6 +1150,11 @@ impl PalletManager {
                 "copy did not verify at the destination: {}",
                 report.reason.unwrap_or_else(|| "unknown".into())
             )));
+        }
+        // Verified: now it is a candidate on the same terms as the source.
+        let copy = self.store.find(new_id).await?;
+        if !copy.is_whole_drive() {
+            self.apply_attributes(&[(copy.drive_index, copy.entry_index, src.attributes)]).await?;
         }
         self.store.find(new_id).await
     }
