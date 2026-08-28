@@ -3,6 +3,63 @@
 ## [Unreleased]
 
 ### 2026-08-28
+- **feat:** Volume-level redundancy — RAID is a property of a volume, not
+  of a drive. `RedundancyPolicy` (`none`, `mirror:N`, `raid5:D+1`,
+  `raid6:D+2`, `@rung`) places every leg of an extent — and every member
+  and parity leg of a stripe — on a distinct failure domain, as a hard
+  boundary: creation is refused (409) when the node cannot satisfy it. A
+  node carries a mix on the same drives. Mirror writes go to every leg;
+  parity writes are read-modify-write under a per-stripe lock with
+  reconstruction from P (one loss) or P+Q (two). Clones inherit the
+  policy. A slab a write fails on joins the volume's persisted **failed
+  set** and is never read again until `resync` rebuilds what was on it.
+  `docs/redundancy.md`.
+- **feat:** `FailureDomain` (`placement/domain.rs`) — a `rung=value` chain
+  `site/…/rack/node/hba/shelf/bay/drive` (#72's vocabulary, #71's
+  input). Slabs carry one (device identity under the drive's labels);
+  `SlabRegistry::best_slab_for_tier_apart_from` is the domain-aware
+  allocation. Unknown domains constrain nothing; empty chains are treated
+  as shared.
+- **feat:** GEM legs — `ExtentLocation.mirrors`, `ParityGroup` per stripe
+  (with `data_width`), reverse index over every leg, `rewrite_legs` /
+  `add_leg_beside` / `drop_leg_everywhere` so a leg rebuilt for a golden
+  is rebuilt for every clone sharing it. `rebuild_from_slabs` recovers
+  legs (same extent, same generation) and parity slots (`PARITY_TAG`).
+- **feat:** Volume metadata **V4** — legs, parity groups, policy and failed
+  set persisted; V3 loads as unreplicated. Restore is record-first: the
+  slot table wins only where it is provably newer (a higher-generation
+  slot for the same extent), and `Slab::allocate_gen` now records the
+  copy-on-write generation so that comparison means something.
+- **feat:** `GET /api/v1/volumes/{id}/health`, `POST …/resync[?verify]`,
+  `PUT …/redundancy`; `redundancy`, `health`, `physical_bytes` on every
+  volume response; `redundancy` on `POST /api/v1/volumes` (with it,
+  `array_id` is optional), on `POST /api/v1/fstemplates`, on
+  `[[volumes]]` and on `--volume name:size:policy`.
+- **feat:** stormdrive integration surface (#70 items 1–2): `labels` and
+  `uuid` on `POST /api/v1/drives`, `PUT /api/v1/drives/{id}/labels`,
+  `GET /api/v1/drives/{id}/slabs`; `SlabRegistry::label_device` widens
+  every slab on the device. `domain` on slab responses and on
+  `POST /api/v1/slabs`.
+- **feat:** Pallet-level mirror (#56) — `copies` on publish places extra
+  legs on drives holding none; a copy lands at priority 0 and takes the
+  source's attributes once verified; `status` groups legs by name and
+  version (`copies_wanted`, `degraded`); `POST /api/v1/pallets/resync`
+  refills a lost leg; `PUT /api/v1/pallets/mirrors` records the policy in
+  `<data_dir>/pallet_mirrors.json`.
+- **fix:** `GlobalExtentMap::insert` / `remove` / `remove_volume` no longer
+  drop a reverse entry the volume does not own — a clone re-mapping an
+  extent it shared used to take the source's slot out of the index, so
+  evacuation could miss it.
+- **fix:** After a copy-on-write releases a shared slot, the owner's
+  recorded share count is synced from the slot table, so a source whose
+  last clone diverged writes in place again instead of copying for nobody.
+- **refactor:** `placement::migrate_extent` moves one *leg* (`migrate_leg`,
+  `migrate_parity_leg`); the destination is kept off the domains of the
+  extent's other legs; shared slots are followed by every map that names
+  them and freed outright.
+- **feat:** `volume/stripe.rs` — GF(2^8) parity arithmetic in the RAID-6
+  field the drive-level engine uses (asserted equal), with reconstruction
+  of one member from P or Q and two from P+Q.
 - **feat:** Array members carry their `uuid` and real `device_path` in
   `GET/POST /api/v1/arrays` responses (`RaidArray::member_details`) — the
   uuid is what member removal takes, so an orchestrator can now run the

@@ -409,6 +409,11 @@ would have to be right about all of them.
   are not its business.
 - **Selection spans drives.** The ladder is per kind across every drive, not per
   disk.
+- **A pallet can be on several drives at once** (#56): `copies` on publish
+  puts the same name and version on N drives, each leg a complete candidate.
+  The ladder sees N candidates with the same attributes and firmware's own
+  boot order is the failover; `status` groups them, `resync` refills a lost
+  one. A copy is at priority 0 until it has verified.
 
 ## 5. Two libraries, on purpose
 
@@ -709,7 +714,8 @@ Not done here:
 - **Volume-level sealed / read-only attach refusal** (#51 item 2) — a pallet
   member is read-only by attribute, but the engine's volume attach path does not
   yet refuse a writable attach of a sealed volume.
-- **Per-leg physical offsets** (#51 item 3) — so a read-only consumer can take
-  one good RAID leg and stop, instead of reconstructing.
+- **Per-leg physical offsets** (#51 item 3) — moot for a *pallet* mirror,
+  where each leg is a complete partition (see `docs/redundancy.md`, "Pallet-
+  level mirror"); still open for a read-only consumer of a parity *volume*.
 - Multi-extent (sparse) members: the reader handles them, the writer emits one
   extent per member.

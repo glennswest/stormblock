@@ -835,17 +835,42 @@ and for whole-device use, nothing more.
   replicates above; converting to or from parity (a restripe); drain over
   HTTP (#70 item 3) and the health inbound (#70 item 4).
 
-### Work plan
+### Work plan — DONE (v10.0.0)
 
-- [ ] `placement/domain.rs` + registry domain tracking + domain-aware best-slab
-- [ ] `volume/redundancy.rs`
-- [ ] GEM: legs, parity groups, reverse index, rebuild
-- [ ] metadata V4 (V3 shape kept, converted on load)
-- [ ] every consumer of a location frees/shares *all* legs
-- [ ] thin.rs: mirror + parity paths, failed set, health
-- [ ] VolumeManager: create options, inherit, persist/restore, resync, set policy
-- [ ] HTTP + template + config surface; drives `labels`/`uuid`, `/drives/{id}/slabs`
-- [ ] tests: mirror across two slabs, degrade, resync; parity 2+1 reconstruct;
-      clone COW keeps policy; insufficient domains refused; V3 → V4 load
-- [ ] docs/redundancy.md, CHANGELOG, README; build + test on dev
-- [ ] pallets: `copies` on publish, legs reported in status, resync (#56)
+- [x] `placement/domain.rs` + registry domain tracking + domain-aware best-slab
+- [x] `volume/redundancy.rs`
+- [x] GEM: legs, parity groups, reverse index, rebuild
+- [x] metadata V4 (V3 shape kept, converted on load)
+- [x] every consumer of a location frees/shares *all* legs
+- [x] thin.rs: mirror + parity paths, failed set, health
+- [x] VolumeManager: create options, inherit, persist/restore, resync, set policy
+- [x] HTTP + template + config surface; drives `labels`/`uuid`, `/drives/{id}/slabs`
+- [x] tests: mirror across two slabs, degrade, resync; parity 2+1 reconstruct;
+      clone COW keeps policy; insufficient domains refused; V3 → V4 load;
+      RAID-6 two-member loss; restart; set+resync
+- [x] docs/redundancy.md, CHANGELOG, README; build + test on dev
+- [x] pallets: `copies` on publish, legs reported in status, resync (#56)
+
+### Worth not re-deriving
+
+- **A removed slab has no domain, and an empty domain must constrain
+  nothing.** The first resync test failed with "no slab apart from 2
+  domains" because the *lost* slab's empty chain was in the exclusion set
+  and `same_at` treats unknown as shared. Right for a candidate (never
+  place on a slab you cannot tell apart), wrong for an exclusion.
+- **The reverse index has owners.** `insert` used to drop the reverse
+  entries of the old location unconditionally — so a clone COWing an
+  extent took the *source's* slot out of the index. Every removal now
+  checks ownership. This was pre-existing and would have made evacuation
+  miss shared slots.
+- **Restore precedence.** "Slot table wins" only worked by iteration order:
+  two slots for one extent (a COW's old and new) both had generation 1.
+  `allocate_gen` records the COW generation, and restore takes the record
+  unless the slot table is provably newer.
+- **Lock order.** Redundant writes take the extent/stripe shard *before* the
+  volume lock; `discard` therefore must not take the volume lock for a
+  redundant volume. Parity never takes the volume lock at all.
+- **`sync_refs` after `dec_ref`.** The GEM's `ref_count` on the *owner* is
+  otherwise never lowered when a clone diverges, so the owner COWs for
+  nobody forever; for parity that also meant the source's group never
+  went back to in-place RMW.
