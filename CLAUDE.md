@@ -874,3 +874,26 @@ and for whole-device use, nothing more.
   otherwise never lowered when a clone diverges, so the owner COWs for
   nobody forever; for parity that also meant the source's group never
   went back to in-place RMW.
+
+### Follow-on — the pieces left out of v10.0.0 (2026-08-28)
+
+- [ ] **Drain over HTTP** (#70 item 3): `POST /api/v1/drives/{id}/drain` → a
+      background task moving every leg off every slab on that device, one
+      extent at a time (locks per extent, so I/O keeps flowing), progress at
+      `GET …/drain`, terminal `empty` = safe to remove. Slabs being drained
+      (or quarantined) take no new allocations.
+- [ ] **Health inbound** (#70 item 4): `POST /api/v1/drives/{id}/health` with
+      a stormdrive report → quarantine the drive's slabs for placement and
+      put them in the failed set of every *redundant* volume with a leg
+      there (an unreplicated volume's only copy stays readable); `failed`
+      orders a drain.
+- [ ] **Rebalance by failure domain** (#71 item 3): fix legs that collide at
+      a rung (placed before labels existed) and even out allocation across
+      domains after a shelf is added.
+- [ ] **Topology as a chain** (#72 item 1 remainder): `[management].topology`
+      feeds the node rungs of every slab's domain and /v1 reports the chain.
+- [ ] **Dirty-stripe log** for the parity write hole: mark a stripe before
+      its read-modify-write, clear lazily, verify only the dirty stripes on
+      restart.
+- [ ] **Restripe**: change a policy to or from parity by copying into a new
+      placement and swapping the map; refused while exported.
