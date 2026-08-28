@@ -34,6 +34,9 @@ pub struct ArrayResponse {
 #[derive(Debug, Serialize)]
 pub struct MemberResponse {
     pub index: usize,
+    /// What `DELETE .../members/{member_id}` takes — without it an
+    /// orchestrator can add members but never surgically remove one.
+    pub uuid: Uuid,
     pub state: String,
     pub device_path: String,
 }
@@ -51,11 +54,12 @@ fn default_stripe_kb() -> u64 {
 }
 
 fn array_to_response(id: RaidArrayId, info: &ArrayInfo) -> ArrayResponse {
-    let members: Vec<MemberResponse> = info.array.member_states().iter().map(|(idx, state)| {
+    let members: Vec<MemberResponse> = info.array.member_details().into_iter().map(|(idx, uuid, state, path)| {
         MemberResponse {
-            index: *idx,
+            index: idx,
+            uuid,
             state: state.to_string(),
-            device_path: String::new(), // Drive paths aren't stored on members
+            device_path: path,
         }
     }).collect();
 

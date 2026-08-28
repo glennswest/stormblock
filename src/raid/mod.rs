@@ -574,6 +574,19 @@ impl RaidArray {
             .collect()
     }
 
+    /// Everything the management API needs per member: index, member uuid,
+    /// state, and the underlying device's path. The uuid is what
+    /// `remove_member` takes, so without it here an orchestrator could add
+    /// members but never surgically remove one (the leg-move sequence).
+    pub fn member_details(&self) -> Vec<(usize, Uuid, RaidMemberState, String)> {
+        let members = self.members.read().unwrap();
+        members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, m.member_uuid, m.state, m.device.id().path.clone()))
+            .collect()
+    }
+
     /// Access the journal (for testing/recovery).
     pub async fn journal_mut(&self) -> tokio::sync::MutexGuard<'_, WriteIntentJournal> {
         self.journal.lock().await
