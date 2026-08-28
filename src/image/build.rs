@@ -82,6 +82,11 @@ pub struct VolumeReport {
     /// The golden this volume was cloned from, when it is a clone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clone_of: Option<Uuid>,
+    /// Sealed: what clones are taken from (#77). Every golden is.
+    pub sealed: bool,
+    /// The filesystem UUID the volume carries, when the build could read one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fs_uuid: Option<Uuid>,
 }
 
 /// Builds an image from a spec.
@@ -502,10 +507,48 @@ impl ImageBuilder {
             source.write_into(&vol, slot_size as usize).await?;
             vol.flush().await?;
 
+            // A golden arrives sealed (#77): what the build lays down is what
+            // clones are taken from, and the first pod that wants one must
+            // not be the thing that makes it cloneable. The filesystem on it
+            // is read into the record here, so a clone can be stamped.
+            let fs = match crate::fs::ext4::read_layout(&vol).await {
+                Ok(l) => Some(crate::volume::FsInfo {
+                    kind: "ext4".into(),
+                    journal: l.has_journal,
+                    features: None,
+                    sixty_four_bit: l.sixty_four_bit,
+                    metadata_csum: l.metadata_csum,
+                    csum_seed: l.csum_seed,
+                    label: l.label.clone(),
+                    uuid: Some(l.uuid),
+                }),
+                Err(_) => None,
+            };
+            drop(vol);
+            mgr.seal_volume(golden_id, fs.clone())
+                .await
+                .map_err(|e| ImageError::Other(format!("seal golden '{golden_name}': {e}")))?;
+
             let clone_id = mgr
                 .create_snapshot(golden_id, &clone_name)
                 .await
                 .map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
+            // A clone is a filesystem of its own: two live filesystems must
+            // never claim one UUID, and the golden's is the one every clone
+            // would otherwise carry (#76).
+            if fs.is_some() {
+                let dev = mgr
+                    .get_volume(&clone_id)
+                    .ok_or_else(|| ImageError::Other("clone vanished after create".into()))?;
+                let fresh = Uuid::new_v4();
+                crate::fs::ext4::stamp_uuid(&dev, fresh, false)
+                    .await
+                    .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?;
+                drop(dev);
+                mgr.set_fs_uuid(clone_id, fresh)
+                    .await
+                    .map_err(|e| ImageError::Other(format!("record clone '{clone_name}': {e}")))?;
+            }
             pairs.push((golden_id, clone_id));
         }
 
@@ -529,6 +572,8 @@ impl ImageBuilder {
                     size_bytes: *size,
                     allocated_bytes: *allocated,
                     clone_of: clone_of.get(&id).map(|g| g.0),
+                    sealed: mgr.is_sealed(&id),
+                    fs_uuid: mgr.fs_info(&id).and_then(|f| f.uuid),
                 });
             }
         }

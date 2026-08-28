@@ -302,6 +302,8 @@ tier = "hot"
     let golden = &slab_part.volumes[0];
     let clone = &slab_part.volumes[1];
     assert_eq!(clone.clone_of, Some(golden.id));
+    assert!(golden.sealed, "a golden arrives sealed (#77)");
+    assert!(!clone.sealed, "the clone is what the node writes to");
     // The hole is not stored: 6 MiB of content, two 1 MiB slots of data.
     assert_eq!(golden.size_bytes, 6 * 1024 * 1024);
     assert_eq!(golden.allocated_bytes, 2 * 1024 * 1024, "holes were written");
@@ -327,6 +329,9 @@ tier = "hot"
         .await
         .unwrap();
     mgr.restore().await.expect("metadata restores from the slab itself");
+    assert!(mgr.is_sealed(&stormblock::volume::VolumeId(golden.id)), "sealed survives in the slab's own record");
+    assert!(!mgr.is_sealed(&stormblock::volume::VolumeId(clone.id)));
+    assert_eq!(mgr.parent(&stormblock::volume::VolumeId(clone.id)), Some(stormblock::volume::VolumeId(golden.id)), "lineage shipped");
 
     let restored = mgr.list_volumes().await;
     assert_eq!(restored.len(), 4, "{restored:#?}");

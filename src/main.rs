@@ -773,12 +773,15 @@ async fn main() -> anyhow::Result<()> {
                 .rsplit_once(':').map(|(_, p)| p).unwrap_or("9090");
             format!("{host}:{port}")
         };
-        let disc = Arc::new(mgmt::discovery::Discovery::new(
-            node_name,
-            mgmt_addr,
-            config.management.data_dir.as_ref().map(std::path::PathBuf::from),
-            std::time::Duration::from_secs(config.management.peer_stale_secs.max(1)),
-        ));
+        let disc = Arc::new(
+            mgmt::discovery::Discovery::new(
+                node_name,
+                mgmt_addr,
+                config.management.data_dir.as_ref().map(std::path::PathBuf::from),
+                std::time::Duration::from_secs(config.management.peer_stale_secs.max(1)),
+            )
+            .with_topology(config.management.topology.clone()),
+        );
         if let Some(s) = Arc::get_mut(&mut state) {
             s.discovery = Some(disc.clone());
         }

@@ -684,8 +684,8 @@ async fn nodes_view(state: &AppState, v1: &V1State) -> BTreeMap<String, NodeCapa
                     node: b.node_name,
                     total_bytes: b.total_bytes,
                     free_bytes: b.free_bytes,
-                    topology: BTreeMap::new(),
-                    topology_chain: String::new(),
+                    topology: b.topology,
+                    topology_chain: b.topology_chain,
                 },
             );
         }

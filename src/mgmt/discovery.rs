@@ -45,6 +45,13 @@ pub struct Beacon {
     pub free_bytes: u64,
     /// Engine version, so a mixed-version cluster is visible in the UI.
     pub engine_version: String,
+    /// The node's `[management].topology` labels, and the same as a
+    /// failure-domain chain (`site=…/rack=…/node=…`), so a peer can place
+    /// at a rung without asking (#72). Absent from older beacons.
+    #[serde(default)]
+    pub topology: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub topology_chain: String,
 }
 
 /// A peer we have heard from.
@@ -81,9 +88,26 @@ pub struct Discovery {
     identity_path: Option<PathBuf>,
     /// A peer unheard from for longer than this is treated as gone.
     stale_after: Duration,
+    /// This node's topology labels, announced in every beacon.
+    topology: std::collections::BTreeMap<String, String>,
 }
 
 impl Discovery {
+    /// Announce these labels (`[management].topology`) in every beacon.
+    pub fn with_topology(mut self, topology: std::collections::BTreeMap<String, String>) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    /// The chain form of this node's labels, with the node rung filled in.
+    pub fn topology_chain(&self) -> String {
+        crate::placement::domain::FailureDomain::from_labels(
+            self.topology.iter().map(|(k, v)| (k.clone(), v.clone())),
+        )
+        .with("node", &self.node_name)
+        .to_string()
+    }
+
     pub fn new(
         node_name: String,
         mgmt_addr: String,
@@ -110,6 +134,7 @@ impl Discovery {
             peers: RwLock::new(HashMap::new()),
             identity_path,
             stale_after,
+            topology: std::collections::BTreeMap::new(),
         }
     }
 
@@ -229,6 +254,8 @@ impl Discovery {
             total_bytes,
             free_bytes,
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            topology: self.topology.clone(),
+            topology_chain: self.topology_chain(),
         }
     }
 }
@@ -468,5 +495,31 @@ mod tests {
         let nodes = d.nodes().await;
         assert_eq!(nodes.len(), 1);
         assert!(nodes[0].stale, "but it stays visible, marked stale");
+    }
+
+    /// A beacon carries the node's topology as labels and as a chain, so a
+    /// peer can compare at a rung without a second request (#72).
+    #[tokio::test]
+    async fn beacon_carries_the_topology_chain() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("rack".to_string(), "r2".to_string());
+        labels.insert("site".to_string(), "hq".to_string());
+        let d = Discovery::new(
+            "n1".into(),
+            "127.0.0.1:9090".into(),
+            Some(dir.path().to_path_buf()),
+            Duration::from_secs(30),
+        )
+        .with_topology(labels.clone());
+        let b = d.beacon_now(10, 5).await;
+        assert_eq!(b.topology, labels);
+        assert_eq!(b.topology_chain, "site=hq/rack=r2/node=n1");
+        // An older beacon without the fields still parses.
+        let mut v = serde_json::to_value(&b).unwrap();
+        v.as_object_mut().unwrap().remove("topology");
+        v.as_object_mut().unwrap().remove("topology_chain");
+        let old: Beacon = serde_json::from_value(v).unwrap();
+        assert!(old.topology.is_empty() && old.topology_chain.is_empty());
     }
 }
