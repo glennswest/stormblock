@@ -159,6 +159,8 @@ pub struct AppState {
     /// Pallet name → drives it should be on (#56). Persisted as
     /// `<data_dir>/pallet_mirrors.json`; the drives carry no record of it.
     pub pallet_mirrors: tokio::sync::RwLock<HashMap<String, u8>>,
+    /// Drives being emptied so they can be pulled (#70 item 3).
+    pub drains: tokio::sync::RwLock<crate::drain::Drains>,
     /// Latest pool-pressure sample, kept current by the watcher (#18).
     pub pool_pressure: Option<std::sync::Arc<tokio::sync::RwLock<Option<crate::volume::pressure::PressureStatus>>>>,
     pub config: StormBlockConfig,
@@ -199,6 +201,17 @@ impl AppState {
         slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
         gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     ) -> Self {
+        // The node's own rungs sit under every slab's failure domain, so a
+        // policy that spreads at `rack` has something to compare (#72).
+        if !config.management.topology.is_empty() {
+            let chain = crate::placement::domain::FailureDomain::from_labels(
+                config.management.topology.iter().map(|(k, v)| (k.clone(), v.clone())),
+            );
+            match slab_registry.try_write() {
+                Ok(mut reg) => reg.set_node_labels(chain),
+                Err(_) => tracing::warn!("slab registry busy at startup; node topology labels not applied"),
+            }
+        }
         AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),
             arrays: tokio::sync::RwLock::new(HashMap::new()),
@@ -230,6 +243,7 @@ impl AppState {
                 Some(dir) => api::pallets::load_mirrors(std::path::Path::new(dir)),
                 None => HashMap::new(),
             }),
+            drains: tokio::sync::RwLock::new(crate::drain::Drains::default()),
             serve: std::sync::OnceLock::new(),
             pool_pressure: None,
             config,

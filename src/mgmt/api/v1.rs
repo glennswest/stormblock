@@ -221,6 +221,10 @@ pub struct NodeCapacity {
     pub free_bytes: u64,
     #[serde(default)]
     pub topology: BTreeMap<String, String>,
+    /// The same labels as a failure-domain chain, widest rung first
+    /// (`site=…/rack=…/node=…`) — what an orchestrator compares at a rung.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub topology_chain: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +455,11 @@ impl V1State {
                 node: node.to_string(),
                 total_bytes: free_bytes,
                 free_bytes,
+                topology_chain: crate::placement::domain::FailureDomain::from_labels(
+                    topology.iter().map(|(k, v)| (k.clone(), v.clone())),
+                )
+                .with("node", node)
+                .to_string(),
                 topology,
             },
         );
@@ -676,6 +685,7 @@ async fn nodes_view(state: &AppState, v1: &V1State) -> BTreeMap<String, NodeCapa
                     total_bytes: b.total_bytes,
                     free_bytes: b.free_bytes,
                     topology: BTreeMap::new(),
+                    topology_chain: String::new(),
                 },
             );
         }
@@ -690,6 +700,11 @@ async fn nodes_view(state: &AppState, v1: &V1State) -> BTreeMap<String, NodeCapa
                 node: v1.local_node.clone(),
                 total_bytes: total,
                 free_bytes: free,
+                topology_chain: crate::placement::domain::FailureDomain::from_labels(
+                    v1.local_topology.iter().map(|(k, v)| (k.clone(), v.clone())),
+                )
+                .with("node", &v1.local_node)
+                .to_string(),
                 topology: v1.local_topology.clone(),
             },
         );

@@ -13,6 +13,7 @@ pub mod redundancy;
 pub mod thin;
 pub mod snapshot;
 pub mod stripe;
+pub mod stripelog;
 #[cfg(feature = "stormfs-data")]
 pub mod versioned;
 pub mod gc;
@@ -33,6 +34,14 @@ pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
 pub use metadata::{MetadataStore, Retention};
 pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport};
 pub use redundancy::{Redundancy, RedundancyPolicy};
+
+/// What a restripe did.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RestripeReport {
+    pub extents_copied: usize,
+    pub slots_released: usize,
+    pub redundancy: String,
+}
 
 /// Everything a volume is created with beyond a name and a size.
 #[derive(Debug, Clone, Default)]
@@ -255,6 +264,7 @@ impl VolumeManager {
         }
         let vol = ThinVolume::new(name.to_string(), virtual_size, self.slot_size);
         let id = vol.id();
+        let parity = opts.redundancy.scheme.is_parity();
         let handle = Arc::new(ThinVolumeHandle::with_redundancy(
             vol,
             self.gem.clone(),
@@ -262,6 +272,9 @@ impl VolumeManager {
             opts.placement,
             opts.redundancy,
         ));
+        if let (Some(store), true) = (&self.metadata_store, parity) {
+            handle.use_stripe_log(store.dir());
+        }
         self.volumes.insert(id, handle);
         self.persist().await;
         Ok(id)
@@ -300,6 +313,123 @@ impl VolumeManager {
         let report = handle.resync(verify).await;
         self.persist().await;
         Ok(report)
+    }
+
+    /// Stop trusting a slab in every redundant volume that has a leg on it —
+    /// what a drive-health report from stormdrive turns into (#70 item 4).
+    /// An unreplicated volume's only copy is left alone: distrusting it
+    /// would make the data unreadable rather than safer. Returns the ids of
+    /// the volumes affected.
+    pub async fn distrust_slab(&mut self, slab: SlabId) -> Vec<VolumeId> {
+        let mut touched = Vec::new();
+        let gem = self.gem.read().await;
+        for (id, handle) in &self.volumes {
+            if handle.redundancy().is_none() {
+                continue;
+            }
+            let has_leg = gem
+                .get_volume_map(id)
+                .map(|m| m.all_legs().any(|l| l.slab_id == slab))
+                .unwrap_or(false);
+            if has_leg {
+                let mut set: std::collections::HashSet<SlabId> = handle.failed_slabs().into_iter().collect();
+                if set.insert(slab) {
+                    handle.set_failed_slabs(set);
+                    touched.push(*id);
+                }
+            }
+        }
+        drop(gem);
+        if !touched.is_empty() {
+            self.persist().await;
+        }
+        touched
+    }
+
+    /// Change a volume's policy to or from parity by rebuilding its
+    /// placement: every extent is copied into a scratch volume with the new
+    /// policy, the scratch map becomes the volume's, and the old slots are
+    /// released. Holds the volume's mapping lock throughout, so it is an
+    /// offline operation — the API refuses it while the volume is exported.
+    pub async fn restripe(&mut self, id: VolumeId, policy: RedundancyPolicy) -> Result<RestripeReport, VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        let needed = policy.scheme.width();
+        if needed > 1 {
+            let available = self.registry.read().await.distinct_domains_with_space(&policy.spread);
+            if available < needed {
+                return Err(VolumeError::InsufficientDomains { policy: policy.spelling(), needed, available });
+            }
+        }
+        let (name, size) = {
+            let v = handle.lock().await;
+            (v.name.clone(), v.virtual_size)
+        };
+        let scratch = ThinVolume::new(format!("{name}-restripe"), size, self.slot_size);
+        let scratch_id = scratch.id();
+        let dest = Arc::new(ThinVolumeHandle::with_redundancy(
+            scratch,
+            self.gem.clone(),
+            self.registry.clone(),
+            PlacementPolicy::default(),
+            policy.clone(),
+        ));
+
+        let extents: Vec<u64> = {
+            let gem = self.gem.read().await;
+            gem.volume_extents(&id).map(|it| it.map(|(v, _)| *v).collect()).unwrap_or_default()
+        };
+        let _hold = handle.lock().await;
+        let mut buf = vec![0u8; self.slot_size as usize];
+        let mut copied = 0usize;
+        for vext in &extents {
+            let off = vext * self.slot_size;
+            if let Err(e) = handle.read(off, &mut buf).await {
+                self.discard_scratch(scratch_id).await;
+                return Err(VolumeError::Drive(e));
+            }
+            if let Err(e) = dest.write(off, &buf).await {
+                self.discard_scratch(scratch_id).await;
+                return Err(VolumeError::Drive(e));
+            }
+            copied += 1;
+        }
+        if let Err(e) = dest.flush().await {
+            self.discard_scratch(scratch_id).await;
+            return Err(VolumeError::Drive(e));
+        }
+
+        // Swap: the volume takes the scratch placement; the old one goes.
+        let old = {
+            let mut gem = self.gem.write().await;
+            gem.rename_volume(scratch_id, id)
+        };
+        let mut released = 0usize;
+        if let Some(old) = old {
+            let mut reg = self.registry.write().await;
+            let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
+            for leg in old.all_legs() {
+                by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
+            }
+            for (slab_id, slots) in by_slab {
+                if let Some(slab) = reg.get_mut(&slab_id) {
+                    match slab.dec_ref_batch(&slots).await {
+                        Ok(o) => released += o.freed as usize,
+                        Err(e) => tracing::warn!(volume = %id, slab = %slab_id, "restripe could not release old slots: {e}"),
+                    }
+                }
+            }
+        }
+        handle.force_redundancy(policy.clone());
+        handle.set_failed_slabs(Vec::new());
+        drop(_hold);
+        self.persist().await;
+        Ok(RestripeReport { extents_copied: copied, slots_released: released, redundancy: policy.spelling() })
+    }
+
+    async fn discard_scratch(&self, scratch_id: VolumeId) {
+        let mut gem = self.gem.write().await;
+        let mut reg = self.registry.write().await;
+        let _ = snapshot::delete_snapshot(scratch_id, &mut gem, &mut reg).await;
     }
 
     /// Whether a volume's data is all there and all protected.
@@ -734,6 +864,7 @@ impl VolumeManager {
         };
 
         let mut restored = 0u32;
+        let mut dirty_to_verify: Vec<(VolumeId, Arc<ThinVolumeHandle>, Vec<u64>)> = Vec::new();
         for vrec in meta.volumes {
             // Legacy V1 records bind volumes to arrays; skip if that array
             // isn't attached. V2 slab-placed records restore regardless.
@@ -817,12 +948,28 @@ impl VolumeManager {
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
+            if let (Some(store), true) = (&self.metadata_store, vrec.redundancy.scheme.is_parity()) {
+                let dirty = handle.use_stripe_log(store.dir());
+                if !dirty.is_empty() {
+                    dirty_to_verify.push((vrec.id, handle.clone(), dirty));
+                }
+            }
             self.volumes.insert(vrec.id, handle);
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
         }
 
         *self.gem.write().await = rebuilt;
+
+        // Stripes a previous run left mid-write: their parity may be stale.
+        // Recompute those and only those.
+        for (id, handle, dirty) in dirty_to_verify {
+            let report = handle.verify_stripes(&dirty).await;
+            tracing::info!(
+                volume = %id, stripes = dirty.len(), verified = report.parity_verified,
+                errors = report.errors.len(), "dirty stripes verified after restart"
+            );
+        }
 
         tracing::info!("Restored {restored} volume(s) from metadata");
         Ok(())

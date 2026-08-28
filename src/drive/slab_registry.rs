@@ -35,6 +35,11 @@ pub struct SlabRegistry {
     /// Labels a drive was registered with (#70), by device path: every slab
     /// on that device — now and later — sits under them.
     device_labels: HashMap<String, FailureDomain>,
+    /// The node's own rungs (`[management].topology`), under every slab.
+    node_labels: FailureDomain,
+    /// Slabs that take no new allocations: being drained, or reported
+    /// failing by whoever watches the drives (#70).
+    quarantined: HashSet<SlabId>,
 }
 
 impl SlabRegistry {
@@ -46,13 +51,75 @@ impl SlabRegistry {
             in_flight: HashSet::new(),
             domains: HashMap::new(),
             device_labels: HashMap::new(),
+            node_labels: FailureDomain::new(),
+            quarantined: HashSet::new(),
         }
+    }
+
+    /// The chain a slab sits in: its device's identity, under the device's
+    /// labels, under the node's.
+    fn derive_domain(&self, slab: &Slab) -> FailureDomain {
+        let own = FailureDomain::from_device(slab.device().id());
+        let own = match self.device_labels.get(&slab.device().id().path) {
+            Some(outer) => own.merged_under(outer),
+            None => own,
+        };
+        if self.node_labels.is_empty() { own } else { own.merged_under(&self.node_labels) }
+    }
+
+    /// Set the node's rungs (`rack`, `room`, `site`, …) under every slab,
+    /// present and future. What `[management].topology` feeds (#72).
+    pub fn set_node_labels(&mut self, labels: FailureDomain) {
+        self.node_labels = labels;
+        let ids: Vec<SlabId> = self.slabs.keys().copied().collect();
+        for id in ids {
+            let d = self.derive_domain(&self.slabs[&id]);
+            self.domains.insert(id, d);
+        }
+    }
+
+    pub fn node_labels(&self) -> &FailureDomain {
+        &self.node_labels
+    }
+
+    /// Stop (or resume) handing out slots from a slab. Everything on it stays
+    /// readable and writable in place; only *new* placement avoids it.
+    pub fn set_quarantined(&mut self, id: SlabId, quarantined: bool) -> bool {
+        if !self.slabs.contains_key(&id) {
+            return false;
+        }
+        if quarantined {
+            self.quarantined.insert(id);
+        } else {
+            self.quarantined.remove(&id);
+        }
+        true
+    }
+
+    pub fn is_quarantined(&self, id: &SlabId) -> bool {
+        self.quarantined.contains(id)
+    }
+
+    pub fn quarantined(&self) -> Vec<SlabId> {
+        let mut v: Vec<SlabId> = self.quarantined.iter().copied().collect();
+        v.sort_by_key(|s| s.0);
+        v
+    }
+
+    /// Whether a slab can take a new slot: has room and is not quarantined.
+    fn allocatable(&self, id: &SlabId) -> Option<u64> {
+        if self.quarantined.contains(id) {
+            return None;
+        }
+        let free = self.slabs.get(id)?.free_slots();
+        if free > 0 { Some(free) } else { None }
     }
 
     /// Say where a device is — `shelf=…/bay=…` from stormdrive, `rack=…`
     /// from an operator — so every slab on it is placed by that. Slabs
     /// already on the device are relabelled; slabs added later inherit it.
     pub fn label_device(&mut self, device_path: &str, labels: FailureDomain) {
+        self.device_labels.insert(device_path.to_string(), labels);
         let ids: Vec<SlabId> = self
             .slabs
             .iter()
@@ -60,10 +127,9 @@ impl SlabRegistry {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            let own = FailureDomain::from_device(self.slabs[&id].device().id());
-            self.domains.insert(id, own.merged_under(&labels));
+            let d = self.derive_domain(&self.slabs[&id]);
+            self.domains.insert(id, d);
         }
-        self.device_labels.insert(device_path.to_string(), labels);
     }
 
     /// The labels a device was registered with, if any.
@@ -107,11 +173,7 @@ impl SlabRegistry {
     pub fn add(&mut self, slab: Slab) {
         let id = slab.slab_id();
         let tier = slab.tier();
-        let own = FailureDomain::from_device(slab.device().id());
-        let domain = match self.device_labels.get(&slab.device().id().path) {
-            Some(outer) => own.merged_under(outer),
-            None => own,
-        };
+        let domain = self.derive_domain(&slab);
         self.tier_index.entry(tier).or_default().push(id);
         self.domains.entry(id).or_insert(domain);
         self.slabs.insert(id, slab);
@@ -161,12 +223,8 @@ impl SlabRegistry {
             .get(&tier)?
             .iter()
             .filter_map(|id| {
-                let c = self.slabs.get(id)?;
-                if c.free_slots() == 0 || self.collides(id, taken, rung) {
-                    None
-                } else {
-                    Some((*id, c.free_slots()))
-                }
+                let free = self.allocatable(id)?;
+                if self.collides(id, taken, rung) { None } else { Some((*id, free)) }
             })
             .max_by_key(|(_, free)| *free)
             .map(|(id, _)| id)
@@ -176,8 +234,8 @@ impl SlabRegistry {
     /// any tier — what a create checks before promising a policy.
     pub fn distinct_domains_with_space(&self, rung: &str) -> usize {
         let mut seen: Vec<FailureDomain> = Vec::new();
-        for (id, slab) in &self.slabs {
-            if slab.free_slots() == 0 {
+        for id in self.slabs.keys() {
+            if self.allocatable(id).is_none() {
                 continue;
             }
             let d = self.domain_of(id);
@@ -192,6 +250,7 @@ impl SlabRegistry {
     pub fn remove(&mut self, id: &SlabId) -> Option<Slab> {
         if let Some(slab) = self.slabs.remove(id) {
             self.domains.remove(id);
+            self.quarantined.remove(id);
             let tier = slab.tier();
             if let Some(ids) = self.tier_index.get_mut(&tier) {
                 ids.retain(|cid| cid != id);
@@ -223,14 +282,7 @@ impl SlabRegistry {
         self.tier_index
             .get(&tier)?
             .iter()
-            .filter_map(|id| {
-                let c = self.slabs.get(id)?;
-                if c.free_slots() > 0 {
-                    Some((*id, c.free_slots()))
-                } else {
-                    None
-                }
-            })
+            .filter_map(|id| Some((*id, self.allocatable(id)?)))
             .max_by_key(|(_, free)| *free)
             .map(|(id, _)| id)
     }
@@ -244,10 +296,10 @@ impl SlabRegistry {
         }
         // Fallback: any slab with space
         self.slabs
-            .iter()
-            .filter(|(_, c)| c.free_slots() > 0)
-            .max_by_key(|(_, c)| c.free_slots())
-            .map(|(id, _)| *id)
+            .keys()
+            .filter_map(|id| Some((*id, self.allocatable(id)?)))
+            .max_by_key(|(_, free)| *free)
+            .map(|(id, _)| id)
     }
 
     /// Total number of registered slabs.

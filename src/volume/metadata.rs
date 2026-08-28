@@ -311,6 +311,10 @@ impl MetadataStore {
         Ok(MetadataStore { data_dir })
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// Serialize metadata into the binary envelope format.
     ///
     /// Public because the envelope — not the file — is the format. A slab

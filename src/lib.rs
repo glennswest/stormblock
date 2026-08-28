@@ -10,6 +10,7 @@ pub mod boot;
 #[cfg(feature = "iscsi")]
 pub mod boot_iscsi;
 pub mod migrate;
+pub mod drain;
 pub mod image;
 pub mod pallet;
 pub mod placement;

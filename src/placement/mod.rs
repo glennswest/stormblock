@@ -125,6 +125,11 @@ pub enum RebalanceStrategy {
     EvenDistribution,
     /// Move extents to their preferred tier.
     TierAffinity,
+    /// Spread by failure domain at a rung (#71): first separate legs of one
+    /// extent or stripe that share a domain (placed before the labels
+    /// existed), then even out allocation across the domains — what a node
+    /// does after a shelf is added.
+    ByFailureDomain { rung: String },
 }
 
 /// Result of a rebalance operation.
@@ -460,6 +465,9 @@ impl PlacementEngine {
                 if registry.collides(&id, keep_apart_from, DEFAULT_RUNG) {
                     return Err(PlacementError::DomainCollision(id));
                 }
+                if registry.is_quarantined(&id) {
+                    return Err(PlacementError::NoDestination);
+                }
                 id
             }
             None => {
@@ -613,7 +621,252 @@ impl PlacementEngine {
             RebalanceStrategy::TierAffinity => {
                 self.rebalance_tier_affinity(gem, registry, volume_policies, shutdown).await
             }
+            RebalanceStrategy::ByFailureDomain { rung } => {
+                self.rebalance_by_domain(gem, registry, &rung, shutdown).await
+            }
         }
+    }
+
+    /// Pass 1: legs of one extent (or members and parity of one stripe) that
+    /// collide at `rung` are separated. Pass 2: allocation is evened out
+    /// across the domains at `rung`.
+    async fn rebalance_by_domain(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        rung: &str,
+        shutdown: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<RebalanceResult, PlacementError> {
+        let mut moved = 0u64;
+        let mut skipped = 0u64;
+        let mut failed = 0u64;
+
+        // Pass 1 — collisions.
+        let mut work: Vec<(VolumeId, u64, Leg, bool)> = Vec::new();
+        for vol in gem.volume_ids() {
+            let Some(map) = gem.get_volume_map(&vol) else { continue };
+            for (vext, loc) in &map.extents {
+                if loc.mirrors.is_empty() {
+                    continue;
+                }
+                let mut seen: Vec<FailureDomain> = Vec::new();
+                for leg in loc.legs() {
+                    let d = registry.domain_of(&leg.slab_id);
+                    if !d.is_empty() && seen.iter().any(|t| t.same_at(&d, rung)) {
+                        work.push((vol, *vext, leg, false));
+                    } else {
+                        seen.push(d);
+                    }
+                }
+            }
+            for (stripe, g) in &map.parity {
+                let mut seen: Vec<FailureDomain> = Vec::new();
+                for vext in g.members(*stripe) {
+                    if let Some(l) = map.extents.get(&vext) {
+                        for leg in l.legs() {
+                            let d = registry.domain_of(&leg.slab_id);
+                            if !d.is_empty() && seen.iter().any(|t| t.same_at(&d, rung)) {
+                                work.push((vol, vext, leg, false));
+                            } else {
+                                seen.push(d);
+                            }
+                        }
+                    }
+                }
+                for leg in &g.legs {
+                    let d = registry.domain_of(&leg.slab_id);
+                    if !d.is_empty() && seen.iter().any(|t| t.same_at(&d, rung)) {
+                        work.push((vol, *stripe, *leg, true));
+                    } else {
+                        seen.push(d);
+                    }
+                }
+            }
+        }
+        for (vol, idx, leg, is_parity) in work {
+            if *shutdown.borrow() {
+                break;
+            }
+            // The domain the leg must leave and the ones it must stay off:
+            // everything else the extent or stripe already sits on.
+            let res = if is_parity {
+                self.migrate_parity_leg_at(gem, registry, vol, idx, leg.slab_id, rung).await
+            } else {
+                self.migrate_leg_at(gem, registry, vol, idx, leg.slab_id, rung).await
+            };
+            match res {
+                Ok(_) => moved += 1,
+                Err(PlacementError::NoDestination) | Err(PlacementError::SlabFull) => skipped += 1,
+                Err(_) => failed += 1,
+            }
+        }
+
+        // Pass 2 — even out across domains.
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            // Per domain key at the rung: (allocated, total, slabs).
+            let mut domains: Vec<(FailureDomain, u64, u64, Vec<SlabId>)> = Vec::new();
+            for (&id, slab) in registry.iter() {
+                let d = registry.domain_of(&id);
+                if d.is_empty() {
+                    continue;
+                }
+                match domains.iter_mut().find(|(k, _, _, _)| k.same_at(&d, rung)) {
+                    Some(e) => {
+                        e.1 += slab.allocated_slots();
+                        e.2 += slab.total_slots();
+                        e.3.push(id);
+                    }
+                    None => domains.push((d, slab.allocated_slots(), slab.total_slots(), vec![id])),
+                }
+            }
+            if domains.len() < 2 {
+                break;
+            }
+            let total_alloc: u64 = domains.iter().map(|d| d.1).sum();
+            let total_cap: u64 = domains.iter().map(|d| d.2).sum();
+            if total_cap == 0 {
+                break;
+            }
+            let avg = total_alloc * 1000 / total_cap;
+            let Some(over) = domains
+                .iter()
+                .filter(|d| d.2 > 0 && d.1 * 1000 / d.2 > avg + 50)
+                .max_by_key(|d| d.1 * 1000 / d.2)
+            else {
+                break;
+            };
+            let Some(under) = domains
+                .iter()
+                .filter(|d| d.2 > 0 && d.1 * 1000 / d.2 < avg)
+                .filter(|d| d.3.iter().any(|s| registry.get(s).map(|x| x.free_slots() > 0).unwrap_or(false)))
+                .min_by_key(|d| d.1 * 1000 / d.2)
+            else {
+                break;
+            };
+            // Any leg on any slab of the overloaded domain, that can go to
+            // the underloaded one without colliding with its extent's others.
+            let mut candidate: Option<(VolumeId, u64, SlabId, bool)> = None;
+            'find: for s in &over.3 {
+                for (vol, vext, _) in gem.slab_extents(*s) {
+                    candidate = Some((vol, vext, *s, false));
+                    break 'find;
+                }
+                for (vol, stripe, _) in gem.slab_parity(*s) {
+                    candidate = Some((vol, stripe, *s, true));
+                    break 'find;
+                }
+            }
+            let Some((vol, idx, from, is_parity)) = candidate else { break };
+            let dest = under
+                .3
+                .iter()
+                .copied()
+                .filter(|s| registry.get(s).map(|x| x.free_slots() > 0).unwrap_or(false))
+                .max_by_key(|s| registry.get(s).map(|x| x.free_slots()).unwrap_or(0));
+            let Some(dest) = dest else { break };
+            let res = if is_parity {
+                self.migrate_parity_leg(gem, registry, vol, idx, from, Some(dest)).await
+            } else {
+                self.migrate_leg(gem, registry, vol, idx, from, Some(dest)).await
+            };
+            match res {
+                Ok(_) => moved += 1,
+                Err(PlacementError::DomainCollision(_)) | Err(PlacementError::SlabFull) => {
+                    skipped += 1;
+                    break;
+                }
+                Err(_) => {
+                    failed += 1;
+                    break;
+                }
+            }
+        }
+
+        Ok(RebalanceResult { moved, skipped, failed })
+    }
+
+    /// `migrate_leg` with the domain comparison at `rung` rather than the
+    /// default, so a collision at `shelf` is resolved by a slab on another
+    /// shelf.
+    async fn migrate_leg_at(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        from_slab: SlabId,
+        rung: &str,
+    ) -> Result<MigrateExtentResult, PlacementError> {
+        let loc = gem.lookup(volume_id, vext_idx)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?
+            .clone();
+        let old = loc.leg_on(from_slab)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?;
+        let others: Vec<FailureDomain> = loc
+            .legs()
+            .filter(|l| *l != old)
+            .map(|l| registry.domain_of(&l.slab_id))
+            .collect();
+        let tier = registry.get(&from_slab).ok_or(PlacementError::SlabNotFound(from_slab))?.tier();
+        let dest = self.best_slab_apart_at(registry, tier, from_slab, &others, rung)?;
+        let new = self
+            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, Some(dest))
+            .await?;
+        Ok(MigrateExtentResult { volume_id, vext_idx, source_slab: old.slab_id, dest_slab: new.slab_id, dest_slot: new.slot_idx })
+    }
+
+    async fn migrate_parity_leg_at(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        stripe: u64,
+        from_slab: SlabId,
+        rung: &str,
+    ) -> Result<MigrateExtentResult, PlacementError> {
+        let g = gem.lookup_parity(volume_id, stripe)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx: stripe })?
+            .clone();
+        let old = g.legs.iter().copied().find(|l| l.slab_id == from_slab)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx: stripe })?;
+        let mut others: Vec<FailureDomain> = g.legs.iter().filter(|l| **l != old).map(|l| registry.domain_of(&l.slab_id)).collect();
+        for vext in g.members(stripe) {
+            if let Some(l) = gem.lookup(volume_id, vext) {
+                others.extend(l.legs().map(|leg| registry.domain_of(&leg.slab_id)));
+            }
+        }
+        let tier = registry.get(&from_slab).ok_or(PlacementError::SlabNotFound(from_slab))?.tier();
+        let dest = self.best_slab_apart_at(registry, tier, from_slab, &others, rung)?;
+        let new = self
+            .move_slot(gem, registry, volume_id, parity_vext_for(&g, old), old, g.ref_count, g.generation, &others, Some(dest))
+            .await?;
+        Ok(MigrateExtentResult { volume_id, vext_idx: stripe, source_slab: old.slab_id, dest_slab: new.slab_id, dest_slot: new.slot_idx })
+    }
+
+    fn best_slab_apart_at(
+        &self,
+        registry: &SlabRegistry,
+        tier: StorageTier,
+        exclude: SlabId,
+        keep_apart_from: &[FailureDomain],
+        rung: &str,
+    ) -> Result<SlabId, PlacementError> {
+        let pick = |ids: Vec<SlabId>| -> Option<SlabId> {
+            ids.into_iter()
+                .filter(|id| *id != exclude && !registry.is_quarantined(id))
+                .filter(|id| !registry.collides(id, keep_apart_from, rung))
+                .filter_map(|id| registry.get(&id).map(|s| (id, s.free_slots())))
+                .filter(|(_, f)| *f > 0)
+                .max_by_key(|(_, f)| *f)
+                .map(|(id, _)| id)
+        };
+        if let Some(id) = pick(registry.by_tier(tier).to_vec()) {
+            return Ok(id);
+        }
+        pick(registry.iter().map(|(id, _)| *id).collect()).ok_or(PlacementError::NoDestination)
     }
 
     /// Even distribution: move extents from slabs with usage above average to slabs below average.
@@ -768,7 +1021,7 @@ impl PlacementEngine {
         // First try same tier
         let candidates: Vec<(SlabId, u64)> = registry.by_tier(tier)
             .iter()
-            .filter(|&&id| id != exclude)
+            .filter(|&&id| id != exclude && !registry.is_quarantined(&id))
             .filter(|&id| !registry.collides(id, keep_apart_from, DEFAULT_RUNG))
             .filter_map(|id| {
                 registry.get(id).and_then(|s| {
@@ -784,6 +1037,7 @@ impl PlacementEngine {
         // Fallback: any tier with space, excluding source
         for (id, slab) in registry.iter() {
             if *id != exclude
+                && !registry.is_quarantined(id)
                 && slab.free_slots() > 0
                 && !registry.collides(id, keep_apart_from, DEFAULT_RUNG)
             {

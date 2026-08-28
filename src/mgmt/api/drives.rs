@@ -306,6 +306,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/smart", get(get_drive_smart))
         .route("/{id}/slabs", get(drive_slabs))
         .route("/{id}/labels", axum::routing::put(set_labels))
+        .route("/{id}/drain", get(drain_status).post(start_drain).delete(cancel_drain))
+        .route("/{id}/health", axum::routing::post(drive_health))
         .with_state(state)
 }
 
@@ -373,4 +375,174 @@ async fn set_labels(
     };
     state.slab_registry.write().await.label_device(&path, labels.clone());
     Json(serde_json::json!({ "path": path, "labels": labels.to_string() })).into_response()
+}
+
+/// Resolve a drive by uuid or path to `(device, path)`.
+async fn find_drive(state: &AppState, id: &str) -> Option<(Arc<dyn crate::drive::BlockDevice>, String)> {
+    let drives = state.drives.read().await;
+    drives
+        .iter()
+        .find(|d| d.path == id || d.device.id().uuid.to_string() == id)
+        .map(|d| (d.device.clone(), d.path.clone()))
+}
+
+/// The slabs on a device, by identity.
+async fn slabs_on_device(state: &AppState, dev: &Arc<dyn crate::drive::BlockDevice>, path: &str) -> Vec<crate::drive::slab::SlabId> {
+    let registry = state.slab_registry.read().await;
+    registry
+        .iter()
+        .filter(|(_, slab)| Arc::ptr_eq(slab.device(), dev) || slab.device().id().path == path)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// `POST /api/v1/drives/{id}/drain` — empty every slab on the drive so it
+/// can be removed (#70 item 3). Async: poll `GET …/drain`. Terminal state
+/// `empty` means nothing of any volume is left on it.
+async fn start_drain(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Some((dev, path)) = find_drive(&state, &id).await else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+    if state.drains.read().await.is_running(&path).await {
+        return ApiError::conflict(format!("{path} is already being drained"));
+    }
+    let slabs = slabs_on_device(&state, &dev, &path).await;
+    if slabs.is_empty() {
+        return Json(serde_json::json!({
+            "drive": path, "state": "empty", "slabs": [], "moved": 0, "failed": 0, "remaining": 0,
+            "note": "no slab on this drive; nothing to move",
+        }))
+        .into_response();
+    }
+    {
+        let vm = state.volume_manager.lock().await;
+        if let Some(meta) = vm.metadata_slab() {
+            if slabs.contains(&meta) {
+                return ApiError::conflict(format!(
+                    "{path} carries slab {} which holds the volume metadata; a drain would leave the \
+                     record with no home. Move the metadata first",
+                    meta.0
+                ));
+            }
+        }
+    }
+    let status = state.drains.write().await.start(
+        path.clone(),
+        slabs,
+        state.gem.clone(),
+        state.slab_registry.clone(),
+        state.volume_manager.clone(),
+    );
+    let snapshot = status.read().await.clone();
+    (axum::http::StatusCode::ACCEPTED, Json(snapshot)).into_response()
+}
+
+/// `GET /api/v1/drives/{id}/drain` — progress of the drain, if one was asked for.
+async fn drain_status(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Some((_, path)) = find_drive(&state, &id).await else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+    match state.drains.read().await.status(&path).await {
+        Some(s) => Json(s).into_response(),
+        None => ApiError::not_found(format!("no drain has been asked for on {path}")),
+    }
+}
+
+/// `DELETE /api/v1/drives/{id}/drain` — stop a running drain. What has moved
+/// stays moved; the slabs take allocations again.
+async fn cancel_drain(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Some((_, path)) = find_drive(&state, &id).await else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+    let drains = state.drains.read().await;
+    match drains.get(&path) {
+        Some(d) => {
+            d.cancel();
+            Json(serde_json::json!({ "drive": path, "cancelled": true })).into_response()
+        }
+        None => ApiError::not_found(format!("no drain has been asked for on {path}")),
+    }
+}
+
+/// What a drive watcher (stormdrive) tells us about a drive (#70 item 4).
+#[derive(Debug, Deserialize)]
+pub struct DriveHealthReport {
+    /// `healthy`, `degraded`, `failing`, `failed`, `missing`.
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Order a drain as well. Implied by `failed` and `missing`.
+    #[serde(default)]
+    pub drain: bool,
+}
+
+/// `POST /api/v1/drives/{id}/health` — stop trusting a drive before anyone
+/// orders it out: its slabs take no new allocations, and every redundant
+/// volume with a leg on them stops reading and writing that leg (the
+/// unreplicated ones keep their only copy). `healthy` lifts the quarantine;
+/// the volumes' failed sets clear on their next resync. `failed`/`missing`
+/// (or `drain: true`) also starts a drain.
+async fn drive_health(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(report): Json<DriveHealthReport>,
+) -> Response {
+    let Some((dev, path)) = find_drive(&state, &id).await else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+    let slabs = slabs_on_device(&state, &dev, &path).await;
+    let state_lc = report.state.to_ascii_lowercase();
+    let distrust = matches!(state_lc.as_str(), "degraded" | "failing" | "failed" | "missing");
+    let healthy = state_lc == "healthy";
+    if !distrust && !healthy {
+        return ApiError::bad_request(format!(
+            "unknown drive state '{}' (healthy, degraded, failing, failed, missing)", report.state
+        ));
+    }
+    tracing::warn!(
+        drive = %path, state = %state_lc, reason = report.reason.as_deref().unwrap_or("-"),
+        "drive health reported"
+    );
+    let mut volumes_touched = Vec::new();
+    {
+        let mut reg = state.slab_registry.write().await;
+        for s in &slabs {
+            reg.set_quarantined(*s, distrust);
+        }
+    }
+    if distrust {
+        let mut vm = state.volume_manager.lock().await;
+        for s in &slabs {
+            volumes_touched.extend(vm.distrust_slab(*s).await);
+        }
+    }
+    let mut drain_started = false;
+    if distrust && (report.drain || matches!(state_lc.as_str(), "failed" | "missing")) && !slabs.is_empty() {
+        let running = state.drains.read().await.is_running(&path).await;
+        let holds_meta = {
+            let vm = state.volume_manager.lock().await;
+            vm.metadata_slab().is_some_and(|m| slabs.contains(&m))
+        };
+        if !running && !holds_meta {
+            state.drains.write().await.start(
+                path.clone(),
+                slabs.clone(),
+                state.gem.clone(),
+                state.slab_registry.clone(),
+                state.volume_manager.clone(),
+            );
+            drain_started = true;
+        }
+    }
+    volumes_touched.sort_by_key(|v| v.0);
+    volumes_touched.dedup();
+    Json(serde_json::json!({
+        "drive": path,
+        "state": state_lc,
+        "slabs": slabs.iter().map(|s| s.0.to_string()).collect::<Vec<_>>(),
+        "quarantined": distrust,
+        "volumes_distrusting": volumes_touched.iter().map(|v| v.0.to_string()).collect::<Vec<_>>(),
+        "drain_started": drain_started,
+    }))
+    .into_response()
 }

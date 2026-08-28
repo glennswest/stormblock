@@ -560,6 +560,42 @@ impl GlobalExtentMap {
         Some(loc)
     }
 
+    /// Give one volume's whole map to another id — a restripe built the new
+    /// placement under a scratch id and the real volume now takes it. The
+    /// reverse entries follow. Whatever `to` had is returned to the caller
+    /// to release.
+    pub fn rename_volume(&mut self, from: VolumeId, to: VolumeId) -> Option<VolumeExtentMap> {
+        let map = self.volumes.remove(&from)?;
+        let old = self.volumes.remove(&to);
+        if let Some(old) = &old {
+            for leg in old.all_legs() {
+                let key = (leg.slab_id, leg.slot_idx);
+                if self.reverse.get(&key).map(|(v, _)| *v) == Some(to) {
+                    self.reverse.remove(&key);
+                }
+            }
+        }
+        for (vext, loc) in &map.extents {
+            for leg in loc.legs() {
+                let key = (leg.slab_id, leg.slot_idx);
+                if self.reverse.get(&key) == Some(&(from, *vext)) || !self.reverse.contains_key(&key) {
+                    self.reverse.insert(key, (to, *vext));
+                }
+            }
+        }
+        for (stripe, g) in &map.parity {
+            for (i, leg) in g.legs.iter().enumerate() {
+                let key = (leg.slab_id, leg.slot_idx);
+                let tagged = parity_vext(i as u8, *stripe);
+                if self.reverse.get(&key) == Some(&(from, tagged)) || !self.reverse.contains_key(&key) {
+                    self.reverse.insert(key, (to, tagged));
+                }
+            }
+        }
+        self.volumes.insert(to, map);
+        old
+    }
+
     /// Remove all extents for a volume. Returns the removed extent map.
     pub fn remove_volume(&mut self, volume_id: VolumeId) -> Option<VolumeExtentMap> {
         let vmap = self.volumes.remove(&volume_id)?;

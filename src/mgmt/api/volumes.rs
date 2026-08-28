@@ -299,6 +299,41 @@ async fn set_redundancy(
     }
 }
 
+/// `POST /api/v1/volumes/{id}/restripe {"redundancy": "raid5:4+1"}` — change
+/// the policy to or from parity by rebuilding the placement. Offline: refused
+/// while the volume is exported or attached.
+async fn restripe_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RedundancyRequest>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let policy = match crate::volume::RedundancyPolicy::parse(&req.redundancy) {
+        Ok(p) => p,
+        Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
+    };
+    let exported = state.exports.read().await.iter().any(|e| e.volume_id == uuid)
+        || state.ublk_exports.lock().await.is_exported(&uuid.to_string());
+    if exported {
+        return ApiError::conflict(format!(
+            "volume {uuid} is exported; a restripe rebuilds its placement offline — detach it first"
+        ));
+    }
+    let mut vm = state.volume_manager.lock().await;
+    match vm.restripe(VolumeId(uuid), policy).await {
+        Ok(report) => {
+            let health = vm.health(&VolumeId(uuid)).await;
+            Json(serde_json::json!({ "id": uuid, "report": report, "health": health })).into_response()
+        }
+        Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
+        Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => ApiError::conflict(e.to_string()),
+        Err(e) => ApiError::internal(e.to_string()),
+    }
+}
+
 /// `POST /api/v1/volumes/{id}/resync[?verify=true]` — rebuild missing legs,
 /// apply a changed policy, clear the failed set.
 async fn resync_volume(
@@ -665,6 +700,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/health", get(volume_health))
         .route("/{id}/redundancy", axum::routing::put(set_redundancy))
         .route("/{id}/resync", axum::routing::post(resync_volume))
+        .route("/{id}/restripe", axum::routing::post(restripe_volume))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/snapshots", axum::routing::post(create_snapshot))

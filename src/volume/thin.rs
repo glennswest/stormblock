@@ -295,6 +295,8 @@ pub struct ThinVolumeHandle {
     /// Per-extent (mirror) or per-stripe (parity) locks, sharded. Only a
     /// redundant volume takes these on the write path.
     shards: Vec<tokio::sync::Mutex<()>>,
+    /// Stripes with a read-modify-write since the last flush (parity only).
+    stripe_log: std::sync::RwLock<super::stripelog::StripeLog>,
 }
 
 impl ThinVolumeHandle {
@@ -330,7 +332,68 @@ impl ThinVolumeHandle {
             redundancy: std::sync::RwLock::new(redundancy),
             failed: std::sync::RwLock::new(HashSet::new()),
             shards: (0..SHARDS).map(|_| tokio::sync::Mutex::new(())).collect(),
+            stripe_log: std::sync::RwLock::new(super::stripelog::StripeLog::none()),
         }
+    }
+
+    /// Keep this volume's dirty-stripe log under `dir`. Returns what a
+    /// previous run left dirty, which the caller should verify.
+    pub fn use_stripe_log(&self, dir: &std::path::Path) -> Vec<u64> {
+        let log = super::stripelog::StripeLog::at(dir, self.id.0);
+        let left = log.load();
+        *self.stripe_log.write().unwrap() = log;
+        left
+    }
+
+    pub fn dirty_stripes(&self) -> Vec<u64> {
+        self.stripe_log.read().unwrap().dirty()
+    }
+
+    /// Set the policy without the transition check — for a restripe that
+    /// has already rebuilt the placement to match.
+    pub fn force_redundancy(&self, policy: RedundancyPolicy) {
+        *self.redundancy.write().unwrap() = policy;
+    }
+
+    /// Recompute and rewrite the parity of the given stripes — what a restart
+    /// does with the stripes the log says were mid-write.
+    pub async fn verify_stripes(&self, stripes: &[u64]) -> ResyncReport {
+        let mut report = ResyncReport::default();
+        let policy = self.redundancy();
+        let Redundancy::Parity { data, parity } = policy.scheme else { return report };
+        let width = data as usize;
+        for &stripe in stripes {
+            let _s = self.shard(stripe).lock().await;
+            let members = match self.assemble_stripe(stripe, width).await {
+                Ok(m) => m,
+                Err(e) => {
+                    report.unrecoverable += 1;
+                    report.errors.push(format!("stripe {stripe}: {e}"));
+                    continue;
+                }
+            };
+            let group = { let gem = self.gem.read().await; gem.lookup_parity(self.id, stripe).cloned() };
+            let Some(g) = group else { continue };
+            if g.ref_count > 1 {
+                // Shared with a clone: the stripe's parity belongs to both
+                // and a recompute from *this* volume's members is only right
+                // if they are the same — which they are, or the group would
+                // have been copied on write. Recompute in place.
+            }
+            let refs: Vec<Option<&[u8]>> = members.iter().map(|m| Some(m.as_slice())).collect();
+            let want = stripe::compute_parity(&refs, self.slot_size as usize, parity);
+            for (i, leg) in g.legs.iter().enumerate() {
+                if self.is_failed(leg.slab_id) {
+                    continue;
+                }
+                match self.write_leg(*leg, 0, &want[i]).await {
+                    Ok(()) => report.parity_verified += 1,
+                    Err(e) => report.errors.push(format!("stripe {stripe} parity {i}: {e}")),
+                }
+            }
+        }
+        let _ = self.stripe_log.read().unwrap().clear();
+        report
     }
 
     // ── Policy and trust ───────────────────────────────────────────────
@@ -1139,6 +1202,12 @@ impl ThinVolumeHandle {
         let member_idx = (vext % data as u64) as usize;
         let _s = self.shard(stripe).lock().await;
 
+        // The write hole, bounded: say which stripe is mid-write before it
+        // is, so a restart verifies this one and not the whole volume.
+        if let Err(e) = self.stripe_log.read().unwrap().mark(stripe) {
+            tracing::warn!(volume = %self.id, stripe, "dirty-stripe log could not be written: {e}");
+        }
+
         let (loc, group) = {
             let gem = self.gem.read().await;
             (gem.lookup(self.id, vext).cloned(), gem.lookup_parity(self.id, stripe).cloned())
@@ -1871,14 +1940,21 @@ impl BlockDevice for ThinVolumeHandle {
                 .unwrap_or_default()
         };
 
-        let reg = self.registry.read().await;
-        for slab_id in slab_ids {
-            if self.is_failed(slab_id) {
-                continue;
+        {
+            let reg = self.registry.read().await;
+            for slab_id in slab_ids {
+                if self.is_failed(slab_id) {
+                    continue;
+                }
+                if let Some(slab) = reg.get(&slab_id) {
+                    slab.device().flush().await?;
+                }
             }
-            if let Some(slab) = reg.get(&slab_id) {
-                slab.device().flush().await?;
-            }
+        }
+        // Everything written so far is on the media, parity included: no
+        // stripe is mid-write from the consumer's point of view.
+        if let Err(e) = self.stripe_log.read().unwrap().clear() {
+            tracing::warn!(volume = %self.id, "dirty-stripe log could not be cleared: {e}");
         }
         Ok(())
     }
