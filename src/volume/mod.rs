@@ -1731,4 +1731,64 @@ mod redundancy_tests {
         assert_eq!(p, want, "stripe 0 parity recomputed on restart");
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /// #76: a sealed volume takes no writes, a clone records its parent and
+    /// inherits the filesystem record, and all of it survives a restart.
+    #[tokio::test]
+    async fn sealing_and_lineage_are_volume_facts_that_survive_a_restart() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let (golden, child, grandchild, path) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let (s, p) = file_slab(&d, "a", slot).await;
+            mgr.add_slab(s).await;
+            let golden = mgr.create_volume_any("golden", 1 << 20).await.unwrap();
+            mgr.get_volume(&golden).unwrap().write(0, &[7u8; 4096]).await.unwrap();
+            let fs = FsInfo {
+                kind: "ext4".into(), journal: true, features: None, sixty_four_bit: false,
+                metadata_csum: true, csum_seed: true, label: "root".into(),
+                uuid: Some(uuid::Uuid::from_u128(0xA0)),
+            };
+            mgr.seal_volume(golden, Some(fs.clone())).await.unwrap();
+            assert!(mgr.is_sealed(&golden));
+            let err = mgr.get_volume(&golden).unwrap().write(0, &[1u8; 4096]).await.unwrap_err();
+            assert!(err.to_string().contains("sealed"), "{err}");
+            assert!(mgr.get_volume(&golden).unwrap().discard(0, 4096).await.is_err());
+            assert!(matches!(mgr.shrink_volume(golden, 4096).await, Err(VolumeError::Sealed(_))));
+
+            let child = mgr.create_snapshot(golden, "child").await.unwrap();
+            assert_eq!(mgr.parent(&child), Some(golden));
+            assert_eq!(mgr.fs_info(&child).unwrap().uuid, fs.uuid, "inherited until stamped");
+            assert!(!mgr.is_sealed(&child), "a clone is writable");
+            mgr.set_fs_uuid(child, uuid::Uuid::from_u128(0xB0)).await.unwrap();
+            let grandchild = mgr.create_snapshot(child, "grandchild").await.unwrap();
+            assert_eq!(mgr.lineage(&grandchild), vec![grandchild, child, golden]);
+            assert_eq!(mgr.children(&golden), vec![child]);
+            mgr.persist().await;
+            (golden, child, grandchild, p)
+        };
+
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        let dev = FileDevice::open(&path).await.unwrap();
+        mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        mgr.restore().await.unwrap();
+        assert!(mgr.is_sealed(&golden), "sealing survives");
+        assert!(!mgr.is_sealed(&child));
+        assert_eq!(mgr.lineage(&grandchild), vec![grandchild, child, golden]);
+        assert_eq!(mgr.fs_info(&child).unwrap().uuid, Some(uuid::Uuid::from_u128(0xB0)));
+        assert_eq!(mgr.fs_info(&grandchild).unwrap().uuid, Some(uuid::Uuid::from_u128(0xB0)), "inherited the stamped one");
+        assert!(mgr.get_volume(&golden).unwrap().write(0, &[1u8; 4096]).await.is_err());
+        assert_eq!(mgr.find_volume("child").await, Some(child));
+        assert_eq!(mgr.find_volume(&golden.0.to_string()).await, Some(golden));
+
+        // Deleting the golden leaves the child's link as a record.
+        mgr.delete_volume(golden).await.unwrap();
+        assert_eq!(mgr.parent(&child), Some(golden));
+        assert_eq!(mgr.lineage(&child), vec![child, golden]);
+        let mut buf = vec![0u8; 4096];
+        mgr.get_volume(&child).unwrap().read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 7), "the clone keeps its refcounted extents");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

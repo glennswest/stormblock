@@ -1263,3 +1263,92 @@ async fn standby_check_and_enforce_over_http() {
     assert_eq!(after["healthy"], true);
     assert_eq!(after["ready"], 1);
 }
+
+/// #76: a template is a volume that has been sealed. The sealed volume shows
+/// as sealed with its filesystem on `GET /api/v1/volumes/{id}`, a clone taken
+/// through any door records its parent and carries its own identity, a
+/// sealed volume is cloneable by name through `from_template`, and a plain
+/// volume with a filesystem on it can be sealed and cloned with no template
+/// object at all.
+#[tokio::test]
+async fn a_template_is_a_sealed_volume_and_any_sealed_volume_clones() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "base", "size": "64M" }))
+        .send().await.unwrap().json().await.unwrap();
+    let sealed: Uuid = created["template"]["sealed_volume_id"].as_str().unwrap().parse().unwrap();
+    assert!(created["template"]["raw_volume_id"].is_null(), "one template, one volume");
+
+    // The volume record says what the template used to say alone.
+    let vol: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes/{sealed}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(vol["sealed"], true);
+    assert_eq!(vol["fs"]["kind"], "ext4");
+    assert_eq!(vol["fs"]["metadata_csum_seed"], true);
+    assert_eq!(vol["fs_uuid"], created["template"]["fs_uuid"]);
+
+    // Cloning the sealed volume directly: parent recorded, identity fresh.
+    let clone: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{sealed}/clone"))
+        .json(&serde_json::json!({ "name": "pvc-direct" }))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(clone["parent"].as_str().unwrap(), sealed.to_string());
+    assert_eq!(clone["sealed"], false);
+    assert_ne!(clone["fs_uuid"], vol["fs_uuid"], "a clone never shares its source's identity");
+    let clone_id: Uuid = clone["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(fs_uuid_on_disk(&state, clone_id).await.to_string(), clone["fs_uuid"].as_str().unwrap());
+
+    // The same clone via `from_template` naming the *volume* — one namespace.
+    let by_name: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes"))
+        .json(&serde_json::json!({ "name": "pvc-by-volume", "from_template": sealed.to_string() }))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(by_name["parent"].as_str().unwrap(), sealed.to_string());
+    assert_ne!(by_name["fs_uuid"], vol["fs_uuid"]);
+    assert_ne!(by_name["fs_uuid"], clone["fs_uuid"]);
+
+    // A plain snapshot of something with a filesystem is stamped too.
+    let snap: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/snapshots"))
+        .json(&serde_json::json!({ "name": "snap-of-clone", "source_volume_id": clone_id }))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(snap["parent"].as_str().unwrap(), clone_id.to_string());
+    assert_ne!(snap["fs_uuid"], clone["fs_uuid"]);
+
+    // Lineage, from the grandchild up.
+    let lineage: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes/{}/lineage", snap["id"].as_str().unwrap()))
+        .send().await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = lineage["lineage"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec![snap["id"].as_str().unwrap(), clone["id"].as_str().unwrap(), &sealed.to_string()]);
+
+    // Writes to the sealed volume are refused; sealing a clone makes it a
+    // golden of its own, with no template object anywhere.
+    let seal: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{clone_id}/seal"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(seal["sealed"], true);
+    let second: reqwest::Response = client
+        .post(format!("{url}/api/v1/volumes/{clone_id}/clone"))
+        .json(&serde_json::json!({ "name": "pvc-from-golden-2" }))
+        .send().await.unwrap();
+    assert_eq!(second.status(), 201);
+    let second: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(second["parent"].as_str().unwrap(), clone_id.to_string());
+    assert_ne!(second["fs_uuid"], clone["fs_uuid"]);
+
+    // An unsealed volume cannot be cloned through the clone door.
+    let refused = client
+        .post(format!("{url}/api/v1/volumes/{}/clone", by_name["id"].as_str().unwrap()))
+        .json(&serde_json::json!({ "name": "nope" }))
+        .send().await.unwrap();
+    assert_eq!(refused.status(), 409);
+
+    server.abort();
+}
