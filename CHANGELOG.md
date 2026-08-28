@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### 2026-08-28
+- **feat:** Attach is a volume operation (#78) — `POST/GET/DELETE
+  /api/v1/volumes/{id}/attach` serves any engine volume and returns the
+  same `AttachInfo` `/v1` does: a local `ublk` device when this node is the
+  one attaching and `ublk_transport` is on, `nvme_tcp` with the shared
+  subsystem's NQN, address and this volume's NSID otherwise. `transport`
+  may name one; a `ublk` that cannot be offered is refused (409), not
+  downgraded. Idempotent; detach tears the device down and withdraws the
+  namespace. A volume no longer has to have come through `/v1` to get a
+  block device — the PVC path's last gap.
+- **feat:** `/v1` `source: {kind: "volume", id}` falls back to an engine
+  volume by id or name when the id is not a `/v1` volume, so a blank the
+  image shipped or a golden sealed through `/api/v1` can be cloned from
+  either door.
+
 ## [v12.0.0] — 2026-08-28
 
 The template/volume split is gone as a *model*: a template is a volume that

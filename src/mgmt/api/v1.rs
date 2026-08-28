@@ -774,7 +774,7 @@ fn account_static_nodes(v1: &mut V1State, replicas: &[Replica], size: u64, charg
 /// replay is idempotent and does not leak namespaces. Connected hosts are
 /// notified by the target, so no reconnect is needed.
 #[cfg(feature = "nvmeof")]
-async fn ensure_nvme_namespace(
+pub(crate) async fn ensure_nvme_namespace(
     state: &AppState,
     volume_id: &str,
     local_id: Option<Uuid>,
@@ -805,7 +805,7 @@ async fn ensure_nvme_namespace(
 /// Withdraw a volume's namespace on detach, so it stops being served and the
 /// NSID can be reused.
 #[cfg(feature = "nvmeof")]
-async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
+pub(crate) async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
     let nsid = {
         let mut v1 = state.v1.lock().await;
         let nsid = v1.nvme_nsids.remove(volume_id);
@@ -822,7 +822,7 @@ async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
     }
 }
 
-fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo {
+pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo {
     let listen = {
         #[cfg(feature = "nvmeof")]
         {
@@ -932,14 +932,16 @@ async fn create_volume(
                 .unwrap_or_default(),
         )
         .filter(|u| !u.is_nil()),
-        Some(VolumeSource::Volume(id)) => Some(
-            v1.volumes
-                .get(id)
-                .ok_or_else(|| V1Error::NotFound(format!("volume {id}")))?
-                .local_id
-                .unwrap_or_default(),
-        )
-        .filter(|u| !u.is_nil()),
+        Some(VolumeSource::Volume(id)) => match v1.volumes.get(id) {
+            Some(rec) => Some(rec.local_id.unwrap_or_default()).filter(|u| !u.is_nil()),
+            // Not a /v1 volume: an engine volume by id or name — a blank the
+            // image shipped, a golden sealed through /api/v1 (#78). Same
+            // clone underneath, so the source may come from either door.
+            None => match state.volume_manager.lock().await.find_volume(id).await {
+                Some(v) => Some(v.0),
+                None => return Err(V1Error::NotFound(format!("volume {id}"))),
+            },
+        },
         None => None,
     };
 

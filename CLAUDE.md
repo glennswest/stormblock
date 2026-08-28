@@ -922,3 +922,10 @@ Lineage, sealing and filesystem identity move onto the **volume**:
   lineage is read from and written to the volume record. Persisted
   templates are adopted at startup: their sealed volumes are marked sealed
   and given their `fs`.
+- **#78, same split one layer up:** attach lived only on `/v1`, whose
+  volume registry is a second store, so a clone made through `/api/v1`
+  had no path to a block device. `POST /api/v1/volumes/{id}/attach` is
+  the volume-level door (same `AttachInfo`, same ublk/NVMe machinery,
+  no epochs or fencing — that stays `/v1`'s contract). The natural end
+  of this line is `/v1` becoming a view over engine volumes rather than
+  its own map; not done.

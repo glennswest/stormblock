@@ -1352,3 +1352,63 @@ async fn a_template_is_a_sealed_volume_and_any_sealed_volume_clones() {
 
     server.abort();
 }
+
+/// #78: attach is a volume operation. A volume that never went through /v1
+/// gets its attach parameters from `POST /api/v1/volumes/{id}/attach`, the
+/// same shape /v1 returns; asking for a ublk device on a node that cannot
+/// offer one is refused rather than silently downgraded.
+#[tokio::test]
+async fn any_engine_volume_can_be_attached_through_the_volume_door() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "base", "size": "64M" }))
+        .send().await.unwrap().json().await.unwrap();
+    let sealed: Uuid = created["template"]["sealed_volume_id"].as_str().unwrap().parse().unwrap();
+    let clone: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{sealed}/clone"))
+        .json(&serde_json::json!({ "name": "pvc-1" }))
+        .send().await.unwrap().json().await.unwrap();
+    let clone_id = clone["id"].as_str().unwrap().to_string();
+
+    // Nothing attached yet.
+    let before: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes/{clone_id}/attach"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(before["attached"], false);
+
+    // The engine's choice on a node without ublk: nvme-tcp, the /v1 shape.
+    let resp = client
+        .post(format!("{url}/api/v1/volumes/{clone_id}/attach"))
+        .json(&serde_json::json!({}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let info: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(info["transport"], "nvme_tcp");
+    assert!(info["nqn"].as_str().unwrap().starts_with("nqn."));
+    assert!(info["addresses"].as_array().unwrap().len() == 1);
+
+    // ublk explicitly, on a node with ublk_transport off: refused, not downgraded.
+    let resp = client
+        .post(format!("{url}/api/v1/volumes/{clone_id}/attach"))
+        .json(&serde_json::json!({ "transport": "ublk" }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+
+    // Detach is idempotent; an unknown volume is 404.
+    let resp = client.delete(format!("{url}/api/v1/volumes/{clone_id}/attach")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client.delete(format!("{url}/api/v1/volumes/{clone_id}/attach")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .post(format!("{url}/api/v1/volumes/{}/attach", Uuid::new_v4()))
+        .json(&serde_json::json!({}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+
+    server.abort();
+}

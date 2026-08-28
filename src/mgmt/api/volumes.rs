@@ -509,6 +509,122 @@ async fn clone_volume(
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct AttachRequest {
+    /// The node attaching. Defaults to this node, which is the only one a
+    /// local ublk device can be offered to.
+    #[serde(default)]
+    pub node: Option<String>,
+    /// `ublk` (local device; only when this node is the one attaching and
+    /// ublk is enabled), `nvme-tcp`, or absent for the engine's choice —
+    /// ublk when it can, nvme-tcp otherwise.
+    #[serde(default)]
+    pub transport: Option<String>,
+}
+
+/// `POST /api/v1/volumes/{id}/attach` — a block device for any engine
+/// volume (#78). Attach is a property of the volume, like seal, clone and
+/// lineage; it does not require the volume to have come through `/v1`.
+///
+/// Returns the same `AttachInfo` `/v1` returns: `ublk` with a `device_hint`
+/// for the local fast path, or `nvme_tcp` with the shared subsystem's NQN,
+/// address and this volume's NSID. Idempotent: attaching twice returns the
+/// same device or namespace.
+///
+/// What `/v1` has and this does not — epochs, fencing, the read-write
+/// master gate and the dual-attach window — is the CSI contract, and a
+/// caller that wants those uses `/v1`. This is the local-node door.
+async fn attach_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<AttachRequest>>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let vol_id = VolumeId(uuid);
+    let device = match state.volume_manager.lock().await.get_volume(&vol_id) {
+        Some(d) => d,
+        None => return ApiError::not_found(format!("volume {uuid} not found")),
+    };
+    let local_node = state.v1.lock().await.local_node.clone();
+    let node = req.node.clone().unwrap_or_else(|| local_node.clone());
+    let want = req.transport.as_deref().map(|t| t.to_ascii_lowercase());
+    match want.as_deref() {
+        None | Some("ublk") | Some("nvme-tcp") | Some("nvme_tcp") | Some("nvmeof") => {}
+        Some(other) => return ApiError::bad_request(format!("transport {other:?}: use ublk or nvme-tcp")),
+    }
+    let key = uuid.to_string();
+
+    // Local fast path, on the same terms as /v1: enabled, this node, and
+    // backed here — which every engine volume is.
+    if want.as_deref() != Some("nvme-tcp") && want.as_deref() != Some("nvme_tcp") && want.as_deref() != Some("nvmeof")
+        && crate::mgmt::ublk_export::should_offer_ublk(
+            state.config.management.ublk_transport,
+            &node,
+            &local_node,
+            true,
+        )
+    {
+        if let Some(path) = state.ublk_exports.lock().await.ensure(&key, device.clone()) {
+            return Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response();
+        }
+        if want.as_deref() == Some("ublk") {
+            return ApiError::conflict(
+                "ublk was asked for but is not available on this node (kernel ublk_drv, or ublk_transport is off)",
+            );
+        }
+    } else if want.as_deref() == Some("ublk") {
+        return ApiError::conflict(format!(
+            "ublk is a local device: this node is {local_node:?}, the attach is for {node:?}, \
+             or ublk_transport is off"
+        ));
+    }
+
+    #[cfg(feature = "nvmeof")]
+    let nsid = super::v1::ensure_nvme_namespace(&state, &key, Some(uuid)).await;
+    #[cfg(not(feature = "nvmeof"))]
+    let nsid = None;
+    Json(super::v1::attach_info_for(&state, nsid)).into_response()
+}
+
+/// `GET /api/v1/volumes/{id}/attach` — how the volume is being served
+/// right now, if it is.
+async fn get_attach(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    if state.volume_manager.lock().await.get_volume(&VolumeId(uuid)).is_none() {
+        return ApiError::not_found(format!("volume {uuid} not found"));
+    }
+    let key = uuid.to_string();
+    if let Some(path) = state.ublk_exports.lock().await.device_path(&key) {
+        return Json(serde_json::json!({ "id": uuid, "attached": true, "info": super::v1::AttachInfo::Ublk { device_hint: path } })).into_response();
+    }
+    let nsid = state.v1.lock().await.nvme_nsids.get(&key).copied();
+    match nsid {
+        Some(n) => Json(serde_json::json!({ "id": uuid, "attached": true, "info": super::v1::attach_info_for(&state, Some(n)) })).into_response(),
+        None => Json(serde_json::json!({ "id": uuid, "attached": false })).into_response(),
+    }
+}
+
+/// `DELETE /api/v1/volumes/{id}/attach` — stop serving it: the ublk device
+/// goes, the NVMe namespace is withdrawn. Idempotent.
+async fn detach_volume(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let key = uuid.to_string();
+    state.ublk_exports.lock().await.remove(&key);
+    #[cfg(feature = "nvmeof")]
+    super::v1::release_nvme_namespace(&state, &key).await;
+    Json(serde_json::json!({ "id": uuid, "attached": false })).into_response()
+}
+
 /// `GET /api/v1/volumes/{id}/lineage` — the volume, its parent, and so on up;
 /// and the volumes cloned directly from it.
 async fn volume_lineage(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
@@ -960,6 +1076,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
         .route("/{id}/clone", axum::routing::post(clone_volume))
         .route("/{id}/lineage", get(volume_lineage))
+        .route("/{id}/attach", get(get_attach).post(attach_volume).delete(detach_volume))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/snapshots", axum::routing::post(create_snapshot))
