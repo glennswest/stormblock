@@ -897,3 +897,28 @@ and for whole-device use, nothing more.
       restart.
 - [x] **Restripe**: change a policy to or from parity by copying into a new
       placement and swapping the map; refused while exported.
+
+### #76 — a template is a volume that has been sealed (2026-08-28)
+
+Lineage, sealing and filesystem identity move onto the **volume**:
+
+- `VolumeRecord` (metadata **V5**) gains `parent`, `sealed` and `fs`
+  (kind, journal, features, 64bit, metadata_csum, csum_seed, label, uuid).
+  `create_snapshot` records the parent and inherits `fs`.
+- A sealed volume refuses writes, discards and shrinks — sealing is a state
+  transition, not a snapshot into a second object. `fs::template::seal`
+  seals the raw volume **in place**: one template is one volume, so the
+  `-raw` half that leaked (#47) no longer exists.
+- **Cloning always stamps.** `fs::clone_volume(vm, source, spec)` is the one
+  clone: snapshot, fresh filesystem UUID when the source carries a
+  filesystem, fsck, lineage recorded. `clone_template`, the volume snapshot
+  API and the /v1 `source: volume` path all go through it.
+- `POST /api/v1/volumes/{id}/seal`, `POST …/{id}/clone`, `GET …/{id}/lineage`;
+  `parent`, `sealed`, `fs` on every volume response; `from_template` on
+  `POST /api/v1/volumes` also accepts a sealed volume by id or name — the
+  blank-ext4-built-into-the-image case that was in neither namespace.
+- The `FsTemplate` store stays as the HTTP view (name, standing clone,
+  clone count); everything that is a property of the filesystem or of
+  lineage is read from and written to the volume record. Persisted
+  templates are adopted at startup: their sealed volumes are marked sealed
+  and given their `fs`.
