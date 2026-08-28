@@ -774,3 +774,78 @@ Worth not re-deriving:
 - The NVMe-oF target only starts when an `export_device` exists at boot
   (`main.rs:1128`); dynamic namespaces exist (#26) but no boot device means
   no listener at all.
+
+---
+
+## Volume-level redundancy — the RAID the design actually needs (2026-08-28)
+
+**Correction of record.** `src/raid/` is drive-level: `RaidArray` mirrors or
+stripes whole member devices and a slab sits on top, so every volume on that
+slab gets the same protection and a node can have exactly one answer. That is
+not the model. **Redundancy is a property of a volume**, realised by placing
+that volume's extents across N distinct physical drives, and a node carries a
+mix — `app-data-1` as a two-way mirror, another volume as 4+1 parity, a
+golden's clones inheriting the golden's policy — side by side on the same
+drives. System and kernel pallets are mirrored as pallets (#56); data is
+mirrored or parity-protected per volume. This is what zeroboot installs onto,
+so it is the blocking item; drive-level `RaidArray` stays as a leg transport
+and for whole-device use, nothing more.
+
+### Design
+
+- **`FailureDomain`** (`placement/domain.rs`): an ordered chain of
+  `rung=value` — `site/building/room/row/rack/node/hba/shelf/bay/drive` (#72's
+  vocabulary, as a chain not a flat map, so #71 is not built twice). A slab
+  carries one; by default it is `drive=<device serial|uuid>`, and a drive
+  registered with `labels` (#70 item 1) extends it. Two slabs are *the same
+  domain at rung R* when their chains agree through R.
+- **`RedundancyPolicy`** (`volume/redundancy.rs`): `none` | `mirror:N` |
+  `raid5:D+1` | `raid6:D+2`, plus the rung to spread at (default `drive`).
+  Spelled `mirror`, `mirror:3`, `raid1`, `raid5:4+1`, `raid6:4+2`, `raid10`
+  (= mirror on organic placement, since striping is what slabs already do).
+- **A hard boundary, not a preference.** Every leg of an extent — and every
+  data member and parity leg of a stripe — lands on a distinct domain at the
+  policy's rung, or the allocation fails. Creation is refused up front when
+  the node cannot satisfy the policy at all.
+- **GEM**: `ExtentLocation` gains `mirrors: Vec<Leg>`; `legs()` is primary
+  plus mirrors. Parity volumes keep one data leg per extent and a per-volume
+  `ParityGroup` per stripe (stripe = `data` consecutive virtual extents; P and
+  Q legs, own ref count, so a clone shares parity until a COW moves it). The
+  reverse index covers every leg, so GC and evacuation see them. Parity slots
+  record `PARITY_TAG | leg << 56 | stripe` as their virtual extent so
+  `rebuild_from_slabs` can tell them apart. Metadata **V4**.
+- **I/O**: mirror writes go to every leg and ack when all healthy legs have
+  it; reads pick a leg and fall through on error. Parity writes are
+  read-modify-write under a per-stripe lock; a lost data slot is
+  reconstructed from the stripe. A leg whose write fails puts its slab in
+  the volume's **failed set** (persisted): skipped for reads and writes,
+  volume reports *degraded*, until `resync` rebuilds every leg that was on
+  it onto a fresh domain and clears it. That is also how `none → mirror:2`
+  and `mirror:2 → mirror:3` are applied: set the policy, resync. The RAID-5
+  write hole is the same as md without a journal; `resync?verify=true`
+  recomputes parity.
+- **Clones inherit** the source's policy: shared extents are already
+  replicated, and every COW re-replicates.
+- **Surface**: `redundancy` + `spread` on `POST /api/v1/volumes`, on
+  `TemplateSpec`, on `[[volumes]]`; `redundancy` and `health` on every volume
+  response; `PUT /api/v1/volumes/{id}/redundancy`; `POST
+  /api/v1/volumes/{id}/resync`. Slabs carry `domain`; drives accept `labels`
+  and `uuid` on `POST /api/v1/drives` and list their slabs (#70 items 1–2).
+- **Out of this cut**: chunk/versioned (StormFS) volumes stay `none` — StormFS
+  replicates above; converting to or from parity (a restripe); drain over
+  HTTP (#70 item 3) and the health inbound (#70 item 4).
+
+### Work plan
+
+- [ ] `placement/domain.rs` + registry domain tracking + domain-aware best-slab
+- [ ] `volume/redundancy.rs`
+- [ ] GEM: legs, parity groups, reverse index, rebuild
+- [ ] metadata V4 (V3 shape kept, converted on load)
+- [ ] every consumer of a location frees/shares *all* legs
+- [ ] thin.rs: mirror + parity paths, failed set, health
+- [ ] VolumeManager: create options, inherit, persist/restore, resync, set policy
+- [ ] HTTP + template + config surface; drives `labels`/`uuid`, `/drives/{id}/slabs`
+- [ ] tests: mirror across two slabs, degrade, resync; parity 2+1 reconstruct;
+      clone COW keeps policy; insufficient domains refused; V3 → V4 load
+- [ ] docs/redundancy.md, CHANGELOG, README; build + test on dev
+- [ ] pallets: `copies` on publish, legs reported in status, resync (#56)
