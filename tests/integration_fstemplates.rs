@@ -1483,7 +1483,7 @@ async fn the_engine_serves_kubernetes_shaped_resources() {
     assert!(slabs["items"][0]["spec"]["domain"].as_str().unwrap().starts_with("drive="));
     let nodes: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/nodes")).send().await.unwrap().json().await.unwrap();
     assert_eq!(nodes["kind"], "NodeList");
-    assert!(nodes["items"].iter().any(|n| n["status"]["local"] == true));
+    assert!(nodes["items"].as_array().unwrap().iter().any(|n| n["status"]["local"] == true));
     let drives: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/drives")).send().await.unwrap().json().await.unwrap();
     assert_eq!(drives["kind"], "DriveList");
 
