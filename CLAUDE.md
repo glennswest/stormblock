@@ -959,3 +959,17 @@ Read-mostly projections of the same state the REST API serves: no second
 store.
 
 - [x] `src/mgmt/api/kube.rs` + tests (v12.3.0); stormdrive 0.6.0 serves `drives`/`enclosures`
+
+### VM disk goldens and cloud-image import (2026-08-28)
+
+- [ ] `fs/disk.rs`: recognise GPT/MBR on a volume (`fs.kind = gpt|mbr`,
+      `uuid` = disk GUID / MBR signature); stamp a fresh one on every clone
+      so clones attached to one host do not collide on PARTUUID. `seal`
+      needs no `force` for a partitioned image.
+- [ ] `image/formats/`: disk-image readers — raw (as now) and **qcow2**
+      (v2/v3, zero clusters, zlib-compressed clusters, no backing chain) —
+      detected by magic, used by `[[slab.golden]] from=` and by the import.
+- [ ] `POST /api/v1/volumes/import {name, file|url, format?, redundancy?}`:
+      async job, streams a URL to `<data_dir>/imports/`, writes only the
+      allocated clusters, seals the result with its `fs` recorded. This is
+      how a cloud image becomes a golden.
