@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v12.4.0] — 2026-08-28
+
 ### 2026-08-28
 - **feat:** Whole-disk goldens. `fs/disk.rs` recognises a GPT or MBR
   partition table and an ISO 9660 image on a volume (`fs.kind = gpt | mbr |

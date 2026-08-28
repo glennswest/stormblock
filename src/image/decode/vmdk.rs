@@ -422,8 +422,8 @@ impl Vmdk {
 
 #[cfg(test)]
 pub(crate) mod testimg {
-    //! A tiny sparse-extent writer (monolithicSparse and streamOptimized
-    //! shapes), for tests only.
+    // A tiny sparse-extent writer (monolithicSparse and streamOptimized
+    // shapes), for tests only.
     use super::*;
     use std::io::Write as _;
 

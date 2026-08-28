@@ -271,9 +271,9 @@ impl Qcow2 {
 /// fixtures with it, so it is compiled in and hidden rather than cfg(test).
 #[doc(hidden)]
 pub mod testimg {
-    //! A tiny qcow2 writer, for tests only: one L1 entry, one L2 table,
-    //! clusters given as data / zero / compressed. Enough to prove the
-    //! reader against bytes that did not come from the reader.
+    // One L1 entry, one L2 table, clusters given as data / zero / compressed
+    // / hole. Enough to prove the reader against bytes that did not come
+    // from the reader.
     use std::io::Write as _;
 
     pub enum C {
