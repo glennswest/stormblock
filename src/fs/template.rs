@@ -1453,10 +1453,10 @@ pub async fn adopt_into_volumes(vm: &Arc<VmLock>, store: &Arc<StoreLock>) -> usi
         if m.get_volume(&sealed).is_none() {
             continue;
         }
-        if !m.is_sealed(&sealed) || m.fs_info(&sealed).is_none() {
-            if m.seal_volume(sealed, Some(t.fs_info())).await.is_ok() {
-                adopted += 1;
-            }
+        if (!m.is_sealed(&sealed) || m.fs_info(&sealed).is_none())
+            && m.seal_volume(sealed, Some(t.fs_info())).await.is_ok()
+        {
+            adopted += 1;
         }
         if let Some(st) = &t.standing {
             let v = VolumeId(st.volume_id);

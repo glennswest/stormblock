@@ -175,6 +175,15 @@ Thin allocation and reclaim are visible on `/metrics` via
 
 ### Preformatted filesystem templates — mkfs once, clone forever
 
+> **A template is a volume that has been sealed (#76, v12.0.0).** Lineage
+> (`parent`), `sealed` and the filesystem record (`fs`) live on every
+> volume. Sealing is a state — `POST /api/v1/volumes/{id}/seal` — not a
+> second object; cloning is `POST /api/v1/volumes/{id}/clone` and always
+> stamps a fresh filesystem UUID; `GET /api/v1/volumes/{id}/lineage` walks
+> the ancestry; and `from_template` accepts any sealed volume by id or name.
+> The `/api/v1/fstemplates` surface below is the same model with a name, a
+> standing clone and a clone count kept beside it.
+
 Formatting a filesystem is the expensive part of provisioning a volume: a
 256 MiB ext4 laid down over the network takes ~20 s, while cloning a sealed
 template is effectively instant and starts at near-zero allocation. So format

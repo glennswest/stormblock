@@ -898,7 +898,7 @@ and for whole-device use, nothing more.
 - [x] **Restripe**: change a policy to or from parity by copying into a new
       placement and swapping the map; refused while exported.
 
-### #76 — a template is a volume that has been sealed (2026-08-28)
+### #76 — a template is a volume that has been sealed (2026-08-28) — DONE (v12.0.0)
 
 Lineage, sealing and filesystem identity move onto the **volume**:
 

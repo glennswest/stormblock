@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## [v12.0.0] — 2026-08-28
+
+The template/volume split is gone as a *model*: a template is a volume that
+has been sealed, and lineage, sealing and filesystem identity are recorded
+on every volume. The `/api/v1/fstemplates` surface is unchanged in shape;
+what changed underneath is that `seal` no longer makes a second volume.
+
+### 2026-08-28
+- **feat:** A template is a volume that has been sealed (#76). Lineage,
+  sealing and filesystem identity are volume facts now — metadata **V5**
+  records `parent`, `sealed` and `fs` (kind, journal, features, 64bit,
+  metadata_csum, csum_seed, label, uuid); `create_snapshot` records the
+  parent and inherits `fs`; a sealed volume refuses writes, discards and
+  shrinks (`VolumeError::Sealed`). `VolumeManager::seal_volume`,
+  `unseal_volume`, `set_fs_info`, `set_fs_uuid`, `parent`, `children`,
+  `lineage`, `find_volume`.
+- **BREAKING (behaviour):** `fs::template::seal` seals the raw volume **in
+  place** instead of snapshotting it into a second volume and deleting the
+  first — one template is one volume, so the `-raw` half that leaked (#47)
+  no longer exists. `sealed_volume_id` is the volume that was formatted; a
+  two-phase template that is still exported keeps its export, which now
+  refuses writes.
+- **feat:** One clone path — `fs::template::clone_volume(vm, source, spec)`
+  snapshots any sealed volume, stamps a fresh filesystem UUID when the
+  source carries a filesystem, fscks, and records the clone's own `fs`.
+  `clone_template` is that plus template bookkeeping; the volume snapshot
+  API and the /v1 `source: volume` path stamp too, so two live filesystems
+  never share a UUID whichever door minted them.
+- **feat:** `POST /api/v1/volumes/{id}/seal` (reads the ext superblock into
+  the record; `DELETE` reopens), `POST …/{id}/clone`, `GET …/{id}/lineage`;
+  `parent`, `sealed`, `fs` and a real `fs_uuid` on every volume response;
+  `from_template` on `POST /api/v1/volumes` also accepts a sealed volume by
+  id or name — the blank-filesystem-built-into-the-image case that was in
+  neither namespace. `CloneResult.template_id` is now optional, beside
+  `source`.
+- **feat:** `fs::template::adopt_into_volumes` — at startup every sealed
+  template's volume is marked sealed and given its `fs`, so a store written
+  before V5 reads the same as one written after.
+
 ## [v11.0.0] — 2026-08-28
 
 Major by the size of the change (the house rule), not by breakage: every
