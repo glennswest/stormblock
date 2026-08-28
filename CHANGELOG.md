@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v12.1.0] — 2026-08-28
+
 ### 2026-08-28
 - **feat:** Attach is a volume operation (#78) — `POST/GET/DELETE
   /api/v1/volumes/{id}/attach` serves any engine volume and returns the
