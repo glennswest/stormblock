@@ -269,6 +269,18 @@ pub fn register_metrics() {
         "stormblock_drive_media_errors",
         "Drive media error count"
     );
+    metrics::describe_gauge!(
+        "stormblock_drive_available_spare_pct",
+        "Drive available spare, percent (NVMe)"
+    );
+    metrics::describe_gauge!(
+        "stormblock_drive_power_on_hours",
+        "Drive power-on hours"
+    );
+    metrics::describe_gauge!(
+        "stormblock_drive_capacity_bytes",
+        "Drive capacity in bytes"
+    );
 
     // Cluster metrics (registered unconditionally, only emitted when cluster is enabled)
     metrics::describe_gauge!(
@@ -360,10 +372,57 @@ async fn refresh_capacity_gauges(state: &crate::mgmt::AppState) {
     metrics::gauge!("stormblock_slab_free_bytes_total").set(free_total as f64);
 }
 
+/// Refresh per-drive gauges from the drives this node has open (#68).
+///
+/// Sampled at scrape time, like the slab gauges: a drive opened after
+/// startup, or one whose SMART data moved, is what the scrape sees. Labels
+/// are the path and the serial, so a drive that changes `/dev` name across
+/// a reboot is still one series by serial. Prometheus itself runs elsewhere
+/// (stormdrive, or a collector container); this is the endpoint it scrapes.
+async fn refresh_drive_gauges(state: &crate::mgmt::AppState) {
+    let drives = state.drives.read().await;
+    let mut capacity_total = 0u64;
+    for d in drives.iter() {
+        let id = d.device.id();
+        let path = d.path.clone();
+        let serial = id.serial.clone();
+        let capacity = d.device.capacity_bytes();
+        capacity_total += capacity;
+        metrics::gauge!("stormblock_drive_capacity_bytes", "drive" => path.clone(), "serial" => serial.clone())
+            .set(capacity as f64);
+        match d.device.smart_status() {
+            Ok(s) => {
+                metrics::gauge!("stormblock_drive_healthy", "drive" => path.clone(), "serial" => serial.clone())
+                    .set(if s.healthy { 1.0 } else { 0.0 });
+                metrics::gauge!("stormblock_drive_media_errors", "drive" => path.clone(), "serial" => serial.clone())
+                    .set(s.media_errors as f64);
+                if let Some(t) = s.temperature_celsius {
+                    metrics::gauge!("stormblock_drive_temperature_celsius", "drive" => path.clone(), "serial" => serial.clone())
+                        .set(t as f64);
+                }
+                if let Some(p) = s.available_spare_pct {
+                    metrics::gauge!("stormblock_drive_available_spare_pct", "drive" => path.clone(), "serial" => serial.clone())
+                        .set(p as f64);
+                }
+                if let Some(h) = s.power_on_hours {
+                    metrics::gauge!("stormblock_drive_power_on_hours", "drive" => path, "serial" => serial)
+                        .set(h as f64);
+                }
+            }
+            Err(_) => {
+                // No SMART is not "unhealthy": say nothing rather than 0.
+            }
+        }
+    }
+    metrics::gauge!("stormblock_drives_total").set(drives.len() as f64);
+    metrics::gauge!("stormblock_capacity_bytes").set(capacity_total as f64);
+}
+
 async fn handle_metrics(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::mgmt::AppState>>,
 ) -> impl IntoResponse {
     refresh_capacity_gauges(&state).await;
+    refresh_drive_gauges(&state).await;
     match REGISTRY.get() {
         Some(reg) => (StatusCode::OK, reg.render()),
         None => (StatusCode::INTERNAL_SERVER_ERROR, "metrics not initialized".to_string()),

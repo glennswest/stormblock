@@ -78,6 +78,16 @@ impl fmt::Display for StatusCode {
     }
 }
 
+/// Pick the process crypto provider once. `rustls` refuses to guess when
+/// both `aws-lc-rs` and `ring` are compiled in — which a test build does,
+/// through `reqwest` in dev-dependencies — so it is said here, explicitly,
+/// before any TLS config is built (client or server).
+pub fn ensure_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+}
+
 /// Builds a [`Client`].
 pub struct ClientBuilder {
     timeout: Duration,
@@ -98,6 +108,7 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Result<Client, Error> {
+        ensure_crypto_provider();
         let mut roots = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };

@@ -279,6 +279,7 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConf
         .map_err(|e| anyhow::anyhow!("failed to parse TLS key: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("no private key found in {key_path}"))?;
 
+    crate::http::ensure_crypto_provider();
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)

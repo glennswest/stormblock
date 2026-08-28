@@ -413,14 +413,22 @@ async fn mgmt_get_metrics() {
     let state = setup_state_with_array(&dir).await;
     let (base_url, server) = start_mgmt_server(state).await;
 
+    // The recorder is process-global; installing it twice is a no-op.
+    stormblock::mgmt::metrics::init_metrics();
+    stormblock::mgmt::metrics::register_metrics();
+
     let client = reqwest::Client::new();
     let resp = client.get(format!("{base_url}/metrics"))
         .send().await.unwrap();
-    // Metrics endpoint returns 500 if init_metrics() wasn't called (test isolation),
-    // or 200 if the global recorder was initialized by another test.
-    let status = resp.status().as_u16();
-    assert!(status == 200 || status == 500,
-        "metrics should return 200 or 500, got {status}");
+    assert_eq!(resp.status().as_u16(), 200);
+    let text = resp.text().await.unwrap();
+    // Exposition format, with a family header and per-drive series (#68).
+    assert!(text.contains("# TYPE stormblock_drives_total gauge\n"), "{text}");
+    assert!(text.contains("stormblock_drives_total 2\n"), "{text}");
+    assert!(text.contains("# HELP stormblock_drive_capacity_bytes Drive capacity in bytes\n"), "{text}");
+    assert!(text.contains("stormblock_drive_capacity_bytes{drive=\"/dev/test0\",serial=\""), "{text}");
+    assert!(text.contains("stormblock_drive_healthy{drive=\"/dev/test1\",serial=\""), "{text}");
+    assert!(text.contains("# TYPE stormblock_slab_free_bytes_total gauge\n"), "{text}");
 
     server.abort();
 }
