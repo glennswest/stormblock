@@ -2548,12 +2548,18 @@ mod tests {
         let t = create(&vm, &store, &TemplateSpec::new("t", 64 * 1024 * 1024)).await.unwrap();
 
         // Wreck the sealed template's filesystem so every clone of it fails
-        // its own verify. The clone inherits the damage copy-on-write.
+        // its own verify. The clone inherits the damage copy-on-write. A
+        // sealed volume refuses writes (#76), so the wrecking has to unseal
+        // it first — which is the guard working, not a nuisance.
         {
-            let sealed = volume(&vm, t.clone_source().unwrap()).await;
+            let id = t.clone_source().unwrap();
+            vm.lock().await.unseal_volume(id).await.unwrap();
+            let sealed = volume(&vm, id).await;
             let mut wreck = vec![0xFFu8; 8192];
             wreck[..1024].fill(0);
             sealed.write(0, &wreck).await.unwrap();
+            drop(sealed);
+            vm.lock().await.seal_volume(id, None).await.unwrap();
         }
 
         let before: Vec<String> = vm
