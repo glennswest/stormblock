@@ -875,7 +875,7 @@ and for whole-device use, nothing more.
   nobody forever; for parity that also meant the source's group never
   went back to in-place RMW.
 
-### Follow-on — the pieces left out of v10.0.0 (2026-08-28) — DONE (v10.1.0)
+### Follow-on — the pieces left out of v10.0.0 (2026-08-28) — DONE (v11.0.0)
 
 - [x] **Drain over HTTP** (#70 item 3): `POST /api/v1/drives/{id}/drain` → a
       background task moving every leg off every slab on that device, one

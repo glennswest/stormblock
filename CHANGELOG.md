@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v11.0.0] — 2026-08-28
+
+Major by the size of the change (the house rule), not by breakage: every
+surface here is additive. This is the drive-plane half of volume-level
+redundancy — a drive can be reported failing, quarantined, drained and
+pulled; data spreads by failure domain after a shelf is added; the parity
+write hole is bounded by a dirty-stripe log; and a policy can be re-striped.
+
 ### 2026-08-28
 - **feat:** Drain over HTTP (#70 item 3) — `POST/GET/DELETE
   /api/v1/drives/{id}/drain`. `src/drain.rs` moves every leg (data and
