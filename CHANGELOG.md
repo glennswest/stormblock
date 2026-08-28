@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v12.3.0] — 2026-08-28
+
 ### 2026-08-28
 - **feat:** Kubernetes-shaped resources served by the engine (#80):
   `/apis/storage.storm.io/v1/{volumes,slabs,drives,nodes}` in the
