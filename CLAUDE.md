@@ -944,3 +944,18 @@ Lineage, sealing and filesystem identity move onto the **volume**:
       `reqwest`; `/metrics` rendered on the axum route instead of
       `metrics-exporter-prometheus`; no direct `hyper`/`hyper-util`; `ui`
       off by default; parse-only TOML. Measure before and after.
+
+### Kubernetes-shaped resources, served by the engine (2026-08-28, #80)
+
+Every component serves its own resources (Glenn: "the kube resources should
+be in each component"). stormblock: `/apis/storage.storm.io/v1/{volumes,
+slabs,drives,nodes}` — `apiVersion/kind/metadata/spec/status`, API
+discovery at `/apis` and `/apis/storage.storm.io/v1`, `?watch=1` as a
+newline-delimited event stream, writes on `Volume.spec` (redundancy,
+sealed, resync) and `Drive.spec` (labels, drain) only. `metadata.name` is
+the uuid — engine names are not unique — with the human name in
+`spec.name` and `metadata.labels["storm.io/name"]`; get accepts either.
+Read-mostly projections of the same state the REST API serves: no second
+store.
+
+- [ ] `src/mgmt/api/kube.rs` + tests
