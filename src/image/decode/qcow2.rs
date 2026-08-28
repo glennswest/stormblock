@@ -381,11 +381,14 @@ mod tests {
         let mut img = testimg::build(12, &[C::Zero]);
         img[16..20].copy_from_slice(&5u32.to_be_bytes()); // backing file name length
         let p = write_tmp(&img).await;
-        let err = Qcow2::open(&p).await.unwrap_err();
+        let err = match Qcow2::open(&p).await {
+            Err(e) => e,
+            Ok(_) => panic!("a backing file must be refused"),
+        };
         assert!(matches!(err, Qcow2Error::Unsupported(ref m) if m.contains("backing")), "{err}");
         let _ = std::fs::remove_file(&p);
         let p = write_tmp(b"not a qcow2 at all, just bytes").await;
-        assert!(matches!(Qcow2::open(&p).await.unwrap_err(), Qcow2Error::NotQcow2));
+        assert!(matches!(Qcow2::open(&p).await.err(), Some(Qcow2Error::NotQcow2)));
         let _ = std::fs::remove_file(p);
     }
 }
