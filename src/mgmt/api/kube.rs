@@ -30,6 +30,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::drive::BlockDevice;
 use crate::mgmt::AppState;
 use crate::volume::VolumeId;
 
