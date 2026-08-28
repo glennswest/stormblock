@@ -669,7 +669,7 @@ async fn local_capacity(state: &AppState) -> (u64, u64) {
 /// All nodes visible for placement/capacity: static peers plus this node,
 /// reported live. A live local report wins unless the node has no slabs and
 /// a static entry exists (test setups).
-async fn nodes_view(state: &AppState, v1: &V1State) -> BTreeMap<String, NodeCapacity> {
+pub(crate) async fn nodes_view(state: &AppState, v1: &V1State) -> BTreeMap<String, NodeCapacity> {
     let mut nodes = v1.nodes.clone();
 
     // Live peers in this node's cluster, learned from discovery beacons.

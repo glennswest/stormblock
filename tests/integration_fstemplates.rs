@@ -1412,3 +1412,89 @@ async fn any_engine_volume_can_be_attached_through_the_volume_door() {
 
     server.abort();
 }
+
+/// #80: the engine serves its own Kubernetes-shaped resources. Discovery
+/// names the group and its kinds; a sealed golden shows up as a `Volume`
+/// with spec/status; get works by uuid or by name; a spec patch is a verb;
+/// drives, slabs and nodes list; and a watch opens with ADDED events.
+#[tokio::test]
+async fn the_engine_serves_kubernetes_shaped_resources() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let apis: serde_json::Value = client.get(format!("{url}/apis")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(apis["kind"], "APIGroupList");
+    assert_eq!(apis["groups"][0]["name"], "storage.storm.io");
+    let res: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(res["kind"], "APIResourceList");
+    let names: Vec<&str> = res["resources"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["volumes", "slabs", "drives", "nodes"]);
+
+    let created: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "base", "size": "64M" }))
+        .send().await.unwrap().json().await.unwrap();
+    let sealed = created["template"]["sealed_volume_id"].as_str().unwrap().to_string();
+
+    let vols: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(vols["kind"], "VolumeList");
+    assert_eq!(vols["apiVersion"], "storage.storm.io/v1");
+    let v = vols["items"].as_array().unwrap().iter().find(|v| v["metadata"]["name"] == sealed).expect("the golden is a Volume");
+    assert_eq!(v["kind"], "Volume");
+    assert_eq!(v["spec"]["sealed"], true);
+    assert_eq!(v["spec"]["fs"]["kind"], "ext4");
+    assert_eq!(v["status"]["health"], "healthy");
+    assert_eq!(v["metadata"]["labels"]["storm.io/name"], "fstemplate-base-raw");
+
+    // By name as well as by uuid, and a label selector.
+    let by_name: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes/fstemplate-base-raw")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(by_name["metadata"]["name"], sealed);
+    let sel: serde_json::Value = client
+        .get(format!("{url}/apis/storage.storm.io/v1/volumes?labelSelector=storm.io/name=fstemplate-base-raw"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(sel["items"].as_array().unwrap().len(), 1);
+    let missing = client.get(format!("{url}/apis/storage.storm.io/v1/volumes/nope")).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let body: serde_json::Value = missing.json().await.unwrap();
+    assert_eq!(body["kind"], "Status");
+    assert_eq!(body["reason"], "NotFound");
+
+    // A spec patch is a verb: unseal, then seal again.
+    let patched: serde_json::Value = client
+        .patch(format!("{url}/apis/storage.storm.io/v1/volumes/{sealed}"))
+        .json(&serde_json::json!({ "spec": { "sealed": false } }))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(patched["spec"]["sealed"], false);
+    let bad = client
+        .patch(format!("{url}/apis/storage.storm.io/v1/volumes/{sealed}"))
+        .json(&serde_json::json!({ "spec": { "redundancy": "raid9" } }))
+        .send().await.unwrap();
+    assert_eq!(bad.status(), 422);
+    client
+        .patch(format!("{url}/apis/storage.storm.io/v1/volumes/{sealed}"))
+        .json(&serde_json::json!({ "spec": { "sealed": true } }))
+        .send().await.unwrap();
+
+    let slabs: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/slabs")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(slabs["kind"], "SlabList");
+    assert_eq!(slabs["items"].as_array().unwrap().len(), 1);
+    assert!(slabs["items"][0]["spec"]["domain"].as_str().unwrap().starts_with("drive="));
+    let nodes: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/nodes")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(nodes["kind"], "NodeList");
+    assert!(nodes["items"].iter().any(|n| n["status"]["local"] == true));
+    let drives: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/drives")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(drives["kind"], "DriveList");
+
+    // A watch opens with what exists.
+    let mut resp = client.get(format!("{url}/apis/storage.storm.io/v1/volumes?watch=1")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let first = resp.chunk().await.unwrap().expect("an ADDED event");
+    let line = String::from_utf8_lossy(&first);
+    let ev: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+    assert_eq!(ev["type"], "ADDED");
+    assert_eq!(ev["object"]["kind"], "Volume");
+
+    server.abort();
+}

@@ -12,6 +12,7 @@ pub mod slabs;
 pub mod stormfs;
 pub mod discovery;
 pub mod v1;
+pub mod kube;
 pub mod moves;
 #[cfg(feature = "iscsi")]
 pub mod luns;
@@ -46,7 +47,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/moves", moves::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
-        .nest("/v1", v1::router(state.clone()));
+        .nest("/v1", v1::router(state.clone()))
+        // Kubernetes-shaped resources, served by the engine itself (#80).
+        .merge(kube::router(state.clone()));
 
     // The StormFS data path (#49, #50). Out of the `mikrotik` profile: a
     // RouterOS node with 256 MB serves container volumes over NVMe-TCP; it is
