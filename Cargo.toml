@@ -114,6 +114,7 @@ http-body-util = "0.1"
 # qcow2 clusters and VMDK grains are deflate/zlib; the Rust backend is
 # miniz_oxide + crc32fast, no C.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+crc32fast = "1"
 webpki-roots = "1"
 
 # Web UI (optional)
