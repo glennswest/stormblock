@@ -344,19 +344,23 @@ impl ThinVolumeHandle {
     /// to or from parity would re-stripe every extent, which is a move, not
     /// a setting.
     pub fn set_redundancy(&self, policy: RedundancyPolicy) -> Result<(), VolumeError> {
+        self.check_transition(&policy)?;
+        *self.redundancy.write().unwrap() = policy;
+        Ok(())
+    }
+
+    /// Whether `set_redundancy` would accept this policy.
+    pub fn check_transition(&self, policy: &RedundancyPolicy) -> Result<(), VolumeError> {
         let current = self.redundancy();
         let ok = match (current.scheme, policy.scheme) {
             (Redundancy::None | Redundancy::Mirror { .. }, Redundancy::None | Redundancy::Mirror { .. }) => true,
             (a, b) => a == b,
         };
-        if !ok {
-            return Err(VolumeError::RestripeRequired {
-                from: current.spelling(),
-                to: policy.spelling(),
-            });
+        if ok {
+            Ok(())
+        } else {
+            Err(VolumeError::RestripeRequired { from: current.spelling(), to: policy.spelling() })
         }
-        *self.redundancy.write().unwrap() = policy;
-        Ok(())
     }
 
     pub fn failed_slabs(&self) -> Vec<SlabId> {
@@ -494,6 +498,7 @@ impl ThinVolumeHandle {
         vext_tag: u64,
         apart_from: &[FailureDomain],
         rung: &str,
+        generation: u64,
     ) -> DriveResult<Leg> {
         let mut tiers = vec![self.placement.preferred_tier];
         tiers.extend(self.placement.tier_fallback.iter().copied());
@@ -517,7 +522,7 @@ impl ThinVolumeHandle {
                     tried.push(slab_id);
                     continue;
                 };
-                match slab.allocate(self.id, vext_tag).await {
+                match slab.allocate_gen(self.id, vext_tag, generation).await {
                     Ok(slot_idx) => {
                         registry.reserve(slab_id, slot_idx);
                         return Ok(Leg::new(slab_id, slot_idx));
@@ -541,9 +546,10 @@ impl ThinVolumeHandle {
         &self,
         registry: &mut SlabRegistry,
         vext_idx: u64,
+        generation: u64,
     ) -> DriveResult<(SlabId, u32)> {
         let failed = self.failed_domains(registry);
-        let leg = self.allocate_apart(registry, vext_idx, &failed, "drive").await?;
+        let leg = self.allocate_apart(registry, vext_idx, &failed, "drive", generation).await?;
         Ok((leg.slab_id, leg.slot_idx))
     }
 
@@ -553,12 +559,13 @@ impl ThinVolumeHandle {
         registry: &mut SlabRegistry,
         vext_idx: u64,
         policy: &RedundancyPolicy,
+        generation: u64,
     ) -> DriveResult<Vec<Leg>> {
         let copies = policy.scheme.copies();
         let mut taken = self.failed_domains(registry);
         let mut legs = Vec::with_capacity(copies);
         for _ in 0..copies {
-            match self.allocate_apart(registry, vext_idx, &taken, &policy.spread).await {
+            match self.allocate_apart(registry, vext_idx, &taken, &policy.spread, generation).await {
                 Ok(leg) => {
                     taken.push(registry.domain_of(&leg.slab_id));
                     legs.push(leg);
@@ -722,7 +729,7 @@ impl ThinVolumeHandle {
             // Allocate slot
             let (slab_id, slot_idx) = {
                 let mut reg = self.registry.write().await;
-                self.allocate_slot(&mut reg, vext_idx).await?
+                self.allocate_slot(&mut reg, vext_idx, 1).await?
             };
 
             // Insert into GEM
@@ -750,7 +757,7 @@ impl ThinVolumeHandle {
         // never written reads as zero from any of them.
         let legs = {
             let mut reg = self.registry.write().await;
-            self.allocate_legs(&mut reg, vext_idx, policy).await?
+            self.allocate_legs(&mut reg, vext_idx, policy, 1).await?
         };
         let mut full = vec![0u8; self.slot_size as usize];
         full[off_in_slot as usize..off_in_slot as usize + buf.len()].copy_from_slice(buf);
@@ -814,13 +821,14 @@ impl ThinVolumeHandle {
         data[off_in_slot as usize..off_in_slot as usize + buf.len()].copy_from_slice(buf);
 
         // Allocate new slot(s)
+        let generation = old_loc.generation + 1;
         let legs = {
             let mut reg = self.registry.write().await;
             if policy.is_none() {
-                let (s, i) = self.allocate_slot(&mut reg, vext_idx).await?;
+                let (s, i) = self.allocate_slot(&mut reg, vext_idx, generation).await?;
                 vec![Leg::new(s, i)]
             } else {
-                self.allocate_legs(&mut reg, vext_idx, policy).await?
+                self.allocate_legs(&mut reg, vext_idx, policy, generation).await?
             }
         };
 
@@ -859,6 +867,7 @@ impl ThinVolumeHandle {
         }
 
         // Dec ref on old slot(s)
+        let mut synced = Vec::new();
         {
             let mut reg = self.registry.write().await;
             // The new slots are mapped now, so they no longer need protecting.
@@ -867,17 +876,41 @@ impl ThinVolumeHandle {
             }
             for leg in old_loc.legs() {
                 if let Some(slab) = reg.get_mut(&leg.slab_id) {
-                    if let Err(e) = slab.dec_ref(leg.slot_idx).await {
-                        tracing::warn!(
+                    match slab.dec_ref(leg.slot_idx).await {
+                        Ok(_) => synced.push((leg, slab.get_slot(leg.slot_idx).map(|s| s.ref_count).unwrap_or(0))),
+                        Err(e) => tracing::warn!(
                             volume = %self.id, slot = leg.slot_idx,
                             "copy-on-write could not release the shared extent: {e}"
-                        );
+                        ),
                     }
                 }
             }
         }
+        self.sync_refs(&synced).await;
 
         Ok(())
+    }
+
+    /// After slots' share counts moved on disk, make the owning maps agree —
+    /// so a source whose last clone diverged writes in place again rather
+    /// than copying for nobody. Takes the GEM lock; the caller must not hold
+    /// the registry.
+    async fn sync_refs(&self, counts: &[(Leg, u32)]) {
+        if counts.is_empty() {
+            return;
+        }
+        let mut gem = self.gem.write().await;
+        for (leg, count) in counts {
+            if *count == 0 {
+                continue;
+            }
+            if let Some((vol, tagged)) = gem.reverse_lookup(leg.slab_id, leg.slot_idx) {
+                match super::gem::parse_parity_vext(tagged) {
+                    Some((_, stripe)) => gem.set_parity_ref(vol, stripe, *count),
+                    None => gem.set_extent_ref(vol, tagged, *count),
+                }
+            }
+        }
     }
 
     /// Unmap an extent and release every slot it referenced. For a parity
@@ -1005,12 +1038,13 @@ impl ThinVolumeHandle {
         members: &[Vec<u8>],
     ) -> DriveResult<()> {
         let taken = self.stripe_domains(stripe, width, None).await;
+        let generation = old.map(|o| o.generation + 1).unwrap_or(1);
         let mut legs = Vec::with_capacity(parity as usize);
         {
             let mut reg = self.registry.write().await;
             let mut taken = taken;
             for i in 0..parity {
-                match self.allocate_apart(&mut reg, parity_vext(i, stripe), &taken, &policy.spread).await {
+                match self.allocate_apart(&mut reg, parity_vext(i, stripe), &taken, &policy.spread, generation).await {
                     Ok(leg) => {
                         taken.push(reg.domain_of(&leg.slab_id));
                         legs.push(leg);
@@ -1036,22 +1070,27 @@ impl ThinVolumeHandle {
         {
             let mut gem = self.gem.write().await;
             let mut g = ParityGroup::new(legs.clone(), width as u8);
-            g.generation = old.map(|o| o.generation + 1).unwrap_or(1);
+            g.generation = generation;
             gem.insert_parity(self.id, stripe, g);
         }
-        let mut reg = self.registry.write().await;
-        for l in &legs {
-            reg.commit(l.slab_id, l.slot_idx);
-        }
-        if let Some(old) = old {
-            for leg in &old.legs {
-                if let Some(slab) = reg.get_mut(&leg.slab_id) {
-                    if let Err(e) = slab.dec_ref(leg.slot_idx).await {
-                        tracing::warn!(volume = %self.id, slot = leg.slot_idx, "could not release shared parity: {e}");
+        let mut synced = Vec::new();
+        {
+            let mut reg = self.registry.write().await;
+            for l in &legs {
+                reg.commit(l.slab_id, l.slot_idx);
+            }
+            if let Some(old) = old {
+                for leg in &old.legs {
+                    if let Some(slab) = reg.get_mut(&leg.slab_id) {
+                        match slab.dec_ref(leg.slot_idx).await {
+                            Ok(_) => synced.push((*leg, slab.get_slot(leg.slot_idx).map(|s| s.ref_count).unwrap_or(0))),
+                            Err(e) => tracing::warn!(volume = %self.id, slot = leg.slot_idx, "could not release shared parity: {e}"),
+                        }
                     }
                 }
             }
         }
+        self.sync_refs(&synced).await;
         Ok(())
     }
 
@@ -1154,7 +1193,7 @@ impl ThinVolumeHandle {
                 let taken = self.stripe_domains(stripe, width, Some(vext)).await;
                 let leg = {
                     let mut reg = self.registry.write().await;
-                    self.allocate_apart(&mut reg, vext, &taken, &policy.spread).await.map_err(|e| {
+                    self.allocate_apart(&mut reg, vext, &taken, &policy.spread, 1).await.map_err(|e| {
                         DriveError::Other(anyhow::anyhow!(
                             "cannot place member {member_idx} of stripe {stripe} apart from the stripe: {e}"
                         ))
@@ -1208,7 +1247,7 @@ impl ThinVolumeHandle {
         let taken = self.stripe_domains(stripe, width, Some(vext)).await;
         let leg = {
             let mut reg = self.registry.write().await;
-            self.allocate_apart(&mut reg, vext, &taken, &policy.spread).await?
+            self.allocate_apart(&mut reg, vext, &taken, &policy.spread, old.generation + 1).await?
         };
         if let Err(e) = self.write_leg(leg, 0, &full).await {
             self.give_back(&[leg]).await;
@@ -1220,15 +1259,20 @@ impl ThinVolumeHandle {
             let mut gem = self.gem.write().await;
             gem.insert(self.id, vext, loc.clone());
         }
-        let mut reg = self.registry.write().await;
-        reg.commit(leg.slab_id, leg.slot_idx);
-        for l in old.legs() {
-            if let Some(slab) = reg.get_mut(&l.slab_id) {
-                if let Err(e) = slab.dec_ref(l.slot_idx).await {
-                    tracing::warn!(volume = %self.id, slot = l.slot_idx, "could not release replaced member: {e}");
+        let mut synced = Vec::new();
+        {
+            let mut reg = self.registry.write().await;
+            reg.commit(leg.slab_id, leg.slot_idx);
+            for l in old.legs() {
+                if let Some(slab) = reg.get_mut(&l.slab_id) {
+                    match slab.dec_ref(l.slot_idx).await {
+                        Ok(_) => synced.push((l, slab.get_slot(l.slot_idx).map(|s| s.ref_count).unwrap_or(0))),
+                        Err(e) => tracing::warn!(volume = %self.id, slot = l.slot_idx, "could not release replaced member: {e}"),
+                    }
                 }
             }
         }
+        self.sync_refs(&synced).await;
         Ok(loc)
     }
 
@@ -1448,7 +1492,7 @@ impl ThinVolumeHandle {
             for _ in 0..want_new {
                 let new = {
                     let mut reg = self.registry.write().await;
-                    match self.allocate_apart(&mut reg, vext, &taken, &policy.spread).await {
+                    match self.allocate_apart(&mut reg, vext, &taken, &policy.spread, loc.generation).await {
                         Ok(l) => {
                             taken.push(reg.domain_of(&l.slab_id));
                             l
@@ -1555,7 +1599,7 @@ impl ThinVolumeHandle {
                 let taken = self.stripe_domains(stripe, width, Some(vext)).await;
                 let new = {
                     let mut reg = self.registry.write().await;
-                    match self.allocate_apart(&mut reg, vext, &taken, &policy.spread).await {
+                    match self.allocate_apart(&mut reg, vext, &taken, &policy.spread, loc.generation).await {
                         Ok(l) => l,
                         Err(e) => {
                             report.errors.push(format!("stripe {stripe} member {i}: {e}"));
@@ -1613,7 +1657,7 @@ impl ThinVolumeHandle {
                         let taken = self.stripe_domains(stripe, width, None).await;
                         let new = {
                             let mut reg = self.registry.write().await;
-                            match self.allocate_apart(&mut reg, parity_vext(i as u8, stripe), &taken, &policy.spread).await {
+                            match self.allocate_apart(&mut reg, parity_vext(i as u8, stripe), &taken, &policy.spread, g.generation).await {
                                 Ok(l) => l,
                                 Err(e) => {
                                     report.errors.push(format!("stripe {stripe} parity {i}: {e}"));

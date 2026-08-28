@@ -48,7 +48,15 @@ use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::volume::extent::VolumeId;
 use crate::placement::domain::{FailureDomain, DEFAULT_RUNG};
-use crate::volume::gem::{GlobalExtentMap, Leg};
+use crate::volume::gem::{GlobalExtentMap, Leg, ParityGroup, parity_vext};
+
+/// What a parity slot records as its virtual extent.
+fn parity_vext_for(g: &ParityGroup, leg: Leg) -> u64 {
+    let i = g.legs.iter().position(|l| *l == leg).unwrap_or(0);
+    // The stripe is not carried on the group; the caller passes it through
+    // `vext_idx` when it has it. Here we only need the leg index.
+    parity_vext(i as u8, 0)
+}
 use crate::volume::snapshot::snapshot_diff;
 use crate::volume::thin::{ThinVolumeHandle, PlacementPolicy};
 
@@ -353,7 +361,7 @@ impl PlacementEngine {
             .map(|l| registry.domain_of(&l.slab_id))
             .collect();
         let new = self
-            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, &others, dest_slab_id)
+            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, dest_slab_id)
             .await?;
         Ok(MigrateExtentResult {
             volume_id,
@@ -394,7 +402,7 @@ impl PlacementEngine {
             }
         }
         let new = self
-            .move_slot(gem, registry, volume_id, stripe, old, g.ref_count, &others, dest_slab_id)
+            .move_slot(gem, registry, volume_id, parity_vext_for(&g, old), old, g.ref_count, g.generation, &others, dest_slab_id)
             .await?;
         Ok(MigrateExtentResult {
             volume_id,
@@ -406,6 +414,8 @@ impl PlacementEngine {
     }
 
     /// The physical move behind `migrate_leg` and `migrate_parity_leg`.
+    /// `vext_idx` is what the destination slot records as its extent — a
+    /// parity leg records its tagged index.
     #[allow(clippy::too_many_arguments)]
     async fn move_slot(
         &self,
@@ -415,6 +425,7 @@ impl PlacementEngine {
         vext_idx: u64,
         old: Leg,
         ref_count: u32,
+        generation: u64,
         keep_apart_from: &[FailureDomain],
         dest_slab_id: Option<SlabId>,
     ) -> Result<Leg, PlacementError> {
@@ -464,7 +475,7 @@ impl PlacementEngine {
         // the slot-table fallback agrees with the map.
         let dest_slot = registry.get_mut(&dest_id)
             .ok_or(PlacementError::SlabNotFound(dest_id))?
-            .allocate(volume_id, vext_idx)
+            .allocate_gen(volume_id, vext_idx, generation)
             .await
             .map_err(|_| PlacementError::SlabFull)?;
 

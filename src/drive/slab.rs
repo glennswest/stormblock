@@ -547,6 +547,19 @@ impl Slab {
         volume_id: VolumeId,
         vext_idx: u64,
     ) -> DriveResult<u32> {
+        self.allocate_gen(volume_id, vext_idx, 1).await
+    }
+
+    /// Allocate a slot recording `generation` — a copy-on-write allocates
+    /// at the old extent's generation plus one, so the slot table can tell
+    /// the current slot of an extent from the one a clone still shares, and
+    /// a mirror's legs all carry the same one.
+    pub async fn allocate_gen(
+        &mut self,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        generation: u64,
+    ) -> DriveResult<u32> {
         if self.free_count == 0 {
             return Err(DriveError::Other(anyhow::anyhow!("slab full")));
         }
@@ -563,7 +576,7 @@ impl Slab {
             volume_id,
             virtual_extent_idx: vext_idx,
             ref_count: 1,
-            generation: 1,
+            generation,
         };
         self.extent_index.insert((volume_id, vext_idx), slot_idx as u32);
 

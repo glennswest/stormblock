@@ -139,10 +139,12 @@ impl SlabRegistry {
         self.domains.get(id).cloned().unwrap_or_default()
     }
 
-    /// Whether a slab is the same domain at `rung` as any of `taken`.
+    /// Whether a slab is the same domain at `rung` as any of `taken`. An
+    /// empty entry in `taken` — a slab that is no longer registered, so
+    /// nobody knows where it was — constrains nothing.
     pub fn collides(&self, id: &SlabId, taken: &[FailureDomain], rung: &str) -> bool {
         let d = self.domain_of(id);
-        taken.iter().any(|t| d.same_at(t, rung))
+        taken.iter().filter(|t| !t.is_empty()).any(|t| d.same_at(t, rung))
     }
 
     /// The slab on `tier` with the most free slots whose domain at `rung`

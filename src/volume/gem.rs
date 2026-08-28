@@ -268,7 +268,10 @@ impl GlobalExtentMap {
         let vmap = self.volumes.get_mut(&volume_id)?;
         let g = vmap.parity.remove(&stripe)?;
         for leg in &g.legs {
-            self.reverse.remove(&(leg.slab_id, leg.slot_idx));
+            let key = (leg.slab_id, leg.slot_idx);
+            if self.reverse.get(&key).map(|(v, _)| *v) == Some(volume_id) {
+                self.reverse.remove(&key);
+            }
         }
         if vmap.extents.is_empty() && vmap.parity.is_empty() {
             self.volumes.remove(&volume_id);
@@ -292,6 +295,20 @@ impl GlobalExtentMap {
             if let Some(loc) = vmap.extents.get_mut(&vext_idx) {
                 loc.ref_count += 1;
             }
+        }
+    }
+
+    /// Set the recorded share count of an extent — after a slot's count
+    /// moved on disk, so the map agrees on whether a write must copy.
+    pub fn set_extent_ref(&mut self, volume_id: VolumeId, vext_idx: u64, ref_count: u32) {
+        if let Some(loc) = self.volumes.get_mut(&volume_id).and_then(|m| m.extents.get_mut(&vext_idx)) {
+            loc.ref_count = ref_count;
+        }
+    }
+
+    pub fn set_parity_ref(&mut self, volume_id: VolumeId, stripe: u64, ref_count: u32) {
+        if let Some(g) = self.volumes.get_mut(&volume_id).and_then(|m| m.parity.get_mut(&stripe)) {
+            g.ref_count = ref_count;
         }
     }
 
@@ -515,12 +532,17 @@ impl GlobalExtentMap {
         dropped
     }
 
-    /// Remove an extent mapping.
+    /// Remove an extent mapping. A reverse entry is dropped only when this
+    /// volume owns it — a slot shared with a clone stays traceable to whoever
+    /// allocated it.
     pub fn remove(&mut self, volume_id: VolumeId, vext_idx: u64) -> Option<ExtentLocation> {
         let vmap = self.volumes.get_mut(&volume_id)?;
         let loc = vmap.extents.remove(&vext_idx)?;
         for leg in loc.legs() {
-            self.reverse.remove(&(leg.slab_id, leg.slot_idx));
+            let key = (leg.slab_id, leg.slot_idx);
+            if self.reverse.get(&key) == Some(&(volume_id, vext_idx)) {
+                self.reverse.remove(&key);
+            }
         }
 
         // Clean up empty volume map
@@ -534,7 +556,10 @@ impl GlobalExtentMap {
     pub fn remove_volume(&mut self, volume_id: VolumeId) -> Option<VolumeExtentMap> {
         let vmap = self.volumes.remove(&volume_id)?;
         for leg in vmap.all_legs() {
-            self.reverse.remove(&(leg.slab_id, leg.slot_idx));
+            let key = (leg.slab_id, leg.slot_idx);
+            if self.reverse.get(&key).map(|(v, _)| *v) == Some(volume_id) {
+                self.reverse.remove(&key);
+            }
         }
         Some(vmap)
     }

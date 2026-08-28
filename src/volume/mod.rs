@@ -276,6 +276,7 @@ impl VolumeManager {
     /// effect at the next `resync_volume`.
     pub async fn set_redundancy(&mut self, id: VolumeId, policy: RedundancyPolicy) -> Result<(), VolumeError> {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        handle.check_transition(&policy)?;
         let needed = policy.scheme.width();
         if needed > 1 {
             let available = self.registry.read().await.distinct_domains_with_space(&policy.spread);
@@ -746,20 +747,52 @@ impl VolumeManager {
                 }
             }
 
-            // Overlay persisted extents the slot tables can't express (a
-            // snapshot's shared slots). Slot-table mappings win on conflict;
-            // persisted mappings fill the gaps. (#13)
+            // Reconcile the record with the slot tables. The record is what
+            // the running node knew — which slots are legs of one extent and
+            // which are a clone's leftovers, which the slot tables cannot
+            // say. The slot tables win only where they are provably newer: a
+            // slot allocated at a higher generation for the same extent is a
+            // copy-on-write the record never saw (a crash between the two
+            // writes), and a recorded slot that is no longer allocated to
+            // this extent has been freed and possibly reused. Persisted
+            // mappings fill the gaps the slot tables cannot express — a
+            // snapshot's shared slots (#13).
             {
                 let reg = self.registry.read().await;
+                let slot_gen = |leg: gem::Leg| -> Option<u64> {
+                    reg.get(&leg.slab_id)
+                        .and_then(|s| s.get_slot(leg.slot_idx))
+                        .filter(|s| s.state != crate::drive::slab::SlotState::Free)
+                        .map(|s| s.generation)
+                };
                 for (vext, loc) in &vrec.extents {
-                    if rebuilt.lookup(vrec.id, *vext).is_none() {
-                        if reg.get(&loc.slab_id).is_some() {
-                            rebuilt.restore_mapping(vrec.id, *vext, loc.clone());
-                        } else {
-                            tracing::warn!(
-                                "Volume '{}' extent {vext}: slab {} not attached, mapping dropped",
-                                vrec.name, loc.slab_id.0
-                            );
+                    match rebuilt.lookup(vrec.id, *vext).cloned() {
+                        None => {
+                            if reg.get(&loc.slab_id).is_some() {
+                                rebuilt.restore_mapping(vrec.id, *vext, loc.clone());
+                            } else {
+                                tracing::warn!(
+                                    "Volume '{}' extent {vext}: slab {} not attached, mapping dropped",
+                                    vrec.name, loc.slab_id.0
+                                );
+                            }
+                        }
+                        Some(rloc) => {
+                            let recorded_is_live = rloc.legs().any(|l| l == loc.primary());
+                            let newer_on_disk = rloc.primary() != loc.primary()
+                                && slot_gen(rloc.primary()) > slot_gen(loc.primary());
+                            if recorded_is_live && !newer_on_disk {
+                                let mut keep = loc.clone();
+                                // Legs the record names that are gone stay
+                                // named: health reports them, resync rebuilds.
+                                keep.mirrors.retain(|m| reg.get(&m.slab_id).is_some() || true);
+                                rebuilt.insert(vrec.id, *vext, keep);
+                            } else {
+                                tracing::info!(
+                                    "Volume '{}' extent {vext}: slot table is newer than the record, taking it",
+                                    vrec.name
+                                );
+                            }
                         }
                     }
                 }
