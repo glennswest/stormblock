@@ -126,15 +126,31 @@ Master checklist lives in **stormblock-registry/CLAUDE.md**, "Layered goldens
       state; a fresh filesystem UUID is stamped at creation, because two
       children must not both claim the parent's identity and under
       `metadata_csum` that UUID seeds every checksum in the filesystem.
-- [ ] **Volume groups** — a "system" group for goldens and a "data" group for
-      PVCs, so the system disk can be replaced wholesale without touching
-      state. **A group has to be a hard allocation boundary, not a
-      preference:** `PlacementPolicy` is tier-based with fallback today, so a
-      golden would silently spill onto the data disk when the system disk
-      fills — leaving a half-migrated system scattered across the disk you
-      were about to replace. Size the system group for **two generations**; a
-      rebase transiently holds both, since old blocks stay refcounted until
-      the old goldens are deleted.
+- [x] **Volume groups — answered by a data pallet** (2026-08-28). The group is
+      a pallet of `PalletKind::Data`, named `data1`, `data2` and so on beside
+      `system1` and `kernel1`. A pallet is a GPT partition, so it is the hard
+      allocation boundary this entry said was required, rather than a
+      preference a tier-based policy can fall back out of. The system drive
+      carries one; a drive that is not a system drive is mostly these. The
+      property wanted was that the system disk can be replaced wholesale
+      without touching state, and it follows: a new system pallet is published
+      and activated beside a data pallet that was never the same partition.
+      Sizing for two generations still applies to the *system* pallet, since a
+      rebase transiently holds both.
+
+- [ ] **Placing a claim among many data pallets.** Discovery already supports
+      any arrangement — `PalletStore::scan` walks every drive and appends
+      everything it finds, so several data pallets on one drive and across
+      several drives need no configuration. **Selection is what does not fit.**
+      `select()` is `max_by_key` over priority then version: a *ladder*, which
+      is the right question for boot, kernel and system, where exactly one
+      wins. Data pallets are a **pool**. Nothing selects a data pallet; a claim
+      is *placed into* one, and the inputs are free capacity and failure
+      domain, neither of which the ladder consults. This wants a new call
+      beside `select` rather than a change to it — `select` is correct for what
+      it answers, and firmware links the read-only half of that code.
+      Blocked on the failure-domain work below for the second input; free
+      capacity alone is enough to start.
 - [ ] **Failure-domain topology.** `placement/topology.rs` models
       `StorageTier` (Hot/Warm/Cool/Cold) and `Locality` — *how fast and how
       far*. It has no notion of *what fails together*: no chassis, rack, row,
