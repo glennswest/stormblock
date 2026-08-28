@@ -1106,6 +1106,49 @@ async fn clone_volume_impl(
         });
     };
 
+    // A whole-disk golden (gpt/mbr) gets a fresh *disk* identity; an ISO has
+    // none to give. Neither is an ext4 to fsck.
+    if matches!(fs.kind.as_str(), "gpt" | "mbr" | "iso9660") {
+        let dev = vm
+            .lock()
+            .await
+            .get_volume(&id)
+            .ok_or_else(|| TemplateError::Internal("clone volume vanished".to_string()))?;
+        let stamped = if spec.stamp_uuid {
+            match crate::fs::disk::stamp(&dev, &fs).await {
+                Ok(u) => u,
+                Err(e) => {
+                    drop(dev);
+                    return Err(discard_or_report(
+                        vm,
+                        id,
+                        format!("stamping a fresh disk identity on clone {}: {e}", spec.name),
+                    )
+                    .await);
+                }
+            }
+        } else {
+            None
+        };
+        drop(dev);
+        let fs_uuid = stamped.or(fs.uuid);
+        {
+            let mut m = vm.lock().await;
+            let mut info = fs.clone();
+            info.uuid = fs_uuid;
+            let _ = m.set_fs_info(id, Some(info)).await;
+        }
+        return Ok(CloneResult {
+            volume_id: id,
+            source,
+            template_id: None,
+            fs_uuid,
+            size_bytes: size,
+            verified: false,
+            from_standby: false,
+        });
+    }
+
     // Fresh identity, with no lock held: this is a superblock write against
     // one volume, and thousands of clones may be minted at once.
     let mut fs_uuid = fs.uuid;

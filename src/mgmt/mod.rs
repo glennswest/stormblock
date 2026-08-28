@@ -161,6 +161,8 @@ pub struct AppState {
     pub pallet_mirrors: tokio::sync::RwLock<HashMap<String, u8>>,
     /// Drives being emptied so they can be pulled (#70 item 3).
     pub drains: tokio::sync::RwLock<crate::drain::Drains>,
+    /// Disk images being imported into goldens.
+    pub imports: tokio::sync::RwLock<crate::image::import::Imports>,
     /// Latest pool-pressure sample, kept current by the watcher (#18).
     pub pool_pressure: Option<std::sync::Arc<tokio::sync::RwLock<Option<crate::volume::pressure::PressureStatus>>>>,
     pub config: StormBlockConfig,
@@ -244,6 +246,7 @@ impl AppState {
                 None => HashMap::new(),
             }),
             drains: tokio::sync::RwLock::new(crate::drain::Drains::default()),
+            imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             serve: std::sync::OnceLock::new(),
             pool_pressure: None,
             config,

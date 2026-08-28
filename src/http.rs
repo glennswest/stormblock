@@ -249,6 +249,40 @@ impl RequestBuilder {
     }
 }
 
+impl Client {
+    /// Stream a GET straight into a file — a cloud image is hundreds of MB
+    /// and a 256 MB node must never hold one in memory. Returns the bytes
+    /// written. Fails on a non-2xx status without writing.
+    pub async fn get_to_file(&self, url: &str, path: &std::path::Path) -> Result<u64, Error> {
+        use http_body_util::BodyExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let uri: hyper::Uri = url.parse().map_err(|e| Error::Url(format!("{url}: {e}")))?;
+        let req = hyper::Request::builder()
+            .method(hyper::Method::GET)
+            .uri(uri)
+            .header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")))
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| Error::Request(e.to_string()))?;
+        let resp = self.inner.request(req).await.map_err(|e| Error::Request(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(Error::Request(format!("{url}: HTTP {status}")));
+        }
+        let mut body = resp.into_body();
+        let mut file = tokio::fs::File::create(path).await.map_err(|e| Error::Body(e.to_string()))?;
+        let mut written = 0u64;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| Error::Body(e.to_string()))?;
+            if let Some(data) = frame.data_ref() {
+                file.write_all(data).await.map_err(|e| Error::Body(e.to_string()))?;
+                written += data.len() as u64;
+            }
+        }
+        file.flush().await.map_err(|e| Error::Body(e.to_string()))?;
+        Ok(written)
+    }
+}
+
 /// A response, body already read.
 #[derive(Debug, Clone)]
 pub struct Response {

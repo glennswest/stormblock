@@ -511,19 +511,7 @@ impl ImageBuilder {
             // clones are taken from, and the first pod that wants one must
             // not be the thing that makes it cloneable. The filesystem on it
             // is read into the record here, so a clone can be stamped.
-            let fs = match crate::fs::ext4::read_layout(&vol).await {
-                Ok(l) => Some(crate::volume::FsInfo {
-                    kind: "ext4".into(),
-                    journal: l.has_journal,
-                    features: None,
-                    sixty_four_bit: l.sixty_four_bit,
-                    metadata_csum: l.metadata_csum,
-                    csum_seed: l.csum_seed,
-                    label: l.label.clone(),
-                    uuid: Some(l.uuid),
-                }),
-                Err(_) => None,
-            };
+            let fs = crate::fs::disk::probe(&vol).await;
             drop(vol);
             mgr.seal_volume(golden_id, fs.clone())
                 .await
@@ -533,21 +521,30 @@ impl ImageBuilder {
                 .create_snapshot(golden_id, &clone_name)
                 .await
                 .map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
-            // A clone is a filesystem of its own: two live filesystems must
-            // never claim one UUID, and the golden's is the one every clone
-            // would otherwise carry (#76).
-            if fs.is_some() {
+            // A clone is a filesystem — or a disk — of its own: two live ones
+            // must never claim one identity, and the golden's is the one
+            // every clone would otherwise carry (#76).
+            if let Some(f) = &fs {
                 let dev = mgr
                     .get_volume(&clone_id)
                     .ok_or_else(|| ImageError::Other("clone vanished after create".into()))?;
-                let fresh = Uuid::new_v4();
-                crate::fs::ext4::stamp_uuid(&dev, fresh, false)
-                    .await
-                    .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?;
+                let fresh = if f.kind == "ext4" {
+                    let u = Uuid::new_v4();
+                    crate::fs::ext4::stamp_uuid(&dev, u, false)
+                        .await
+                        .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?;
+                    Some(u)
+                } else {
+                    crate::fs::disk::stamp(&dev, f)
+                        .await
+                        .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?
+                };
                 drop(dev);
-                mgr.set_fs_uuid(clone_id, fresh)
-                    .await
-                    .map_err(|e| ImageError::Other(format!("record clone '{clone_name}': {e}")))?;
+                if let Some(u) = fresh {
+                    mgr.set_fs_uuid(clone_id, u)
+                        .await
+                        .map_err(|e| ImageError::Other(format!("record clone '{clone_name}': {e}")))?;
+                }
             }
             pairs.push((golden_id, clone_id));
         }
@@ -749,6 +746,9 @@ impl ImageBuilder {
 /// Content for a golden volume, wherever it comes from.
 enum GoldenSource {
     File { file: tokio::fs::File, len: u64 },
+    /// A qcow2, a VMDK or the VMDK inside an OVA: a cloud image or a VM
+    /// export, laid in as the raw disk it describes.
+    Decoded(crate::image::import::Source),
     Member {
         pallet: Box<crate::pallet::Pallet>,
         view: PartitionView,
@@ -758,6 +758,15 @@ enum GoldenSource {
 
 impl GoldenSource {
     async fn open_file(path: &Path) -> Result<GoldenSource> {
+        match crate::image::decode::detect_file(path).await {
+            Ok(crate::image::decode::SourceFormat::Raw) | Err(_) => {}
+            Ok(fmt) => {
+                let (src, _) = crate::image::import::open_source(path, Some(&fmt.to_string()))
+                    .await
+                    .map_err(|e| ImageError::Spec(format!("golden content {}: {e}", path.display())))?;
+                return Ok(GoldenSource::Decoded(src));
+            }
+        }
         let len = file_len(path).await?;
         let file = tokio::fs::File::open(path).await.map_err(|e| {
             ImageError::Spec(format!("golden content {}: {e}", path.display()))
@@ -768,6 +777,7 @@ impl GoldenSource {
     fn byte_len(&self) -> u64 {
         match self {
             GoldenSource::File { len, .. } => *len,
+            GoldenSource::Decoded(src) => src.virtual_size(),
             GoldenSource::Member { member, .. } => member.byte_len,
         }
     }
@@ -784,6 +794,10 @@ impl GoldenSource {
                 file.read_exact(buf).await?;
                 Ok(())
             }
+            GoldenSource::Decoded(src) => src
+                .read_at(offset, buf)
+                .await
+                .map_err(|e| ImageError::Other(format!("decoding golden content: {e}"))),
             GoldenSource::Member { pallet, view, member } => {
                 pallet.read_member(member, view, offset, buf).await?;
                 Ok(())
@@ -832,6 +846,17 @@ impl GoldenSource {
         let mut written = 0u64;
         while off < len {
             let take = ((len - off) as usize).min(chunk);
+            // A decoded image knows which clusters it never wrote.
+            if let GoldenSource::Decoded(src) = self {
+                let may = src
+                    .may_have_data(off, take as u64)
+                    .await
+                    .map_err(|e| ImageError::Other(format!("decoding golden content: {e}")))?;
+                if !may {
+                    off += take as u64;
+                    continue;
+                }
+            }
             self.read_at(off, &mut buf[..take]).await?;
             if buf[..take].iter().any(|&b| b != 0) {
                 vol.write(off, &buf[..take]).await?;

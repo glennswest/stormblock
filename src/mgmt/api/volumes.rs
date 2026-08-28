@@ -394,18 +394,21 @@ async fn seal_volume(
         None => return ApiError::not_found(format!("volume {uuid} not found")),
     };
     let existing = state.volume_manager.lock().await.fs_info(&vol_id).cloned();
-    let fs = match crate::fs::ext4::read_layout(&dev).await {
-        Ok(l) => Some(crate::volume::FsInfo {
-            kind: existing.as_ref().map(|f| f.kind.clone()).unwrap_or_else(|| "ext4".into()),
-            journal: l.has_journal,
-            features: existing.as_ref().and_then(|f| f.features.clone()),
-            sixty_four_bit: l.sixty_four_bit,
-            metadata_csum: l.metadata_csum,
-            csum_seed: l.csum_seed,
-            label: req.label.clone().unwrap_or(l.label.clone()),
-            uuid: Some(l.uuid),
-        }),
-        Err(e) => match (&req.fs, req.force, existing) {
+    // ext4 by superblock; else a partition table or an ISO (a VM disk golden
+    // is a whole disk, and sealing it must not need `force`).
+    let fs = match crate::fs::disk::probe(&dev).await {
+        Some(mut f) => {
+            if let Some(l) = &req.label {
+                f.label = l.clone();
+            }
+            if f.kind == "ext4" {
+                if let Some(ex) = &existing {
+                    f.features = ex.features.clone();
+                }
+            }
+            Some(f)
+        }
+        None => match (&req.fs, req.force, existing) {
             (Some(kind), _, _) => Some(crate::volume::FsInfo {
                 kind: kind.clone(), journal: false, features: None, sixty_four_bit: false,
                 metadata_csum: false, csum_seed: false, label: req.label.clone().unwrap_or_default(), uuid: None,
@@ -413,7 +416,7 @@ async fn seal_volume(
             (None, true, existing) => existing,
             (None, false, _) => {
                 return ApiError::conflict(format!(
-                    "volume {uuid} has no readable filesystem ({e}); seal it with force=true, or say what is on it"
+                    "volume {uuid} has no readable filesystem or partition table; seal it with force=true, or say what is on it"
                 ))
             }
         },
@@ -623,6 +626,40 @@ async fn detach_volume(State(state): State<Arc<AppState>>, Path(id): Path<String
     #[cfg(feature = "nvmeof")]
     super::v1::release_nvme_namespace(&state, &key).await;
     Json(serde_json::json!({ "id": uuid, "attached": false })).into_response()
+}
+
+/// `POST /api/v1/volumes/import {name, file|url, format?, redundancy?, size?, seal?}`
+/// — a cloud image, a VM export (qcow2, vmdk, ova) or an ISO becomes a
+/// sealed golden. Async: 202 with the job, poll `GET …/import/{id}`.
+async fn start_import(
+    State(state): State<Arc<AppState>>,
+    Json(spec): Json<crate::image::import::ImportSpec>,
+) -> Response {
+    let started = state.imports.write().await.start(state.clone(), spec);
+    match started {
+        Ok(status) => {
+            let s = status.read().await.clone();
+            (axum::http::StatusCode::ACCEPTED, Json(s)).into_response()
+        }
+        Err(e) => ApiError::bad_request(e),
+    }
+}
+
+async fn list_imports(State(state): State<Arc<AppState>>) -> Response {
+    let items = state.imports.read().await.all().await;
+    let count = items.len();
+    Json(serde_json::json!({ "items": items, "count": count })).into_response()
+}
+
+async fn get_import(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    match state.imports.read().await.status(&uuid).await {
+        Some(s) => Json(s).into_response(),
+        None => ApiError::not_found(format!("import {uuid} not found")),
+    }
 }
 
 /// `GET /api/v1/volumes/{id}/lineage` — the volume, its parent, and so on up;
@@ -1077,6 +1114,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/clone", axum::routing::post(clone_volume))
         .route("/{id}/lineage", get(volume_lineage))
         .route("/{id}/attach", get(get_attach).post(attach_volume).delete(detach_volume))
+        .route("/import", get(list_imports).post(start_import))
+        .route("/import/{id}", get(get_import))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/snapshots", axum::routing::post(create_snapshot))

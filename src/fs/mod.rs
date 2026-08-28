@@ -18,6 +18,7 @@
 //!
 //! See [`ext4`] for the on-disk format and [`template`] for the lifecycle.
 
+pub mod disk;
 pub mod ext4;
 /// Reading the blocks a filesystem is *not* using.
 ///

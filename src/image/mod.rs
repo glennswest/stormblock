@@ -25,6 +25,8 @@
 //! behind it.
 
 pub mod build;
+pub mod decode;
+pub mod import;
 pub mod fat;
 pub mod formats;
 pub mod iso;
