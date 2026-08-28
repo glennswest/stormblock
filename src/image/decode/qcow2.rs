@@ -267,8 +267,10 @@ impl Qcow2 {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testimg {
+/// A tiny qcow2 writer for tests — the integration suite builds its
+/// fixtures with it, so it is compiled in and hidden rather than cfg(test).
+#[doc(hidden)]
+pub mod testimg {
     //! A tiny qcow2 writer, for tests only: one L1 entry, one L2 table,
     //! clusters given as data / zero / compressed. Enough to prove the
     //! reader against bytes that did not come from the reader.

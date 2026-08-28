@@ -320,7 +320,7 @@ impl Vmdk {
             let file_off: u64 = rest
                 .split('"')
                 .nth(2)
-                .and_then(|s| s.trim().split_whitespace().next())
+                .and_then(|s| s.split_whitespace().next())
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             let len = sectors * SECTOR;
