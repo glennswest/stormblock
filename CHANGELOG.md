@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### 2026-08-28
+- **feat:** Drain over HTTP (#70 item 3) — `POST/GET/DELETE
+  /api/v1/drives/{id}/drain`. `src/drain.rs` moves every leg (data and
+  parity) off every slab on the device one extent at a time, locking per
+  extent and yielding between, so I/O keeps flowing; slabs being drained are
+  quarantined; a leg that fails to move is skipped and listed. Terminal
+  `empty` = safe to remove; `stuck` keeps the quarantine. Refused for the
+  slab holding the volume metadata.
+- **feat:** Drive health inbound (#70 item 4) — `POST /api/v1/drives/{id}/health`
+  quarantines the drive's slabs and puts them in the failed set of every
+  *redundant* volume with a leg there (`VolumeManager::distrust_slab`; an
+  unreplicated volume's only copy stays trusted); `failed`/`missing` or
+  `drain: true` starts a drain; `healthy` lifts the quarantine.
+- **feat:** `SlabRegistry` quarantine — `set_quarantined` keeps a slab out of
+  every allocation path (`best_slab_for_tier`, `…_apart_from`, `best_slab`,
+  `distinct_domains_with_space`, placement destinations) while leaving what
+  is on it readable and writable.
+- **feat:** `RebalanceStrategy::ByFailureDomain { rung }` (#71 item 3) —
+  separates legs of one extent or stripe that share a domain at the rung,
+  then evens allocation out across the domains.
+- **feat:** Node topology as a chain (#72) — `[management].topology` sets the
+  registry's node labels under every slab's domain; `/v1/nodes/capacity`
+  reports `topology_chain` for the local node.
+- **feat:** Dirty-stripe log (`volume/stripelog.rs`) — a parity volume with a
+  data directory marks a stripe before its read-modify-write (one fsync per
+  stripe per flush interval), `flush` clears the log, and restore
+  recomputes exactly the stripes a crash left marked
+  (`ThinVolumeHandle::verify_stripes`).
+- **feat:** Restripe — `VolumeManager::restripe` /
+  `POST /api/v1/volumes/{id}/restripe` changes a policy to or from parity by
+  copying into a scratch placement and swapping the map
+  (`GlobalExtentMap::rename_volume`); refused while exported.
+
 ## [v10.0.0] — 2026-08-28
 
 Major by the size of the change, not by breakage: every API and file format

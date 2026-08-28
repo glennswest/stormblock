@@ -166,11 +166,73 @@ groups legs by name and version with `copies_wanted` and `degraded`;
 records how many drives a name should be on (`<data_dir>/pallet_mirrors.json`
 — the drives carry no record of it).
 
+## Retiring a drive: health, quarantine, drain
+
+The drive plane (stormdrive, #70) talks to the engine in two verbs.
+
+```
+POST /api/v1/drives/{id}/health  {"state":"failing","reason":"SMART: 12 pending sectors"}
+POST /api/v1/drives/{id}/drain
+GET  /api/v1/drives/{id}/drain          → {"state":"running","moved":…,"remaining":…}
+DELETE /api/v1/drives/{id}/drain        → cancel; what moved stays moved
+```
+
+**Health.** `degraded`, `failing`, `failed` or `missing` **quarantines** every
+slab on the drive — no new allocation lands there, existing data stays
+readable and writable in place — and puts the slab in the **failed set of
+every redundant volume with a leg on it**, so those volumes stop reading and
+writing that leg immediately. An unreplicated volume's only copy is left
+alone: distrusting it would make the data unreadable, not safer. `healthy`
+lifts the quarantine; the volumes' failed sets clear on their next `resync`.
+`failed` and `missing` (or `"drain": true`) also start a drain.
+
+**Drain** moves every leg off every slab on the drive — data and parity —
+one extent at a time, taking the map and registry locks per extent and
+yielding between, so I/O keeps flowing and a cancel lands within one extent.
+Each move keeps the leg off the domains of its extent's other legs, and a
+slot shared by a golden and its clones is followed by every map that names
+it. A leg that fails to move is skipped and listed rather than stalling the
+rest. Terminal states: `empty` — nothing of any volume remains, safe to pull;
+`stuck` — some legs could not move (the drive stays quarantined);
+`cancelled`. A drive whose slab holds the volume metadata is refused; move the
+metadata first.
+
+## Rebalance by failure domain
+
+`RebalanceStrategy::ByFailureDomain { rung }` (#71 item 3) runs two passes:
+first it separates legs of one extent — or members and parity of one stripe —
+that share a domain at the rung, which happens to data placed before the
+labels existed; then it evens out allocation across the domains at that
+rung, which is what a node does after a shelf is added. Both passes are
+per-leg moves that respect the extent's other legs.
+
+## The parity write hole
+
+A parity write is two writes, and a crash between them leaves the stripe's
+parity stale. With a data directory, a parity volume keeps a **dirty-stripe
+log** (`<data_dir>/stripes-<volume>.log`): a stripe is marked before its
+read-modify-write (one fsync the first time it goes dirty since the last
+flush — not per write), and `flush` clears the log, since after a flush
+nothing is mid-write from the consumer's point of view. On restart the
+stripes left in the log are recomputed and only those. Without a data
+directory there is no log and `resync?verify=true` remains the recovery.
+
+## Restripe
+
+```
+POST /api/v1/volumes/{id}/restripe {"redundancy":"raid5:4+1"}
+```
+
+Converting to or from parity rebuilds the placement: every extent is copied
+into a scratch placement under the new policy, the volume takes that map in
+one swap, and the old slots are released. It holds the volume's mapping lock
+throughout and is refused while the volume is exported or attached — it is
+offline by design. `none`/`mirror` to `mirror` does not need it: set the
+policy and `resync`.
+
 ## Not in this cut
 
 - StormFS chunk/versioned volumes stay `none` — StormFS replicates above.
-- Converting to or from parity (a restripe).
-- A write-intent journal for the parity write hole; `resync?verify=true` is
-  the recovery.
-- `POST /api/v1/drives/{id}/drain` and the health inbound (#70 items 3–4);
-  `rebalance` by failure domain (#71 item 3).
+- A restripe of a volume with live writers (it is offline).
+- `[management].topology` still travels as a flat map to /v1 peers; only the
+  local node reports `topology_chain`.

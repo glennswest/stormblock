@@ -56,7 +56,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **NVMe userspace driver** — VFIO-based, per-core queue pairs, MMIO polling. No kernel block layer in the NVMe path.
 - **SAS via io_uring** — Kernel SAS drivers (mpt3sas) with O_DIRECT and registered buffers.
 - **ublk server** — Exports volumes as `/dev/ublkbN` via io_uring URING_CMD (Linux 6.0+).
-- **Redundancy per volume** — `mirror:N`, `raid5:D+1`, `raid6:D+2` are a property of each volume, realised by placing its extents across distinct failure domains (drive, shelf, rack, …); a node carries a mix on the same drives, clones inherit their golden's policy, and `resync` rebuilds a lost leg. See [docs/redundancy.md](docs/redundancy.md).
+- **Redundancy per volume** — `mirror:N`, `raid5:D+1`, `raid6:D+2` are a property of each volume, realised by placing its extents across distinct failure domains (drive, shelf, rack, …); a node carries a mix on the same drives, clones inherit their golden's policy, `resync` rebuilds a lost leg, a drive can be reported failing and drained over HTTP, and a dirty-stripe log bounds the parity write hole. See [docs/redundancy.md](docs/redundancy.md).
 - **Software RAID** — drive-level RAID 1/5/6/10 with AVX2/AVX-512/NEON SIMD parity computation, kept as a leg transport and for whole-device use.
 - **Slab extent store** — Organic data placement with fixed-size 1 MB slots per device. Volumes spread across any device on any tier.
 - **Global Extent Map (GEM)** — Cross-slab extent tracking with reverse index, COW snapshot cloning, and rebuild-from-slabs recovery.
