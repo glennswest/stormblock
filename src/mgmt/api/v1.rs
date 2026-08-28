@@ -955,11 +955,25 @@ async fn create_volume(
     // Master on this node: back it with a real thin volume (COW clone of the
     // source when one is bound locally).
     let local_id = if master == v1.local_node {
-        let mut vm = state.volume_manager.lock().await;
-        let created = match source_local {
-            Some(src) => vm.create_snapshot(EngineVolumeId(src), &req.name).await,
-            None => vm.create_volume_any(&req.name, req.size_bytes).await,
+        // A source that carries a filesystem is cloned with its own identity
+        // (#76); anything else is the plain map clone.
+        let has_fs = {
+            let vm = state.volume_manager.lock().await;
+            source_local.is_some_and(|src| vm.fs_info(&EngineVolumeId(src)).is_some())
         };
+        let created = match source_local {
+            Some(src) if has_fs => {
+                let mut spec = crate::fs::template::CloneSpec::new(&req.name);
+                spec.verify = false;
+                crate::fs::template::clone_volume_unsealed_ok(&state.volume_manager, EngineVolumeId(src), &spec)
+                    .await
+                    .map(|c| c.volume_id)
+                    .map_err(|e| crate::volume::VolumeError::AllocatorError(e.to_string()))
+            }
+            Some(src) => state.volume_manager.lock().await.create_snapshot(EngineVolumeId(src), &req.name).await,
+            None => state.volume_manager.lock().await.create_volume_any(&req.name, req.size_bytes).await,
+        };
+        let mut vm = state.volume_manager.lock().await;
         match created {
             Ok(id) => {
                 // Clones inherit the source size; grow to the request if larger.

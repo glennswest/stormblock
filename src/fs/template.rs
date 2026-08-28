@@ -357,6 +357,23 @@ impl FsTemplate {
     }
 }
 
+impl FsTemplate {
+    /// What this template says about its filesystem, in the shape the volume
+    /// record keeps (#76).
+    pub fn fs_info(&self) -> crate::volume::FsInfo {
+        crate::volume::FsInfo {
+            kind: self.fs.as_str().to_string(),
+            journal: self.journal,
+            features: self.features.clone(),
+            sixty_four_bit: self.sixty_four_bit,
+            metadata_csum: self.metadata_csum,
+            csum_seed: self.csum_seed,
+            label: self.label.clone(),
+            uuid: self.fs_uuid,
+        }
+    }
+}
+
 /// Errors the template lifecycle raises. Each maps to one HTTP status, so the
 /// API layer never has to guess from a string.
 #[derive(Debug)]
@@ -908,18 +925,15 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
     }
     drop(dev);
 
-    let sealed = vm
-        .lock()
-        .await
-        .create_snapshot(raw, &format!("fstemplate-{}-{}", template.fs, template.name))
-        .await
-        .map_err(|e| TemplateError::Internal(format!("sealing snapshot: {e}")))?;
-
+    // Sealing is a state the volume enters, not a snapshot into a second
+    // object (#76): the volume that was formatted *is* the template, it just
+    // takes no more writes. One template, one volume — there is no `-raw`
+    // half left to leak (#47).
     let mut s = store.lock().await;
     let t = s
         .get_mut(id)
         .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {id} not found")))?;
-    t.sealed_volume_id = Some(sealed.0);
+    t.sealed_volume_id = Some(raw.0);
     t.raw_volume_id = None;
     t.state = TemplateState::Ready;
     if let Some(l) = &layout {
@@ -936,18 +950,13 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
     s.persist();
     drop(s);
 
-    // The snapshot owns its extents outright — copy-on-write refcounts mean it
-    // does not depend on the volume it was taken from — so the scratch volume
-    // is now pure cost. Dropping it here is what keeps one template to one
-    // volume instead of two (#47).
-    if let Err(e) = vm.lock().await.delete_volume(raw).await {
-        tracing::warn!(
-            "fstemplate {}: scratch volume {raw} not deleted after sealing: {e}",
-            out.name
-        );
-    }
+    vm.lock()
+        .await
+        .seal_volume(raw, Some(out.fs_info()))
+        .await
+        .map_err(|e| TemplateError::Internal(format!("sealing volume {raw}: {e}")))?;
 
-    tracing::info!("fstemplate {} sealed as volume {}", out.name, sealed.0);
+    tracing::info!("fstemplate {} sealed as volume {}", out.name, raw);
     Ok(out)
 }
 
@@ -998,7 +1007,10 @@ impl CloneSpec {
 #[derive(Debug, Clone)]
 pub struct CloneResult {
     pub volume_id: VolumeId,
-    pub template_id: Uuid,
+    /// The volume it was cloned from.
+    pub source: VolumeId,
+    /// The template, when the clone came through one.
+    pub template_id: Option<Uuid>,
     pub fs_uuid: Option<Uuid>,
     pub size_bytes: u64,
     /// Whether this clone was checked before being handed out.
@@ -1010,34 +1022,53 @@ pub struct CloneResult {
     pub from_standby: bool,
 }
 
-/// Mint a copy-on-write clone of a sealed template.
+/// Clone any sealed volume — the one answer to "clone this" (#76).
 ///
-/// This is the provisioning path: a snapshot plus, at most, one 16-byte patch.
-/// No mkfs, no attach, no round trip.
-pub async fn clone_template(
+/// A snapshot, then — when the source carries a filesystem — a fresh
+/// filesystem UUID and a check. Lineage is recorded by the snapshot. The
+/// stamp is not optional in spirit: two live filesystems must never claim
+/// one identity, and every consumer clones *through* here.
+pub async fn clone_volume(
     vm: &Arc<VmLock>,
-    store: &Arc<StoreLock>,
-    key: &str,
+    source: VolumeId,
     spec: &CloneSpec,
 ) -> Result<CloneResult> {
-    let template = store
-        .lock()
-        .await
-        .find(key)
-        .cloned()
-        .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {key} not found")))?;
-    if template.state != TemplateState::Ready {
-        return Err(TemplateError::Conflict(format!(
-            "fstemplate {} is {} — seal it before cloning",
-            template.name,
-            template.state.as_str()
-        )));
-    }
-    let source = template.clone_source().ok_or_else(|| {
-        TemplateError::Internal(format!("fstemplate {} has no sealed snapshot", template.name))
-    })?;
+    clone_volume_impl(vm, source, spec, true).await
+}
+
+/// A snapshot of a volume that is *not* sealed — the plain snapshot the
+/// volume API always offered — but with the filesystem identity handled the
+/// same way: a source that carries a filesystem yields a clone with its own
+/// UUID. The source may still be changing under it; that is the caller's
+/// consistency question, as it always was for a snapshot.
+pub async fn clone_volume_unsealed_ok(
+    vm: &Arc<VmLock>,
+    source: VolumeId,
+    spec: &CloneSpec,
+) -> Result<CloneResult> {
+    clone_volume_impl(vm, source, spec, false).await
+}
+
+async fn clone_volume_impl(
+    vm: &Arc<VmLock>,
+    source: VolumeId,
+    spec: &CloneSpec,
+    require_sealed: bool,
+) -> Result<CloneResult> {
     if spec.name.trim().is_empty() {
         return Err(TemplateError::Invalid("clone name must not be empty".to_string()));
+    }
+    let (fs, sealed, exists) = {
+        let m = vm.lock().await;
+        (m.fs_info(&source).cloned(), m.is_sealed(&source), m.get_volume(&source).is_some())
+    };
+    if !exists {
+        return Err(TemplateError::NotFound(format!("volume {source} not found")));
+    }
+    if require_sealed && !sealed {
+        return Err(TemplateError::Conflict(format!(
+            "volume {source} is not sealed — seal it before cloning"
+        )));
     }
 
     let (id, size) = {
@@ -1045,13 +1076,12 @@ pub async fn clone_template(
         let id = m
             .create_snapshot(source, &spec.name)
             .await
-            .map_err(|e| TemplateError::Internal(format!("cloning template: {e}")))?;
+            .map_err(|e| TemplateError::Internal(format!("cloning volume: {e}")))?;
 
-        // A clone inherits the template's size; grow it if the caller asked
+        // A clone inherits the source's size; grow it if the caller asked
         // for more. Shrinking is never attempted — the filesystem inside would
         // not survive it.
-        let mut size =
-            m.get_volume(&id).map(|d| d.capacity_bytes()).unwrap_or(template.size_bytes);
+        let mut size = m.get_volume(&id).map(|d| d.capacity_bytes()).unwrap_or(0);
         if let Some(want) = spec.size_bytes {
             if want > size {
                 m.resize_volume(id, want)
@@ -1063,9 +1093,22 @@ pub async fn clone_template(
         (id, size)
     };
 
+    // No filesystem the engine knows about: a plain clone, done.
+    let Some(fs) = fs else {
+        return Ok(CloneResult {
+            volume_id: id,
+            source,
+            template_id: None,
+            fs_uuid: None,
+            size_bytes: size,
+            verified: false,
+            from_standby: false,
+        });
+    };
+
     // Fresh identity, with no lock held: this is a superblock write against
     // one volume, and thousands of clones may be minted at once.
-    let mut fs_uuid = template.fs_uuid;
+    let mut fs_uuid = fs.uuid;
     if spec.stamp_uuid || spec.label.is_some() {
         let dev = vm
             .lock()
@@ -1078,7 +1121,7 @@ pub async fn clone_template(
                 Ok(_) => fs_uuid = Some(fresh),
                 Err(e) => {
                     // Roll the clone back: handing out a volume that silently
-                    // shares its template's identity is the bug this exists to
+                    // shares its source's identity is the bug this exists to
                     // prevent (stormblockmk#12).
                     drop(dev);
                     return Err(discard_or_report(
@@ -1131,6 +1174,72 @@ pub async fn clone_template(
         }
     }
 
+    // The record follows the filesystem: the clone's own UUID and label.
+    {
+        let mut m = vm.lock().await;
+        let mut info = fs.clone();
+        info.uuid = fs_uuid;
+        if let Some(l) = &spec.label {
+            info.label = l.clone();
+        }
+        let _ = m.set_fs_info(id, Some(info)).await;
+    }
+
+    Ok(CloneResult {
+        volume_id: id,
+        source,
+        template_id: None,
+        fs_uuid,
+        size_bytes: size,
+        verified: spec.verify,
+        from_standby: false,
+    })
+}
+
+/// Mint a copy-on-write clone of a sealed template.
+///
+/// This is the provisioning path: a snapshot plus, at most, one 16-byte patch.
+/// No mkfs, no attach, no round trip. The clone itself is [`clone_volume`];
+/// what is template-specific is the bookkeeping around it.
+pub async fn clone_template(
+    vm: &Arc<VmLock>,
+    store: &Arc<StoreLock>,
+    key: &str,
+    spec: &CloneSpec,
+) -> Result<CloneResult> {
+    let template = store
+        .lock()
+        .await
+        .find(key)
+        .cloned()
+        .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {key} not found")))?;
+    if template.state != TemplateState::Ready {
+        return Err(TemplateError::Conflict(format!(
+            "fstemplate {} is {} — seal it before cloning",
+            template.name,
+            template.state.as_str()
+        )));
+    }
+    let source = template.clone_source().ok_or_else(|| {
+        TemplateError::Internal(format!("fstemplate {} has no sealed snapshot", template.name))
+    })?;
+
+    // A template restored from an older store may not have told the volume
+    // what it carries yet; the clone path reads it from the volume.
+    {
+        let mut m = vm.lock().await;
+        if m.get_volume(&source).is_some() {
+            if !m.is_sealed(&source) {
+                let _ = m.seal_volume(source, Some(template.fs_info())).await;
+            } else if m.fs_info(&source).is_none() {
+                let _ = m.set_fs_info(source, Some(template.fs_info())).await;
+            }
+        }
+    }
+
+    let mut result = clone_volume(vm, source, spec).await?;
+    result.template_id = Some(template.id);
+
     {
         let mut s = store.lock().await;
         if let Some(t) = s.get_mut(&template.id) {
@@ -1153,14 +1262,7 @@ pub async fn clone_template(
         replenish(vm, store, template.id);
     }
 
-    Ok(CloneResult {
-        volume_id: id,
-        template_id: template.id,
-        fs_uuid,
-        size_bytes: size,
-        verified: spec.verify,
-        from_standby: false,
-    })
+    Ok(result)
 }
 
 // ------------------------------------------------------------- standing by
@@ -1315,6 +1417,7 @@ pub async fn standing_needed(store: &StoreLock) -> Vec<StandingStatus> {
 /// Run at startup and after a seal. Failures are logged and skipped: a
 /// template without a standing clone still works, it is only slower.
 pub async fn ensure_standing_all(vm: &Arc<VmLock>, store: &Arc<StoreLock>) -> usize {
+    adopt_into_volumes(vm, store).await;
     let ready: Vec<(Uuid, String)> = {
         let s = store.lock().await;
         s.templates
@@ -1332,6 +1435,42 @@ pub async fn ensure_standing_all(vm: &Arc<VmLock>, store: &Arc<StoreLock>) -> us
         }
     }
     minted
+}
+
+/// Make the volume records agree with the template store: every sealed
+/// template's volume is marked sealed and carries its filesystem info, and
+/// a standing clone's record knows its own UUID. What a store written before
+/// #76 needs once; idempotent after.
+pub async fn adopt_into_volumes(vm: &Arc<VmLock>, store: &Arc<StoreLock>) -> usize {
+    let templates: Vec<FsTemplate> = store.lock().await.templates.clone();
+    let mut adopted = 0usize;
+    let mut m = vm.lock().await;
+    for t in &templates {
+        if t.state != TemplateState::Ready {
+            continue;
+        }
+        let Some(sealed) = t.clone_source() else { continue };
+        if m.get_volume(&sealed).is_none() {
+            continue;
+        }
+        if !m.is_sealed(&sealed) || m.fs_info(&sealed).is_none() {
+            if m.seal_volume(sealed, Some(t.fs_info())).await.is_ok() {
+                adopted += 1;
+            }
+        }
+        if let Some(st) = &t.standing {
+            let v = VolumeId(st.volume_id);
+            if m.get_volume(&v).is_some() && m.fs_info(&v).map(|f| f.uuid) != Some(st.fs_uuid) {
+                let mut info = t.fs_info();
+                info.uuid = st.fs_uuid;
+                let _ = m.set_fs_info(v, Some(info)).await;
+            }
+        }
+    }
+    if adopted > 0 {
+        tracing::info!("{adopted} sealed template volume(s) adopted as sealed volumes (#76)");
+    }
+    adopted
 }
 
 /// Take the standing clone, and mint its replacement behind the caller.
@@ -1411,7 +1550,8 @@ pub async fn claim(
 
     Ok(CloneResult {
         volume_id: volume,
-        template_id: template.id,
+        source: template.clone_source().unwrap_or(volume),
+        template_id: Some(template.id),
         fs_uuid: standing.fs_uuid,
         size_bytes: size,
         verified: standing.verified,
@@ -2080,7 +2220,7 @@ mod tests {
 
         // Two clones of one template must not collide either.
         let second =
-            clone_template(&vm, &store, &clone.template_id.to_string(), &CloneSpec::new("pvc-2"))
+            clone_template(&vm, &store, &clone.template_id.unwrap().to_string(), &CloneSpec::new("pvc-2"))
                 .await
                 .unwrap();
         assert_ne!(second.fs_uuid, clone.fs_uuid);

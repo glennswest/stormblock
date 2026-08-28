@@ -35,7 +35,43 @@ const MAGIC: [u8; 8] = *b"STRMVOL\0";
 /// carries its mirror legs, a parity volume carries its stripes' parity
 /// groups, and the record names the policy and the slabs the volume has
 /// stopped trusting. A V3 record loads as an unreplicated volume.
-const VERSION: u32 = 4;
+///
+/// V5 puts lineage, sealing and filesystem identity on the volume (#76):
+/// `parent`, `sealed`, `fs`. A template is a volume that has been sealed.
+const VERSION: u32 = 5;
+
+/// What is known about the filesystem on a volume — the properties that used
+/// to live on a separate template object and are facts about the volume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsInfo {
+    /// `ext2`, `ext3`, `ext4`, …
+    pub kind: String,
+    pub journal: bool,
+    pub features: Option<String>,
+    pub sixty_four_bit: bool,
+    pub metadata_csum: bool,
+    /// What keeps a UUID stamp to one superblock write.
+    pub csum_seed: bool,
+    pub label: String,
+    /// The filesystem's own UUID. A clone gets a fresh one; two live
+    /// filesystems must never claim one identity.
+    pub uuid: Option<uuid::Uuid>,
+}
+
+impl FsInfo {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": self.kind,
+            "journal": self.journal,
+            "features": self.features,
+            "64bit": self.sixty_four_bit,
+            "metadata_csum": self.metadata_csum,
+            "metadata_csum_seed": self.csum_seed,
+            "label": self.label,
+            "uuid": self.uuid,
+        })
+    }
+}
 
 /// Metadata filename.
 const METADATA_FILE: &str = "volumes.dat";
@@ -77,6 +113,12 @@ pub struct VolumeRecord {
     pub parity: BTreeMap<u64, ParityGroup>,
     /// Slabs a write has failed on: skipped until a resync clears them.
     pub failed_slabs: Vec<SlabId>,
+    /// The volume this one was cloned from, if any (#76).
+    pub parent: Option<VolumeId>,
+    /// Sealed: refuses writes; what clones are taken from.
+    pub sealed: bool,
+    /// The filesystem on it, when the engine knows.
+    pub fs: Option<FsInfo>,
 }
 
 /// What is supposed to happen to a volume's divergence from its golden.
@@ -150,6 +192,60 @@ fn convert_legacy_extents(m: BTreeMap<u64, LegacyLocation>) -> BTreeMap<u64, Ext
     m.into_iter().map(|(k, v)| (k, v.into())).collect()
 }
 
+/// V4 payload shapes — decode-only, converted on load.
+mod v4 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: Option<RaidArrayId>,
+        pub extents: BTreeMap<u64, ExtentLocation>,
+        pub retention: Retention,
+        pub redundancy: RedundancyPolicy,
+        pub parity: BTreeMap<u64, ParityGroup>,
+        pub failed_slabs: Vec<SlabId>,
+    }
+}
+
+impl From<v4::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v4::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: v.array_id,
+                    extents: v.extents,
+                    retention: v.retention,
+                    redundancy: v.redundancy,
+                    parity: v.parity,
+                    failed_slabs: v.failed_slabs,
+                    // Nothing before V5 recorded lineage; the template
+                    // store's adoption fills in what it knows at startup.
+                    parent: None,
+                    sealed: false,
+                    fs: None,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// V3 payload shapes — decode-only, converted on load.
 ///
 /// **bincode is not self-describing**, so a field added to a struct is not
@@ -197,6 +293,9 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     redundancy: RedundancyPolicy::none(),
                     parity: BTreeMap::new(),
                     failed_slabs: Vec::new(),
+                    parent: None,
+                    sealed: false,
+                    fs: None,
                 })
                 .collect(),
         }
@@ -244,6 +343,9 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     redundancy: RedundancyPolicy::none(),
                     parity: BTreeMap::new(),
                     failed_slabs: Vec::new(),
+                    parent: None,
+                    sealed: false,
+                    fs: None,
                 })
                 .collect(),
         }
@@ -294,6 +396,9 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     redundancy: RedundancyPolicy::none(),
                     parity: BTreeMap::new(),
                     failed_slabs: Vec::new(),
+                    parent: None,
+                    sealed: false,
+                    fs: None,
                 })
                 .collect(),
         }
@@ -359,7 +464,7 @@ impl MetadataStore {
         // Every version that ever existed is decoded through its own shapes
         // and converted; see the note on `mod v2`.
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != 1 && version != 2 && version != 3 && version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported metadata version {version}"),
@@ -405,6 +510,12 @@ impl MetadataStore {
             let (old, _): (v3::VolumeMetadata, _) =
                 bincode::serde::decode_from_slice(payload, bincode::config::standard())
                     .map_err(|e| io::Error::other(format!("bincode decode (v3): {e}")))?;
+            return Ok(old.into());
+        }
+        if version == 4 {
+            let (old, _): (v4::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v4): {e}")))?;
             return Ok(old.into());
         }
         let (metadata, _): (VolumeMetadata, _) =
@@ -520,8 +631,85 @@ mod tests {
                 redundancy: RedundancyPolicy::none(),
                 parity: BTreeMap::new(),
                 failed_slabs: Vec::new(),
+                parent: None,
+                sealed: false,
+                fs: None,
             }],
         }
+    }
+
+    /// A V4 record — redundancy but no lineage — loads with nothing sealed.
+    #[test]
+    fn a_v4_record_loads_with_no_lineage() {
+        let slab_id = crate::drive::slab::SlabId(Uuid::new_v4());
+        let mut extents = BTreeMap::new();
+        extents.insert(1u64, ExtentLocation::new(slab_id, 5));
+        let old = v4::VolumeMetadata {
+            extent_size: 1 << 20,
+            arrays: vec![],
+            volumes: vec![v4::VolumeRecord {
+                id: VolumeId(Uuid::from_u128(44)),
+                name: "four".into(),
+                virtual_size: 1 << 30,
+                array_id: None,
+                extents,
+                retention: Retention::Keep,
+                redundancy: RedundancyPolicy::mirror(2),
+                parity: BTreeMap::new(),
+                failed_slabs: vec![slab_id],
+            }],
+        };
+        let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&payload);
+        let crc = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        let back = MetadataStore::decode(&buf).expect("a V4 record must still load");
+        let v = &back.volumes[0];
+        assert_eq!(v.redundancy, RedundancyPolicy::mirror(2));
+        assert_eq!(v.failed_slabs, vec![slab_id]);
+        assert!(v.parent.is_none() && !v.sealed && v.fs.is_none());
+    }
+
+    #[test]
+    fn v5_lineage_round_trips() {
+        let parent = VolumeId(Uuid::from_u128(1));
+        let meta = VolumeMetadata {
+            extent_size: 1 << 20,
+            arrays: vec![],
+            volumes: vec![VolumeRecord {
+                id: VolumeId(Uuid::from_u128(2)),
+                name: "child".into(),
+                virtual_size: 1 << 30,
+                array_id: None,
+                extents: BTreeMap::new(),
+                retention: Retention::Keep,
+                redundancy: RedundancyPolicy::none(),
+                parity: BTreeMap::new(),
+                failed_slabs: Vec::new(),
+                parent: Some(parent),
+                sealed: true,
+                fs: Some(FsInfo {
+                    kind: "ext4".into(),
+                    journal: true,
+                    features: Some("^64bit".into()),
+                    sixty_four_bit: false,
+                    metadata_csum: true,
+                    csum_seed: true,
+                    label: "root".into(),
+                    uuid: Some(Uuid::from_u128(9)),
+                }),
+            }],
+        };
+        let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
+        let v = &back.volumes[0];
+        assert_eq!(v.parent, Some(parent));
+        assert!(v.sealed);
+        assert_eq!(v.fs.as_ref().unwrap().uuid, Some(Uuid::from_u128(9)));
     }
 
     /// A V3 record — one leg per extent, no policy — must load as an
@@ -593,6 +781,9 @@ mod tests {
                 redundancy: RedundancyPolicy::parse("raid5:4+1@shelf").unwrap(),
                 parity,
                 failed_slabs: vec![b],
+                parent: None,
+                sealed: false,
+                fs: None,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -758,6 +949,9 @@ mod retention_tests {
                 redundancy: RedundancyPolicy::none(),
                 parity: BTreeMap::new(),
                 failed_slabs: Vec::new(),
+                parent: None,
+                sealed: false,
+                fs: None,
             }],
         }
     }

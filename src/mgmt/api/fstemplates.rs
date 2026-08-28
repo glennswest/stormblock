@@ -51,7 +51,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 /// Map a lifecycle error onto the status a client can act on.
-fn err(e: TemplateError) -> Response {
+pub fn err(e: TemplateError) -> Response {
     match e {
         TemplateError::NotFound(m) => ApiError::not_found(m),
         TemplateError::Exists(m) | TemplateError::Conflict(m) => ApiError::conflict(m),

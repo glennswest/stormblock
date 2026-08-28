@@ -31,7 +31,7 @@ use crate::placement::topology::StorageTier;
 use crate::raid::RaidArrayId;
 
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
-pub use metadata::{MetadataStore, Retention};
+pub use metadata::{FsInfo, MetadataStore, Retention};
 pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport};
 pub use redundancy::{Redundancy, RedundancyPolicy};
 
@@ -79,6 +79,10 @@ pub struct VolumeManager {
     /// the I/O path, and every consumer of a handle would otherwise have to
     /// carry it around to be able to ask.
     retentions: HashMap<VolumeId, Retention>,
+    /// Lineage: which volume each one was cloned from (#76).
+    parents: HashMap<VolumeId, VolumeId>,
+    /// What is known about the filesystem on each volume.
+    fs_info: HashMap<VolumeId, FsInfo>,
 }
 
 impl VolumeManager {
@@ -96,6 +100,8 @@ impl VolumeManager {
             metadata_store: None,
             metadata_slab: None,
             retentions: HashMap::new(),
+            parents: HashMap::new(),
+            fs_info: HashMap::new(),
         }
     }
 
@@ -111,7 +117,111 @@ impl VolumeManager {
             metadata_store: Some(store),
             metadata_slab: None,
             retentions: HashMap::new(),
+            parents: HashMap::new(),
+            fs_info: HashMap::new(),
         })
+    }
+
+    // ── Lineage, sealing, filesystem identity (#76) ────────────────────
+
+    /// The volume this one was cloned from.
+    pub fn parent(&self, id: &VolumeId) -> Option<VolumeId> {
+        self.parents.get(id).copied()
+    }
+
+    /// Every volume cloned directly from `id`.
+    pub fn children(&self, id: &VolumeId) -> Vec<VolumeId> {
+        let mut v: Vec<VolumeId> = self.parents.iter().filter(|(_, p)| *p == id).map(|(c, _)| *c).collect();
+        v.sort_by_key(|c| c.0);
+        v
+    }
+
+    /// `id`, its parent, its parent's parent, … oldest last. Stops at a cycle
+    /// or a parent that no longer exists (a deleted golden leaves the link
+    /// as a record of where the data came from).
+    pub fn lineage(&self, id: &VolumeId) -> Vec<VolumeId> {
+        let mut out = vec![*id];
+        let mut cur = *id;
+        while let Some(p) = self.parents.get(&cur) {
+            if out.contains(p) || out.len() > 1024 {
+                break;
+            }
+            out.push(*p);
+            cur = *p;
+        }
+        out
+    }
+
+    pub fn is_sealed(&self, id: &VolumeId) -> bool {
+        self.volumes.get(id).map(|h| h.is_sealed()).unwrap_or(false)
+    }
+
+    /// Seal a volume: from now on it takes no writes and is what clones are
+    /// taken from. `fs`, when given, records what is on it.
+    pub async fn seal_volume(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        handle.set_sealed(true);
+        if let Some(fs) = fs {
+            self.fs_info.insert(id, fs);
+        }
+        self.persist().await;
+        Ok(())
+    }
+
+    /// Reopen a sealed volume for writes. Exists for an operator undoing a
+    /// mistake; clones already taken keep their own extents either way.
+    pub async fn unseal_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        handle.set_sealed(false);
+        self.persist().await;
+        Ok(())
+    }
+
+    pub fn fs_info(&self, id: &VolumeId) -> Option<&FsInfo> {
+        self.fs_info.get(id)
+    }
+
+    pub async fn set_fs_info(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
+        if !self.volumes.contains_key(&id) {
+            return Err(VolumeError::VolumeNotFound(id));
+        }
+        match fs {
+            Some(f) => {
+                self.fs_info.insert(id, f);
+            }
+            None => {
+                self.fs_info.remove(&id);
+            }
+        }
+        self.persist().await;
+        Ok(())
+    }
+
+    /// Record the filesystem UUID a stamp just wrote.
+    pub async fn set_fs_uuid(&mut self, id: VolumeId, uuid: uuid::Uuid) -> Result<(), VolumeError> {
+        if !self.volumes.contains_key(&id) {
+            return Err(VolumeError::VolumeNotFound(id));
+        }
+        if let Some(f) = self.fs_info.get_mut(&id) {
+            f.uuid = Some(uuid);
+        }
+        self.persist().await;
+        Ok(())
+    }
+
+    /// A volume by id or by name.
+    pub async fn find_volume(&self, key: &str) -> Option<VolumeId> {
+        if let Ok(u) = key.parse::<uuid::Uuid>() {
+            if self.volumes.contains_key(&VolumeId(u)) {
+                return Some(VolumeId(u));
+            }
+        }
+        for (id, h) in &self.volumes {
+            if h.name().await == key {
+                return Some(*id);
+            }
+        }
+        None
     }
 
     /// Keep volume metadata inside `slab_id` instead of (or as well as) a
@@ -476,6 +586,7 @@ impl VolumeManager {
             let snap_id = snap.id();
             let handle = Arc::new(self.inherit_handle(snap, source_id));
             self.volumes.insert(snap_id, handle);
+            self.record_lineage(snap_id, *source_id);
             ids.push(snap_id);
         }
         self.persist().await;
@@ -486,6 +597,9 @@ impl VolumeManager {
     pub async fn delete_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
+        self.parents.remove(&id);
+        self.fs_info.remove(&id);
+        self.retentions.remove(&id);
 
         // Remove all extents from GEM and dec_ref on slabs
         let mut gem = self.gem.write().await;
@@ -604,8 +718,19 @@ impl VolumeManager {
         let snap_id = snap.id();
         let snap_handle = Arc::new(self.inherit_handle(snap, &source_id));
         self.volumes.insert(snap_id, snap_handle);
+        self.record_lineage(snap_id, source_id);
         self.persist().await;
         Ok(snap_id)
+    }
+
+    /// A clone descends from its source and starts out carrying the same
+    /// filesystem (same UUID, until something stamps it — which the
+    /// filesystem-aware clone path does).
+    fn record_lineage(&mut self, child: VolumeId, source: VolumeId) {
+        self.parents.insert(child, source);
+        if let Some(fs) = self.fs_info.get(&source).cloned() {
+            self.fs_info.insert(child, fs);
+        }
     }
 
     /// A clone is protected the way its source is: its shared extents
@@ -769,6 +894,7 @@ impl VolumeManager {
                 handle.capacity_bytes(),
                 handle.redundancy(),
                 handle.failed_slabs(),
+                handle.is_sealed(),
             ));
         }
 
@@ -787,12 +913,15 @@ impl VolumeManager {
             .collect();
         let volumes = vol_info
             .into_iter()
-            .map(|(id, name, virtual_size, redundancy, failed_slabs)| metadata::VolumeRecord {
+            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed)| metadata::VolumeRecord {
                 id,
                 name,
                 virtual_size,
                 array_id: None,
                 retention: self.retentions.get(&id).copied().unwrap_or_default(),
+                parent: self.parents.get(&id).copied(),
+                sealed,
+                fs: self.fs_info.get(&id).cloned(),
                 extents: gem
                     .get_volume_map(&id)
                     .map(|m| m.extents.clone())
@@ -948,6 +1077,13 @@ impl VolumeManager {
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
+            handle.set_sealed(vrec.sealed);
+            if let Some(p) = vrec.parent {
+                self.parents.insert(vrec.id, p);
+            }
+            if let Some(fs) = vrec.fs.clone() {
+                self.fs_info.insert(vrec.id, fs);
+            }
             if let (Some(store), true) = (&self.metadata_store, vrec.redundancy.scheme.is_parity()) {
                 let dirty = handle.use_stripe_log(store.dir());
                 if !dirty.is_empty() {

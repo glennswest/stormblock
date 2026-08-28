@@ -93,6 +93,9 @@ pub enum VolumeError {
     InsufficientDomains { policy: String, needed: usize, available: usize },
     /// A policy change that would need the data re-striped, not re-copied.
     RestripeRequired { from: String, to: String },
+    /// The volume is sealed: it is what clones are taken from, and nothing
+    /// writes to it (#76).
+    Sealed(VolumeId),
 }
 
 impl fmt::Display for VolumeError {
@@ -118,6 +121,10 @@ impl fmt::Display for VolumeError {
                 f,
                 "changing redundancy from {from} to {to} would re-stripe the data; only \
                  none/mirror to mirror is applied in place (resync after setting it)"
+            ),
+            VolumeError::Sealed(id) => write!(
+                f,
+                "volume {id} is sealed: it is what clones are taken from, and it takes no writes"
             ),
         }
     }
@@ -297,6 +304,8 @@ pub struct ThinVolumeHandle {
     shards: Vec<tokio::sync::Mutex<()>>,
     /// Stripes with a read-modify-write since the last flush (parity only).
     stripe_log: std::sync::RwLock<super::stripelog::StripeLog>,
+    /// Sealed: refuses writes, discards and shrinks (#76).
+    sealed: std::sync::atomic::AtomicBool,
 }
 
 impl ThinVolumeHandle {
@@ -333,7 +342,25 @@ impl ThinVolumeHandle {
             failed: std::sync::RwLock::new(HashSet::new()),
             shards: (0..SHARDS).map(|_| tokio::sync::Mutex::new(())).collect(),
             stripe_log: std::sync::RwLock::new(super::stripelog::StripeLog::none()),
+            sealed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        self.sealed.load(Ordering::Relaxed)
+    }
+
+    /// Seal (or unseal) the volume. Sealing is a state, not a snapshot: the
+    /// volume itself becomes what clones are taken from.
+    pub fn set_sealed(&self, sealed: bool) {
+        self.sealed.store(sealed, Ordering::Relaxed);
+    }
+
+    fn refuse_if_sealed(&self) -> DriveResult<()> {
+        if self.is_sealed() {
+            return Err(DriveError::Other(anyhow::anyhow!("{}", VolumeError::Sealed(self.id))));
+        }
+        Ok(())
     }
 
     /// Keep this volume's dirty-stripe log under `dir`. Returns what a
@@ -475,6 +502,9 @@ impl ThinVolumeHandle {
         let current = self.virtual_size.load(Ordering::Relaxed);
         if new_size == current {
             return Ok(());
+        }
+        if new_size < current && self.is_sealed() {
+            return Err(VolumeError::Sealed(self.id));
         }
 
         let mut vol = self.inner.lock().await;
@@ -1857,6 +1887,7 @@ impl BlockDevice for ThinVolumeHandle {
     /// write of parity is the thing that must not interleave, and two
     /// writers in different stripes never touch the same parity slot.
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        self.refuse_if_sealed()?;
         let buf_len = buf.len() as u64;
         let mut bytes_written = 0u64;
         let mut pos = offset;
@@ -1960,6 +1991,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.refuse_if_sealed()?;
         let policy = self.redundancy();
         // An unreplicated volume serialises against its own allocations with
         // the volume lock; a redundant one uses the extent/stripe shards,

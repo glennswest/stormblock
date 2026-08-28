@@ -39,11 +39,52 @@ pub struct VolumeResponse {
     pub health: String,
     /// Physical bytes the volume occupies, every leg and parity slot counted.
     pub physical_bytes: u64,
+    /// The volume this one was cloned from (#76).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Uuid>,
+    /// Sealed: takes no writes; what clones are taken from.
+    pub sealed: bool,
+    /// The filesystem on it, when the engine knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs: Option<serde_json::Value>,
 }
 
-async fn describe(handle: &crate::volume::ThinVolumeHandle) -> (String, String, u64) {
-    let h = handle.health().await;
-    (h.redundancy, h.state.to_string(), handle.physical().await)
+/// Everything about a volume the response carries beyond name and size.
+struct Described {
+    redundancy: String,
+    health: String,
+    physical_bytes: u64,
+    parent: Option<Uuid>,
+    sealed: bool,
+    fs: Option<serde_json::Value>,
+    fs_uuid: Option<Uuid>,
+}
+
+async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described {
+    match vm.get_volume_handle(id) {
+        Some(handle) => {
+            let h = handle.health().await;
+            let fs = vm.fs_info(id);
+            Described {
+                redundancy: h.redundancy,
+                health: h.state.to_string(),
+                physical_bytes: handle.physical().await,
+                parent: vm.parent(id).map(|p| p.0),
+                sealed: handle.is_sealed(),
+                fs: fs.map(|f| f.json()),
+                fs_uuid: fs.and_then(|f| f.uuid),
+            }
+        }
+        None => Described {
+            redundancy: "none".into(),
+            health: "healthy".into(),
+            physical_bytes: 0,
+            parent: None,
+            sealed: false,
+            fs: None,
+            fs_uuid: None,
+        },
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,10 +140,7 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let vols = vm.list_volumes().await;
     let mut items: Vec<VolumeResponse> = Vec::with_capacity(vols.len());
     for (id, name, vsize, allocated) in &vols {
-        let (redundancy, health, physical_bytes) = match vm.get_volume_handle(id) {
-            Some(h) => describe(&h).await,
-            None => ("none".into(), "healthy".into(), *allocated),
-        };
+        let d = describe(&vm, id).await;
         items.push(VolumeResponse {
             id: id.0,
             name: name.clone(),
@@ -111,10 +149,13 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             allocated_bytes: *allocated,
             allocated_human: human_size(*allocated),
             array_id: None,
-            fs_uuid: None,
-            redundancy,
-            health,
-            physical_bytes,
+            fs_uuid: d.fs_uuid,
+            redundancy: d.redundancy,
+            health: d.health,
+            physical_bytes: d.physical_bytes,
+            parent: d.parent,
+            sealed: d.sealed,
+            fs: d.fs,
         });
     }
     let count = items.len();
@@ -138,7 +179,7 @@ async fn get_volume(
             let name = handle.name().await;
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
-            let (redundancy, health, physical_bytes) = describe(&handle).await;
+            let d = describe(&vm, &vol_id).await;
             let resp = VolumeResponse {
                 id: uuid,
                 name,
@@ -147,10 +188,13 @@ async fn get_volume(
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
                 array_id: None,
-                fs_uuid: None,
-                redundancy,
-                health,
-                physical_bytes,
+                fs_uuid: d.fs_uuid,
+                redundancy: d.redundancy,
+                health: d.health,
+                physical_bytes: d.physical_bytes,
+                parent: d.parent,
+                sealed: d.sealed,
+                fs: d.fs,
             };
             Json(resp).into_response()
         }
@@ -169,22 +213,34 @@ async fn create_volume(
         Err(e) => return ApiError::bad_request(e),
     };
 
-    // Cloning a template is a snapshot plus a fresh filesystem UUID — no
-    // mkfs, no attach. Placement comes from the template's own extents.
+    // Cloning a template — or any sealed volume, by id or name — is a
+    // snapshot plus a fresh filesystem UUID: no mkfs, no attach. Placement
+    // comes from the source's own extents. One namespace: a template is a
+    // volume that has been sealed (#76).
     if let Some(key) = req.from_template.as_deref() {
-        let (vol_id, fs_uuid, size_bytes) =
+        let is_template = state.fstemplates.lock().await.find(key).is_some();
+        let (vol_id, fs_uuid, size_bytes) = if is_template {
             match super::fstemplates::clone_for_volume_api(&state, key, &req.name, size).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
-            };
-        let vm = state.volume_manager.lock().await;
-        let (allocated, redundancy, health, physical_bytes) = match vm.get_volume_handle(&vol_id) {
-            Some(h) => {
-                let (r, hs, p) = describe(&h).await;
-                (h.allocated().await, r, hs, p)
             }
-            None => (0, "none".into(), "healthy".into(), 0),
+        } else {
+            let source = { state.volume_manager.lock().await.find_volume(key).await };
+            let Some(source) = source else {
+                return ApiError::not_found(format!("no fstemplate or volume named {key}"));
+            };
+            let spec = crate::fs::template::CloneSpec { size_bytes: size, ..crate::fs::template::CloneSpec::new(&req.name) };
+            match crate::fs::template::clone_volume(&state.volume_manager, source, &spec).await {
+                Ok(c) => (c.volume_id, c.fs_uuid, c.size_bytes),
+                Err(e) => return super::fstemplates::err(e),
+            }
         };
+        let vm = state.volume_manager.lock().await;
+        let allocated = match vm.get_volume_handle(&vol_id) {
+            Some(h) => h.allocated().await,
+            None => 0,
+        };
+        let d = describe(&vm, &vol_id).await;
         let resp = VolumeResponse {
             id: vol_id.0,
             name: req.name,
@@ -193,10 +249,13 @@ async fn create_volume(
             allocated_bytes: allocated,
             allocated_human: human_size(allocated),
             array_id: None,
-            fs_uuid,
-            redundancy,
-            health,
-            physical_bytes,
+            fs_uuid: fs_uuid.or(d.fs_uuid),
+            redundancy: d.redundancy,
+            health: d.health,
+            physical_bytes: d.physical_bytes,
+            parent: d.parent,
+            sealed: d.sealed,
+            fs: d.fs,
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -250,6 +309,9 @@ async fn create_volume(
                 redundancy: redundancy.spelling(),
                 health: "healthy".into(),
                 physical_bytes: 0,
+                parent: None,
+                sealed: false,
+                fs: None,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -297,6 +359,176 @@ async fn set_redundancy(
         Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => ApiError::conflict(e.to_string()),
         Err(e) => ApiError::bad_request(e.to_string()),
     }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SealRequest {
+    /// Record what is on the volume, when the caller knows and the engine
+    /// cannot read it (a filesystem it does not write). Absent: the engine
+    /// reads the ext superblock if there is one.
+    #[serde(default)]
+    pub fs: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Seal even if no filesystem can be read off it.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/v1/volumes/{id}/seal` — a volume becomes what clones are taken
+/// from: no more writes (#76). The ext superblock, if there is one, is read
+/// and recorded so every clone can be stamped with its own identity.
+async fn seal_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<SealRequest>>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let vol_id = VolumeId(uuid);
+    let dev = match state.volume_manager.lock().await.get_volume(&vol_id) {
+        Some(d) => d,
+        None => return ApiError::not_found(format!("volume {uuid} not found")),
+    };
+    let existing = state.volume_manager.lock().await.fs_info(&vol_id).cloned();
+    let fs = match crate::fs::ext4::read_layout(&dev).await {
+        Ok(l) => Some(crate::volume::FsInfo {
+            kind: existing.as_ref().map(|f| f.kind.clone()).unwrap_or_else(|| "ext4".into()),
+            journal: l.has_journal,
+            features: existing.as_ref().and_then(|f| f.features.clone()),
+            sixty_four_bit: l.sixty_four_bit,
+            metadata_csum: l.metadata_csum,
+            csum_seed: l.csum_seed,
+            label: req.label.clone().unwrap_or(l.label.clone()),
+            uuid: Some(l.uuid),
+        }),
+        Err(e) => match (&req.fs, req.force, existing) {
+            (Some(kind), _, _) => Some(crate::volume::FsInfo {
+                kind: kind.clone(), journal: false, features: None, sixty_four_bit: false,
+                metadata_csum: false, csum_seed: false, label: req.label.clone().unwrap_or_default(), uuid: None,
+            }),
+            (None, true, existing) => existing,
+            (None, false, _) => {
+                return ApiError::conflict(format!(
+                    "volume {uuid} has no readable filesystem ({e}); seal it with force=true, or say what is on it"
+                ))
+            }
+        },
+    };
+    drop(dev);
+    let mut vm = state.volume_manager.lock().await;
+    match vm.seal_volume(vol_id, fs).await {
+        Ok(()) => {
+            let d = describe(&vm, &vol_id).await;
+            Json(serde_json::json!({ "id": uuid, "sealed": true, "fs": d.fs })).into_response()
+        }
+        Err(e) => ApiError::internal(e.to_string()),
+    }
+}
+
+/// `DELETE /api/v1/volumes/{id}/seal` — reopen for writes.
+async fn unseal_volume(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let mut vm = state.volume_manager.lock().await;
+    match vm.unseal_volume(VolumeId(uuid)).await {
+        Ok(()) => Json(serde_json::json!({ "id": uuid, "sealed": false })).into_response(),
+        Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
+        Err(e) => ApiError::internal(e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloneRequest {
+    pub name: String,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// fsck the clone before handing it out (default true).
+    #[serde(default = "default_true")]
+    pub verify: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `POST /api/v1/volumes/{id}/clone` — the one answer to "clone this": a
+/// snapshot of a sealed volume, stamped with its own filesystem UUID and
+/// checked when the source carries a filesystem, lineage recorded (#76).
+async fn clone_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CloneRequest>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let size = match super::fstemplates::resolve_size(&req.size, None) {
+        Ok(s) => s,
+        Err(e) => return ApiError::bad_request(e),
+    };
+    let mut spec = crate::fs::template::CloneSpec::new(&req.name);
+    spec.size_bytes = size;
+    spec.label = req.label;
+    spec.verify = req.verify;
+    match crate::fs::template::clone_volume(&state.volume_manager, VolumeId(uuid), &spec).await {
+        Ok(c) => {
+            let vm = state.volume_manager.lock().await;
+            let d = describe(&vm, &c.volume_id).await;
+            let allocated = vm.get_volume_handle(&c.volume_id).map(|h| h.allocated()).unwrap().await;
+            let resp = VolumeResponse {
+                id: c.volume_id.0,
+                name: req.name,
+                virtual_size_bytes: c.size_bytes,
+                virtual_size_human: human_size(c.size_bytes),
+                allocated_bytes: allocated,
+                allocated_human: human_size(allocated),
+                array_id: None,
+                fs_uuid: c.fs_uuid.or(d.fs_uuid),
+                redundancy: d.redundancy,
+                health: d.health,
+                physical_bytes: d.physical_bytes,
+                parent: d.parent,
+                sealed: d.sealed,
+                fs: d.fs,
+            };
+            (axum::http::StatusCode::CREATED, Json(resp)).into_response()
+        }
+        Err(e) => super::fstemplates::err(e),
+    }
+}
+
+/// `GET /api/v1/volumes/{id}/lineage` — the volume, its parent, and so on up;
+/// and the volumes cloned directly from it.
+async fn volume_lineage(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let vm = state.volume_manager.lock().await;
+    let vol_id = VolumeId(uuid);
+    if vm.get_volume(&vol_id).is_none() {
+        return ApiError::not_found(format!("volume {uuid} not found"));
+    }
+    let mut ancestors = Vec::new();
+    for a in vm.lineage(&vol_id) {
+        let present = vm.get_volume(&a).is_some();
+        let name = match vm.get_volume_handle(&a) {
+            Some(h) => Some(h.name().await),
+            None => None,
+        };
+        ancestors.push(serde_json::json!({ "id": a.0, "name": name, "present": present, "sealed": vm.is_sealed(&a) }));
+    }
+    let children: Vec<serde_json::Value> = vm.children(&vol_id).iter().map(|c| serde_json::json!({ "id": c.0 })).collect();
+    Json(serde_json::json!({ "id": uuid, "lineage": ancestors, "children": children })).into_response()
 }
 
 /// `POST /api/v1/volumes/{id}/restripe {"redundancy": "raid5:4+1"}` — change
@@ -398,13 +630,28 @@ async fn create_snapshot(
 
     let source_id = VolumeId(req.source_volume_id);
 
-    let mut vm = state.volume_manager.lock().await;
-    match vm.create_snapshot(source_id, &req.name).await {
+    // A snapshot of a volume the engine knows carries a filesystem is a
+    // clone, and a clone always gets its own identity (#76): two live
+    // filesystems must never claim one UUID. A snapshot of anything else is
+    // the plain map clone it always was.
+    let has_fs = state.volume_manager.lock().await.fs_info(&source_id).is_some();
+    let created = if has_fs {
+        let mut spec = crate::fs::template::CloneSpec::new(&req.name);
+        spec.verify = false;
+        crate::fs::template::clone_volume_unsealed_ok(&state.volume_manager, source_id, &spec)
+            .await
+            .map(|c| c.volume_id)
+            .map_err(|e| e.to_string())
+    } else {
+        state.volume_manager.lock().await.create_snapshot(source_id, &req.name).await.map_err(|e| e.to_string())
+    };
+    let vm = state.volume_manager.lock().await;
+    match created {
         Ok(snap_id) => {
             let handle = vm.get_volume_handle(&snap_id).unwrap();
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
-            let (redundancy, health, physical_bytes) = describe(&handle).await;
+            let d = describe(&vm, &snap_id).await;
             let resp = VolumeResponse {
                 id: snap_id.0,
                 name: req.name,
@@ -413,10 +660,13 @@ async fn create_snapshot(
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
                 array_id: None,
-                fs_uuid: None,
-                redundancy,
-                health,
-                physical_bytes,
+                fs_uuid: d.fs_uuid,
+                redundancy: d.redundancy,
+                health: d.health,
+                physical_bytes: d.physical_bytes,
+                parent: d.parent,
+                sealed: d.sealed,
+                fs: d.fs,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -471,7 +721,7 @@ async fn resize_volume(
             let name = handle.name().await;
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
-            let (redundancy, health, physical_bytes) = describe(&handle).await;
+            let d = describe(&vm, &vol_id).await;
             let resp = VolumeResponse {
                 id: uuid,
                 name,
@@ -480,10 +730,13 @@ async fn resize_volume(
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
                 array_id: None,
-                fs_uuid: None,
-                redundancy,
-                health,
-                physical_bytes,
+                fs_uuid: d.fs_uuid,
+                redundancy: d.redundancy,
+                health: d.health,
+                physical_bytes: d.physical_bytes,
+                parent: d.parent,
+                sealed: d.sealed,
+                fs: d.fs,
             };
             Json(resp).into_response()
         }
@@ -701,6 +954,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/redundancy", axum::routing::put(set_redundancy))
         .route("/{id}/resync", axum::routing::post(resync_volume))
         .route("/{id}/restripe", axum::routing::post(restripe_volume))
+        .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
+        .route("/{id}/clone", axum::routing::post(clone_volume))
+        .route("/{id}/lineage", get(volume_lineage))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/snapshots", axum::routing::post(create_snapshot))
