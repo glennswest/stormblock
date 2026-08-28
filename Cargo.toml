@@ -111,6 +111,9 @@ rustls-pemfile = "2"
 hyper-util = { version = "0.1", features = ["tokio", "http1", "http2", "server-auto", "client", "client-legacy"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs"] }
 http-body-util = "0.1"
+# qcow2 clusters and VMDK grains are deflate/zlib; the Rust backend is
+# miniz_oxide + crc32fast, no C.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 webpki-roots = "1"
 
 # Web UI (optional)
