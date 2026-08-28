@@ -192,11 +192,16 @@ impl GlobalExtentMap {
         vext_idx: u64,
         location: ExtentLocation,
     ) {
-        // Remove old reverse entries if this virtual extent was already mapped
+        // Remove old reverse entries if this virtual extent was already
+        // mapped — but only the ones this extent owns: a clone re-mapping an
+        // extent it shared must not take the source's slot out of the index.
         if let Some(vmap) = self.volumes.get(&volume_id) {
             if let Some(old_loc) = vmap.extents.get(&vext_idx) {
                 for leg in old_loc.legs() {
-                    self.reverse.remove(&(leg.slab_id, leg.slot_idx));
+                    let key = (leg.slab_id, leg.slot_idx);
+                    if self.reverse.get(&key) == Some(&(volume_id, vext_idx)) {
+                        self.reverse.remove(&key);
+                    }
                 }
             }
         }
@@ -238,8 +243,11 @@ impl GlobalExtentMap {
     pub fn insert_parity(&mut self, volume_id: VolumeId, stripe: u64, group: ParityGroup) {
         if let Some(vmap) = self.volumes.get(&volume_id) {
             if let Some(old) = vmap.parity.get(&stripe) {
-                for leg in &old.legs {
-                    self.reverse.remove(&(leg.slab_id, leg.slot_idx));
+                for (i, leg) in old.legs.iter().enumerate() {
+                    let key = (leg.slab_id, leg.slot_idx);
+                    if self.reverse.get(&key) == Some(&(volume_id, parity_vext(i as u8, stripe))) {
+                        self.reverse.remove(&key);
+                    }
                 }
             }
         }

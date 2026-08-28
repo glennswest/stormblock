@@ -782,11 +782,9 @@ impl VolumeManager {
                             let newer_on_disk = rloc.primary() != loc.primary()
                                 && slot_gen(rloc.primary()) > slot_gen(loc.primary());
                             if recorded_is_live && !newer_on_disk {
-                                let mut keep = loc.clone();
                                 // Legs the record names that are gone stay
                                 // named: health reports them, resync rebuilds.
-                                keep.mirrors.retain(|m| reg.get(&m.slab_id).is_some() || true);
-                                rebuilt.insert(vrec.id, *vext, keep);
+                                rebuilt.insert(vrec.id, *vext, loc.clone());
                             } else {
                                 tracing::info!(
                                     "Volume '{}' extent {vext}: slot table is newer than the record, taking it",
