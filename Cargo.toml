@@ -89,11 +89,11 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # feature so a UEFI driver can link the crate's synchronous read path, so
 # `default-features = false` now leaves the `no_std` core rather than the whole
 # crate.
-mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v2.0.4", default-features = false, features = ["std"] }
+mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v2.1.0", default-features = false, features = ["std"] }
 
 # Userspace file I/O into those filesystems — writing a template's contents
 # with no mount, no loop device and no attach.
-fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.4.1", default-features = false }
+fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.5.0", default-features = false }
 
 # Async utilities
 async-trait = "0.1"

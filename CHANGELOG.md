@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### 2026-08-27
+- **chore(deps):** `mkfs-ext4` v2.0.4 → v2.1.0 and `fio-ext4` v1.4.1 →
+  v1.5.0, moved together so cargo still resolves one copy of `mkfs-ext4`
+  (two tags are two source ids, and the `BlockDevice` trait from one does
+  not satisfy the other). Brings the fixes for the measured 280x–1065x
+  write amplification (mkfs.ext4.rs#4, fio.ext4.rs#3): streamed unpack
+  writes each data block once, allocation resumes from the last block
+  placed, and the new write-back `CachedDevice` is available for
+  write-heavy consumers — this engine's own opens are unchanged, since a
+  serving path must not hold completed writes in memory.
+
 ### 2026-08-26
 - **feat:** NVMe-TCP initiator `BlockDevice` (#73) — `drive/nvmeof_dev.rs`
   attaches a remote NVMe-TCP namespace as a local drive via
