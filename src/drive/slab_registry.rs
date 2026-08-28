@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::placement::domain::FailureDomain;
 use crate::placement::topology::StorageTier;
 use super::slab::{Slab, SlabId};
 
@@ -27,6 +28,10 @@ pub struct SlabRegistry {
     /// in flight, and any slot left stranded by a crash mid-write is a real
     /// orphan that the collector should reclaim.
     in_flight: HashSet<(SlabId, u32)>,
+    /// What fails together with each slab. Defaults to the identity of the
+    /// device the slab lives on; widened by drive labels when a drive was
+    /// registered with them (#70) or set outright.
+    domains: HashMap<SlabId, FailureDomain>,
 }
 
 impl SlabRegistry {
@@ -36,6 +41,7 @@ impl SlabRegistry {
             slabs: HashMap::new(),
             tier_index: HashMap::new(),
             in_flight: HashSet::new(),
+            domains: HashMap::new(),
         }
     }
 
@@ -61,17 +67,90 @@ impl SlabRegistry {
         self.in_flight.len()
     }
 
-    /// Register a slab.
+    /// Register a slab. Its failure domain is its device's identity until
+    /// something says more.
     pub fn add(&mut self, slab: Slab) {
         let id = slab.slab_id();
         let tier = slab.tier();
+        let domain = FailureDomain::from_device(slab.device().id());
         self.tier_index.entry(tier).or_default().push(id);
+        self.domains.entry(id).or_insert(domain);
         self.slabs.insert(id, slab);
+    }
+
+    /// Register a slab with an explicit failure domain.
+    pub fn add_in_domain(&mut self, slab: Slab, domain: FailureDomain) {
+        let id = slab.slab_id();
+        self.domains.insert(id, domain);
+        self.add(slab);
+    }
+
+    /// Set (replace) a slab's failure domain.
+    pub fn set_domain(&mut self, id: SlabId, domain: FailureDomain) -> bool {
+        if !self.slabs.contains_key(&id) {
+            return false;
+        }
+        self.domains.insert(id, domain);
+        true
+    }
+
+    /// The failure domain a slab is in. Empty — *unknown* — only for a slab
+    /// the registry never saw added, which should not happen.
+    pub fn domain_of(&self, id: &SlabId) -> FailureDomain {
+        self.domains.get(id).cloned().unwrap_or_default()
+    }
+
+    /// Whether a slab is the same domain at `rung` as any of `taken`.
+    pub fn collides(&self, id: &SlabId, taken: &[FailureDomain], rung: &str) -> bool {
+        let d = self.domain_of(id);
+        taken.iter().any(|t| d.same_at(t, rung))
+    }
+
+    /// The slab on `tier` with the most free slots whose domain at `rung`
+    /// differs from every one in `taken` — the allocation step of a
+    /// redundancy policy. `None` means the policy cannot be met on this
+    /// tier, which the caller treats as a boundary, not a hint.
+    pub fn best_slab_for_tier_apart_from(
+        &self,
+        tier: StorageTier,
+        taken: &[FailureDomain],
+        rung: &str,
+    ) -> Option<SlabId> {
+        self.tier_index
+            .get(&tier)?
+            .iter()
+            .filter_map(|id| {
+                let c = self.slabs.get(id)?;
+                if c.free_slots() == 0 || self.collides(id, taken, rung) {
+                    None
+                } else {
+                    Some((*id, c.free_slots()))
+                }
+            })
+            .max_by_key(|(_, free)| *free)
+            .map(|(id, _)| id)
+    }
+
+    /// How many distinct domains at `rung` have a slab with free space, on
+    /// any tier — what a create checks before promising a policy.
+    pub fn distinct_domains_with_space(&self, rung: &str) -> usize {
+        let mut seen: Vec<FailureDomain> = Vec::new();
+        for (id, slab) in &self.slabs {
+            if slab.free_slots() == 0 {
+                continue;
+            }
+            let d = self.domain_of(id);
+            if !seen.iter().any(|s| s.same_at(&d, rung)) {
+                seen.push(d);
+            }
+        }
+        seen.len()
     }
 
     /// Remove a slab by ID.
     pub fn remove(&mut self, id: &SlabId) -> Option<Slab> {
         if let Some(slab) = self.slabs.remove(id) {
+            self.domains.remove(id);
             let tier = slab.tier();
             if let Some(ids) = self.tier_index.get_mut(&tier) {
                 ids.retain(|cid| cid != id);

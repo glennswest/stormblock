@@ -9,6 +9,7 @@ pub mod chunk;
 pub mod extent;
 pub mod gem;
 pub mod metadata;
+pub mod redundancy;
 pub mod thin;
 pub mod snapshot;
 #[cfg(feature = "stormfs-data")]
@@ -30,6 +31,7 @@ use crate::raid::RaidArrayId;
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
 pub use metadata::{MetadataStore, Retention};
 pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy};
+pub use redundancy::{Redundancy, RedundancyPolicy};
 pub use gem::GlobalExtentMap;
 
 /// Default slot size for slabs created via add_backing_device.

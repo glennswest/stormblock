@@ -33,6 +33,7 @@
 //! unaware — all I/O goes through the BlockDevice trait (via ublk), and
 //! the placement engine handles replication in the background.
 
+pub mod domain;
 pub mod topology;
 pub mod cold;
 
