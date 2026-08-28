@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v10.0.0] — 2026-08-28
+
+Major by the size of the change, not by breakage: every API and file format
+added here is additive and a V3 `volumes.dat` still loads. What changed is
+where redundancy lives — it is now a property of a volume, placed across
+failure domains, rather than of a drive.
+
 ### 2026-08-28
 - **feat:** Volume-level redundancy — RAID is a property of a volume, not
   of a drive. `RedundancyPolicy` (`none`, `mirror:N`, `raid5:D+1`,
