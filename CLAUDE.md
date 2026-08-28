@@ -960,16 +960,18 @@ store.
 
 - [x] `src/mgmt/api/kube.rs` + tests (v12.3.0); stormdrive 0.6.0 serves `drives`/`enclosures`
 
-### VM disk goldens and cloud-image import (2026-08-28)
+### VM disk goldens and cloud-image import (2026-08-28) — DONE (v12.4.0)
 
-- [ ] `fs/disk.rs`: recognise GPT/MBR on a volume (`fs.kind = gpt|mbr`,
+- [x] `fs/disk.rs`: recognise GPT/MBR on a volume (`fs.kind = gpt|mbr`,
       `uuid` = disk GUID / MBR signature); stamp a fresh one on every clone
       so clones attached to one host do not collide on PARTUUID. `seal`
       needs no `force` for a partitioned image.
-- [ ] `image/formats/`: disk-image readers — raw (as now) and **qcow2**
+- [x] `image/decode/`: disk-image readers (`image/formats` is the *output* side) — raw (as now) and **qcow2**
       (v2/v3, zero clusters, zlib-compressed clusters, no backing chain) —
       detected by magic, used by `[[slab.golden]] from=` and by the import.
-- [ ] `POST /api/v1/volumes/import {name, file|url, format?, redundancy?}`:
+- [x] `POST /api/v1/volumes/import {name, file|url, format?, redundancy?}`:
       async job, streams a URL to `<data_dir>/imports/`, writes only the
       allocated clusters, seals the result with its `fs` recorded. This is
-      how a cloud image becomes a golden.
+      how a cloud image becomes a golden. VMDK (sparse, streamOptimized,
+      flat descriptor) and the VMDK inside an OVA too; an ISO is raw and
+      recognised as `iso9660`.

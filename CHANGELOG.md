@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### 2026-08-28
+- **feat:** Whole-disk goldens. `fs/disk.rs` recognises a GPT or MBR
+  partition table and an ISO 9660 image on a volume (`fs.kind = gpt | mbr |
+  iso9660`, `uuid` = disk GUID / MBR signature) — `seal` needs no `force`
+  for a VM disk — and every clone of a `gpt`/`mbr` golden gets a fresh
+  **disk identity** (both GPT headers re-CRC'd; MBR signature) so clones
+  attached to one host do not collide on PARTUUID. An ISO has nothing to
+  stamp and is left alone. What is *inside* the partitions stays the
+  guest's job (cloud-init / sysprep).
+- **feat:** Disk-image readers (`image/decode/`): **qcow2** (v2/v3, zero
+  clusters, zlib-compressed clusters; backing files, external data files,
+  extended L2 and zstd refused by name), **VMDK** (monolithicSparse,
+  streamOptimized with compressed grains and the footer directory, and the
+  text descriptor with FLAT/SPARSE extents), and the VMDK read straight
+  out of an **OVA** (ustar walk, no extraction). Detected by magic, never
+  by extension — a cloud image called `.img` is a qcow2. `[[slab.golden]]
+  from=` accepts all of them.
+- **feat:** `POST /api/v1/volumes/import {name, file|url, format?,
+  redundancy?, size?, seal?}` — an async job (`GET …/import/{id}` for
+  progress) that streams a URL to `<data_dir>/imports/` (never in memory),
+  writes only the clusters the image carries, and seals the result with
+  its disk shape recorded. This is how a cloud image, a VM export or an ISO
+  becomes a golden. `http::Client::get_to_file` streams the download.
+- **feat:** The image build report carries `sealed` and `fs_uuid` per
+  volume, and stamps a disk identity on the first clone of a disk golden.
+
 ## [v12.3.0] — 2026-08-28
 
 ### 2026-08-28

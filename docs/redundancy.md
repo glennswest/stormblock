@@ -236,3 +236,33 @@ policy and `resync`.
 - A restripe of a volume with live writers (it is offline).
 - `[management].topology` still travels as a flat map to /v1 peers; only the
   local node reports `topology_chain`.
+
+## Whole-disk goldens: VM images, cloud images, ISOs
+
+A golden is a volume; nothing in the copy-on-write path assumes a
+filesystem. A whole VM disk — GPT or MBR, partitions, whatever is inside
+them — is stored as raw bytes and cloned like anything else. Redundancy
+applies per clone.
+
+```
+POST /api/v1/volumes/import {"name":"ubuntu-24.04","url":"https://cloud-images.ubuntu.com/…/noble-server-cloudimg-amd64.img","redundancy":"mirror:2"}
+GET  /api/v1/volumes/import/{id}      → downloading | writing | sealing | done | failed, bytes walked / written
+POST /api/v1/volumes/{golden}/clone   {"name":"vm-7"} → a disk with its own GPT GUID / MBR signature
+POST /api/v1/volumes/{clone}/attach   → the VM's disk, over ublk or NVMe-TCP
+```
+
+Formats, detected by magic: raw (an ISO is raw), qcow2 (zero and
+zlib-compressed clusters; no backing chain — flatten first), VMDK
+(monolithicSparse, streamOptimized as an OVA/OVF export carries, and the
+descriptor + flat extent), and the VMDK inside an OVA. Only the clusters
+the image carries are written, so a 2 GB cloud image with 600 MB used
+costs 600 MB once and each VM pays what it writes. `vhd`/`vhdx` are
+recognised and refused; convert with `qemu-img convert -O qcow2`.
+
+What the engine stamps on a clone is the **disk** identity — GPT disk GUID
+(both headers, CRCs redone) or MBR signature — because that is what a
+host derives `PARTUUID` from, and two clones with one identity on one host
+collide the way two ext4 clones with one UUID do. What lives inside the
+partitions (filesystem UUIDs, `machine-id`, SIDs, hostname) is the guest's
+to change on first boot — cloud-init, sysprep — exactly as with any cloned
+VM disk. An ISO has no identity to stamp and is cloned as-is.
