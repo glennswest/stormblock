@@ -264,3 +264,90 @@ async fn run(
         tokio::task::yield_now().await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::Slab;
+    use crate::drive::BlockDevice;
+    use crate::placement::topology::StorageTier;
+    use crate::volume::{CreateOptions, RedundancyPolicy};
+
+    async fn slab(dir: &std::path::Path, name: &str, slot: u64) -> Slab {
+        let path = dir.join(name);
+        let dev = FileDevice::open_with_capacity(path.to_str().unwrap(), 8 * 1024 * 1024).await.unwrap();
+        Slab::format(std::sync::Arc::new(dev), slot, StorageTier::Hot).await.unwrap()
+    }
+
+    /// A drive is drained one extent at a time; when nothing of any volume is
+    /// left on it the drain says `empty`, the data still reads, and the slab
+    /// takes allocations again only if it was not the one being retired.
+    #[tokio::test]
+    async fn a_drain_empties_a_slab_and_keeps_the_data_readable() {
+        let dir = std::env::temp_dir().join(format!("stormblock-drain-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let slot = 4096u64;
+        let mut vm = VolumeManager::new(slot);
+        let a = slab(&dir, "a.bin", slot).await;
+        let b = slab(&dir, "b.bin", slot).await;
+        let c = slab(&dir, "c.bin", slot).await;
+        let (ida, _idb, _idc) = (a.slab_id(), b.slab_id(), c.slab_id());
+        vm.add_slab(a).await;
+        vm.add_slab(b).await;
+        vm.add_slab(c).await;
+
+        // A plain volume and a mirrored one, both with legs on `a`.
+        let plain = vm.create_volume_any("plain", 1 << 20).await.unwrap();
+        let mirror = vm
+            .create_volume_with("m", 1 << 20, CreateOptions::redundant(RedundancyPolicy::mirror(2)))
+            .await
+            .unwrap();
+        let pv = vm.get_volume(&plain).unwrap();
+        let mv = vm.get_volume(&mirror).unwrap();
+        for i in 0..6u64 {
+            pv.write(i * slot, &vec![0x10 + i as u8; slot as usize]).await.unwrap();
+            mv.write(i * slot, &vec![0x40 + i as u8; slot as usize]).await.unwrap();
+        }
+        let gem = vm.gem().clone();
+        let registry = vm.registry().clone();
+        let legs_on_a_before = gem.read().await.slab_extents(ida).len();
+        assert!(legs_on_a_before > 0, "something landed on a");
+
+        let volumes = Arc::new(tokio::sync::Mutex::new(vm));
+        let mut drains = Drains::default();
+        let status = drains.start("a.bin".into(), vec![ida], gem.clone(), registry.clone(), volumes.clone());
+        for _ in 0..500 {
+            if status.read().await.state != DrainState::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let st = status.read().await.clone();
+        assert_eq!(st.state, DrainState::Empty, "{st:?}");
+        assert_eq!(st.moved as usize, legs_on_a_before);
+        assert_eq!(st.remaining, 0);
+        assert!(gem.read().await.slab_extents(ida).is_empty());
+        assert_eq!(registry.read().await.get(&ida).unwrap().allocated_slots(), 0, "the slab is empty");
+
+        for i in 0..6u64 {
+            let mut buf = vec![0u8; slot as usize];
+            pv.read(i * slot, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&x| x == 0x10 + i as u8));
+            mv.read(i * slot, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&x| x == 0x40 + i as u8));
+        }
+        // The mirror is still two legs on two different slabs, neither `a`.
+        let g = gem.read().await;
+        for i in 0..6u64 {
+            let l = g.lookup(mirror, i).unwrap();
+            assert_eq!(l.leg_count(), 2);
+            assert!(l.legs().all(|leg| leg.slab_id != ida));
+            let legs: Vec<_> = l.legs().collect();
+            assert_ne!(legs[0].slab_id, legs[1].slab_id);
+        }
+        drop(g);
+        assert!(!registry.read().await.is_quarantined(&ida), "an empty drive is released");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

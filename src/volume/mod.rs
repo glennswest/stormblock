@@ -1467,4 +1467,132 @@ mod redundancy_tests {
         assert!(matches!(err, VolumeError::RestripeRequired { .. }), "{err}");
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    #[tokio::test]
+    async fn distrust_touches_only_redundant_volumes_with_a_leg_there() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let (a, _) = file_slab(&d, "a", slot).await;
+        let (b, _) = file_slab(&d, "b", slot).await;
+        let ida = a.slab_id();
+        mgr.add_slab(a).await;
+        mgr.add_slab(b).await;
+        let plain = mgr.create_volume_any("plain", 1 << 20).await.unwrap();
+        let m = mgr.create_volume_with("m", 1 << 20, CreateOptions::redundant(RedundancyPolicy::mirror(2))).await.unwrap();
+        let untouched = mgr.create_volume_with("u", 1 << 20, CreateOptions::redundant(RedundancyPolicy::mirror(2))).await.unwrap();
+        mgr.get_volume(&plain).unwrap().write(0, &[1u8; 4096]).await.unwrap();
+        mgr.get_volume(&m).unwrap().write(0, &[2u8; 4096]).await.unwrap();
+
+        let touched = mgr.distrust_slab(ida).await;
+        assert_eq!(touched, vec![m], "only the mirror with a leg on a");
+        assert_eq!(mgr.get_volume_handle(&m).unwrap().failed_slabs(), vec![ida]);
+        assert!(mgr.get_volume_handle(&plain).unwrap().failed_slabs().is_empty(), "the only copy stays trusted");
+        assert!(mgr.get_volume_handle(&untouched).unwrap().failed_slabs().is_empty());
+        assert_eq!(mgr.health(&m).await.unwrap().state, HealthState::Degraded);
+        let mut buf = vec![0u8; 4096];
+        mgr.get_volume(&m).unwrap().read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 2));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn restripe_moves_a_volume_between_policies_with_its_data() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        for n in ["a", "b", "c"] {
+            let (s, _) = file_slab(&d, n, slot).await;
+            mgr.add_slab(s).await;
+        }
+        let free0 = mgr.registry().read().await.total_free_slots();
+        let id = mgr.create_volume_any("v", 1 << 20).await.unwrap();
+        let v = mgr.get_volume(&id).unwrap();
+        let datas: Vec<Vec<u8>> = (0..5).map(|i| vec![0xA0 + i as u8; slot as usize]).collect();
+        for (i, dd) in datas.iter().enumerate() {
+            v.write(i as u64 * slot, dd).await.unwrap();
+        }
+        assert_eq!(mgr.registry().read().await.total_free_slots(), free0 - 5);
+
+        // none → raid5:2+1: 5 data slots + 3 stripes of parity.
+        let r = mgr.restripe(id, RedundancyPolicy::parity(2, 1)).await.unwrap();
+        assert_eq!(r.extents_copied, 5);
+        assert_eq!(r.slots_released, 5, "the old placement is gone");
+        assert_eq!(mgr.redundancy(&id).unwrap(), RedundancyPolicy::parity(2, 1));
+        assert_eq!(mgr.registry().read().await.total_free_slots(), free0 - 8);
+        assert_eq!(mgr.health(&id).await.unwrap().state, HealthState::Healthy);
+        let v = mgr.get_volume(&id).unwrap();
+        for (i, dd) in datas.iter().enumerate() {
+            let mut buf = vec![0u8; slot as usize];
+            v.read(i as u64 * slot, &mut buf).await.unwrap();
+            assert_eq!(&buf, dd, "extent {i} after restripe to parity");
+        }
+        assert_eq!(mgr.get_volume_handle(&id).unwrap().physical().await, 8 * slot);
+
+        // raid5 → mirror:2: 10 slots.
+        let r = mgr.restripe(id, RedundancyPolicy::mirror(2)).await.unwrap();
+        assert_eq!(r.slots_released, 8);
+        assert_eq!(mgr.registry().read().await.total_free_slots(), free0 - 10);
+        for (i, dd) in datas.iter().enumerate() {
+            let mut buf = vec![0u8; slot as usize];
+            v.read(i as u64 * slot, &mut buf).await.unwrap();
+            assert_eq!(&buf, dd, "extent {i} after restripe to mirror");
+        }
+        assert_eq!(mgr.health(&id).await.unwrap().state, HealthState::Healthy);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The dirty-stripe log: a parity write marks its stripe, a flush clears
+    /// it, and a restart with marks left over verifies exactly those stripes
+    /// and leaves nothing behind.
+    #[tokio::test]
+    async fn dirty_stripes_are_logged_cleared_on_flush_and_verified_on_restart() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let (id, paths, parity_leg) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let mut paths = Vec::new();
+            for n in ["a", "b", "c"] {
+                let (s, p) = file_slab(&d, n, slot).await;
+                mgr.add_slab(s).await;
+                paths.push(p);
+            }
+            let id = mgr.create_volume_with("p", 1 << 20, CreateOptions::redundant(RedundancyPolicy::parity(2, 1))).await.unwrap();
+            let h = mgr.get_volume_handle(&id).unwrap();
+            h.write(0, &[1u8; 4096]).await.unwrap();
+            h.write(slot, &[2u8; 4096]).await.unwrap();
+            h.write(2 * slot, &[3u8; 4096]).await.unwrap();
+            assert_eq!(h.dirty_stripes(), vec![0, 1], "two stripes were written since the last flush");
+            assert!(meta.join(format!("stripes-{}.log", id.0.simple())).exists());
+            h.flush().await.unwrap();
+            assert!(h.dirty_stripes().is_empty());
+            assert!(!meta.join(format!("stripes-{}.log", id.0.simple())).exists());
+
+            // A write after the flush, then a "crash": no flush, metadata persisted.
+            h.write(0, &[9u8; 4096]).await.unwrap();
+            assert_eq!(h.dirty_stripes(), vec![0]);
+            let parity_leg = mgr.gem().read().await.lookup_parity(id, 0).unwrap().legs[0];
+            // Corrupt stripe 0's parity to prove the restart recomputes it.
+            {
+                let reg = mgr.registry().read().await;
+                reg.get(&parity_leg.slab_id).unwrap().write_slot(parity_leg.slot_idx, 0, &[0xFF; 4096]).await.unwrap();
+            }
+            mgr.persist().await;
+            (id, paths, parity_leg)
+        };
+
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        for p in &paths {
+            let dev = FileDevice::open(p).await.unwrap();
+            mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        }
+        mgr.restore().await.unwrap();
+        assert!(!meta.join(format!("stripes-{}.log", id.0.simple())).exists(), "verified stripes are cleared");
+        let mut p = vec![0u8; 4096];
+        mgr.registry().read().await.get(&parity_leg.slab_id).unwrap().read_slot(parity_leg.slot_idx, 0, &mut p).await.unwrap();
+        let want: Vec<u8> = (0..4096).map(|_| 9u8 ^ 2u8).collect();
+        assert_eq!(p, want, "stripe 0 parity recomputed on restart");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

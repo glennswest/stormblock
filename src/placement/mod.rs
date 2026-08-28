@@ -1499,4 +1499,71 @@ mod tests {
             .to_string().contains("write failed"));
         assert!(PlacementError::Other("test".into()).to_string().contains("test"));
     }
+
+    /// #71 item 3: legs placed before a shelf label existed can end up on one
+    /// shelf; rebalancing at the shelf rung moves one of them to another.
+    #[tokio::test]
+    async fn rebalance_by_domain_separates_legs_that_share_a_shelf() {
+        use crate::placement::domain::FailureDomain;
+        use crate::volume::thin::{ThinVolume, ThinVolumeHandle, PlacementPolicy};
+        use crate::volume::RedundancyPolicy;
+
+        let dir = std::env::temp_dir().join(format!("stormblock-rebalance-domain-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let slot = 4096u64;
+        let mut registry = SlabRegistry::new();
+        let mut ids = Vec::new();
+        for n in ["a", "b", "c"] {
+            let path = dir.join(format!("{n}.bin"));
+            let dev = crate::drive::filedev::FileDevice::open_with_capacity(path.to_str().unwrap(), 8 * 1024 * 1024).await.unwrap();
+            let slab = crate::drive::slab::Slab::format(Arc::new(dev), slot, StorageTier::Hot).await.unwrap();
+            ids.push(slab.slab_id());
+            registry.add(slab);
+        }
+        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+
+        // Only a and b exist as far as placement is concerned: quarantine c.
+        registry.write().await.set_quarantined(ids[2], true);
+        let vol = ThinVolume::new("m".into(), 1 << 20, slot);
+        let vid = vol.id();
+        let h = ThinVolumeHandle::with_redundancy(vol, gem.clone(), registry.clone(), PlacementPolicy::default(), RedundancyPolicy::mirror(2));
+        for i in 0..4u64 {
+            h.write(i * slot, &vec![i as u8 + 1; slot as usize]).await.unwrap();
+        }
+        // Now the labels arrive: a and b are one shelf, c is another.
+        {
+            let mut r = registry.write().await;
+            let da = r.domain_of(&ids[0]).merged_under(&FailureDomain::parse("shelf=S1").unwrap());
+            let db = r.domain_of(&ids[1]).merged_under(&FailureDomain::parse("shelf=S1").unwrap());
+            let dc = r.domain_of(&ids[2]).merged_under(&FailureDomain::parse("shelf=S2").unwrap());
+            r.set_domain(ids[0], da);
+            r.set_domain(ids[1], db);
+            r.set_domain(ids[2], dc);
+            r.set_quarantined(ids[2], false);
+        }
+        let engine = PlacementEngine::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let result = {
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
+            engine.rebalance(&mut g, &mut r, RebalanceStrategy::ByFailureDomain { rung: "shelf".into() }, &HashMap::new(), &rx).await.unwrap()
+        };
+        assert!(result.moved >= 4, "{result:?}");
+        let g = gem.read().await;
+        let r = registry.read().await;
+        for i in 0..4u64 {
+            let loc = g.lookup(vid, i).unwrap();
+            let legs: Vec<Leg> = loc.legs().collect();
+            assert_eq!(legs.len(), 2);
+            assert!(!r.domain_of(&legs[0].slab_id).same_at(&r.domain_of(&legs[1].slab_id), "shelf"), "extent {i} legs on different shelves");
+        }
+        drop((g, r));
+        for i in 0..4u64 {
+            let mut buf = vec![0u8; slot as usize];
+            h.read(i * slot, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&x| x == i as u8 + 1));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
