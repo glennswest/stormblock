@@ -270,7 +270,6 @@ mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
     use crate::drive::slab::Slab;
-    use crate::drive::BlockDevice;
     use crate::placement::topology::StorageTier;
     use crate::volume::{CreateOptions, RedundancyPolicy};
 

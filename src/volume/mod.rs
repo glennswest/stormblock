@@ -413,7 +413,7 @@ impl VolumeManager {
             for (slab_id, slots) in by_slab {
                 if let Some(slab) = reg.get_mut(&slab_id) {
                     match slab.dec_ref_batch(&slots).await {
-                        Ok(o) => released += o.freed as usize,
+                        Ok(o) => released += o.freed,
                         Err(e) => tracing::warn!(volume = %id, slab = %slab_id, "restripe could not release old slots: {e}"),
                     }
                 }

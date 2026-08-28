@@ -750,14 +750,14 @@ impl PlacementEngine {
             // Any leg on any slab of the overloaded domain, that can go to
             // the underloaded one without colliding with its extent's others.
             let mut candidate: Option<(VolumeId, u64, SlabId, bool)> = None;
-            'find: for s in &over.3 {
-                for (vol, vext, _) in gem.slab_extents(*s) {
+            for s in &over.3 {
+                if let Some((vol, vext, _)) = gem.slab_extents(*s).into_iter().next() {
                     candidate = Some((vol, vext, *s, false));
-                    break 'find;
+                    break;
                 }
-                for (vol, stripe, _) in gem.slab_parity(*s) {
+                if let Some((vol, stripe, _)) = gem.slab_parity(*s).into_iter().next() {
                     candidate = Some((vol, stripe, *s, true));
-                    break 'find;
+                    break;
                 }
             }
             let Some((vol, idx, from, is_parity)) = candidate else { break };
