@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v9.13.1] — 2026-08-27
+
 ### 2026-08-27
 - **chore(deps):** `mkfs-ext4` v2.0.4 → v2.1.0 and `fio-ext4` v1.4.1 →
   v1.5.0, moved together so cargo still resolves one copy of `mkfs-ext4`
