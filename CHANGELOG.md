@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-08-28
+- **feat:** Array members carry their `uuid` and real `device_path` in
+  `GET/POST /api/v1/arrays` responses (`RaidArray::member_details`) — the
+  uuid is what member removal takes, so an orchestrator can now run the
+  full leg-move sequence (add member → rebuild → remove member) over HTTP
+
 ## [v9.13.1] — 2026-08-27
 
 ### 2026-08-27
