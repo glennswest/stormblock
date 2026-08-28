@@ -421,6 +421,8 @@ mod tests {
             total_bytes: 100,
             free_bytes: 50,
             engine_version: "test".into(),
+            topology: Default::default(),
+            topology_chain: String::new(),
         };
 
         d.record(mk("same", ident.cluster_id, Some("prod"))).await;
@@ -459,6 +461,8 @@ mod tests {
             total_bytes: 100,
             free_bytes: 50,
             engine_version: "test".into(),
+            topology: Default::default(),
+            topology_chain: String::new(),
         };
         d.record(mk).await;
         assert!(
@@ -486,6 +490,8 @@ mod tests {
             total_bytes: 100,
             free_bytes: 50,
             engine_version: "test".into(),
+            topology: Default::default(),
+            topology_chain: String::new(),
         })
         .await;
 

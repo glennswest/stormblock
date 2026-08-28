@@ -976,9 +976,11 @@ pub async fn slabs_in(image: &Path) -> Result<Vec<SlabContents>> {
                     name: v.name,
                     size_bytes: v.virtual_size,
                     allocated_bytes: v.extents.len() as u64 * meta.extent_size,
-                    // Which CoW came from which golden is not in this record —
-                    // a CoW is a volume like any other once it exists.
-                    clone_of: None,
+                    // Lineage is in the record since V5; a CoW is a volume
+                    // like any other once it exists.
+                    clone_of: v.parent.map(|p| p.0),
+                    sealed: v.sealed,
+                    fs_uuid: v.fs.as_ref().and_then(|f| f.uuid),
                 });
             }
             volumes.sort_by(|a, b| a.name.cmp(&b.name));
