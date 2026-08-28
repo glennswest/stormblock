@@ -326,7 +326,7 @@ pub mod testimg {
                     let extra = sectors - 1;
                     out.extend_from_slice(&comp);
                     let pad = (512 - comp.len() % 512) % 512;
-                    out.extend(std::iter::repeat_n(0u8, pad));
+                    out.extend(std::iter::repeat(0u8).take(pad));
                     (1u64 << 62) | (extra << x) | host
                 }
             };

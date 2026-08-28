@@ -56,7 +56,7 @@ mod tests {
         let mut out = h;
         out.extend_from_slice(data);
         let pad = (512 - data.len() % 512) % 512;
-        out.extend(std::iter::repeat_n(0u8, pad));
+        out.extend(std::iter::repeat(0u8).take(pad));
         out
     }
 
@@ -66,7 +66,7 @@ mod tests {
         let disk = b"KDMV....not really a disk but the bytes we want";
         tar.extend(tar_entry("box-disk1.vmdk", disk));
         tar.extend(tar_entry("box.mf", b"SHA256(box.ovf)= 00"));
-        tar.extend(std::iter::repeat_n(0u8, 1024));
+        tar.extend(std::iter::repeat(0u8).take(1024));
         let p = std::env::temp_dir().join(format!("stormblock-ova-{}.ova", uuid::Uuid::new_v4().simple()));
         tokio::fs::write(&p, &tar).await.unwrap();
         let (mut w, name) = vmdk_window(&p).await.unwrap().expect("a vmdk member");

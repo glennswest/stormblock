@@ -187,12 +187,13 @@ impl Source {
         }
     }
 
-    /// The natural copy unit.
+    /// The natural copy unit: the format's own allocation unit, so a hole
+    /// next to data is never written as zeros.
     pub fn chunk(&self) -> u64 {
         match self {
             Source::Raw { .. } => 1 << 20,
-            Source::Qcow2(q) => q.cluster_size.max(64 * 1024),
-            Source::Vmdk(v) => v.chunk.max(64 * 1024),
+            Source::Qcow2(q) => q.cluster_size,
+            Source::Vmdk(v) => v.chunk,
         }
     }
 

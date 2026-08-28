@@ -460,7 +460,7 @@ pub(crate) mod testimg {
                         out.extend_from_slice(&(comp.len() as u32).to_le_bytes());
                         out.extend_from_slice(&comp);
                         let pad = (512 - out.len() % 512) % 512;
-                        out.extend(std::iter::repeat_n(0u8, pad));
+                        out.extend(std::iter::repeat(0u8).take(pad));
                     } else {
                         out.extend_from_slice(&padded);
                     }
