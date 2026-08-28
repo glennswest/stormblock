@@ -69,7 +69,7 @@ pub async fn detect(dev: &Arc<dyn BlockDevice>) -> DriveResult<Option<FsInfo>> {
         let mut pvd = vec![0u8; 2048];
         dev.read(0x8000, &mut pvd).await?;
         if &pvd[1..6] == b"CD001" {
-            let label = String::from_utf8_lossy(&pvd[40..72]).trim().to_string();
+            let label = String::from_utf8_lossy(&pvd[40..72]).trim_matches(|c| c == ' ' || c == '\0').to_string();
             return Ok(Some(FsInfo {
                 kind: "iso9660".into(),
                 journal: false,

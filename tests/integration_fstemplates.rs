@@ -1498,3 +1498,78 @@ async fn the_engine_serves_kubernetes_shaped_resources() {
 
     server.abort();
 }
+
+/// A VM disk becomes a golden: a qcow2 (with an MBR disk inside, as a cloud
+/// image would carry) is imported through the job API, only its allocated
+/// clusters are written, the result is sealed with `fs.kind = mbr`, and a
+/// clone gets its own disk signature. No filesystem the engine writes is
+/// involved anywhere.
+#[tokio::test]
+async fn a_qcow2_disk_image_imports_into_a_sealed_golden_and_clones_with_its_own_identity() {
+    use stormblock::image::decode::qcow2::testimg::{self, C};
+
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    // Cluster 0: an MBR with one partition; cluster 3: some "filesystem".
+    let mut mbr = vec![0u8; 4096];
+    mbr[440..444].copy_from_slice(&0xCAFE_F00Du32.to_le_bytes());
+    mbr[446 + 4] = 0x83;
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+    let payload: Vec<u8> = (0..4096).map(|i| (i % 199) as u8).collect();
+    let img = testimg::build(12, &[C::Data(mbr), C::Hole, C::Zero, C::Compressed(payload.clone())]);
+    let path = dir.path().join("cloud.img"); // a cloud image called .img is a qcow2
+    std::fs::write(&path, &img).unwrap();
+
+    let job: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/import"))
+        .json(&serde_json::json!({ "name": "cloud-golden", "file": path.to_str().unwrap() }))
+        .send().await.unwrap().json().await.unwrap();
+    let id = job["id"].as_str().unwrap().to_string();
+    let mut st = job;
+    for _ in 0..200 {
+        if st["state"] == "done" || st["state"] == "failed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        st = client.get(format!("{url}/api/v1/volumes/import/{id}")).send().await.unwrap().json().await.unwrap();
+    }
+    assert_eq!(st["state"], "done", "{st}");
+    assert_eq!(st["format"], "qcow2", "detected by magic, not by the .img name");
+    assert_eq!(st["virtual_size"], 4 * 4096);
+    assert_eq!(st["written_bytes"], 2 * 4096, "only the two clusters with data");
+    assert_eq!(st["fs"]["kind"], "mbr");
+    let vol = st["volume_id"].as_str().unwrap().to_string();
+
+    let v: serde_json::Value = client.get(format!("{url}/api/v1/volumes/{vol}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["sealed"], true);
+    assert_eq!(v["fs"]["kind"], "mbr");
+    let golden_sig = v["fs_uuid"].as_str().unwrap().to_string();
+
+    let clone: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{vol}/clone"))
+        .json(&serde_json::json!({ "name": "vm-1" }))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(clone["parent"].as_str().unwrap(), vol);
+    assert_ne!(clone["fs_uuid"].as_str().unwrap(), golden_sig, "a clone is its own disk");
+    // The clone's content is the image's: the compressed cluster came through.
+    let clone_id: Uuid = clone["id"].as_str().unwrap().parse().unwrap();
+    let dev = state.volume_manager.lock().await.get_volume(&VolumeId(clone_id)).unwrap();
+    let mut buf = vec![0u8; 4096];
+    dev.read(3 * 4096, &mut buf).await.unwrap();
+    assert_eq!(buf, payload);
+    dev.read(4096, &mut buf).await.unwrap();
+    assert!(buf.iter().all(|&b| b == 0), "a hole reads as zeros");
+
+    // An unsupported format says so, up front.
+    let bad = client
+        .post(format!("{url}/api/v1/volumes/import"))
+        .json(&serde_json::json!({ "name": "x", "file": "/nowhere", "format": "vhd" }))
+        .send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+
+    server.abort();
+}
