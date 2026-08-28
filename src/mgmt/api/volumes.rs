@@ -483,7 +483,10 @@ async fn clone_volume(
         Ok(c) => {
             let vm = state.volume_manager.lock().await;
             let d = describe(&vm, &c.volume_id).await;
-            let allocated = vm.get_volume_handle(&c.volume_id).map(|h| h.allocated()).unwrap().await;
+            let allocated = match vm.get_volume_handle(&c.volume_id) {
+                Some(h) => h.allocated().await,
+                None => 0,
+            };
             let resp = VolumeResponse {
                 id: c.volume_id.0,
                 name: req.name,
