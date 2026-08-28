@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [v12.2.0] — 2026-08-28
+
+### 2026-08-28
+- **feat:** Dependency cut (#79). `src/http.rs` — a pooled HTTP(S) client on
+  `hyper-util` + `hyper-rustls`, the subset of `reqwest` the engine used
+  (`post/get/put/delete`, `json`, `send`, `status`, `json`, `text`, a
+  timeout, an extra CA) — replaces `reqwest` in cluster RPCs, heartbeats,
+  replication, migration and the StormFS announce (`reqwest` stays a
+  dev-dependency for tests). `mgmt/metrics.rs` — an in-house `metrics`
+  recorder that renders the Prometheus exposition format on the axum route
+  replaces `metrics-exporter-prometheus`. `toml` → `basic-toml`. The
+  embedded management UI (`ui`) is **off by default**: the engine serves
+  an API, stormview is the UI. Measured with `cargo tree -e normal`:
+  default build 335 → 212 crates, `mikrotik,nvmeof` 262 → 186,
+  `Cargo.lock` 384 → 354.
+- **fix:** The rustls crypto provider is installed explicitly
+  (`http::ensure_crypto_provider`), so a build that has both `aws-lc-rs`
+  and `ring` in its graph (any test build, via dev-dependencies) does not
+  panic building a TLS config.
+- **feat:** Per-drive metrics (#68) — `stormblock_drive_{healthy,
+  temperature_celsius, media_errors, available_spare_pct, power_on_hours,
+  capacity_bytes}{drive,serial}` sampled from every open drive at scrape
+  time; `stormblock_drives_total` and `stormblock_capacity_bytes` refreshed
+  at scrape rather than set once at startup. Prometheus itself runs
+  elsewhere; `/metrics` is what it scrapes.
+- **feat:** `stormblock image build` seals every golden it lays down and
+  records its filesystem (#77), and stamps each first clone with its own
+  UUID; the build report carries `sealed` and `fs_uuid`. A blank arrives
+  cloneable; the claim path asserts instead of repairing.
+- **feat:** Discovery beacons carry `topology` and `topology_chain` (#72),
+  so `/v1/nodes/capacity` reports the chain for peers, not only the local
+  node.
+
 ## [v12.1.0] — 2026-08-28
 
 ### 2026-08-28

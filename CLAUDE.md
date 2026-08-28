@@ -933,14 +933,14 @@ Lineage, sealing and filesystem identity move onto the **volume**:
   of this line is `/v1` becoming a view over engine volumes rather than
   its own map; not done.
 
-### Follow-on 2 (2026-08-28): #77, #72, #79
+### Follow-on 2 (2026-08-28): #77, #72, #79 — DONE (v12.2.0)
 
-- [ ] **#77** — `stormblock image build` seals every golden it lays down
+- [x] **#77** — `stormblock image build` seals every golden it lays down
       (and records its `fs`), so a blank arrives cloneable and the claim
       path asserts instead of repairing.
-- [ ] **#72** — the discovery beacon carries the node's topology chain, so
+- [x] **#72** — the discovery beacon carries the node's topology chain, so
       `/v1/nodes/capacity` reports `topology_chain` for peers too.
-- [ ] **#79** — dependency cut: one hyper-based HTTP client instead of
+- [x] **#79** — dependency cut (335 → 212 default, 262 → 186 RouterOS; `hyper`/`hyper-util` stay direct — they cost nothing beside axum): one hyper-based HTTP client instead of
       `reqwest`; `/metrics` rendered on the axum route instead of
       `metrics-exporter-prometheus`; no direct `hyper`/`hyper-util`; `ui`
       off by default; parse-only TOML. Measure before and after.
