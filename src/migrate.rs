@@ -19,11 +19,22 @@ use crate::placement::PlacementEngine;
 use crate::raid::{RaidArray, RaidLevel};
 use crate::volume::gem::GlobalExtentMap;
 
+/// How long a rebuild may take before the migration gives up.
+///
+/// Generous, because a rebuild is a whole-volume copy and a slow disk is not a
+/// broken one. Finite, because the alternative — the previous behaviour — is a
+/// drain that never ends and a node that never finishes leaving.
+const REBUILD_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(6 * 60 * 60);
+
 /// Errors during migration.
 #[derive(Debug)]
 pub enum MigrateError {
     RaidAdd(String),
     RaidRemove(String),
+    /// The rebuild did not finish. The source is untouched — this error is the
+    /// difference between a migration that stopped and one that destroyed the
+    /// copy it was migrating.
+    RebuildFailed(String),
     NotRaid1,
     SlabFormat(String),
     Evacuate(String),
@@ -34,6 +45,7 @@ impl std::fmt::Display for MigrateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MigrateError::RaidAdd(e) => write!(f, "RAID add member failed: {e}"),
+            MigrateError::RebuildFailed(e) => write!(f, "rebuild did not complete: {e}"),
             MigrateError::RaidRemove(e) => write!(f, "RAID remove member failed: {e}"),
             MigrateError::NotRaid1 => write!(f, "migration requires RAID 1 array"),
             MigrateError::SlabFormat(e) => write!(f, "slab format failed: {e}"),
@@ -78,24 +90,59 @@ pub async fn migrate_to_local(
         .map_err(|e| MigrateError::RaidAdd(e.to_string()))?;
     let _ = member_uuid;
 
-    // Wait for rebuild to complete by polling member states
+    // Wait for the rebuild to finish, on an **explicit outcome**.
+    //
+    // This loop used to end when nothing was `Rebuilding`, and then remove the
+    // remote member. "Nothing is rebuilding" is the absence of evidence, not
+    // success: any state that was neither `Active` nor `Rebuilding` — `Failed`
+    // included — left the loop, logged "rebuild complete", and deleted the
+    // only copy that was not on the machine being drained. A failed rebuild
+    // destroyed the data it was migrating (#69).
+    //
+    // So: synced, failed, or timed out, and nothing else. The old leg is
+    // removed only on the first of those.
     tracing::info!("Migration: waiting for RAID 1 rebuild to complete...");
+    let deadline = tokio::time::Instant::now() + REBUILD_TIMEOUT;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         let states = array.member_states();
-        let all_active = states.iter().all(|(_, s)| s.to_string() == "Active");
-        if all_active {
+
+        // The new member is what is being waited on. Every member active is
+        // the only positive statement that the copy is complete.
+        if states.iter().all(|(_, s)| s.to_string() == "Active") {
             break;
         }
-        let rebuilding: Vec<_> = states.iter()
-            .filter(|(_, s)| s.to_string() == "Rebuilding")
-            .collect();
-        if rebuilding.is_empty() {
-            break;
+
+        // Any failure ends it, and the source is left alone. Removing the
+        // remote member here is exactly the bug.
+        if let Some((uuid, _)) =
+            states.iter().find(|(_, s)| s.to_string() == "failed" || s.to_string() == "Failed")
+        {
+            return Err(MigrateError::RebuildFailed(format!(
+                "member {uuid} failed during rebuild; the remote member is untouched \
+                 and still holds the data"
+            )));
         }
-        tracing::info!("Migration: {} member(s) still rebuilding", rebuilding.len());
+
+        let rebuilding = states.iter().filter(|(_, s)| s.to_string() == "Rebuilding").count();
+        if rebuilding == 0 {
+            // Neither finished nor failed nor rebuilding: unknown, and unknown
+            // is not success. Previously this was the silent exit.
+            return Err(MigrateError::RebuildFailed(format!(
+                "no member is rebuilding and not all are active: {states:?} — refusing to \
+                 remove the remote member on an unclear outcome"
+            )));
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MigrateError::RebuildFailed(format!(
+                "rebuild did not finish within {REBUILD_TIMEOUT:?}; the remote member is \
+                 untouched and still holds the data"
+            )));
+        }
+        tracing::info!("Migration: {rebuilding} member(s) still rebuilding");
     }
-    tracing::info!("Migration: rebuild complete");
+    tracing::info!("Migration: rebuild complete — every member active");
 
     // Remove the remote member
     tracing::info!("Migration: removing remote member {}", remote_member_uuid);
@@ -205,9 +252,9 @@ mod tests {
 
         // Set up GEM with these extents
         let mut gem = GlobalExtentMap::new();
-        gem.insert(vol, 0, ExtentLocation { slab_id: src_slab_id, slot_idx: slot0, ref_count: 1, generation: 1 });
-        gem.insert(vol, 1, ExtentLocation { slab_id: src_slab_id, slot_idx: slot1, ref_count: 1, generation: 1 });
-        gem.insert(vol, 2, ExtentLocation { slab_id: src_slab_id, slot_idx: slot2, ref_count: 1, generation: 1 });
+        gem.insert(vol, 0, ExtentLocation::new(src_slab_id, slot0));
+        gem.insert(vol, 1, ExtentLocation::new(src_slab_id, slot1));
+        gem.insert(vol, 2, ExtentLocation::new(src_slab_id, slot2));
 
         let mut registry = SlabRegistry::new();
         registry.add(src_slab);

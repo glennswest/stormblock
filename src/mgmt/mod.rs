@@ -31,6 +31,9 @@ use tokio_rustls::TlsAcceptor;
 pub struct DriveInfo {
     pub device: Arc<dyn BlockDevice>,
     pub path: String,
+    /// Where the drive is — failure-domain labels given at registration
+    /// (#70). Empty when nobody said.
+    pub labels: crate::placement::domain::FailureDomain,
 }
 
 /// Information about a RAID array, stored in AppState.

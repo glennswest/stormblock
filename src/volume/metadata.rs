@@ -10,9 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Serialize, Deserialize};
 
+use crate::drive::slab::SlabId;
 use crate::raid::RaidArrayId;
 use crate::volume::extent::VolumeId;
-use crate::volume::gem::ExtentLocation;
+use crate::volume::gem::{ExtentLocation, ParityGroup};
+use crate::volume::redundancy::RedundancyPolicy;
 use crate::volume::thin::PhysicalExtent;
 
 /// Magic bytes: "STRMVOL\0"
@@ -28,7 +30,12 @@ const MAGIC: [u8; 8] = *b"STRMVOL\0";
 /// away. Nothing recorded that before, so a container's root and a customer's
 /// data looked identical to the engine, and anything acting on one had to be
 /// told which it was by whoever happened to mount it.
-const VERSION: u32 = 3;
+///
+/// V4 makes redundancy a property of the volume: each extent location
+/// carries its mirror legs, a parity volume carries its stripes' parity
+/// groups, and the record names the policy and the slabs the volume has
+/// stopped trusting. A V3 record loads as an unreplicated volume.
+const VERSION: u32 = 4;
 
 /// Metadata filename.
 const METADATA_FILE: &str = "volumes.dat";
@@ -64,6 +71,12 @@ pub struct VolumeRecord {
     /// Whether this volume is meant to survive. See [`Retention`].
     #[serde(default)]
     pub retention: Retention,
+    /// How the volume is protected. `none` for everything written before V4.
+    pub redundancy: RedundancyPolicy,
+    /// Stripe → parity legs, for a parity volume.
+    pub parity: BTreeMap<u64, ParityGroup>,
+    /// Slabs a write has failed on: skipped until a resync clears them.
+    pub failed_slabs: Vec<SlabId>,
 }
 
 /// What is supposed to happen to a volume's divergence from its golden.
@@ -112,13 +125,85 @@ impl Retention {
     }
 }
 
-/// V2 payload shapes — decode-only, converted on load.
+/// The extent location shape every version before V4 wrote: one leg.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LegacyLocation {
+    pub slab_id: SlabId,
+    pub slot_idx: u32,
+    pub ref_count: u32,
+    pub generation: u64,
+}
+
+impl From<LegacyLocation> for ExtentLocation {
+    fn from(l: LegacyLocation) -> Self {
+        ExtentLocation {
+            slab_id: l.slab_id,
+            slot_idx: l.slot_idx,
+            ref_count: l.ref_count,
+            generation: l.generation,
+            mirrors: Vec::new(),
+        }
+    }
+}
+
+fn convert_legacy_extents(m: BTreeMap<u64, LegacyLocation>) -> BTreeMap<u64, ExtentLocation> {
+    m.into_iter().map(|(k, v)| (k, v.into())).collect()
+}
+
+/// V3 payload shapes — decode-only, converted on load.
 ///
 /// **bincode is not self-describing**, so a field added to a struct is not
 /// something an older payload can be read *around*: the decoder would run off
 /// the end of the record or, worse, read the next record's bytes as this
 /// one's. `#[serde(default)]` does nothing here. Every version that ever
 /// existed therefore keeps its own shape, and conversion happens on load.
+mod v3 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: Option<RaidArrayId>,
+        pub extents: BTreeMap<u64, LegacyLocation>,
+        pub retention: Retention,
+    }
+}
+
+impl From<v3::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v3::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: v.array_id,
+                    extents: convert_legacy_extents(v.extents),
+                    retention: v.retention,
+                    // Nothing before V4 was replicated: one leg per extent.
+                    redundancy: RedundancyPolicy::none(),
+                    parity: BTreeMap::new(),
+                    failed_slabs: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// V2 payload shapes — decode-only, converted on load.
 mod v2 {
     use super::*;
 
@@ -135,7 +220,7 @@ mod v2 {
         pub name: String,
         pub virtual_size: u64,
         pub array_id: Option<RaidArrayId>,
-        pub extents: BTreeMap<u64, ExtentLocation>,
+        pub extents: BTreeMap<u64, LegacyLocation>,
     }
 }
 
@@ -152,10 +237,13 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     name: v.name,
                     virtual_size: v.virtual_size,
                     array_id: v.array_id,
-                    extents: v.extents,
+                    extents: convert_legacy_extents(v.extents),
                     // V2 did not ask. Silence means keep — a volume discarded
                     // because its record predates the question is gone.
                     retention: Retention::Keep,
+                    redundancy: RedundancyPolicy::none(),
+                    parity: BTreeMap::new(),
+                    failed_slabs: Vec::new(),
                 })
                 .collect(),
         }
@@ -203,6 +291,9 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     // silence is "keep": a volume thrown away because a format
                     // predates the question is not recoverable.
                     retention: Retention::Keep,
+                    redundancy: RedundancyPolicy::none(),
+                    parity: BTreeMap::new(),
+                    failed_slabs: Vec::new(),
                 })
                 .collect(),
         }
@@ -264,7 +355,7 @@ impl MetadataStore {
         // Every version that ever existed is decoded through its own shapes
         // and converted; see the note on `mod v2`.
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != 1 && version != 2 && version != VERSION {
+        if version != 1 && version != 2 && version != 3 && version != VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported metadata version {version}"),
@@ -304,6 +395,12 @@ impl MetadataStore {
             let (old, _): (v2::VolumeMetadata, _) =
                 bincode::serde::decode_from_slice(payload, bincode::config::standard())
                     .map_err(|e| io::Error::other(format!("bincode decode (v2): {e}")))?;
+            return Ok(old.into());
+        }
+        if version == 3 {
+            let (old, _): (v3::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v3): {e}")))?;
             return Ok(old.into());
         }
         let (metadata, _): (VolumeMetadata, _) =
@@ -400,8 +497,8 @@ mod tests {
         let vol_id = VolumeId(Uuid::new_v4());
         let slab_id = crate::drive::slab::SlabId(Uuid::new_v4());
         let mut extents = BTreeMap::new();
-        extents.insert(0, ExtentLocation { slab_id, slot_idx: 3, ref_count: 2, generation: 1 });
-        extents.insert(1, ExtentLocation { slab_id, slot_idx: 9, ref_count: 1, generation: 1 });
+        extents.insert(0, ExtentLocation { slab_id, slot_idx: 3, ref_count: 2, generation: 1, mirrors: vec![] });
+        extents.insert(1, ExtentLocation::new(slab_id, 9));
 
         VolumeMetadata {
             extent_size: 4 * 1024 * 1024,
@@ -416,8 +513,90 @@ mod tests {
                 array_id: Some(array_id),
                 extents,
                 retention: Retention::Keep,
+                redundancy: RedundancyPolicy::none(),
+                parity: BTreeMap::new(),
+                failed_slabs: Vec::new(),
             }],
         }
+    }
+
+    /// A V3 record — one leg per extent, no policy — must load as an
+    /// unreplicated volume with its extents intact. Same reasoning as the V2
+    /// test below: bincode has no defaults, so the old shape is decoded as
+    /// itself.
+    #[test]
+    fn a_v3_record_loads_as_unreplicated() {
+        let slab_id = crate::drive::slab::SlabId(Uuid::new_v4());
+        let mut extents = BTreeMap::new();
+        extents.insert(4u64, LegacyLocation { slab_id, slot_idx: 11, ref_count: 2, generation: 3 });
+        let old = v3::VolumeMetadata {
+            extent_size: 1 << 20,
+            arrays: vec![],
+            volumes: vec![v3::VolumeRecord {
+                id: VolumeId(Uuid::from_u128(3)),
+                name: "three".into(),
+                virtual_size: 1 << 30,
+                array_id: None,
+                extents,
+                retention: Retention::Ephemeral,
+            }],
+        };
+        let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&payload);
+        let crc = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+
+        let back = MetadataStore::decode(&buf).expect("a V3 record must still load");
+        let v = &back.volumes[0];
+        assert_eq!(v.name, "three");
+        assert_eq!(v.retention, Retention::Ephemeral);
+        assert!(v.redundancy.is_none());
+        let loc = &v.extents[&4];
+        assert_eq!((loc.slab_id, loc.slot_idx, loc.ref_count, loc.generation), (slab_id, 11, 2, 3));
+        assert!(loc.mirrors.is_empty());
+        assert!(v.parity.is_empty() && v.failed_slabs.is_empty());
+    }
+
+    /// Mirrors, parity groups, the policy and the failed set all survive.
+    #[test]
+    fn v4_redundancy_round_trips() {
+        let (a, b, c) = (
+            crate::drive::slab::SlabId(Uuid::new_v4()),
+            crate::drive::slab::SlabId(Uuid::new_v4()),
+            crate::drive::slab::SlabId(Uuid::new_v4()),
+        );
+        let mut extents = BTreeMap::new();
+        extents.insert(0u64, ExtentLocation::with_legs(
+            crate::volume::gem::Leg::new(a, 1), vec![crate::volume::gem::Leg::new(b, 2)],
+        ));
+        let mut parity = BTreeMap::new();
+        parity.insert(0u64, ParityGroup::new(vec![crate::volume::gem::Leg::new(c, 5)], 4));
+        let meta = VolumeMetadata {
+            extent_size: 1 << 20,
+            arrays: vec![],
+            volumes: vec![VolumeRecord {
+                id: VolumeId(Uuid::from_u128(4)),
+                name: "four".into(),
+                virtual_size: 1 << 30,
+                array_id: None,
+                extents,
+                retention: Retention::Keep,
+                redundancy: RedundancyPolicy::parse("raid5:4+1@shelf").unwrap(),
+                parity,
+                failed_slabs: vec![b],
+            }],
+        };
+        let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
+        let v = &back.volumes[0];
+        assert_eq!(v.redundancy.spelling(), "raid5:4+1@shelf");
+        assert_eq!(v.extents[&0].mirrors, vec![crate::volume::gem::Leg::new(b, 2)]);
+        assert_eq!(v.parity[&0].legs, vec![crate::volume::gem::Leg::new(c, 5)]);
+        assert_eq!(v.failed_slabs, vec![b]);
     }
 
     #[test]
@@ -572,6 +751,9 @@ mod retention_tests {
                 array_id: None,
                 extents: BTreeMap::new(),
                 retention,
+                redundancy: RedundancyPolicy::none(),
+                parity: BTreeMap::new(),
+                failed_slabs: Vec::new(),
             }],
         }
     }

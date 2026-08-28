@@ -470,9 +470,9 @@ async fn iscsi_migrate_between_disks() {
 
     // Build GEM
     let mut gem = GlobalExtentMap::new();
-    gem.insert(vol_a, 0, ExtentLocation { slab_id: src_id, slot_idx: s_a, ref_count: 1, generation: 1 });
-    gem.insert(vol_b, 0, ExtentLocation { slab_id: src_id, slot_idx: s_b, ref_count: 1, generation: 1 });
-    gem.insert(vol_c, 0, ExtentLocation { slab_id: src_id, slot_idx: s_c, ref_count: 1, generation: 1 });
+    gem.insert(vol_a, 0, ExtentLocation::new(src_id, s_a));
+    gem.insert(vol_b, 0, ExtentLocation::new(src_id, s_b));
+    gem.insert(vol_c, 0, ExtentLocation::new(src_id, s_c));
 
     let mut registry = SlabRegistry::new();
     registry.add(src_slab);
@@ -955,12 +955,7 @@ async fn iscsi_large_migration() {
         gem.insert(
             *vol,
             0,
-            ExtentLocation {
-                slab_id: src_id,
-                slot_idx: *slot,
-                ref_count: 1,
-                generation: 1,
-            },
+            ExtentLocation::new(src_id, *slot),
         );
         let _ = i;
     }

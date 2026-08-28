@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod redundancy;
 pub mod thin;
 pub mod snapshot;
+pub mod stripe;
 #[cfg(feature = "stormfs-data")]
 pub mod versioned;
 pub mod gc;
@@ -30,8 +31,21 @@ use crate::raid::RaidArrayId;
 
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
 pub use metadata::{MetadataStore, Retention};
-pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy};
+pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport};
 pub use redundancy::{Redundancy, RedundancyPolicy};
+
+/// Everything a volume is created with beyond a name and a size.
+#[derive(Debug, Clone, Default)]
+pub struct CreateOptions {
+    pub redundancy: RedundancyPolicy,
+    pub placement: PlacementPolicy,
+}
+
+impl CreateOptions {
+    pub fn redundant(policy: RedundancyPolicy) -> Self {
+        CreateOptions { redundancy: policy, ..Default::default() }
+    }
+}
 pub use gem::GlobalExtentMap;
 
 /// Default slot size for slabs created via add_backing_device.
@@ -199,18 +213,7 @@ impl VolumeManager {
                 format!("no backing device for array {array_id}")
             ));
         }
-
-        let vol = ThinVolume::new(name.to_string(), virtual_size, self.slot_size);
-        let id = vol.id();
-        let handle = Arc::new(ThinVolumeHandle::new(
-            vol,
-            self.gem.clone(),
-            self.registry.clone(),
-            PlacementPolicy::default(),
-        ));
-        self.volumes.insert(id, handle);
-        self.persist().await;
-        Ok(id)
+        self.create_volume_with(name, virtual_size, CreateOptions::default()).await
     }
 
     /// Create a new thin volume without binding it to a specific array.
@@ -223,17 +226,87 @@ impl VolumeManager {
         name: &str,
         virtual_size: u64,
     ) -> Result<VolumeId, VolumeError> {
+        self.create_volume_with(name, virtual_size, CreateOptions::default()).await
+    }
+
+    /// Create a volume with a redundancy policy.
+    ///
+    /// The policy is a boundary: a node that cannot put every leg of an
+    /// extent on a distinct domain at the policy's rung refuses the volume
+    /// now, rather than the first write finding out. Thin sizing is not
+    /// checked — a volume larger than any one drive is the normal case,
+    /// since each extent picks its own slabs.
+    pub async fn create_volume_with(
+        &mut self,
+        name: &str,
+        virtual_size: u64,
+        opts: CreateOptions,
+    ) -> Result<VolumeId, VolumeError> {
+        let needed = opts.redundancy.scheme.width();
+        if needed > 1 {
+            let available = self.registry.read().await.distinct_domains_with_space(&opts.redundancy.spread);
+            if available < needed {
+                return Err(VolumeError::InsufficientDomains {
+                    policy: opts.redundancy.spelling(),
+                    needed,
+                    available,
+                });
+            }
+        }
         let vol = ThinVolume::new(name.to_string(), virtual_size, self.slot_size);
         let id = vol.id();
-        let handle = Arc::new(ThinVolumeHandle::new(
+        let handle = Arc::new(ThinVolumeHandle::with_redundancy(
             vol,
             self.gem.clone(),
             self.registry.clone(),
-            PlacementPolicy::default(),
+            opts.placement,
+            opts.redundancy,
         ));
         self.volumes.insert(id, handle);
         self.persist().await;
         Ok(id)
+    }
+
+    /// A volume's policy.
+    pub fn redundancy(&self, id: &VolumeId) -> Option<RedundancyPolicy> {
+        self.volumes.get(id).map(|h| h.redundancy())
+    }
+
+    /// Change a volume's policy; `none`/`mirror` to `mirror` only. Takes
+    /// effect at the next `resync_volume`.
+    pub async fn set_redundancy(&mut self, id: VolumeId, policy: RedundancyPolicy) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        let needed = policy.scheme.width();
+        if needed > 1 {
+            let available = self.registry.read().await.distinct_domains_with_space(&policy.spread);
+            if available < needed {
+                return Err(VolumeError::InsufficientDomains {
+                    policy: policy.spelling(),
+                    needed,
+                    available,
+                });
+            }
+        }
+        handle.set_redundancy(policy)?;
+        self.persist().await;
+        Ok(())
+    }
+
+    /// Rebuild what a volume is missing and clear the slabs it stopped
+    /// trusting. See [`ThinVolumeHandle::resync`].
+    pub async fn resync_volume(&mut self, id: VolumeId, verify: bool) -> Result<ResyncReport, VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        let report = handle.resync(verify).await;
+        self.persist().await;
+        Ok(report)
+    }
+
+    /// Whether a volume's data is all there and all protected.
+    pub async fn health(&self, id: &VolumeId) -> Option<VolumeHealth> {
+        match self.volumes.get(id) {
+            Some(h) => Some(h.health().await),
+            None => None,
+        }
     }
 
     /// Snapshot several volumes at a single consistency point.
@@ -268,14 +341,9 @@ impl VolumeManager {
         }
 
         let mut ids = Vec::with_capacity(snaps.len());
-        for snap in snaps {
+        for (snap, (source_id, _)) in snaps.into_iter().zip(sources) {
             let snap_id = snap.id();
-            let handle = Arc::new(ThinVolumeHandle::new(
-                snap,
-                self.gem.clone(),
-                self.registry.clone(),
-                PlacementPolicy::default(),
-            ));
+            let handle = Arc::new(self.inherit_handle(snap, source_id));
             self.volumes.insert(snap_id, handle);
             ids.push(snap_id);
         }
@@ -403,15 +471,28 @@ impl VolumeManager {
             ).await?
         };
         let snap_id = snap.id();
-        let snap_handle = Arc::new(ThinVolumeHandle::new(
-            snap,
-            self.gem.clone(),
-            self.registry.clone(),
-            PlacementPolicy::default(),
-        ));
+        let snap_handle = Arc::new(self.inherit_handle(snap, &source_id));
         self.volumes.insert(snap_id, snap_handle);
         self.persist().await;
         Ok(snap_id)
+    }
+
+    /// A clone is protected the way its source is: its shared extents
+    /// already are, and every copy-on-write will be.
+    fn inherit_handle(&self, vol: ThinVolume, source_id: &VolumeId) -> ThinVolumeHandle {
+        let (policy, failed) = match self.volumes.get(source_id) {
+            Some(src) => (src.redundancy(), src.failed_slabs()),
+            None => (RedundancyPolicy::none(), Vec::new()),
+        };
+        let handle = ThinVolumeHandle::with_redundancy(
+            vol,
+            self.gem.clone(),
+            self.registry.clone(),
+            PlacementPolicy::default(),
+            policy,
+        );
+        handle.set_failed_slabs(failed);
+        handle
     }
 
     /// List all volumes: (id, name, virtual_size, allocated).
@@ -551,7 +632,13 @@ impl VolumeManager {
         // first, then gem/registry).
         let mut vol_info = Vec::with_capacity(self.volumes.len());
         for (id, handle) in &self.volumes {
-            vol_info.push((*id, handle.name().await, handle.capacity_bytes()));
+            vol_info.push((
+                *id,
+                handle.name().await,
+                handle.capacity_bytes(),
+                handle.redundancy(),
+                handle.failed_slabs(),
+            ));
         }
 
         let gem = self.gem.read().await;
@@ -569,7 +656,7 @@ impl VolumeManager {
             .collect();
         let volumes = vol_info
             .into_iter()
-            .map(|(id, name, virtual_size)| metadata::VolumeRecord {
+            .map(|(id, name, virtual_size, redundancy, failed_slabs)| metadata::VolumeRecord {
                 id,
                 name,
                 virtual_size,
@@ -579,6 +666,12 @@ impl VolumeManager {
                     .get_volume_map(&id)
                     .map(|m| m.extents.clone())
                     .unwrap_or_default(),
+                redundancy,
+                parity: gem
+                    .get_volume_map(&id)
+                    .map(|m| m.parity.clone())
+                    .unwrap_or_default(),
+                failed_slabs,
             })
             .collect();
         metadata::VolumeMetadata {
@@ -672,6 +765,12 @@ impl VolumeManager {
                 }
             }
 
+            // Parity groups: the record is authoritative — it knows the
+            // stripe width, which the slot tables do not.
+            for (stripe, group) in &vrec.parity {
+                rebuilt.insert_parity(vrec.id, *stripe, group.clone());
+            }
+
             self.retentions.insert(vrec.id, vrec.retention);
             let vol = ThinVolume::restore(
                 vrec.id,
@@ -679,12 +778,14 @@ impl VolumeManager {
                 vrec.virtual_size,
                 self.slot_size,
             );
-            let handle = Arc::new(ThinVolumeHandle::new(
+            let handle = Arc::new(ThinVolumeHandle::with_redundancy(
                 vol,
                 self.gem.clone(),
                 self.registry.clone(),
                 PlacementPolicy::default(),
+                vrec.redundancy.clone(),
             ));
+            handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             self.volumes.insert(vrec.id, handle);
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);

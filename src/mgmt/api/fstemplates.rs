@@ -114,6 +114,10 @@ pub struct CreateTemplateRequest {
     /// anything that is not.
     #[serde(default)]
     pub files: Vec<SeedFileRequest>,
+    /// Redundancy for the template and every clone of it: `mirror`,
+    /// `mirror:3`, `raid5:4+1`, … (see `POST /api/v1/volumes`).
+    #[serde(default)]
+    pub redundancy: Option<String>,
     /// Format here and seal in one call. Default true; false leaves the
     /// template `awaiting_format` for an initiator to format over an export.
     #[serde(default = "yes")]
@@ -242,6 +246,13 @@ async fn create_template(
         }
     }
 
+    let redundancy = match req.redundancy.as_deref() {
+        Some(r) => match crate::volume::RedundancyPolicy::parse(r) {
+            Ok(p) => p,
+            Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
+        },
+        None => Default::default(),
+    };
     let spec = TemplateSpec {
         name: req.name,
         fs,
@@ -256,6 +267,7 @@ async fn create_template(
         // remember to say `format: false`.
         format_in_core: req.format && req.parent.is_none(),
         parent: req.parent,
+        redundancy,
     };
 
     match template::create(&state.volume_manager, &state.fstemplates, &spec).await {

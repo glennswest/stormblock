@@ -605,16 +605,21 @@ enum PalletAction {
 struct VolumeSpec {
     name: String,
     size: u64,
+    redundancy: stormblock::volume::RedundancyPolicy,
 }
 
 fn parse_volume_spec(s: &str) -> Result<VolumeSpec, String> {
-    let parts: Vec<&str> = s.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err("format: name:size (e.g. data:100G)".into());
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    if parts.len() < 2 {
+        return Err("format: name:size[:redundancy] (e.g. data:100G, data:100G:mirror:2)".into());
     }
     let name = parts[0].to_string();
     let size = parse_size(parts[1])?;
-    Ok(VolumeSpec { name, size })
+    let redundancy = match parts.get(2) {
+        Some(r) => stormblock::volume::RedundancyPolicy::parse(r)?,
+        None => Default::default(),
+    };
+    Ok(VolumeSpec { name, size, redundancy })
 }
 
 fn parse_raid_level(s: &str) -> Result<RaidLevel, String> {
@@ -848,6 +853,7 @@ async fn main() -> anyhow::Result<()> {
                         state_drives.push(DriveInfo {
                             device: arc_dev.clone(),
                             path: path.clone(),
+                            labels: Default::default(),
                         });
                     }
                     drives.push(arc_dev);
@@ -940,7 +946,17 @@ async fn main() -> anyhow::Result<()> {
                         if !restored {
                             for spec in &cli.volumes {
                                 let mut vm = state.volume_manager.lock().await;
-                                match vm.create_volume(&spec.name, spec.size, array_id).await {
+                                let created = if spec.redundancy.is_none() {
+                                    vm.create_volume(&spec.name, spec.size, array_id).await
+                                } else {
+                                    vm.create_volume_with(
+                                        &spec.name,
+                                        spec.size,
+                                        stormblock::volume::CreateOptions::redundant(spec.redundancy.clone()),
+                                    )
+                                    .await
+                                };
+                                match created {
                                     Ok(vol_id) => {
                                         tracing::info!(
                                             "Volume '{}' ({}) created — virtual={} bytes ({:.1} GB)",

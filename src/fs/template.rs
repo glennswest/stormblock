@@ -183,6 +183,10 @@ pub struct TemplateSpec {
     /// layout — because it *is* the parent's filesystem. Only `size_bytes` may
     /// differ, and only upwards.
     pub parent: Option<String>,
+    /// How the template — and therefore every clone taken from it — is
+    /// protected. A golden mirrored two ways hands out clones whose shared
+    /// extents already have two legs and whose writes get two.
+    pub redundancy: crate::volume::RedundancyPolicy,
 }
 
 impl TemplateSpec {
@@ -197,6 +201,7 @@ impl TemplateSpec {
             seed: Vec::new(),
             format_in_core: true,
             parent: None,
+            redundancy: Default::default(),
         }
     }
 
@@ -628,7 +633,11 @@ pub async fn create(
         None => vm
             .lock()
             .await
-            .create_volume_any(&format!("fstemplate-{}-raw", spec.name), spec.size_bytes)
+            .create_volume_with(
+                &format!("fstemplate-{}-raw", spec.name),
+                spec.size_bytes,
+                crate::volume::CreateOptions::redundant(spec.redundancy.clone()),
+            )
             .await
             .map_err(|e| TemplateError::Internal(format!("creating template volume: {e}")))?,
         Some(p) => {

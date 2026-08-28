@@ -600,6 +600,41 @@ impl RaidArray {
         }
     }
 
+    /// Mark a member failed, and say why.
+    ///
+    /// This is the call that was missing, and its absence is what made every
+    /// degraded path unreachable in production: a member whose I/O failed
+    /// stayed `Active`, so nothing ever read from the survivor, nothing
+    /// rebuilt, and a mirror with one dead leg reported itself healthy.
+    ///
+    /// Idempotent, and it never removes the last member: an array whose every
+    /// member has failed has lost its data, and saying so is more useful than
+    /// a state that implies a survivor exists. The caller gets `false` when
+    /// the member was already failed, so a retry storm logs once.
+    pub fn fail_member(&self, idx: usize, why: &str) -> bool {
+        let mut members = self.members.write().unwrap();
+        if idx >= members.len() || members[idx].state == RaidMemberState::Failed {
+            return false;
+        }
+        let uuid = members[idx].member_uuid;
+        members[idx].state = RaidMemberState::Failed;
+        let survivors = members
+            .iter()
+            .filter(|m| m.state == RaidMemberState::Active)
+            .count();
+        if survivors == 0 {
+            tracing::error!(
+                "RAID member {idx} ({uuid}) failed: {why} — NO ACTIVE MEMBERS REMAIN, \
+                 this array has lost its data"
+            );
+        } else {
+            tracing::warn!(
+                "RAID member {idx} ({uuid}) failed: {why} — {survivors} active member(s) remain"
+            );
+        }
+        true
+    }
+
     /// Number of failed members.
     fn failed_count_locked(members: &[MemberInfo]) -> usize {
         members.iter()
@@ -697,6 +732,10 @@ impl RaidArray {
                         .collect();
                     if active_non_new.is_empty() {
                         tracing::error!("RAID 1 rebuild: no source members available");
+                        array.fail_member(
+                            new_idx,
+                            "rebuild aborted: no active member to rebuild from",
+                        );
                         return;
                     }
                     source_idx = active_non_new[0];
@@ -708,14 +747,23 @@ impl RaidArray {
                     (Arc::clone(&members[source_idx].device), Arc::clone(&members[new_idx].device))
                 };
 
+                // A rebuild that stops must say so. Returning silently left
+                // the member `Rebuilding` for ever, which is how a caller
+                // waiting for the rebuild waits for ever — and how
+                // `migrate_to_local` came to treat "nothing is rebuilding" as
+                // success (#69).
+                //
+                // A read error fails the *source*: it is the drive that could
+                // not produce the data. A write error fails the new member.
                 if let Err(e) = source_dev.read(DATA_OFFSET + offset, &mut buf).await {
-                    tracing::error!("RAID 1 rebuild read error at {offset}: {e}");
+                    array.fail_member(source_idx, &format!("rebuild read error at {offset}: {e}"));
+                    array.fail_member(new_idx, "rebuild aborted: source could not be read");
                     return;
                 }
 
                 // Write to new member
                 if let Err(e) = new_dev.write(DATA_OFFSET + offset, &buf).await {
-                    tracing::error!("RAID 1 rebuild write error at {offset}: {e}");
+                    array.fail_member(new_idx, &format!("rebuild write error at {offset}: {e}"));
                     return;
                 }
 
@@ -1052,13 +1100,22 @@ impl RaidArray {
             }));
         }
 
-        let mut last_result = Ok(0);
+        // A member that could not take the write is **out of date**, and that
+        // is the whole reason to mark it failed rather than log and continue:
+        // it stayed `Active` before, so a later read could be served from a
+        // leg that never received the data. A mirror whose legs disagree and
+        // does not know it is worse than one that lost a leg and does.
+        //
+        // The write itself still succeeds if any member took it — that is what
+        // a mirror is for — but it succeeds with one fewer leg, loudly.
+        let mut wrote: Option<usize> = None;
+        let mut failed: Option<DriveError> = None;
         for handle in handles {
             match handle.await {
-                Ok((_, Ok(n))) => last_result = Ok(n),
+                Ok((_, Ok(n))) => wrote = Some(n),
                 Ok((idx, Err(e))) => {
-                    tracing::error!("RAID-1 write failed on member {idx}: {e}");
-                    last_result = Err(e);
+                    self.fail_member(idx, &format!("write error: {e}"));
+                    failed = Some(e);
                 }
                 Err(e) => {
                     tracing::error!("RAID-1 write task panicked: {e}");
@@ -1066,7 +1123,13 @@ impl RaidArray {
                 }
             }
         }
-        last_result
+        match (wrote, failed) {
+            // At least one leg holds it. The array is degraded, not broken.
+            (Some(n), _) => Ok(n),
+            // Nobody took it.
+            (None, Some(e)) => Err(e),
+            (None, None) => Ok(0),
+        }
     }
 
     async fn raid1_flush(&self) -> DriveResult<()> {

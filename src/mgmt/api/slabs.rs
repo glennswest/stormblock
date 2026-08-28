@@ -21,6 +21,9 @@ use crate::placement::topology::StorageTier;
 pub struct SlabResponse {
     pub id: String,
     pub tier: String,
+    /// What fails together with this slab: `drive=…`, or the wider chain a
+    /// labelled drive gave it. Redundancy policies spread across these.
+    pub domain: String,
     pub slot_size: u64,
     pub total_slots: u64,
     pub free_slots: u64,
@@ -46,6 +49,10 @@ pub struct FormatSlabRequest {
     #[serde(default = "default_tier")]
     pub tier: String,
     pub slot_size: Option<u64>,
+    /// Failure domain to record for the slab, `rung=value/…`. Defaults to
+    /// the device's identity under whatever labels the drive carries.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 fn default_tier() -> String {
@@ -74,6 +81,7 @@ async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             SlabResponse {
                 id: id.0.to_string(),
                 tier: format!("{}", slab.tier()),
+                domain: reg.domain_of(id).to_string(),
                 slot_size,
                 total_slots: total,
                 free_slots: free,
@@ -110,6 +118,7 @@ async fn get_slab(
             Json(SlabResponse {
                 id: slab_id.0.to_string(),
                 tier: format!("{}", slab.tier()),
+                domain: reg.domain_of(&slab_id).to_string(),
                 slot_size,
                 total_slots: total,
                 free_slots: free,
@@ -143,15 +152,28 @@ async fn format_slab(
         Err(e) => return ApiError::bad_request(format!("cannot open device '{}': {e}", req.device_path)),
     };
 
+    let domain = match req.domain.as_deref() {
+        Some(d) => match crate::placement::domain::FailureDomain::parse(d) {
+            Ok(d) => Some(d),
+            Err(e) => return ApiError::bad_request(e),
+        },
+        None => None,
+    };
     match crate::drive::slab::Slab::format(device, slot_size, tier).await {
         Ok(slab) => {
             let slab_id = slab.slab_id();
             let total = slab.total_slots();
             let free = slab.free_slots();
             let allocated = slab.allocated_slots();
+            let mut reg = state.slab_registry.write().await;
+            match domain {
+                Some(d) => reg.add_in_domain(slab, d),
+                None => reg.add(slab),
+            }
             let resp = SlabResponse {
                 id: slab_id.0.to_string(),
-                tier: format!("{}", slab.tier()),
+                tier: format!("{}", tier),
+                domain: reg.domain_of(&slab_id).to_string(),
                 slot_size,
                 total_slots: total,
                 free_slots: free,
@@ -161,7 +183,7 @@ async fn format_slab(
                 free_bytes: free * slot_size,
                 free_bytes_human: human_size(free * slot_size),
             };
-            state.slab_registry.write().await.add(slab);
+            drop(reg);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
         Err(e) => ApiError::internal(format!("failed to format slab: {e}")),

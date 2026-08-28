@@ -356,12 +356,14 @@ pub async fn commit(
         // decrements rather than frees, and the pinned reader is untouched.
         if let Some(old) = displaced {
             out.extents_released += 1;
-            if let Some(slab) = reg.get_mut(&old.slab_id) {
-                if let Err(e) = slab.dec_ref(old.slot_idx).await {
-                    out.failures.push(format!(
-                        "slab {} slot {}: {e}",
-                        old.slab_id.0, old.slot_idx
-                    ));
+            for leg in old.legs() {
+                if let Some(slab) = reg.get_mut(&leg.slab_id) {
+                    if let Err(e) = slab.dec_ref(leg.slot_idx).await {
+                        out.failures.push(format!(
+                            "slab {} slot {}: {e}",
+                            leg.slab_id.0, leg.slot_idx
+                        ));
+                    }
                 }
             }
         }

@@ -43,6 +43,9 @@ pub struct DriveResponse {
     pub capacity_bytes: u64,
     pub capacity_human: String,
     pub block_size: u32,
+    /// Failure-domain labels the drive was registered with (#70), as a
+    /// chain: `shelf=S/bay=3`. Empty when nobody said where it is.
+    pub labels: String,
 }
 
 async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -62,6 +65,7 @@ async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 capacity_bytes: d.device.capacity_bytes(),
                 capacity_human: human_size(d.device.capacity_bytes()),
                 block_size: d.device.block_size(),
+                labels: d.labels.to_string(),
             }
         })
         .collect();
@@ -90,6 +94,7 @@ async fn get_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
                 capacity_bytes: d.device.capacity_bytes(),
                 capacity_human: human_size(d.device.capacity_bytes()),
                 block_size: d.device.block_size(),
+                labels: d.labels.to_string(),
             };
             Json(resp).into_response()
         }
@@ -152,6 +157,17 @@ pub struct OpenRequest {
     /// already exists, and for anything that is not a file.
     #[serde(default)]
     pub size_bytes: Option<u64>,
+    /// Where the drive is: failure-domain labels (`shelf`, `bay`, `hba`,
+    /// `rack`, …), as stormdrive resolves them from SES/sysfs (#70). Every
+    /// slab on the drive is placed under them — a mirror's legs will not
+    /// share a shelf when the policy says `@shelf`.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// A caller-derived stable identity (uuid5 of the WWID, say). Recorded
+    /// as the `drive` rung of the labels, since the device's own uuid is
+    /// minted per open (#65).
+    #[serde(default)]
+    pub uuid: Option<Uuid>,
 }
 
 async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequest>) -> Response {
@@ -178,14 +194,22 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
         },
     };
 
+    let mut labels = crate::placement::domain::FailureDomain::from_labels(req.labels.clone());
+    if let Some(u) = req.uuid {
+        labels = labels.with("drive", &u.to_string());
+    }
     let index = {
         let mut drives = state.drives.write().await;
         drives.push(crate::mgmt::DriveInfo {
             device: dev.clone(),
             path: req.path.clone(),
+            labels: labels.clone(),
         });
         drives.len() - 1
     };
+    if !labels.is_empty() {
+        state.slab_registry.write().await.label_device(&req.path, labels.clone());
+    }
     let id = dev.id();
     tracing::info!(
         "drive {index} opened: {} ({}) — {} bytes, block_size={}, type={}",
@@ -206,6 +230,7 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
             capacity_bytes: dev.capacity_bytes(),
             capacity_human: human_size(dev.capacity_bytes()),
             block_size: dev.block_size(),
+            labels: labels.to_string(),
         }),
     )
         .into_response()
@@ -279,5 +304,73 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(list_drives).post(open_drive))
         .route("/{id}", get(get_drive).delete(close_drive))
         .route("/{id}/smart", get(get_drive_smart))
+        .route("/{id}/slabs", get(drive_slabs))
+        .route("/{id}/labels", axum::routing::put(set_labels))
         .with_state(state)
+}
+
+/// `GET /api/v1/drives/{id}/slabs` — the slabs that live on this drive, by
+/// identity of the device (#70 item 2). `id` is the drive's UUID or path.
+async fn drive_slabs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let found = {
+        let drives = state.drives.read().await;
+        drives
+            .iter()
+            .find(|d| d.path == id || d.device.id().uuid.to_string() == id)
+            .map(|d| (d.device.clone(), d.path.clone(), d.labels.clone()))
+    };
+    let Some((dev, path, labels)) = found else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+    let registry = state.slab_registry.read().await;
+    let items: Vec<serde_json::Value> = registry
+        .iter()
+        .filter(|(_, slab)| Arc::ptr_eq(slab.device(), &dev) || slab.device().id().path == path)
+        .map(|(sid, slab)| {
+            serde_json::json!({
+                "id": sid.0.to_string(),
+                "tier": slab.tier().to_string(),
+                "domain": registry.domain_of(sid).to_string(),
+                "total_slots": slab.total_slots(),
+                "free_slots": slab.free_slots(),
+            })
+        })
+        .collect();
+    let count = items.len();
+    Json(serde_json::json!({
+        "drive": dev.id().uuid,
+        "path": path,
+        "labels": labels.to_string(),
+        "items": items,
+        "count": count,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LabelsRequest {
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+/// `PUT /api/v1/drives/{id}/labels` — (re)label a drive after the fact;
+/// every slab on it moves under the new labels.
+async fn set_labels(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<LabelsRequest>,
+) -> Response {
+    let labels = crate::placement::domain::FailureDomain::from_labels(req.labels);
+    let path = {
+        let mut drives = state.drives.write().await;
+        let Some(d) = drives
+            .iter_mut()
+            .find(|d| d.path == id || d.device.id().uuid.to_string() == id)
+        else {
+            return ApiError::not_found(format!("no open drive {id}"));
+        };
+        d.labels = labels.clone();
+        d.path.clone()
+    };
+    state.slab_registry.write().await.label_device(&path, labels.clone());
+    Json(serde_json::json!({ "path": path, "labels": labels.to_string() })).into_response()
 }

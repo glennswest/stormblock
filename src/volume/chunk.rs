@@ -406,12 +406,7 @@ pub async fn allocate(
             g.insert(
                 req.volume,
                 *vext,
-                ExtentLocation {
-                    slab_id: *slab_id,
-                    slot_idx: *slot_idx,
-                    ref_count: 1,
-                    generation: 1,
-                },
+                ExtentLocation::new(*slab_id, *slot_idx),
             );
         }
     }
@@ -571,7 +566,9 @@ pub async fn free(
         // read-modify-write of the slot table each.
         let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
         for (_, loc) in &to_free {
-            by_slab.entry(loc.slab_id).or_default().push(loc.slot_idx);
+            for leg in loc.legs() {
+                by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
+            }
         }
         {
             let mut reg = registry.write().await;
@@ -1053,12 +1050,10 @@ mod tests {
             g.insert(
                 v,
                 9,
-                ExtentLocation {
-                    slab_id: reg.read().await.iter().next().map(|(id, _)| *id).unwrap(),
-                    slot_idx: 99,
-                    ref_count: 1,
-                    generation: 1,
-                },
+                ExtentLocation::new(
+                    reg.read().await.iter().next().map(|(id, _)| *id).unwrap(),
+                    99,
+                ),
             );
         }
 

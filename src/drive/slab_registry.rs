@@ -32,6 +32,9 @@ pub struct SlabRegistry {
     /// device the slab lives on; widened by drive labels when a drive was
     /// registered with them (#70) or set outright.
     domains: HashMap<SlabId, FailureDomain>,
+    /// Labels a drive was registered with (#70), by device path: every slab
+    /// on that device — now and later — sits under them.
+    device_labels: HashMap<String, FailureDomain>,
 }
 
 impl SlabRegistry {
@@ -42,7 +45,39 @@ impl SlabRegistry {
             tier_index: HashMap::new(),
             in_flight: HashSet::new(),
             domains: HashMap::new(),
+            device_labels: HashMap::new(),
         }
+    }
+
+    /// Say where a device is — `shelf=…/bay=…` from stormdrive, `rack=…`
+    /// from an operator — so every slab on it is placed by that. Slabs
+    /// already on the device are relabelled; slabs added later inherit it.
+    pub fn label_device(&mut self, device_path: &str, labels: FailureDomain) {
+        let ids: Vec<SlabId> = self
+            .slabs
+            .iter()
+            .filter(|(_, s)| s.device().id().path == device_path)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            let own = FailureDomain::from_device(self.slabs[&id].device().id());
+            self.domains.insert(id, own.merged_under(&labels));
+        }
+        self.device_labels.insert(device_path.to_string(), labels);
+    }
+
+    /// The labels a device was registered with, if any.
+    pub fn device_labels(&self, device_path: &str) -> Option<&FailureDomain> {
+        self.device_labels.get(device_path)
+    }
+
+    /// Slabs whose device is at `device_path`.
+    pub fn slabs_on_device(&self, device_path: &str) -> Vec<SlabId> {
+        self.slabs
+            .iter()
+            .filter(|(_, s)| s.device().id().path == device_path)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Mark a freshly allocated slot as in flight, protecting it from
@@ -72,7 +107,11 @@ impl SlabRegistry {
     pub fn add(&mut self, slab: Slab) {
         let id = slab.slab_id();
         let tier = slab.tier();
-        let domain = FailureDomain::from_device(slab.device().id());
+        let own = FailureDomain::from_device(slab.device().id());
+        let domain = match self.device_labels.get(&slab.device().id().path) {
+            Some(outer) => own.merged_under(outer),
+            None => own,
+        };
         self.tier_index.entry(tier).or_default().push(id);
         self.domains.entry(id).or_insert(domain);
         self.slabs.insert(id, slab);

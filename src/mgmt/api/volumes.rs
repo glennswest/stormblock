@@ -32,6 +32,18 @@ pub struct VolumeResponse {
     /// clone gets its own, stamped at clone time (#38).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs_uuid: Option<Uuid>,
+    /// How the volume is protected: `none`, `mirror:2`, `raid5:4+1`, …
+    pub redundancy: String,
+    /// `healthy`, `degraded` or `failed` — what the policy asks for versus
+    /// what is on trusted slabs.
+    pub health: String,
+    /// Physical bytes the volume occupies, every leg and parity slot counted.
+    pub physical_bytes: u64,
+}
+
+async fn describe(handle: &crate::volume::ThinVolumeHandle) -> (String, String, u64) {
+    let h = handle.health().await;
+    (h.redundancy, h.state.to_string(), handle.physical().await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +61,25 @@ pub struct CreateVolumeRequest {
     /// empty volume — the mkfs-once path. Template id or name.
     #[serde(default)]
     pub from_template: Option<String>,
+    /// Redundancy: `mirror`, `mirror:3`, `raid5:4+1`, `raid6:4+2`, with an
+    /// optional `@rung` (`mirror:2@shelf`). A policy is a boundary — the
+    /// create is refused when the node cannot place every leg on a distinct
+    /// domain. With a policy, `array_id` is not needed: the volume's extents
+    /// pick their own slabs.
+    #[serde(default)]
+    pub redundancy: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RedundancyRequest {
+    pub redundancy: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ResyncQuery {
+    /// Also recompute and rewrite every stripe's parity.
+    #[serde(default)]
+    pub verify: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,8 +97,13 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "list").increment(1);
     let vm = state.volume_manager.lock().await;
     let vols = vm.list_volumes().await;
-    let items: Vec<VolumeResponse> = vols.iter().map(|(id, name, vsize, allocated)| {
-        VolumeResponse {
+    let mut items: Vec<VolumeResponse> = Vec::with_capacity(vols.len());
+    for (id, name, vsize, allocated) in &vols {
+        let (redundancy, health, physical_bytes) = match vm.get_volume_handle(id) {
+            Some(h) => describe(&h).await,
+            None => ("none".into(), "healthy".into(), *allocated),
+        };
+        items.push(VolumeResponse {
             id: id.0,
             name: name.clone(),
             virtual_size_bytes: *vsize,
@@ -76,8 +112,11 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             allocated_human: human_size(*allocated),
             array_id: None,
             fs_uuid: None,
-        }
-    }).collect();
+            redundancy,
+            health,
+            physical_bytes,
+        });
+    }
     let count = items.len();
     Json(ListResponse { items, count })
 }
@@ -99,6 +138,7 @@ async fn get_volume(
             let name = handle.name().await;
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
+            let (redundancy, health, physical_bytes) = describe(&handle).await;
             let resp = VolumeResponse {
                 id: uuid,
                 name,
@@ -108,6 +148,9 @@ async fn get_volume(
                 allocated_human: human_size(allocated),
                 array_id: None,
                 fs_uuid: None,
+                redundancy,
+                health,
+                physical_bytes,
             };
             Json(resp).into_response()
         }
@@ -135,9 +178,12 @@ async fn create_volume(
                 Err(resp) => return resp,
             };
         let vm = state.volume_manager.lock().await;
-        let allocated = match vm.get_volume_handle(&vol_id) {
-            Some(h) => h.allocated().await,
-            None => 0,
+        let (allocated, redundancy, health, physical_bytes) = match vm.get_volume_handle(&vol_id) {
+            Some(h) => {
+                let (r, hs, p) = describe(&h).await;
+                (h.allocated().await, r, hs, p)
+            }
+            None => (0, "none".into(), "healthy".into(), 0),
         };
         let resp = VolumeResponse {
             id: vol_id.0,
@@ -148,6 +194,9 @@ async fn create_volume(
             allocated_human: human_size(allocated),
             array_id: None,
             fs_uuid,
+            redundancy,
+            health,
+            physical_bytes,
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -157,13 +206,23 @@ async fn create_volume(
         Some(s) => s,
         None => return ApiError::bad_request("size is required"),
     };
+    let redundancy = match req.redundancy.as_deref() {
+        Some(r) => match crate::volume::RedundancyPolicy::parse(r) {
+            Ok(p) => p,
+            Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
+        },
+        None => crate::volume::RedundancyPolicy::none(),
+    };
     let array_id = match req.array_id {
-        Some(a) => RaidArrayId(a),
-        None => return ApiError::bad_request("array_id is required (or use from_template)"),
+        Some(a) => Some(RaidArrayId(a)),
+        None if req.redundancy.is_some() => None,
+        None => return ApiError::bad_request(
+            "array_id is required (or use from_template, or give a redundancy policy)",
+        ),
     };
 
     // Verify array exists
-    {
+    if let Some(array_id) = array_id {
         let arrays = state.arrays.read().await;
         if !arrays.contains_key(&array_id) {
             return ApiError::not_found(format!("array {} not found", array_id.0));
@@ -171,7 +230,13 @@ async fn create_volume(
     }
 
     let mut vm = state.volume_manager.lock().await;
-    match vm.create_volume(&req.name, size, array_id).await {
+    let created = match array_id {
+        Some(a) if redundancy.is_none() => vm.create_volume(&req.name, size, a).await,
+        _ => vm
+            .create_volume_with(&req.name, size, crate::volume::CreateOptions::redundant(redundancy.clone()))
+            .await,
+    };
+    match created {
         Ok(vol_id) => {
             let resp = VolumeResponse {
                 id: vol_id.0,
@@ -180,13 +245,79 @@ async fn create_volume(
                 virtual_size_human: human_size(size),
                 allocated_bytes: 0,
                 allocated_human: human_size(0),
-                array_id: Some(array_id.0),
+                array_id: array_id.map(|a| a.0),
                 fs_uuid: None,
+                redundancy: redundancy.spelling(),
+                health: "healthy".into(),
+                physical_bytes: 0,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
+        Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => {
+            ApiError::conflict(format!("failed to create volume: {e}"))
+        }
         Err(e) => ApiError::bad_request(format!("failed to create volume: {e}")),
+    }
+}
+
+/// `GET /api/v1/volumes/{id}/health` — the full health report.
+async fn volume_health(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let vm = state.volume_manager.lock().await;
+    match vm.health(&VolumeId(uuid)).await {
+        Some(h) => Json(h).into_response(),
+        None => ApiError::not_found(format!("volume {uuid} not found")),
+    }
+}
+
+/// `PUT /api/v1/volumes/{id}/redundancy` — change the policy. Only
+/// none/mirror → mirror is applied in place; the next resync adds or
+/// drops legs. Anything involving parity is a re-stripe and is refused.
+async fn set_redundancy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RedundancyRequest>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let policy = match crate::volume::RedundancyPolicy::parse(&req.redundancy) {
+        Ok(p) => p,
+        Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
+    };
+    let mut vm = state.volume_manager.lock().await;
+    match vm.set_redundancy(VolumeId(uuid), policy.clone()).await {
+        Ok(()) => Json(serde_json::json!({ "id": uuid, "redundancy": policy.spelling() })).into_response(),
+        Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
+        Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => ApiError::conflict(e.to_string()),
+        Err(e) => ApiError::bad_request(e.to_string()),
+    }
+}
+
+/// `POST /api/v1/volumes/{id}/resync[?verify=true]` — rebuild missing legs,
+/// apply a changed policy, clear the failed set.
+async fn resync_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ResyncQuery>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let mut vm = state.volume_manager.lock().await;
+    match vm.resync_volume(VolumeId(uuid), q.verify).await {
+        Ok(report) => {
+            let health = vm.health(&VolumeId(uuid)).await;
+            Json(serde_json::json!({ "id": uuid, "report": report, "health": health })).into_response()
+        }
+        Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
+        Err(e) => ApiError::internal(e.to_string()),
     }
 }
 
@@ -238,6 +369,7 @@ async fn create_snapshot(
             let handle = vm.get_volume_handle(&snap_id).unwrap();
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
+            let (redundancy, health, physical_bytes) = describe(&handle).await;
             let resp = VolumeResponse {
                 id: snap_id.0,
                 name: req.name,
@@ -247,6 +379,9 @@ async fn create_snapshot(
                 allocated_human: human_size(allocated),
                 array_id: None,
                 fs_uuid: None,
+                redundancy,
+                health,
+                physical_bytes,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -301,6 +436,7 @@ async fn resize_volume(
             let name = handle.name().await;
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
+            let (redundancy, health, physical_bytes) = describe(&handle).await;
             let resp = VolumeResponse {
                 id: uuid,
                 name,
@@ -310,6 +446,9 @@ async fn resize_volume(
                 allocated_human: human_size(allocated),
                 array_id: None,
                 fs_uuid: None,
+                redundancy,
+                health,
+                physical_bytes,
             };
             Json(resp).into_response()
         }
@@ -523,6 +662,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(list_volumes).post(create_volume))
         .route("/{id}", get(get_volume).delete(delete_volume))
         .route("/{id}/resize", axum::routing::patch(resize_volume))
+        .route("/{id}/health", get(volume_health))
+        .route("/{id}/redundancy", axum::routing::put(set_redundancy))
+        .route("/{id}/resync", axum::routing::post(resync_volume))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/snapshots", axum::routing::post(create_snapshot))

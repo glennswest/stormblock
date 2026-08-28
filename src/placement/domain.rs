@@ -51,10 +51,13 @@ impl FailureDomain {
     }
 
     /// The domain a device is in by its own identity alone: `drive=<serial>`,
-    /// or the uuid when there is no serial worth the name.
+    /// or its path when there is no serial worth the name (a file device says
+    /// `file`; the path is what tells two of them apart, and it is stable
+    /// across a restart where the uuid is not — #65).
     pub fn from_device(id: &DeviceId) -> Self {
-        let value = if id.serial.is_empty() || id.serial == "unknown" {
-            id.uuid.to_string()
+        let generic = id.serial.is_empty() || id.serial == "unknown" || id.serial == "file";
+        let value = if generic {
+            if id.path.is_empty() { id.uuid.to_string() } else { id.path.clone() }
         } else {
             id.serial.clone()
         };

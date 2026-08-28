@@ -412,6 +412,10 @@ pub struct VolumeConfig {
     pub name: String,
     pub size: String,
     pub array: String,
+    /// `mirror:2`, `raid5:4+1`, … — see `POST /api/v1/volumes`. Absent means
+    /// one copy.
+    #[serde(default)]
+    pub redundancy: Option<String>,
 }
 
 #[cfg(feature = "iscsi")]
@@ -537,6 +541,7 @@ impl StormBlockConfig {
                     name: name.clone(),
                     size: size.to_string(),
                     array: "cli-array".to_string(),
+                    redundancy: None,
                 })
                 .collect();
         }

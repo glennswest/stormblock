@@ -261,9 +261,9 @@ async fn migrate_boot_volumes_between_slabs() {
 
     // Build GEM
     let mut gem = GlobalExtentMap::new();
-    gem.insert(vol_root, 0, ExtentLocation { slab_id: src_id, slot_idx: slot_r, ref_count: 1, generation: 1 });
-    gem.insert(vol_swap, 0, ExtentLocation { slab_id: src_id, slot_idx: slot_s, ref_count: 1, generation: 1 });
-    gem.insert(vol_home, 0, ExtentLocation { slab_id: src_id, slot_idx: slot_h, ref_count: 1, generation: 1 });
+    gem.insert(vol_root, 0, ExtentLocation::new(src_id, slot_r));
+    gem.insert(vol_swap, 0, ExtentLocation::new(src_id, slot_s));
+    gem.insert(vol_home, 0, ExtentLocation::new(src_id, slot_h));
 
     let mut registry = SlabRegistry::new();
     registry.add(src_slab);

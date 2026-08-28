@@ -118,8 +118,8 @@ pub async fn collect(
     let mut live: HashSet<(SlabId, u32)> = HashSet::new();
     for vid in gem.volume_ids() {
         if let Some(map) = gem.get_volume_map(&vid) {
-            for loc in map.extents.values() {
-                live.insert((loc.slab_id, loc.slot_idx));
+            for leg in map.all_legs() {
+                live.insert((leg.slab_id, leg.slot_idx));
             }
         }
     }
@@ -403,12 +403,7 @@ mod tests {
         gem.insert(
             source,
             0,
-            ExtentLocation {
-                slab_id,
-                slot_idx: slot,
-                ref_count: 1,
-                generation: 1,
-            },
+            ExtentLocation::new(slab_id, slot),
         );
         gem.clone_volume_map(source, clone);
         // Delete the source: its reverse-index claim goes with it, but the
@@ -455,12 +450,7 @@ mod tests {
         gem2.insert(
             vol,
             0,
-            ExtentLocation {
-                slab_id,
-                slot_idx: slot,
-                ref_count: 1,
-                generation: 1,
-            },
+            ExtentLocation::new(slab_id, slot),
         );
         let report = collect(&gem2, &mut reg, GcOptions::default()).await;
         assert_eq!(report.reclaimed, 0);

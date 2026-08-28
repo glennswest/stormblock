@@ -47,7 +47,8 @@ use crate::drive::BlockDevice;
 use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::volume::extent::VolumeId;
-use crate::volume::gem::{ExtentLocation, GlobalExtentMap};
+use crate::placement::domain::{FailureDomain, DEFAULT_RUNG};
+use crate::volume::gem::{ExtentLocation, GlobalExtentMap, Leg};
 use crate::volume::snapshot::snapshot_diff;
 use crate::volume::thin::{ThinVolumeHandle, PlacementPolicy};
 
@@ -64,6 +65,8 @@ pub enum PlacementError {
     ReadFailed { slab_id: SlabId, slot_idx: u32, error: String },
     WriteFailed { slab_id: SlabId, slot_idx: u32, error: String },
     Other(String),
+    /// The destination would put two legs of one extent on one domain.
+    DomainCollision(SlabId),
 }
 
 impl fmt::Display for PlacementError {
@@ -75,6 +78,9 @@ impl fmt::Display for PlacementError {
             }
             PlacementError::SlabNotFound(id) => write!(f, "slab {id} not found"),
             PlacementError::NoDestination => write!(f, "no suitable destination slab"),
+            PlacementError::DomainCollision(id) => write!(
+                f, "slab {id} shares a failure domain with another leg of the extent"
+            ),
             PlacementError::ReadFailed { slab_id, slot_idx, error } => {
                 write!(f, "read failed: slab {slab_id} slot {slot_idx}: {error}")
             }
@@ -301,11 +307,9 @@ impl PlacementEngine {
 
     /// Migrate a single extent from one slab to another.
     ///
-    /// Reads slot data from source slab, allocates a slot in the destination
-    /// slab, writes data, updates GEM, and dec_refs the source slot.
-    ///
+    /// Moves the extent's **primary** leg; `migrate_leg` moves a named one.
     /// If `dest_slab_id` is None, picks the best slab for the given tier
-    /// (excluding source).
+    /// (excluding the source and the domains of the extent's other legs).
     pub async fn migrate_extent(
         &self,
         gem: &mut GlobalExtentMap,
@@ -314,13 +318,108 @@ impl PlacementEngine {
         vext_idx: u64,
         dest_slab_id: Option<SlabId>,
     ) -> Result<MigrateExtentResult, PlacementError> {
-        // Look up current location in GEM
+        let from = gem.lookup(volume_id, vext_idx)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?
+            .slab_id;
+        self.migrate_leg(gem, registry, volume_id, vext_idx, from, dest_slab_id).await
+    }
+
+    /// Move the leg of `(volume, extent)` that lives on `from_slab` to another
+    /// slab, keeping every other leg where it is.
+    ///
+    /// Reads the slot, allocates a slot in the destination, writes the data,
+    /// then rewrites **every** map that named the old slot — a golden and its
+    /// clones share the physical slot, and all of them must follow — and
+    /// frees the old slot outright, since nothing references it any more.
+    /// The destination is kept off the domains of the extent's other legs, so
+    /// a move never collapses a mirror onto one drive.
+    pub async fn migrate_leg(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        from_slab: SlabId,
+        dest_slab_id: Option<SlabId>,
+    ) -> Result<MigrateExtentResult, PlacementError> {
         let loc = gem.lookup(volume_id, vext_idx)
             .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?
             .clone();
+        let old = loc.leg_on(from_slab)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?;
+        let others: Vec<FailureDomain> = loc
+            .legs()
+            .filter(|l| *l != old)
+            .map(|l| registry.domain_of(&l.slab_id))
+            .collect();
+        let new = self
+            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, &others, dest_slab_id)
+            .await?;
+        Ok(MigrateExtentResult {
+            volume_id,
+            vext_idx,
+            source_slab: old.slab_id,
+            dest_slab: new.slab_id,
+            dest_slot: new.slot_idx,
+        })
+    }
 
-        let source_slab_id = loc.slab_id;
-        let source_slot_idx = loc.slot_idx;
+    /// Move one parity leg of a stripe off `from_slab`.
+    pub async fn migrate_parity_leg(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        stripe: u64,
+        from_slab: SlabId,
+        dest_slab_id: Option<SlabId>,
+    ) -> Result<MigrateExtentResult, PlacementError> {
+        let g = gem.lookup_parity(volume_id, stripe)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx: stripe })?
+            .clone();
+        let old = g.legs.iter().copied().find(|l| l.slab_id == from_slab)
+            .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx: stripe })?;
+        let mut others: Vec<FailureDomain> = g
+            .legs
+            .iter()
+            .filter(|l| **l != old)
+            .map(|l| registry.domain_of(&l.slab_id))
+            .collect();
+        // Keep parity off the stripe's data members too.
+        for vext in g.members(stripe) {
+            if let Some(l) = gem.lookup(volume_id, vext) {
+                for leg in l.legs() {
+                    others.push(registry.domain_of(&leg.slab_id));
+                }
+            }
+        }
+        let new = self
+            .move_slot(gem, registry, volume_id, stripe, old, g.ref_count, &others, dest_slab_id)
+            .await?;
+        Ok(MigrateExtentResult {
+            volume_id,
+            vext_idx: stripe,
+            source_slab: old.slab_id,
+            dest_slab: new.slab_id,
+            dest_slot: new.slot_idx,
+        })
+    }
+
+    /// The physical move behind `migrate_leg` and `migrate_parity_leg`.
+    #[allow(clippy::too_many_arguments)]
+    async fn move_slot(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        old: Leg,
+        ref_count: u32,
+        keep_apart_from: &[FailureDomain],
+        dest_slab_id: Option<SlabId>,
+    ) -> Result<Leg, PlacementError> {
+        let source_slab_id = old.slab_id;
+        let source_slot_idx = old.slot_idx;
 
         // Read data from source slot
         let slot_size = registry.get(&source_slab_id)
@@ -347,6 +446,9 @@ impl PlacementEngine {
                 if slab.free_slots() == 0 {
                     return Err(PlacementError::SlabFull);
                 }
+                if registry.collides(&id, keep_apart_from, DEFAULT_RUNG) {
+                    return Err(PlacementError::DomainCollision(id));
+                }
                 id
             }
             None => {
@@ -354,11 +456,12 @@ impl PlacementEngine {
                 let source_tier = registry.get(&source_slab_id)
                     .ok_or(PlacementError::SlabNotFound(source_slab_id))?
                     .tier();
-                self.best_slab_excluding(registry, source_tier, source_slab_id)?
+                self.best_slab_excluding(registry, source_tier, source_slab_id, keep_apart_from)?
             }
         };
 
-        // Allocate slot in destination slab
+        // Allocate slot in destination slab, recorded as the same extent so
+        // the slot-table fallback agrees with the map.
         let dest_slot = registry.get_mut(&dest_id)
             .ok_or(PlacementError::SlabNotFound(dest_id))?
             .allocate(volume_id, vext_idx)
@@ -376,17 +479,30 @@ impl PlacementEngine {
                 error: e.to_string(),
             })?;
 
-        // Update GEM: point this extent to the new location
-        gem.insert(volume_id, vext_idx, ExtentLocation {
-            slab_id: dest_id,
-            slot_idx: dest_slot,
-            ref_count: 1,
-            generation: loc.generation + 1,
-        });
+        // A shared slot stays shared: the new slot carries the same count.
+        if ref_count > 1 {
+            if let Some(slab) = registry.get_mut(&dest_id) {
+                for _ in 1..ref_count {
+                    if let Err(e) = slab.inc_ref(dest_slot).await {
+                        tracing::warn!(
+                            volume = %volume_id, slab = %dest_id, slot = dest_slot,
+                            "could not carry the share count to the moved slot: {e}"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
 
-        // Dec ref on source slot (may free it)
+        // Every map that named the old slot now names the new one.
+        let new = Leg::new(dest_id, dest_slot);
+        let mut moves = HashMap::new();
+        moves.insert(old, new);
+        gem.rewrite_legs(&moves);
+
+        // Nothing references the source slot any more: free it outright.
         if let Some(slab) = registry.get_mut(&source_slab_id) {
-            if let Err(e) = slab.dec_ref(source_slot_idx).await {
+            if let Err(e) = slab.free(source_slot_idx).await {
                 // The extent now lives on the destination, so this only
                 // strands the source copy — but that is still lost capacity.
                 tracing::warn!(
@@ -396,13 +512,7 @@ impl PlacementEngine {
             }
         }
 
-        Ok(MigrateExtentResult {
-            volume_id,
-            vext_idx,
-            source_slab: source_slab_id,
-            dest_slab: dest_id,
-            dest_slot,
-        })
+        Ok(new)
     }
 
     /// Evacuate all extents from a slab, moving them to other available slabs.
@@ -434,21 +544,32 @@ impl PlacementEngine {
 
             // Re-collect remaining extents each iteration (GEM changes as we migrate)
             let extents = gem.slab_extents(slab_id);
-            if extents.is_empty() {
-                break;
+            if let Some((vol_id, vext_idx, _loc)) = extents.first() {
+                match self.migrate_leg(gem, registry, *vol_id, *vext_idx, slab_id, None).await {
+                    Ok(_) => migrated += 1,
+                    Err(e) => {
+                        tracing::warn!(
+                            "placement: failed to evacuate vol={} vext={}: {}",
+                            vol_id, vext_idx, e
+                        );
+                        failed += 1;
+                        // Skip this extent to avoid infinite loop
+                        break;
+                    }
+                }
+                continue;
             }
 
-            let (vol_id, vext_idx, _loc) = &extents[0];
-
-            match self.migrate_extent(gem, registry, *vol_id, *vext_idx, None).await {
+            let parity = gem.slab_parity(slab_id);
+            let Some((vol_id, stripe, _)) = parity.first() else { break };
+            match self.migrate_parity_leg(gem, registry, *vol_id, *stripe, slab_id, None).await {
                 Ok(_) => migrated += 1,
                 Err(e) => {
                     tracing::warn!(
-                        "placement: failed to evacuate vol={} vext={}: {}",
-                        vol_id, vext_idx, e
+                        "placement: failed to evacuate parity vol={} stripe={}: {}",
+                        vol_id, stripe, e
                     );
                     failed += 1;
-                    // Skip this extent to avoid infinite loop
                     break;
                 }
             }
@@ -631,11 +752,13 @@ impl PlacementEngine {
         registry: &SlabRegistry,
         tier: StorageTier,
         exclude: SlabId,
+        keep_apart_from: &[FailureDomain],
     ) -> Result<SlabId, PlacementError> {
         // First try same tier
         let candidates: Vec<(SlabId, u64)> = registry.by_tier(tier)
             .iter()
             .filter(|&&id| id != exclude)
+            .filter(|&id| !registry.collides(id, keep_apart_from, DEFAULT_RUNG))
             .filter_map(|id| {
                 registry.get(id).and_then(|s| {
                     if s.free_slots() > 0 { Some((*id, s.free_slots())) } else { None }
@@ -649,7 +772,10 @@ impl PlacementEngine {
 
         // Fallback: any tier with space, excluding source
         for (id, slab) in registry.iter() {
-            if *id != exclude && slab.free_slots() > 0 {
+            if *id != exclude
+                && slab.free_slots() > 0
+                && !registry.collides(id, keep_apart_from, DEFAULT_RUNG)
+            {
                 return Ok(*id);
             }
         }
@@ -891,9 +1017,7 @@ mod tests {
 
         // Set up GEM
         let mut gem = GlobalExtentMap::new();
-        gem.insert(vol, 0, ExtentLocation {
-            slab_id: slab_a_id, slot_idx: slot, ref_count: 1, generation: 1,
-        });
+        gem.insert(vol, 0, ExtentLocation::new(slab_a_id, slot));
 
         let mut registry = SlabRegistry::new();
         registry.add(slab_a);
@@ -946,9 +1070,7 @@ mod tests {
         for i in 0..5 {
             let slot = slab_a.allocate(vol, i).await.unwrap();
             slab_a.write_slot(slot, 0, &vec![(i as u8 + 0x10); 4096]).await.unwrap();
-            gem.insert(vol, i, ExtentLocation {
-                slab_id: slab_a_id, slot_idx: slot, ref_count: 1, generation: 1,
-            });
+            gem.insert(vol, i, ExtentLocation::new(slab_a_id, slot));
         }
 
         let mut registry = SlabRegistry::new();
@@ -1004,9 +1126,7 @@ mod tests {
         for i in 0..total_a {
             let slot = slab_a.allocate(vol, i).await.unwrap();
             slab_a.write_slot(slot, 0, &vec![0xFF; 512]).await.unwrap();
-            gem.insert(vol, i, ExtentLocation {
-                slab_id: slab_a_id, slot_idx: slot, ref_count: 1, generation: 1,
-            });
+            gem.insert(vol, i, ExtentLocation::new(slab_a_id, slot));
         }
 
         let mut registry = SlabRegistry::new();
@@ -1053,9 +1173,7 @@ mod tests {
         for i in 0..3 {
             let slot = slab_cold.allocate(vol, i).await.unwrap();
             slab_cold.write_slot(slot, 0, &vec![(i as u8 + 0x50); 4096]).await.unwrap();
-            gem.insert(vol, i, ExtentLocation {
-                slab_id: cold_id, slot_idx: slot, ref_count: 1, generation: 1,
-            });
+            gem.insert(vol, i, ExtentLocation::new(cold_id, slot));
         }
 
         let mut registry = SlabRegistry::new();

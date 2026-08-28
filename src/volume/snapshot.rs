@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::volume::extent::VolumeId;
-use crate::volume::gem::{ExtentLocation, GlobalExtentMap};
+use crate::volume::gem::{GlobalExtentMap, ParityGroup};
 use crate::volume::thin::{ThinVolume, VolumeError};
 
 /// Create a snapshot of a source volume.
@@ -35,8 +35,8 @@ pub async fn create_snapshot(
         // each one coalesces its slot-table writes by sector — a clone of an
         // N-extent image costs sectors touched, not N round trips.
         let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
-        for loc in cloned.extents.values() {
-            by_slab.entry(loc.slab_id).or_default().push(loc.slot_idx);
+        for leg in cloned.all_legs() {
+            by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
         }
         for (slab_id, slots) in by_slab {
             if let Some(slab) = registry.get_mut(&slab_id) {
@@ -78,8 +78,8 @@ pub async fn delete_snapshot(
         // header once, rather than twice per extent. Deleting a clone is on
         // the container restart path, so this is the hot direction too.
         let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
-        for loc in vmap.extents.values() {
-            by_slab.entry(loc.slab_id).or_default().push(loc.slot_idx);
+        for leg in vmap.all_legs() {
+            by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
         }
         for (slab_id, slots) in by_slab {
             let Some(slab) = registry.get_mut(&slab_id) else {
@@ -161,26 +161,65 @@ pub async fn reset_to_source(
     for idx in snapshot_diff(gem, clone_id, source_id) {
         // Drop the clone's private copy, if it made one here.
         if let Some(old) = gem.remove(clone_id, idx) {
-            to_free.entry(old.slab_id).or_default().push(old.slot_idx);
+            for leg in old.legs() {
+                to_free.entry(leg.slab_id).or_default().push(leg.slot_idx);
+            }
             freed += 1;
         }
 
         // Point back at the source's extent, if it still has one here.
         if let Some(loc) = gem.lookup(source_id, idx).cloned() {
-            to_share.entry(loc.slab_id).or_default().push(loc.slot_idx);
-            gem.restore_mapping(
-                clone_id,
-                idx,
-                ExtentLocation {
-                    slab_id: loc.slab_id,
-                    slot_idx: loc.slot_idx,
-                    ref_count: loc.ref_count + 1,
-                    generation: loc.generation,
-                },
-            );
+            for leg in loc.legs() {
+                to_share.entry(leg.slab_id).or_default().push(leg.slot_idx);
+            }
+            let mut shared = loc.clone();
+            shared.ref_count += 1;
+            gem.restore_mapping(clone_id, idx, shared);
             // The source is now shared again, so a write to *it* must copy too.
             gem.inc_extent_ref(source_id, idx);
             restored += 1;
+        }
+    }
+
+    // A parity volume's stripes: a clone that copied a data extent moved its
+    // parity with it, so the private parity goes back to the source's too.
+    let clone_parity: Vec<(u64, ParityGroup)> = gem
+        .get_volume_map(&clone_id)
+        .map(|m| m.parity.iter().map(|(s, g)| (*s, g.clone())).collect())
+        .unwrap_or_default();
+    let source_parity: Vec<(u64, ParityGroup)> = gem
+        .get_volume_map(&source_id)
+        .map(|m| m.parity.iter().map(|(s, g)| (*s, g.clone())).collect())
+        .unwrap_or_default();
+    let stripes: std::collections::BTreeSet<u64> = clone_parity
+        .iter()
+        .chain(source_parity.iter())
+        .map(|(s, _)| *s)
+        .collect();
+    for stripe in stripes {
+        let mine = clone_parity.iter().find(|(s, _)| *s == stripe).map(|(_, g)| g);
+        let theirs = source_parity.iter().find(|(s, _)| *s == stripe).map(|(_, g)| g);
+        let same = match (mine, theirs) {
+            (Some(a), Some(b)) => a.legs == b.legs,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            continue;
+        }
+        if let Some(old) = gem.remove_parity(clone_id, stripe) {
+            for leg in &old.legs {
+                to_free.entry(leg.slab_id).or_default().push(leg.slot_idx);
+            }
+        }
+        if let Some(g) = theirs {
+            for leg in &g.legs {
+                to_share.entry(leg.slab_id).or_default().push(leg.slot_idx);
+            }
+            let mut shared = g.clone();
+            shared.ref_count += 1;
+            gem.restore_parity(clone_id, stripe, shared);
+            gem.inc_parity_ref(source_id, stripe);
         }
     }
 
