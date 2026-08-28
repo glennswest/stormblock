@@ -133,6 +133,7 @@ pub enum RebalanceStrategy {
 }
 
 /// Result of a rebalance operation.
+#[derive(Debug, Clone, Copy)]
 pub struct RebalanceResult {
     pub moved: u64,
     pub skipped: u64,
