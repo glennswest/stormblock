@@ -1401,11 +1401,10 @@ impl ThinVolumeHandle {
         let mut adds: Vec<(Leg, Leg, u32)> = Vec::new();
         let mut drops: Vec<Leg> = Vec::new();
 
-        for (vext, loc) in extents {
+        for (vext, _) in extents {
             let _e = self.shard(vext).lock().await;
             // Re-read under the lock: a write may have moved it.
             let Some(loc) = ({ let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() }) else { continue };
-            let _ = loc.generation;
             let (healthy, missing): (Vec<Leg>, Vec<Leg>) = {
                 let reg = self.registry.read().await;
                 loc.legs().partition(|l| reg.get(&l.slab_id).is_some() && !self.is_failed(l.slab_id))
@@ -2176,6 +2175,411 @@ mod tests {
         handle.read(0, &mut buf).await.unwrap();
         assert!(buf.iter().all(|&b| b == 0xCD), "partial discard must not lose data");
 
+        cleanup(&paths);
+    }
+}
+
+#[cfg(test)]
+mod redundancy_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::Slab;
+    use crate::volume::gem::GlobalExtentMap;
+
+    type Shared<T> = Arc<tokio::sync::RwLock<T>>;
+
+    /// `n` slabs, each on its own file — so each is its own failure domain.
+    async fn setup_slabs(n: usize, slot_size: u64) -> (Shared<GlobalExtentMap>, Shared<SlabRegistry>, Vec<SlabId>, Vec<String>) {
+        let test_id = uuid::Uuid::new_v4().simple().to_string();
+        let dir = std::env::temp_dir().join("stormblock-redundancy-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut registry = SlabRegistry::new();
+        let mut ids = Vec::new();
+        let mut paths = Vec::new();
+        for i in 0..n {
+            let path = dir.join(format!("{test_id}-slab-{i}.bin"));
+            let path_str = path.to_str().unwrap().to_string();
+            let _ = std::fs::remove_file(&path);
+            let dev = FileDevice::open_with_capacity(&path_str, 8 * 1024 * 1024).await.unwrap();
+            let slab = Slab::format(Arc::new(dev), slot_size, StorageTier::Hot).await.unwrap();
+            ids.push(slab.slab_id());
+            registry.add(slab);
+            paths.push(path_str);
+        }
+        (
+            Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            ids,
+            paths,
+        )
+    }
+
+    async fn add_slab(registry: &Shared<SlabRegistry>, paths: &mut Vec<String>, slot_size: u64) -> SlabId {
+        let path = std::env::temp_dir()
+            .join("stormblock-redundancy-test")
+            .join(format!("{}-spare.bin", uuid::Uuid::new_v4().simple()));
+        let path_str = path.to_str().unwrap().to_string();
+        let dev = FileDevice::open_with_capacity(&path_str, 8 * 1024 * 1024).await.unwrap();
+        let slab = Slab::format(Arc::new(dev), slot_size, StorageTier::Hot).await.unwrap();
+        let id = slab.slab_id();
+        registry.write().await.add(slab);
+        paths.push(path_str);
+        id
+    }
+
+    fn volume(gem: &Shared<GlobalExtentMap>, registry: &Shared<SlabRegistry>, policy: &str, slot_size: u64) -> Arc<ThinVolumeHandle> {
+        let vol = ThinVolume::new("r".into(), 64 * 1024 * 1024, slot_size);
+        Arc::new(ThinVolumeHandle::with_redundancy(
+            vol,
+            gem.clone(),
+            registry.clone(),
+            PlacementPolicy::default(),
+            RedundancyPolicy::parse(policy).unwrap(),
+        ))
+    }
+
+    async fn raw(registry: &Shared<SlabRegistry>, leg: Leg, len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        let reg = registry.read().await;
+        reg.get(&leg.slab_id).unwrap().read_slot(leg.slot_idx, 0, &mut buf).await.unwrap();
+        buf
+    }
+
+    async fn loc(gem: &Shared<GlobalExtentMap>, id: VolumeId, vext: u64) -> ExtentLocation {
+        gem.read().await.lookup(id, vext).unwrap().clone()
+    }
+
+    fn pattern(seed: u8, len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i as u8).wrapping_mul(13).wrapping_add(seed)).collect()
+    }
+
+    fn cleanup(paths: &[String]) {
+        for p in paths {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn mirror_places_two_legs_on_two_slabs() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, paths) = setup_slabs(2, slot).await;
+        let v = volume(&gem, &reg, "mirror:2", slot);
+        let data = pattern(1, slot as usize);
+        v.write(0, &data).await.unwrap();
+
+        let l = loc(&gem, v.volume_id(), 0).await;
+        assert_eq!(l.leg_count(), 2);
+        let legs: Vec<Leg> = l.legs().collect();
+        assert_ne!(legs[0].slab_id, legs[1].slab_id, "legs must be on different slabs");
+        for leg in legs {
+            assert_eq!(raw(&reg, leg, slot as usize).await, data, "both legs carry the data");
+        }
+        assert_eq!(v.physical().await, 2 * slot);
+        assert_eq!(v.allocated().await, slot);
+        assert_eq!(v.health().await.state, HealthState::Healthy);
+
+        let mut back = vec![0u8; slot as usize];
+        v.read(0, &mut back).await.unwrap();
+        assert_eq!(back, data);
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn mirror_zero_fills_the_rest_of_the_slot_on_every_leg() {
+        let slot = 16384u64;
+        let (gem, reg, _ids, paths) = setup_slabs(2, slot).await;
+        let v = volume(&gem, &reg, "mirror", slot);
+        v.write(4096, &[0xAB; 4096]).await.unwrap();
+        let l = loc(&gem, v.volume_id(), 0).await;
+        for leg in l.legs() {
+            let r = raw(&reg, leg, slot as usize).await;
+            assert!(r[..4096].iter().all(|&b| b == 0));
+            assert!(r[4096..8192].iter().all(|&b| b == 0xAB));
+            assert!(r[8192..].iter().all(|&b| b == 0));
+        }
+        let mut back = vec![0xFF; slot as usize];
+        v.read(0, &mut back).await.unwrap();
+        assert!(back[..4096].iter().all(|&b| b == 0));
+        assert!(back[8192..].iter().all(|&b| b == 0));
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn mirror_refused_without_enough_domains() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, paths) = setup_slabs(1, slot).await;
+        assert_eq!(reg.read().await.distinct_domains_with_space("drive"), 1);
+        let v = volume(&gem, &reg, "mirror:2", slot);
+        let err = v.write(0, &[1u8; 4096]).await.unwrap_err();
+        assert!(err.to_string().contains("distinct"), "{err}");
+        assert_eq!(v.extent_count().await, 0, "nothing half-mapped");
+        assert_eq!(reg.read().await.total_free_slots(), reg.read().await.total_slots(), "nothing leaked");
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn mirror_survives_a_lost_slab_and_resyncs() {
+        let slot = 4096u64;
+        let (gem, reg, ids, mut paths) = setup_slabs(2, slot).await;
+        let v = volume(&gem, &reg, "mirror:2", slot);
+        let datas: Vec<Vec<u8>> = (0..3).map(|i| pattern(10 + i, slot as usize)).collect();
+        for (i, d) in datas.iter().enumerate() {
+            v.write(i as u64 * slot, d).await.unwrap();
+        }
+
+        // The drive goes away.
+        let lost = ids[0];
+        reg.write().await.remove(&lost);
+
+        for (i, d) in datas.iter().enumerate() {
+            let mut back = vec![0u8; slot as usize];
+            v.read(i as u64 * slot, &mut back).await.unwrap();
+            assert_eq!(&back, d, "extent {i} still readable from the surviving leg");
+        }
+        let h = v.health().await;
+        assert_eq!(h.state, HealthState::Degraded);
+        assert_eq!(h.legs_missing, 3);
+        assert_eq!(h.unreadable, 0);
+
+        // A write while degraded lands on what is left.
+        v.write(0, &pattern(99, slot as usize)).await.unwrap();
+
+        // Replacement drive arrives; resync rebuilds onto it.
+        let spare = add_slab(&reg, &mut paths, slot).await;
+        let report = v.resync(false).await;
+        assert_eq!(report.legs_rebuilt, 3, "{report:?}");
+        assert_eq!(report.unrecoverable, 0);
+        let h = v.health().await;
+        assert_eq!(h.state, HealthState::Healthy, "{h:?}");
+        for i in 0..3u64 {
+            let l = loc(&gem, v.volume_id(), i).await;
+            assert_eq!(l.leg_count(), 2);
+            assert!(l.legs().all(|l| l.slab_id != lost));
+            assert!(l.legs().any(|l| l.slab_id == spare));
+            let want = if i == 0 { pattern(99, slot as usize) } else { datas[i as usize].clone() };
+            for leg in l.legs() {
+                assert_eq!(raw(&reg, leg, slot as usize).await, want, "leg content after resync");
+            }
+        }
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn failed_slab_is_skipped_until_resync_clears_it() {
+        let slot = 4096u64;
+        let (gem, reg, ids, mut paths) = setup_slabs(2, slot).await;
+        let v = volume(&gem, &reg, "mirror:2", slot);
+        v.write(0, &pattern(1, slot as usize)).await.unwrap();
+        let before = loc(&gem, v.volume_id(), 0).await;
+
+        // A write failed there (simulated): stop trusting it.
+        let bad = ids[1];
+        v.set_failed_slabs([bad]);
+        assert_eq!(v.health().await.state, HealthState::Degraded);
+
+        // Writes now go only to the good leg; the bad one goes stale.
+        let newer = pattern(2, slot as usize);
+        v.write(0, &newer).await.unwrap();
+        let good = before.legs().find(|l| l.slab_id != bad).unwrap();
+        let stale = before.legs().find(|l| l.slab_id == bad).unwrap();
+        assert_eq!(raw(&reg, good, slot as usize).await, newer);
+        assert_ne!(raw(&reg, stale, slot as usize).await, newer, "failed leg must not be written");
+        let mut back = vec![0u8; slot as usize];
+        v.read(0, &mut back).await.unwrap();
+        assert_eq!(back, newer, "reads never touch the failed leg");
+
+        // New extents avoid it too.
+        let (_, _, _, _) = (&gem, &reg, &ids, &paths);
+        let spare = add_slab(&reg, &mut paths, slot).await;
+        v.write(slot, &pattern(3, slot as usize)).await.unwrap();
+        let l1 = loc(&gem, v.volume_id(), 1).await;
+        assert!(l1.legs().all(|l| l.slab_id != bad));
+        assert!(l1.legs().any(|l| l.slab_id == spare));
+
+        let report = v.resync(false).await;
+        assert_eq!(report.legs_rebuilt, 1, "{report:?}");
+        assert_eq!(report.slabs_cleared, vec![bad]);
+        assert!(v.failed_slabs().is_empty());
+        assert_eq!(v.health().await.state, HealthState::Healthy);
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn parity_2p1_keeps_parity_true_and_reconstructs() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, mut paths) = setup_slabs(3, slot).await;
+        let v = volume(&gem, &reg, "raid5:2+1", slot);
+        let a = pattern(1, slot as usize);
+        let b = pattern(2, slot as usize);
+        v.write(0, &a).await.unwrap();
+        v.write(slot, &b).await.unwrap();
+
+        let la = loc(&gem, v.volume_id(), 0).await;
+        let lb = loc(&gem, v.volume_id(), 1).await;
+        let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+        assert_eq!(g.legs.len(), 1);
+        assert_eq!(g.data_width, 2);
+        let mut slabs = vec![la.slab_id, lb.slab_id, g.legs[0].slab_id];
+        slabs.sort_by_key(|s| s.0);
+        slabs.dedup();
+        assert_eq!(slabs.len(), 3, "data and parity on three different slabs");
+
+        let xor = |x: &[u8], y: &[u8]| -> Vec<u8> { x.iter().zip(y).map(|(p, q)| p ^ q).collect() };
+        assert_eq!(raw(&reg, g.legs[0], slot as usize).await, xor(&a, &b), "P = A ^ B");
+        assert_eq!(v.physical().await, 3 * slot);
+
+        // A partial overwrite is folded into parity read-modify-write.
+        let mut a2 = a.clone();
+        a2[1024..2048].copy_from_slice(&[0x5A; 1024]);
+        v.write(1024, &[0x5A; 1024]).await.unwrap();
+        assert_eq!(raw(&reg, la.primary(), slot as usize).await, a2);
+        assert_eq!(raw(&reg, g.legs[0], slot as usize).await, xor(&a2, &b), "P follows the delta");
+
+        // Lose the slab holding A: A comes back from B and P.
+        reg.write().await.remove(&la.slab_id);
+        let mut back = vec![0u8; slot as usize];
+        v.read(0, &mut back).await.unwrap();
+        assert_eq!(back, a2, "reconstructed from the stripe");
+        let h = v.health().await;
+        assert_eq!(h.state, HealthState::Degraded, "{h:?}");
+        assert_eq!(h.unreadable, 0);
+
+        // A write to the degraded member rebuilds it on the way through.
+        let spare = add_slab(&reg, &mut paths, slot).await;
+        v.write(0, &[0x77; 512]).await.unwrap();
+        let la2 = loc(&gem, v.volume_id(), 0).await;
+        assert_eq!(la2.slab_id, spare, "member rebuilt onto the spare");
+        let mut a3 = a2.clone();
+        a3[..512].copy_from_slice(&[0x77; 512]);
+        assert_eq!(raw(&reg, la2.primary(), slot as usize).await, a3);
+        assert_eq!(raw(&reg, g.legs[0], slot as usize).await, xor(&a3, &b));
+        assert_eq!(v.health().await.state, HealthState::Healthy);
+
+        // And a full resync with verify leaves everything consistent.
+        let report = v.resync(true).await;
+        assert_eq!(report.unrecoverable, 0, "{report:?}");
+        assert_eq!(report.parity_verified, 1);
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn parity_discard_updates_parity_and_frees_an_empty_stripe() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, paths) = setup_slabs(3, slot).await;
+        let free_before = reg.read().await.total_free_slots();
+        let v = volume(&gem, &reg, "raid5:2+1", slot);
+        let a = pattern(1, slot as usize);
+        let b = pattern(2, slot as usize);
+        v.write(0, &a).await.unwrap();
+        v.write(slot, &b).await.unwrap();
+        let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+
+        v.discard(slot, slot).await.unwrap();
+        assert_eq!(raw(&reg, g.legs[0], slot as usize).await, a, "P = A ^ 0 after B is discarded");
+        assert_eq!(v.extent_count().await, 1);
+
+        v.discard(0, slot).await.unwrap();
+        assert!(gem.read().await.lookup_parity(v.volume_id(), 0).is_none(), "empty stripe has no parity");
+        assert_eq!(reg.read().await.total_free_slots(), free_before, "everything returned");
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn parity_clone_copies_its_own_parity_on_write() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, paths) = setup_slabs(4, slot).await;
+        let v = volume(&gem, &reg, "raid5:2+1", slot);
+        let a = pattern(1, slot as usize);
+        let b = pattern(2, slot as usize);
+        v.write(0, &a).await.unwrap();
+        v.write(slot, &b).await.unwrap();
+        let src_parity = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+
+        let snap = {
+            let mut g = gem.write().await;
+            let mut r = reg.write().await;
+            crate::volume::snapshot::create_snapshot(v.volume_id(), "snap", 64 * 1024 * 1024, slot, &mut g, &mut r)
+                .await
+                .unwrap()
+        };
+        let c = Arc::new(ThinVolumeHandle::with_redundancy(
+            snap, gem.clone(), reg.clone(), PlacementPolicy::default(), v.redundancy(),
+        ));
+        assert_eq!(gem.read().await.lookup_parity(c.volume_id(), 0).unwrap().ref_count, 2);
+
+        let cc = pattern(7, slot as usize);
+        c.write(0, &cc).await.unwrap();
+
+        let xor = |x: &[u8], y: &[u8]| -> Vec<u8> { x.iter().zip(y).map(|(p, q)| p ^ q).collect() };
+        let cg = gem.read().await.lookup_parity(c.volume_id(), 0).unwrap().clone();
+        assert_ne!(cg.legs, src_parity.legs, "the clone got its own parity");
+        assert_eq!(cg.ref_count, 1);
+        assert_eq!(raw(&reg, cg.legs[0], slot as usize).await, xor(&cc, &b));
+        let sg = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+        assert_eq!(sg.legs, src_parity.legs);
+        assert_eq!(sg.ref_count, 1, "source's parity is exclusive again");
+        assert_eq!(raw(&reg, sg.legs[0], slot as usize).await, xor(&a, &b), "source parity untouched");
+
+        let mut back = vec![0u8; slot as usize];
+        v.read(0, &mut back).await.unwrap();
+        assert_eq!(back, a);
+        c.read(0, &mut back).await.unwrap();
+        assert_eq!(back, cc);
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn raid6_reconstructs_two_lost_members_and_resyncs() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, mut paths) = setup_slabs(5, slot).await;
+        let v = volume(&gem, &reg, "raid6:3+2", slot);
+        let datas: Vec<Vec<u8>> = (0..3).map(|i| pattern(20 + i, slot as usize)).collect();
+        for (i, d) in datas.iter().enumerate() {
+            v.write(i as u64 * slot, d).await.unwrap();
+        }
+        let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+        assert_eq!(g.legs.len(), 2);
+
+        let l0 = loc(&gem, v.volume_id(), 0).await;
+        let l1 = loc(&gem, v.volume_id(), 1).await;
+        reg.write().await.remove(&l0.slab_id);
+        reg.write().await.remove(&l1.slab_id);
+        for (i, d) in datas.iter().enumerate() {
+            let mut back = vec![0u8; slot as usize];
+            v.read(i as u64 * slot, &mut back).await.unwrap();
+            assert_eq!(&back, d, "member {i} with two members lost");
+        }
+        let h = v.health().await;
+        assert_eq!(h.state, HealthState::Degraded, "{h:?}");
+
+        add_slab(&reg, &mut paths, slot).await;
+        add_slab(&reg, &mut paths, slot).await;
+        let report = v.resync(false).await;
+        assert_eq!(report.legs_rebuilt, 2, "{report:?}");
+        assert_eq!(v.health().await.state, HealthState::Healthy);
+        for (i, d) in datas.iter().enumerate() {
+            let l = loc(&gem, v.volume_id(), i as u64).await;
+            assert_eq!(raw(&reg, l.primary(), slot as usize).await, d.clone());
+        }
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn slot_tables_rebuild_legs_and_parity() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, paths) = setup_slabs(3, slot).await;
+        let m = volume(&gem, &reg, "mirror:2", slot);
+        m.write(0, &pattern(1, slot as usize)).await.unwrap();
+        let p = volume(&gem, &reg, "raid5:2+1", slot);
+        p.write(0, &pattern(2, slot as usize)).await.unwrap();
+        p.write(slot, &pattern(3, slot as usize)).await.unwrap();
+
+        let rebuilt = GlobalExtentMap::rebuild_from_slabs(reg.read().await.iter());
+        let ml = rebuilt.lookup(m.volume_id(), 0).unwrap();
+        assert_eq!(ml.leg_count(), 2);
+        assert!(ml.same_slots(&loc(&gem, m.volume_id(), 0).await));
+        let pg = rebuilt.lookup_parity(p.volume_id(), 0).unwrap();
+        assert_eq!(pg.legs, gem.read().await.lookup_parity(p.volume_id(), 0).unwrap().legs);
         cleanup(&paths);
     }
 }

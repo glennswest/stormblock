@@ -48,7 +48,7 @@ use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::volume::extent::VolumeId;
 use crate::placement::domain::{FailureDomain, DEFAULT_RUNG};
-use crate::volume::gem::{ExtentLocation, GlobalExtentMap, Leg};
+use crate::volume::gem::{GlobalExtentMap, Leg};
 use crate::volume::snapshot::snapshot_diff;
 use crate::volume::thin::{ThinVolumeHandle, PlacementPolicy};
 
@@ -793,6 +793,7 @@ impl Default for PlacementEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::volume::gem::ExtentLocation;
     use crate::drive::filedev::FileDevice;
     use crate::drive::BlockDevice;
     use crate::drive::slab::Slab;

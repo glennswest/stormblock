@@ -127,7 +127,7 @@ impl Retention {
 
 /// The extent location shape every version before V4 wrote: one leg.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct LegacyLocation {
+pub struct LegacyLocation {
     pub slab_id: SlabId,
     pub slot_idx: u32,
     pub ref_count: u32,

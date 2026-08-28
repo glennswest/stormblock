@@ -1162,3 +1162,131 @@ mod tests {
         let _ = std::fs::remove_dir_all(&meta_dir);
     }
 }
+
+#[cfg(test)]
+mod redundancy_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+
+    async fn file_slab(dir: &std::path::Path, tag: &str, slot: u64) -> (Slab, String) {
+        let path = dir.join(format!("{tag}.bin"));
+        let path_str = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        let dev = FileDevice::open_with_capacity(&path_str, 8 * 1024 * 1024).await.unwrap();
+        (Slab::format(Arc::new(dev), slot, StorageTier::Hot).await.unwrap(), path_str)
+    }
+
+    fn dir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("stormblock-vm-redundancy-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_policy_the_node_cannot_place() {
+        let d = dir();
+        let mut mgr = VolumeManager::new(4096);
+        let (s, _) = file_slab(&d, "only", 4096).await;
+        mgr.add_slab(s).await;
+        let err = mgr
+            .create_volume_with("m", 1 << 20, CreateOptions::redundant(RedundancyPolicy::mirror(2)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VolumeError::InsufficientDomains { needed: 2, available: 1, .. }), "{err}");
+        // Nothing was created.
+        assert!(mgr.list_volumes().await.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_redundant_volume_survives_a_restart() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let data: Vec<u8> = (0..2 * slot as usize + 100).map(|i| (i % 241) as u8).collect();
+
+        let (vol_id, paths) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let (a, pa) = file_slab(&d, "a", slot).await;
+            let (b, pb) = file_slab(&d, "b", slot).await;
+            mgr.add_slab(a).await;
+            mgr.add_slab(b).await;
+            let id = mgr
+                .create_volume_with("m", 1 << 20, CreateOptions::redundant(RedundancyPolicy::mirror(2)))
+                .await
+                .unwrap();
+            let v = mgr.get_volume(&id).unwrap();
+            let mut off = 0;
+            while off < data.len() {
+                off += v.write(off as u64, &data[off..]).await.unwrap();
+            }
+            v.flush().await.unwrap();
+            // A clone inherits the policy.
+            let snap = mgr.create_snapshot(id, "clone").await.unwrap();
+            assert_eq!(mgr.redundancy(&snap).unwrap(), RedundancyPolicy::mirror(2));
+            mgr.persist().await;
+            (id, vec![pa, pb])
+        };
+
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        for p in &paths {
+            let dev = FileDevice::open(p).await.unwrap();
+            mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        }
+        mgr.restore().await.unwrap();
+        assert_eq!(mgr.redundancy(&vol_id).unwrap(), RedundancyPolicy::mirror(2));
+        let h = mgr.health(&vol_id).await.unwrap();
+        assert_eq!(h.state, HealthState::Healthy, "{h:?}");
+        assert_eq!(h.legs_expected, 6, "three extents, two legs each");
+        let v = mgr.get_volume(&vol_id).unwrap();
+        let mut got = vec![0u8; data.len()];
+        let mut off = 0;
+        while off < got.len() {
+            let end = got.len();
+            off += v.read(off as u64, &mut got[off..end]).await.unwrap();
+        }
+        assert_eq!(got, data);
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn setting_mirror_on_a_plain_volume_takes_effect_at_resync() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let (a, _) = file_slab(&d, "a", slot).await;
+        mgr.add_slab(a).await;
+        let id = mgr.create_volume_any("plain", 1 << 20).await.unwrap();
+        let v = mgr.get_volume(&id).unwrap();
+        for i in 0..4u64 {
+            v.write(i * slot, &vec![i as u8 + 1; slot as usize]).await.unwrap();
+        }
+        assert_eq!(mgr.get_volume_handle(&id).unwrap().physical().await, 4 * slot);
+
+        // One drive: a mirror cannot be promised.
+        assert!(mgr.set_redundancy(id, RedundancyPolicy::mirror(2)).await.is_err());
+        let (b, _) = file_slab(&d, "b", slot).await;
+        mgr.add_slab(b).await;
+        mgr.set_redundancy(id, RedundancyPolicy::mirror(2)).await.unwrap();
+        assert_eq!(mgr.health(&id).await.unwrap().state, HealthState::Degraded, "asked for more than exists");
+
+        let report = mgr.resync_volume(id, false).await.unwrap();
+        assert_eq!(report.legs_added, 4, "{report:?}");
+        let h = mgr.health(&id).await.unwrap();
+        assert_eq!(h.state, HealthState::Healthy, "{h:?}");
+        assert_eq!(mgr.get_volume_handle(&id).unwrap().physical().await, 8 * slot);
+        for i in 0..4u64 {
+            let mut back = vec![0u8; slot as usize];
+            v.read(i * slot, &mut back).await.unwrap();
+            assert!(back.iter().all(|&b| b == i as u8 + 1));
+        }
+
+        // Parity is a restripe, refused as a setting.
+        let err = mgr.set_redundancy(id, RedundancyPolicy::parity(2, 1)).await.unwrap_err();
+        assert!(matches!(err, VolumeError::RestripeRequired { .. }), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
