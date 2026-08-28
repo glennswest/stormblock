@@ -1,3 +1,22 @@
+> **Superseded in part, 2026-08-28.** The mechanism described below was
+> drive-level: `RaidArray::add_member` / `remove_member` mirroring whole
+> devices. That is the wrong layer. The design of record is **volume-level
+> redundancy** — see "Volume-level redundancy" in `CLAUDE.md`: redundancy is a
+> property of a volume, realised by placing that volume's extents across N
+> distinct failure domains, so one node carries a mix (`app-data-1` as a
+> two-way mirror, another volume as 4+1 parity) on the same drives. Drive-level
+> `RaidArray` remains as a leg transport and for whole-device use.
+>
+> What survives from this document, and why it is kept: the **appliance leg as
+> an anchor**, the **drain semantics** that follow from it, and the
+> **placement/rebalancing split**. Those are statements about *where legs go*
+> and *when they move*, which the volume-level design expresses as a failure
+> domain and a resync rather than as members of an array. Read the mechanism
+> here as illustrative and `CLAUDE.md` as authoritative.
+>
+> The dependency on stormblock#69 stands: `migrate_to_local` treating a failed
+> rebuild as success is fixed, and the reasoning for why it mattered is below.
+
 # Where a claim lives, and how it follows a workload
 
 Design, 2026-08-28. Not implemented. Records a decision about the default
