@@ -66,13 +66,13 @@ struct RegistrationResponse {
 /// StormFS registration client.
 pub struct StormFsRegistration {
     config: StormFsConfig,
-    client: reqwest::Client,
+    client: crate::http::Client,
 }
 
 impl StormFsRegistration {
     /// Create a new StormFS registration client.
     pub fn new(config: StormFsConfig) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");

@@ -15,14 +15,14 @@ use super::StormTypeConfig;
 
 /// Factory that creates HTTP(S) network connections to peer nodes.
 pub struct HttpNetworkFactory {
-    client: reqwest::Client,
+    client: crate::http::Client,
     scheme: String,
 }
 
 impl Default for HttpNetworkFactory {
     fn default() -> Self {
         HttpNetworkFactory {
-            client: reqwest::Client::new(),
+            client: crate::http::Client::new(),
             scheme: "http".to_string(),
         }
     }
@@ -33,7 +33,7 @@ impl HttpNetworkFactory {
         Self::default()
     }
 
-    pub fn with_tls(client: reqwest::Client) -> Self {
+    pub fn with_tls(client: crate::http::Client) -> Self {
         HttpNetworkFactory {
             client,
             scheme: "https".to_string(),
@@ -56,7 +56,7 @@ impl RaftNetworkFactory<StormTypeConfig> for HttpNetworkFactory {
 /// HTTP(S) network connection to a single peer node.
 pub struct HttpNetwork {
     addr: String,
-    client: reqwest::Client,
+    client: crate::http::Client,
     scheme: String,
 }
 

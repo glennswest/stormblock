@@ -68,7 +68,7 @@ pub struct ReplicatedVolume {
     /// True = sync (wait for all replicas), false = async (fire and forget).
     sync_mode: bool,
     /// HTTP client for replica RPCs.
-    client: reqwest::Client,
+    client: crate::http::Client,
     /// Channel for async replication queue (used only in async mode).
     async_tx: Option<tokio::sync::mpsc::UnboundedSender<ReplicateRequest>>,
 }
@@ -82,7 +82,7 @@ impl ReplicatedVolume {
         replica_addrs: Vec<String>,
         sync_mode: bool,
     ) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
@@ -166,7 +166,7 @@ impl ReplicatedVolume {
 async fn async_replication_task(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<ReplicateRequest>,
     addrs: Vec<String>,
-    client: reqwest::Client,
+    client: crate::http::Client,
 ) {
     let mut retry_queue: VecDeque<RetryEntry> = VecDeque::new();
 

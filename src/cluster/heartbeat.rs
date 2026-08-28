@@ -94,7 +94,7 @@ struct Probe {
 async fn probe_peers(
     peers: Vec<(u64, String)>,
     req: Arc<HeartbeatRequest>,
-    client: reqwest::Client,
+    client: crate::http::Client,
     url_scheme: Arc<String>,
     tuning: &HeartbeatTuning,
 ) -> Vec<Probe> {
@@ -160,12 +160,12 @@ async fn probe_peers(
 /// Why a probe did not produce a response.
 #[derive(Debug)]
 enum HeartbeatProbeError {
-    Http(reqwest::Error),
+    Http(crate::http::Error),
     Status(u16),
 }
 
-impl From<reqwest::Error> for HeartbeatProbeError {
-    fn from(e: reqwest::Error) -> Self {
+impl From<crate::http::Error> for HeartbeatProbeError {
+    fn from(e: crate::http::Error) -> Self {
         HeartbeatProbeError::Http(e)
     }
 }
@@ -186,7 +186,7 @@ impl std::fmt::Display for HeartbeatProbeError {
 async fn heartbeat_round(
     local: &NodeInfo,
     membership: &Arc<RwLock<MembershipStore>>,
-    client: &reqwest::Client,
+    client: &crate::http::Client,
     url_scheme: &Arc<String>,
     tuning: &HeartbeatTuning,
 ) -> Duration {
@@ -271,7 +271,7 @@ pub fn start_heartbeat(
     membership: Arc<RwLock<MembershipStore>>,
     tuning: HeartbeatTuning,
     membership_path: std::path::PathBuf,
-    client: reqwest::Client,
+    client: crate::http::Client,
     url_scheme: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -390,7 +390,7 @@ mod tests {
             probe_timeout: Duration::from_millis(400),
             max_in_flight: 64,
         };
-        let client = reqwest::Client::builder()
+        let client = crate::http::Client::builder()
             // The client's own timeout is deliberately far longer than the
             // probe deadline, which is the situation in production: the round
             // must be bounded by its own pacing, not by the client's.
@@ -441,7 +441,7 @@ mod tests {
         let took = heartbeat_round(
             &node(1, "127.0.0.1:1"),
             &membership,
-            &reqwest::Client::new(),
+            &crate::http::Client::new(),
             &Arc::new("http".to_string()),
             &HeartbeatTuning::for_interval(Duration::from_millis(100)),
         )

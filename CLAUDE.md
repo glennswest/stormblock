@@ -42,6 +42,9 @@ cargo build --release --target aarch64-unknown-linux-musl --features "arm64,iscs
 
 # MikroTik RouterOS appliance (NVMe-TCP only — no VFIO, no io_uring, no StormFS)
 cargo build --release --target aarch64-unknown-linux-musl --no-default-features --features "mikrotik,nvmeof"
+
+# The embedded management UI is off by default since v12.2.0 (#79):
+# stormview is the UI. Add --features ui for the old pages.
 ```
 
 **NVMe-TCP, not iSCSI.** What StormBlock serves on RouterOS is containers,

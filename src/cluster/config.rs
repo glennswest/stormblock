@@ -97,20 +97,17 @@ impl ClusterConfig {
         if self.tls_enabled { "https" } else { "http" }
     }
 
-    /// Build a reqwest HTTP client configured for cluster TLS (if enabled).
-    pub fn build_http_client(&self) -> anyhow::Result<reqwest::Client> {
-        let mut builder = reqwest::Client::builder()
+    /// Build an HTTP client configured for cluster TLS (if enabled).
+    pub fn build_http_client(&self) -> anyhow::Result<crate::http::Client> {
+        let mut builder = crate::http::Client::builder()
             .timeout(std::time::Duration::from_secs(10));
 
         if self.tls_enabled {
             if let Some(ca_path) = &self.tls_ca_cert {
                 let ca_pem = std::fs::read(ca_path)
                     .map_err(|e| anyhow::anyhow!("failed to read cluster CA cert '{}': {e}", ca_path))?;
-                let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
-                    .map_err(|e| anyhow::anyhow!("failed to parse cluster CA cert: {e}"))?;
-                builder = builder.add_root_certificate(ca_cert);
+                builder = builder.add_root_certificate_pem(ca_pem);
             }
-            builder = builder.use_rustls_tls();
         }
 
         builder.build()

@@ -69,7 +69,7 @@ pub async fn migrate_volume(
     chunk_size: usize,
     rate_limit_mbps: Option<u64>,
 ) -> Result<MigrationStatus, anyhow::Error> {
-    let client = reqwest::Client::builder()
+    let client = crate::http::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
