@@ -569,7 +569,12 @@ else
 fi
 
 mkdir -p /run/udev
-if [ -x /usr/lib/systemd/systemd-udevd ] && [ -x /usr/bin/udevadm ]; then
+# `-x` is not enough: udevadm is dynamically linked, and a copy made without
+# its libraries is executable and still fails as "udevadm: not found". That
+# happened here — udevd started, every udevadm call failed, and nothing could
+# trigger, settle or *stop* it. A udevd that cannot be controlled is worse than
+# no udevd, so this asks it to run before relying on it.
+if [ -x /usr/lib/systemd/systemd-udevd ] && udevadm --version >/dev/null 2>&1; then
     /usr/lib/systemd/systemd-udevd --daemon
     udevadm trigger --type=subsystems --action=add
     udevadm trigger --type=devices --action=add
@@ -1045,6 +1050,26 @@ mount --move /dev /sysroot/dev
 # Carry /run (holds the overlay lower/upper mounts) into the new root
 mkdir -p /sysroot/run
 mount --move /run /sysroot/run 2>/dev/null || true
+
+# Stop udev before handing over.
+#
+# **A udevd started here keeps running across switch_root**, against a root
+# that is about to disappear, with rules and helpers that are about to go with
+# it. It sits harmless for exactly as long as nothing generates a uevent — and
+# then the first kernel module loaded on the real root produced 14,000
+# udev-workers and OOM-killed the node at 16 seconds. The failure looks like
+# whatever ran last, not like the initramfs that left this behind.
+#
+# Every distribution's initramfs stops udev before switch_root. This one did
+# not, and could not: udevadm was unusable, so even `udevadm control --exit`
+# was unavailable. Both doors are tried, because the point is that udevd does
+# not survive this line.
+if udevadm --version >/dev/null 2>&1; then
+    udevadm control --exit 2>/dev/null || true
+fi
+for _p in $(pidof systemd-udevd udevd 2>/dev/null); do
+    kill "$_p" 2>/dev/null || true
+done
 
 # switch_root — PID 1 becomes /sbin/init, stormblock continues in background
 exec switch_root /sysroot /sbin/init
