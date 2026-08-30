@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-08-30
+- **fix:** a ublk export lets the **kernel** assign its device number. It asked
+  for `/dev/ublkb0`, then `1`, from a counter that starts at zero in a fresh
+  process — on a node already serving 39 devices from boot — and a *requested*
+  id makes `UblkServer` send STOP_DEV and DEL_DEV first. So the first API
+  attach on a booted node deleted `/dev/ublkb0` out from under the filesystem
+  mounted on it: on the machine this was found on, `/var/log/pods` went to
+  "lost async page write", the kernel shut the filesystem down, and every later
+  write returned EIO — while nothing said a block device had been deleted.
 - **fix:** this node's name comes from the **kernel** when nothing else
   supplies one. Nothing exports `HOSTNAME` but a login shell, so a stormblock
   started by an init system called itself `localhost` on a node named
