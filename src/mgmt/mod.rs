@@ -53,6 +53,46 @@ pub enum ExportProtocol {
     Nvmeof,
 }
 
+/// This node's name, as everything that places or attaches a volume sees it.
+///
+/// Order: the config, then `$STORMBLOCK_NODE`, then `$HOSTNAME`, then the
+/// **kernel's** hostname, then `localhost`.
+///
+/// The kernel's own name is the one that was missing, and its absence is not
+/// cosmetic: a workload started by an init system rather than a shell has no
+/// `HOSTNAME` in its environment — nothing exports it but a login shell — so a
+/// stormblock started as PID 1's child called itself `localhost` on a node
+/// named `storm-2c91b3`. Every local attach then failed with "ublk is a local
+/// device: this node is \"localhost\", the attach is for \"storm-2c91b3\"",
+/// which reads as a transport problem and is an identity problem.
+pub fn local_node_name(config: &crate::mgmt::config::StormBlockConfig) -> String {
+    config
+        .management
+        .node_name
+        .clone()
+        .or_else(|| std::env::var("STORMBLOCK_NODE").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(kernel_hostname)
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+/// What `uname -n` reports, read where the kernel keeps it.
+///
+/// `/proc/sys/kernel/hostname` rather than `gethostname(2)` so this needs no
+/// libc and works the same on every platform that has procfs; a system without
+/// one simply falls through to the next answer.
+fn kernel_hostname() -> Option<String> {
+    let name = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    let name = name.trim();
+    // A container that has not set one reports the empty string or
+    // "localhost"; neither is an identity, and taking one would hide the
+    // problem rather than fix it.
+    if name.is_empty() || name == "localhost" || name == "(none)" {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 impl std::fmt::Display for ExportProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -188,13 +228,7 @@ pub struct AppState {
 impl AppState {
     /// This node's name in the /v1 surface and in discovery beacons.
     pub fn local_node_name(&self) -> String {
-        self.config
-            .management
-            .node_name
-            .clone()
-            .or_else(|| std::env::var("STORMBLOCK_NODE").ok())
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .unwrap_or_else(|| "localhost".to_string())
+        local_node_name(&self.config)
     }
 
     pub fn new(

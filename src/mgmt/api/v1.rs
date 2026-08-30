@@ -394,13 +394,10 @@ impl V1State {
     /// Build the state from config, loading any persisted copy from
     /// `<data_dir>/v1_state.json`.
     pub fn from_config(config: &crate::mgmt::config::StormBlockConfig) -> Self {
-        let local_node = config
-            .management
-            .node_name
-            .clone()
-            .or_else(|| std::env::var("STORMBLOCK_NODE").ok())
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .unwrap_or_else(|| "localhost".to_string());
+        // One place decides what this node is called. Two copies of this
+        // fallback is how /v1 and the attach path came to disagree about the
+        // node's own name.
+        let local_node = crate::mgmt::local_node_name(config);
         let persist_path = config
             .management
             .data_dir
