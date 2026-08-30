@@ -41,6 +41,11 @@ async fn setup(dir: &TempDir) -> Arc<AppState> {
 
     let mut config = StormBlockConfig::default();
     config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
+    // Pinned off so the attach assertions below are the same on every machine.
+    // The default is on, and a build host that happens to have `ublk_drv`
+    // loaded would otherwise get a local device where a build host without it
+    // gets nvme-tcp — a test whose answer depends on the kernel it ran on.
+    config.management.ublk_transport = false;
     let slab_registry = vm.registry().clone();
     let gem = vm.gem().clone();
     Arc::new(AppState::new(config, vm, slab_registry, gem))
@@ -1381,7 +1386,7 @@ async fn any_engine_volume_can_be_attached_through_the_volume_door() {
         .send().await.unwrap().json().await.unwrap();
     assert_eq!(before["attached"], false);
 
-    // The engine's choice on a node without ublk: nvme-tcp, the /v1 shape.
+    // The engine's choice with the transport turned off: nvme-tcp, /v1 shape.
     let resp = client
         .post(format!("{url}/api/v1/volumes/{clone_id}/attach"))
         .json(&serde_json::json!({}))
@@ -1392,11 +1397,9 @@ async fn any_engine_volume_can_be_attached_through_the_volume_door() {
     assert!(info["nqn"].as_str().unwrap().starts_with("nqn."));
     assert!(info["addresses"].as_array().unwrap().len() == 1);
 
-    // ublk explicitly, where it cannot be served: refused, not downgraded.
-    //
-    // In this test that is because the volume is not backed on the requesting
-    // node — the same clause that matters in production. The transport flag is
-    // on by default now, so turning it off is no longer what this asserts.
+    // ublk explicitly, where it cannot be served: refused, not downgraded. A
+    // caller that named a transport must not be given a different one and told
+    // it succeeded.
     let resp = client
         .post(format!("{url}/api/v1/volumes/{clone_id}/attach"))
         .json(&serde_json::json!({ "transport": "ublk" }))

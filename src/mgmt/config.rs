@@ -1072,3 +1072,24 @@ portal_base = 9000
         }
     }
 }
+
+#[cfg(test)]
+mod ublk_default_tests {
+    use super::*;
+
+    /// The default that cost a node its VM disks: off, on a machine already
+    /// serving 39 ublk devices, reported as a transport conflict.
+    #[test]
+    fn a_local_attach_is_offered_ublk_by_default() {
+        assert!(ManagementConfig::default().ublk_transport);
+        // And a config that says otherwise is still obeyed — the flag is the
+        // door to forcing every attach through the network.
+        let off: StormBlockConfig =
+            toml::from_str("[management]\nublk_transport = false\n").unwrap();
+        assert!(!off.management.ublk_transport);
+        // A config that does not mention it gets the new default rather than
+        // serde's `bool` default of false.
+        let quiet: StormBlockConfig = toml::from_str("[management]\n").unwrap();
+        assert!(quiet.management.ublk_transport);
+    }
+}
