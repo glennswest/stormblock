@@ -1392,7 +1392,11 @@ async fn any_engine_volume_can_be_attached_through_the_volume_door() {
     assert!(info["nqn"].as_str().unwrap().starts_with("nqn."));
     assert!(info["addresses"].as_array().unwrap().len() == 1);
 
-    // ublk explicitly, on a node with ublk_transport off: refused, not downgraded.
+    // ublk explicitly, where it cannot be served: refused, not downgraded.
+    //
+    // In this test that is because the volume is not backed on the requesting
+    // node — the same clause that matters in production. The transport flag is
+    // on by default now, so turning it off is no longer what this asserts.
     let resp = client
         .post(format!("{url}/api/v1/volumes/{clone_id}/attach"))
         .json(&serde_json::json!({ "transport": "ublk" }))

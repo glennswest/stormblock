@@ -301,13 +301,25 @@ pub struct ManagementConfig {
     /// `host:port`) and `/v1/.../attach` plus the NVMe-oF discovery log page
     /// report it instead. Falls back to `$STORMBLOCK_ADVERTISED_ADDR`.
     pub advertised_addr: Option<String>,
-    /// Offer the ublk transport to CSI when a volume is attached on this same
-    /// node (the master is local). The CSI node then gets a local
-    /// `/dev/ublkbN` device with no NVMe-oF/TCP round trip. Requires Linux
-    /// 6.0+ with `ublk_drv` loaded; when unavailable the engine transparently
-    /// falls back to nvme-tcp. Off by default.
-    #[serde(default)]
+    /// Offer the ublk transport when a volume is attached on this same node.
+    /// The consumer then gets a local `/dev/ublkbN` with no NVMe-oF/TCP round
+    /// trip. Requires Linux 6.0+ with `ublk_drv`; when that is missing the
+    /// engine falls back to nvme-tcp on its own.
+    ///
+    /// **On by default**, and it was off. Every guard that makes a local
+    /// attach safe is already checked at the call site — the volume must be
+    /// backed here, and the request must name this node — so the flag was
+    /// guarding nothing that those did not, and its absence produced
+    /// `409 Conflict: ublk is a local device …, or ublk_transport is off`,
+    /// which reads as a transport problem on a node already serving 39 ublk
+    /// devices. Set it to `false` to force every attach through nvme-tcp.
+    #[serde(default = "yes")]
     pub ublk_transport: bool,
+}
+
+/// serde needs a function for a default of `true`.
+fn yes() -> bool {
+    true
 }
 
 impl Default for ManagementConfig {
@@ -324,7 +336,7 @@ impl Default for ManagementConfig {
             beacon_secs: default_beacon_secs(),
             peer_stale_secs: default_peer_stale_secs(),
             advertised_addr: None,
-            ublk_transport: false,
+            ublk_transport: true,
         }
     }
 }
