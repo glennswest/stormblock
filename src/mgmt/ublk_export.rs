@@ -127,11 +127,27 @@ impl UblkExportManager {
     fn start(&mut self, volume_id: &str, device: Arc<dyn BlockDevice>) -> Option<String> {
         use crate::drive::ublk::UblkServer;
 
-        let id = self.next_id;
-        let device_path = format!("/dev/ublkb{id}");
+        // **The kernel picks the number, not us.**
+        //
+        // This asked for `/dev/ublkb0`, then `1`, and so on from a counter
+        // that started at zero in a fresh process — while the node was already
+        // serving 39 devices from boot. Worse, `UblkServer::run` treats a
+        // *requested* id as "clean up whatever is there": it sends STOP_DEV
+        // and DEL_DEV for that id first, so the first API attach on a booted
+        // node tore down `/dev/ublkb0`. On the machine this was found on that
+        // device carried `/var/log/pods`, whose filesystem the kernel then put
+        // into shutdown state — "lost async page write", every later write
+        // EIO, and the VM whose start triggered it reported a missing
+        // directory. Nothing anywhere said a device had been deleted.
+        //
+        // Asking with no id makes the kernel allocate a free one and skips
+        // that cleanup entirely, which is the only way to be sure of not
+        // taking a device somebody else is using.
+        let seq = self.next_id;
         let (shutdown, rx) = tokio::sync::watch::channel(false);
-        let server = Arc::new(UblkServer::new(device).with_dev_id(id));
+        let server = Arc::new(UblkServer::new(device));
         let runner = server.clone();
+        let id = seq;
         // UblkServer::run() holds non-Send raw pointers, so it must run on a
         // dedicated OS thread with its own runtime (same pattern as the
         // boot-iscsi ublk export in main.rs).
@@ -152,8 +168,28 @@ impl UblkExportManager {
                 });
             })
             .ok()?;
-        // ids are not recycled: a monotonic counter avoids reassigning a
-        // /dev/ublkbN that a just-torn-down export might still be vacating.
+        // The path is not known until the kernel has assigned one, so wait
+        // for the server to report it. Bounded: a device that has not appeared
+        // in a second is not going to, and returning a path that never
+        // materialises would wedge whatever tries to open it.
+        let mut device_path = String::new();
+        for _ in 0..100 {
+            if let Some(assigned) = server.dev_id() {
+                device_path = format!("/dev/ublkb{assigned}");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if device_path.is_empty() {
+            tracing::error!(
+                volume = volume_id,
+                "ublk export did not come up: the kernel assigned no device"
+            );
+            let _ = shutdown.send(true);
+            return None;
+        }
+        // Only a counter for thread names now — the identity comes from the
+        // kernel.
         self.next_id += 1;
         self.exports.insert(
             volume_id.to_string(),

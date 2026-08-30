@@ -389,6 +389,18 @@ impl UblkServer {
         self
     }
 
+    /// The id the kernel assigned, once it has. `None` until then.
+    ///
+    /// A caller that needs the path must wait for this rather than assume a
+    /// number: guessing one is how an export took `/dev/ublkb0` from the
+    /// filesystem that was already on it.
+    pub fn dev_id(&self) -> Option<u32> {
+        match self.dev_id.load(Ordering::Relaxed) {
+            id if id >= 0 => Some(id as u32),
+            _ => None,
+        }
+    }
+
     /// Block device path (e.g., `/dev/ublkb0`). Valid after `run()` starts.
     pub fn dev_path(&self) -> String {
         let id = self.dev_id.load(Ordering::Relaxed);
