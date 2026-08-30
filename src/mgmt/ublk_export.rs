@@ -188,6 +188,31 @@ impl UblkExportManager {
             let _ = shutdown.send(true);
             return None;
         }
+
+        // **Never take a device something is already mounted on.**
+        //
+        // Belt and braces over the kernel's own allocation: this node runs its
+        // root filesystem on a ublk device, and an export that lands on the
+        // same number takes the root out from under a running system —
+        // observed as "lost async page write", a journal I/O error and a
+        // filesystem the kernel puts into shutdown state, with nothing saying
+        // a block device had been replaced.
+        //
+        // Checked against the mount table rather than against our own
+        // bookkeeping, because the devices that matter most were created by a
+        // process that no longer exists — the initramfs — and are not in any
+        // table this process holds.
+        if let Some(user) = mounted_on(&device_path) {
+            tracing::error!(
+                volume = volume_id,
+                device = %device_path,
+                mountpoint = %user,
+                "refusing this ublk export: the kernel handed back a device that is \
+                 already mounted — attaching here would take that filesystem away"
+            );
+            let _ = shutdown.send(true);
+            return None;
+        }
         // Only a counter for thread names now — the identity comes from the
         // kernel.
         self.next_id += 1;
@@ -203,6 +228,28 @@ impl UblkExportManager {
     fn start(&mut self, _volume_id: &str, _device: Arc<dyn BlockDevice>) -> Option<String> {
         None
     }
+}
+
+/// Where `device` is mounted, if it is.
+///
+/// `/proc/self/mounts` rather than a cached list: the devices that matter here
+/// were created by a process that no longer exists (the initramfs) and appear
+/// in no table this process keeps.
+#[cfg(target_os = "linux")]
+fn mounted_on(device: &str) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
+    for line in mounts.lines() {
+        let mut f = line.split_whitespace();
+        if f.next() == Some(device) {
+            return f.next().map(|m| m.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mounted_on(_device: &str) -> Option<String> {
+    None
 }
 
 /// Probe whether the ublk control device is usable on this host.
