@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 2026-08-30
+- **fix:** this node's name comes from the **kernel** when nothing else
+  supplies one. Nothing exports `HOSTNAME` but a login shell, so a stormblock
+  started by an init system called itself `localhost` on a node named
+  `storm-2c91b3`, and every local attach failed with what read as a transport
+  error. Both copies of the fallback are now one function — two copies is how
+  `/v1` and the attach path came to disagree about the node's own name.
+- **fix:** `management.ublk_transport` is **on by default**. Every guard that
+  makes a local attach safe is checked at the call site — the volume must be
+  backed here and the request must name this node — so the flag guarded
+  nothing those did not, while its absence produced `409 Conflict: ublk is a
+  local device …, or ublk_transport is off` on a node already serving 39 ublk
+  devices. Where `ublk_drv` is missing the engine still falls back to nvme-tcp,
+  which is what makes the default safe.
+  Both found by a VM that would not start on a real node.
+
 ## [v12.4.0] — 2026-08-28
 
 ### 2026-08-28
