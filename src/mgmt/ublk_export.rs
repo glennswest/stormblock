@@ -143,6 +143,13 @@ impl UblkExportManager {
         // Asking with no id makes the kernel allocate a free one and skips
         // that cleanup entirely, which is the only way to be sure of not
         // taking a device somebody else is using.
+        // What the kernel already has, before asking it for anything.
+        //
+        // Logged because the one question that could not be answered after a
+        // node lost its root device was "did device 0 exist a moment before
+        // the export took that number". A list here answers it in the log the
+        // next time, at the cost of one readdir per attach.
+        let before = existing_devices();
         let seq = self.next_id;
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let server = Arc::new(UblkServer::new(device));
@@ -220,7 +227,12 @@ impl UblkExportManager {
             volume_id.to_string(),
             Export { device_path: device_path.clone(), shutdown, server: Some(server) },
         );
-        tracing::info!(volume = volume_id, device = %device_path, "ublk export created for CSI attach");
+        tracing::info!(
+            volume = volume_id,
+            device = %device_path,
+            existing_before = %before,
+            "ublk export created"
+        );
         Some(device_path)
     }
 
@@ -228,6 +240,27 @@ impl UblkExportManager {
     fn start(&mut self, _volume_id: &str, _device: Arc<dyn BlockDevice>) -> Option<String> {
         None
     }
+}
+
+/// Every ublk device the kernel currently has, as a list.
+///
+/// Read from sysfs rather than remembered: the devices that matter were made
+/// by processes that no longer exist.
+#[cfg(target_os = "linux")]
+fn existing_devices() -> String {
+    let mut ids: Vec<u32> = std::fs::read_dir("/sys/class/ublk-char")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_prefix("ublkc")?.parse().ok())
+        .collect();
+    ids.sort_unstable();
+    ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn existing_devices() -> String {
+    String::new()
 }
 
 /// Where `device` is mounted, if it is.
