@@ -81,6 +81,28 @@ pub async fn format(device: Arc<dyn BlockDevice>, label: &str) -> Result<()> {
     fs.finish().await
 }
 
+/// Format, then lay a set of files into the root.
+///
+/// **This is what a cloud-init seed is.** NoCloud looks for a filesystem
+/// labelled `cidata` holding `meta-data`, `user-data` and optionally
+/// `network-config` — three small files at the root, no directories. Those
+/// names do not fit 8.3, so they need the LFN entries this writer already
+/// produces; and vfat is one of the two types every cloud-init build accepts,
+/// where an ext4 volume with the same label is not universally picked up.
+///
+/// In memory rather than from a directory, because the seed is generated per
+/// VM and staging it on the node's filesystem first would be a temporary file
+/// on a path that may be read-only, for bytes that already exist.
+pub async fn format_from_files(
+    device: Arc<dyn BlockDevice>,
+    files: &[(String, Vec<u8>)],
+    label: &str,
+) -> Result<()> {
+    let mut fs = Fat32::new(device, label)?;
+    fs.write_files(files).await?;
+    fs.finish().await
+}
+
 /// Format, then lay `dir`'s contents into it.
 pub async fn format_from_dir(
     device: Arc<dyn BlockDevice>,
@@ -336,12 +358,41 @@ impl Fat32 {
         Ok((first, data.len() as u64))
     }
 
+    /// Lay a set of in-memory files into the root of the volume.
+    async fn write_files(&mut self, files: &[(String, Vec<u8>)]) -> Result<()> {
+        // Sorted, so the same seed twice is the same bytes.
+        let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut used_short = HashSet::new();
+        let mut entries = Vec::new();
+        for (name, data) in sorted {
+            let (first, size) = if data.is_empty() {
+                (0u32, 0u64)
+            } else {
+                let first = self.allocate_chain(data.len() as u64)?;
+                self.write_chain(first, data).await?;
+                (first, data.len() as u64)
+            };
+            let short = short_name(name, &mut used_short);
+            entries.extend_from_slice(&lfn_entries(name, &short));
+            entries.extend_from_slice(&dir_entry(&short, ATTR_ARCHIVE, first, size));
+        }
+        self.write_root(entries).await
+    }
+
     /// Lay a host directory tree into the root of the volume.
     async fn write_tree(&mut self, dir: &Path) -> Result<()> {
         let entries = self.write_dir_children(dir, None).await?;
+        self.write_root(entries).await
+    }
+
+    /// Put a set of directory entries in the root, with the volume label.
+    async fn write_root(&mut self, entries: Vec<u8>) -> Result<()> {
         let mut bytes = Vec::new();
         // The volume label lives in the root directory as well as in the BPB;
-        // some tools only look at one of them.
+        // some tools only look at one of them — and for a cloud-init seed the
+        // label *is* the contract, so both are written.
         bytes.extend_from_slice(&label_entry(&self.label));
         bytes.extend_from_slice(&entries);
 
@@ -804,5 +855,59 @@ mod tests {
         let a = short_name("stormcos-6.12.0.conf", &mut used);
         let b = short_name("stormcos-6.13.0.conf", &mut used);
         assert_ne!(a, b);
+    }
+
+    /// A cloud-init seed is what this exists for now: three files at the root
+    /// of a labelled volume, with names that do not fit 8.3 and therefore need
+    /// real long-name entries. NoCloud finds it by the label and reads it by
+    /// the names, so both have to be right.
+    #[tokio::test]
+    async fn a_seed_is_three_files_and_a_label() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dev = volume(&dir, "seed.img", 16 << 20).await;
+        let files = vec![
+            ("user-data".to_string(), b"#cloud-config\nhostname: web1\n".to_vec()),
+            ("meta-data".to_string(), b"instance-id: iid-web1\n".to_vec()),
+            ("network-config".to_string(), b"version: 2\n".to_vec()),
+        ];
+        super::format_from_files(dev.clone(), &files, "CIDATA").await.unwrap();
+
+        let mut head = vec![0u8; 512];
+        dev.read(0, &mut head).await.unwrap();
+        // The label lives in the BPB as well as the root directory, because
+        // some tools read only one of them.
+        let bpb_label = String::from_utf8_lossy(&head[43..54]).to_string();
+        assert!(bpb_label.starts_with("CIDATA"), "{bpb_label:?}");
+
+        // And the long names are really there — searched as UTF-16, which is
+        // how an LFN entry stores them.
+        let mut whole = vec![0u8; 2 << 20];
+        dev.read(0, &mut whole).await.unwrap();
+        for short in ["USER-D~1", "META-D~1", "NETWOR~1"] {
+            assert!(
+                whole.windows(short.len()).any(|w| w == short.as_bytes()),
+                "{short} is not in the image; short names present: {:?}",
+                whole
+                    .windows(8)
+                    .filter(|w| w.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'~' || *c == b'-'))
+                    .take(6)
+                    .map(|w| String::from_utf8_lossy(w).to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
+        // The long name itself, in UTF-16 — but only the first five
+        // characters, because an LFN entry splits a name across three field
+        // ranges (chars 1-5, 6-11, 12-13) and it is never contiguous on disk.
+        for name in ["user-data", "meta-data", "network-config"] {
+            let head: Vec<u8> = name
+                .encode_utf16()
+                .take(5)
+                .flat_map(|c| c.to_le_bytes())
+                .collect();
+            assert!(
+                whole.windows(head.len()).any(|w| w == head),
+                "{name} has no long-name entry — a guest would see only the 8.3 name"
+            );
+        }
     }
 }

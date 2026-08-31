@@ -638,6 +638,78 @@ async fn detach_volume(State(state): State<Arc<AppState>>, Path(id): Path<String
 /// `POST /api/v1/volumes/import {name, file|url, format?, redundancy?, size?, seal?}`
 /// — a cloud image, a VM export (qcow2, vmdk, ova) or an ISO becomes a
 /// sealed golden. Async: 202 with the job, poll `GET …/import/{id}`.
+/// `POST /api/v1/volumes/{id}/cidata` — make this volume a cloud-init seed.
+///
+/// **The medium is the contract.** NoCloud looks for a filesystem *labelled*
+/// `cidata` (or `CIDATA`) holding `meta-data`, `user-data` and optionally
+/// `network-config`, and in practice it has to be **vfat or ISO 9660** — an
+/// ext4 volume with the same label and the same files is not picked up, which
+/// presents inside the guest as `Did not find any data source, searched
+/// classes: ()` with a disk sitting right there. That cost a VM boot to find,
+/// so the door that makes a seed makes the right kind of one.
+///
+/// vfat rather than ISO 9660 because this engine already writes FAT with real
+/// long-name entries — `meta-data` does not fit 8.3 — and because a seed is
+/// per VM and writable, which an ISO is not.
+async fn write_cidata(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CidataRequest>,
+) -> Response {
+    let Some(vol) = resolve_volume(&state, &id).await else {
+        return ApiError::not_found(format!("no volume {id}"));
+    };
+    let files: Vec<(String, Vec<u8>)> = match req
+        .files
+        .into_iter()
+        .map(|f| f.resolve().map(|s| (leaf(&s.path), s.contents)))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(f) => f,
+        Err(e) => return ApiError::bad_request(e),
+    };
+    if files.is_empty() {
+        return ApiError::bad_request("a seed with no files is not a seed");
+    }
+    let dev = match writable_volume(&state, vol.0).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    // Upper case: both spellings are accepted by cloud-init, and FAT stores a
+    // label upper case anyway — writing it that way means what `blkid` reports
+    // is what was asked for.
+    let label = req.label.unwrap_or_else(|| "CIDATA".to_string()).to_uppercase();
+    match crate::image::fat::format_from_files(dev, &files, &label).await {
+        Ok(()) => {
+            let mut vm = state.volume_manager.lock().await;
+            let fs = crate::volume::FsInfo::vfat(&label);
+            let _ = vm.set_fs_info(vol, Some(fs)).await;
+            Json(serde_json::json!({
+                "volume_id": vol.0,
+                "label": label,
+                "type": "vfat",
+                "written": files.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            }))
+            .into_response()
+        }
+        Err(e) => ApiError::bad_request(format!("writing the seed: {e}")),
+    }
+}
+
+/// The last component of a path — a seed is flat, and a caller that wrote
+/// `/user-data` means the file at the root.
+fn leaf(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CidataRequest {
+    pub files: Vec<super::fstemplates::SeedFileRequest>,
+    /// `CIDATA` unless told otherwise.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 /// A volume by id or by name, for the doors that take one in a path.
 async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Option<VolumeId> {
     state.volume_manager.lock().await.find_volume(key).await
@@ -1130,6 +1202,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/import/{id}", get(get_import))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
+        .route("/{id}/cidata", axum::routing::post(write_cidata))
         .route("/snapshots", axum::routing::post(create_snapshot))
         .with_state(state)
 }

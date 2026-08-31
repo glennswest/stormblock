@@ -59,6 +59,22 @@ pub struct FsInfo {
 }
 
 impl FsInfo {
+    /// What a vfat volume is, for the one case that makes one: a cloud-init
+    /// seed. None of the ext-family properties apply, and saying so plainly
+    /// beats leaving a record that claims a journal on a FAT filesystem.
+    pub fn vfat(label: &str) -> FsInfo {
+        FsInfo {
+            kind: "vfat".into(),
+            journal: false,
+            features: None,
+            sixty_four_bit: false,
+            metadata_csum: false,
+            csum_seed: false,
+            label: label.to_string(),
+            uuid: None,
+        }
+    }
+
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "kind": self.kind,

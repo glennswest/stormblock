@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-08-31
+- **feat:** `POST /api/v1/volumes/{id}/cidata` — make a volume a **cloud-init
+  seed**, as vfat with the label cloud-init actually looks for. The medium is
+  the contract: NoCloud wants vfat or ISO 9660 labelled `cidata`/`CIDATA`, and
+  an ext4 volume with the same label and the same files is not picked up —
+  which presents inside the guest as `Did not find any data source, searched
+  classes: ()` with the disk sitting right there. vfat rather than ISO because
+  this engine already writes FAT with real long-name entries (`meta-data` does
+  not fit 8.3) and a seed is per VM and writable, which an ISO is not.
+  `image::fat::format_from_files` writes a set of in-memory files into the root
+  of a labelled volume, with nothing staged on the node.
 - **feat:** a **raw image imports straight off the wire**, with nothing staged.
   Raw is sequential, so spooling it to `<data_dir>/imports/` only meant needing
   room for the image's whole *virtual* size on a node about to store just the
