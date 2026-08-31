@@ -470,9 +470,16 @@ async fn clone_volume(
     Path(id): Path<String>,
     Json(req): Json<CloneRequest>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // By name as well as by id.
+    //
+    // A golden is *named* by whatever references it — a VM spec says
+    // `dataVolume: { name: fedora-43-x86_64 }`, an image pull writes that
+    // name, and nobody carries the uuid around. The volume manager has always
+    // resolved either; this door did not, so cloning a golden by the only
+    // handle its consumers have came back as "invalid UUID".
+    let uuid = match resolve_volume(&state, &id).await {
+        Some(u) => u.0,
+        None => return ApiError::not_found(format!("no volume {id}")),
     };
     let size = match super::fstemplates::resolve_size(&req.size, None) {
         Ok(s) => s,
@@ -631,6 +638,11 @@ async fn detach_volume(State(state): State<Arc<AppState>>, Path(id): Path<String
 /// `POST /api/v1/volumes/import {name, file|url, format?, redundancy?, size?, seal?}`
 /// — a cloud image, a VM export (qcow2, vmdk, ova) or an ISO becomes a
 /// sealed golden. Async: 202 with the job, poll `GET …/import/{id}`.
+/// A volume by id or by name, for the doors that take one in a path.
+async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Option<VolumeId> {
+    state.volume_manager.lock().await.find_volume(key).await
+}
+
 async fn start_import(
     State(state): State<Arc<AppState>>,
     Json(spec): Json<crate::image::import::ImportSpec>,
