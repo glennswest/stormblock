@@ -657,6 +657,34 @@ if [ -z "${NO_NETWORK:-}" ]; then
 
 ip link set "$IFACE" up
 
+# Bring the node up **on a bridge**, the way every hypervisor does.
+#
+# A VM's NIC is a tap, and a tap has to hang off something. Attaching one
+# straight to the interface that carries the node's own address is not
+# possible — a tap is not a port of a physical NIC — so without a bridge the
+# only options are NAT (a private network the LAN cannot reach) or macvtap
+# (which deliberately stops the node talking to its own guests). Both are
+# worse than moving the node's address onto a bridge that its uplink is a port
+# of, which is what Proxmox, libvirt and every other hypervisor does.
+#
+# **With a fallback, because this is the one step that can strand a node.** If
+# any part of it fails the interface is left exactly as it was and the boot
+# carries on with plain DHCP on the uplink — a node with no VM networking is a
+# node; a node with no networking is a recovery job.
+BRIDGE="${STORM_BRIDGE:-stormbr0}"
+UPLINK="$IFACE"
+if [ -z "${NO_BRIDGE:-}" ] && ip link add name "$BRIDGE" type bridge 2>/dev/null; then
+    if ip link set "$IFACE" master "$BRIDGE" 2>/dev/null && ip link set "$BRIDGE" up; then
+        # Everything below configures the bridge instead: it is the interface
+        # that now holds the address, and the uplink is one of its ports.
+        echo "  bridged: $IFACE is a port of $BRIDGE"
+        IFACE="$BRIDGE"
+    else
+        echo "WARNING: could not enslave $IFACE to $BRIDGE — no VM networking"
+        ip link del "$BRIDGE" 2>/dev/null || true
+    fi
+fi
+
 if [ -n "$IP_CONF" ] && [ "$IP_CONF" != "dhcp" ]; then
     # Static IP from kernel cmdline (ip=addr::gw:mask::iface:none)
     ADDR=$(echo "$IP_CONF" | cut -d: -f1)
@@ -693,7 +721,10 @@ if [ -n "$NETADDR" ]; then
     # one identifier a machine has before anyone has configured anything.
     NODE_NAME="$(cat /run/dhcp-hostname 2>/dev/null || true)"
     if [ -z "$NODE_NAME" ]; then
-        MAC="$(cat "/sys/class/net/$IFACE/address" 2>/dev/null | tr -d ':')"
+        # The *uplink's* MAC, not the bridge's: a bridge takes a random
+        # address until it has a port, so naming a node after it would give
+        # the same machine a different name every boot.
+        MAC="$(cat "/sys/class/net/${UPLINK:-$IFACE}/address" 2>/dev/null | tr -d ':')"
         [ -n "$MAC" ] && NODE_NAME="storm-$(echo "$MAC" | tail -c 7)"
     fi
     if [ -n "$NODE_NAME" ]; then

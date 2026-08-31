@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-08-31
+- **feat(initramfs):** the node comes up **on a bridge** (`stormbr0`, with the
+  uplink as a port), because a VM's NIC is a tap and a tap has to hang off
+  something. Without it the only options are NAT — a private network the LAN
+  cannot reach — or macvtap, which deliberately stops the node talking to its
+  own guests. **With a fallback**: if any part of it fails the uplink is left
+  as it was and the boot carries on with plain DHCP, because a node with no VM
+  networking is a node and a node with no networking is a recovery job. The
+  node's name still comes from the *uplink's* MAC: a bridge takes a random
+  address until it has a port, so naming a machine after it would rename it
+  every boot.
 - **feat:** `POST /api/v1/volumes/{id}/cidata` — make a volume a **cloud-init
   seed**, as vfat with the label cloud-init actually looks for. The medium is
   the contract: NoCloud wants vfat or ISO 9660 labelled `cidata`/`CIDATA`, and
