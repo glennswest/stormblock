@@ -164,7 +164,22 @@ impl SeedFileRequest {
                     .decode(b64.as_bytes())
                     .map_err(|e| format!("{}: contents_base64 is not base64: {e}", self.path))?
             }
-            (None, None) => Vec::new(),
+            // Neither: almost always a caller whose field name is wrong —
+            // serde ignores what it does not know, so `content` instead of
+            // `contents` arrives here as "write nothing" and produces a file
+            // of zero bytes that looks written. A cloud-init seed built that
+            // way boots a guest that finds its datasource and reads an empty
+            // user-data, which is indistinguishable from no seed at all and
+            // took a VM boot to notice.
+            //
+            // An empty file is still askable for, explicitly: `contents: ""`.
+            (None, None) => {
+                return Err(format!(
+                    "{}: no contents — give `contents` (or `contents_base64`); \
+                     write an empty file with `contents: \"\"`",
+                    self.path
+                ))
+            }
         };
         Ok(SeedFile { path: self.path, contents: bytes })
     }
@@ -546,5 +561,42 @@ pub async fn clone_for_volume_api(
     match template::clone_template(&state.volume_manager, &state.fstemplates, key, &spec).await {
         Ok(c) => Ok((c.volume_id, c.fs_uuid, c.size_bytes)),
         Err(e) => Err(err(e)),
+    }
+}
+
+#[cfg(test)]
+mod seed_file_tests {
+    use super::SeedFileRequest;
+
+    /// serde ignores a field it does not know, so a caller writing `content`
+    /// instead of `contents` used to get a file of zero bytes that looked
+    /// written — and a cloud-init seed built that way is indistinguishable
+    /// from no seed at all until a guest boots and finds nothing.
+    #[test]
+    fn a_file_with_no_contents_is_refused_and_an_empty_one_is_not() {
+        let neither = SeedFileRequest {
+            path: "/user-data".into(),
+            contents: None,
+            contents_base64: None,
+        };
+        let e = neither.resolve().unwrap_err();
+        assert!(e.contains("no contents"), "{e}");
+        assert!(e.contains("contents_base64"), "it must say what to use instead: {e}");
+
+        // Asking for an empty file explicitly still works.
+        let empty = SeedFileRequest {
+            path: "/marker".into(),
+            contents: Some(String::new()),
+            contents_base64: None,
+        };
+        assert!(empty.resolve().unwrap().contents.is_empty());
+
+        // And both at once is still a contradiction.
+        let both = SeedFileRequest {
+            path: "/x".into(),
+            contents: Some("a".into()),
+            contents_base64: Some("YQ==".into()),
+        };
+        assert!(both.resolve().is_err());
     }
 }
