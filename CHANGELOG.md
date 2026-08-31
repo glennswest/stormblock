@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### 2026-08-31
+- **feat:** a **raw image imports straight off the wire**, with nothing staged.
+  Raw is sequential, so spooling it to `<data_dir>/imports/` only meant needing
+  room for the image's whole *virtual* size on a node about to store just the
+  parts that are used — a 32 GB image with 9 GB in it failed with ENOSPC while
+  the volume it was headed for had room three times over. The body is consumed
+  through a bounded channel (backpressure: a slow disk slows the download), and
+  only non-zero windows are written, so a sparse image still costs what it
+  uses. qcow2 and VMDK still stage — their decoders seek.
+- **feat:** clone a volume by **name** as well as by uuid. A golden is named by
+  everything that references it, and nobody carries the uuid around.
+
 ### 2026-08-30
 - **fix:** a ublk export lets the **kernel** assign its device number. It asked
   for `/dev/ublkb0`, then `1`, from a counter that starts at zero in a fresh

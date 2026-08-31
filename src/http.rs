@@ -253,6 +253,76 @@ impl Client {
     /// Stream a GET straight into a file — a cloud image is hundreds of MB
     /// and a 256 MB node must never hold one in memory. Returns the bytes
     /// written. Fails on a non-2xx status without writing.
+    /// How big the thing at this URL says it is, if it says.
+    ///
+    /// A HEAD, because a streaming import has to create the volume before it
+    /// has seen the last byte, and a volume needs a size.
+    pub async fn content_length(&self, url: &str) -> Result<Option<u64>, Error> {
+        let uri: hyper::Uri = url.parse().map_err(|e| Error::Url(format!("{url}: {e}")))?;
+        let req = hyper::Request::builder()
+            .method(hyper::Method::HEAD)
+            .uri(uri)
+            .header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")))
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| Error::Request(e.to_string()))?;
+        let resp = self.inner.request(req).await.map_err(|e| Error::Request(e.to_string()))?;
+        if !(200..300).contains(&resp.status().as_u16()) {
+            return Ok(None);
+        }
+        Ok(resp
+            .headers()
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok()))
+    }
+
+    /// GET a URL and send the body onward in frames, as they arrive.
+    ///
+    /// **Nothing is staged.** A raw disk image is sequential — it can be
+    /// decoded straight off the wire — so requiring a spool file means
+    /// requiring room for the image's *whole virtual size* on a node about to
+    /// store only the parts that are used. A 32 GB image with 9 GB in it
+    /// failed with ENOSPC while the volume it was headed for had room three
+    /// times over.
+    ///
+    /// A bounded channel rather than a callback: the consumer writes to a
+    /// volume, which is async, and a synchronous sink would have to block the
+    /// runtime to do it. The bound is the backpressure — a slow disk slows the
+    /// download rather than growing a queue.
+    pub async fn get_to_channel(
+        &self,
+        url: &str,
+        tx: tokio::sync::mpsc::Sender<Bytes>,
+    ) -> Result<u64, Error> {
+        use http_body_util::BodyExt as _;
+        let uri: hyper::Uri = url.parse().map_err(|e| Error::Url(format!("{url}: {e}")))?;
+        let req = hyper::Request::builder()
+            .method(hyper::Method::GET)
+            .uri(uri)
+            .header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")))
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| Error::Request(e.to_string()))?;
+        let resp = self.inner.request(req).await.map_err(|e| Error::Request(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(Error::Request(format!("{url}: HTTP {status}")));
+        }
+        let mut body = resp.into_body();
+        let mut seen = 0u64;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| Error::Body(e.to_string()))?;
+            if let Some(data) = frame.data_ref() {
+                seen += data.len() as u64;
+                if tx.send(data.clone()).await.is_err() {
+                    // The consumer gave up — say so rather than reading the
+                    // rest of a body nobody wants.
+                    return Err(Error::Body("the import stopped reading".into()));
+                }
+            }
+        }
+        Ok(seen)
+    }
+
     pub async fn get_to_file(&self, url: &str, path: &std::path::Path) -> Result<u64, Error> {
         use http_body_util::BodyExt as _;
         use tokio::io::AsyncWriteExt as _;

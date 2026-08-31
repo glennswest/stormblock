@@ -286,6 +286,17 @@ pub async fn open_source(path: &Path, forced: Option<&str>) -> Result<(Source, S
 }
 
 async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>) -> Result<(), String> {
+    // A raw image over HTTP is written as it arrives, with nothing staged.
+    //
+    // Raw is sequential, so there is no reason to spool it — and spooling
+    // means needing room for the image's *whole virtual size* on a node about
+    // to store only the parts that are used. A 32 GB image with 9 GB in it
+    // failed with ENOSPC while the volume it was headed for had room three
+    // times over. qcow2 and VMDK still stage: their decoders seek.
+    if let (Some(url), Some("raw" | "iso" | "iso9660")) = (&spec.url, spec.format.as_deref()) {
+        return stream_raw(state, spec, st, url).await;
+    }
+
     // 1. Fetch, if a URL.
     let mut downloaded: Option<PathBuf> = None;
     let path: PathBuf = match (&spec.file, &spec.url) {
@@ -318,6 +329,146 @@ async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportSta
         }
     }
     result
+}
+
+/// Import a raw image straight off the wire.
+///
+/// The volume has to exist before the last byte arrives, so its size comes
+/// from the request or from `Content-Length`. Only non-zero chunks are
+/// written, exactly as the staged path does — a sparse image costs what it
+/// uses, not what it spans.
+async fn stream_raw(
+    state: &Arc<AppState>,
+    spec: &ImportSpec,
+    st: &Arc<RwLock<ImportStatus>>,
+    url: &str,
+) -> Result<(), String> {
+    let client = crate::http::Client::builder()
+        .timeout(std::time::Duration::from_secs(6 * 3600))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let declared = match &spec.size {
+        Some(s) => Some(crate::mgmt::config::parse_size(s).map_err(|e| format!("size: {e}"))?),
+        None => None,
+    };
+    let length = client.content_length(url).await.map_err(|e| e.to_string())?;
+    let size = match (declared, length) {
+        (Some(d), Some(l)) => d.max(l),
+        (Some(d), None) => d,
+        (None, Some(l)) => l,
+        // Neither: a volume cannot be created without a size, and guessing one
+        // would silently truncate the image.
+        (None, None) => {
+            return Err(format!(
+                "{url} does not say how big it is (no Content-Length); give `size`"
+            ))
+        }
+    };
+    {
+        let mut s = st.write().await;
+        s.format = Some("raw".into());
+        s.virtual_size = size;
+        s.state = ImportState::Writing;
+    }
+
+    let policy = match &spec.redundancy {
+        Some(r) => RedundancyPolicy::parse(r)?,
+        None => RedundancyPolicy::none(),
+    };
+    let vol_id: VolumeId = {
+        let mut vm = state.volume_manager.lock().await;
+        vm.create_volume_with(&spec.name, size, CreateOptions::redundant(policy))
+            .await
+            .map_err(|e| format!("create volume: {e}"))?
+    };
+    st.write().await.volume_id = Some(vol_id.0);
+    let dev: Arc<dyn BlockDevice> = state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume(&vol_id)
+        .ok_or_else(|| "volume vanished after create".to_string())?;
+
+    // The body arrives in frames of whatever size the server chose, and a
+    // volume write wants a decent-sized piece — so frames are gathered into a
+    // 4 MiB window and each window is written only if it holds something.
+    const WINDOW: usize = 4 << 20;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8);
+    let fetch = {
+        let url = url.to_string();
+        tokio::spawn(async move { client.get_to_channel(&url, tx).await })
+    };
+
+    let mut window: Vec<u8> = Vec::with_capacity(WINDOW);
+    let mut off = 0u64;
+    let mut written = 0u64;
+    let outcome: Result<(), String> = async {
+        while let Some(data) = rx.recv().await {
+            let mut rest = &data[..];
+            while !rest.is_empty() {
+                let take = (WINDOW - window.len()).min(rest.len());
+                window.extend_from_slice(&rest[..take]);
+                rest = &rest[take..];
+                if window.len() == WINDOW {
+                    if window.iter().any(|&b| b != 0) {
+                        dev.write(off, &window)
+                            .await
+                            .map_err(|e| format!("write at {off}: {e}"))?;
+                        written += window.len() as u64;
+                    }
+                    off += window.len() as u64;
+                    window.clear();
+                    let mut s = st.write().await;
+                    s.downloaded_bytes = off;
+                    s.progress_bytes = off;
+                    s.written_bytes = written;
+                }
+            }
+        }
+        if !window.is_empty() {
+            if window.iter().any(|&b| b != 0) {
+                dev.write(off, &window).await.map_err(|e| format!("write at {off}: {e}"))?;
+                written += window.len() as u64;
+            }
+            off += window.len() as u64;
+        }
+        // The fetch's own error is the interesting one when both fail: a write
+        // that stopped because the body did should not be reported as a disk
+        // problem.
+        match fetch.await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e.to_string()),
+            Err(e) => return Err(format!("fetch task: {e}")),
+        }
+        dev.flush().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = outcome {
+        // Nothing half-imported survives as a volume.
+        drop(dev);
+        let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
+        st.write().await.volume_id = None;
+        return Err(e);
+    }
+    {
+        let mut s = st.write().await;
+        s.downloaded_bytes = off;
+        s.progress_bytes = off;
+        s.written_bytes = written;
+        s.state = ImportState::Sealing;
+    }
+
+    let fs = crate::fs::disk::probe(&dev).await;
+    drop(dev);
+    st.write().await.fs = fs.as_ref().map(|f| f.json());
+    let mut vm = state.volume_manager.lock().await;
+    if spec.seal {
+        vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
+    } else if fs.is_some() {
+        vm.set_fs_info(vol_id, fs).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>, path: &Path) -> Result<(), String> {
