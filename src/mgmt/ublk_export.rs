@@ -196,6 +196,34 @@ impl UblkExportManager {
             return None;
         }
 
+        // The id is assigned at ADD_DEV, but the *block device* appears only
+        // at START_DEV — a ~60 ms gap on this hardware — and whoever is
+        // handed this path opens it immediately: qemu lost that race and
+        // died at "Could not open '/dev/ublkb40': No such file or
+        // directory" while the log had already said "ublk export created".
+        // A path is not a result until it can be opened.
+        let appeared = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if std::path::Path::new(&device_path).exists() {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        if !appeared {
+            tracing::error!(
+                volume = volume_id,
+                device = %device_path,
+                "ublk export did not come up: the device node never appeared"
+            );
+            let _ = shutdown.send(true);
+            return None;
+        }
+
         // **Never take a device something is already mounted on.**
         //
         // Belt and braces over the kernel's own allocation: this node runs its

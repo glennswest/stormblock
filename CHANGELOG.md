@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-08-31
+- **fix(ublk):** an export is not created until its device node exists. The
+  id arrives at ADD_DEV but the block device only appears at START_DEV — a
+  ~60 ms gap — and the attach API returned the path in between, so a
+  hypervisor spawned against it died at "Could not open /dev/ublkbN" while
+  the log said the export was created. Bounded wait for the node, and a
+  refusal that names the volume if it never appears.
+
+### 2026-08-31
 - **feat(initramfs):** the node comes up **on a bridge** (`stormbr0`, with the
   uplink as a port), because a VM's NIC is a tap and a tap has to hang off
   something. Without it the only options are NAT — a private network the LAN
