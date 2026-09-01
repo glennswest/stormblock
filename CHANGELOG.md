@@ -14,10 +14,13 @@
   recorded, its own filesystem UUID — that shares nothing with its source and
   survives that source's slab being reformatted. Within a role, and by
   default, cloning is the ordinary free copy-on-write.
-- **feat:** every volume reports `role` (`system` or `data`) on
-  `/api/v1/volumes`. A clone is in its source's half whatever it is called, so
-  the name is not evidence; this makes "is the volume I meant to be durable
-  actually in the data slab?" a question with an answer.
+- **feat:** every volume reports `role` (`system` or `data`) — on
+  `/api/v1/volumes`, and on the `Volume` kube resource as `spec.role` plus a
+  `storm.io/slab-role` label, so `kubectl get volumes -l
+  storm.io/slab-role=data` is a check. A clone is in its source's half
+  whatever it is called, so the name is not evidence; this makes "is the
+  volume I meant to be durable actually in the data slab?" a question with an
+  answer.
 - **docs:** `docs/images.md` §2a2 — why the blank a `-data` volume clones from
   has to be in the data slab, with what the extent map looks like when it is
   not. In an image spec the mistake is unspellable (each slab is filled with
