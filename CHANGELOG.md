@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### 2026-09-01
+- **fix:** **a whole-disk slab path yields every slab in the GPT** (#88
+  follow-on), not the first that opens. A node boots with the disk on its
+  command line, not a partition — `rd.stormblock.slab=/dev/sda` — and the data
+  slab is allocated first so that growing the system slab across a release
+  cannot move the partition holding the node's identity. That ordering made
+  "first slab found" the data slab: a node attached identity storage, looked
+  for `stormblock.volume=stormpump` inside it, and had no root device. The
+  failure read as a missing volume rather than as the wrong partition, which
+  is the kind of thing that sends you looking in entirely the wrong place.
+  One path can now produce several slabs, so the per-slab metadata reporting
+  zips against the source path recorded per slab rather than against the paths
+  given, which are no longer 1:1 with the slabs opened. Unblocks
+  glennswest/stormpump#12.
+
 - **feat:** **a clone can cross the slab-role boundary, as a copy** (#88
   follow-on). A copy-on-write clone shares its source's slots, so a clone is
   only as durable as the slab its source is in — cloning a *system* golden
