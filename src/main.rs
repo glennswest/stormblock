@@ -3669,10 +3669,7 @@ async fn handle_boot_local(
     local_tier: &str,
     check: bool,
 ) -> anyhow::Result<()> {
-    use std::path::{Path, PathBuf};
-    use stormblock::volume::MetadataStore;
-
-    let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
+    let mgr = open_slabs_and_restore(slab_paths, meta).await?;
 
     // 3. Resolve the boot volume: --volume wins, else boot.toml.
     let selector = match volume {
