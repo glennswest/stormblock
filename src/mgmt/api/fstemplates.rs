@@ -379,6 +379,10 @@ async fn clone_template(
         verify: req.verify,
         // Handed to whoever asked, so it counts against the template.
         standby: false,
+        // A template's clones stay in the template's half of the node's
+        // storage. Crossing is `POST /api/v1/volumes/{id}/clone` with a
+        // `role`, where the copy it costs is the caller's decision (#88).
+        role: None,
     };
 
     match template::clone_template(&state.volume_manager, &state.fstemplates, &id, &spec).await {
