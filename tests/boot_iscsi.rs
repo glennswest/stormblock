@@ -159,6 +159,7 @@ async fn provision_volumes_on_file_slab() {
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
         tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+        ..Default::default()
     };
 
     // Create volumes

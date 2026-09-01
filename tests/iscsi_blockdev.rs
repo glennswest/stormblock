@@ -326,6 +326,7 @@ async fn iscsi_thin_volume_io() {
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
         tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+        ..Default::default()
     };
 
     // Create a 5 MB volume
@@ -381,6 +382,7 @@ async fn iscsi_multi_volume_isolation() {
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
         tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+        ..Default::default()
     };
 
     // Create 3 volumes (simulating boot partitions)
@@ -649,6 +651,7 @@ async fn iscsi_multi_extent_volume() {
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
         tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+        ..Default::default()
     };
 
     // Create a volume that spans 4 extents (4 MB, slot_size=1MB)
@@ -728,6 +731,7 @@ async fn iscsi_snapshot_cow() {
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
         tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+        ..Default::default()
     };
 
     // Create original volume and write data
@@ -836,6 +840,7 @@ async fn iscsi_sequential_write_stress() {
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
         tier_fallback: vec![StorageTier::Hot, StorageTier::Warm, StorageTier::Cold],
+        ..Default::default()
     };
 
     // Allocate 20 extents across a volume (20 MB)
