@@ -115,6 +115,11 @@ pub struct ImageSpec {
     pub partitions: Vec<RawPartition>,
     #[serde(default)]
     pub slab: Option<SlabPartition>,
+    /// The *other* mutable end: identity and state, in a partition of its own
+    /// so that replacing the system slab is an install rather than an
+    /// amnesia event (#88). Omit it and the image has one slab, as before.
+    #[serde(default)]
+    pub data_slab: Option<SlabPartition>,
 }
 
 /// The EFI System Partition — the floor, because firmware needs FAT.
@@ -291,6 +296,16 @@ pub mod type_guid {
         0x14,
     ];
 
+    /// A stormblock **data** slab — `7D3E5A91-6C24-4B8F-A05D-2E9147BC6F38`.
+    ///
+    /// Its own type, not a label or a naming convention, because the question
+    /// "may this device be reformatted?" is asked of a path an operator typed
+    /// and has to be answerable from the partition table alone (#88).
+    pub const SLAB_DATA: [u8; 16] = [
+        0x91, 0x5A, 0x3E, 0x7D, 0x24, 0x6C, 0x8F, 0x4B, 0xA0, 0x5D, 0x2E, 0x91, 0x47, 0xBC, 0x6F,
+        0x38,
+    ];
+
     /// Resolve a name or an explicit GUID from a spec.
     pub fn parse(s: &str) -> Option<[u8; 16]> {
         match s.to_ascii_lowercase().as_str() {
@@ -299,6 +314,7 @@ pub mod type_guid {
             "swap" => Some(SWAP),
             "basic" | "msdata" | "fat" => Some(BASIC),
             "slab" | "stormblock" => Some(SLAB),
+            "data-slab" | "slab-data" | "stormblock-data" => Some(SLAB_DATA),
             "pallet" => Some(crate::pallet::PALLET_TYPE_GUID),
             other => uuid::Uuid::parse_str(other).ok().map(|u| u.to_bytes_le()),
         }

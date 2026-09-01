@@ -20,12 +20,12 @@ pub mod gc;
 pub mod pressure;
 pub mod relocate;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::drive::BlockDevice;
-use crate::drive::slab::{Slab, SlabId};
+use crate::drive::slab::{Slab, SlabId, SlabRole};
 use crate::drive::slab_registry::SlabRegistry;
 use crate::placement::topology::StorageTier;
 use crate::raid::RaidArrayId;
@@ -54,6 +54,13 @@ impl CreateOptions {
     pub fn redundant(policy: RedundancyPolicy) -> Self {
         CreateOptions { redundancy: policy, ..Default::default() }
     }
+
+    /// Place this volume in the node's data slabs — identity and state,
+    /// which no install may reformat (#88).
+    pub fn in_role(mut self, role: SlabRole) -> Self {
+        self.placement.role = role;
+        self
+    }
 }
 pub use gem::GlobalExtentMap;
 
@@ -70,10 +77,16 @@ pub struct VolumeManager {
     array_slabs: HashMap<RaidArrayId, SlabId>,
     slot_size: u64,
     metadata_store: Option<MetadataStore>,
-    /// Slab that keeps this manager's `volumes.dat` inside itself. Set where
-    /// there is no filesystem to keep it in — an image, an appliance disk —
-    /// so the slab is the whole record of what it holds.
-    metadata_slab: Option<SlabId>,
+    /// Slabs that keep this manager's `volumes.dat` inside themselves. Set
+    /// where there is no filesystem to keep it in — an image, an appliance
+    /// disk — so the slab is the whole record of what it holds.
+    ///
+    /// Plural because a node's mutable storage is two partitions, not one.
+    /// Each slab records **its own** volumes: the data slab's copy has to
+    /// survive the system slab being replaced wholesale, so it cannot live
+    /// in the system slab, and a single merged copy in either one would be
+    /// exactly the coupling an install is supposed to break (#88).
+    metadata_slabs: Vec<SlabId>,
     /// What each volume is for: kept, or thrown away. Held here rather than
     /// on the volume handle because it is a fact about the data, not about
     /// the I/O path, and every consumer of a handle would otherwise have to
@@ -98,7 +111,7 @@ impl VolumeManager {
             array_slabs: HashMap::new(),
             slot_size,
             metadata_store: None,
-            metadata_slab: None,
+            metadata_slabs: Vec::new(),
             retentions: HashMap::new(),
             parents: HashMap::new(),
             fs_info: HashMap::new(),
@@ -115,7 +128,7 @@ impl VolumeManager {
             array_slabs: HashMap::new(),
             slot_size,
             metadata_store: Some(store),
-            metadata_slab: None,
+            metadata_slabs: Vec::new(),
             retentions: HashMap::new(),
             parents: HashMap::new(),
             fs_info: HashMap::new(),
@@ -232,12 +245,30 @@ impl VolumeManager {
     /// An image has nowhere else to put them — there is no filesystem in the
     /// picture until the volume this record names has been exported.
     pub fn persist_to_slab(&mut self, slab_id: SlabId) {
-        self.metadata_slab = Some(slab_id);
+        self.metadata_slabs = vec![slab_id];
     }
 
-    /// Which slab, if any, this manager writes its metadata into.
+    /// The same, for a node whose storage is more than one slab. Each slab
+    /// is given the volumes that live on it and nothing else.
+    pub fn persist_to_slabs(&mut self, slab_ids: Vec<SlabId>) {
+        self.metadata_slabs = slab_ids;
+    }
+
+    /// Which slab, if any, this manager writes its metadata into. The first
+    /// of them where there are several.
     pub fn metadata_slab(&self) -> Option<SlabId> {
-        self.metadata_slab
+        self.metadata_slabs.first().copied()
+    }
+
+    /// Every slab this manager writes a copy of its metadata into.
+    pub fn metadata_slabs(&self) -> &[SlabId] {
+        &self.metadata_slabs
+    }
+
+    /// Whether this slab carries part of the manager's own record of itself
+    /// — what a delete guard has to ask before removing a drive.
+    pub fn is_metadata_slab(&self, id: &SlabId) -> bool {
+        self.metadata_slabs.contains(id)
     }
 
     /// Register a RAID array as a backing device for volumes.
@@ -363,7 +394,11 @@ impl VolumeManager {
     ) -> Result<VolumeId, VolumeError> {
         let needed = opts.redundancy.scheme.width();
         if needed > 1 {
-            let available = self.registry.read().await.distinct_domains_with_space(&opts.redundancy.spread);
+            let available = self
+                .registry
+                .read()
+                .await
+                .distinct_domains_with_space_in_role(&opts.redundancy.spread, opts.placement.role);
             if available < needed {
                 return Err(VolumeError::InsufficientDomains {
                     policy: opts.redundancy.spelling(),
@@ -402,7 +437,11 @@ impl VolumeManager {
         handle.check_transition(&policy)?;
         let needed = policy.scheme.width();
         if needed > 1 {
-            let available = self.registry.read().await.distinct_domains_with_space(&policy.spread);
+            let available = self
+                .registry
+                .read()
+                .await
+                .distinct_domains_with_space_in_role(&policy.spread, handle.placement_role());
             if available < needed {
                 return Err(VolumeError::InsufficientDomains {
                     policy: policy.spelling(),
@@ -465,7 +504,11 @@ impl VolumeManager {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         let needed = policy.scheme.width();
         if needed > 1 {
-            let available = self.registry.read().await.distinct_domains_with_space(&policy.spread);
+            let available = self
+                .registry
+                .read()
+                .await
+                .distinct_domains_with_space_in_role(&policy.spread, handle.placement_role());
             if available < needed {
                 return Err(VolumeError::InsufficientDomains { policy: policy.spelling(), needed, available });
             }
@@ -480,7 +523,7 @@ impl VolumeManager {
             scratch,
             self.gem.clone(),
             self.registry.clone(),
-            PlacementPolicy::default(),
+            PlacementPolicy { role: handle.placement_role(), ..Default::default() },
             policy.clone(),
         ));
 
@@ -735,16 +778,21 @@ impl VolumeManager {
 
     /// A clone is protected the way its source is: its shared extents
     /// already are, and every copy-on-write will be.
+    ///
+    /// The placement role is inherited for the same reason and is the
+    /// stronger case: a clone shares the source's slots, so a clone of a
+    /// data volume that copied-on-write into a *system* slab would put half
+    /// of the node's identity in the half an install replaces (#88).
     fn inherit_handle(&self, vol: ThinVolume, source_id: &VolumeId) -> ThinVolumeHandle {
-        let (policy, failed) = match self.volumes.get(source_id) {
-            Some(src) => (src.redundancy(), src.failed_slabs()),
-            None => (RedundancyPolicy::none(), Vec::new()),
+        let (policy, failed, role) = match self.volumes.get(source_id) {
+            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role()),
+            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System),
         };
         let handle = ThinVolumeHandle::with_redundancy(
             vol,
             self.gem.clone(),
             self.registry.clone(),
-            PlacementPolicy::default(),
+            PlacementPolicy { role, ..Default::default() },
             policy,
         );
         handle.set_failed_slabs(failed);
@@ -833,18 +881,18 @@ impl VolumeManager {
     /// COW snapshot's shared slots are recorded under the original writer,
     /// so without this file a snapshot reads as zeros after reattach (#13).
     pub async fn persist(&self) {
-        if self.metadata_store.is_none() && self.metadata_slab.is_none() {
+        if self.metadata_store.is_none() && self.metadata_slabs.is_empty() {
             return;
         }
-        let meta = self.snapshot_metadata().await;
 
         if let Some(store) = &self.metadata_store {
+            let meta = self.snapshot_metadata().await;
             if let Err(e) = store.save(&meta) {
                 tracing::warn!("Volume metadata persist failed: {e}");
             }
         }
 
-        if let Some(slab_id) = self.metadata_slab {
+        for (slab_id, meta) in self.per_slab_metadata().await {
             match MetadataStore::encode(&meta) {
                 Ok(bytes) => {
                     let reg = self.registry.read().await;
@@ -865,19 +913,113 @@ impl VolumeManager {
         }
     }
 
-    /// The metadata the metadata slab carries, if it carries any.
-    async fn load_slab_metadata(&self) -> anyhow::Result<Option<metadata::VolumeMetadata>> {
-        let Some(slab_id) = self.metadata_slab else {
-            return Ok(None);
+    /// One `volumes.dat` per metadata slab, each holding only what that slab
+    /// actually carries.
+    ///
+    /// A volume goes into the copy of every slab it has a leg on. One with no
+    /// extents yet — created and not written — has no slab to point at, so it
+    /// goes to the first metadata slab of its own role: that is where its
+    /// first write would land, and the role is the boundary an install
+    /// respects (#88).
+    async fn per_slab_metadata(&self) -> Vec<(SlabId, metadata::VolumeMetadata)> {
+        if self.metadata_slabs.is_empty() {
+            return Vec::new();
+        }
+        let full = self.snapshot_metadata().await;
+        if self.metadata_slabs.len() == 1 {
+            return vec![(self.metadata_slabs[0], full)];
+        }
+
+        let mut roles: HashMap<VolumeId, SlabRole> = HashMap::new();
+        for (id, handle) in &self.volumes {
+            roles.insert(*id, handle.placement_role());
+        }
+        let touched: HashMap<VolumeId, HashSet<SlabId>> = {
+            let gem = self.gem.read().await;
+            self.volumes
+                .keys()
+                .map(|id| {
+                    let slabs = gem
+                        .get_volume_map(id)
+                        .map(|m| m.all_legs().map(|l| l.slab_id).collect())
+                        .unwrap_or_default();
+                    (*id, slabs)
+                })
+                .collect()
         };
         let reg = self.registry.read().await;
-        let slab = reg
-            .get(&slab_id)
-            .ok_or_else(|| anyhow::anyhow!("metadata slab {} is not attached", slab_id.0))?;
-        match slab.read_metadata().await? {
-            Some(bytes) => Ok(Some(MetadataStore::decode(&bytes)?)),
-            None => Ok(None),
+        // Where a volume with no extents is recorded: the first metadata
+        // slab whose role matches it.
+        let home = |vid: &VolumeId| -> Option<SlabId> {
+            let want = roles.get(vid).copied().unwrap_or_default();
+            self.metadata_slabs.iter().copied().find(|s| reg.role_of(s) == want)
+        };
+        let array_of: HashMap<SlabId, RaidArrayId> = self
+            .array_slabs
+            .iter()
+            .map(|(array, slab)| (*slab, *array))
+            .collect();
+
+        self.metadata_slabs
+            .iter()
+            .map(|slab_id| {
+                let volumes: Vec<_> = full
+                    .volumes
+                    .iter()
+                    .filter(|v| match touched.get(&v.id) {
+                        Some(on) if !on.is_empty() => on.contains(slab_id),
+                        _ => home(&v.id) == Some(*slab_id),
+                    })
+                    .cloned()
+                    .collect();
+                let arrays: Vec<_> = match array_of.get(slab_id) {
+                    Some(array_id) => full
+                        .arrays
+                        .iter()
+                        .filter(|a| a.array_id == *array_id)
+                        .cloned()
+                        .collect(),
+                    None => Vec::new(),
+                };
+                (
+                    *slab_id,
+                    metadata::VolumeMetadata { extent_size: full.extent_size, arrays, volumes },
+                )
+            })
+            .collect()
+    }
+
+    /// The volume records the metadata slabs carry, each paired with the role
+    /// of the slab it came from — which is what a volume with no extents of
+    /// its own is placed by.
+    async fn load_slab_records(
+        &self,
+    ) -> anyhow::Result<Option<Vec<(metadata::VolumeRecord, SlabRole)>>> {
+        if self.metadata_slabs.is_empty() {
+            return Ok(None);
         }
+        let reg = self.registry.read().await;
+        let mut out: Vec<(metadata::VolumeRecord, SlabRole)> = Vec::new();
+        let mut seen: HashSet<VolumeId> = HashSet::new();
+        let mut found = false;
+        for slab_id in &self.metadata_slabs {
+            let slab = reg
+                .get(slab_id)
+                .ok_or_else(|| anyhow::anyhow!("metadata slab {} is not attached", slab_id.0))?;
+            let Some(bytes) = slab.read_metadata().await? else { continue };
+            found = true;
+            let doc = MetadataStore::decode(&bytes)?;
+            let role = slab.role();
+            for v in doc.volumes {
+                if seen.insert(v.id) {
+                    out.push((v, role));
+                }
+            }
+        }
+        if !found {
+            return Ok(None);
+        }
+        Ok(Some(out))
     }
 
     /// The record every persist path writes: volumes, their sizes, and the
@@ -947,11 +1089,10 @@ impl VolumeManager {
     /// there produces an image that cannot boot, so it has to fail the build
     /// rather than warn into a log nobody reads.
     pub async fn persist_checked(&self) -> anyhow::Result<()> {
-        let meta = self.snapshot_metadata().await;
         if let Some(store) = &self.metadata_store {
-            store.save(&meta)?;
+            store.save(&self.snapshot_metadata().await)?;
         }
-        if let Some(slab_id) = self.metadata_slab {
+        for (slab_id, meta) in self.per_slab_metadata().await {
             let bytes = MetadataStore::encode(&meta)?;
             let reg = self.registry.read().await;
             let slab = reg
@@ -971,12 +1112,12 @@ impl VolumeManager {
             Some(s) if s.exists() => Some(s.load()?),
             _ => None,
         };
-        let meta = match from_dir {
-            Some(m) => m,
-            None => match self.load_slab_metadata().await? {
-                Some(m) => m,
+        let records: Vec<(metadata::VolumeRecord, SlabRole)> = match from_dir {
+            Some(m) => m.volumes.into_iter().map(|v| (v, SlabRole::System)).collect(),
+            None => match self.load_slab_records().await? {
+                Some(r) => r,
                 None => {
-                    if self.metadata_store.is_some() || self.metadata_slab.is_some() {
+                    if self.metadata_store.is_some() || !self.metadata_slabs.is_empty() {
                         tracing::info!("No persisted metadata found, starting fresh");
                     }
                     return Ok(());
@@ -994,7 +1135,7 @@ impl VolumeManager {
 
         let mut restored = 0u32;
         let mut dirty_to_verify: Vec<(VolumeId, Arc<ThinVolumeHandle>, Vec<u64>)> = Vec::new();
-        for vrec in meta.volumes {
+        for (vrec, home_role) in records {
             // Legacy V1 records bind volumes to arrays; skip if that array
             // isn't attached. V2 slab-placed records restore regardless.
             if let Some(array_id) = vrec.array_id {
@@ -1063,6 +1204,19 @@ impl VolumeManager {
             }
 
             self.retentions.insert(vrec.id, vrec.retention);
+            // Where a volume already lives is what it is. The role is not in
+            // the record because it does not need to be: a volume whose
+            // extents are in a data slab is a data volume, and one written
+            // by an older build has no data slab to be in. Deriving it means
+            // no metadata version to bump and no way for the record and the
+            // placement to disagree (#88).
+            let role = {
+                let reg = self.registry.read().await;
+                rebuilt
+                    .get_volume_map(&vrec.id)
+                    .and_then(|m| m.all_legs().next().map(|l| reg.role_of(&l.slab_id)))
+                    .unwrap_or(home_role)
+            };
             let vol = ThinVolume::restore(
                 vrec.id,
                 vrec.name.clone(),
@@ -1073,7 +1227,7 @@ impl VolumeManager {
                 vol,
                 self.gem.clone(),
                 self.registry.clone(),
-                PlacementPolicy::default(),
+                PlacementPolicy { role, ..Default::default() },
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());

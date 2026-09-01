@@ -12,7 +12,7 @@ use stormblock::drive::slab::{Slab, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZE};
 #[cfg(feature = "iscsi")]
 use stormblock::boot_iscsi::{BootDiskLayout, IscsiBootManager};
 use stormblock::placement::topology::StorageTier;
-use stormblock::raid::{RaidArray, RaidLevel};
+use stormblock::raid::{RaidArray, RaidArrayId, RaidLevel};
 use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
 use stormblock::target::{self, reactor::{ReactorConfig, ReactorPool}};
 use stormblock::mgmt::{self, AppState, ArrayInfo, DriveInfo};
@@ -2049,6 +2049,70 @@ async fn slab_in_partition(
     Ok(None)
 }
 
+/// Whether `path` carries a data slab, and what names it.
+///
+/// Asked of the *device*, never of the path: the answer has to hold when an
+/// operator hands over `/dev/sda` and the data slab is `/dev/sda6`, and when
+/// they hand over `/dev/sda6` itself. Two independent records say so — the
+/// GPT type GUID of the partition, which can be read without opening
+/// anything, and the role byte in the slab's own header, which is what a
+/// whole-drive slab with no partition table has instead (#88).
+///
+/// `Ok(None)` means nothing on the device claims to be one. A device that
+/// cannot be read at all is not an error here: the caller is about to open it
+/// properly and will fail there with a better message.
+async fn data_slab_on(path: &str) -> anyhow::Result<Option<String>> {
+    use stormblock::drive::partition::PartitionDevice;
+
+    if !std::path::Path::new(path).exists() {
+        return Ok(None);
+    }
+    let dev: Arc<dyn BlockDevice> =
+        match stormblock::drive::filedev::FileDevice::open(path).await {
+            Ok(d) => Arc::new(d),
+            Err(_) => return Ok(None),
+        };
+
+    // The device itself, when it is a bare slab rather than a partitioned
+    // drive.
+    if let Ok(slab) = Slab::open(dev.clone()).await {
+        if slab.is_data() {
+            return Ok(Some(format!("{path} is itself a data slab ({})", slab.slab_id().0)));
+        }
+        return Ok(None);
+    }
+
+    let Ok(gpt) = stormblock::pallet::gpt::Gpt::read(&dev).await else {
+        return Ok(None);
+    };
+    let lba = gpt.block_size as u64;
+    for (i, e) in gpt.entries.iter().enumerate() {
+        if e.first_lba == 0 || e.last_lba < e.first_lba {
+            continue;
+        }
+        let label = if e.name.is_empty() {
+            format!("partition {}", i + 1)
+        } else {
+            format!("partition {} ({})", i + 1, e.name)
+        };
+        if e.type_guid == stormblock::image::type_guid::SLAB_DATA {
+            return Ok(Some(format!("{path} {label} is typed as a stormblock data slab")));
+        }
+        // A slab whose GPT entry predates the data type still knows what it
+        // is: the header carries the role too, and the two are written
+        // together.
+        let start = e.first_lba * lba;
+        let len = (e.last_lba + 1 - e.first_lba) * lba;
+        let Ok(part) = PartitionDevice::new(dev.clone(), start, len) else { continue };
+        if let Ok(slab) = Slab::open(Arc::new(part)).await {
+            if slab.is_data() {
+                return Ok(Some(format!("{path} {label} holds a data slab")));
+            }
+        }
+    }
+    Ok(None)
+}
+
 async fn open_slabs_and_restore(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -2090,8 +2154,16 @@ async fn open_slabs_and_restore(
         slabs.push(slab);
     }
 
-    // 2. Metadata: an explicit --meta wins, then the slab's own copy, then
+    // 2. Metadata: an explicit --meta wins, then each slab's own copy, then
     //    the "meta" directory beside the first slab.
+    //
+    //    **Each slab's own copy**, plural, because a node's mutable storage
+    //    is a system slab and a data slab, and the second one's record has to
+    //    survive the first being replaced by an install. A single merged copy
+    //    living in one of them would recreate exactly the coupling the split
+    //    exists to break (#88). A slab with no copy of its own is the older
+    //    arrangement — one document naming every array, positionally — and
+    //    still works.
     let meta_dir: PathBuf = match meta {
         Some(m) => PathBuf::from(m),
         None => Path::new(&slab_paths[0])
@@ -2099,61 +2171,125 @@ async fn open_slabs_and_restore(
             .unwrap_or_else(|| Path::new("."))
             .join("meta"),
     };
-    let embedded = match meta {
-        Some(_) => None,
-        None => slabs[0]
-            .read_metadata()
-            .await
-            .map_err(|e| anyhow::anyhow!("read slab metadata from {}: {e}", slab_paths[0]))?,
-    };
-    let (metadata, source) = match embedded {
-        Some(bytes) => (
-            MetadataStore::decode(&bytes)?,
-            format!("slab {}", slab_paths[0]),
-        ),
+    let mut embedded: Vec<Option<stormblock::volume::metadata::VolumeMetadata>> =
+        Vec::with_capacity(slabs.len());
+    if meta.is_none() {
+        for (path, slab) in slab_paths.iter().zip(&slabs) {
+            let doc = match slab
+                .read_metadata()
+                .await
+                .map_err(|e| anyhow::anyhow!("read slab metadata from {path}: {e}"))?
+            {
+                Some(bytes) => Some(MetadataStore::decode(&bytes)?),
+                None => None,
+            };
+            embedded.push(doc);
+        }
+    } else {
+        embedded.resize_with(slabs.len(), || None);
+    }
+
+    let primary = embedded.iter().position(|d| d.is_some());
+    let (extent_size, from_slabs, source) = match primary {
+        Some(i) => {
+            let carriers: Vec<&str> = slab_paths
+                .iter()
+                .zip(&embedded)
+                .filter(|(_, d)| d.is_some())
+                .map(|(p, _)| p.as_str())
+                .collect();
+            (
+                embedded[i].as_ref().unwrap().extent_size,
+                true,
+                format!("slab(s) {}", carriers.join(", ")),
+            )
+        }
         None => {
             let store = MetadataStore::new(meta_dir.clone())?;
             if !store.exists() {
                 anyhow::bail!(
-                    "no volume metadata: slab {} carries none and there is no volumes.dat in {}",
-                    slab_paths[0],
+                    "no volume metadata: no slab of {} carries any and there is no volumes.dat in {}",
+                    slab_paths.join(", "),
                     meta_dir.display()
                 );
             }
-            (store.load()?, meta_dir.display().to_string())
+            let doc = store.load()?;
+            if doc.arrays.is_empty() {
+                anyhow::bail!("metadata in {} records no arrays", meta_dir.display());
+            }
+            if slab_paths.len() > doc.arrays.len() {
+                anyhow::bail!(
+                    "{} slab path(s) given but metadata records only {} array(s)",
+                    slab_paths.len(),
+                    doc.arrays.len()
+                );
+            }
+            let size = doc.extent_size;
+            embedded[0] = Some(doc);
+            (size, false, meta_dir.display().to_string())
         }
     };
     println!("Volume metadata from {source}");
-    if metadata.arrays.is_empty() {
-        anyhow::bail!("metadata from {source} records no arrays");
-    }
-    if slab_paths.len() > metadata.arrays.len() {
-        anyhow::bail!(
-            "{} slab path(s) given but metadata records only {} array(s)",
-            slab_paths.len(),
-            metadata.arrays.len()
-        );
+
+    // Every document has to agree on the slot size: it is the unit the extent
+    // maps are written in, and two slabs disagreeing about it is not something
+    // to average out.
+    for (path, doc) in slab_paths.iter().zip(&embedded) {
+        if let Some(d) = doc {
+            if d.extent_size != extent_size {
+                anyhow::bail!(
+                    "slab {path} records a {}-byte extent and slab {} records {extent_size}",
+                    d.extent_size,
+                    slab_paths[primary.unwrap_or(0)]
+                );
+            }
+        }
     }
 
     // 3. Attach the slabs non-destructively (no reformat) and restore volumes.
     //    Runtime changes go back where the metadata came from.
-    let mut mgr = if source.starts_with("slab ") {
-        VolumeManager::new(metadata.extent_size)
+    let mut mgr = if from_slabs {
+        VolumeManager::new(extent_size)
     } else {
-        VolumeManager::with_data_dir(metadata.extent_size, meta_dir.clone())?
+        VolumeManager::with_data_dir(extent_size, meta_dir.clone())?
     };
-    let mut metadata_slab = None;
-    for ((path, rec), slab) in slab_paths.iter().zip(&metadata.arrays).zip(slabs) {
-        if metadata_slab.is_none() && slab.has_metadata_region() {
-            metadata_slab = Some(slab.slab_id());
+    // Array ids: a slab that describes itself names its own; one that does
+    // not falls back to the positional pairing the single-document layout
+    // used, taking the next unclaimed record.
+    let fallback: Vec<RaidArrayId> = embedded[primary.unwrap_or(0)]
+        .as_ref()
+        .map(|d| d.arrays.iter().map(|a| a.array_id).collect())
+        .unwrap_or_default();
+    let mut claimed: Vec<RaidArrayId> = embedded
+        .iter()
+        .filter_map(|d| d.as_ref().and_then(|d| d.arrays.first()).map(|a| a.array_id))
+        .collect();
+    let mut metadata_slabs = Vec::new();
+    for ((path, slab), doc) in slab_paths.iter().zip(slabs).zip(&embedded) {
+        let array_id = match doc.as_ref().and_then(|d| d.arrays.first()) {
+            Some(rec) => rec.array_id,
+            None => {
+                let next = *fallback.iter().find(|a| !claimed.contains(a)).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "slab {path} carries no metadata of its own and the record names no \
+                         further array to pair it with"
+                    )
+                })?;
+                claimed.push(next);
+                next
+            }
+        };
+        let role = slab.role();
+        if slab.has_metadata_region() {
+            metadata_slabs.push(slab.slab_id());
         }
-        mgr.attach_slab(rec.array_id, slab)
+        mgr.attach_slab(array_id, slab)
             .await
             .map_err(|e| anyhow::anyhow!("attach slab {path}: {e}"))?;
-        println!("Attached slab {path} (array {})", rec.array_id);
+        println!("Attached {role} slab {path} (array {array_id})");
     }
-    if let Some(id) = metadata_slab {
-        mgr.persist_to_slab(id);
+    if !metadata_slabs.is_empty() {
+        mgr.persist_to_slabs(metadata_slabs);
     }
     mgr.restore().await?;
 
@@ -3620,9 +3756,27 @@ async fn handle_boot_local(
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     if let Some(disk) = local_disk {
         let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // The target is about to be formatted. An operator supplies a path,
+        // and a path proves nothing about what is on the device — so ask the
+        // device (#88). A reinstall is exactly "boot a fresh image and flow
+        // over onto the disk the previous install was on", and that disk is
+        // where this node's CA and its ServiceAccount signing key live.
+        if let Some(what) = data_slab_on(disk).await? {
+            anyhow::bail!(
+                "refusing to format {disk} for flow-over: {what}. That partition holds this \
+                 node's identity — its CA key and its ServiceAccount signing key — and nothing \
+                 can mint it again. Point --local-disk at the system partition, or at a drive \
+                 that carries no data slab"
+            );
+        }
+        // Nor may a data slab be *drained* into the system disk: moving those
+        // extents puts identity back in the half the next image replaces.
         let source_slabs: Vec<_> = {
             let reg = mgr.registry().read().await;
-            reg.iter().map(|(id, _)| *id).collect()
+            reg.iter()
+                .filter(|(_, s)| !s.is_data())
+                .map(|(id, _)| *id)
+                .collect()
         };
         let dest_dev: Arc<dyn BlockDevice> =
             Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);

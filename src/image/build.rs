@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::drive::filedev::FileDevice;
 use crate::drive::partition::PartitionDevice;
-use crate::drive::slab::{auto_metadata_bytes, Slab, SlabFormat, DEFAULT_SLOT_SIZE};
+use crate::drive::slab::{auto_metadata_bytes, Slab, SlabFormat, SlabRole, DEFAULT_SLOT_SIZE};
 use crate::drive::BlockDevice;
 use crate::mgmt::config::parse_size;
 use crate::pallet::format::{parse_member_kind, parse_pallet_kind, MemberKind, PalletKind};
@@ -27,7 +27,10 @@ use crate::placement::topology::StorageTier;
 use crate::raid::RaidArrayId;
 use crate::volume::{VolumeId, VolumeManager};
 
-use super::{type_guid, EspSpec, GoldenSpec, ImageError, ImageSpec, MemberEntry, PalletEntry, Result};
+use super::{
+    type_guid, EspSpec, GoldenSpec, ImageError, ImageSpec, MemberEntry, PalletEntry, Result,
+    SlabPartition,
+};
 
 /// Partitions are 1 MiB aligned, as everywhere else.
 const ALIGN: u64 = 1024 * 1024;
@@ -149,6 +152,9 @@ impl ImageBuilder {
                 },
             };
             total += align_up(size, ALIGN);
+        }
+        if let Some(data) = &self.spec.data_slab {
+            total += align_up(size_of(&data.size)?.unwrap_or(64 * ALIGN), ALIGN);
         }
         if let Some(slab) = &self.spec.slab {
             total += align_up(size_of(&slab.size)?.unwrap_or(64 * ALIGN), ALIGN);
@@ -364,58 +370,112 @@ impl ImageBuilder {
             });
         }
 
-        // 4. The mutable end.
-        if let Some(slab) = &self.spec.slab {
-            let size = match size_of(&slab.size)? {
-                Some(s) => align_up(s, ALIGN),
-                None => gpt.largest_free_bytes() / ALIGN * ALIGN,
-            };
-            if size == 0 {
+        // 4. The mutable end — the data slab first, then the system slab.
+        //
+        //    That order is deliberate. The system slab is the half an image
+        //    replaces, and it is the half that says `rest`; putting it last
+        //    means growing it across a release does not move the partition
+        //    holding the node's identity (#88).
+        if let Some(data) = &self.spec.data_slab {
+            if is_rest(&data.size) {
                 return Err(ImageError::Spec(
-                    "no room left for the slab; give the image a larger `size`".into(),
+                    "the data slab cannot take the `rest` of the image: it is allocated before                      the system slab, so `rest` would leave the system slab nothing. Give it an                      explicit size"
+                        .into(),
                 ));
             }
-            let name = slab.name.clone().unwrap_or_else(|| "stormblock".to_string());
-            let slot = gpt.allocate(&name, type_guid::SLAB, size, 0)?;
-            gpt.write(&device).await?;
-            let start = gpt.entries[slot].start_bytes(lba);
-            let len = gpt.entries[slot].size_bytes(lba);
-            let part = Arc::new(PartitionDevice::new(device.clone(), start, len)?);
-            let tier = slab
-                .tier
-                .as_deref()
-                .map(parse_tier)
-                .transpose()?
-                .unwrap_or(StorageTier::Hot);
-            let slot_size = slab.slot_size.unwrap_or(DEFAULT_SLOT_SIZE);
-            // The slab keeps its own volumes.dat: an image has no filesystem
-            // to keep one in, and a slab whose contents are only described
-            // somewhere else is a slab that boots to "no volume metadata".
-            let meta_bytes = match size_of(&slab.meta_size)? {
-                Some(b) => b,
-                None => auto_metadata_bytes(len, slot_size),
-            };
-            let formatted = Slab::format_with(
-                part,
-                SlabFormat::new(slot_size, tier).with_metadata(meta_bytes),
-            )
-            .await?;
-            let volumes = self.fill_slab(&device, formatted, &slab.goldens).await?;
-            report.partitions.push(PartitionReport {
-                index: slot,
-                name,
-                kind: "slab".into(),
-                start_bytes: start,
-                size_bytes: len,
-                pallet_id: None,
-                pallet_version: None,
-                verified: None,
-                volumes,
-            });
+            if data.size.is_none() && self.spec.slab.is_some() {
+                return Err(ImageError::Spec(
+                    "[data_slab] needs an explicit `size` when the image also has a [slab] — an                      identity partition is not something to size by guess"
+                        .into(),
+                ));
+            }
+            let part = self
+                .lay_slab(&device, &mut gpt, lba, data, SlabRole::Data)
+                .await?;
+            report.partitions.push(part);
+        }
+        if let Some(slab) = &self.spec.slab {
+            let part = self
+                .lay_slab(&device, &mut gpt, lba, slab, SlabRole::System)
+                .await?;
+            report.partitions.push(part);
         }
 
         device.flush().await?;
         Ok(report)
+    }
+
+    /// Allocate one slab partition, format it, and fill it with its goldens.
+    ///
+    /// Both slabs go through here: a data slab differs from a system slab in
+    /// its GPT type GUID and the role byte in its header, and in nothing else.
+    /// It is a slab, holding volumes, built by the same code — what the role
+    /// buys is that a reinstall can tell the two apart from the disk rather
+    /// than from a path someone typed (#88).
+    async fn lay_slab(
+        &self,
+        device: &Arc<dyn BlockDevice>,
+        gpt: &mut Gpt,
+        lba: u32,
+        slab: &SlabPartition,
+        role: SlabRole,
+    ) -> Result<PartitionReport> {
+        let (type_guid, default_name, kind) = match role {
+            SlabRole::System => (type_guid::SLAB, "stormblock", "slab"),
+            SlabRole::Data => (type_guid::SLAB_DATA, "stormblock-data", "data-slab"),
+        };
+        let size = match size_of(&slab.size)? {
+            Some(s) => align_up(s, ALIGN),
+            None => gpt.largest_free_bytes() / ALIGN * ALIGN,
+        };
+        if size == 0 {
+            return Err(ImageError::Spec(format!(
+                "no room left for the {kind}; give the image a larger `size`"
+            )));
+        }
+        let name = slab.name.clone().unwrap_or_else(|| default_name.to_string());
+        let slot = gpt.allocate(&name, type_guid, size, 0)?;
+        gpt.write(device).await?;
+        let start = gpt.entries[slot].start_bytes(lba);
+        let len = gpt.entries[slot].size_bytes(lba);
+        let part = Arc::new(PartitionDevice::new(device.clone(), start, len)?);
+        let tier = slab
+            .tier
+            .as_deref()
+            .map(parse_tier)
+            .transpose()?
+            .unwrap_or(StorageTier::Hot);
+        let slot_size = slab.slot_size.unwrap_or(DEFAULT_SLOT_SIZE);
+        // The slab keeps its own volumes.dat: an image has no filesystem
+        // to keep one in, and a slab whose contents are only described
+        // somewhere else is a slab that boots to "no volume metadata".
+        //
+        // For the data slab this is not a convenience but the whole point:
+        // its record of itself has to survive the system slab being replaced,
+        // so it cannot be kept in the system slab's copy.
+        let meta_bytes = match size_of(&slab.meta_size)? {
+            Some(b) => b,
+            None => auto_metadata_bytes(len, slot_size),
+        };
+        let formatted = Slab::format_with(
+            part,
+            SlabFormat::new(slot_size, tier)
+                .with_metadata(meta_bytes)
+                .with_role(role),
+        )
+        .await?;
+        let volumes = self.fill_slab(device, formatted, &slab.goldens).await?;
+        Ok(PartitionReport {
+            index: slot,
+            name,
+            kind: kind.into(),
+            start_bytes: start,
+            size_bytes: len,
+            pallet_id: None,
+            pallet_version: None,
+            verified: None,
+            volumes,
+        })
     }
 
     /// Lay the goldens into the freshly formatted slab, take the first clone
@@ -649,6 +709,9 @@ impl ImageBuilder {
         n += self.spec.pallets.iter().filter(|p| is_rest(&p.size)).count();
         n += self.spec.partitions.iter().filter(|p| is_rest(&p.size)).count();
         if self.spec.slab.as_ref().is_some_and(|s| is_rest(&s.size)) {
+            n += 1;
+        }
+        if self.spec.data_slab.as_ref().is_some_and(|s| is_rest(&s.size)) {
             n += 1;
         }
         n
@@ -968,6 +1031,9 @@ pub struct SlabContents {
     /// list is then empty because there is none to read, not because the slab
     /// is empty.
     pub self_describing: bool,
+    /// `system` or `data` — what the slab is for, and therefore whether an
+    /// install may reformat it (#88).
+    pub role: String,
     pub volumes: Vec<VolumeReport>,
 }
 
@@ -984,7 +1050,7 @@ pub async fn slabs_in(image: &Path) -> Result<Vec<SlabContents>> {
     let gpt = Gpt::read(&dev).await?;
     let mut out = Vec::new();
     for (index, entry) in gpt.partitions() {
-        if entry.type_guid != type_guid::SLAB {
+        if entry.type_guid != type_guid::SLAB && entry.type_guid != type_guid::SLAB_DATA {
             continue;
         }
         let start = entry.start_bytes(gpt.block_size);
@@ -1019,6 +1085,7 @@ pub async fn slabs_in(image: &Path) -> Result<Vec<SlabContents>> {
             total_slots: slab.total_slots(),
             free_slots: slab.free_slots(),
             self_describing: slab.has_metadata_region(),
+            role: slab.role().to_string(),
             volumes,
         });
     }

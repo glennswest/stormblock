@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::placement::domain::FailureDomain;
 use crate::placement::topology::StorageTier;
-use super::slab::{Slab, SlabId};
+use super::slab::{Slab, SlabId, SlabRole};
 
 /// Registry of all slabs known to this node.
 pub struct SlabRegistry {
@@ -209,22 +209,39 @@ impl SlabRegistry {
         taken.iter().filter(|t| !t.is_empty()).any(|t| d.same_at(t, rung))
     }
 
+    /// What a slab is for. A slab that is not registered reads as `System`,
+    /// which is what every slab formatted before roles existed is.
+    pub fn role_of(&self, id: &SlabId) -> SlabRole {
+        self.slabs.get(id).map(|s| s.role()).unwrap_or_default()
+    }
+
     /// The slab on `tier` with the most free slots whose domain at `rung`
     /// differs from every one in `taken` — the allocation step of a
     /// redundancy policy. `None` means the policy cannot be met on this
     /// tier, which the caller treats as a boundary, not a hint.
+    ///
+    /// `role` is a hard filter, not a preference. A system volume that
+    /// spilled one copy-on-write extent into the data slab would be silently
+    /// orphaned by the next reimage, and a data volume that spilled one into
+    /// the system slab would lose that extent to the same reimage — which is
+    /// the failure #88 is about, one extent at a time instead of all at once.
     pub fn best_slab_for_tier_apart_from(
         &self,
         tier: StorageTier,
         taken: &[FailureDomain],
         rung: &str,
+        role: SlabRole,
     ) -> Option<SlabId> {
         self.tier_index
             .get(&tier)?
             .iter()
             .filter_map(|id| {
                 let free = self.allocatable(id)?;
-                if self.collides(id, taken, rung) { None } else { Some((*id, free)) }
+                if self.role_of(id) != role || self.collides(id, taken, rung) {
+                    None
+                } else {
+                    Some((*id, free))
+                }
             })
             .max_by_key(|(_, free)| *free)
             .map(|(id, _)| id)
@@ -233,9 +250,15 @@ impl SlabRegistry {
     /// How many distinct domains at `rung` have a slab with free space, on
     /// any tier — what a create checks before promising a policy.
     pub fn distinct_domains_with_space(&self, rung: &str) -> usize {
+        self.distinct_domains_with_space_in_role(rung, SlabRole::System)
+    }
+
+    /// The same, counting only slabs of one role — the space a volume of
+    /// that role can actually reach.
+    pub fn distinct_domains_with_space_in_role(&self, rung: &str, role: SlabRole) -> usize {
         let mut seen: Vec<FailureDomain> = Vec::new();
         for id in self.slabs.keys() {
-            if self.allocatable(id).is_none() {
+            if self.allocatable(id).is_none() || self.role_of(id) != role {
                 continue;
             }
             let d = self.domain_of(id);
@@ -276,13 +299,23 @@ impl SlabRegistry {
         self.tier_index.get(&tier).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Find the slab on the given tier with the most free slots.
+    /// Find the system slab on the given tier with the most free slots.
     /// Returns None if no slabs on that tier have free space.
     pub fn best_slab_for_tier(&self, tier: StorageTier) -> Option<SlabId> {
+        self.best_slab_for_tier_in_role(tier, SlabRole::System)
+    }
+
+    /// The same, for a named role.
+    pub fn best_slab_for_tier_in_role(&self, tier: StorageTier, role: SlabRole) -> Option<SlabId> {
         self.tier_index
             .get(&tier)?
             .iter()
-            .filter_map(|id| Some((*id, self.allocatable(id)?)))
+            .filter_map(|id| {
+                if self.role_of(id) != role {
+                    return None;
+                }
+                Some((*id, self.allocatable(id)?))
+            })
             .max_by_key(|(_, free)| *free)
             .map(|(id, _)| id)
     }
@@ -294,9 +327,10 @@ impl SlabRegistry {
                 return Some(id);
             }
         }
-        // Fallback: any slab with space
+        // Fallback: any system slab with space
         self.slabs
             .keys()
+            .filter(|id| self.role_of(id) == SlabRole::System)
             .filter_map(|id| Some((*id, self.allocatable(id)?)))
             .max_by_key(|(_, free)| *free)
             .map(|(id, _)| id)

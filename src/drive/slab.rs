@@ -191,6 +191,56 @@ impl Slot {
     }
 }
 
+/// What a slab is for, and therefore what may reformat it.
+///
+/// A node's mutable end is two slabs, not one. The **system** slab holds the
+/// goldens and the clones the node runs from: an image replaces it wholesale,
+/// and that is the upgrade. The **data** slab holds what the node minted and
+/// nothing else can mint again — its CA private key, its ServiceAccount token
+/// signing key, its `-data` volumes. Reformatting the first is an install;
+/// reformatting the second invalidates every token the cluster ever issued,
+/// and the node comes up looking healthy (#88).
+///
+/// The distinction has to be readable *from the disk*, because the operator
+/// supplies a path and a path proves nothing. It is recorded twice: here, in
+/// a byte v1 left as padding, and in the partition's GPT type GUID
+/// (`image::type_guid::SLAB_DATA`) so a whole drive can be judged without
+/// opening every partition. A slab formatted before this reads as `System`,
+/// which is what every slab in the field is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlabRole {
+    /// Goldens and their clones. An image build replaces this.
+    #[default]
+    System,
+    /// Identity and state. Nothing in an install path may format this.
+    Data,
+}
+
+impl SlabRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SlabRole::System => "system",
+            SlabRole::Data => "data",
+        }
+    }
+
+    /// Parse a spelling from a spec or a command line.
+    pub fn parse(s: &str) -> Option<SlabRole> {
+        match s.to_ascii_lowercase().as_str() {
+            "system" | "" => Some(SlabRole::System),
+            "data" => Some(SlabRole::Data),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SlabRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// On-disk slab header (128 bytes used of 4096).
 #[derive(Debug, Clone)]
 struct SlabHeader {
@@ -205,6 +255,9 @@ struct SlabHeader {
     update_time: u64,
     tier: StorageTier,
     flags: u8,
+    /// What the slab is for. Written into a v1 pad byte, so a slab formatted
+    /// before this reads as `System` rather than as garbage.
+    role: SlabRole,
     /// Byte offset of the embedded volume-metadata region, 0 when the slab
     /// has none. Written into what v1 left reserved, so a slab formatted
     /// before this reads as "no region" rather than as garbage, and a slab
@@ -233,7 +286,8 @@ impl SlabHeader {
         buf[92..100].copy_from_slice(&self.update_time.to_le_bytes());
         buf[100] = self.tier as u8;
         buf[101] = self.flags;
-        // bytes 102..104 pad
+        buf[102] = self.role as u8;
+        // byte 103 pad
         buf[104..112].copy_from_slice(&self.meta_offset.to_le_bytes());
         buf[112..120].copy_from_slice(&self.meta_size.to_le_bytes());
         // bytes 120..124 reserved
@@ -284,6 +338,10 @@ impl SlabHeader {
             _ => StorageTier::Cold,
         };
         let flags = data[101];
+        let role = match data[102] {
+            1 => SlabRole::Data,
+            _ => SlabRole::System,
+        };
         let meta_offset = u64::from_le_bytes(data[104..112].try_into().unwrap());
         let meta_size = u64::from_le_bytes(data[112..120].try_into().unwrap());
 
@@ -299,6 +357,7 @@ impl SlabHeader {
             update_time,
             tier,
             flags,
+            role,
             meta_offset,
             meta_size,
             checksum: stored_crc,
@@ -316,11 +375,22 @@ pub struct SlabFormat {
     /// self-describing, which is right wherever a data directory holds
     /// `volumes.dat` instead.
     pub metadata_bytes: u64,
+    /// What the slab is for. [`SlabRole::System`] unless said otherwise —
+    /// a data slab is the exception a caller has to ask for.
+    pub role: SlabRole,
 }
 
 impl SlabFormat {
     pub fn new(slot_size: u64, tier: StorageTier) -> Self {
-        SlabFormat { slot_size, tier, metadata_bytes: 0 }
+        SlabFormat { slot_size, tier, metadata_bytes: 0, role: SlabRole::System }
+    }
+
+    /// Format this slab as identity storage: nothing on an install path may
+    /// reformat it, and the role travels on the disk rather than in the
+    /// caller's memory of which path it handed over (#88).
+    pub fn with_role(mut self, role: SlabRole) -> Self {
+        self.role = role;
+        self
     }
 
     /// Reserve an explicit number of bytes for embedded metadata.
@@ -439,6 +509,7 @@ impl Slab {
             update_time: now,
             tier,
             flags: 0,
+            role: opts.role,
             meta_offset,
             meta_size,
             checksum: 0,
@@ -914,6 +985,17 @@ impl Slab {
     /// Storage tier.
     pub fn tier(&self) -> StorageTier {
         self.tier
+    }
+
+    /// What the slab is for — see [`SlabRole`].
+    pub fn role(&self) -> SlabRole {
+        self.header.role
+    }
+
+    /// Whether this slab holds identity and state rather than goldens, and so
+    /// must survive every reimage and every flow-over (#88).
+    pub fn is_data(&self) -> bool {
+        self.header.role == SlabRole::Data
     }
 
     /// Slot size in bytes.

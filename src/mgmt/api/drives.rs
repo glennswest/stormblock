@@ -416,8 +416,8 @@ async fn start_drain(State(state): State<Arc<AppState>>, Path(id): Path<String>)
     }
     {
         let vm = state.volume_manager.lock().await;
-        if let Some(meta) = vm.metadata_slab() {
-            if slabs.contains(&meta) {
+        if let Some(meta) = slabs.iter().find(|s| vm.is_metadata_slab(s)) {
+            {
                 return ApiError::conflict(format!(
                     "{path} carries slab {} which holds the volume metadata; a drain would leave the \
                      record with no home. Move the metadata first",
@@ -521,7 +521,7 @@ async fn drive_health(
         let running = state.drains.read().await.is_running(&path).await;
         let holds_meta = {
             let vm = state.volume_manager.lock().await;
-            vm.metadata_slab().is_some_and(|m| slabs.contains(&m))
+            slabs.iter().any(|s| vm.is_metadata_slab(s))
         };
         if !running && !holds_meta {
             state.drains.write().await.start(

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
 use crate::drive::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, SmartData};
-use crate::drive::slab::SlabId;
+use crate::drive::slab::{SlabId, SlabRole};
 use crate::drive::slab_registry::SlabRegistry;
 use crate::placement::domain::FailureDomain;
 use crate::placement::topology::StorageTier;
@@ -68,6 +68,14 @@ impl fmt::Display for VolumePurpose {
 pub struct PlacementPolicy {
     pub preferred_tier: StorageTier,
     pub tier_fallback: Vec<StorageTier>,
+    /// Which half of the node's mutable storage this volume lives in.
+    ///
+    /// A hard boundary, and the only one that survives an install: a
+    /// `System` volume never allocates in a data slab and a `Data` volume
+    /// never allocates in a system slab, so replacing the goldens cannot
+    /// take a copy-on-write extent of the node's identity with it (#88).
+    /// Tier is a preference with a fallback chain; this is not.
+    pub role: SlabRole,
 }
 
 impl Default for PlacementPolicy {
@@ -75,6 +83,7 @@ impl Default for PlacementPolicy {
         PlacementPolicy {
             preferred_tier: StorageTier::Hot,
             tier_fallback: vec![StorageTier::Warm, StorageTier::Cool, StorageTier::Cold],
+            role: SlabRole::System,
         }
     }
 }
@@ -346,6 +355,11 @@ impl ThinVolumeHandle {
         }
     }
 
+    /// Which half of the node's mutable storage this volume allocates from.
+    pub fn placement_role(&self) -> SlabRole {
+        self.placement.role
+    }
+
     pub fn is_sealed(&self) -> bool {
         self.sealed.load(Ordering::Relaxed)
     }
@@ -604,7 +618,9 @@ impl ThinVolumeHandle {
                 for t in &tried {
                     taken.push(registry.domain_of(t));
                 }
-                let Some(slab_id) = registry.best_slab_for_tier_apart_from(tier, &taken, rung) else {
+                let Some(slab_id) =
+                    registry.best_slab_for_tier_apart_from(tier, &taken, rung, self.placement.role)
+                else {
                     break;
                 };
                 if self.is_failed(slab_id) {
@@ -628,7 +644,8 @@ impl ThinVolumeHandle {
             }
         }
         Err(DriveError::Other(anyhow::anyhow!(
-            "no space: no slab apart from {} domain(s) at rung '{rung}'",
+            "no space: no {} slab apart from {} domain(s) at rung '{rung}'",
+            self.placement.role,
             apart_from.len()
         )))
     }

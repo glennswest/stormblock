@@ -283,7 +283,7 @@ async fn delete_volume(State(state): State<Arc<AppState>>, Path(name): Path<Stri
 
 async fn all_slabs(state: &AppState) -> Vec<Value> {
     let reg = state.slab_registry.read().await;
-    let meta = state.volume_manager.lock().await.metadata_slab();
+    let meta: Vec<_> = state.volume_manager.lock().await.metadata_slabs().to_vec();
     let mut items: Vec<Value> = reg
         .iter()
         .map(|(id, slab)| {
@@ -292,6 +292,7 @@ async fn all_slabs(state: &AppState) -> Vec<Value> {
             let mut labels = BTreeMap::new();
             labels.insert("storm.io/tier".to_string(), slab.tier().to_string());
             labels.insert("storm.io/drive".to_string(), dev.path.clone());
+            labels.insert("storm.io/slab-role".to_string(), slab.role().to_string());
             object(
                 "Slab",
                 &key,
@@ -299,6 +300,7 @@ async fn all_slabs(state: &AppState) -> Vec<Value> {
                 labels,
                 json!({
                     "tier": slab.tier().to_string(),
+                    "role": slab.role().to_string(),
                     "slotSize": slab.slot_size(),
                     "domain": reg.domain_of(id).to_string(),
                     "drive": { "path": dev.path, "serial": dev.serial, "uuid": dev.uuid },
@@ -310,7 +312,7 @@ async fn all_slabs(state: &AppState) -> Vec<Value> {
                     "capacityBytes": slab.total_slots() * slab.slot_size(),
                     "freeBytes": slab.free_slots() * slab.slot_size(),
                     "quarantined": reg.is_quarantined(id),
-                    "holdsMetadata": meta == Some(*id),
+                    "holdsMetadata": meta.contains(id),
                 }),
             )
         })
@@ -450,7 +452,10 @@ async fn patch_drive(
                         .filter(|(_, s)| Arc::ptr_eq(s.device(), &dev) || s.device().id().path == path)
                         .map(|(id, _)| *id)
                         .collect();
-                    let holds_meta = state.volume_manager.lock().await.metadata_slab().is_some_and(|m| slabs.contains(&m));
+                    let holds_meta = {
+                        let vm = state.volume_manager.lock().await;
+                        slabs.iter().any(|s| vm.is_metadata_slab(s))
+                    };
                     if holds_meta {
                         return status_error(StatusCode::CONFLICT, "Conflict", format!("{path} holds the volume metadata slab; move it first"));
                     }
