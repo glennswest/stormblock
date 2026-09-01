@@ -93,7 +93,9 @@ pub async fn from_image_with(raw: &Path, out: &Path, opts: IsoOptions) -> Result
     let mut cursor = FIRST_FILE_SECTOR * ISO_SECTOR;
     let mut n = 0;
     for (_, e) in gpt.partitions() {
-        if e.type_guid == type_guid::SLAB && !opts.include_slab {
+        if (e.type_guid == type_guid::SLAB || e.type_guid == type_guid::SLAB_DATA)
+            && !opts.include_slab
+        {
             tracing::info!(
                 "leaving the slab '{}' out of the ISO ({} bytes of empty space); \
                  pass include_slab to carry it",
