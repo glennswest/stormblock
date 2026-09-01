@@ -32,6 +32,14 @@ async fn setup_state(dir: &TempDir) -> Arc<AppState> {
 
     let mut config = StormBlockConfig::default();
     config.management.node_name = Some("w1".to_string());
+    // These tests are about the /v1 contract, and the contract's transport is
+    // NVMe-oF/TCP. The local ublk fast path is on by default and fires
+    // whenever the master is on this node and `ublk_drv` is loaded — so
+    // leaving it on made `attach` answer `ublk` on a Linux box with the module
+    // and `nvme_tcp` on one without, which is a property of the build host
+    // rather than of the code under test. `should_offer_ublk` is unit-tested
+    // where it lives.
+    config.management.ublk_transport = false;
     config
         .management
         .topology
