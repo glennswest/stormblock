@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### 2026-09-01
+- **fix:** an image spec that names a section the builder does not know is
+  **refused**, not ignored (#81). `[[slab.clone]]` where `[[slab.golden]]` was
+  meant built cleanly, reported success, and produced an image with two
+  volumes missing; the symptom arrived one image, one copy and one boot later
+  as a root device that never appeared, pointing at the mount list rather than
+  at the spec. A spec is hand-edited and has no schema anywhere else. The cost
+  of silence is higher now that `[data_slab]` exists: a misspelt section there
+  puts the node's identity back in the partition an install replaces.
+- **fix:** `evacuate_slab` **skips** an extent it cannot move instead of
+  stopping at it, and returns which ones were left behind and why (#67). The
+  comment said "skip this extent to avoid infinite loop" and the code broke
+  out of the loop — the worst behaviour available for the case the call
+  exists to serve, since one unreadable extent abandoned everything still
+  readable on a failing drive. Skipping is also what actually avoids the
+  loop: a failed extent is still in the GEM on the next pass.
+- **fix(test):** the `/v1` attach tests pin the transport to nvme-tcp. The
+  local ublk fast path is on by default, so `v1_rw_attach_only_on_master`
+  answered `ublk` on any Linux host with `ublk_drv` loaded and `nvme_tcp` on
+  one without — it was measuring the build host, not the contract.
+
 ## [v13.0.0] — 2026-09-01
 
 ### Added
