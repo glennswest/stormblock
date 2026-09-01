@@ -808,3 +808,132 @@ size = "rest"
     )
     .expect("a correct spec still parses");
 }
+
+/// #88 — a clone shares its source's slots, so cloning across the role
+/// boundary has to be a copy.
+///
+/// This is the residual hazard the split leaves behind, and it is quiet: a
+/// copy-on-write clone of a system golden is a *system* volume however it is
+/// named, so a `…-data` volume made that way is one an install replaces. The
+/// name is the only thing that says otherwise.
+///
+/// Two things are asserted. A plain clone stays in its source's half — which
+/// is correct, and is why the name cannot be trusted. And a clone that asks
+/// for the other role gets a real copy: its extents are in the data slab, it
+/// shares no slot with the golden, and reformatting the system slab leaves it
+/// readable.
+#[tokio::test]
+async fn cloning_across_the_role_boundary_copies_instead_of_sharing() {
+    use std::sync::Arc;
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::drive::BlockDevice;
+    use stormblock::fs::template::{clone_volume_unsealed_ok, CloneSpec};
+    use stormblock::placement::topology::StorageTier;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::VolumeManager;
+
+    let tmp = TempDir::new().unwrap();
+    let slot = 64 * 1024u64;
+    let mut mgr = VolumeManager::new(slot);
+    let mut made = Vec::new();
+    for (name, role) in [("system.slab", SlabRole::System), ("data.slab", SlabRole::Data)] {
+        let p = tmp.path().join(name);
+        std::fs::write(&p, vec![0u8; 8 * 1024 * 1024]).unwrap();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open(p.to_str().unwrap()).await.unwrap());
+        let slab = Slab::format_with(dev, SlabFormat::new(slot, StorageTier::Hot).with_role(role))
+            .await
+            .unwrap();
+        made.push((role, slab.slab_id()));
+        mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab).await.unwrap();
+    }
+    let system_slab = made.iter().find(|(r, _)| *r == SlabRole::System).unwrap().1;
+    let data_slab = made.iter().find(|(r, _)| *r == SlabRole::Data).unwrap().1;
+
+    // A blank golden in the system slab — the mistake this guards.
+    let golden = mgr.create_volume_any("blank.golden", 4 * slot).await.unwrap();
+    let payload = vec![0xC3u8; slot as usize];
+    {
+        let v = mgr.get_volume(&golden).unwrap();
+        v.write(0, &payload).await.unwrap();
+        v.write(2 * slot, &payload).await.unwrap();
+        v.flush().await.unwrap();
+    }
+    mgr.seal_volume(golden, None).await.unwrap();
+
+    let vm = Arc::new(tokio::sync::Mutex::new(mgr));
+    let slabs_of = |vm: Arc<tokio::sync::Mutex<VolumeManager>>, id| async move {
+        let m = vm.lock().await;
+        let gem = m.gem().read().await;
+        let mut s: Vec<_> = gem
+            .get_volume_map(&id)
+            .map(|x| x.all_legs().map(|l| l.slab_id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        s.sort_by_key(|x| x.0);
+        s.dedup();
+        s
+    };
+
+    // A plain clone shares the golden's slots, so it is in the golden's half.
+    // Calling it "-data" changes nothing, which is exactly the hazard.
+    let shared = clone_volume_unsealed_ok(&vm, golden, &CloneSpec::new("looks-like-data"))
+        .await
+        .unwrap();
+    assert_eq!(
+        slabs_of(vm.clone(), shared.volume_id).await,
+        vec![system_slab],
+        "a copy-on-write clone is in its source's half — the name is not a boundary"
+    );
+    assert_eq!(vm.lock().await.volume_role(&shared.volume_id), Some(SlabRole::System));
+
+    // Asking for the other role crosses properly: a copy, sharing nothing.
+    let mut spec = CloneSpec::new("really-data");
+    spec.role = Some(SlabRole::Data);
+    let crossed = clone_volume_unsealed_ok(&vm, golden, &spec).await.unwrap();
+    assert_eq!(
+        slabs_of(vm.clone(), crossed.volume_id).await,
+        vec![data_slab],
+        "the crossing left extents in the system slab"
+    );
+    assert_eq!(vm.lock().await.volume_role(&crossed.volume_id), Some(SlabRole::Data));
+    assert_eq!(
+        vm.lock().await.parent(&crossed.volume_id),
+        Some(golden),
+        "a copy is still descended from what it was copied from"
+    );
+
+    // The content came across, holes included — a copy is not a re-blank.
+    {
+        let m = vm.lock().await;
+        let v = m.get_volume(&crossed.volume_id).unwrap();
+        let mut buf = vec![0u8; slot as usize];
+        v.read(0, &mut buf).await.unwrap();
+        assert_eq!(buf, payload, "the copy lost the first extent");
+        v.read(2 * slot, &mut buf).await.unwrap();
+        assert_eq!(buf, payload, "the copy lost the third extent");
+        v.read(slot, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "the hole came back as data");
+    }
+
+    // And it survives the system slab going away, which the shared clone
+    // would not: dropping every slot the golden owns leaves the copy intact.
+    {
+        let mut m = vm.lock().await;
+        m.delete_volume(golden).await.unwrap();
+        m.delete_volume(shared.volume_id).await.unwrap();
+        let reg = m.registry().read().await;
+        assert_eq!(
+            reg.get(&system_slab).unwrap().allocated_slots(),
+            0,
+            "the system slab still holds something the copy might need"
+        );
+    }
+    {
+        let m = vm.lock().await;
+        let v = m.get_volume(&crossed.volume_id).unwrap();
+        let mut buf = vec![0u8; slot as usize];
+        v.read(0, &mut buf).await.unwrap();
+        assert_eq!(buf, payload, "the copy depended on the system slab after all");
+    }
+}
