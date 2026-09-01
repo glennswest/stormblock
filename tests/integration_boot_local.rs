@@ -159,3 +159,68 @@ async fn boot_local_rejects_unknown_volume_and_missing_meta() {
     assert!(text.contains("volumes.dat"), "missing-meta error unclear:\n{text}");
     assert!(text.contains("carries any"), "missing-meta error unclear:\n{text}");
 }
+
+/// #88 — flow-over must not format the disk the node's identity is on.
+///
+/// A reinstall is "boot a fresh image, then flow over onto the disk the
+/// previous install was on". That disk holds tier-0: the node CA private key
+/// and the ServiceAccount token signing key, neither of which anything can
+/// mint again. The operator supplies a path, and a path proves nothing — so
+/// the check is asked of the device.
+#[tokio::test]
+async fn flow_over_refuses_a_target_that_carries_a_data_slab() {
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::placement::topology::StorageTier;
+
+    let tmp = TempDir::new().unwrap();
+    let (slab, _meta, _uuid) = build_artifact(&tmp, "boot-machine-a").await;
+
+    // The disk the previous install left behind: a bare data slab.
+    let identity = tmp.path().join("identity.disk");
+    let dev = FileDevice::open_with_capacity(identity.to_str().unwrap(), 32 * 1024 * 1024)
+        .await
+        .unwrap();
+    Slab::format_with(
+        Arc::new(dev),
+        SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::Data),
+    )
+    .await
+    .unwrap();
+
+    let (ok, text) = run_boot_local(&[
+        "--slab",
+        slab.to_str().unwrap(),
+        "--volume",
+        "boot-machine-a",
+        "--local-disk",
+        identity.to_str().unwrap(),
+    ]);
+    assert!(!ok, "flow-over onto a data slab must fail:\n{text}");
+    assert!(text.contains("refusing to format"), "unclear refusal:\n{text}");
+    assert!(text.contains("is itself a data slab"), "did not name why:\n{text}");
+
+    // The slab is still there: the refusal happened before the format.
+    let reopened = Slab::open(Arc::new(
+        FileDevice::open(identity.to_str().unwrap()).await.unwrap(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(reopened.role(), SlabRole::Data, "the target was formatted anyway");
+
+    // A plain disk is still a fine target — the guard is about data slabs,
+    // not about caution in general.
+    let plain = tmp.path().join("plain.disk");
+    FileDevice::open_with_capacity(plain.to_str().unwrap(), 32 * 1024 * 1024)
+        .await
+        .unwrap();
+    let (_ok, text) = run_boot_local(&[
+        "--slab",
+        slab.to_str().unwrap(),
+        "--volume",
+        "boot-machine-a",
+        "--local-disk",
+        plain.to_str().unwrap(),
+        "--check",
+    ]);
+    assert!(!text.contains("refusing to format"), "guard fired on a blank disk:\n{text}");
+}
