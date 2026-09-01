@@ -199,6 +199,18 @@ pub async fn migrate_to_slab(
         "slab migration complete: {} migrated, {} failed",
         result.migrated, result.failed
     );
+    // Name what was left behind. An evacuation runs against a slab that is
+    // going away, so an extent that did not move is data about to be lost,
+    // and a count does not say which (#67).
+    for f in &result.failures {
+        tracing::error!(
+            "slab migration left {} {} of volume {} behind: {}",
+            if f.parity { "stripe" } else { "extent" },
+            f.vext_idx,
+            f.volume_id,
+            f.error
+        );
+    }
 
     Ok(SlabMigrateResult {
         source_slab,

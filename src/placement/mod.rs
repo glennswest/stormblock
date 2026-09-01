@@ -37,7 +37,7 @@ pub mod domain;
 pub mod topology;
 pub mod cold;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -116,6 +116,21 @@ pub struct EvacuateResult {
     pub slab_id: SlabId,
     pub migrated: u64,
     pub failed: u64,
+    /// The extents that could not be moved, and why. An evacuation is run
+    /// against a drive that is on its way out, so *which* extents were left
+    /// behind is the whole answer: it names what is about to be lost, and a
+    /// bare count does not (#67).
+    pub failures: Vec<EvacuateFailure>,
+}
+
+/// One extent an evacuation could not move.
+#[derive(Debug, Clone)]
+pub struct EvacuateFailure {
+    pub volume_id: VolumeId,
+    /// The virtual extent, or the stripe index when `parity` is set.
+    pub vext_idx: u64,
+    pub parity: bool,
+    pub error: String,
 }
 
 /// Strategy for rebalancing extents across slabs.
@@ -553,7 +568,15 @@ impl PlacementEngine {
         }
 
         let mut migrated = 0u64;
-        let mut failed = 0u64;
+        let mut failures: Vec<EvacuateFailure> = Vec::new();
+        // What actually prevents the infinite loop: an extent that failed is
+        // still in the GEM on the next pass, so it has to be *skipped*, not
+        // stopped at. The original code broke out of the loop instead, which
+        // is the worst behaviour available for the case this exists to serve
+        // — one unreadable extent abandoned everything still readable on a
+        // failing drive (#67).
+        let mut skip: HashSet<(VolumeId, u64)> = HashSet::new();
+        let mut skip_parity: HashSet<(VolumeId, u64)> = HashSet::new();
 
         loop {
             // Check shutdown
@@ -564,41 +587,61 @@ impl PlacementEngine {
 
             // Re-collect remaining extents each iteration (GEM changes as we migrate)
             let extents = gem.slab_extents(slab_id);
-            if let Some((vol_id, vext_idx, _loc)) = extents.first() {
-                match self.migrate_leg(gem, registry, *vol_id, *vext_idx, slab_id, None).await {
-                    Ok(_) => migrated += 1,
-                    Err(e) => {
-                        tracing::warn!(
-                            "placement: failed to evacuate vol={} vext={}: {}",
-                            vol_id, vext_idx, e
-                        );
-                        failed += 1;
-                        // Skip this extent to avoid infinite loop
-                        break;
-                    }
+            let next = extents
+                .iter()
+                .find(|(v, x, _)| !skip.contains(&(*v, *x)))
+                .map(|(v, x, _)| (*v, *x));
+            if let Some((vol_id, vext_idx)) = next {
+                if let Err(e) =
+                    self.migrate_leg(gem, registry, vol_id, vext_idx, slab_id, None).await
+                {
+                    tracing::warn!(
+                        "placement: failed to evacuate vol={} vext={}: {}",
+                        vol_id, vext_idx, e
+                    );
+                    skip.insert((vol_id, vext_idx));
+                    failures.push(EvacuateFailure {
+                        volume_id: vol_id,
+                        vext_idx,
+                        parity: false,
+                        error: e.to_string(),
+                    });
+                } else {
+                    migrated += 1;
                 }
                 continue;
             }
 
             let parity = gem.slab_parity(slab_id);
-            let Some((vol_id, stripe, _)) = parity.first() else { break };
-            match self.migrate_parity_leg(gem, registry, *vol_id, *stripe, slab_id, None).await {
-                Ok(_) => migrated += 1,
-                Err(e) => {
-                    tracing::warn!(
-                        "placement: failed to evacuate parity vol={} stripe={}: {}",
-                        vol_id, stripe, e
-                    );
-                    failed += 1;
-                    break;
-                }
+            let next = parity
+                .iter()
+                .find(|(v, s, _)| !skip_parity.contains(&(*v, *s)))
+                .map(|(v, s, _)| (*v, *s));
+            let Some((vol_id, stripe)) = next else { break };
+            if let Err(e) =
+                self.migrate_parity_leg(gem, registry, vol_id, stripe, slab_id, None).await
+            {
+                tracing::warn!(
+                    "placement: failed to evacuate parity vol={} stripe={}: {}",
+                    vol_id, stripe, e
+                );
+                skip_parity.insert((vol_id, stripe));
+                failures.push(EvacuateFailure {
+                    volume_id: vol_id,
+                    vext_idx: stripe,
+                    parity: true,
+                    error: e.to_string(),
+                });
+            } else {
+                migrated += 1;
             }
         }
 
         Ok(EvacuateResult {
             slab_id,
             migrated,
-            failed,
+            failed: failures.len() as u64,
+            failures,
         })
     }
 
@@ -1319,6 +1362,60 @@ mod tests {
         // Reverse index should point to new location
         assert!(gem.reverse_lookup(slab_a_id, slot).is_none());
         assert_eq!(gem.reverse_lookup(slab_b_id, result.dest_slot), Some((vol, 0)));
+
+        cleanup(&[p1, p2]);
+    }
+
+    /// #67 — one extent that cannot be moved must not abandon the rest.
+    ///
+    /// An evacuation is what runs against a drive on its way out. Stopping at
+    /// the first failure is the worst behaviour available there: everything
+    /// still readable is left on the failing drive. The extent is skipped,
+    /// the rest are moved, and the ones that were left behind are named.
+    #[tokio::test]
+    async fn an_extent_that_cannot_move_is_skipped_and_named() {
+        let (mut slab_a, p1) = make_slab(10 * 1024 * 1024, StorageTier::Hot).await;
+        let (slab_b, p2) = make_slab(10 * 1024 * 1024, StorageTier::Hot).await;
+        let slab_a_id = slab_a.slab_id();
+        let slab_b_id = slab_b.slab_id();
+        let vol = VolumeId::new();
+
+        let mut gem = GlobalExtentMap::new();
+        for i in 0..4 {
+            let slot = slab_a.allocate(vol, i).await.unwrap();
+            slab_a.write_slot(slot, 0, &vec![(i as u8 + 0x20); 4096]).await.unwrap();
+            gem.insert(vol, i, ExtentLocation::new(slab_a_id, slot));
+        }
+        // A fifth extent whose slot does not exist on the source: reading it
+        // fails, which is what a bad sector looks like from here.
+        let bogus_slot = slab_a.total_slots() as u32 + 7;
+        gem.insert(vol, 99, ExtentLocation::new(slab_a_id, bogus_slot));
+
+        let mut registry = SlabRegistry::new();
+        registry.add(slab_a);
+        registry.add(slab_b);
+
+        let engine = PlacementEngine::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let result = engine
+            .evacuate_slab(&mut gem, &mut registry, slab_a_id, &rx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.migrated, 4, "the readable extents were left behind");
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures[0].volume_id, vol);
+        assert_eq!(result.failures[0].vext_idx, 99);
+        assert!(!result.failures[0].parity);
+        assert!(!result.failures[0].error.is_empty(), "the failure says nothing");
+
+        // Everything readable moved; only the unreadable one is still here.
+        let left: Vec<u64> = gem.slab_extents(slab_a_id).into_iter().map(|(_, x, _)| x).collect();
+        assert_eq!(left, vec![99]);
+        for i in 0..4 {
+            assert_eq!(gem.lookup(vol, i).unwrap().slab_id, slab_b_id);
+        }
 
         cleanup(&[p1, p2]);
     }
