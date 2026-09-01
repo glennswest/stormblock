@@ -766,6 +766,91 @@ impl VolumeManager {
         Ok(snap_id)
     }
 
+    /// Which half of the node's mutable storage a volume allocates from.
+    pub fn volume_role(&self, id: &VolumeId) -> Option<SlabRole> {
+        self.volumes.get(id).map(|h| h.placement_role())
+    }
+
+    /// Copy a volume into slabs of a different role — a clone that **shares
+    /// nothing**.
+    ///
+    /// A copy-on-write clone shares its source's slots, so a clone is only as
+    /// durable as the slab its source is in. That is the right trade inside
+    /// one role and the wrong one across the boundary: a clone of a system
+    /// golden is a *system* volume however it is named, and an install
+    /// replaces the slab holding every extent it never wrote (#88).
+    ///
+    /// There is no way to make that sharing safe — a slot cannot be in two
+    /// partitions — so the crossing costs a real copy: the source's allocated
+    /// bytes, once, and the result depends on nothing in the slab it came
+    /// from. Lineage and the filesystem record are inherited as with any
+    /// clone, so the caller still stamps a fresh filesystem UUID.
+    ///
+    /// The source is not locked, for the same reason a snapshot does not lock
+    /// it: a sealed volume cannot change, and an unsealed one is the caller's
+    /// consistency question.
+    pub async fn copy_volume(
+        &mut self,
+        source_id: VolumeId,
+        name: &str,
+        role: SlabRole,
+    ) -> Result<VolumeId, VolumeError> {
+        let source = self
+            .volumes
+            .get(&source_id)
+            .ok_or(VolumeError::VolumeNotFound(source_id))?
+            .clone();
+        let virtual_size = source.lock().await.virtual_size;
+        let opts = CreateOptions {
+            redundancy: source.redundancy(),
+            placement: PlacementPolicy { role, ..Default::default() },
+        };
+        let dest_id = self.create_volume_with(name, virtual_size, opts).await?;
+        let dest = self
+            .volumes
+            .get(&dest_id)
+            .ok_or(VolumeError::VolumeNotFound(dest_id))?
+            .clone();
+
+        // Only the mapped extents: an unmapped one reads as zeros on both
+        // sides, and writing it would cost the destination a slot per hole —
+        // the same thin provisioning the image builder is careful about.
+        let extents: Vec<u64> = {
+            let gem = self.gem.read().await;
+            gem.volume_extents(&source_id)
+                .map(|it| it.map(|(v, _)| *v).collect())
+                .unwrap_or_default()
+        };
+        let mut buf = vec![0u8; self.slot_size as usize];
+        for vext in &extents {
+            let off = vext * self.slot_size;
+            let failed = match source.read(off, &mut buf).await {
+                Err(e) => Some(e),
+                Ok(_) => dest.write(off, &buf).await.err(),
+            };
+            if let Some(e) = failed {
+                drop(dest);
+                let _ = self.delete_volume(dest_id).await;
+                return Err(VolumeError::Drive(e));
+            }
+        }
+        if let Err(e) = dest.flush().await {
+            drop(dest);
+            let _ = self.delete_volume(dest_id).await;
+            return Err(VolumeError::Drive(e));
+        }
+        drop(dest);
+
+        self.record_lineage(dest_id, source_id);
+        self.persist().await;
+        tracing::info!(
+            "volume {source_id} copied into a {role} slab as '{name}' ({dest_id}): \
+             {} extent(s), sharing nothing with the source",
+            extents.len()
+        );
+        Ok(dest_id)
+    }
+
     /// A clone descends from its source and starts out carrying the same
     /// filesystem (same UUID, until something stamps it — which the
     /// filesystem-aware clone path does).

@@ -47,6 +47,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::drive::slab::SlabRole;
 use crate::volume::{VolumeId, VolumeManager};
 
 use super::ext4;
@@ -990,6 +991,15 @@ pub struct CloneSpec {
     /// a provisioning path that has measured the cost and would rather not pay
     /// it per clone.
     pub verify: bool,
+    /// Put the clone in slabs of this role instead of the source's.
+    ///
+    /// `None` — the default — is the ordinary copy-on-write clone, which
+    /// shares the source's slots and is therefore in the source's half of the
+    /// node's storage whatever it is called. Asking for the *other* role is
+    /// the crossing that sharing cannot express, so it is served by a real
+    /// copy instead: the clone depends on nothing in the slab it came from,
+    /// and an install that replaces that slab does not take it (#88).
+    pub role: Option<SlabRole>,
 }
 
 impl CloneSpec {
@@ -1073,10 +1083,22 @@ async fn clone_volume_impl(
 
     let (id, size) = {
         let mut m = vm.lock().await;
-        let id = m
-            .create_snapshot(source, &spec.name)
-            .await
-            .map_err(|e| TemplateError::Internal(format!("cloning volume: {e}")))?;
+        // Across the role boundary a clone cannot share slots — a slot is in
+        // one partition — so it is a copy. Within the boundary, and by
+        // default, it is the ordinary copy-on-write clone (#88).
+        let crossing = spec
+            .role
+            .filter(|want| m.volume_role(&source).is_some_and(|have| have != *want));
+        let id = match crossing {
+            Some(role) => m
+                .copy_volume(source, &spec.name, role)
+                .await
+                .map_err(|e| TemplateError::Internal(format!("copying volume: {e}")))?,
+            None => m
+                .create_snapshot(source, &spec.name)
+                .await
+                .map_err(|e| TemplateError::Internal(format!("cloning volume: {e}")))?,
+        };
 
         // A clone inherits the source's size; grow it if the caller asked
         // for more. Shrinking is never attempted — the filesystem inside would
