@@ -1028,3 +1028,75 @@ tier = "hot"
         "expected both slabs to be found:\n{text}"
     );
 }
+
+/// Filling a data slab must create its volumes in the data role.
+///
+/// `PlacementPolicy::default()` is `SlabRole::System`, and `fill_slab` builds
+/// a VolumeManager with exactly one slab attached. So a data slab was filled
+/// by an allocator looking for a *system* slab, found none, and failed on the
+/// very first golden with "no space: no system slab apart from 0 domain(s) at
+/// rung 'drive'" — an out-of-space message for a slab that was entirely empty,
+/// which is the least useful place to start looking.
+#[tokio::test]
+async fn a_data_slab_is_filled_with_volumes_in_its_own_role() {
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+    write(tmp.path(), "rootfs.img", &vec![0xAB; 2 * 1024 * 1024]);
+    write(tmp.path(), "blank.img", &vec![0xCD; 3 * 1024 * 1024]);
+
+    // Two goldens in the data slab, so this also covers the second allocation
+    // rather than only the first.
+    let extra = format!(
+        r#"
+[[pallet]]
+name = "system1"
+kind = "system"
+version = 1
+members = [
+  {{ name = "stormpump", role = "rootfs", file = "{rootfs}" }},
+]
+
+[data_slab]
+size = "32M"
+tier = "hot"
+
+  [[data_slab.golden]]
+  name = "stormcert"
+  file = "{blank}"
+  clone = "stormcert-data"
+
+  [[data_slab.golden]]
+  name = "stormblock-state"
+  file = "{blank}"
+
+[slab]
+size = "rest"
+tier = "hot"
+
+  [[slab.golden]]
+  name = "stormpump"
+  from = "pallet:system1/stormpump"
+"#,
+        rootfs = tmp.path().join("rootfs.img").display(),
+        blank = tmp.path().join("blank.img").display(),
+    );
+    let mut toml = spec_toml(tmp.path(), &extra);
+    toml = toml.replace("size = \"192M\"", "size = \"320M\"");
+    let out = tmp.path().join("node.img");
+    let report = ImageBuilder::new(ImageSpec::from_toml(&toml).unwrap())
+        .build(&out)
+        .await
+        .expect("a data slab with goldens must build");
+
+    let data = report.partitions.iter().find(|p| p.kind == "data-slab").unwrap();
+    let names: Vec<&str> = data.volumes.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["stormcert.golden", "stormcert-data", "stormblock-state.golden", "stormblock-state"]
+    );
+    // Content actually landed: an empty data slab was the symptom.
+    assert!(
+        data.volumes.iter().any(|v| v.allocated > 0),
+        "the data slab reported no allocated bytes — nothing was written into it"
+    );
+}

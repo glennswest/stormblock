@@ -25,7 +25,7 @@ use crate::pallet::{
 };
 use crate::placement::topology::StorageTier;
 use crate::raid::RaidArrayId;
-use crate::volume::{VolumeId, VolumeManager};
+use crate::volume::{CreateOptions, VolumeId, VolumeManager};
 
 use super::{
     type_guid, EspSpec, GoldenSpec, ImageError, ImageSpec, MemberEntry, PalletEntry, Result,
@@ -464,7 +464,7 @@ impl ImageBuilder {
                 .with_role(role),
         )
         .await?;
-        let volumes = self.fill_slab(device, formatted, &slab.goldens).await?;
+        let volumes = self.fill_slab(device, formatted, &slab.goldens, role).await?;
         Ok(PartitionReport {
             index: slot,
             name,
@@ -491,6 +491,7 @@ impl ImageBuilder {
         device: &Arc<dyn BlockDevice>,
         slab: Slab,
         goldens: &[GoldenSpec],
+        role: SlabRole,
     ) -> Result<Vec<VolumeReport>> {
         let slab_id = slab.slab_id();
         let slot_size = slab.slot_size();
@@ -539,8 +540,18 @@ impl ImageBuilder {
                 return Err(ImageError::TooSmall { need, have: free_bytes });
             }
 
+            // In the role of the slab being filled. `PlacementPolicy::default()`
+            // is `SlabRole::System`, and this manager has exactly one slab
+            // attached — so filling a data slab asked the allocator for a
+            // system slab, found none, and failed with "no space: no system
+            // slab apart from 0 domain(s)" on the first golden. The clone
+            // inherits the golden's role, so setting it here is enough.
             let golden_id = mgr
-                .create_volume_any(&golden_name, size)
+                .create_volume_with(
+                    &golden_name,
+                    size,
+                    CreateOptions::default().in_role(role),
+                )
                 .await
                 .map_err(|e| ImageError::Other(format!("create golden '{golden_name}': {e}")))?;
             let vol = mgr
