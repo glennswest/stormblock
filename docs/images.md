@@ -164,7 +164,8 @@ Three things follow, and all three are enforced rather than documented:
 2. **The role is a hard allocation boundary.** A system volume never takes a
    slot in a data slab and a data volume never takes one in a system slab —
    otherwise the split leaks one copy-on-write extent at a time, which is the
-   same loss, slower. Clones inherit the role from their source.
+   same loss, slower. Clones inherit the role from their source, which has a
+   consequence worth a section of its own: see §2a2.
 3. **Nothing on an install path formats a data slab.** `boot-local
    --local-disk` refuses a target that carries one, asking the device rather
    than trusting the path; a flow-over never migrates a data slab's extents
@@ -175,10 +176,91 @@ Three things follow, and all three are enforced rather than documented:
 `[data_slab]` takes the same fields as `[slab]`, and the same
 `[[data_slab.golden]]` entries. It needs an explicit `size` — it is allocated
 before the system slab, so it cannot take the `rest`, and an identity
-partition is not something to size by guess. **Put the blank that `-data`
-volumes clone from in the data slab**: a clone shares its golden's slots, so a
-blank in the system slab would leave the clone's unwritten extents pointing at
-the half an install replaces.
+partition is not something to size by guess.
+
+## 2a2. The blank goes in the data slab, because a clone shares its golden
+
+This is the one part of the split that a spec can still get wrong, and it is
+quiet when it does. It is worth understanding rather than memorising.
+
+**A copy-on-write clone shares its golden's slots.** That is the whole point
+of it: a clone costs nothing until it is written, so ten data containers cost
+the golden once. What the clone owns is only what it has *written*; every
+extent it has not written is a pointer into the golden's slots.
+
+```text
+data slab                            system slab
+┌──────────────────────────┐         ┌──────────────────────────┐
+│ blank.golden  ■ ■ ■ ■    │         │ stormpump.golden ■ ■ ■   │
+│ stormcert-data ·  ·  ·   │         │ stormpump         ·  ·   │
+└──────────────────────────┘         └──────────────────────────┘
+  ■ owned slot   · shared, points at the golden's slot
+```
+
+So a clone is only as durable as the slab its golden is in. Put the blank in
+the system slab and `stormcert-data` looks like a data volume, is named like
+one, and is made of pointers into the half an install replaces:
+
+```text
+data slab                            system slab
+┌──────────────────────────┐         ┌──────────────────────────┐
+│ stormcert-data  ·  ·  ·  │────────▶│ blank.golden  ■ ■ ■ ■    │
+└──────────────────────────┘         └──────────────────────────┘
+                                       ▲ the install reformats this
+```
+
+The node reinstalls, the system slab is reformatted, and the tier-0 volume
+is a set of dangling pointers — while everything about it, including which
+partition it is listed in, still says it is safe.
+
+**In an image spec this cannot happen.** Each slab is filled by its own
+volume manager with only that slab attached, so a `[[data_slab.golden]]`
+lands its golden *and* takes its first clone in the data slab, and a
+`[[slab.golden]]` does the same on the system side. There is no way to spell
+the crossing. The rule "put the blank in the data slab" is therefore about
+which section you write it under, and nothing else:
+
+```toml
+[data_slab]
+size = "64M"
+
+  [[data_slab.golden]]        # ✅ golden and clone both land here
+  name  = "stormcert"
+  file  = "build/goldens/blank64.img"
+  clone = "stormcert-data"
+```
+
+**At runtime it can, and the engine now refuses to do it silently.** On a
+node with both slabs attached, `POST /api/v1/volumes/{id}/clone` inherits the
+source's role — so cloning a *system* golden gives you a system volume no
+matter what you call it. That is correct behaviour (the alternative would be
+the dangling pointers above), but the result is not what an operator asking
+for `something-data` expects. Two things make it visible and fixable:
+
+- **Every volume reports its role.** `GET /api/v1/volumes` and
+  `/api/v1/volumes/{id}` carry `"role": "system" | "data"`, so "is the volume
+  I meant to be durable actually in the data slab?" is a question with an
+  answer. The name is not that answer.
+- **A clone can ask to cross.** `POST /api/v1/volumes/{id}/clone` with
+  `{"role": "data"}` on a system-slab source performs a **real copy** rather
+  than a copy-on-write clone — because a slot cannot be in two partitions,
+  the crossing has no cheap form. The result shares nothing with its source
+  and survives that source's slab being reformatted. It still records the
+  lineage and still gets its own filesystem UUID.
+
+  ```bash
+  curl -X POST .../api/v1/volumes/blank.golden/clone \
+    -d '{"name": "stormcert-data", "role": "data"}'
+  ```
+
+  It costs the source's *allocated* bytes, once — holes are not copied, so a
+  mostly-empty blank stays cheap. Within a role, and by default, cloning is
+  the ordinary free copy-on-write and nothing changes.
+
+The short version: **sharing is what makes clones free, and sharing is what
+ties them to a partition.** Those are the same property, so the boundary the
+data slab draws is a boundary clones cannot straddle — they either stay on
+one side, or they stop being clones and become copies.
 
 ## 2a. The slab is where the node actually lives
 

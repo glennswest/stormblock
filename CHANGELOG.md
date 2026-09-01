@@ -3,6 +3,25 @@
 ## [Unreleased]
 
 ### 2026-09-01
+- **feat:** **a clone can cross the slab-role boundary, as a copy** (#88
+  follow-on). A copy-on-write clone shares its source's slots, so a clone is
+  only as durable as the slab its source is in — cloning a *system* golden
+  gives a system volume however it is named, and an install replaces every
+  extent it never wrote. Sharing is what makes clones free and sharing is
+  what ties them to a partition; they are the same property, so the crossing
+  has no cheap form. `POST /api/v1/volumes/{id}/clone` now takes
+  `{"role": "data"}` and performs a real copy — holes not copied, lineage
+  recorded, its own filesystem UUID — that shares nothing with its source and
+  survives that source's slab being reformatted. Within a role, and by
+  default, cloning is the ordinary free copy-on-write.
+- **feat:** every volume reports `role` (`system` or `data`) on
+  `/api/v1/volumes`. A clone is in its source's half whatever it is called, so
+  the name is not evidence; this makes "is the volume I meant to be durable
+  actually in the data slab?" a question with an answer.
+- **docs:** `docs/images.md` §2a2 — why the blank a `-data` volume clones from
+  has to be in the data slab, with what the extent map looks like when it is
+  not. In an image spec the mistake is unspellable (each slab is filled with
+  only itself attached); at runtime it was silent, and now it is neither.
 - **fix:** an image spec that names a section the builder does not know is
   **refused**, not ignored (#81). `[[slab.clone]]` where `[[slab.golden]]` was
   meant built cleanly, reported success, and produced an image with two
