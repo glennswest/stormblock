@@ -486,3 +486,248 @@ tier = "hot"
     let slab = report.partitions.iter().find(|p| p.kind == "slab").unwrap();
     assert_eq!(slab.volumes.len(), 2, "{:#?}", slab.volumes);
 }
+
+/// #88 — an image that carries a data slab survives being reimaged.
+///
+/// The failure this guards is silent: tier-0 holds the node's CA private key
+/// and its ServiceAccount token signing key, and a reinstall that reformats
+/// the slab holding them mints new ones. Every token in the cluster becomes
+/// invalid and the node comes up looking healthy.
+///
+/// So the assertions are the two halves of the split. The system slab and the
+/// data slab are separate partitions with separate type GUIDs and separate
+/// records of themselves; and after the system slab has been reformatted and
+/// refilled — which is what an install is — the data volume is still there
+/// with its contents intact.
+#[tokio::test]
+async fn a_reimage_replaces_the_system_slab_and_leaves_the_data_slab_alone() {
+    use std::sync::Arc;
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::partition::PartitionDevice;
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::drive::BlockDevice;
+    use stormblock::image::type_guid;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::VolumeManager;
+
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+    write(tmp.path(), "rootfs.img", &vec![0xAB; 2 * 1024 * 1024]);
+    // The blank every `-data` volume is a clone of. It lives in the data
+    // slab, because a clone shares its golden's slots: a blank in the system
+    // slab would make the clone's unwritten extents point at the half an
+    // install replaces.
+    write(tmp.path(), "blank.img", &vec![0u8; 2 * 1024 * 1024]);
+
+    let extra = format!(
+        r#"
+[[pallet]]
+name = "system1"
+kind = "system"
+version = 1
+members = [
+  {{ name = "stormpump", role = "rootfs", file = "{rootfs}" }},
+]
+
+[data_slab]
+size = "24M"
+tier = "hot"
+
+  [[data_slab.golden]]
+  name = "stormcert"
+  file = "{blank}"
+  clone = "stormcert-data"
+
+[slab]
+size = "rest"
+tier = "hot"
+
+  [[slab.golden]]
+  name = "stormpump"
+  from = "pallet:system1/stormpump"
+"#,
+        rootfs = tmp.path().join("rootfs.img").display(),
+        blank = tmp.path().join("blank.img").display(),
+    );
+    let mut toml = spec_toml(tmp.path(), &extra);
+    toml = toml.replace("size = \"192M\"", "size = \"320M\"");
+    let spec = ImageSpec::from_toml(&toml).unwrap();
+    let out = tmp.path().join("node.img");
+    let report = ImageBuilder::new(spec).build(&out).await.expect("build");
+
+    let system = report.partitions.iter().find(|p| p.kind == "slab").expect("system slab");
+    let data = report.partitions.iter().find(|p| p.kind == "data-slab").expect("data slab");
+    assert_ne!(system.index, data.index, "two partitions, not one");
+    // The data slab is allocated first, so growing the system slab across a
+    // release does not move the partition holding the node's identity.
+    assert!(data.start_bytes < system.start_bytes, "data slab comes first");
+
+    // Each carries only its own volumes.
+    let sys_names: Vec<&str> = system.volumes.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(sys_names, vec!["stormpump.golden", "stormpump"]);
+    let data_names: Vec<&str> = data.volumes.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(data_names, vec!["stormcert.golden", "stormcert-data"]);
+
+    // The partition table says which is which, without opening either.
+    let table = stormblock::image::build::table_of(&out).await.unwrap();
+    assert_eq!(table.entries[system.index].type_guid, type_guid::SLAB);
+    assert_eq!(table.entries[data.index].type_guid, type_guid::SLAB_DATA);
+
+    // And so does each slab's own header, which is what a whole-drive slab
+    // with no partition table has instead.
+    let listed = stormblock::image::build::slabs_in(&out).await.unwrap();
+    let mut roles: Vec<&str> = listed.iter().map(|s| s.role.as_str()).collect();
+    roles.sort_unstable();
+    assert_eq!(roles, vec!["data", "system"]);
+
+    // Write the node's identity into the clone in the data slab — the thing
+    // nothing can mint again.
+    let dev: Arc<dyn BlockDevice> =
+        Arc::new(FileDevice::open(out.to_str().unwrap()).await.unwrap());
+    let secret = vec![0x5Eu8; 4096];
+    let open_both = |dev: Arc<dyn BlockDevice>| async move {
+        let sys_part = Arc::new(
+            PartitionDevice::new(dev.clone(), system.start_bytes, system.size_bytes).unwrap(),
+        );
+        let data_part =
+            Arc::new(PartitionDevice::new(dev, data.start_bytes, data.size_bytes).unwrap());
+        let sys_slab = Slab::open(sys_part).await.unwrap();
+        let data_slab = Slab::open(data_part).await.unwrap();
+        assert_eq!(data_slab.role(), SlabRole::Data);
+        assert_eq!(sys_slab.role(), SlabRole::System);
+        let slot_size = sys_slab.slot_size();
+        let ids = vec![sys_slab.slab_id(), data_slab.slab_id()];
+        let mut mgr = VolumeManager::new(slot_size);
+        mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), sys_slab).await.unwrap();
+        mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), data_slab).await.unwrap();
+        mgr.persist_to_slabs(ids);
+        mgr.restore().await.unwrap();
+        mgr
+    };
+
+    {
+        let mut mgr = open_both(dev.clone()).await;
+        let names: Vec<String> = mgr.list_volumes().await.into_iter().map(|(_, n, ..)| n).collect();
+        assert_eq!(names.len(), 4, "both slabs' records were read: {names:?}");
+        let id = mgr.find_volume("stormcert-data").await.expect("the tier-0 clone");
+        let vol = mgr.get_volume(&id).unwrap();
+        vol.write(0, &secret).await.unwrap();
+        vol.flush().await.unwrap();
+        drop(vol);
+        mgr.persist_checked().await.unwrap();
+    }
+
+    // Now reimage: reformat the system partition and lay a new golden and
+    // clone into it, exactly as an install does. The data partition is not
+    // touched, because nothing here has any reason to touch it.
+    {
+        let sys_part = Arc::new(
+            PartitionDevice::new(dev.clone(), system.start_bytes, system.size_bytes).unwrap(),
+        );
+        let meta = stormblock::drive::slab::auto_metadata_bytes(system.size_bytes, 1024 * 1024);
+        let fresh = Slab::format_with(
+            sys_part,
+            SlabFormat::new(1024 * 1024, stormblock::placement::topology::StorageTier::Hot)
+                .with_metadata(meta),
+        )
+        .await
+        .unwrap();
+        let slab_id = fresh.slab_id();
+        let mut mgr = VolumeManager::new(1024 * 1024);
+        mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), fresh).await.unwrap();
+        mgr.persist_to_slab(slab_id);
+        let new_golden = mgr.create_volume_any("stormpump.golden", 2 * 1024 * 1024).await.unwrap();
+        let v = mgr.get_volume(&new_golden).unwrap();
+        v.write(0, &vec![0xF0; 4096]).await.unwrap();
+        v.flush().await.unwrap();
+        drop(v);
+        mgr.seal_volume(new_golden, None).await.unwrap();
+        mgr.create_snapshot(new_golden, "stormpump").await.unwrap();
+        mgr.persist_checked().await.unwrap();
+    }
+
+    // The node boots again on both slabs. The new system volumes are there,
+    // and so is the identity — which is the whole point.
+    let mgr = open_both(dev.clone()).await;
+    let names: Vec<String> = mgr.list_volumes().await.into_iter().map(|(_, n, ..)| n).collect();
+    assert!(names.contains(&"stormpump".to_string()), "{names:?}");
+    assert!(names.contains(&"stormcert-data".to_string()), "identity survived: {names:?}");
+
+    let id = mgr.find_volume("stormcert-data").await.expect("tier-0 after the reimage");
+    let vol = mgr.get_volume(&id).unwrap();
+    let mut buf = vec![0u8; 4096];
+    vol.read(0, &mut buf).await.unwrap();
+    assert_eq!(buf, secret, "the reimage re-minted the node's identity");
+
+    // The new system clone is the new one, not a ghost of the old.
+    let sys = mgr.find_volume("stormpump").await.unwrap();
+    let sv = mgr.get_volume(&sys).unwrap();
+    sv.read(0, &mut buf).await.unwrap();
+    assert!(buf.iter().all(|&b| b == 0xF0), "the system slab was replaced");
+}
+
+/// The boundary is hard, not a preference: a data volume that grows never
+/// takes a slot in the system slab, and a system volume never takes one in
+/// the data slab. Without this the split leaks one copy-on-write extent at a
+/// time — the same loss as #88, just slower.
+#[tokio::test]
+async fn a_volume_allocates_only_in_slabs_of_its_own_role() {
+    use std::sync::Arc;
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::drive::BlockDevice;
+    use stormblock::placement::topology::StorageTier;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::{CreateOptions, VolumeManager};
+
+    let tmp = TempDir::new().unwrap();
+    let slot = 64 * 1024u64;
+    let mut ids = Vec::new();
+    let mut mgr = VolumeManager::new(slot);
+    for (name, role) in [("system.slab", SlabRole::System), ("data.slab", SlabRole::Data)] {
+        let p = tmp.path().join(name);
+        std::fs::write(&p, vec![0u8; 8 * 1024 * 1024]).unwrap();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open(p.to_str().unwrap()).await.unwrap());
+        let slab = Slab::format_with(dev, SlabFormat::new(slot, StorageTier::Hot).with_role(role))
+            .await
+            .unwrap();
+        ids.push((role, slab.slab_id()));
+        mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab).await.unwrap();
+    }
+    let system_slab = ids.iter().find(|(r, _)| *r == SlabRole::System).unwrap().1;
+    let data_slab = ids.iter().find(|(r, _)| *r == SlabRole::Data).unwrap().1;
+
+    let sys = mgr.create_volume_any("sys", 1024 * 1024).await.unwrap();
+    let dat = mgr
+        .create_volume_with(
+            "identity",
+            1024 * 1024,
+            CreateOptions::default().in_role(SlabRole::Data),
+        )
+        .await
+        .unwrap();
+    for id in [sys, dat] {
+        let v = mgr.get_volume(&id).unwrap();
+        v.write(0, &vec![0x7Eu8; slot as usize]).await.unwrap();
+        v.flush().await.unwrap();
+    }
+
+    let gem = mgr.gem().read().await;
+    let where_is = |id| {
+        gem.get_volume_map(&id)
+            .map(|m| m.all_legs().map(|l| l.slab_id).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    assert_eq!(where_is(sys), vec![system_slab], "a system volume stayed system-side");
+    assert_eq!(where_is(dat), vec![data_slab], "a data volume stayed data-side");
+
+    // A clone inherits the role, so its copy-on-write lands data-side too.
+    drop(gem);
+    let clone = mgr.create_snapshot(dat, "identity-clone").await.unwrap();
+    let cv = mgr.get_volume(&clone).unwrap();
+    cv.write(0, &vec![0x11u8; slot as usize]).await.unwrap();
+    cv.flush().await.unwrap();
+    let gem = mgr.gem().read().await;
+    assert_eq!(where_is(clone), vec![data_slab], "a clone's COW left the data slab");
+}
