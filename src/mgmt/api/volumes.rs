@@ -44,6 +44,12 @@ pub struct VolumeResponse {
     pub parent: Option<Uuid>,
     /// Sealed: takes no writes; what clones are taken from.
     pub sealed: bool,
+    /// Which half of the node's mutable storage the volume lives in:
+    /// `system` (replaced wholesale by an install) or `data` (identity and
+    /// state, which no install path formats). A clone is in its source's
+    /// half whatever it is named, so this is how an operator checks that the
+    /// volume they meant to be durable actually is (#88).
+    pub role: String,
     /// The filesystem on it, when the engine knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<serde_json::Value>,
@@ -56,6 +62,7 @@ struct Described {
     physical_bytes: u64,
     parent: Option<Uuid>,
     sealed: bool,
+    role: String,
     fs: Option<serde_json::Value>,
     fs_uuid: Option<Uuid>,
 }
@@ -71,6 +78,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
                 physical_bytes: handle.physical().await,
                 parent: vm.parent(id).map(|p| p.0),
                 sealed: handle.is_sealed(),
+                role: handle.placement_role().to_string(),
                 fs: fs.map(|f| f.json()),
                 fs_uuid: fs.and_then(|f| f.uuid),
             }
@@ -81,6 +89,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             physical_bytes: 0,
             parent: None,
             sealed: false,
+            role: crate::drive::slab::SlabRole::System.to_string(),
             fs: None,
             fs_uuid: None,
         },
@@ -155,6 +164,7 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             physical_bytes: d.physical_bytes,
             parent: d.parent,
             sealed: d.sealed,
+            role: d.role.clone(),
             fs: d.fs,
         });
     }
@@ -194,6 +204,7 @@ async fn get_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                role: d.role.clone(),
                 fs: d.fs,
             };
             Json(resp).into_response()
@@ -255,6 +266,7 @@ async fn create_volume(
             physical_bytes: d.physical_bytes,
             parent: d.parent,
             sealed: d.sealed,
+            role: d.role.clone(),
             fs: d.fs,
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
@@ -311,6 +323,7 @@ async fn create_volume(
                 physical_bytes: 0,
                 parent: None,
                 sealed: false,
+                role: crate::drive::slab::SlabRole::System.to_string(),
                 fs: None,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
@@ -456,6 +469,15 @@ pub struct CloneRequest {
     /// fsck the clone before handing it out (default true).
     #[serde(default = "default_true")]
     pub verify: bool,
+    /// Put the clone in `system` or `data` slabs instead of the source's.
+    ///
+    /// A copy-on-write clone shares its source's slots, so by default the
+    /// clone is in the source's half of the node's storage whatever it is
+    /// named — cloning a system golden into something called `…-data` gives a
+    /// volume an install replaces. Naming the other role here crosses the
+    /// boundary properly, as a real copy that shares nothing (#88).
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -485,10 +507,20 @@ async fn clone_volume(
         Ok(s) => s,
         Err(e) => return ApiError::bad_request(e),
     };
+    let role = match req.role.as_deref() {
+        Some(r) => match crate::drive::slab::SlabRole::parse(r) {
+            Some(r) => Some(r),
+            None => {
+                return ApiError::bad_request(format!("invalid role '{r}' (use system or data)"))
+            }
+        },
+        None => None,
+    };
     let mut spec = crate::fs::template::CloneSpec::new(&req.name);
     spec.size_bytes = size;
     spec.label = req.label;
     spec.verify = req.verify;
+    spec.role = role;
     match crate::fs::template::clone_volume(&state.volume_manager, VolumeId(uuid), &spec).await {
         Ok(c) => {
             let vm = state.volume_manager.lock().await;
@@ -511,6 +543,7 @@ async fn clone_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                role: d.role.clone(),
                 fs: d.fs,
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -906,6 +939,7 @@ async fn create_snapshot(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                role: d.role.clone(),
                 fs: d.fs,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
@@ -976,6 +1010,7 @@ async fn resize_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                role: d.role.clone(),
                 fs: d.fs,
             };
             Json(resp).into_response()
