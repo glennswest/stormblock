@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### 2026-09-01
+- **feat:** a node's mutable storage is **two slabs**, and an install replaces
+  only one of them (#88). Tier-0 — the node CA private key, the apiserver
+  serving cert and the **ServiceAccount token signing key** — sat in the same
+  slab as the goldens, so anything that reformatted the slab to replace the
+  goldens re-minted the node's identity. A re-minted signing key invalidates
+  every ServiceAccount token in the cluster, and the node comes up looking
+  healthy. `[data_slab]` in an image spec is a second slab partition with its
+  own type GUID (`7D3E5A91-…`) and a role byte in its header; the system slab
+  is the half that takes `rest` and the half an image replaces, and the data
+  slab is allocated before it so growing one across a release does not move
+  the other. **The role is a hard allocation boundary**, not a preference: a
+  system volume never takes a slot in a data slab and a data volume never
+  takes one in a system slab, and clones inherit it — otherwise the split
+  leaks one copy-on-write extent at a time, which is the same loss more
+  slowly. **Each slab carries its own `volumes.dat`**, because the data
+  slab's record of itself has to survive the system slab being replaced; a
+  boot given several slabs reads each one's copy and merges them, and a slab
+  with no copy of its own is the older single-document arrangement and still
+  works. `boot-local --local-disk` now **refuses a target that carries a data
+  slab**, asking the device (GPT type, then the slab header) rather than
+  trusting the path an operator typed — a reinstall is exactly "flow over onto
+  the disk the previous install was on" — and a flow-over never migrates a
+  data slab's extents onto the system disk. `stormblock slab format --role
+  data` and `POST /api/v1/slabs {"role":"data"}` are how a data slab is made,
+  and both refuse to overwrite one unless that same request says `data`.
+  `role` is reported on `/api/v1/slabs`, `/api/v1/drives/{id}/slabs`, the
+  `Slab` kube resource and `image build`'s slab listing.
+
 ### 2026-08-31
 - **fix(ublk):** an export is not created until its device node exists. The
   id arrives at ADD_DEV but the block device only appears at START_DEV — a

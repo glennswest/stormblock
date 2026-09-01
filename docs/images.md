@@ -61,6 +61,14 @@ name = "firmware"
 type = "linux"                  # esp | linux | swap | basic | slab | pallet | <GUID>
 from_file = "build/fw.bin"
 
+[data_slab]                     # identity and state — never reformatted
+size = "64M"
+
+  [[data_slab.golden]]          # the blank every `-data` volume clones
+  name  = "stormcert"
+  file  = "build/goldens/blank64.img"
+  clone = "stormcert-data"
+
 [slab]                          # the mutable end
 size = "rest"
 tier = "hot"
@@ -72,8 +80,11 @@ tier = "hot"
 ```
 
 **Order on disk is the order of the sections** — ESP, pallets as listed, raw
-partitions, slab — because allocation is first-fit out of measured free runs
-and the builder fills them in that sequence. An image is often read by
+partitions, data slab, slab — because allocation is first-fit out of measured
+free runs and the builder fills them in that sequence. The data slab comes
+before the system slab deliberately: the system slab is the half that says
+`rest` and the half an image replaces, so putting it last means growing it
+across a release does not move the partition holding the node's identity. An image is often read by
 something that was told where to look, so being predictable matters.
 
 **Block size, on a 4Kn target.** Images are written with 512-byte LBAs,
@@ -108,7 +119,66 @@ pallet does not verify fails; it does not warn.
 | `[esp]` | `C12A7328-…` EFI System | FAT16 or FAT32, built from a directory, copied from an image, or left formatted and empty |
 | `[[pallet]]` | `A324B90E-…` stormcos pallet | a sealed, versioned, verified pallet |
 | `[[partition]]` | as named | a file, verbatim |
+| `[data_slab]` | `7D3E5A91-…` stormblock data slab | the same, for identity and state — a partition no install may reformat |
 | `[slab]` | `4C9A7B2E-…` stormblock slab | a formatted slab holding the goldens, a first clone of each, and its own volume metadata |
+
+## 2a1. Two slabs: one an install replaces, one it must not (#88)
+
+The mutable end of a node is two partitions, not one.
+
+The **system slab** holds the goldens and the clones the node runs from.
+Replacing it wholesale *is* the install: a new image lands new goldens and new
+first clones, and nothing of value was in there that the image did not put
+there.
+
+The **data slab** holds what the node minted and nothing else can mint again.
+Tier-0 (`/data/stormcert`) is the case that matters: the node CA private key,
+the apiserver serving cert, and the **ServiceAccount token signing key**. A
+re-minted signing key invalidates every ServiceAccount token in the cluster
+and a re-minted CA invalidates everything it issued — and the node comes up
+looking healthy, which is what makes the failure expensive.
+
+Before the split, both sat in one slab, so anything that reformatted the slab
+to replace the goldens took identity with it. Two places did: `image build`
+formats unconditionally, and `boot-local --local-disk` formats whatever device
+it is handed, which on a reinstall is the disk the previous install was on.
+
+The split is a **partition boundary**, the same argument the `data1` pallet
+already makes for blank templates — a hard allocation boundary rather than a
+preference something can fall out of. It is recorded twice, because the two
+records answer different questions:
+
+- the **GPT type GUID** (`7D3E5A91-6C24-4B8F-A05D-2E9147BC6F38`), so a whole
+  drive can be judged without opening any partition on it;
+- a **role byte in the slab header**, which is what a whole-drive slab with no
+  partition table has instead. A slab formatted before roles existed reads as
+  `system`, which is what all of them are.
+
+Three things follow, and all three are enforced rather than documented:
+
+1. **Each slab carries its own `volumes.dat`.** The data slab's record of
+   itself has to survive the system slab being replaced, so it cannot live in
+   the system slab. A boot given both (`--slab … --slab …`) reads each slab's
+   own copy and merges them; a slab with no copy of its own is the older
+   single-document arrangement and still works.
+2. **The role is a hard allocation boundary.** A system volume never takes a
+   slot in a data slab and a data volume never takes one in a system slab —
+   otherwise the split leaks one copy-on-write extent at a time, which is the
+   same loss, slower. Clones inherit the role from their source.
+3. **Nothing on an install path formats a data slab.** `boot-local
+   --local-disk` refuses a target that carries one, asking the device rather
+   than trusting the path; a flow-over never migrates a data slab's extents
+   onto the system disk; `stormblock slab format` and `POST /api/v1/slabs`
+   refuse unless the caller says `--role data` / `"role": "data"` in that same
+   request.
+
+`[data_slab]` takes the same fields as `[slab]`, and the same
+`[[data_slab.golden]]` entries. It needs an explicit `size` — it is allocated
+before the system slab, so it cannot take the `rest`, and an identity
+partition is not something to size by guess. **Put the blank that `-data`
+volumes clone from in the data slab**: a clone shares its golden's slots, so a
+blank in the system slab would leave the clone's unwritten extents pointing at
+the half an install replaces.
 
 ## 2a. The slab is where the node actually lives
 

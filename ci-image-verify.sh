@@ -52,6 +52,12 @@ name = "platform"
 kind = "system"
 members = [ { name = "rootimg", role = "rootimage", kind = "rootimage", file = "initramfs.img" } ]
 
+# Identity and state, in a partition of its own: an install replaces the
+# system slab wholesale and must not touch this one (#88).
+[data_slab]
+size = "16M"
+tier = "hot"
+
 [slab]
 size = "rest"
 tier = "hot"
@@ -65,7 +71,31 @@ say "build"
 "$ABS_BIN" image inspect disk.img
 
 say "GPT, per fdisk"
-if need fdisk; then fdisk disk.img | head -8; fi
+if need fdisk; then fdisk -l disk.img | tail -12; fi
+
+say "two slabs, told apart by their partition type — not by their names"
+"$ABS_BIN" image inspect disk.img | grep -E "^  (system|data) slab"
+test "$("$ABS_BIN" image inspect disk.img | grep -c '^  data slab')" = 1
+test "$("$ABS_BIN" image inspect disk.img | grep -c '^  system slab')" = 1
+python3 - <<'PY'
+import struct, uuid
+d = open('disk.img','rb').read()
+hdr = d[512:512+92]
+assert hdr[:8] == b'EFI PART', "no GPT header at LBA 1"
+lba = struct.unpack('<Q', hdr[72:80])[0]
+count = struct.unpack('<I', hdr[80:84])[0]
+esz = struct.unpack('<I', hdr[84:88])[0]
+SYSTEM = uuid.UUID('4C9A7B2E-1D63-4F8A-9E51-0B7C2A6D3F14')
+DATA   = uuid.UUID('7D3E5A91-6C24-4B8F-A05D-2E9147BC6F38')
+seen = []
+for i in range(count):
+    e = d[lba*512 + i*esz: lba*512 + (i+1)*esz]
+    t = uuid.UUID(bytes_le=e[:16])
+    if t in (SYSTEM, DATA):
+        seen.append('system' if t == SYSTEM else 'data')
+assert sorted(seen) == ['data', 'system'], seen
+print("  GPT type GUIDs:", seen)
+PY
 
 say "ESP, per mtools"
 mdir -i disk.img@@1M ::/

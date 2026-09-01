@@ -1555,7 +1555,8 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
             }
             for s in stormblock::image::build::slabs_in(path).await.map_err(ie)? {
                 println!(
-                    "  slab {} — {} slots of {}, {} free{}",
+                    "  {} slab {} — {} slots of {}, {} free{}",
+                    s.role,
                     s.name,
                     s.total_slots,
                     stormblock::mgmt::config::human_size(s.slot_size),
