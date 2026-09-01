@@ -1455,6 +1455,7 @@ mod tests {
         policies.insert(vol, PlacementPolicy {
             preferred_tier: StorageTier::Hot,
             tier_fallback: vec![StorageTier::Warm, StorageTier::Cold],
+            ..Default::default()
         });
 
         let result = engine.rebalance(

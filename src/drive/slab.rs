@@ -1971,6 +1971,7 @@ mod tests {
             update_time: 1234567900,
             tier: StorageTier::Warm,
             flags: 0,
+            role: SlabRole::Data,
             meta_offset: HEADER_SIZE,
             meta_size: 128 * 1024,
             checksum: 0,
@@ -1983,8 +1984,52 @@ mod tests {
         assert_eq!(decoded.total_slots, 100);
         assert_eq!(decoded.free_slots, 95);
         assert_eq!(decoded.tier, StorageTier::Warm);
+        assert_eq!(decoded.role, SlabRole::Data);
         assert_eq!(decoded.meta_offset, HEADER_SIZE);
         assert_eq!(decoded.meta_size, 128 * 1024);
+    }
+
+    /// The role byte lives where v1 wrote padding, so a slab formatted before
+    /// roles existed reads as `System` — which is what every one of them is.
+    #[test]
+    fn a_header_with_a_zero_role_byte_reads_as_system() {
+        let header = SlabHeader {
+            slab_uuid: Uuid::new_v4(),
+            device_uuid: Uuid::new_v4(),
+            slot_size: DEFAULT_SLOT_SIZE,
+            total_slots: 8,
+            free_slots: 8,
+            data_offset: 2 * 1024 * 1024,
+            table_offset: HEADER_SIZE,
+            create_time: 0,
+            update_time: 0,
+            tier: StorageTier::Hot,
+            flags: 0,
+            role: SlabRole::System,
+            meta_offset: 0,
+            meta_size: 0,
+            checksum: 0,
+        };
+        let bytes = header.to_bytes();
+        assert_eq!(bytes[102], 0, "system is the zero value, so v1 padding decodes to it");
+        assert_eq!(SlabHeader::from_bytes(&bytes).unwrap().role, SlabRole::System);
+    }
+
+    #[tokio::test]
+    async fn a_data_slab_says_so_after_a_reopen() {
+        let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
+        let slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_role(SlabRole::Data),
+        )
+        .await
+        .unwrap();
+        assert!(slab.is_data());
+        drop(slab);
+        let reopened = Slab::open(dev).await.unwrap();
+        assert_eq!(reopened.role(), SlabRole::Data);
+        assert!(reopened.is_data());
+        let _ = std::fs::remove_file(path);
     }
 
     /// A slab formatted before the metadata region existed has zeros where

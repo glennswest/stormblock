@@ -257,6 +257,7 @@ impl IscsiBootManager {
         let placement = PlacementPolicy {
             preferred_tier: StorageTier::Cool,
             tier_fallback: vec![StorageTier::Warm, StorageTier::Hot, StorageTier::Cold],
+            ..Default::default()
         };
 
         for part in &layout.partitions {

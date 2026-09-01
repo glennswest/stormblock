@@ -95,7 +95,7 @@ const METADATA_TMP: &str = "volumes.dat.tmp";
 const METADATA_BAK: &str = "volumes.dat.bak";
 
 /// Serializable volume metadata payload.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeMetadata {
     pub extent_size: u64,
     pub arrays: Vec<ArrayRecord>,
@@ -103,14 +103,14 @@ pub struct VolumeMetadata {
 }
 
 /// Persisted array info — just enough to verify arrays exist on recovery.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrayRecord {
     pub array_id: RaidArrayId,
     pub total_capacity: u64,
 }
 
 /// Persisted volume state.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeRecord {
     pub id: VolumeId,
     pub name: String,
