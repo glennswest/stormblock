@@ -937,3 +937,94 @@ async fn cloning_across_the_role_boundary_copies_instead_of_sharing() {
         assert_eq!(buf, payload, "the copy depended on the system slab after all");
     }
 }
+
+/// A whole-disk path must yield every slab in the GPT, not the first that
+/// opens.
+///
+/// This is the shape a node actually boots in: `rd.stormblock.slab=/dev/sda`
+/// names the disk, not a partition. The data slab is allocated first so that
+/// growing the system slab across a release cannot move the partition holding
+/// the node's identity — which makes it the earlier GPT entry, and makes
+/// "return the first slab found" return the one with no root volume in it.
+/// The failure reads as a missing volume rather than as the wrong partition,
+/// which is why it is worth a test rather than a comment (stormpump#12).
+#[tokio::test]
+async fn a_whole_disk_path_finds_the_system_volume_behind_the_data_slab() {
+    use std::process::Command;
+
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+    write(tmp.path(), "rootfs.img", &vec![0xAB; 2 * 1024 * 1024]);
+    write(tmp.path(), "blank.img", &vec![0u8; 2 * 1024 * 1024]);
+
+    let extra = format!(
+        r#"
+[[pallet]]
+name = "system1"
+kind = "system"
+version = 1
+members = [
+  {{ name = "stormpump", role = "rootfs", file = "{rootfs}" }},
+]
+
+[data_slab]
+size = "24M"
+tier = "hot"
+
+  [[data_slab.golden]]
+  name = "stormcert"
+  file = "{blank}"
+  clone = "stormcert-data"
+
+[slab]
+size = "rest"
+tier = "hot"
+
+  [[slab.golden]]
+  name = "stormpump"
+  from = "pallet:system1/stormpump"
+"#,
+        rootfs = tmp.path().join("rootfs.img").display(),
+        blank = tmp.path().join("blank.img").display(),
+    );
+    let mut toml = spec_toml(tmp.path(), &extra);
+    toml = toml.replace("size = \"192M\"", "size = \"320M\"");
+    let out = tmp.path().join("node.img");
+    let report = ImageBuilder::new(ImageSpec::from_toml(&toml).unwrap())
+        .build(&out)
+        .await
+        .expect("build");
+
+    // The premise: the data slab really is the earlier entry, so a first-match
+    // search would land on it.
+    let system = report.partitions.iter().find(|p| p.kind == "slab").unwrap();
+    let data = report.partitions.iter().find(|p| p.kind == "data-slab").unwrap();
+    assert!(data.start_bytes < system.start_bytes, "premise: data slab is first");
+
+    // Hand over the whole disk, exactly as the kernel command line does.
+    // `--check` resolves the boot volume and exits before any ublk export, so
+    // this behaves the same on Linux and macOS.
+    let cmd = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+        .arg("boot-local")
+        .args(["--slab", out.to_str().unwrap()])
+        .args(["--volume", "stormpump"])
+        .arg("--check")
+        .output()
+        .expect("spawn stormblock boot-local");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&cmd.stdout),
+        String::from_utf8_lossy(&cmd.stderr)
+    );
+
+    assert!(
+        cmd.status.success(),
+        "a whole disk carrying both slabs must resolve the boot volume:\n{text}"
+    );
+    // Both were opened, and the roles were reported rather than guessed at.
+    assert!(text.contains("data slab found in"), "data slab not reported:\n{text}");
+    assert!(
+        text.matches("found in").count() >= 2,
+        "expected both slabs to be found:\n{text}"
+    );
+}
