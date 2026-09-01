@@ -139,6 +139,7 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
     let mut labels = BTreeMap::new();
     labels.insert("storm.io/name".to_string(), name.clone());
     labels.insert("storm.io/node".to_string(), state.v1.lock().await.local_node.clone());
+    labels.insert("storm.io/slab-role".to_string(), handle.placement_role().to_string());
     if let Some(p) = vm.parent(&id) {
         labels.insert("storm.io/parent".to_string(), p.0.to_string());
     }
@@ -152,6 +153,10 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
             "sizeBytes": handle.capacity_bytes(),
             "redundancy": handle.redundancy().spelling(),
             "sealed": handle.is_sealed(),
+            // Which half of the node's mutable storage this is in. A clone is
+            // in its source's half whatever it is named, so the name is not
+            // evidence and this is (#88).
+            "role": handle.placement_role().to_string(),
             "retention": vm.retention(&id).as_str(),
             "fs": fs.map(|f| f.json()),
         }),

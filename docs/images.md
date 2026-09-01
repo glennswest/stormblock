@@ -230,17 +230,20 @@ size = "64M"
   clone = "stormcert-data"
 ```
 
-**At runtime it can, and the engine now refuses to do it silently.** On a
-node with both slabs attached, `POST /api/v1/volumes/{id}/clone` inherits the
-source's role — so cloning a *system* golden gives you a system volume no
-matter what you call it. That is correct behaviour (the alternative would be
-the dangling pointers above), but the result is not what an operator asking
-for `something-data` expects. Two things make it visible and fixable:
+**At runtime it can be asked for, and the engine no longer lets it pass in
+silence.** On a node with both slabs attached, `POST
+/api/v1/volumes/{id}/clone` inherits the source's role — so cloning a *system*
+golden gives you a system volume no matter what you call it. That is the
+correct outcome (the alternative would be the dangling pointers above), but it
+is not what an operator asking for `something-data` expects, and nothing in
+the result used to say so. Two things make it visible and fixable:
 
 - **Every volume reports its role.** `GET /api/v1/volumes` and
-  `/api/v1/volumes/{id}` carry `"role": "system" | "data"`, so "is the volume
-  I meant to be durable actually in the data slab?" is a question with an
-  answer. The name is not that answer.
+  `/api/v1/volumes/{id}` carry `"role": "system" | "data"`, and the `Volume`
+  kube resource carries `spec.role` plus a `storm.io/slab-role` label — so
+  `kubectl get volumes -l storm.io/slab-role=data` answers "is the volume I
+  meant to be durable actually in the data slab?". The name is not that
+  answer.
 - **A clone can ask to cross.** `POST /api/v1/volumes/{id}/clone` with
   `{"role": "data"}` on a system-slab source performs a **real copy** rather
   than a copy-on-write clone — because a slot cannot be in two partitions,
