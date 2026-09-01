@@ -2036,21 +2036,31 @@ async fn resolve_boot_volume(
 /// `boot-local` at boot and `adopt-ublk` at handover — because they need
 /// exactly the same three things and disagreeing about any of them would mean
 /// the two halves of a handover had different ideas of what the node holds.
-/// Find the slab inside a partitioned disk.
+/// Find every slab inside a partitioned disk.
 ///
-/// Returns `None` when there is no partition table, or none of its partitions
-/// holds a slab — in which case the caller's original error is the honest one
-/// to report, since "this is not a slab" beats "and it has no GPT either".
-async fn slab_in_partition(
+/// Returns an empty vector when there is no partition table, or none of its
+/// partitions holds a slab — in which case the caller's original error is the
+/// honest one to report, since "this is not a slab" beats "and it has no GPT
+/// either".
+///
+/// **Every** slab, not the first that opens. A node's mutable storage is now a
+/// system slab *and* a data slab (#88), and the data slab is allocated first,
+/// so it is the earlier GPT entry. Returning the first match meant a
+/// whole-disk path like `rd.stormblock.slab=/dev/sda` attached identity
+/// storage, looked for `stormblock.volume=stormpump` inside it, and found no
+/// root device — a boot failure that reads as a missing volume rather than as
+/// the wrong partition (stormpump#12).
+async fn slabs_in_partitions(
     dev: &Arc<dyn BlockDevice>,
     path: &str,
-) -> anyhow::Result<Option<Slab>> {
+) -> anyhow::Result<Vec<Slab>> {
     use stormblock::drive::partition::PartitionDevice;
 
     let Ok(gpt) = stormblock::pallet::gpt::Gpt::read(dev).await else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let lba = gpt.block_size as u64;
+    let mut found = Vec::new();
     for (i, e) in gpt.entries.iter().enumerate() {
         if e.first_lba == 0 || e.last_lba < e.first_lba {
             continue;
@@ -2064,11 +2074,12 @@ async fn slab_in_partition(
             } else {
                 format!("partition {} ({})", i + 1, e.name)
             };
-            println!("  {path}: slab found in {label}");
-            return Ok(Some(s));
+            let role = if s.is_data() { "data slab" } else { "slab" };
+            println!("  {path}: {role} found in {label}");
+            found.push(s);
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// Whether `path` carries a data slab, and what names it.
@@ -2157,23 +2168,36 @@ async fn open_slabs_and_restore(
         }
     }
     let mut slabs = Vec::with_capacity(slab_paths.len());
+    // The path each slab came from. One whole-disk path can yield several
+    // slabs, so this is what the per-slab reporting below zips against —
+    // `slab_paths` is no longer 1:1 with `slabs`.
+    let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
     for path in slab_paths {
         let dev: Arc<dyn BlockDevice> =
             Arc::new(stormblock::drive::filedev::FileDevice::open(path).await?);
-        let slab = match Slab::open(dev.clone()).await {
-            Ok(s) => s,
+        match Slab::open(dev.clone()).await {
+            Ok(s) => {
+                slabs.push(s);
+                slab_sources.push(path.clone());
+            }
             // A whole disk, or a disk image, rather than the partition the
             // slab is in. Both are the ordinary thing to be handed — a disk
             // image is what `image build` produces and what someone copies off
             // a node — and requiring the offset to be worked out by hand is
             // how a debugging tool ends up unused. The table says where the
-            // partitions are; try each one.
-            Err(first) => match slab_in_partition(&dev, path).await? {
-                Some(s) => s,
-                None => return Err(anyhow::anyhow!("open slab {path}: {first}")),
-            },
-        };
-        slabs.push(slab);
+            // partitions are; try each one, and take them all: a system slab
+            // and a data slab sit in the same GPT.
+            Err(first) => {
+                let found = slabs_in_partitions(&dev, path).await?;
+                if found.is_empty() {
+                    return Err(anyhow::anyhow!("open slab {path}: {first}"));
+                }
+                for s in found {
+                    slabs.push(s);
+                    slab_sources.push(path.clone());
+                }
+            }
+        }
     }
 
     // 2. Metadata: an explicit --meta wins, then each slab's own copy, then
@@ -2196,7 +2220,7 @@ async fn open_slabs_and_restore(
     let mut embedded: Vec<Option<stormblock::volume::metadata::VolumeMetadata>> =
         Vec::with_capacity(slabs.len());
     if meta.is_none() {
-        for (path, slab) in slab_paths.iter().zip(&slabs) {
+        for (path, slab) in slab_sources.iter().zip(&slabs) {
             let doc = match slab
                 .read_metadata()
                 .await
@@ -2214,7 +2238,7 @@ async fn open_slabs_and_restore(
     let primary = embedded.iter().position(|d| d.is_some());
     let (extent_size, from_slabs, source) = match primary {
         Some(i) => {
-            let carriers: Vec<&str> = slab_paths
+            let carriers: Vec<&str> = slab_sources
                 .iter()
                 .zip(&embedded)
                 .filter(|(_, d)| d.is_some())
@@ -2239,10 +2263,10 @@ async fn open_slabs_and_restore(
             if doc.arrays.is_empty() {
                 anyhow::bail!("metadata in {} records no arrays", meta_dir.display());
             }
-            if slab_paths.len() > doc.arrays.len() {
+            if slabs.len() > doc.arrays.len() {
                 anyhow::bail!(
-                    "{} slab path(s) given but metadata records only {} array(s)",
-                    slab_paths.len(),
+                    "{} slab(s) opened but metadata records only {} array(s)",
+                    slabs.len(),
                     doc.arrays.len()
                 );
             }
@@ -2256,13 +2280,13 @@ async fn open_slabs_and_restore(
     // Every document has to agree on the slot size: it is the unit the extent
     // maps are written in, and two slabs disagreeing about it is not something
     // to average out.
-    for (path, doc) in slab_paths.iter().zip(&embedded) {
+    for (path, doc) in slab_sources.iter().zip(&embedded) {
         if let Some(d) = doc {
             if d.extent_size != extent_size {
                 anyhow::bail!(
                     "slab {path} records a {}-byte extent and slab {} records {extent_size}",
                     d.extent_size,
-                    slab_paths[primary.unwrap_or(0)]
+                    slab_sources[primary.unwrap_or(0)]
                 );
             }
         }
@@ -2287,7 +2311,7 @@ async fn open_slabs_and_restore(
         .filter_map(|d| d.as_ref().and_then(|d| d.arrays.first()).map(|a| a.array_id))
         .collect();
     let mut metadata_slabs = Vec::new();
-    for ((path, slab), doc) in slab_paths.iter().zip(slabs).zip(&embedded) {
+    for ((path, slab), doc) in slab_sources.iter().zip(slabs).zip(&embedded) {
         let array_id = match doc.as_ref().and_then(|d| d.arrays.first()) {
             Some(rec) => rec.array_id,
             None => {
