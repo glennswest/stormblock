@@ -76,7 +76,7 @@ async fn boot_local_attaches_and_resolves_by_name() {
         "--check",
     ]);
     assert!(ok, "check mode must exit 0:\n{text}");
-    assert!(text.contains("Attached slab"), "attach missing:\n{text}");
+    assert!(text.contains("Attached system slab"), "attach missing:\n{text}");
     assert!(
         text.contains("Boot volume: boot-machine-a"),
         "resolve missing:\n{text}"
@@ -157,5 +157,5 @@ async fn boot_local_rejects_unknown_volume_and_missing_meta() {
     let (ok, text) = run_boot_local(&["--slab", bare.to_str().unwrap(), "--volume", "x"]);
     assert!(!ok);
     assert!(text.contains("volumes.dat"), "missing-meta error unclear:\n{text}");
-    assert!(text.contains("carries none"), "missing-meta error unclear:\n{text}");
+    assert!(text.contains("carries any"), "missing-meta error unclear:\n{text}");
 }

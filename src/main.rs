@@ -2208,7 +2208,7 @@ async fn open_slabs_and_restore(
             let store = MetadataStore::new(meta_dir.clone())?;
             if !store.exists() {
                 anyhow::bail!(
-                    "no volume metadata: no slab of {} carries any and there is no volumes.dat in {}",
+                    "no volume metadata: none of the slab(s) {} carries any, and there is no volumes.dat in {}",
                     slab_paths.join(", "),
                     meta_dir.display()
                 );
