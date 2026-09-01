@@ -96,7 +96,16 @@ pub type Result<T> = std::result::Result<T, ImageError>;
 /// Sizes are human strings (`512M`, `8G`). Exactly one partition may say
 /// `rest`, and only when the image has an explicit `size` — otherwise there is
 /// no "rest" to take.
+///
+/// **Every struct here rejects a key it does not know** (#81). A spec is a
+/// hand-edited file with no schema anywhere else, and a section name is easy
+/// to get wrong: `[[slab.clone]]` for `[[slab.golden]]` was accepted in
+/// silence, the build reported success, and the failure surfaced one image,
+/// one copy and one boot later as a root device that never appeared. A spec
+/// naming something the builder does not implement is not going to produce
+/// the image its author wanted, so it is refused where it can still be fixed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageSpec {
     #[serde(default)]
     pub name: String,
@@ -124,6 +133,7 @@ pub struct ImageSpec {
 
 /// The EFI System Partition — the floor, because firmware needs FAT.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EspSpec {
     /// Defaults to 100M, or the size of `from_image`.
     #[serde(default)]
@@ -140,6 +150,7 @@ pub struct EspSpec {
 
 /// One pallet in the image: either composed here, or taken from elsewhere.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PalletEntry {
     #[serde(default)]
     pub name: Option<String>,
@@ -172,6 +183,7 @@ pub struct PalletEntry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemberEntry {
     pub name: String,
     pub role: String,
@@ -187,6 +199,7 @@ pub struct MemberEntry {
 
 /// A partition that is not a pallet: firmware blobs, a data image, anything.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawPartition {
     pub name: String,
     #[serde(default)]
@@ -205,6 +218,7 @@ pub struct RawPartition {
 /// the slab and takes the first CoW clone of it, and the clone is what the
 /// node runs from — a golden is never used directly (#62).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SlabPartition {
     #[serde(default)]
     pub size: Option<String>,
@@ -225,6 +239,7 @@ pub struct SlabPartition {
 
 /// A golden volume in the slab, and the first clone taken of it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GoldenSpec {
     /// Base name. The golden volume is `<name>.golden` unless `golden_name`
     /// says otherwise, and the clone is `<name>` unless `clone` does.

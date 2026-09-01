@@ -732,3 +732,79 @@ async fn a_volume_allocates_only_in_slabs_of_its_own_role() {
     drop(cv);
     assert_eq!(where_is(&mgr, clone).await, vec![data_slab], "a clone's COW left the data slab");
 }
+
+/// #81 — a mistyped section is a parse error, not silence.
+///
+/// `[[slab.clone]]` where `[[slab.golden]]` was meant built cleanly, reported
+/// success, and produced an image with two volumes missing. The symptom
+/// arrived one image, one copy and one boot later, as a root device that
+/// never appeared — and it pointed at the mount list rather than at the spec
+/// that failed to create the volume.
+#[tokio::test]
+async fn a_spec_that_names_something_the_builder_does_not_know_is_refused() {
+    let cases = [
+        // The section that started it.
+        (
+            r#"
+name = "x"
+[slab]
+size = "rest"
+  [[slab.clone]]
+  name = "cilium"
+"#,
+            "clone",
+        ),
+        // A misspelt data slab is the same class, and the cost is higher:
+        // silence there means the node's identity shares a partition with
+        // the goldens again (#88).
+        (
+            r#"
+name = "x"
+[data-slab]
+size = "64M"
+"#,
+            "data-slab",
+        ),
+        (
+            r#"
+name = "x"
+[[pallet]]
+name = "system1"
+verison = 1
+"#,
+            "verison",
+        ),
+        (
+            r#"
+name = "x"
+[esp]
+size = "24M"
+from_directory = "esp"
+"#,
+            "from_directory",
+        ),
+    ];
+    for (toml, offender) in cases {
+        let err = ImageSpec::from_toml(toml).expect_err("must not parse: {toml}");
+        let msg = err.to_string();
+        assert!(msg.contains(offender), "did not name '{offender}': {msg}");
+    }
+
+    // And the spec that is right still parses.
+    ImageSpec::from_toml(
+        r#"
+name = "x"
+size = "320M"
+[data_slab]
+size = "64M"
+  [[data_slab.golden]]
+  name = "stormcert"
+  clone = "stormcert-data"
+[slab]
+size = "rest"
+  [[slab.golden]]
+  name = "stormpump"
+"#,
+    )
+    .expect("a correct spec still parses");
+}
