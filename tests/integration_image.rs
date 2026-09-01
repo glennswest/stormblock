@@ -713,21 +713,22 @@ async fn a_volume_allocates_only_in_slabs_of_its_own_role() {
         v.flush().await.unwrap();
     }
 
-    let gem = mgr.gem().read().await;
-    let where_is = |id| {
-        gem.get_volume_map(&id)
-            .map(|m| m.all_legs().map(|l| l.slab_id).collect::<Vec<_>>())
+    async fn where_is(mgr: &VolumeManager, id: stormblock::volume::VolumeId) -> Vec<stormblock::drive::slab::SlabId> {
+        mgr.gem()
+            .read()
+            .await
+            .get_volume_map(&id)
+            .map(|m| m.all_legs().map(|l| l.slab_id).collect())
             .unwrap_or_default()
-    };
-    assert_eq!(where_is(sys), vec![system_slab], "a system volume stayed system-side");
-    assert_eq!(where_is(dat), vec![data_slab], "a data volume stayed data-side");
+    }
+    assert_eq!(where_is(&mgr, sys).await, vec![system_slab], "a system volume stayed system-side");
+    assert_eq!(where_is(&mgr, dat).await, vec![data_slab], "a data volume stayed data-side");
 
     // A clone inherits the role, so its copy-on-write lands data-side too.
-    drop(gem);
     let clone = mgr.create_snapshot(dat, "identity-clone").await.unwrap();
     let cv = mgr.get_volume(&clone).unwrap();
     cv.write(0, &vec![0x11u8; slot as usize]).await.unwrap();
     cv.flush().await.unwrap();
-    let gem = mgr.gem().read().await;
-    assert_eq!(where_is(clone), vec![data_slab], "a clone's COW left the data slab");
+    drop(cv);
+    assert_eq!(where_is(&mgr, clone).await, vec![data_slab], "a clone's COW left the data slab");
 }
