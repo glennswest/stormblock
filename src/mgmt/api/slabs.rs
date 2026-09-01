@@ -21,6 +21,8 @@ use crate::placement::topology::StorageTier;
 pub struct SlabResponse {
     pub id: String,
     pub tier: String,
+    /// `system` or `data` — whether an install may reformat this slab (#88).
+    pub role: String,
     /// What fails together with this slab: `drive=…`, or the wider chain a
     /// labelled drive gave it. Redundancy policies spread across these.
     pub domain: String,
@@ -53,6 +55,10 @@ pub struct FormatSlabRequest {
     /// the device's identity under whatever labels the drive carries.
     #[serde(default)]
     pub domain: Option<String>,
+    /// `system` (the default — goldens, replaced by an image) or `data`
+    /// (identity and state, which no install path may reformat).
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 fn default_tier() -> String {
@@ -81,6 +87,7 @@ async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             SlabResponse {
                 id: id.0.to_string(),
                 tier: format!("{}", slab.tier()),
+                role: slab.role().to_string(),
                 domain: reg.domain_of(id).to_string(),
                 slot_size,
                 total_slots: total,
@@ -118,6 +125,7 @@ async fn get_slab(
             Json(SlabResponse {
                 id: slab_id.0.to_string(),
                 tier: format!("{}", slab.tier()),
+                role: slab.role().to_string(),
                 domain: reg.domain_of(&slab_id).to_string(),
                 slot_size,
                 total_slots: total,
@@ -146,6 +154,32 @@ async fn format_slab(
 
     let slot_size = req.slot_size.unwrap_or(crate::drive::slab::DEFAULT_SLOT_SIZE);
 
+    let role = match req.role.as_deref() {
+        Some(r) => match crate::drive::slab::SlabRole::parse(r) {
+            Some(r) => r,
+            None => return ApiError::bad_request(format!("invalid role '{r}' (use system or data)")),
+        },
+        None => crate::drive::slab::SlabRole::System,
+    };
+
+    // Formatting destroys what is there, and a data slab holds the one thing
+    // on the node nothing can mint again. Refuse unless the caller says, in
+    // this request, that a data slab is what it means to write (#88).
+    if role != crate::drive::slab::SlabRole::Data {
+        if let Ok(existing) = crate::drive::filedev::FileDevice::open(&req.device_path).await {
+            let dev = Arc::new(existing) as Arc<dyn crate::drive::BlockDevice>;
+            if let Ok(slab) = crate::drive::slab::Slab::open(dev).await {
+                if slab.is_data() {
+                    return ApiError::conflict(format!(
+                        "{} already holds a data slab ({}); pass \"role\": \"data\" to replace it",
+                        req.device_path,
+                        slab.slab_id().0
+                    ));
+                }
+            }
+        }
+    }
+
     // Open the device
     let device = match crate::drive::filedev::FileDevice::open(&req.device_path).await {
         Ok(d) => Arc::new(d) as Arc<dyn crate::drive::BlockDevice>,
@@ -159,7 +193,8 @@ async fn format_slab(
         },
         None => None,
     };
-    match crate::drive::slab::Slab::format(device, slot_size, tier).await {
+    let opts = crate::drive::slab::SlabFormat::new(slot_size, tier).with_role(role);
+    match crate::drive::slab::Slab::format_with(device, opts).await {
         Ok(slab) => {
             let slab_id = slab.slab_id();
             let total = slab.total_slots();
@@ -173,6 +208,7 @@ async fn format_slab(
             let resp = SlabResponse {
                 id: slab_id.0.to_string(),
                 tier: format!("{}", tier),
+                role: role.to_string(),
                 domain: reg.domain_of(&slab_id).to_string(),
                 slot_size,
                 total_slots: total,

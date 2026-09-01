@@ -8,7 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use stormblock::drive::{self, BlockDevice};
-use stormblock::drive::slab::{Slab, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZE};
+use stormblock::drive::slab::{Slab, SlabRole, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZE};
 #[cfg(feature = "iscsi")]
 use stormblock::boot_iscsi::{BootDiskLayout, IscsiBootManager};
 use stormblock::placement::topology::StorageTier;
@@ -361,6 +361,10 @@ enum SlabAction {
         /// Storage tier (hot, warm, cool, cold)
         #[arg(long, default_value = "hot")]
         tier: String,
+        /// What the slab is for: `system` (goldens, replaced by an image) or
+        /// `data` (identity and state, which no install may reformat)
+        #[arg(long, default_value = "system")]
+        role: String,
     },
     /// List slabs on specified devices
     List {
@@ -1263,15 +1267,31 @@ fn parse_tier(s: &str) -> Result<StorageTier, String> {
 
 async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
     match action {
-        SlabAction::Format { device, tier } => {
+        SlabAction::Format { device, tier, role } => {
             let tier = parse_tier(tier)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let role = SlabRole::parse(role)
+                .ok_or_else(|| anyhow::anyhow!("unknown slab role '{role}': system or data"))?;
+            // Formatting is destructive, and a data slab is the one thing on
+            // the node nothing can mint again (#88).
+            if let Some(what) = data_slab_on(device).await? {
+                if role != SlabRole::Data {
+                    anyhow::bail!(
+                        "refusing to format {device}: {what}. Pass --role data if you mean to \
+                         replace it"
+                    );
+                }
+            }
             let dev = Arc::new(
                 stormblock::drive::filedev::FileDevice::open(device).await?
             ) as Arc<dyn BlockDevice>;
-            let slab = Slab::format(dev, SLAB_SLOT_SIZE, tier).await
+            let slab = Slab::format_with(
+                dev,
+                stormblock::drive::slab::SlabFormat::new(SLAB_SLOT_SIZE, tier).with_role(role),
+            ).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Slab formatted: {}", slab.slab_id());
+            println!("  role: {}", slab.role());
             println!("  tier: {}", slab.tier());
             println!("  slot size: {} bytes", slab.slot_size());
             println!("  total slots: {}", slab.total_slots());
@@ -1285,8 +1305,8 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                         let dev = Arc::new(dev) as Arc<dyn BlockDevice>;
                         match Slab::open(dev).await {
                             Ok(slab) => {
-                                println!("{}: slab {} (tier={}, {} slots, {} free)",
-                                    device, slab.slab_id(), slab.tier(),
+                                println!("{}: slab {} (role={}, tier={}, {} slots, {} free)",
+                                    device, slab.slab_id(), slab.role(), slab.tier(),
                                     slab.total_slots(), slab.free_slots());
                             }
                             Err(e) => {
@@ -1307,6 +1327,7 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             let slab = Slab::open(dev).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Slab {}", slab.slab_id());
+            println!("  role: {}", slab.role());
             println!("  tier: {}", slab.tier());
             println!("  slot size: {} bytes", slab.slot_size());
             println!("  total slots: {}", slab.total_slots());

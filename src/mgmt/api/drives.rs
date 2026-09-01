@@ -332,6 +332,7 @@ async fn drive_slabs(State(state): State<Arc<AppState>>, Path(id): Path<String>)
             serde_json::json!({
                 "id": sid.0.to_string(),
                 "tier": slab.tier().to_string(),
+                "role": slab.role().to_string(),
                 "domain": registry.domain_of(sid).to_string(),
                 "total_slots": slab.total_slots(),
                 "free_slots": slab.free_slots(),
