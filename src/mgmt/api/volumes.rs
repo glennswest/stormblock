@@ -44,6 +44,13 @@ pub struct VolumeResponse {
     pub parent: Option<Uuid>,
     /// Sealed: takes no writes; what clones are taken from.
     pub sealed: bool,
+    /// `rw` or `ro` — whether the volume is set to take writes. A setting,
+    /// changeable at any point in the volume's life, unlike sealing.
+    pub access: String,
+    /// Whether a write would actually land: not sealed *and* not read-only.
+    /// A sealed volume reports `access: "rw", writable: false` — sealing is
+    /// the stronger statement and does not disturb the setting underneath.
+    pub writable: bool,
     /// Which half of the node's mutable storage the volume lives in:
     /// `system` (replaced wholesale by an install) or `data` (identity and
     /// state, which no install path formats). A clone is in its source's
@@ -62,6 +69,8 @@ struct Described {
     physical_bytes: u64,
     parent: Option<Uuid>,
     sealed: bool,
+    access: String,
+    writable: bool,
     role: String,
     fs: Option<serde_json::Value>,
     fs_uuid: Option<Uuid>,
@@ -78,6 +87,8 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
                 physical_bytes: handle.physical().await,
                 parent: vm.parent(id).map(|p| p.0),
                 sealed: handle.is_sealed(),
+                access: handle.access().to_string(),
+                writable: handle.writable(),
                 role: handle.placement_role().to_string(),
                 fs: fs.map(|f| f.json()),
                 fs_uuid: fs.and_then(|f| f.uuid),
@@ -89,6 +100,8 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             physical_bytes: 0,
             parent: None,
             sealed: false,
+            access: crate::volume::Access::ReadWrite.to_string(),
+            writable: true,
             role: crate::drive::slab::SlabRole::System.to_string(),
             fs: None,
             fs_uuid: None,
@@ -174,6 +187,8 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             physical_bytes: d.physical_bytes,
             parent: d.parent,
             sealed: d.sealed,
+            access: d.access.clone(),
+            writable: d.writable,
             role: d.role.clone(),
             fs: d.fs,
         });
@@ -214,6 +229,10 @@ async fn get_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                access: d.access.clone(),
+                writable: d.writable,
+            access: d.access.clone(),
+            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
@@ -416,6 +435,8 @@ async fn compose_volume(
         physical_bytes: allocated,
         parent: placements.first().map(|(p, _)| p.0),
         sealed: false,
+        access: crate::volume::Access::ReadWrite.to_string(),
+        writable: true,
         role: vm
             .get_volume_handle(&id)
             .map(|h| h.placement_role().to_string())
@@ -479,6 +500,8 @@ async fn create_volume(
             physical_bytes: d.physical_bytes,
             parent: d.parent,
             sealed: d.sealed,
+            access: d.access.clone(),
+            writable: d.writable,
             role: d.role.clone(),
             fs: d.fs,
         };
@@ -550,6 +573,8 @@ async fn create_volume(
                 physical_bytes: 0,
                 parent: None,
                 sealed: false,
+                access: crate::volume::Access::ReadWrite.to_string(),
+                writable: true,
                 // What it was actually placed in, which is not always what
                 // was asked for: a node with no system slab places in data.
                 role: vm.volume_role(&vol_id).unwrap_or_default().to_string(),
@@ -675,6 +700,68 @@ async fn seal_volume(
 }
 
 /// `DELETE /api/v1/volumes/{id}/seal` — reopen for writes.
+#[derive(Debug, Deserialize)]
+pub struct AccessRequest {
+    /// `rw` or `ro` (`read-write`/`read-only` also accepted).
+    pub access: String,
+}
+
+/// `PUT /api/v1/volumes/{id}/access` — take the volume out of service for
+/// writes, or put it back.
+///
+/// The lifecycle lever sealing is not. A sealed volume is the master copy
+/// clones are taken from and is read-only for that reason; this is a setting
+/// on an ordinary clone, it moves both ways, and it survives a restart. The
+/// response reports both, because "sealed" wins over "rw" and an operator
+/// who sets `rw` on a sealed volume should see that it is still not writable
+/// rather than be told the setting took.
+async fn set_access(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<AccessRequest>,
+) -> Response {
+    let Some(access) = crate::volume::Access::parse(&req.access) else {
+        return ApiError::bad_request(format!(
+            "invalid access '{}' (use rw or ro)", req.access
+        ));
+    };
+    let Some(vol_id) = resolve_volume(&state, &id).await else {
+        return ApiError::not_found(format!("no volume {id}"));
+    };
+    let mut vm = state.volume_manager.lock().await;
+    match vm.set_access(vol_id, access).await {
+        Ok(()) => Json(serde_json::json!({
+            "id": vol_id.0,
+            "access": access.to_string(),
+            "sealed": vm.is_sealed(&vol_id),
+            "writable": vm.writable(&vol_id),
+        }))
+        .into_response(),
+        Err(crate::volume::VolumeError::VolumeNotFound(_)) => {
+            ApiError::not_found(format!("volume {vol_id} not found"))
+        }
+        Err(e) => ApiError::internal(e.to_string()),
+    }
+}
+
+/// `GET /api/v1/volumes/{id}/access` — the setting and whether writes land.
+async fn get_access(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Some(vol_id) = resolve_volume(&state, &id).await else {
+        return ApiError::not_found(format!("no volume {id}"));
+    };
+    let vm = state.volume_manager.lock().await;
+    match vm.access(&vol_id) {
+        Some(a) => Json(serde_json::json!({
+            "id": vol_id.0,
+            "access": a.to_string(),
+            "sealed": vm.is_sealed(&vol_id),
+            "writable": vm.writable(&vol_id),
+        }))
+        .into_response(),
+        None => ApiError::not_found(format!("volume {vol_id} not found")),
+    }
+}
+
 async fn unseal_volume(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let uuid = match id.parse::<Uuid>() {
         Ok(u) => u,
@@ -772,6 +859,10 @@ async fn clone_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                access: d.access.clone(),
+                writable: d.writable,
+            access: d.access.clone(),
+            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
@@ -1168,6 +1259,10 @@ async fn create_snapshot(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                access: d.access.clone(),
+                writable: d.writable,
+            access: d.access.clone(),
+            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
@@ -1239,6 +1334,10 @@ async fn resize_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                access: d.access.clone(),
+                writable: d.writable,
+            access: d.access.clone(),
+            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
@@ -1460,6 +1559,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/tier", axum::routing::post(retier_volume))
         .route("/{id}/restripe", axum::routing::post(restripe_volume))
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
+        .route("/{id}/access", get(get_access).put(set_access))
         .route("/{id}/clone", axum::routing::post(clone_volume))
         .route("/{id}/lineage", get(volume_lineage))
         .route("/{id}/attach", get(get_attach).post(attach_volume).delete(detach_volume))

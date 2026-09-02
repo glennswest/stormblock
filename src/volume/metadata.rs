@@ -38,7 +38,61 @@ const MAGIC: [u8; 8] = *b"STRMVOL\0";
 ///
 /// V5 puts lineage, sealing and filesystem identity on the volume (#76):
 /// `parent`, `sealed`, `fs`. A template is a volume that has been sealed.
-const VERSION: u32 = 5;
+///
+/// V6 adds [`Access`]: whether the volume takes writes *right now*. Sealing
+/// says what a volume is and only moves one way in practice; access is a
+/// setting on a clone that moves both ways over its life. A V5 record loads
+/// read-write, which is what every volume that predates the question was.
+const VERSION: u32 = 6;
+
+/// Whether a volume takes writes.
+///
+/// Not the same question as `sealed`, and both are enforced. Sealed says
+/// *what a volume is*: the master copy, the thing clones are taken from, so
+/// a sealed volume is always read-only whatever its access says. Access is a
+/// property of a clone and changes over the clone's life — seeded read-write
+/// and then published read-only, attached read-only to a rescue guest,
+/// re-opened when it is that volume's turn to be written. Clearing `sealed`
+/// on a volume whose access is `ReadOnly` still leaves it read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Access {
+    /// Takes writes, discards and shrinks. The default: a volume nobody said
+    /// anything about is an ordinary writable one.
+    #[default]
+    ReadWrite,
+    /// Refuses them, and says so — the target answers "write protected"
+    /// rather than a media error, so an initiator can tell a policy from a
+    /// fault.
+    ReadOnly,
+}
+
+impl Access {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Access::ReadWrite => "rw",
+            Access::ReadOnly => "ro",
+        }
+    }
+
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Access::ReadOnly)
+    }
+
+    /// Every spelling a caller might reasonably send.
+    pub fn parse(s: &str) -> Option<Access> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "rw" | "read-write" | "read_write" | "readwrite" | "write" | "w" => Access::ReadWrite,
+            "ro" | "read-only" | "read_only" | "readonly" | "read" | "r" => Access::ReadOnly,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for Access {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// What is known about the filesystem on a volume — the properties that used
 /// to live on a separate template object and are facts about the volume.
@@ -133,6 +187,8 @@ pub struct VolumeRecord {
     pub parent: Option<VolumeId>,
     /// Sealed: refuses writes; what clones are taken from.
     pub sealed: bool,
+    /// Whether the volume takes writes at all right now. See [`Access`].
+    pub access: Access,
     /// The filesystem on it, when the engine knows.
     pub fs: Option<FsInfo>,
 }
@@ -208,6 +264,66 @@ fn convert_legacy_extents(m: BTreeMap<u64, LegacyLocation>) -> BTreeMap<u64, Ext
     m.into_iter().map(|(k, v)| (k, v.into())).collect()
 }
 
+/// V5 payload shapes — decode-only, converted on load. Everything a V6
+/// record carries except `access`.
+mod v5 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: Option<RaidArrayId>,
+        pub extents: BTreeMap<u64, ExtentLocation>,
+        pub retention: Retention,
+        pub redundancy: RedundancyPolicy,
+        pub parity: BTreeMap<u64, ParityGroup>,
+        pub failed_slabs: Vec<SlabId>,
+        pub parent: Option<VolumeId>,
+        pub sealed: bool,
+        pub fs: Option<FsInfo>,
+    }
+}
+
+impl From<v5::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v5::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: v.array_id,
+                    extents: v.extents,
+                    retention: v.retention,
+                    redundancy: v.redundancy,
+                    parity: v.parity,
+                    failed_slabs: v.failed_slabs,
+                    parent: v.parent,
+                    sealed: v.sealed,
+                    // Nothing before V6 could say otherwise, and a volume
+                    // that was writable before an upgrade must stay writable
+                    // across it: sealing still refuses writes on its own.
+                    access: Access::ReadWrite,
+                    fs: v.fs,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// V4 payload shapes — decode-only, converted on load.
 mod v4 {
     use super::*;
@@ -255,6 +371,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     // store's adoption fills in what it knows at startup.
                     parent: None,
                     sealed: false,
+                    access: Access::ReadWrite,
                     fs: None,
                 })
                 .collect(),
@@ -311,6 +428,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     failed_slabs: Vec::new(),
                     parent: None,
                     sealed: false,
+                    access: Access::ReadWrite,
                     fs: None,
                 })
                 .collect(),
@@ -361,6 +479,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     failed_slabs: Vec::new(),
                     parent: None,
                     sealed: false,
+                    access: Access::ReadWrite,
                     fs: None,
                 })
                 .collect(),
@@ -414,6 +533,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     failed_slabs: Vec::new(),
                     parent: None,
                     sealed: false,
+                    access: Access::ReadWrite,
                     fs: None,
                 })
                 .collect(),
@@ -532,6 +652,12 @@ impl MetadataStore {
             let (old, _): (v4::VolumeMetadata, _) =
                 bincode::serde::decode_from_slice(payload, bincode::config::standard())
                     .map_err(|e| io::Error::other(format!("bincode decode (v4): {e}")))?;
+            return Ok(old.into());
+        }
+        if version == 5 {
+            let (old, _): (v5::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v5): {e}")))?;
             return Ok(old.into());
         }
         let (metadata, _): (VolumeMetadata, _) =

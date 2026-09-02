@@ -10,6 +10,12 @@ use super::pdu::{NvmeSqe, NvmeCqe};
 const SCT_GENERIC: u8 = 0x00;
 const SCT_MEDIA: u8 = 0x02;
 
+/// Command Specific status: bits 11:9 = 1.
+const SCT_COMMAND_SPECIFIC: u8 = 0x01;
+/// Command Specific: the namespace is write protected — a policy, not a
+/// fault, and the one status an initiator can act on differently.
+const SC_NS_WRITE_PROTECTED: u8 = 0x20;
+
 /// Generic status codes worth naming.
 const SC_INVALID_FIELD: u8 = 0x02;
 const SC_LBA_OUT_OF_RANGE: u8 = 0x80;
@@ -33,6 +39,7 @@ fn io_status(e: &crate::drive::DriveError, writing: bool) -> (u8, u8) {
     use crate::drive::DriveError;
     match e {
         DriveError::NoSpace(_) => (SCT_GENERIC, SC_CAPACITY_EXCEEDED),
+        DriveError::ReadOnly(_) => (SCT_COMMAND_SPECIFIC, SC_NS_WRITE_PROTECTED),
         DriveError::OutOfRange { .. } => (SCT_GENERIC, SC_LBA_OUT_OF_RANGE),
         DriveError::NotAligned { .. } | DriveError::BufferTooSmall { .. } => {
             (SCT_GENERIC, SC_INVALID_FIELD)

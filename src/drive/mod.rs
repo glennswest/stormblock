@@ -88,6 +88,10 @@ pub enum DriveError {
     /// answering with a media error sends the operator to the wrong layer
     /// (#92).
     NoSpace(String),
+    /// The write was refused by policy, not by hardware: a sealed volume, or
+    /// one whose access is read-only. Targets answer "write protected", so an
+    /// initiator can tell a setting from a fault.
+    ReadOnly(String),
     DeviceNotReady,
     VfioNotAvailable,
     Other(anyhow::Error),
@@ -107,6 +111,7 @@ impl fmt::Display for DriveError {
                 write!(f, "buffer too small: need {need}, have {have}")
             }
             DriveError::NoSpace(what) => write!(f, "no space: {what}"),
+            DriveError::ReadOnly(why) => write!(f, "read-only: {why}"),
             DriveError::DeviceNotReady => write!(f, "device not ready"),
             DriveError::VfioNotAvailable => write!(f, "VFIO not available"),
             DriveError::Other(e) => write!(f, "{e}"),

@@ -153,6 +153,9 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
             "sizeBytes": handle.capacity_bytes(),
             "redundancy": handle.redundancy().spelling(),
             "sealed": handle.is_sealed(),
+            // The setting; `status.writable` is whether a write would land,
+            // which sealing also decides.
+            "access": handle.access().to_string(),
             // Which half of the node's mutable storage this is in. A clone is
             // in its source's half whatever it is named, so the name is not
             // evidence and this is (#88).
@@ -162,6 +165,7 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
         }),
         json!({
             "health": health.state.to_string(),
+            "writable": handle.writable(),
             "legsExpected": health.legs_expected,
             "legsMissing": health.legs_missing,
             "unreadable": health.unreadable,
@@ -215,6 +219,9 @@ struct VolumeSpecPatch {
     redundancy: Option<String>,
     #[serde(default)]
     sealed: Option<bool>,
+    /// `rw` or `ro`, at any point in the volume's life.
+    #[serde(default)]
+    access: Option<String>,
     /// A verb, not a state: `true` runs a resync now.
     #[serde(default)]
     resync: Option<bool>,
@@ -249,6 +256,22 @@ async fn patch_volume(
         let r = if sealed { vm.seal_volume(id, None).await } else { vm.unseal_volume(id).await };
         if let Err(e) = r {
             return status_error(StatusCode::CONFLICT, "Conflict", e.to_string());
+        }
+    }
+    if let Some(a) = spec.access {
+        match crate::volume::Access::parse(&a) {
+            Some(access) => {
+                if let Err(e) = vm.set_access(id, access).await {
+                    return status_error(StatusCode::CONFLICT, "Conflict", e.to_string());
+                }
+            }
+            None => {
+                return status_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Invalid",
+                    format!("spec.access: {a:?} (use rw or ro)"),
+                )
+            }
         }
     }
     if let Some(ret) = spec.retention {

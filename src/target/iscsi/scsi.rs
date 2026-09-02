@@ -92,8 +92,12 @@ impl SenseData {
         SenseData { key: SenseKey::IllegalRequest, asc: 0x21, ascq: 0x00 }
     }
 
+    /// Write protected: DATA PROTECT, which is what SPC has for a medium
+    /// that refuses writes by policy. (It was ILLEGAL REQUEST here, which
+    /// says the *command* was wrong rather than that the LUN will not take
+    /// it, and initiators retry the two differently.)
     pub fn write_protected() -> Self {
-        SenseData { key: SenseKey::IllegalRequest, asc: 0x27, ascq: 0x00 }
+        SenseData { key: SenseKey::DataProtect, asc: 0x27, ascq: 0x00 }
     }
 
     /// The thinly provisioned LUN had nowhere to put the write — out of
@@ -110,6 +114,7 @@ impl SenseData {
         use crate::drive::DriveError;
         match e {
             DriveError::NoSpace(_) => SenseData::space_allocation_failed(),
+            DriveError::ReadOnly(_) => SenseData::write_protected(),
             DriveError::OutOfRange { .. } => SenseData::lba_out_of_range(),
             DriveError::NotAligned { .. } | DriveError::BufferTooSmall { .. } => {
                 SenseData::invalid_field_in_cdb()

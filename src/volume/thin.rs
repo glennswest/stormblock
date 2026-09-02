@@ -25,6 +25,7 @@ use crate::drive::slab_registry::SlabRegistry;
 use crate::placement::domain::FailureDomain;
 use crate::placement::topology::StorageTier;
 use super::extent::VolumeId;
+use super::metadata::Access;
 use super::gem::{ExtentLocation, GlobalExtentMap, Leg, ParityGroup, parity_vext};
 use super::redundancy::{Redundancy, RedundancyPolicy};
 use super::stripe;
@@ -105,6 +106,9 @@ pub enum VolumeError {
     /// The volume is sealed: it is what clones are taken from, and nothing
     /// writes to it (#76).
     Sealed(VolumeId),
+    /// The volume's access is read-only right now. Unlike sealing this is a
+    /// setting, and an operator can put it back.
+    ReadOnly(VolumeId),
 }
 
 impl fmt::Display for VolumeError {
@@ -134,6 +138,10 @@ impl fmt::Display for VolumeError {
             VolumeError::Sealed(id) => write!(
                 f,
                 "volume {id} is sealed: it is what clones are taken from, and it takes no writes"
+            ),
+            VolumeError::ReadOnly(id) => write!(
+                f,
+                "volume {id} is read-only: set its access to rw to write to it"
             ),
         }
     }
@@ -315,6 +323,10 @@ pub struct ThinVolumeHandle {
     stripe_log: std::sync::RwLock<super::stripelog::StripeLog>,
     /// Sealed: refuses writes, discards and shrinks (#76).
     sealed: std::sync::atomic::AtomicBool,
+    /// Read-only: the same refusal, from a setting rather than from what the
+    /// volume is. A sealed volume is read-only whatever this says; a clone
+    /// moves between the two over its life.
+    read_only: std::sync::atomic::AtomicBool,
 }
 
 impl ThinVolumeHandle {
@@ -352,6 +364,7 @@ impl ThinVolumeHandle {
             shards: (0..SHARDS).map(|_| tokio::sync::Mutex::new(())).collect(),
             stripe_log: std::sync::RwLock::new(super::stripelog::StripeLog::none()),
             sealed: std::sync::atomic::AtomicBool::new(false),
+            read_only: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -370,9 +383,37 @@ impl ThinVolumeHandle {
         self.sealed.store(sealed, Ordering::Relaxed);
     }
 
+    /// The access setting, which is not the whole answer: ask [`writable`]
+    /// for whether a write would be taken.
+    ///
+    /// [`writable`]: ThinVolumeHandle::writable
+    pub fn access(&self) -> Access {
+        if self.read_only.load(Ordering::Relaxed) {
+            Access::ReadOnly
+        } else {
+            Access::ReadWrite
+        }
+    }
+
+    /// Set the access mode. Takes effect on the next write; nothing in
+    /// flight is cancelled, and a sealed volume stays read-only either way.
+    pub fn set_access(&self, access: Access) {
+        self.read_only.store(access.is_read_only(), Ordering::Relaxed);
+    }
+
+    /// Whether a write would be taken right now: both gates open.
+    pub fn writable(&self) -> bool {
+        !self.is_sealed() && !self.read_only.load(Ordering::Relaxed)
+    }
+
+    /// Refuse a write, naming which gate closed it — sealing and read-only
+    /// are different facts and an operator undoes them differently.
     fn refuse_if_sealed(&self) -> DriveResult<()> {
         if self.is_sealed() {
-            return Err(DriveError::Other(anyhow::anyhow!("{}", VolumeError::Sealed(self.id))));
+            return Err(DriveError::ReadOnly(VolumeError::Sealed(self.id).to_string()));
+        }
+        if self.read_only.load(Ordering::Relaxed) {
+            return Err(DriveError::ReadOnly(VolumeError::ReadOnly(self.id).to_string()));
         }
         Ok(())
     }

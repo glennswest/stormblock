@@ -32,7 +32,7 @@ use crate::placement::topology::StorageTier;
 use crate::raid::RaidArrayId;
 
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
-pub use metadata::{FsInfo, MetadataStore, Retention};
+pub use metadata::{Access, FsInfo, MetadataStore, Retention};
 pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport};
 pub use redundancy::{Redundancy, RedundancyPolicy};
 
@@ -210,9 +210,39 @@ impl VolumeManager {
 
     /// Reopen a sealed volume for writes. Exists for an operator undoing a
     /// mistake; clones already taken keep their own extents either way.
+    ///
+    /// Unsealing does not make a volume writable on its own: a volume whose
+    /// access is read-only stays read-only, because those are two different
+    /// statements and undoing one is not consent to undo the other.
     pub async fn unseal_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         handle.set_sealed(false);
+        self.persist().await;
+        Ok(())
+    }
+
+    /// What a volume's access is set to. Say nothing about sealing — ask
+    /// [`writable`](Self::writable) for whether a write would land.
+    pub fn access(&self, id: &VolumeId) -> Option<Access> {
+        self.volumes.get(id).map(|h| h.access())
+    }
+
+    /// Whether a write would be taken: not sealed and not read-only.
+    pub fn writable(&self, id: &VolumeId) -> bool {
+        self.volumes.get(id).map(|h| h.writable()).unwrap_or(false)
+    }
+
+    /// Set a volume read-only or read-write, at any point in its life.
+    ///
+    /// The lever a consumer needs and sealing is not: sealing declares a
+    /// volume to be the master copy clones descend from, which is a one-way
+    /// statement about what it *is*. This is a setting on an ordinary
+    /// clone — published read-only, handed to a rescue guest read-only,
+    /// opened again when it is that volume's turn to be written — and it
+    /// moves both ways. Persisted, so it survives a restart.
+    pub async fn set_access(&mut self, id: VolumeId, access: Access) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        handle.set_access(access);
         self.persist().await;
         Ok(())
     }
@@ -586,6 +616,7 @@ impl VolumeManager {
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
+            handle.set_access(vrec.access);
             if let Some(fs) = vrec.fs.clone() {
                 self.fs_info.insert(vrec.id, fs);
             }
@@ -1383,6 +1414,7 @@ impl VolumeManager {
                 handle.redundancy(),
                 handle.failed_slabs(),
                 handle.is_sealed(),
+                handle.access(),
             ));
         }
 
@@ -1401,7 +1433,7 @@ impl VolumeManager {
             .collect();
         let volumes = vol_info
             .into_iter()
-            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed)| metadata::VolumeRecord {
+            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed, access)| metadata::VolumeRecord {
                 id,
                 name,
                 virtual_size,
@@ -1409,6 +1441,7 @@ impl VolumeManager {
                 retention: self.retentions.get(&id).copied().unwrap_or_default(),
                 parent: self.parents.get(&id).copied(),
                 sealed,
+                access,
                 fs: self.fs_info.get(&id).cloned(),
                 extents: gem
                     .get_volume_map(&id)
@@ -1578,6 +1611,7 @@ impl VolumeManager {
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
+            handle.set_access(vrec.access);
             if let Some(p) = vrec.parent {
                 self.parents.insert(vrec.id, p);
             }
