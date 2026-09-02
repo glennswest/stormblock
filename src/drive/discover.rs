@@ -35,6 +35,15 @@ pub struct FoundSlab {
 /// root device — a boot failure that reads as a missing volume rather than as
 /// the wrong partition (stormpump#12).
 pub async fn slabs_in_partitions(dev: &Arc<dyn BlockDevice>) -> Vec<FoundSlab> {
+    // A drive that is itself a slab, with no partition table at all. This is
+    // what a store built by `POST /api/v1/slabs` on a plain file looks like —
+    // the shape an appliance's parts store has — and looking only inside
+    // partitions found nothing in it, so a store survived exactly as long as
+    // the process that made it.
+    if let Ok(slab) = Slab::open(dev.clone()).await {
+        return vec![FoundSlab { label: "the whole drive".to_string(), slab }];
+    }
+
     let Ok(gpt) = crate::pallet::gpt::Gpt::read(dev).await else {
         return Vec::new();
     };

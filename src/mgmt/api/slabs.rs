@@ -65,7 +65,7 @@ fn default_tier() -> String {
     "hot".to_string()
 }
 
-fn parse_tier(s: &str) -> Option<StorageTier> {
+pub(crate) fn parse_tier(s: &str) -> Option<StorageTier> {
     match s.to_lowercase().as_str() {
         "hot" => Some(StorageTier::Hot),
         "warm" => Some(StorageTier::Warm),

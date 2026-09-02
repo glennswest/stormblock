@@ -3,6 +3,34 @@
 ## [Unreleased]
 
 ### 2026-09-02
+- **feat (volume): `POST /api/v1/volumes/{id}/tier` moves a volume between
+  tiers, online.** The newest image belongs on the fastest drive and last
+  month's does not. Every extent not already on a slab of the target tier is
+  migrated to one, one extent per lock cycle so the volume keeps serving while
+  it moves; the id, name, contents and exports are unchanged. The destination
+  must match the volume's *role* as well as the tier — a data volume is not
+  demoted onto a system slab, because the roles say different things about what
+  an install may erase. Shared extents follow correctly: `migrate_leg` rewrites
+  every map that named the old slot, so a golden and the disks composed from it
+  move together rather than being torn apart.
+
+  Measured on forge: 5328 extents of a 32 GB image moved from an 800 GB SSD to
+  a 2 TB spinning drive, zero failures, and the image read back byte-identical.
+- **feat (volume): the create API can place a volume by role.**
+  `POST /api/v1/volumes` gains `role` (`system` or `data`, default `system`).
+  `CreateOptions::in_role` existed in the library and nothing could reach it,
+  so an appliance whose slabs are all `data` — content meant to outlive a
+  rebuild of the box — could not create a volume at all: every request asked
+  for a system slab and found none. The response now reports the role the
+  volume actually has rather than the constant `system`.
+- **fix (drive): a whole-drive slab is discovered.** `slabs_in_partitions`
+  read a GPT and looked inside partitions, so a drive that is *itself* a slab —
+  what `POST /api/v1/slabs` on a plain device produces — was found by nothing.
+  A store built that way survived exactly as long as the process that made it.
+- **fix (volume): an adopted slab keeps its own record.** Adoption now marks a
+  slab with a metadata region as one this manager persists into. Storage that
+  arrived as a disk has no data directory of its own, and a store whose contents
+  live only in the running process is not a store.
 - **feat (drives): adopt the storage already on a drive.**
   `POST /api/v1/drives/{id}/adopt` opens every slab in a drive's partitions and
   restores the volumes they describe, without writing anything. An appliance

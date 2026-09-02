@@ -118,6 +118,15 @@ pub struct CreateVolumeRequest {
     /// pick their own slabs.
     #[serde(default)]
     pub redundancy: Option<String>,
+    /// Which slabs this volume may live in: `system` (goldens, replaced by an
+    /// image) or `data` (identity and state, which no install may reformat).
+    /// Defaults to `system`.
+    ///
+    /// An appliance whose whole job is holding images has data slabs and
+    /// nothing else — its content is meant to outlive a rebuild of the box —
+    /// and without this every create asked for a system slab and found none.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +244,119 @@ pub struct ComposeVolumeRequest {
 ///
 /// The result is a disk made *of* its components rather than a copy of them:
 /// no bytes are read or written, only the map. What it costs is the map.
+#[derive(Debug, Deserialize)]
+pub struct RetierRequest {
+    /// Where the volume's extents should live: `hot`, `warm`, `cool`, `cold`.
+    pub tier: String,
+}
+
+/// `POST /api/v1/volumes/{id}/tier` — move a volume's extents to another tier.
+///
+/// The newest image belongs on the fastest drive and last month's does not.
+/// This is how it gets moved: every extent that is not already on a slab of
+/// the target tier is migrated to one, **online**, one extent per lock cycle
+/// so the volume keeps serving while it moves. Nothing about the volume
+/// changes except where its bytes are — same id, same name, same contents,
+/// same exports.
+///
+/// Shared extents move correctly: `migrate_leg` rewrites every map that named
+/// the old slot, so a golden and every disk composed from it follow it down
+/// together rather than being torn apart.
+///
+/// Returns as soon as the work is scheduled; the slabs' free counts are how
+/// you watch it happen.
+async fn retier_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RetierRequest>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "retier").increment(1);
+
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let vol_id = VolumeId(uuid);
+
+    let Some(tier) = super::slabs::parse_tier(&req.tier) else {
+        return ApiError::bad_request(format!(
+            "invalid tier '{}' (hot, warm, cool, cold)", req.tier
+        ));
+    };
+
+    let role = {
+        let vm = state.volume_manager.lock().await;
+        match vm.get_volume_handle(&vol_id) {
+            Some(h) => h.placement_role(),
+            None => return ApiError::not_found(format!("volume {vol_id} not found")),
+        }
+    };
+
+    // A destination of the right tier *and* the right role. A data volume does
+    // not get demoted onto a system slab: the roles mean different things about
+    // what an install is allowed to erase.
+    let dest = {
+        let reg = state.slab_registry.read().await;
+        reg.best_slab_for_tier_in_role(tier, role)
+    };
+    let Some(dest) = dest else {
+        return ApiError::conflict(format!(
+            "no {} slab in the {role} role to move to", req.tier
+        ));
+    };
+
+    // What has to move: everything not already there.
+    let todo: Vec<u64> = {
+        let gem = state.gem.read().await;
+        gem.volume_extents(&vol_id)
+            .map(|it| {
+                it.filter(|(_, loc)| loc.slab_id != dest)
+                    .map(|(vext, _)| *vext)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let total = todo.len();
+    if total > 0 {
+        let gem_arc = state.gem.clone();
+        let reg_arc = state.slab_registry.clone();
+        tokio::spawn(async move {
+            let engine = crate::placement::PlacementEngine::new();
+            let (mut moved, mut failed) = (0usize, 0usize);
+            for vext in todo {
+                // One extent per lock cycle, so I/O to the volume interleaves
+                // with the move instead of stalling behind all of it.
+                let mut gem = gem_arc.write().await;
+                let mut reg = reg_arc.write().await;
+                match engine.migrate_extent(&mut gem, &mut reg, vol_id, vext, Some(dest)).await {
+                    Ok(_) => moved += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!(volume = %vol_id, extent = vext, "retier: {e}");
+                        if failed > 16 {
+                            tracing::error!(volume = %vol_id, "retier: giving up after repeated failures");
+                            break;
+                        }
+                    }
+                }
+                drop(reg);
+                drop(gem);
+                tokio::task::yield_now().await;
+            }
+            tracing::info!(volume = %vol_id, moved, failed, "retier complete");
+        });
+    }
+
+    (axum::http::StatusCode::ACCEPTED, Json(serde_json::json!({
+        "volume": vol_id.0,
+        "tier": tier.to_string(),
+        "role": role.to_string(),
+        "destination_slab": dest.0,
+        "extents_to_move": total,
+    }))).into_response()
+}
+
 async fn compose_volume(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ComposeVolumeRequest>,
@@ -293,7 +415,10 @@ async fn compose_volume(
         physical_bytes: allocated,
         parent: placements.first().map(|(p, _)| p.0),
         sealed: false,
-        role: crate::drive::slab::SlabRole::System.to_string(),
+        role: vm
+            .get_volume_handle(&id)
+            .map(|h| h.placement_role().to_string())
+            .unwrap_or_else(|| crate::drive::slab::SlabRole::System.to_string()),
         fs: None,
     };
     metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
@@ -387,11 +512,23 @@ async fn create_volume(
         }
     }
 
+    let role = match req.role.as_deref() {
+        Some(r) => match crate::drive::slab::SlabRole::parse(r) {
+            Some(r) => r,
+            None => return ApiError::bad_request(format!("invalid role '{r}' (system or data)")),
+        },
+        None => crate::drive::slab::SlabRole::System,
+    };
+
     let mut vm = state.volume_manager.lock().await;
     let created = match array_id {
         Some(a) if redundancy.is_none() => vm.create_volume(&req.name, size, a).await,
         _ => vm
-            .create_volume_with(&req.name, size, crate::volume::CreateOptions::redundant(redundancy.clone()))
+            .create_volume_with(
+                &req.name,
+                size,
+                crate::volume::CreateOptions::redundant(redundancy.clone()).in_role(role),
+            )
             .await,
     };
     match created {
@@ -410,7 +547,7 @@ async fn create_volume(
                 physical_bytes: 0,
                 parent: None,
                 sealed: false,
-                role: crate::drive::slab::SlabRole::System.to_string(),
+                role: role.to_string(),
                 fs: None,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
@@ -1315,6 +1452,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/health", get(volume_health))
         .route("/{id}/redundancy", axum::routing::put(set_redundancy))
         .route("/{id}/resync", axum::routing::post(resync_volume))
+        .route("/{id}/tier", axum::routing::post(retier_volume))
         .route("/{id}/restripe", axum::routing::post(restripe_volume))
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
         .route("/{id}/clone", axum::routing::post(clone_volume))

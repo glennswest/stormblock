@@ -471,6 +471,8 @@ impl VolumeManager {
         }
 
         let mut metadata_slabs = Vec::new();
+        // Slabs whose own metadata region should carry the record from now on.
+        let mut adopted_meta: Vec<SlabId> = Vec::new();
         {
             let mut reg = self.registry.write().await;
             for f in found {
@@ -490,6 +492,7 @@ impl VolumeManager {
                 if f.slab.has_metadata_region() {
                     metadata_slabs.push(id);
                 }
+                adopted_meta.push(id);
                 report.slabs.push((id, f.label, f.slab.role().to_string()));
                 reg.add(f.slab);
             }
@@ -569,6 +572,20 @@ impl VolumeManager {
                 self.parents.insert(vrec.id, parent);
             }
             report.volumes.push((vrec.id, vrec.name, vrec.virtual_size));
+        }
+
+        // An adopted slab keeps its own record from here on. Storage that
+        // arrived as a file has no data directory of its own, and a store
+        // whose contents live only in the process that imported them is a
+        // store that does not survive a restart — which is what happened to
+        // the first parts store built this way.
+        for id in adopted_meta {
+            if !self.metadata_slabs.contains(&id) {
+                self.metadata_slabs.push(id);
+            }
+        }
+        if !self.metadata_slabs.is_empty() {
+            self.persist().await;
         }
 
         Ok(report)
