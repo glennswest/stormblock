@@ -437,6 +437,29 @@ pub fn primary_local_host() -> Option<String> {
         .clone()
 }
 
+/// Say, once at startup, what consumers will be told to dial and where that
+/// answer came from.
+///
+/// A derived address is a *guess* on a node with more than one network, and a
+/// silent guess is the failure mode this whole path keeps producing: forge
+/// has eth0 on one network and eth1 on another, its name resolves to the
+/// second, and the default route picks the first. Both are defensible; only
+/// the operator knows which one the consumers are on. So the derivation stays
+/// — it beats loopback, which is never right — and it says so out loud.
+pub fn log_advertised_host(cfg: &ManagementConfig, listen_host: &str) {
+    let host = cfg.resolve_advertised_host(listen_host);
+    if cfg.advertised_host().is_some() {
+        tracing::info!("consumers are told to attach to {host} (management.advertised_addr)");
+        return;
+    }
+    match primary_local_host() {
+        Some(ip) if ip == host => tracing::warn!(
+            "consumers are told to attach to {host}, derived from this node's default route —              set management.advertised_addr if they reach this node on a different network"
+        ),
+        _ => tracing::info!("consumers are told to attach to {host}"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveConfig {
     pub path: String,

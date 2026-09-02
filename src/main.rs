@@ -778,6 +778,13 @@ async fn main() -> anyhow::Result<()> {
     let gem = volume_manager.gem().clone();
     let mut state = Arc::new(AppState::new(config.clone(), volume_manager, slab_registry, gem));
 
+    // What consumers will be told to dial, said once, before anything can be
+    // attached — a derived address is a guess on a multi-homed node.
+    mgmt::config::log_advertised_host(
+        &config.management,
+        cli.nvmeof_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(""),
+    );
+
     // Node/cluster discovery. Attached before the targets start so peers see
     // this node as soon as it is serving.
     if !config.management.discovery_disabled {
