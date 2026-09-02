@@ -56,16 +56,13 @@ async fn setup(dir: &TempDir) -> (Arc<AppState>, uuid::Uuid, uuid::Uuid) {
     config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
     let slab_registry = vm.registry().clone();
     let gem = vm.gem().clone();
-    let state = AppState::new(config);
+    let state = Arc::new(AppState::new(config, vm, slab_registry, gem));
     *state.drives.write().await = drive_infos;
     state.arrays.write().await.insert(
         array_id,
-        ArrayInfo { array: arc_array, level, member_count, capacity, stripe_size },
+        ArrayInfo { array: arc_array, level, member_count, capacity_bytes: capacity, stripe_size },
     );
-    *state.volume_manager.lock().await = vm;
-    *state.slab_registry.write().await = slab_registry.read().await.clone();
-    *state.gem.write().await = gem.read().await.clone();
-    (Arc::new(state), v1.0, v2.0)
+    (state, v1.0, v2.0)
 }
 
 #[tokio::test]
@@ -237,10 +234,13 @@ async fn synonyms_survive_a_restart() {
         server.abort();
     }
 
-    // A second engine over the same data dir.
+    // A second engine over the same data dir, holding no volumes of its own.
     let mut config = StormBlockConfig::default();
     config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
-    let second = Arc::new(AppState::new(config));
+    let fresh = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let reg = fresh.registry().clone();
+    let gem = fresh.gem().clone();
+    let second = Arc::new(AppState::new(config, fresh, reg, gem));
     let (base, server) = start(second).await;
     let client = reqwest::Client::new();
     let body: serde_json::Value = client
