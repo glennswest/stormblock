@@ -620,7 +620,10 @@ async fn unknown_template_and_bad_input_are_reported_precisely() {
             .status(),
         400
     );
-    // A plain volume still needs its array.
+    // A plain volume needs somewhere to be placed, and this node has slabs —
+    // so it is created. It used to need an `array_id`, which slab placement
+    // made obsolete: a volume's extents pick their own slabs, and demanding
+    // an array binding refused the one request every consumer sends.
     assert_eq!(
         client
             .post(format!("{url}/api/v1/volumes"))
@@ -629,7 +632,7 @@ async fn unknown_template_and_bad_input_are_reported_precisely() {
             .await
             .unwrap()
             .status(),
-        400
+        201
     );
 
     server.abort();
