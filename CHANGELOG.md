@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v13.2.0] — 2026-09-02
+
 ### 2026-09-02
 - **feat (volume): synonyms — a stable name that points at a volume, and can
   be re-pointed at a new version.** A consumer refers to storage by a name it

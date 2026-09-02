@@ -243,7 +243,7 @@ impl SynonymStore {
     pub fn list(&self, namespace: Option<&str>) -> Vec<&Synonym> {
         self.synonyms
             .values()
-            .filter(|s| namespace.is_none_or(|ns| s.namespace == ns))
+            .filter(|s| namespace.map_or(true, |ns| s.namespace == ns))
             .collect()
     }
 
@@ -334,7 +334,7 @@ impl SynonymStore {
 
     pub fn remove(&mut self, namespace: &str, name: &str) -> Result<Synonym, SynonymError> {
         let k = key(namespace, name);
-        let gone = self.synonyms.remove(&k).ok_or_else(|| SynonymError::NotFound(k))?;
+        let gone = self.synonyms.remove(&k).ok_or(SynonymError::NotFound(k))?;
         self.persist();
         Ok(gone)
     }
