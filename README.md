@@ -256,6 +256,30 @@ A synonym does not pin: it resolves to whatever it points at *now*. A consumer
 that must not be moved under its feet records the `(version, target)` it
 resolved and compares at its next start.
 
+**Writes go to a clone, never to the golden.** A golden is the master copy and
+is sealed, so what a consumer wants from a name is not the volume it resolves
+to but a copy-on-write clone of it — its own filesystem identity, its own
+divergence, costing nothing until written. `claim` is that in one call, and it
+binds a name to the clone in the caller's own namespace, which is how one
+golden ends up behind many consumers each holding a name of their own:
+
+```bash
+curl -X POST http://node:9090/api/v1/synonyms/images/fedora/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace":"tenant-a","name":"root"}'
+```
+
+Claiming again re-points that tenant's own name at its new clone. A claim of
+an unsealed target is refused (`unsealed_ok=true` to override): a golden is
+sealed, so an unsealed target is something still being written, and a clone of
+it is a snapshot of a moving thing — the caller's consistency question, and
+one they should have to ask out loud.
+
+The same rule is enforced where it is cheapest to say so: a **read-write
+attach of a sealed volume is refused**, before a guest boots onto storage that
+will not take its writes, and the refusal names the way forward (clone it, or
+attach `mode=ro`).
+
 ### Where a volume is placed: `system` or `data`
 
 A volume lives in one half of the node's mutable storage — `system` (goldens,

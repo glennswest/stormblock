@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### 2026-09-02
+- **feat (volume): writes go to a clone, never to the golden — enforced at the
+  attach.** A golden is the master copy and is sealed, so a read-write attach
+  of one is now refused with the way forward in the message (clone it, or
+  attach `mode=ro`), rather than letting a guest boot onto storage that
+  answers every write with a refusal. `POST /api/v1/volumes/{id}/attach` takes
+  `mode` (`rw` default, `ro`); `ro` is an assertion about intent, not a
+  transport lock — the engine's own gate is what refuses the write, and it
+  answers "write protected" when it does.
+- **feat (volume): `POST /api/v1/synonyms/{ns}/{name}/claim`.** What a
+  consumer wants from a name is not the golden it resolves to but a
+  copy-on-write clone of it, with its own filesystem identity, costing nothing
+  until written. A claim resolves, clones, and binds a name to the clone in
+  the caller's own namespace — one golden behind many consumers, each holding
+  a name of its own, each writing only to its own clone. A second claim
+  re-points that consumer's name at its new clone. Claiming an unsealed target
+  is refused unless `unsealed_ok=true`: an unsealed volume may be changing
+  under the copy, which is the caller's consistency question to own out loud.
+
 ## [v13.2.0] — 2026-09-02
 
 ### 2026-09-02
