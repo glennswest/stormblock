@@ -381,7 +381,16 @@ impl ManagementConfig {
     ///
     /// Preference order: explicit `advertised_addr`, the target's own listen
     /// host when it is concrete, the management listen host when it is
-    /// concrete, then loopback as a last resort.
+    /// concrete, then **this node's own routable address**, and loopback only
+    /// when there is no route at all.
+    ///
+    /// The loopback fallback used to be reached whenever everything was a
+    /// wildcard — which is the ordinary configuration, since a node that
+    /// serves the network binds `0.0.0.0`. An attach then answered
+    /// `traddr: 127.0.0.1`, which is not merely unhelpful to a remote
+    /// initiator but actively wrong: it names the initiator's own machine.
+    /// Observed on forge, where the response could only be used by knowing
+    /// the node's address some other way.
     pub fn resolve_advertised_host(&self, listen_host: &str) -> String {
         if let Some(h) = self.advertised_host() {
             return h;
@@ -397,8 +406,35 @@ impl ManagementConfig {
         if !is_wildcard_host(mgmt_host) {
             return mgmt_host.to_string();
         }
+        // Everything is a wildcard, so the node is listening on every
+        // interface and the honest answer is the address it reaches other
+        // machines from.
+        if let Some(ip) = primary_local_host() {
+            return ip;
+        }
         "127.0.0.1".to_string()
     }
+}
+
+/// The address this node uses to reach other machines, cached for the life of
+/// the process.
+///
+/// **No packet is sent.** Connecting a UDP socket only picks a route and binds
+/// a source address, which is exactly the question being asked; the address it
+/// is pointed at is TEST-NET-1, which is not routed anywhere real. This beats
+/// resolving the node's own name, which depends on DNS agreeing with what the
+/// interfaces actually are, and beats walking interfaces, which needs a
+/// dependency and still has to guess which one matters.
+pub fn primary_local_host() -> Option<String> {
+    static CACHED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+            sock.connect("192.0.2.1:9").ok()?;
+            let ip = sock.local_addr().ok()?.ip();
+            (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
+        })
+        .clone()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -832,9 +868,21 @@ mod tests {
         let c = mgmt_with(None, "192.168.1.10:9090");
         assert_eq!(c.resolve_advertised_host("0.0.0.0"), "192.168.1.10");
 
-        // Everything wildcard: loopback is the last resort.
+        // Everything wildcard: the node's own routable address, and loopback
+        // only on a host that has no route at all. Never the unspecified
+        // address, and never loopback while a route exists — that answer
+        // names the *initiator's* machine, not this one.
         let c = mgmt_with(None, "0.0.0.0:9090");
-        assert_eq!(c.resolve_advertised_host("0.0.0.0"), "127.0.0.1");
+        let got = c.resolve_advertised_host("0.0.0.0");
+        match primary_local_host() {
+            Some(ip) => {
+                assert_eq!(got, ip);
+                assert_ne!(got, "127.0.0.1");
+                assert!(got.parse::<std::net::IpAddr>().is_ok(), "{got}");
+            }
+            None => assert_eq!(got, "127.0.0.1"),
+        }
+        assert_ne!(got, "0.0.0.0");
     }
 
     #[test]
