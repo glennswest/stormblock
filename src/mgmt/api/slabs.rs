@@ -219,18 +219,35 @@ async fn format_slab(
         Ok(slab) => {
             let slab_id = slab.slab_id();
             let total = slab.total_slots();
+            // A slab with a region for its own record should be keeping one.
+            // Registering it without saying so left the record living only in
+            // whatever directory the engine happened to have — which for
+            // storage that arrives as a drive is nowhere, so its contents did
+            // not survive a restart.
+            let carries_metadata = slab.has_metadata_region();
             let free = slab.free_slots();
             let allocated = slab.allocated_slots();
-            let mut reg = state.slab_registry.write().await;
-            match domain {
-                Some(d) => reg.add_in_domain(slab, d),
-                None => reg.add(slab),
+            let slab_domain = {
+                let mut reg = state.slab_registry.write().await;
+                match domain {
+                    Some(d) => reg.add_in_domain(slab, d),
+                    None => reg.add(slab),
+                }
+                reg.domain_of(&slab_id).to_string()
+            };
+            if carries_metadata {
+                let mut vm = state.volume_manager.lock().await;
+                let mut slabs = vm.metadata_slabs().to_vec();
+                if !slabs.contains(&slab_id) {
+                    slabs.push(slab_id);
+                    vm.persist_to_slabs(slabs);
+                }
             }
             let resp = SlabResponse {
                 id: slab_id.0.to_string(),
                 tier: format!("{}", tier),
                 role: role.to_string(),
-                domain: reg.domain_of(&slab_id).to_string(),
+                domain: slab_domain,
                 slot_size,
                 total_slots: total,
                 free_slots: free,
@@ -240,7 +257,6 @@ async fn format_slab(
                 free_bytes: free * slot_size,
                 free_bytes_human: human_size(free * slot_size),
             };
-            drop(reg);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
         Err(e) => ApiError::internal(format!("failed to format slab: {e}")),

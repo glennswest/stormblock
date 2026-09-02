@@ -54,6 +54,18 @@
 ## [v13.1.0] — 2026-09-02
 
 ### 2026-09-02
+- **fix (slabs): a formatted slab is registered as one that keeps its own
+  record.** `POST /api/v1/slabs` added the slab to the registry and stopped
+  there, so nothing ever wrote the volume record into the region the slab had
+  just reserved for it. Only adoption did that — which meant a slab formatted
+  through the API held volumes that vanished on the next restart. Verified on
+  forge: two 32 GB images imported, the service restarted, and both came back
+  adopted from the drives with their content byte-identical.
+- **fix (volume): an adopted volume keeps the role of the slab it lives in.**
+  Adoption rebuilt handles with the default placement policy, so a volume
+  adopted out of a data slab came back as `system` and could not allocate into
+  the slab it was sitting in. It now derives the role from where its extents
+  actually are — the same rule `restore` uses and for the same reason (#88).
 - **fix (#92, #93): a volume is created where the node actually has slabs.**
   `PlacementPolicy::default()` is `SlabRole::System`, and nothing between
   `POST /api/v1/volumes` (or `/volumes/import`) and `create_volume_with` asked

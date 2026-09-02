@@ -606,6 +606,19 @@ impl VolumeManager {
                 }
             }
 
+            // Where a volume already lives is what it is — the same rule
+            // `restore` uses. A volume adopted out of a data slab that came
+            // back as `system` could not allocate into the slab it is sitting
+            // in: every later write would look for a system slab and find
+            // none.
+            let role = {
+                let reg = self.registry.read().await;
+                vrec.extents
+                    .values()
+                    .next()
+                    .map(|loc| reg.role_of(&loc.slab_id))
+                    .unwrap_or(SlabRole::System)
+            };
             let vol = ThinVolume::restore(
                 vrec.id, vrec.name.clone(), vrec.virtual_size, self.slot_size,
             );
@@ -613,7 +626,7 @@ impl VolumeManager {
                 vol,
                 self.gem.clone(),
                 self.registry.clone(),
-                PlacementPolicy::default(),
+                PlacementPolicy { role, ..Default::default() },
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
