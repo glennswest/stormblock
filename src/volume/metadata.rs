@@ -781,6 +781,69 @@ mod tests {
         }
     }
 
+    /// A V5 record — everything but access — loads read-write.
+    ///
+    /// The safe reading of silence: a volume that took writes before an
+    /// upgrade must still take them after one. Sealing still refuses on its
+    /// own, so a sealed V5 record does not become writable here.
+    #[test]
+    fn a_v5_record_loads_read_write() {
+        let slab_id = crate::drive::slab::SlabId(Uuid::new_v4());
+        let mut extents = BTreeMap::new();
+        extents.insert(3u64, ExtentLocation::new(slab_id, 9));
+        let old = v5::VolumeMetadata {
+            extent_size: 1 << 20,
+            arrays: vec![],
+            volumes: vec![
+                v5::VolumeRecord {
+                    id: VolumeId(Uuid::from_u128(55)),
+                    name: "five".into(),
+                    virtual_size: 1 << 30,
+                    array_id: None,
+                    extents,
+                    retention: Retention::Keep,
+                    redundancy: RedundancyPolicy::mirror(2),
+                    parity: BTreeMap::new(),
+                    failed_slabs: vec![slab_id],
+                    parent: Some(VolumeId(Uuid::from_u128(54))),
+                    sealed: false,
+                    fs: None,
+                },
+                v5::VolumeRecord {
+                    id: VolumeId(Uuid::from_u128(56)),
+                    name: "golden".into(),
+                    virtual_size: 1 << 30,
+                    array_id: None,
+                    extents: BTreeMap::new(),
+                    retention: Retention::Keep,
+                    redundancy: RedundancyPolicy::none(),
+                    parity: BTreeMap::new(),
+                    failed_slabs: vec![],
+                    parent: None,
+                    sealed: true,
+                    fs: None,
+                },
+            ],
+        };
+        let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&payload);
+        let crc = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        let back = MetadataStore::decode(&buf).expect("a V5 record must still load");
+        let v = &back.volumes[0];
+        assert_eq!(v.access, Access::ReadWrite);
+        assert_eq!(v.parent, Some(VolumeId(Uuid::from_u128(54))));
+        assert_eq!(v.failed_slabs, vec![slab_id]);
+        let g = &back.volumes[1];
+        assert!(g.sealed, "sealing survives the conversion");
+        assert_eq!(g.access, Access::ReadWrite, "and is not confused with the setting");
+    }
+
     /// A V4 record — redundancy but no lineage — loads with nothing sealed.
     #[test]
     fn a_v4_record_loads_with_no_lineage() {
