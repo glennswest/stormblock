@@ -775,6 +775,7 @@ mod tests {
                 failed_slabs: Vec::new(),
                 parent: None,
                 sealed: false,
+                access: Access::ReadWrite,
                 fs: None,
             }],
         }
@@ -835,6 +836,7 @@ mod tests {
                 failed_slabs: Vec::new(),
                 parent: Some(parent),
                 sealed: true,
+                access: Access::ReadWrite,
                 fs: Some(FsInfo {
                     kind: "ext4".into(),
                     journal: true,
@@ -925,6 +927,7 @@ mod tests {
                 failed_slabs: vec![b],
                 parent: None,
                 sealed: false,
+                access: Access::ReadWrite,
                 fs: None,
             }],
         };
@@ -1093,6 +1096,7 @@ mod retention_tests {
                 failed_slabs: Vec::new(),
                 parent: None,
                 sealed: false,
+                access: Access::ReadWrite,
                 fs: None,
             }],
         }

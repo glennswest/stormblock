@@ -231,8 +231,6 @@ async fn get_volume(
                 sealed: d.sealed,
                 access: d.access.clone(),
                 writable: d.writable,
-            access: d.access.clone(),
-            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
@@ -861,8 +859,6 @@ async fn clone_volume(
                 sealed: d.sealed,
                 access: d.access.clone(),
                 writable: d.writable,
-            access: d.access.clone(),
-            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
@@ -1261,8 +1257,6 @@ async fn create_snapshot(
                 sealed: d.sealed,
                 access: d.access.clone(),
                 writable: d.writable,
-            access: d.access.clone(),
-            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
@@ -1336,8 +1330,6 @@ async fn resize_volume(
                 sealed: d.sealed,
                 access: d.access.clone(),
                 writable: d.writable,
-            access: d.access.clone(),
-            writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
             };
