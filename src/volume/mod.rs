@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod redundancy;
 pub mod thin;
 pub mod snapshot;
+pub mod compose;
 pub mod stripe;
 pub mod stripelog;
 #[cfg(feature = "stormfs-data")]
@@ -421,6 +422,60 @@ impl VolumeManager {
             handle.use_stripe_log(store.dir());
         }
         self.volumes.insert(id, handle);
+        self.persist().await;
+        Ok(id)
+    }
+
+    /// Compose a volume from other volumes, sharing their extents.
+    ///
+    /// The components are usually sealed goldens, and the result is a disk
+    /// made *of* them rather than a copy of them: nothing is read, nothing is
+    /// written, and the slots they already occupy are simply referenced once
+    /// more. Writing to the result copies on write, the same as a clone.
+    ///
+    /// Each component is placed at the byte offset given, and takes its span
+    /// from the source's virtual size — a sparse golden still owns the whole
+    /// span it was sized for.
+    pub async fn compose_volume(
+        &mut self,
+        name: &str,
+        declared_size: Option<u64>,
+        placements: &[(VolumeId, u64)],
+    ) -> Result<VolumeId, VolumeError> {
+        let mut components = Vec::with_capacity(placements.len());
+        for (source, at) in placements {
+            let handle = self.volumes.get(source)
+                .ok_or(VolumeError::VolumeNotFound(*source))?;
+            components.push(compose::Component {
+                source: *source,
+                at: *at,
+                span: handle.capacity_bytes(),
+            });
+        }
+
+        let vol = {
+            let mut gem = self.gem.write().await;
+            let mut reg = self.registry.write().await;
+            compose::compose_volume(
+                name, declared_size, self.slot_size, &components, &mut gem, &mut reg,
+            ).await?
+        };
+
+        let id = vol.id();
+        // The composition inherits the first component's policy and role: the
+        // result lives beside what it is made of, and a disk composed of
+        // system goldens is a system volume.
+        let handle = Arc::new(match placements.first() {
+            Some((first, _)) => self.inherit_handle(vol, first),
+            None => ThinVolumeHandle::with_redundancy(
+                vol, self.gem.clone(), self.registry.clone(),
+                PlacementPolicy::default(), RedundancyPolicy::none(),
+            ),
+        });
+        self.volumes.insert(id, handle);
+        if let Some((first, _)) = placements.first() {
+            self.record_lineage(id, *first);
+        }
         self.persist().await;
         Ok(id)
     }

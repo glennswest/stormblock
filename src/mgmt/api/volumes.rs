@@ -213,6 +213,93 @@ async fn get_volume(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ComposeComponentRequest {
+    /// The volume to share in, by id or name. Usually a sealed golden.
+    pub volume: String,
+    /// Where it starts in the composed volume. Bytes, slot-aligned.
+    #[serde(default)]
+    pub at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComposeVolumeRequest {
+    pub name: String,
+    /// Total size. Omitted takes the end of the last component.
+    #[serde(default)]
+    pub size: Option<String>,
+    pub components: Vec<ComposeComponentRequest>,
+}
+
+/// Compose a volume out of other volumes, sharing their extents.
+///
+/// The result is a disk made *of* its components rather than a copy of them:
+/// no bytes are read or written, only the map. What it costs is the map.
+async fn compose_volume(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ComposeVolumeRequest>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "compose").increment(1);
+
+    if req.components.is_empty() {
+        return ApiError::bad_request("a composed volume needs at least one component");
+    }
+
+    let size = match super::fstemplates::resolve_size(&req.size, None) {
+        Ok(v) => v,
+        Err(e) => return ApiError::bad_request(e),
+    };
+
+    // Resolve every name before composing, so a typo in the last component
+    // does not leave a half-built volume behind.
+    let mut placements = Vec::with_capacity(req.components.len());
+    {
+        let vm = state.volume_manager.lock().await;
+        for c in &req.components {
+            match vm.find_volume(&c.volume).await {
+                Some(id) => placements.push((id, c.at)),
+                None => return ApiError::not_found(format!("no volume named {}", c.volume)),
+            }
+        }
+    }
+
+    let mut vm = state.volume_manager.lock().await;
+    let id = match vm.compose_volume(&req.name, size, &placements).await {
+        Ok(id) => id,
+        Err(e) => return ApiError::bad_request(format!("failed to compose volume: {e}")),
+    };
+
+    // What it cost is the interesting number, so report it: a composition
+    // that shares everything allocates nothing of its own.
+    let (virtual_size, allocated) = vm
+        .list_volumes()
+        .await
+        .into_iter()
+        .find(|(vid, _, _, _)| *vid == id)
+        .map(|(_, _, v, a)| (v, a))
+        .unwrap_or((0, 0));
+
+    let resp = VolumeResponse {
+        id: id.0,
+        name: req.name,
+        virtual_size_bytes: virtual_size,
+        virtual_size_human: human_size(virtual_size),
+        allocated_bytes: allocated,
+        allocated_human: human_size(allocated),
+        array_id: None,
+        fs_uuid: None,
+        redundancy: vm.redundancy(&id).map(|r| r.spelling()).unwrap_or_else(|| "none".into()),
+        health: "healthy".into(),
+        physical_bytes: allocated,
+        parent: placements.first().map(|(p, _)| p.0),
+        sealed: false,
+        role: crate::drive::slab::SlabRole::System.to_string(),
+        fs: None,
+    };
+    metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
+    (axum::http::StatusCode::CREATED, Json(resp)).into_response()
+}
+
 async fn create_volume(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateVolumeRequest>,
@@ -1239,5 +1326,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/{id}/cidata", axum::routing::post(write_cidata))
         .route("/snapshots", axum::routing::post(create_snapshot))
+        .route("/compose", axum::routing::post(compose_volume))
         .with_state(state)
 }

@@ -663,6 +663,66 @@ impl GlobalExtentMap {
         Some(dest_map)
     }
 
+    /// Share one volume's extents into another, offset by `dest_base_vext`.
+    ///
+    /// `clone_volume_map` is this with a single source and no offset. A
+    /// composed volume needs several sources at several offsets, which is the
+    /// difference between "a copy of that golden" and "a disk made of those
+    /// goldens".
+    ///
+    /// Returns the legs whose slab ref counts the caller must raise. The GEM's
+    /// own counts are raised here, on both sides: the destination's copy
+    /// because it now shares, and the source's because it is now shared.
+    ///
+    /// The reverse index is left pointing at whoever held it — a shared slot
+    /// has several (volume, extent) pairs and one owner, the same convention
+    /// `restore_mapping` and `clone_volume_map` keep.
+    pub fn gather_into(
+        &mut self,
+        source_id: VolumeId,
+        dest_id: VolumeId,
+        dest_base_vext: u64,
+    ) -> Vec<Leg> {
+        let Some(source_map) = self.volumes.get(&source_id).cloned() else {
+            // A golden nothing has written yet contributes no extents, and a
+            // volume made of it is legitimately empty there. Not an error.
+            return Vec::new();
+        };
+
+        let mut legs = Vec::new();
+        {
+            let dest_map = self.volumes.entry(dest_id).or_default();
+            for (&vext_idx, loc) in &source_map.extents {
+                let mut shared = loc.clone();
+                shared.ref_count += 1;
+                legs.extend(shared.legs());
+                dest_map.extents.insert(dest_base_vext + vext_idx, shared);
+            }
+            for (&stripe, g) in &source_map.parity {
+                let mut shared = g.clone();
+                shared.ref_count += 1;
+                dest_map.parity.insert(dest_base_vext + stripe, shared);
+            }
+        }
+
+        for leg in &legs {
+            self.reverse
+                .entry((leg.slab_id, leg.slot_idx))
+                .or_insert((source_id, 0));
+        }
+
+        if let Some(src_map) = self.volumes.get_mut(&source_id) {
+            for loc in src_map.extents.values_mut() {
+                loc.ref_count += 1;
+            }
+            for g in src_map.parity.values_mut() {
+                g.ref_count += 1;
+            }
+        }
+
+        legs
+    }
+
     /// Number of tracked volumes.
     pub fn volume_count(&self) -> usize {
         self.volumes.len()

@@ -3,6 +3,27 @@
 ## [Unreleased]
 
 ### 2026-09-02
+- **feat (volume): compose a volume out of other volumes — a disk that is a
+  *list of* goldens rather than a copy of them.** `POST /api/v1/volumes/compose`
+  takes a name and a list of `{volume, at}` components and builds an extent map
+  that shares their slab slots. Nothing is read and nothing is written: what it
+  costs is the map. Copy-on-write already covers the rest — a consumer that
+  writes to a composed disk gets its own slot for what it changed and keeps
+  sharing everything else, so one golden is safe to hand to a fleet.
+
+  A snapshot was this with one source and no offset (`clone_volume_map`); the
+  missing piece was placing several sources at several offsets, now
+  `GlobalExtentMap::gather_into`. Offsets must be slot-aligned, because an
+  extent map cannot express anything else and would silently place the
+  component at the slot below; components may not overlap, because each would
+  believe it owned the shared extent. Both are refused with the offending pair
+  named.
+
+  What it is for: a stormcos image lands every golden twice today, once into a
+  pallet partition and once into the slab — 8.7 GB of partitions and 2.3 GB of
+  slab for about 2.4 GB of distinct content. Composed, a fleet is one set of
+  goldens and one small map per node, and cutting a version writes maps instead
+  of gigabytes.
 - **feat (nvmeof): every configured drive is a namespace, in config order.**
   Only the first was exported, and only when there was exactly one — a second
   drive was reachable by no initiator at all, so the only way to put content on
