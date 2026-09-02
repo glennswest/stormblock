@@ -288,3 +288,127 @@ async fn a_synonym_can_point_off_node() {
 
     server.abort();
 }
+
+/// The rule, at the door where it is cheapest to say: **writes go to a clone,
+/// never to the golden.** A read-write attach of a sealed volume is refused
+/// before anything boots onto it, and the refusal names the way forward.
+#[tokio::test]
+async fn a_golden_refuses_a_read_write_attach_and_offers_the_clone() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    // Unsealed: a rw attach is fine.
+    let resp = client
+        .post(format!("{base}/api/v1/volumes/{v1}/attach"))
+        .json(&serde_json::json!({"transport": "nvme-tcp"}))
+        .send().await.unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // Sealed — it is a golden now.
+    state
+        .volume_manager
+        .lock().await
+        .seal_volume(stormblock::volume::VolumeId(v1), None)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/api/v1/volumes/{v1}/attach"))
+        .json(&serde_json::json!({"transport": "nvme-tcp"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("clone"), "the refusal has to say what to do instead: {text}");
+
+    // Reading it is still fine — that is what a golden is for.
+    let resp = client
+        .post(format!("{base}/api/v1/volumes/{v1}/attach"))
+        .json(&serde_json::json!({"transport": "nvme-tcp", "mode": "ro"}))
+        .send().await.unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // So is a read-only volume that is not sealed — a different refusal, and
+    // a different way out.
+    let resp = client
+        .put(format!("{base}/api/v1/volumes/{v1}/access"))
+        .json(&serde_json::json!({"access": "ro"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    server.abort();
+}
+
+/// One golden, a name per consumer, each pointing at that consumer's own
+/// writable clone — which is what the whole surface is for.
+#[tokio::test]
+async fn claiming_a_name_hands_out_a_clone_not_the_golden() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "images", "name": "fedora", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    // An unsealed target is a moving thing: refused until the caller says so.
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/images/fedora/claim"))
+        .json(&serde_json::json!({"namespace": "tenant-a", "name": "root"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert!(resp.text().await.unwrap().contains("not sealed"));
+
+    state
+        .volume_manager
+        .lock().await
+        .seal_volume(stormblock::volume::VolumeId(v1), None)
+        .await
+        .unwrap();
+
+    // Two consumers claim the same golden and get different volumes.
+    let mut claimed = Vec::new();
+    for ns in ["tenant-a", "tenant-b"] {
+        let resp = client
+            .post(format!("{base}/api/v1/synonyms/images/fedora/claim"))
+            .json(&serde_json::json!({"namespace": ns, "name": "root", "verify": false}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 201, "{ns}");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["claimed_from"]["volume"], v1.to_string());
+        assert_eq!(body["volume"]["sealed"], false);
+        assert_eq!(body["synonym"]["namespace"], ns);
+        claimed.push(body["volume"]["id"].as_str().unwrap().to_string());
+    }
+    assert_ne!(claimed[0], claimed[1], "each consumer writes to its own clone");
+    assert_ne!(claimed[0], v1.to_string(), "and never to the golden");
+
+    // A tenant's own name resolves to its own clone, and that clone is
+    // writable where the golden is not.
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/v1/synonyms/tenant-a/root"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(body["target"]["id"], claimed[0]);
+    assert_eq!(body["volume"]["writable"], true);
+
+    let resp = client
+        .post(format!("{base}/api/v1/volumes/{}/attach", claimed[0]))
+        .json(&serde_json::json!({"transport": "nvme-tcp"}))
+        .send().await.unwrap();
+    assert!(resp.status().is_success(), "a clone takes a rw attach: {}", resp.status());
+
+    // Claiming again re-points the tenant's own name at its new clone.
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/images/fedora/claim"))
+        .json(&serde_json::json!({"namespace": "tenant-a", "name": "root", "verify": false}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["synonym"]["version"], 2);
+    assert_ne!(body["volume"]["id"].as_str().unwrap(), claimed[0]);
+
+    server.abort();
+}
