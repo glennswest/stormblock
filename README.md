@@ -174,6 +174,49 @@ curl -X POST http://node:9090/api/v1/luns \
 Thin allocation and reclaim are visible on `/metrics` via
 `stormblock_slab_allocated_bytes` and `stormblock_slab_free_bytes`.
 
+### Read-write, read-only, and sealed
+
+Two different statements, both enforced, reported separately:
+
+- **`access`** (`rw`/`ro`) is a *setting*, and it moves both ways over a
+  volume's life — seeded read-write and published read-only, handed to a
+  rescue guest read-only, opened again when it is that volume's turn to be
+  written.
+- **`sealed`** says what a volume *is*: the master copy clones descend from.
+  A sealed volume is read-only whatever its access says, and unsealing does
+  not silently make a read-only volume writable.
+
+`writable` on every volume response is the answer to "would a write land":
+not sealed **and** not read-only.
+
+```bash
+# Take it out of service for writes, and put it back
+curl -X PUT http://node:9090/api/v1/volumes/<uuid>/access \
+  -H 'Content-Type: application/json' -d '{"access":"ro"}'
+curl -X PUT http://node:9090/api/v1/volumes/<uuid>/access \
+  -H 'Content-Type: application/json' -d '{"access":"rw"}'
+
+# The setting, and whether writes actually land
+curl http://node:9090/api/v1/volumes/<uuid>/access
+```
+
+A refused write says which gate closed it rather than reading as a hardware
+fault: NVMe answers *namespace is write protected*, iSCSI answers DATA
+PROTECT. The same care applies to space — a thin volume with nowhere to put a
+write answers *Capacity Exceeded* (ENOSPC at the initiator) rather than a
+media error (#92).
+
+### Where a volume is placed: `system` or `data`
+
+A volume lives in one half of the node's mutable storage — `system` (goldens,
+which an install replaces wholesale) or `data` (identity and state, which no
+install path formats). Name it on `POST /api/v1/volumes` or on
+`/api/v1/volumes/import` with `"role": "system"|"data"`; leave it out and the
+node decides, which matters on a box whose drives carry *only* data slabs — a
+registry node, whose content is meant to outlive a rebuild. There the default
+was a system slab that does not exist, and every write failed at its first
+allocation while reads went on working (#92, #93).
+
 ### Preformatted filesystem templates — mkfs once, clone forever
 
 > **A template is a volume that has been sealed (#76, v12.0.0).** Lineage

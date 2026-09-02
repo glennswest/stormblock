@@ -3,6 +3,44 @@
 ## [Unreleased]
 
 ### 2026-09-02
+- **fix (#92, #93): a volume is created where the node actually has slabs.**
+  `PlacementPolicy::default()` is `SlabRole::System`, and nothing between
+  `POST /api/v1/volumes` (or `/volumes/import`) and `create_volume_with` asked
+  the node what it has — so on a registry box, whose drives carry only
+  `role=data` slabs, every volume was created system-side. The create
+  succeeded, because a thin create allocates nothing, and then every write
+  failed at the first allocation with `no space: no system slab apart from 0
+  domain(s)`: #93 as the import job reports it, #92 as an NVMe initiator sees
+  it (reads work — unallocated extents read as zeros — and every write at
+  every offset fails, with buffered writes lying until flush). The role is now
+  settled once at create: `CreateOptions.role` is optional, so "the caller did
+  not say" is distinguishable from "the caller said system", and
+  `SlabRegistry::default_role()` answers the first case with the role the node
+  can reach. The boundary itself is unchanged and still hard (#88).
+  `ImportSpec` and `POST /api/v1/volumes` both take an explicit `role`, and a
+  create reports the role it was really placed in.
+- **fix (#92): out of space is not a media error.** The failed write came back
+  as `sct 0x2 / sc 0x81` — *unrecovered read error*, on a write, for a volume
+  with nothing wrong with its media, which sends an operator to the drive.
+  `DriveError::NoSpace` carries the real reason out of the engine: NVMe
+  answers Capacity Exceeded (generic 0x81, ENOSPC at the initiator), iSCSI
+  answers DATA PROTECT / space allocation failed (0x27/0x07), and a genuine
+  write failure is a write fault (media 0x80) rather than a read error.
+- **feat (volume): `access` — read-write or read-only, at any point in a
+  volume's life.** Sealing was the only way to stop a volume taking writes,
+  and it is the wrong lever: sealing says what a volume *is*, the master copy
+  clones descend from. `Access` (`rw`/`ro`) is a setting on an ordinary clone,
+  it moves both ways, and it is persisted (metadata **V6**; a V5 record loads
+  `rw`). Sealed still wins — a sealed volume is read-only whatever its access
+  says, and unsealing does not silently make a read-only volume writable — so
+  the two are reported separately: `access` is the setting, `writable` is
+  whether a write would land. `GET`/`PUT /api/v1/volumes/{id}/access`, both
+  fields on every volume response, `spec.access` and `status.writable` on the
+  kube Volume. A refusal says which gate closed it: NVMe answers "namespace is
+  write protected" (command-specific 0x20), iSCSI answers DATA PROTECT — which
+  is also what `write_protected()` should always have been rather than ILLEGAL
+  REQUEST, since initiators retry a bad command and a protected medium
+  differently.
 - **fix (volume): an empty manager no longer overwrites a record of real
   storage.** Knowing about no volumes is not the same as there being none. A
   restart that came up before its slabs were attached held nothing, and the
