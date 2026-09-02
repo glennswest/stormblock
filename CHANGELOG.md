@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [v13.3.1] — 2026-09-02
+
+### 2026-09-02
+- **fix (api): a plain create needs a slab, not an `array_id`.** Driving the
+  built binary rather than the in-process router, a node whose drive carried a
+  slab adopted at startup refused `POST /api/v1/volumes {"name","size"}` —
+  the one request every consumer sends — with *array_id is required*. An array
+  binding is legacy: a volume's extents pick their own slabs. The create now
+  needs somewhere to pick from and nothing else, and a node with no slabs at
+  all says **that**, instead of naming a parameter that would not have helped.
+- **test: the engine as a process** (`tests/integration_engine_e2e.rs`,
+  opt-in via `STORMBLOCK_BIN`). Every other test builds an `AppState`
+  in-process and calls the router, which skips config parsing, drive adoption
+  and every CLI default — exactly where the above hid. Tests that agree with
+  each other prove nothing.
+- **verified on real hardware:** #92's write path, end to end on dev.g8.lo
+  (Fedora 6.17.1) — engine over a `role=data` slab, volume created, attached
+  nvme-tcp, `nvme connect` from the host kernel, `dd` writes at several
+  offsets and block sizes all succeed, and 1 MiB of random data written
+  through the initiator compares equal on read-back. The seal guard, the
+  synonym surface (`?since`, `If-None-Match` → 304) and `claim` were exercised
+  against the same running engine.
+
 ## [v13.3.0] — 2026-09-02
 
 ### 2026-09-02
