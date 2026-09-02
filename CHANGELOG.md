@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [v13.3.3] — 2026-09-02
+
+### 2026-09-02
+- **feat (mgmt): the engine says at startup what consumers will be told to
+  dial, and whether that was a guess.** A derived advertised address is a
+  guess on a multi-homed node — forge reaches the world through one interface
+  and serves its consumers on another — and a silent guess is what makes this
+  class of problem expensive. The line names the address and, when it came
+  from the default route, names `management.advertised_addr` as the knob that
+  settles it. **Set it explicitly on any node whose consumers are not on the
+  default route**: a storage fabric usually is not.
+
 ## [v13.3.2] — 2026-09-02
 
 ### 2026-09-02
