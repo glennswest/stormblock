@@ -850,6 +850,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Collect the first volume device for target export
     let mut export_device: Option<Arc<dyn BlockDevice>> = None;
+    // The drives to publish as NVMe namespaces, in config order, when the
+    // drives *are* what is served. Empty when a RAID array or a set of
+    // volumes is being exported instead — then there is one thing to export
+    // and `export_device` is it.
+    let mut raw_drive_namespaces: Vec<Arc<dyn BlockDevice>> = Vec::new();
 
     // Phase 1: Open drives
     if !device_paths.is_empty() {
@@ -1017,8 +1022,13 @@ async fn main() -> anyhow::Result<()> {
                     return Err(e.into());
                 }
             }
-        } else if drives.len() == 1 {
-            // Single drive, no RAID — export directly
+        } else if !drives.is_empty() {
+            // No RAID and no volumes: the drives themselves are what this
+            // node serves, each as its own namespace. `drives.len() == 1`
+            // here used to mean a second drive was exported as nothing at
+            // all — invisible to every initiator, with no way to write it
+            // except copying a finished file onto the machine.
+            raw_drive_namespaces = drives.clone();
             export_device = Some(drives.into_iter().next().unwrap());
         }
     } else {
@@ -1177,7 +1187,22 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             let mut nvmeof = target::nvmeof::NvmeofTarget::new(nvmeof_config);
-            nvmeof.add_namespace(1, device.clone());
+            // Namespace n is the nth drive in the configuration, from 1. That
+            // ordering is the whole contract an initiator has for telling the
+            // drives apart, so it is logged rather than left to be inferred.
+            if raw_drive_namespaces.is_empty() {
+                nvmeof.add_namespace(1, device.clone());
+            } else {
+                for (i, drive) in raw_drive_namespaces.iter().enumerate() {
+                    let nsid = i as u32 + 1;
+                    tracing::info!(
+                        "NVMe-oF namespace {nsid}: {} ({} bytes)",
+                        config.drives.get(i).map(|d| d.path.as_str()).unwrap_or("?"),
+                        drive.capacity_bytes(),
+                    );
+                    nvmeof.add_namespace(nsid, drive.clone());
+                }
+            }
             let nvmeof = Arc::new(nvmeof);
 
             // Store in AppState so the export API can add namespaces at

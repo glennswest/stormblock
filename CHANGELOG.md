@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-09-02
+- **feat (nvmeof): every configured drive is a namespace, in config order.**
+  Only the first was exported, and only when there was exactly one — a second
+  drive was reachable by no initiator at all, so the only way to put content on
+  an appliance was to build it elsewhere and copy the finished file over.
+  Namespace *n* is now the *n*th drive in the configuration, from 1, and each
+  is logged with its path and size at startup because that ordering is the only
+  contract an initiator has for telling them apart. This is what lets a drive
+  be created on the appliance that will serve it, attached from the build box,
+  written in place, and detached — with `image build --out <device>` above, the
+  bytes never leave the machine that owns them.
 - **feat (image): `image build --out` accepts a block device and writes the
   disk in place.** The point is where the device can come from: an appliance
   exports a drive over NVMe/TCP, the build box attaches it, and the image is
