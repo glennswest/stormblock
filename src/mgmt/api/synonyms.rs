@@ -42,6 +42,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::ApiError;
+use crate::drive::BlockDevice;
 use crate::mgmt::AppState;
 use crate::volume::synonym::{self, Synonym, SynonymError, Target, DEFAULT_NAMESPACE};
 use crate::volume::VolumeId;
