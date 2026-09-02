@@ -1059,11 +1059,13 @@ pin_cores = false
         let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
         assert_eq!(s.advertise_addr, "10.0.0.7");
 
-        // Loopback only when there is genuinely nothing better — honest for a
-        // single-node server, and visible in the startup log either way.
+        // With nothing configured, the node's own routable address — the
+        // serving surface advertises what a remote consumer can dial, and
+        // loopback there names the consumer's machine rather than this one.
         let cfg = cfg_with_data_dir("/d");
         let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420").unwrap();
-        assert_eq!(s.advertise_addr, "127.0.0.1");
+        assert_eq!(s.advertise_addr, primary_local_host().unwrap_or_else(|| "127.0.0.1".into()));
+        assert_ne!(s.advertise_addr, "0.0.0.0");
     }
 
     /// `serve.advertise_addr` overrides even an explicit management one: a
