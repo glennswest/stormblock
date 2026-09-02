@@ -432,3 +432,98 @@ async fn mgmt_get_metrics() {
 
     server.abort();
 }
+
+/// The access setting over HTTP: both ways, and sealed on top of it.
+#[tokio::test]
+async fn mgmt_volume_access_is_a_setting_sealing_overrides() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state_with_array(&dir).await;
+    let (base_url, server) = start_mgmt_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let id = {
+        let vm = state.volume_manager.lock().await;
+        vm.list_volumes().await[0].0 .0
+    };
+
+    // A new volume is rw and writable.
+    let body: serde_json::Value = client
+        .get(format!("{base_url}/api/v1/volumes/{id}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(body["access"], "rw");
+    assert_eq!(body["writable"], true);
+
+    // Set read-only.
+    let resp = client
+        .put(format!("{base_url}/api/v1/volumes/{id}/access"))
+        .json(&serde_json::json!({"access": "ro"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["access"], "ro");
+    assert_eq!(body["writable"], false);
+
+    // The write path agrees.
+    {
+        let vm = state.volume_manager.lock().await;
+        let dev = vm.get_volume(&stormblock::volume::VolumeId(id)).unwrap();
+        assert!(dev.write(0, &vec![1u8; 4096]).await.is_err(), "read-only refuses writes");
+    }
+
+    // And back — unlike sealing, this is a setting.
+    let body: serde_json::Value = client
+        .put(format!("{base_url}/api/v1/volumes/{id}/access"))
+        .json(&serde_json::json!({"access": "read-write"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(body["access"], "rw");
+    assert_eq!(body["writable"], true);
+
+    // Sealing wins over the setting without disturbing it.
+    state
+        .volume_manager
+        .lock().await
+        .seal_volume(stormblock::volume::VolumeId(id), None)
+        .await
+        .unwrap();
+    let body: serde_json::Value = client
+        .get(format!("{base_url}/api/v1/volumes/{id}/access"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(body["sealed"], true);
+    assert_eq!(body["access"], "rw", "the setting is untouched by sealing");
+    assert_eq!(body["writable"], false);
+
+    // A spelling nobody uses is a 400, not a silent read-write.
+    let resp = client
+        .put(format!("{base_url}/api/v1/volumes/{id}/access"))
+        .json(&serde_json::json!({"access": "maybe"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+
+    server.abort();
+}
+
+/// #93 — `POST /api/v1/volumes` names its role, and reports the one it got.
+#[tokio::test]
+async fn mgmt_create_volume_names_its_role() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state_with_array(&dir).await;
+    let (base_url, server) = start_mgmt_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base_url}/api/v1/volumes"))
+        .json(&serde_json::json!({"name": "identity", "size": "8M", "role": "data"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["role"], "data");
+
+    // Nothing else is accepted as a role.
+    let resp = client
+        .post(format!("{base_url}/api/v1/volumes"))
+        .json(&serde_json::json!({"name": "nope", "size": "8M", "role": "kernel"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+
+    server.abort();
+}
