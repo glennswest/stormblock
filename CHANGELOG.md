@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v13.1.0] — 2026-09-02
+
 ### 2026-09-02
 - **fix (#92, #93): a volume is created where the node actually has slabs.**
   `PlacementPolicy::default()` is `SlabRole::System`, and nothing between
