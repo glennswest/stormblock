@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### 2026-09-02
+- **feat (image): `image build --out` accepts a block device and writes the
+  disk in place.** The point is where the device can come from: an appliance
+  exports a drive over NVMe/TCP, the build box attaches it, and the image is
+  built onto the machine that will serve it — there is no 32 GB file to copy
+  afterwards. Previously `--out` unlinked whatever was already at the path,
+  which for a device node deletes the *node*; the next open then created an
+  ordinary file under `/dev`, and the build succeeded while serving nothing.
+  A device is now opened as it is found, its size checked rather than
+  extended (`TooSmall` names both), and the file path keeps the sparse-create
+  behaviour it had. A device is left as found outside the regions the image
+  writes, so a byte-for-byte reproducible image wants one nothing has written
+  yet — which is what an appliance's freshly created sparse drive is.
+
+### 2026-09-02
 - **fix (serving): a volume extent is a slab slot, and the server was sizing
   it as neither.** `stormblock --config` built its `VolumeManager` with
   `DEFAULT_EXTENT_SIZE` (4 MiB) while slabs are formatted with

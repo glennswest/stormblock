@@ -92,6 +92,25 @@ pub struct VolumeReport {
     pub fs_uuid: Option<Uuid>,
 }
 
+/// Whether the path names a block device, as opposed to a file to create.
+///
+/// A path that does not exist is not one: the file build creates it.
+async fn is_block_device(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        match tokio::fs::metadata(path).await {
+            Ok(m) => m.file_type().is_block_device(),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Builds an image from a spec.
 pub struct ImageBuilder {
     spec: ImageSpec,
@@ -214,25 +233,46 @@ impl ImageBuilder {
             return Err(ImageError::TooSmall { need, have: total });
         }
 
-        // A sparse file: an image is mostly holes until something fills them,
-        // and a 32 GiB image should not cost 32 GiB to build.
-        if let Some(parent) = out.parent() {
-            if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-        }
-        if tokio::fs::try_exists(out).await.unwrap_or(false) {
-            tokio::fs::remove_file(out).await?;
-        }
+        // Building onto a block device writes the disk in place. That is the
+        // point of it: the device can be a drive an appliance exported over
+        // NVMe/TCP, so the image lands on the machine that will serve it and
+        // there is never a 32 GB file to copy afterwards. It also means the
+        // two paths below must not be confused — unlinking a device node
+        // deletes the *node*, and the next open silently creates a regular
+        // file in /dev, which builds happily and serves nothing.
+        let out_str = out
+            .to_str()
+            .ok_or_else(|| ImageError::Spec("output path is not UTF-8".into()))?;
         let total = align_up(total, ALIGN);
-        let device: Arc<dyn BlockDevice> = Arc::new(
-            FileDevice::open_with_capacity(
-                out.to_str()
-                    .ok_or_else(|| ImageError::Spec("output path is not UTF-8".into()))?,
-                total,
-            )
-            .await?,
-        );
+        let is_block_device = is_block_device(out).await;
+
+        let device: Arc<dyn BlockDevice> = if is_block_device {
+            // Its size is the device's and cannot be changed, so this is a
+            // check rather than an extend. It is left as it is found: whatever
+            // the image does not write stays, which for a device straight from
+            // an appliance is zeros, and for a device with a previous life is
+            // that life. Nothing reads outside the partitions the new GPT
+            // declares, but a byte-for-byte reproducible image wants a device
+            // nobody has written yet.
+            let dev = FileDevice::open(out_str).await?;
+            let have = dev.capacity_bytes();
+            if have < total {
+                return Err(ImageError::TooSmall { need: total, have });
+            }
+            Arc::new(dev)
+        } else {
+            // A sparse file: an image is mostly holes until something fills
+            // them, and a 32 GiB image should not cost 32 GiB to build.
+            if let Some(parent) = out.parent() {
+                if !parent.as_os_str().is_empty() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+            }
+            if tokio::fs::try_exists(out).await.unwrap_or(false) {
+                tokio::fs::remove_file(out).await?;
+            }
+            Arc::new(FileDevice::open_with_capacity(out_str, total).await?)
+        };
 
         let mut gpt = Gpt::create_with_lba(&device, lba);
         gpt.write(&device).await?;
