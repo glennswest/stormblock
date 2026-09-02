@@ -881,6 +881,20 @@ async fn clone_volume(
 
 #[derive(Debug, Deserialize, Default)]
 pub struct AttachRequest {
+    /// `rw` (the default) or `ro`.
+    ///
+    /// A read-write attach of a golden is refused, and that is the whole
+    /// rule: **you write to a clone, never to the master copy.** A sealed
+    /// volume is what clones are taken from, so the answer to "I need to
+    /// write to it" is always a clone of it, never a way in. Refusing here
+    /// rather than at the first write means the caller is told *before* a
+    /// guest boots onto storage that will not take its writes.
+    ///
+    /// `ro` is an assertion about intent, not a transport-level lock: the
+    /// engine's own gate is what actually refuses the write, and it answers
+    /// "write protected" when it does.
+    #[serde(default)]
+    pub mode: Option<String>,
     /// The node attaching. Defaults to this node, which is the only one a
     /// local ublk device can be offered to.
     #[serde(default)]
@@ -915,10 +929,36 @@ async fn attach_volume(
     };
     let req = body.map(|b| b.0).unwrap_or_default();
     let vol_id = VolumeId(uuid);
+    let mode = match req.mode.as_deref() {
+        None => crate::volume::Access::ReadWrite,
+        Some(m) => match crate::volume::Access::parse(m) {
+            Some(a) => a,
+            None => return ApiError::bad_request(format!("invalid mode '{m}' (use rw or ro)")),
+        },
+    };
     let device = match state.volume_manager.lock().await.get_volume(&vol_id) {
         Some(d) => d,
         None => return ApiError::not_found(format!("volume {uuid} not found")),
     };
+
+    // Writes go to a clone. A golden is the master copy and takes none, and
+    // an attach is the last point where saying so is cheap.
+    if mode == crate::volume::Access::ReadWrite {
+        let vm = state.volume_manager.lock().await;
+        if vm.is_sealed(&vol_id) {
+            return ApiError::conflict(format!(
+                "volume {uuid} is sealed: a golden takes no writes. Clone it \
+                 (POST /api/v1/volumes/{uuid}/clone) and attach the clone, or attach it \
+                 with mode=ro"
+            ));
+        }
+        if !vm.writable(&vol_id) {
+            return ApiError::conflict(format!(
+                "volume {uuid} is read-only: set its access to rw \
+                 (PUT /api/v1/volumes/{uuid}/access) or attach it with mode=ro"
+            ));
+        }
+    }
     let local_node = state.v1.lock().await.local_node.clone();
     let node = req.node.clone().unwrap_or_else(|| local_node.clone());
     let want = req.transport.as_deref().map(|t| t.to_ascii_lowercase());

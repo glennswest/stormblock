@@ -54,6 +54,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{namespace}/{name}", get(resolve_two).put(repoint_two).delete(remove_two))
         .route("/{name}/rollback", post(rollback_one))
         .route("/{namespace}/{name}/rollback", post(rollback_two))
+        .route("/{name}/claim", post(claim_one))
+        .route("/{namespace}/{name}/claim", post(claim_two))
         .with_state(state)
 }
 
@@ -359,6 +361,161 @@ async fn remove_two(
     Path((namespace, name)): Path<(String, String)>,
 ) -> Response {
     do_remove(state, &namespace, &name).await
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ClaimRequest {
+    /// Name for the clone. Defaults to the synonym's name with the caller's
+    /// namespace in front, which is unique enough to be safe and obvious
+    /// enough to be findable.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Bind a synonym to the clone in this namespace, so the caller keeps
+    /// referring to storage by a name of its own — the pattern this whole
+    /// surface exists for: one golden, one name per consumer, each pointing
+    /// at that consumer's own writable clone.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Grow the clone (never shrinks).
+    #[serde(default)]
+    pub size: Option<String>,
+    /// Give the clone its own filesystem label.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// fsck the clone before handing it back (default true).
+    #[serde(default = "yes")]
+    pub verify: bool,
+    /// Clone a target that is *not* sealed. Off by default: a golden is
+    /// sealed, so an unsealed target is something still being written, and a
+    /// clone of it is a snapshot of a moving thing — the caller's
+    /// consistency question, and one they should have to ask out loud.
+    #[serde(default)]
+    pub unsealed_ok: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `POST /api/v1/synonyms/{ns}/{name}/claim` — take a writable clone of what
+/// a name points at.
+///
+/// **You write to a clone, never to the golden.** A golden is the master copy
+/// and is sealed, so what a consumer wants from a name is not the volume it
+/// resolves to but a copy-on-write clone of it: its own filesystem identity,
+/// its own divergence, costing nothing until written. This is that in one
+/// call — resolve, clone, and (optionally) bind a name to the clone in the
+/// caller's own namespace, which is how one golden ends up behind many
+/// consumers each holding a name of their own.
+async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequest) -> Response {
+    let found = state.synonyms.read().await.get(namespace, name).cloned();
+    let Some(syn) = found else {
+        return ApiError::not_found(format!("no synonym {}", synonym::key(namespace, name)));
+    };
+    let Some(source) = syn.target.volume_id() else {
+        return ApiError::conflict(format!(
+            "{} names storage on another node ({}); attach it, or import it here first",
+            synonym::key(namespace, name),
+            syn.target.as_str()
+        ));
+    };
+    {
+        let vm = state.volume_manager.lock().await;
+        if vm.get_volume_handle(&source).is_none() {
+            return ApiError::conflict(format!(
+                "{} points at volume {source}, which is not on this node",
+                synonym::key(namespace, name)
+            ));
+        }
+        if !vm.is_sealed(&source) && !req.unsealed_ok {
+            return ApiError::conflict(format!(
+                "volume {source} is not sealed: a claim clones a golden, and an unsealed \
+                 volume may be changing under the copy. Seal it, or claim with \
+                 unsealed_ok=true and own the consistency question"
+            ));
+        }
+    }
+
+    let size = match super::fstemplates::resolve_size(&req.size, None) {
+        Ok(s) => s,
+        Err(e) => return ApiError::bad_request(e),
+    };
+    let clone_ns = req.namespace.as_deref().unwrap_or(namespace).to_string();
+    let clone_name = req
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("{clone_ns}-{}", syn.name));
+    let mut spec = crate::fs::template::CloneSpec::new(&clone_name);
+    spec.size_bytes = size;
+    spec.label = req.label.clone();
+    spec.verify = req.verify;
+    let cloned = if req.unsealed_ok {
+        crate::fs::template::clone_volume_unsealed_ok(&state.volume_manager, source, &spec).await
+    } else {
+        crate::fs::template::clone_volume(&state.volume_manager, source, &spec).await
+    };
+    let c = match cloned {
+        Ok(c) => c,
+        Err(e) => return super::fstemplates::err(e),
+    };
+
+    // Bind a name to the clone when one was asked for. A claim that hands
+    // back only a uuid puts the caller back where it started: holding an id
+    // it has to remember for itself.
+    let bound = match &req.name {
+        _ if req.namespace.is_none() && req.name.is_none() => None,
+        _ => {
+            let mut store = state.synonyms.write().await;
+            let target = Target::Volume { id: c.volume_id };
+            match store.create(&clone_ns, &clone_name, target.clone(), syn.label.clone(), None) {
+                Ok(s) => Some(s.clone()),
+                // A consumer claiming again is re-pointing its own name at
+                // its new clone, which is the normal second claim.
+                Err(SynonymError::Exists(_)) => {
+                    store.repoint(&clone_ns, &clone_name, target, syn.label.clone()).ok().cloned()
+                }
+                Err(e) => return err(e),
+            }
+        }
+    };
+
+    let mut out = json!({
+        "claimed_from": {
+            "synonym": synonym::key(namespace, name),
+            "version": syn.version,
+            "volume": source.0,
+        },
+        "volume": {
+            "id": c.volume_id.0,
+            "name": clone_name,
+            "size_bytes": c.size_bytes,
+            "fs_uuid": c.fs_uuid,
+            "sealed": false,
+            "access": "rw",
+        },
+    });
+    if let Some(b) = bound {
+        out["synonym"] = body(&state, &b, None).await;
+    }
+    (StatusCode::CREATED, Json(out)).into_response()
+}
+
+async fn claim_one(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    body: Option<Json<ClaimRequest>>,
+) -> Response {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    claim(state, DEFAULT_NAMESPACE, &name, req).await
+}
+
+async fn claim_two(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+    body: Option<Json<ClaimRequest>>,
+) -> Response {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    claim(state, &namespace, &name, req).await
 }
 
 /// Resolve a synonym to a volume id, for the surfaces that take "an id or a
