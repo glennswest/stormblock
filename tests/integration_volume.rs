@@ -292,3 +292,186 @@ async fn a_clone_can_prove_it_has_not_been_written() {
 
     let _ = std::fs::remove_file(&p);
 }
+
+/// #93 / #92 — a node whose drives carry only data slabs places volumes in
+/// them, instead of asking for a system slab that does not exist.
+///
+/// A registry box is exactly this: its content is meant to outlive a rebuild
+/// of the box, so every slab on it is `role=data`. Before this, a create
+/// succeeded (thin: a create allocates nothing) and then every write failed
+/// at the first allocation — which reads to an initiator as a write that
+/// fails at every offset while reads work, since an unallocated extent reads
+/// as zeros.
+#[tokio::test]
+async fn a_data_only_node_places_volumes_in_its_data_slabs() {
+    use std::sync::Arc;
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::drive::BlockDevice;
+    use stormblock::placement::topology::StorageTier;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::VolumeManager;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slot = 64 * 1024u64;
+    let mut mgr = VolumeManager::new(slot);
+    let p = tmp.path().join("data.slab");
+    std::fs::write(&p, vec![0u8; 8 * 1024 * 1024]).unwrap();
+    let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(p.to_str().unwrap()).await.unwrap());
+    let slab = Slab::format_with(
+        dev,
+        SlabFormat::new(slot, StorageTier::Hot).with_role(SlabRole::Data),
+    )
+    .await
+    .unwrap();
+    let data_slab = slab.slab_id();
+    mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab).await.unwrap();
+
+    let id = mgr.create_volume_any("seeded", 1024 * 1024).await.unwrap();
+    assert_eq!(
+        mgr.volume_role(&id),
+        Some(SlabRole::Data),
+        "with no system slab on the node, the volume is placed data-side"
+    );
+
+    // The point of the placement: the write lands.
+    let v = mgr.get_volume(&id).unwrap();
+    v.write(0, &vec![0xA5u8; slot as usize]).await.unwrap();
+    v.flush().await.unwrap();
+    let mut back = vec![0u8; slot as usize];
+    v.read(0, &mut back).await.unwrap();
+    assert!(back.iter().all(|&b| b == 0xA5), "the data came back");
+    drop(v);
+
+    let legs: Vec<_> = mgr
+        .gem()
+        .read()
+        .await
+        .get_volume_map(&id)
+        .map(|m| m.all_legs().map(|l| l.slab_id).collect())
+        .unwrap_or_default();
+    assert_eq!(legs, vec![data_slab]);
+
+    // A node that has both keeps the old answer: system unless asked.
+    let p2 = tmp.path().join("system.slab");
+    std::fs::write(&p2, vec![0u8; 8 * 1024 * 1024]).unwrap();
+    let dev2: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(p2.to_str().unwrap()).await.unwrap());
+    let sys = Slab::format_with(
+        dev2,
+        SlabFormat::new(slot, StorageTier::Hot).with_role(SlabRole::System),
+    )
+    .await
+    .unwrap();
+    mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), sys).await.unwrap();
+    let later = mgr.create_volume_any("golden", 1024 * 1024).await.unwrap();
+    assert_eq!(mgr.volume_role(&later), Some(SlabRole::System));
+}
+
+/// #92 — out of space is not a media error, and the target says which.
+///
+/// The write that failed on a data-only node came back as `sct 0x2 / sc
+/// 0x81`: *unrecovered read error*, on a write, for a volume with nothing
+/// wrong with its media. What the engine knows has to survive the trip.
+#[tokio::test]
+async fn an_out_of_space_write_reports_capacity_not_media() {
+    use std::sync::Arc;
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::drive::{BlockDevice, DriveError};
+    use stormblock::placement::topology::StorageTier;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::{CreateOptions, VolumeManager};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slot = 64 * 1024u64;
+    let mut mgr = VolumeManager::new(slot);
+    let p = tmp.path().join("data.slab");
+    std::fs::write(&p, vec![0u8; 4 * 1024 * 1024]).unwrap();
+    let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(p.to_str().unwrap()).await.unwrap());
+    let slab = Slab::format_with(
+        dev,
+        SlabFormat::new(slot, StorageTier::Hot).with_role(SlabRole::Data),
+    )
+    .await
+    .unwrap();
+    mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab).await.unwrap();
+
+    // Asked for system explicitly, on a node that has none: the allocation
+    // has nowhere to go, and that is a space problem, not a medium one.
+    let id = mgr
+        .create_volume_with(
+            "wrong-side",
+            1024 * 1024,
+            CreateOptions::default().in_role(SlabRole::System),
+        )
+        .await
+        .unwrap();
+    let v = mgr.get_volume(&id).unwrap();
+    let err = v.write(0, &vec![1u8; 4096]).await.unwrap_err();
+    assert!(
+        matches!(err, DriveError::NoSpace(_)),
+        "expected NoSpace, got {err:?}"
+    );
+
+    // Reads of the unwritten volume still succeed — which is why the report
+    // was "reads work, every write fails".
+    let mut back = vec![0xFFu8; 4096];
+    v.read(0, &mut back).await.unwrap();
+    assert!(back.iter().all(|&b| b == 0));
+}
+
+/// Read-only is a setting with a life, not a seal.
+#[tokio::test]
+async fn access_moves_both_ways_and_sealing_still_wins() {
+    use std::sync::Arc;
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::slab::{Slab, SlabFormat};
+    use stormblock::drive::{BlockDevice, DriveError};
+    use stormblock::placement::topology::StorageTier;
+    use stormblock::raid::RaidArrayId;
+    use stormblock::volume::{Access, VolumeManager};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let slot = 64 * 1024u64;
+    let mut mgr = VolumeManager::new(slot);
+    let p = tmp.path().join("s.slab");
+    std::fs::write(&p, vec![0u8; 8 * 1024 * 1024]).unwrap();
+    let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(p.to_str().unwrap()).await.unwrap());
+    let slab = Slab::format_with(dev, SlabFormat::new(slot, StorageTier::Hot)).await.unwrap();
+    mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab).await.unwrap();
+
+    let id = mgr.create_volume_any("vm-disk", 1024 * 1024).await.unwrap();
+    assert_eq!(mgr.access(&id), Some(Access::ReadWrite));
+    assert!(mgr.writable(&id));
+
+    let v = mgr.get_volume(&id).unwrap();
+    v.write(0, &vec![7u8; 4096]).await.unwrap();
+
+    mgr.set_access(id, Access::ReadOnly).await.unwrap();
+    assert!(!mgr.writable(&id));
+    let err = v.write(0, &vec![8u8; 4096]).await.unwrap_err();
+    assert!(matches!(err, DriveError::ReadOnly(_)), "got {err:?}");
+    // Reads are unaffected, and what was written before is still there.
+    let mut back = vec![0u8; 4096];
+    v.read(0, &mut back).await.unwrap();
+    assert!(back.iter().all(|&b| b == 7));
+    // Discards are writes too.
+    assert!(v.discard(0, slot).await.is_err());
+
+    // And back: unlike sealing, this is a setting.
+    mgr.set_access(id, Access::ReadWrite).await.unwrap();
+    v.write(0, &vec![9u8; 4096]).await.unwrap();
+    assert!(mgr.writable(&id));
+
+    // Sealing wins over the setting, and unsealing does not undo a read-only
+    // that was set separately.
+    mgr.seal_volume(id, None).await.unwrap();
+    assert!(!mgr.writable(&id));
+    assert_eq!(mgr.access(&id), Some(Access::ReadWrite), "the setting is untouched");
+    assert!(v.write(0, &vec![10u8; 4096]).await.is_err());
+    mgr.set_access(id, Access::ReadOnly).await.unwrap();
+    mgr.unseal_volume(id).await.unwrap();
+    assert!(!mgr.writable(&id), "still read-only: two statements, undone separately");
+    mgr.set_access(id, Access::ReadWrite).await.unwrap();
+    assert!(mgr.writable(&id));
+}
