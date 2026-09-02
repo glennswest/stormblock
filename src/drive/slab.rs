@@ -1036,6 +1036,20 @@ impl Slab {
                 "slot index {slot_idx} out of range"
             )));
         }
+        // An offset at or past the end of the slot would resolve into the
+        // *next* slot, which belongs to a different extent and very likely a
+        // different volume. Silently returning that address is how a volume
+        // layer configured with the wrong extent size corrupts its neighbours
+        // one megabyte at a time; refusing it turns the same mistake into a
+        // failed write the caller reports.
+        if offset_in_slot >= self.header.slot_size {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "offset {offset_in_slot} is past the end of a {}-byte slot \
+                 (slot {slot_idx}): the caller's extent size does not match \
+                 this slab's slot size",
+                self.header.slot_size
+            )));
+        }
         let phys_offset = self.header.data_offset
             + (slot_idx as u64) * self.header.slot_size
             + offset_in_slot;
@@ -1316,6 +1330,49 @@ fn align_up(value: u64, alignment: u64) -> u64 {
         value
     } else {
         value + alignment - remainder
+    }
+}
+
+#[cfg(test)]
+mod slot_bounds_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+
+    /// An offset past the end of a slot must be refused, not resolved into
+    /// the next slot.
+    ///
+    /// This is the shape of the corruption it prevents: a volume layer built
+    /// with a 4 MiB extent size against a slab formatted with 1 MiB slots
+    /// asks for offsets up to 4 MiB inside "its" slot, and the arithmetic
+    /// happily hands back an address three slots downstream. Nothing errors,
+    /// every write is acknowledged, and the volume reads back with whole
+    /// megabytes of another extent's data — or of zeros, where the neighbour
+    /// overwrote what was there.
+    #[tokio::test]
+    async fn an_offset_past_the_slot_is_refused_not_aliased() {
+        let dir = std::env::temp_dir().join("stormblock-slot-bounds-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
+        let path_str = path.to_str().unwrap().to_string();
+
+        let slot_size = 1024 * 1024;
+        let dev = FileDevice::open_with_capacity(&path_str, 64 * slot_size).await.unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(dev);
+        let slab = Slab::format_with(dev, SlabFormat::new(slot_size, StorageTier::Hot))
+            .await
+            .unwrap();
+
+        // Inside the slot: an address inside that slot, and nowhere else.
+        let (_, at_zero) = slab.slot_device_and_offset(1, 0).unwrap();
+        let (_, near_end) = slab.slot_device_and_offset(1, slot_size - 4096).unwrap();
+        assert_eq!(near_end - at_zero, slot_size - 4096);
+
+        // At the boundary and beyond: refused. Without this, `slot 1 +
+        // slot_size` and `slot 2 + 0` are the same address.
+        assert!(slab.slot_device_and_offset(1, slot_size).is_err());
+        assert!(slab.slot_device_and_offset(1, 4 * slot_size - 4096).is_err());
+
+        let _ = std::fs::remove_file(&path_str);
     }
 }
 

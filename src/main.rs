@@ -13,7 +13,7 @@ use stormblock::drive::slab::{Slab, SlabRole, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZ
 use stormblock::boot_iscsi::{BootDiskLayout, IscsiBootManager};
 use stormblock::placement::topology::StorageTier;
 use stormblock::raid::{RaidArray, RaidArrayId, RaidLevel};
-use stormblock::volume::{VolumeManager, DEFAULT_EXTENT_SIZE};
+use stormblock::volume::VolumeManager;
 use stormblock::target::{self, reactor::{ReactorConfig, ReactorPool}};
 use stormblock::mgmt::{self, AppState, ArrayInfo, DriveInfo};
 use stormblock::mgmt::config::{StormBlockConfig, parse_size};
@@ -754,12 +754,25 @@ async fn main() -> anyhow::Result<()> {
     // Build shared state
     let data_dir = cli.data_dir.as_deref()
         .or(config.management.data_dir.as_deref());
+    // A volume extent IS a slab slot. The volume layer divides an offset by
+    // this to pick an extent and uses the remainder as the offset *within the
+    // slot* the slab hands back, so a value larger than the slab's slot size
+    // does not mean "bigger extents" — it means every write runs past the end
+    // of its own slot and over its neighbours. This was `DEFAULT_EXTENT_SIZE`
+    // (4 MiB) against slabs formatted with `DEFAULT_SLOT_SIZE` (1 MiB): extent
+    // 0 was written across slots 0-3, extent 1 across 4-7, and the data that
+    // did land was overwritten by the next extent's overflow. It read back as
+    // whole megabytes of zeros scattered through the volume, and only on the
+    // serving path — `boot-local` and `image build` take their extent size
+    // from the slab they opened, which is why every image this engine built
+    // was correct while everything it served was not.
+    let extent_size = drive::slab::DEFAULT_SLOT_SIZE;
     let volume_manager = match data_dir {
         Some(dir) => {
             tracing::info!("Volume metadata persistence enabled: {dir}");
-            VolumeManager::with_data_dir(DEFAULT_EXTENT_SIZE, dir.into())?
+            VolumeManager::with_data_dir(extent_size, dir.into())?
         }
-        None => VolumeManager::new(DEFAULT_EXTENT_SIZE),
+        None => VolumeManager::new(extent_size),
     };
     let slab_registry = volume_manager.registry().clone();
     let gem = volume_manager.gem().clone();
@@ -823,7 +836,7 @@ async fn main() -> anyhow::Result<()> {
         let status = stormblock::volume::pressure::spawn(
             config.pressure.clone(),
             state.slab_registry.clone(),
-            DEFAULT_EXTENT_SIZE,
+            extent_size,
         );
         if let Some(s) = Arc::get_mut(&mut state) {
             s.pool_pressure = Some(status);

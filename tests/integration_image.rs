@@ -1096,7 +1096,7 @@ tier = "hot"
     );
     // Content actually landed: an empty data slab was the symptom.
     assert!(
-        data.volumes.iter().any(|v| v.allocated > 0),
+        data.volumes.iter().any(|v| v.allocated_bytes > 0),
         "the data slab reported no allocated bytes — nothing was written into it"
     );
 }

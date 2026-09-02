@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### 2026-09-02
+- **fix (serving): a volume extent is a slab slot, and the server was sizing
+  it as neither.** `stormblock --config` built its `VolumeManager` with
+  `DEFAULT_EXTENT_SIZE` (4 MiB) while slabs are formatted with
+  `DEFAULT_SLOT_SIZE` (1 MiB). The volume layer divides an offset by that
+  value to choose an extent and hands the remainder to the slab as an offset
+  *within one slot* — so with a 4 MiB extent size, extent 0 was written across
+  physical slots 0-3, extent 1 across 4-7, and each extent's overflow
+  overwrote the next three. Every write was acknowledged. The volume read back
+  with whole megabytes of zeros and of other extents' data scattered through
+  it, and the damage only appeared once more than one extent had been written,
+  which is why a small write looked fine and a 32 GB image did not.
+  The serving path was the only one affected: `boot-local` and `image build`
+  take their extent size from the slab they opened, so every image this engine
+  built was correct while everything it served over NVMe/TCP was not. The
+  server now takes its extent size from `drive::slab::DEFAULT_SLOT_SIZE`, and
+  the pool-pressure watcher uses the same value rather than a second constant.
+- **fix (slab): an offset past the end of a slot is refused, not aliased into
+  the next one.** `slot_device_and_offset` bounds-checked the slot index but
+  not the offset inside it, so `slot 1 + slot_size` and `slot 2 + 0` resolved
+  to the same address — which is what turned the extent-size mismatch above
+  into silent cross-extent corruption instead of a failed write. Any caller
+  whose extent size disagrees with the slab's slot size now gets an error
+  naming both.
+- **fix (tests): `integration_image` did not compile.** It asserted on
+  `VolumeReport::allocated`; the field is `allocated_bytes`. Introduced with
+  feb3fd3, and it took the whole test binary with it — 686 tests now build and
+  pass.
+
 ### 2026-09-01
 - **fix:** **a whole-disk slab path yields every slab in the GPT** (#88
   follow-on), not the first that opens. A node boots with the disk on its
