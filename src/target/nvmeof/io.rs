@@ -6,6 +6,42 @@ use crate::drive::BlockDevice;
 
 use super::pdu::{NvmeSqe, NvmeCqe};
 
+/// Status Code Types (CQE status bits 11:9).
+const SCT_GENERIC: u8 = 0x00;
+const SCT_MEDIA: u8 = 0x02;
+
+/// Generic status codes worth naming.
+const SC_INVALID_FIELD: u8 = 0x02;
+const SC_LBA_OUT_OF_RANGE: u8 = 0x80;
+const SC_CAPACITY_EXCEEDED: u8 = 0x81;
+
+/// Media and Data Integrity status codes. Note the asymmetry: a *write*
+/// fault is 0x80 and 0x81 is an unrecovered *read* error, so answering a
+/// failed write with 0x81 tells the initiator's kernel the wrong thing.
+const SC_WRITE_FAULT: u8 = 0x80;
+const SC_UNRECOVERED_READ: u8 = 0x81;
+
+/// What to answer a failed I/O with.
+///
+/// The engine's own reason is not always a medium problem, and saying it is
+/// sends the operator to the drive when the volume simply had nowhere to put
+/// the write — a thin volume out of slots, or one whose placement role has
+/// no slab on this node (#92). `Capacity Exceeded` is the status NVMe has
+/// for exactly that, and the initiator surfaces it as ENOSPC instead of
+/// "critical medium error".
+fn io_status(e: &crate::drive::DriveError, writing: bool) -> (u8, u8) {
+    use crate::drive::DriveError;
+    match e {
+        DriveError::NoSpace(_) => (SCT_GENERIC, SC_CAPACITY_EXCEEDED),
+        DriveError::OutOfRange { .. } => (SCT_GENERIC, SC_LBA_OUT_OF_RANGE),
+        DriveError::NotAligned { .. } | DriveError::BufferTooSmall { .. } => {
+            (SCT_GENERIC, SC_INVALID_FIELD)
+        }
+        _ if writing => (SCT_MEDIA, SC_WRITE_FAULT),
+        _ => (SCT_MEDIA, SC_UNRECOVERED_READ),
+    }
+}
+
 /// NVMe I/O opcodes.
 pub const IO_FLUSH: u8 = 0x00;
 pub const IO_WRITE: u8 = 0x01;
@@ -35,7 +71,7 @@ pub async fn handle_io_command(
         _ => {
             tracing::debug!("unsupported NVMe I/O opcode: {opcode:#04x}");
             IoResult {
-                cqe: NvmeCqe::error(cid, 0, 0, 0, 0x01), // Invalid Opcode
+                cqe: NvmeCqe::error(cid, 0, 0, SCT_GENERIC, 0x01), // Invalid Opcode
                 data: Vec::new(),
             }
         }
@@ -51,7 +87,7 @@ async fn handle_read(sqe: &NvmeSqe, device: &Arc<dyn BlockDevice>, cid: u16) -> 
 
     if offset + len > device.capacity_bytes() {
         return IoResult {
-            cqe: NvmeCqe::error(cid, 0, 0, 0, 0x80), // LBA Out of Range
+            cqe: NvmeCqe::error(cid, 0, 0, SCT_GENERIC, SC_LBA_OUT_OF_RANGE),
             data: Vec::new(),
         };
     }
@@ -64,8 +100,9 @@ async fn handle_read(sqe: &NvmeSqe, device: &Arc<dyn BlockDevice>, cid: u16) -> 
         },
         Err(e) => {
             tracing::error!("NVMe read error at LBA {slba}: {e}");
+            let (sct, sc) = io_status(&e, false);
             IoResult {
-                cqe: NvmeCqe::error(cid, 0, 0, 2, 0x81), // Internal Error
+                cqe: NvmeCqe::error(cid, 0, 0, sct, sc),
                 data: Vec::new(),
             }
         }
@@ -86,7 +123,7 @@ async fn handle_write(
 
     if offset + expected_len as u64 > device.capacity_bytes() {
         return IoResult {
-            cqe: NvmeCqe::error(cid, 0, 0, 0, 0x80),
+            cqe: NvmeCqe::error(cid, 0, 0, SCT_GENERIC, SC_LBA_OUT_OF_RANGE),
             data: Vec::new(),
         };
     }
@@ -94,7 +131,7 @@ async fn handle_write(
     if data.len() < expected_len {
         tracing::warn!("NVMe write: insufficient data ({} < {expected_len})", data.len());
         return IoResult {
-            cqe: NvmeCqe::error(cid, 0, 0, 0, 0x02), // Invalid Field
+            cqe: NvmeCqe::error(cid, 0, 0, SCT_GENERIC, SC_INVALID_FIELD),
             data: Vec::new(),
         };
     }
@@ -106,8 +143,9 @@ async fn handle_write(
         },
         Err(e) => {
             tracing::error!("NVMe write error at LBA {slba}: {e}");
+            let (sct, sc) = io_status(&e, true);
             IoResult {
-                cqe: NvmeCqe::error(cid, 0, 0, 2, 0x81),
+                cqe: NvmeCqe::error(cid, 0, 0, sct, sc),
                 data: Vec::new(),
             }
         }
@@ -122,8 +160,9 @@ async fn handle_flush(device: &Arc<dyn BlockDevice>, cid: u16) -> IoResult {
         },
         Err(e) => {
             tracing::error!("NVMe flush error: {e}");
+            let (sct, sc) = io_status(&e, true);
             IoResult {
-                cqe: NvmeCqe::error(cid, 0, 0, 2, 0x81),
+                cqe: NvmeCqe::error(cid, 0, 0, sct, sc),
                 data: Vec::new(),
             }
         }

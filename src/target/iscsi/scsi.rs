@@ -65,6 +65,7 @@ pub enum SenseKey {
     MediumError = 0x03,
     IllegalRequest = 0x05,
     UnitAttention = 0x06,
+    DataProtect = 0x07,
 }
 
 /// Fixed-format sense data (18 bytes minimum).
@@ -93,6 +94,28 @@ impl SenseData {
 
     pub fn write_protected() -> Self {
         SenseData { key: SenseKey::IllegalRequest, asc: 0x27, ascq: 0x00 }
+    }
+
+    /// The thinly provisioned LUN had nowhere to put the write — out of
+    /// slots, or a placement role with no slab on this node (#92). SBC's own
+    /// status for it; a medium error here blames the drive for a decision
+    /// made two layers up.
+    pub fn space_allocation_failed() -> Self {
+        SenseData { key: SenseKey::DataProtect, asc: 0x27, ascq: 0x07 }
+    }
+
+    /// What a failed I/O deserves: the engine's reason where it has one,
+    /// a medium error only where it does not.
+    pub fn for_drive_error(e: &crate::drive::DriveError) -> Self {
+        use crate::drive::DriveError;
+        match e {
+            DriveError::NoSpace(_) => SenseData::space_allocation_failed(),
+            DriveError::OutOfRange { .. } => SenseData::lba_out_of_range(),
+            DriveError::NotAligned { .. } | DriveError::BufferTooSmall { .. } => {
+                SenseData::invalid_field_in_cdb()
+            }
+            _ => SenseData::medium_error(),
+        }
     }
 
     /// Encode as fixed-format sense data (18 bytes).
@@ -498,7 +521,7 @@ async fn do_read(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>) -> S
     let mut buf = vec![0u8; len as usize];
     match device.read(offset, &mut buf).await {
         Ok(_) => ScsiResult::good(buf),
-        Err(_) => ScsiResult::check_condition(SenseData::medium_error()),
+        Err(e) => ScsiResult::check_condition(SenseData::for_drive_error(&e)),
     }
 }
 
@@ -529,7 +552,7 @@ async fn do_write(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>, dat
 
     match device.write(offset, &data[..expected_len]).await {
         Ok(_) => ScsiResult::good_empty(),
-        Err(_) => ScsiResult::check_condition(SenseData::medium_error()),
+        Err(e) => ScsiResult::check_condition(SenseData::for_drive_error(&e)),
     }
 }
 
@@ -579,8 +602,8 @@ async fn handle_write_same(
     while written < block_count {
         let chunk_blocks = blocks_per_chunk.min(block_count - written);
         let buf = pattern.repeat(chunk_blocks as usize);
-        if device.write(offset + written * bs, &buf).await.is_err() {
-            return ScsiResult::check_condition(SenseData::medium_error());
+        if let Err(e) = device.write(offset + written * bs, &buf).await {
+            return ScsiResult::check_condition(SenseData::for_drive_error(&e));
         }
         written += chunk_blocks;
     }

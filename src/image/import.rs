@@ -42,6 +42,15 @@ pub struct ImportSpec {
     /// Grow the volume beyond the image's size (never shrink).
     #[serde(default)]
     pub size: Option<String>,
+    /// Which half of the node's storage the golden lands in: `system` (the
+    /// goldens an image build replaces) or `data` (identity and state).
+    ///
+    /// Absent means the node decides — system where it has a system slab,
+    /// otherwise data. Without this a registry box, whose drives are all
+    /// `role=data`, asked for a system slab that does not exist and failed
+    /// the import on its first write (#93).
+    #[serde(default)]
+    pub role: Option<String>,
     /// Seal when done (default true). `false` leaves it writable.
     #[serde(default = "yes")]
     pub seal: bool,
@@ -129,6 +138,10 @@ impl Imports {
         };
         if let Some(r) = &spec.redundancy {
             RedundancyPolicy::parse(r).map_err(|e| format!("redundancy: {e}"))?;
+        }
+        if let Some(r) = &spec.role {
+            crate::drive::slab::SlabRole::parse(r)
+                .ok_or_else(|| format!("invalid role '{r}' (use system or data)"))?;
         }
         if let Some(f) = &spec.format {
             match f.to_ascii_lowercase().as_str() {
@@ -375,9 +388,10 @@ async fn stream_raw(
         Some(r) => RedundancyPolicy::parse(r)?,
         None => RedundancyPolicy::none(),
     };
+    let role = spec.role.as_deref().and_then(crate::drive::slab::SlabRole::parse);
     let vol_id: VolumeId = {
         let mut vm = state.volume_manager.lock().await;
-        vm.create_volume_with(&spec.name, size, CreateOptions::redundant(policy))
+        vm.create_volume_with(&spec.name, size, CreateOptions::redundant(policy).in_role_opt(role))
             .await
             .map_err(|e| format!("create volume: {e}"))?
     };
@@ -492,9 +506,10 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
         Some(r) => RedundancyPolicy::parse(r)?,
         None => RedundancyPolicy::none(),
     };
+    let role = spec.role.as_deref().and_then(crate::drive::slab::SlabRole::parse);
     let vol_id: VolumeId = {
         let mut vm = state.volume_manager.lock().await;
-        vm.create_volume_with(&spec.name, size, CreateOptions::redundant(policy))
+        vm.create_volume_with(&spec.name, size, CreateOptions::redundant(policy).in_role_opt(role))
             .await
             .map_err(|e| format!("create volume: {e}"))?
     };

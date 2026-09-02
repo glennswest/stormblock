@@ -80,6 +80,14 @@ pub enum DriveError {
     NotAligned { offset: u64, block_size: u32 },
     OutOfRange { offset: u64, len: u64, capacity: u64 },
     BufferTooSmall { need: usize, have: usize },
+    /// The backing store has nowhere to put the write: a thin volume whose
+    /// slabs are full, or — the case that reads as a hardware fault if it is
+    /// not named — a volume whose placement role has no slab at all on this
+    /// node. Distinct from `Io` because a target has an honest status for it
+    /// (NVMe "Capacity Exceeded", SCSI "space allocation failed"), and
+    /// answering with a media error sends the operator to the wrong layer
+    /// (#92).
+    NoSpace(String),
     DeviceNotReady,
     VfioNotAvailable,
     Other(anyhow::Error),
@@ -98,6 +106,7 @@ impl fmt::Display for DriveError {
             DriveError::BufferTooSmall { need, have } => {
                 write!(f, "buffer too small: need {need}, have {have}")
             }
+            DriveError::NoSpace(what) => write!(f, "no space: {what}"),
             DriveError::DeviceNotReady => write!(f, "device not ready"),
             DriveError::VfioNotAvailable => write!(f, "VFIO not available"),
             DriveError::Other(e) => write!(f, "{e}"),

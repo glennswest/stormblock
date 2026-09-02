@@ -45,10 +45,17 @@ pub struct RestripeReport {
 }
 
 /// Everything a volume is created with beyond a name and a size.
+///
+/// `placement.role` is not read here: the role a volume is created in comes
+/// from `role`, so that "the caller did not say" is distinguishable from
+/// "the caller said system" (#93).
 #[derive(Debug, Clone, Default)]
 pub struct CreateOptions {
     pub redundancy: RedundancyPolicy,
     pub placement: PlacementPolicy,
+    /// Which half of the node's storage to place in. `None` asks the node:
+    /// system where it has a system slab, otherwise the role it does have.
+    pub role: Option<SlabRole>,
 }
 
 impl CreateOptions {
@@ -59,7 +66,13 @@ impl CreateOptions {
     /// Place this volume in the node's data slabs — identity and state,
     /// which no install may reformat (#88).
     pub fn in_role(mut self, role: SlabRole) -> Self {
-        self.placement.role = role;
+        self.role = Some(role);
+        self
+    }
+
+    /// Place in `role` when one was named, and let the node decide otherwise.
+    pub fn in_role_opt(mut self, role: Option<SlabRole>) -> Self {
+        self.role = role;
         self
     }
 }
@@ -406,13 +419,21 @@ impl VolumeManager {
         virtual_size: u64,
         opts: CreateOptions,
     ) -> Result<VolumeId, VolumeError> {
+        // The role is settled here, once, and written onto the handle: an
+        // unspecified role means "wherever this node keeps volumes", which is
+        // the system slabs on a node that has them and the data slabs on a
+        // node that does not (#93).
+        let role = match opts.role {
+            Some(r) => r,
+            None => self.registry.read().await.default_role(),
+        };
         let needed = opts.redundancy.scheme.width();
         if needed > 1 {
             let available = self
                 .registry
                 .read()
                 .await
-                .distinct_domains_with_space_in_role(&opts.redundancy.spread, opts.placement.role);
+                .distinct_domains_with_space_in_role(&opts.redundancy.spread, role);
             if available < needed {
                 return Err(VolumeError::InsufficientDomains {
                     policy: opts.redundancy.spelling(),
@@ -421,6 +442,7 @@ impl VolumeManager {
                 });
             }
         }
+        let placement = PlacementPolicy { role, ..opts.placement };
         let vol = ThinVolume::new(name.to_string(), virtual_size, self.slot_size);
         let id = vol.id();
         let parity = opts.redundancy.scheme.is_parity();
@@ -428,7 +450,7 @@ impl VolumeManager {
             vol,
             self.gem.clone(),
             self.registry.clone(),
-            opts.placement,
+            placement,
             opts.redundancy,
         ));
         if let (Some(store), true) = (&self.metadata_store, parity) {

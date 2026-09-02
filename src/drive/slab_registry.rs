@@ -253,6 +253,27 @@ impl SlabRegistry {
         self.distinct_domains_with_space_in_role(rung, SlabRole::System)
     }
 
+    /// Which role a new volume goes in when the caller did not say.
+    ///
+    /// `System` is the answer wherever the node has a system slab with space,
+    /// which is every node that carries goldens. A node whose storage is
+    /// *only* data slabs — a registry box, a node whose system half lives on
+    /// a different drive that is not attached here — has no system slab to
+    /// place in, and defaulting to one there produces a volume that creates
+    /// fine and then fails every write with "no system slab apart from 0
+    /// domain(s)" (#92, #93). The role boundary is still hard: this picks
+    /// which side of it a volume is created on, once, and nothing afterwards
+    /// spills across.
+    pub fn default_role(&self) -> SlabRole {
+        if self.distinct_domains_with_space_in_role("drive", SlabRole::System) > 0 {
+            return SlabRole::System;
+        }
+        if self.distinct_domains_with_space_in_role("drive", SlabRole::Data) > 0 {
+            return SlabRole::Data;
+        }
+        SlabRole::System
+    }
+
     /// The same, counting only slabs of one role — the space a volume of
     /// that role can actually reach.
     pub fn distinct_domains_with_space_in_role(&self, rung: &str, role: SlabRole) -> usize {

@@ -120,11 +120,12 @@ pub struct CreateVolumeRequest {
     pub redundancy: Option<String>,
     /// Which slabs this volume may live in: `system` (goldens, replaced by an
     /// image) or `data` (identity and state, which no install may reformat).
-    /// Defaults to `system`.
     ///
-    /// An appliance whose whole job is holding images has data slabs and
-    /// nothing else — its content is meant to outlive a rebuild of the box —
-    /// and without this every create asked for a system slab and found none.
+    /// Absent lets the node decide: system where it has a system slab,
+    /// otherwise data. An appliance whose whole job is holding images has
+    /// data slabs and nothing else — its content is meant to outlive a
+    /// rebuild of the box — and without that every create asked for a system
+    /// slab and found none (#93).
     #[serde(default)]
     pub role: Option<String>,
 }
@@ -514,20 +515,22 @@ async fn create_volume(
 
     let role = match req.role.as_deref() {
         Some(r) => match crate::drive::slab::SlabRole::parse(r) {
-            Some(r) => r,
-            None => return ApiError::bad_request(format!("invalid role '{r}' (system or data)")),
+            Some(r) => Some(r),
+            None => {
+                return ApiError::bad_request(format!("invalid role '{r}' (use system or data)"))
+            }
         },
-        None => crate::drive::slab::SlabRole::System,
+        None => None,
     };
 
     let mut vm = state.volume_manager.lock().await;
     let created = match array_id {
-        Some(a) if redundancy.is_none() => vm.create_volume(&req.name, size, a).await,
+        Some(a) if redundancy.is_none() && role.is_none() => vm.create_volume(&req.name, size, a).await,
         _ => vm
             .create_volume_with(
                 &req.name,
                 size,
-                crate::volume::CreateOptions::redundant(redundancy.clone()).in_role(role),
+                crate::volume::CreateOptions::redundant(redundancy.clone()).in_role_opt(role),
             )
             .await,
     };
@@ -547,7 +550,9 @@ async fn create_volume(
                 physical_bytes: 0,
                 parent: None,
                 sealed: false,
-                role: role.to_string(),
+                // What it was actually placed in, which is not always what
+                // was asked for: a node with no system slab places in data.
+                role: vm.volume_role(&vol_id).unwrap_or_default().to_string(),
                 fs: None,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);

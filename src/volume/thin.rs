@@ -643,8 +643,8 @@ impl ThinVolumeHandle {
                 }
             }
         }
-        Err(DriveError::Other(anyhow::anyhow!(
-            "no space: no {} slab apart from {} domain(s) at rung '{rung}'",
+        Err(DriveError::NoSpace(format!(
+            "no {} slab apart from {} domain(s) at rung '{rung}'",
             self.placement.role,
             apart_from.len()
         )))
@@ -687,10 +687,16 @@ impl ThinVolumeHandle {
                         }
                         registry.commit(l.slab_id, l.slot_idx);
                     }
-                    return Err(DriveError::Other(anyhow::anyhow!(
+                    // Still out of space, whatever the policy asked for: the
+                    // kind survives the wrapping so the target can say so.
+                    let msg = format!(
                         "cannot place {copies} legs on distinct '{}' domains: {e}",
                         policy.spread
-                    )));
+                    );
+                    return Err(match e {
+                        DriveError::NoSpace(_) => DriveError::NoSpace(msg),
+                        _ => DriveError::Other(anyhow::anyhow!(msg)),
+                    });
                 }
             }
         }
