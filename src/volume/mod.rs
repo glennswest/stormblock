@@ -68,6 +68,19 @@ pub use gem::GlobalExtentMap;
 /// Default slot size for slabs created via add_backing_device.
 pub const DEFAULT_SLOT_SIZE: u64 = crate::drive::slab::DEFAULT_SLOT_SIZE;
 
+/// What an adoption found and what it did with it.
+#[derive(Debug, Default)]
+pub struct AdoptReport {
+    /// Slabs newly attached: id, the partition they were found in, role.
+    pub slabs: Vec<(SlabId, String, String)>,
+    /// Volumes now addressable: id, name, virtual size.
+    pub volumes: Vec<(VolumeId, String, u64)>,
+    /// Slabs this engine already had.
+    pub already_attached: usize,
+    /// Volumes this engine already knew.
+    pub already_known: usize,
+}
+
 /// Manages volumes, slab allocation, and snapshots.
 pub struct VolumeManager {
     gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
@@ -424,6 +437,141 @@ impl VolumeManager {
         self.volumes.insert(id, handle);
         self.persist().await;
         Ok(id)
+    }
+
+    /// Take on the slabs already present on a drive, and the volumes they
+    /// describe, without writing anything.
+    ///
+    /// An appliance is handed a whole-disk image and serves it. The goldens
+    /// inside it are volumes in a slab in one of its partitions, and until
+    /// they are attached the engine serving that image cannot name them —
+    /// which is why an image's contents could only be reached by booting a
+    /// node from it. Adoption opens them where they lie.
+    ///
+    /// **Nothing is written.** The slabs are opened, their volume records read
+    /// and their mappings restored into the live map. A volume already known
+    /// is left exactly as it is: adopting a drive twice, or adopting one whose
+    /// volumes another drive already provided, changes nothing.
+    ///
+    /// **A slab whose slot size disagrees with this manager's is refused.**
+    /// That mismatch is not a detail — the volume layer divides by one and the
+    /// slab addresses by the other, so every extent would be written across
+    /// its neighbours. It is the defect that corrupted the serving path, and
+    /// it is not going to be reintroduced through the back door.
+    ///
+    /// Adoption lasts for this run. It is a runtime action against a drive the
+    /// engine has open, not a change to what the engine is configured to hold.
+    pub async fn adopt_slabs(
+        &mut self,
+        found: Vec<crate::drive::discover::FoundSlab>,
+    ) -> Result<AdoptReport, VolumeError> {
+        let mut report = AdoptReport::default();
+        if found.is_empty() {
+            return Ok(report);
+        }
+
+        let mut metadata_slabs = Vec::new();
+        {
+            let mut reg = self.registry.write().await;
+            for f in found {
+                let id = f.slab.slab_id();
+                if f.slab.slot_size() != self.slot_size {
+                    return Err(VolumeError::InvalidSize(format!(
+                        "slab {} in {} has {}-byte slots and this engine addresses \
+                         {}-byte extents: adopting it would write every extent \
+                         across its neighbours",
+                        id.0, f.label, f.slab.slot_size(), self.slot_size
+                    )));
+                }
+                if reg.get(&id).is_some() {
+                    report.already_attached += 1;
+                    continue;
+                }
+                if f.slab.has_metadata_region() {
+                    metadata_slabs.push(id);
+                }
+                report.slabs.push((id, f.label, f.slab.role().to_string()));
+                reg.add(f.slab);
+            }
+        }
+
+        // The records live in the slab, which is the only place they can live
+        // for storage that arrived as a file: there is no data directory
+        // belonging to an image.
+        let mut records: Vec<metadata::VolumeRecord> = Vec::new();
+        {
+            let reg = self.registry.read().await;
+            let mut seen: HashSet<VolumeId> = HashSet::new();
+            for slab_id in &metadata_slabs {
+                let Some(slab) = reg.get(slab_id) else { continue };
+                let bytes = match slab.read_metadata().await {
+                    Ok(Some(b)) => b,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!(slab = %slab_id, "adopt: metadata unreadable: {e}");
+                        continue;
+                    }
+                };
+                let doc = match MetadataStore::decode(&bytes) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(slab = %slab_id, "adopt: metadata undecodable: {e}");
+                        continue;
+                    }
+                };
+                for v in doc.volumes {
+                    if seen.insert(v.id) {
+                        records.push(v);
+                    }
+                }
+            }
+        }
+
+        for vrec in records {
+            if self.volumes.contains_key(&vrec.id) {
+                report.already_known += 1;
+                continue;
+            }
+
+            // Restore only what this drive can actually serve. `restore_mapping`
+            // never displaces an existing claim, so a golden and the clone that
+            // shares its slots both land without either stealing the other's.
+            {
+                let reg = self.registry.read().await;
+                let mut gem = self.gem.write().await;
+                for (vext, loc) in &vrec.extents {
+                    if reg.get(&loc.slab_id).is_some() {
+                        gem.restore_mapping(vrec.id, *vext, loc.clone());
+                    }
+                }
+                for (stripe, g) in &vrec.parity {
+                    gem.restore_parity(vrec.id, *stripe, g.clone());
+                }
+            }
+
+            let vol = ThinVolume::restore(
+                vrec.id, vrec.name.clone(), vrec.virtual_size, self.slot_size,
+            );
+            let handle = Arc::new(ThinVolumeHandle::with_redundancy(
+                vol,
+                self.gem.clone(),
+                self.registry.clone(),
+                PlacementPolicy::default(),
+                vrec.redundancy.clone(),
+            ));
+            handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
+            handle.set_sealed(vrec.sealed);
+            if let Some(fs) = vrec.fs.clone() {
+                self.fs_info.insert(vrec.id, fs);
+            }
+            self.volumes.insert(vrec.id, handle);
+            if let Some(parent) = vrec.parent {
+                self.parents.insert(vrec.id, parent);
+            }
+            report.volumes.push((vrec.id, vrec.name, vrec.virtual_size));
+        }
+
+        Ok(report)
     }
 
     /// Compose a volume from other volumes, sharing their extents.

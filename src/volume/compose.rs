@@ -248,6 +248,37 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A slab whose slots are a different size from the manager's extents is
+    /// refused outright. This is the shape of the defect that corrupted the
+    /// serving path: divide by one size, address by another, and every extent
+    /// is written across its neighbours. Adoption is a door into the engine
+    /// from a disk someone else formatted, so it is the obvious way back in.
+    #[tokio::test]
+    async fn adopting_a_slab_with_a_different_slot_size_is_refused() {
+        use crate::drive::discover::FoundSlab;
+
+        let (mut vm, path) = manager().await;
+
+        let dir = std::env::temp_dir().join("stormblock-compose-test");
+        let other = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
+        let other_str = other.to_str().unwrap().to_string();
+        let dev = FileDevice::open_with_capacity(&other_str, 16 * 1024 * 1024).await.unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(dev);
+        // Four times this manager's extent size — the exact 4 MiB against
+        // 1 MiB that went wrong in production, scaled down.
+        let slab = Slab::format(dev, SLOT * 4, StorageTier::Hot).await.unwrap();
+
+        let err = vm
+            .adopt_slabs(vec![FoundSlab { label: "test".into(), slab }])
+            .await
+            .expect_err("a slot-size mismatch must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("slots"), "the error names the sizes: {msg}");
+
+        let _ = std::fs::remove_file(&other_str);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// An offset an extent map cannot express would quietly land at the slot
     /// below it, which is a component silently in the wrong place.
     #[tokio::test]

@@ -8,6 +8,7 @@ pub mod dma;
 pub mod filedev;
 pub mod handover;
 pub mod partition;
+pub mod discover;
 // The initiators reuse the *target's* PDU parsers rather than carrying a
 // second copy of RFC 7143 / the NVMe-TCP spec, so each exists exactly
 // where its target does.

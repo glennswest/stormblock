@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ### 2026-09-02
+- **feat (drives): adopt the storage already on a drive.**
+  `POST /api/v1/drives/{id}/adopt` opens every slab in a drive's partitions and
+  restores the volumes they describe, without writing anything. An appliance
+  handed a whole-disk image could serve it as a namespace and do nothing else
+  with it — the goldens inside are volumes in a slab in one of its partitions,
+  and nothing had opened them, so an image's contents could only be reached by
+  booting a node from it. Measured on forge: `stormcos-sno-10.21.img` yielded
+  its data and system slabs and **102 volumes** in about six seconds, and the
+  51 goldens among them became composable.
+
+  A slab whose slot size disagrees with the engine's extent size is refused,
+  naming both. Adoption is otherwise a door into the engine from a disk someone
+  else formatted, and that mismatch is exactly the defect that corrupted the
+  serving path.
+
+  Safe to repeat: a slab already attached and a volume already known are counted
+  and left alone. Adoption lasts for the run — it is an action against a drive
+  the engine has open, not a change to what it is configured to hold.
+- **refactor (drive): slab discovery moves into the library** as
+  `drive::discover::slabs_in_partitions`, so the management API and the
+  `boot-local` path find slabs the same way rather than one of them having a
+  private copy.
 - **feat (volume): compose a volume out of other volumes — a disk that is a
   *list of* goldens rather than a copy of them.** `POST /api/v1/volumes/compose`
   takes a name and a list of `{volume, at}` components and builds an extent map

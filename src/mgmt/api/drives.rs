@@ -305,6 +305,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}", get(get_drive).delete(close_drive))
         .route("/{id}/smart", get(get_drive_smart))
         .route("/{id}/slabs", get(drive_slabs))
+        .route("/{id}/adopt", axum::routing::post(adopt_drive))
         .route("/{id}/labels", axum::routing::put(set_labels))
         .route("/{id}/drain", get(drain_status).post(start_drain).delete(cancel_drain))
         .route("/{id}/health", axum::routing::post(drive_health))
@@ -313,6 +314,72 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// `GET /api/v1/drives/{id}/slabs` — the slabs that live on this drive, by
 /// identity of the device (#70 item 2). `id` is the drive's UUID or path.
+/// `POST /api/v1/drives/{id}/adopt` — take on the slabs already on a drive.
+///
+/// An appliance handed a whole-disk image serves it as a namespace, and until
+/// now that was all it could do with it: the goldens inside are volumes in a
+/// slab in one of its partitions, and nothing had opened them. This opens them
+/// where they lie, without writing anything, so they can be named — read,
+/// cloned, or composed into a disk that shares their extents.
+///
+/// Safe to call twice: a slab already attached and a volume already known are
+/// counted and left alone.
+async fn adopt_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "drives", "method" => "adopt").increment(1);
+
+    let found = {
+        let drives = state.drives.read().await;
+        drives
+            .iter()
+            .find(|d| d.path == id || d.device.id().uuid.to_string() == id)
+            .map(|d| (d.device.clone(), d.path.clone()))
+    };
+    let Some((dev, path)) = found else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+
+    let slabs = crate::drive::discover::slabs_in_partitions(&dev).await;
+    if slabs.is_empty() {
+        return ApiError::bad_request(format!(
+            "no slab found in any partition of {path} — it may have no partition table, \
+             or hold pallets only"
+        ));
+    }
+
+    let report = {
+        let mut vm = state.volume_manager.lock().await;
+        match vm.adopt_slabs(slabs).await {
+            Ok(r) => r,
+            Err(e) => return ApiError::bad_request(format!("adopting {path}: {e}")),
+        }
+    };
+
+    tracing::info!(
+        drive = %path,
+        slabs = report.slabs.len(),
+        volumes = report.volumes.len(),
+        "adopted the storage already on a drive"
+    );
+
+    Json(serde_json::json!({
+        "drive": dev.id().uuid,
+        "path": path,
+        "slabs": report.slabs.iter().map(|(sid, label, role)| serde_json::json!({
+            "id": sid.0.to_string(),
+            "found_in": label,
+            "role": role,
+        })).collect::<Vec<_>>(),
+        "volumes": report.volumes.iter().map(|(vid, name, size)| serde_json::json!({
+            "id": vid.0.to_string(),
+            "name": name,
+            "virtual_size_bytes": size,
+            "virtual_size_human": human_size(*size),
+        })).collect::<Vec<_>>(),
+        "slabs_already_attached": report.already_attached,
+        "volumes_already_known": report.already_known,
+    })).into_response()
+}
+
 async fn drive_slabs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let found = {
         let drives = state.drives.read().await;
