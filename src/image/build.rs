@@ -1158,3 +1158,40 @@ pub async fn table_of(image: &Path) -> Result<Gpt> {
 
 /// The pallet type GUID, re-exported for callers laying out their own tables.
 pub const PALLET_GUID: [u8; 16] = PALLET_TYPE_GUID;
+
+#[cfg(test)]
+mod out_kind_tests {
+    use super::is_block_device;
+
+    /// A path that does not exist is a file to create, not a device to write
+    /// in place — the file build makes it. Getting this backwards would refuse
+    /// every ordinary output.
+    #[tokio::test]
+    async fn a_missing_path_and_a_plain_file_are_not_devices() {
+        let dir = std::env::temp_dir().join("stormblock-out-kind-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let missing = dir.join("nothing-here.img");
+        let _ = std::fs::remove_file(&missing);
+        assert!(!is_block_device(&missing).await);
+
+        let plain = dir.join("plain.img");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(!is_block_device(&plain).await);
+        let _ = std::fs::remove_file(&plain);
+    }
+
+    /// And a real device is. Skipped where none is present rather than
+    /// asserting on a machine that has no disks to see.
+    #[tokio::test]
+    async fn a_block_device_is_recognised() {
+        for candidate in ["/dev/sda", "/dev/vda", "/dev/nvme0n1", "/dev/loop0"] {
+            let p = std::path::Path::new(candidate);
+            if p.exists() {
+                assert!(is_block_device(p).await, "{candidate} is a block device");
+                return;
+            }
+        }
+        eprintln!("no block device present; skipping");
+    }
+}
