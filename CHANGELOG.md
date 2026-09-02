@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [v13.3.2] — 2026-09-02
+
+### 2026-09-02
+- **fix (mgmt): an attach tells a remote initiator *this node's* address, not
+  loopback.** Found testing on forge: with the targets on `0.0.0.0` and no
+  `advertised_addr` — the ordinary configuration for a node that serves the
+  network — an attach answered `{"traddr": "127.0.0.1"}`, which is not merely
+  unhelpful to a remote initiator, it names the initiator's own machine. The
+  wildcard case now answers the address this node reaches other machines from,
+  and loopback only where there is no route at all. No packet is sent to find
+  it: connecting a UDP socket picks a route and binds a source address, and
+  the address it is pointed at is TEST-NET-1.
+
 ## [v13.3.1] — 2026-09-02
 
 ### 2026-09-02
