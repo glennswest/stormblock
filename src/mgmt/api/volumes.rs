@@ -526,16 +526,18 @@ async fn create_volume(
         },
         None => crate::volume::RedundancyPolicy::none(),
     };
-    let array_id = match req.array_id {
-        Some(a) => Some(RaidArrayId(a)),
-        // Naming a role is expressing slab placement, exactly as a redundancy
-        // policy is: the extents pick their own slabs, and an array binding
-        // would be a second, contradictory answer to where they go.
-        None if req.redundancy.is_some() || req.role.is_some() => None,
-        None => return ApiError::bad_request(
-            "array_id is required (or use from_template, a role, or a redundancy policy)",
-        ),
-    };
+    // An array binding is legacy. A volume's extents pick their own slabs, so
+    // the only thing a create needs is somewhere to pick from — and demanding
+    // an `array_id` for the plain case meant `{"name","size"}`, the request
+    // every consumer actually sends, was refused on a node that had storage
+    // and had adopted it.
+    let array_id = req.array_id.map(RaidArrayId);
+    if array_id.is_none() && state.slab_registry.read().await.is_empty() {
+        return ApiError::conflict(
+            "this node has no slabs to place a volume in: format one \
+             (POST /api/v1/slabs) or configure a drive that already carries one",
+        );
+    }
 
     // Verify array exists
     if let Some(array_id) = array_id {
