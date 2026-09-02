@@ -1191,6 +1191,24 @@ impl VolumeManager {
         }
 
         if let Some(store) = &self.metadata_store {
+            // Knowing about no volumes is not the same as there being none.
+            // A manager whose slabs have not been attached yet holds nothing,
+            // and writing that over a record describing real storage destroys
+            // the only statement of what the slabs contain — the extents
+            // survive in the slot tables, but nothing is left to say which
+            // volume they belong to or what it was called.
+            //
+            // This happened: a restart came up with no slabs attached, and the
+            // next persist replaced a two-volume record with an empty one.
+            if self.volumes.is_empty() && store.exists() {
+                let had = store.load().map(|m| m.volumes.len()).unwrap_or(0);
+                if had > 0 {
+                    tracing::warn!(
+                        "not overwriting a record of {had} volume(s) with an empty one —                          this manager has no volumes, which usually means its slabs are                          not attached rather than that the storage is empty"
+                    );
+                    return;
+                }
+            }
             let meta = self.snapshot_metadata().await;
             if let Err(e) = store.save(&meta) {
                 tracing::warn!("Volume metadata persist failed: {e}");

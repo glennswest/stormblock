@@ -59,11 +59,25 @@ pub struct FormatSlabRequest {
     /// (identity and state, which no install path may reformat).
     #[serde(default)]
     pub role: Option<String>,
+    /// Bytes reserved in the slab for its own record of what it holds.
+    ///
+    /// A slab with no metadata region cannot say what volumes are on it, so
+    /// the only statement of that lives wherever the engine happened to keep
+    /// it — and storage that arrived as a drive has no such place. A `data`
+    /// slab therefore reserves one by default: outliving whatever formatted it
+    /// is the entire point of the role.
+    #[serde(default)]
+    pub metadata_bytes: Option<u64>,
 }
 
 fn default_tier() -> String {
     "hot".to_string()
 }
+
+/// How much of a data slab is set aside for its own volume record. Two
+/// copies are kept, so this is the space for both; 4 MiB holds thousands of
+/// volumes and costs nothing on a drive measured in terabytes.
+const DEFAULT_SLAB_METADATA: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn parse_tier(s: &str) -> Option<StorageTier> {
     match s.to_lowercase().as_str() {
@@ -193,7 +207,14 @@ async fn format_slab(
         },
         None => None,
     };
-    let opts = crate::drive::slab::SlabFormat::new(slot_size, tier).with_role(role);
+    // A data slab keeps its own record unless told otherwise: its reason for
+    // existing is to survive the thing that would otherwise hold it.
+    let meta_bytes = req.metadata_bytes.unwrap_or(
+        if role == crate::drive::slab::SlabRole::Data { DEFAULT_SLAB_METADATA } else { 0 },
+    );
+    let opts = crate::drive::slab::SlabFormat::new(slot_size, tier)
+        .with_role(role)
+        .with_metadata(meta_bytes);
     match crate::drive::slab::Slab::format_with(device, opts).await {
         Ok(slab) => {
             let slab_id = slab.slab_id();

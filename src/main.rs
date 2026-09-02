@@ -889,6 +889,43 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         tracing::info!("{} drive(s) ready", drives.len());
+
+        // Take on the storage that is already on them. For an appliance whose
+        // drives *are* its storage pool this is the difference between coming
+        // back up holding what it held and coming back up empty: slabs were
+        // only ever registered by an explicit call, so a restart left the pool
+        // invisible until someone made one — and the only other way to
+        // register a slab is to format it, which is the wrong answer to
+        // "where did my volumes go".
+        //
+        // Non-destructive: it opens what is there and reads it. A drive with
+        // no slab on it contributes nothing.
+        {
+            let mut adopted_slabs = 0usize;
+            let mut adopted_volumes = 0usize;
+            for dev in &drives {
+                let found = stormblock::drive::discover::slabs_in_partitions(dev).await;
+                if found.is_empty() {
+                    continue;
+                }
+                let mut vm = state.volume_manager.lock().await;
+                match vm.adopt_slabs(found).await {
+                    Ok(r) => {
+                        adopted_slabs += r.slabs.len();
+                        adopted_volumes += r.volumes.len();
+                    }
+                    Err(e) => tracing::warn!(
+                        "drive {}: {e}", dev.id().path
+                    ),
+                }
+            }
+            if adopted_slabs > 0 {
+                tracing::info!(
+                    "adopted {adopted_slabs} slab(s) and {adopted_volumes} volume(s) \
+                     already on the drives"
+                );
+            }
+        }
         metrics::gauge!("stormblock_drives_total").set(drives.len() as f64);
         metrics::gauge!("stormblock_capacity_bytes").set(
             drives.iter().map(|d| d.capacity_bytes() as f64).sum::<f64>()
@@ -1190,7 +1227,17 @@ async fn main() -> anyhow::Result<()> {
             // Namespace n is the nth drive in the configuration, from 1. That
             // ordering is the whole contract an initiator has for telling the
             // drives apart, so it is logged rather than left to be inferred.
-            if raw_drive_namespaces.is_empty() {
+            if !config.nvmeof.as_ref().map(|n| n.export_drives).unwrap_or(true) {
+                // The drives are this engine's storage pool, not what it
+                // serves. Publishing them raw beside the volume exports would
+                // hand every initiator an unmanaged second writer into slabs
+                // the engine allocates from.
+                tracing::info!(
+                    "NVMe-oF: not publishing {} drive(s) as raw namespaces \
+                     (nvmeof.export_drives = false); volume exports only",
+                    raw_drive_namespaces.len().max(1),
+                );
+            } else if raw_drive_namespaces.is_empty() {
                 nvmeof.add_namespace(1, device.clone());
             } else {
                 for (i, drive) in raw_drive_namespaces.iter().enumerate() {

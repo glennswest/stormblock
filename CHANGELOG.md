@@ -3,6 +3,36 @@
 ## [Unreleased]
 
 ### 2026-09-02
+- **fix (volume): an empty manager no longer overwrites a record of real
+  storage.** Knowing about no volumes is not the same as there being none. A
+  restart that came up before its slabs were attached held nothing, and the
+  next persist replaced a two-volume record with an empty one — the extents
+  survived in the slot tables, but nothing was left to say which volume they
+  belonged to or what it was called. `persist` now refuses to write an empty
+  set over a non-empty record and says why.
+- **feat (drives): the engine adopts the storage on its configured drives at
+  startup.** Slabs were only ever registered by an explicit call, so an
+  appliance whose drives *are* its storage pool came back from a restart with
+  the pool invisible — and the only other way to register a slab is to format
+  it, which is the wrong answer to "where did my volumes go".
+- **feat (nvmeof): `export_drives` — do not publish the storage pool raw.**
+  Publishing every configured drive as a namespace is right when the drives are
+  what the node serves, and wrong when they are the pool it allocates from:
+  there it hands every initiator an unmanaged second writer beside the volume
+  exports that are the intended door. Defaults to true, so nothing changes for
+  the file-per-image layout; forge sets it false.
+- **fix (config): a command-line override no longer drops the rest of the
+  `[nvmeof]` section.** It rebuilt the struct field by field, silently
+  discarding everything the overrides did not mention, which is why a `nqn` set
+  in the config file appeared to do nothing whenever the command line touched
+  that section at all.
+- **feat (slabs): `POST /api/v1/slabs` takes `metadata_bytes`, and a `data`
+  slab reserves a region by default.** A slab with no metadata region cannot
+  record what volumes are on it, so that statement lives only wherever the
+  engine happened to keep it — and storage that arrived as a drive has no such
+  place. **Not yet verified end to end:** forge still comes back from a restart
+  with its slabs adopted and no volume records, so the write half of this is
+  unfinished.
 - **feat (volume): `POST /api/v1/volumes/{id}/tier` moves a volume between
   tiers, online.** The newest image belongs on the fastest drive and last
   month's does not. Every extent not already on a slab of the target tier is

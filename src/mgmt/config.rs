@@ -447,6 +447,10 @@ pub struct IscsiExportConfig {
     pub max_connections: u32,
 }
 
+fn default_export_drives() -> bool {
+    true
+}
+
 #[cfg(feature = "iscsi")]
 fn default_max_connections() -> u32 {
     4
@@ -469,6 +473,16 @@ pub struct NvmeofExportConfig {
     pub listen_addr: String,
     #[serde(default = "default_nvmeof_nqn")]
     pub nqn: String,
+    /// Publish each configured drive as a raw namespace.
+    ///
+    /// True where the drives *are* what this node serves — an appliance
+    /// holding one image per drive, which is what the file-per-image layout
+    /// looks like. **False where the drives are this engine's storage pool**:
+    /// publishing the pool raw hands every initiator a second, unmanaged
+    /// writer into slabs the engine is allocating from, beside the volume
+    /// exports that are the intended door.
+    #[serde(default = "default_export_drives")]
+    pub export_drives: bool,
 }
 
 #[cfg(feature = "nvmeof")]
@@ -583,10 +597,16 @@ impl StormBlockConfig {
             let existing = self.nvmeof.take().unwrap_or(NvmeofExportConfig {
                 listen_addr: default_nvmeof_addr(),
                 nqn: default_nvmeof_nqn(),
+                export_drives: default_export_drives(),
             });
+            // `..existing` rather than a fresh struct: rebuilding it field by
+            // field silently dropped everything the overrides did not mention,
+            // which is why a `[nvmeof]` setting in the config file appeared to
+            // do nothing whenever the command line touched this section at all.
             self.nvmeof = Some(NvmeofExportConfig {
                 listen_addr: nvmeof_addr.unwrap_or(&existing.listen_addr).to_string(),
                 nqn: nvmeof_nqn.unwrap_or(&existing.nqn).to_string(),
+                ..existing
             });
         }
 
