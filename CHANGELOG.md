@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v13.3.0] — 2026-09-02
+
 ### 2026-09-02
 - **feat (volume): writes go to a clone, never to the golden — enforced at the
   attach.** A golden is the master copy and is sealed, so a read-write attach
