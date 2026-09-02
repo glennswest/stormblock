@@ -20,6 +20,7 @@ pub mod versioned;
 pub mod gc;
 pub mod pressure;
 pub mod relocate;
+pub mod synonym;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ use crate::raid::RaidArrayId;
 
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
 pub use metadata::{Access, FsInfo, MetadataStore, Retention};
+pub use synonym::{Synonym, SynonymError, SynonymStore, Target as SynonymTarget};
 pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport};
 pub use redundancy::{Redundancy, RedundancyPolicy};
 

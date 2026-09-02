@@ -185,6 +185,10 @@ pub struct AppState {
     /// process that serves until it is killed wants anyway, but it is a cycle
     /// and worth saying so.
     pub serve: std::sync::OnceLock<Arc<crate::serve::ctx::ServeContext>>,
+    /// Stable names that point at volumes, and can be re-pointed at a new
+    /// version. Persisted as `<data_dir>/synonyms.json`; kept apart from the
+    /// volume because a volume is extents and a synonym is a binding.
+    pub synonyms: tokio::sync::RwLock<crate::volume::SynonymStore>,
     /// Preformatted filesystem templates — mkfs once, clone forever (#38).
     pub fstemplates: Arc<tokio::sync::Mutex<crate::fs::TemplateStore>>,
     /// Live per-volume ublk exports for the local CSI fast path.
@@ -269,6 +273,12 @@ impl AppState {
                     None => crate::fs::TemplateStore::in_memory(),
                 },
             )),
+            synonyms: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
+                Some(dir) => crate::volume::SynonymStore::load(std::path::Path::new(dir)),
+                // A name that does not survive a restart is worse than no
+                // name: something would resolve it once and never again.
+                None => crate::volume::SynonymStore::in_memory(),
+            }),
             ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
             moves: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::moves::load(std::path::Path::new(dir)),

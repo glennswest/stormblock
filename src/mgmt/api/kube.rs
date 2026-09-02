@@ -192,8 +192,13 @@ async fn all_volumes(state: &AppState) -> Vec<Value> {
     out
 }
 
+/// By uuid, by `spec.name`, or by synonym — the manager first, so a synonym
+/// never shadows a volume that answers to the same name.
 async fn resolve_volume(state: &AppState, key: &str) -> Option<VolumeId> {
-    state.volume_manager.lock().await.find_volume(key).await
+    if let Some(id) = state.volume_manager.lock().await.find_volume(key).await {
+        return Some(id);
+    }
+    super::synonyms::volume_for(state, key).await
 }
 
 async fn get_volume(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {

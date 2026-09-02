@@ -149,6 +149,14 @@ pub struct RedundancyRequest {
 }
 
 #[derive(Debug, Deserialize, Default)]
+pub struct DeleteQuery {
+    /// Delete even though a synonym points at it, leaving that name
+    /// dangling.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
 pub struct ResyncQuery {
     /// Also recompute and rewrite every stripe's parity.
     #[serde(default)]
@@ -1062,9 +1070,17 @@ pub struct CidataRequest {
     pub label: Option<String>,
 }
 
-/// A volume by id or by name, for the doors that take one in a path.
+/// A volume by id, by name, or by synonym — for the doors that take one in
+/// a path.
+///
+/// The volume manager is asked first, so a synonym can never shadow a real
+/// volume: a name means what it has always meant, and a synonym is only
+/// consulted for names nothing else answers to.
 async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Option<VolumeId> {
-    state.volume_manager.lock().await.find_volume(key).await
+    if let Some(id) = state.volume_manager.lock().await.find_volume(key).await {
+        return Some(id);
+    }
+    super::synonyms::volume_for(state, key).await
 }
 
 async fn start_import(
@@ -1183,6 +1199,7 @@ async fn resync_volume(
 async fn delete_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<DeleteQuery>,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "delete").increment(1);
     let uuid = match id.parse::<Uuid>() {
@@ -1191,6 +1208,28 @@ async fn delete_volume(
     };
 
     let vol_id = VolumeId(uuid);
+
+    // A synonym pointing here is a reference held by something that knows
+    // this volume only by name. Deleting under it leaves a name that
+    // resolves to nothing, and the consumer finds out at its next start —
+    // which is a failed boot, and the worst place to learn it. Re-point the
+    // name, or say `force=true` and take the dangling synonym knowingly.
+    if !q.force {
+        let named: Vec<String> = state
+            .synonyms
+            .read()
+            .await
+            .pointing_at(&vol_id)
+            .iter()
+            .map(|s| crate::volume::synonym::key(&s.namespace, &s.name))
+            .collect();
+        if !named.is_empty() {
+            return ApiError::conflict(format!(
+                "cannot delete volume {uuid}: the synonym(s) {} point at it — re-point them                  first, or delete with force=true and leave them dangling",
+                named.join(", ")
+            ));
+        }
+    }
 
     // Refuse while anything is serving it. This asks the shared question
     // rather than only checking the export table, so a volume backing a live
