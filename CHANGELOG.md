@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### 2026-09-02
+- **feat (volume): synonyms — a stable name that points at a volume, and can
+  be re-pointed at a new version.** A consumer refers to storage by a name it
+  chose once; what the name should mean changes when a golden is imported or a
+  version rolled back, and nothing carried that. `/api/v1/synonyms` is the
+  binding, kept apart from the volume on purpose — a volume is extents, a
+  synonym is a pointer, so dropping a name never touches data, and deleting a
+  volume a name still points at is refused (`force=true` to leave it dangling
+  knowingly, since a dangling name fails as *a machine does not boot*).
+  Namespaced (`images/nginx`; a bare name is the `default` namespace) and
+  persisted as `<data_dir>/synonyms.json`.
+
+  **The version is how a client knows.** Every re-point bumps a monotonic
+  `version` and pushes the old target onto a capped history; `?since=N`
+  answers `changed: true|false` with the current target in the same round
+  trip, and the same question in HTTP spelling — `If-None-Match: "N"` against
+  the version-as-ETag — answers 304. A rollback goes *forward* in version: a
+  client that saw the bad publish has to see a change when it is undone.
+
+  A target is a volume on this node or a URI another node serves
+  (`nvme-tcp://…`), and resolution says which, so a caller learns it is being
+  sent off-node rather than finding out when the I/O is slow. Resolution also
+  reports what the target is right now (size, `sealed`, `access`, `role`).
+  Synonyms resolve wherever a volume is named by id or name, and the volume
+  manager is asked first, so a synonym can never shadow a real volume.
+
 ## [v13.1.0] — 2026-09-02
 
 ### 2026-09-02

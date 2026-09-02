@@ -206,6 +206,56 @@ PROTECT. The same care applies to space — a thin volume with nowhere to put a
 write answers *Capacity Exceeded* (ENOSPC at the initiator) rather than a
 media error (#92).
 
+### Synonyms — a stable name, re-pointed at a new version
+
+A consumer refers to storage by a name it chose once (`fedora-43`,
+`images/nginx`, `node-root`); what that name should mean changes when a new
+golden is imported or a version is rolled back. A **synonym** is that binding,
+kept apart from the volume — a volume is extents, a synonym is a pointer, so
+dropping a name never touches data and deleting the data is refused while a
+name still points at it.
+
+```bash
+# Name a volume (by id or by its own name), in a namespace
+curl -X POST http://node:9090/api/v1/synonyms \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace":"images","name":"fedora","volume":"fedora-43-x86_64","label":"43"}'
+
+# Publish a new version of the same name — the version bumps
+curl -X PUT http://node:9090/api/v1/synonyms/images/fedora \
+  -H 'Content-Type: application/json' \
+  -d '{"volume":"fedora-44-x86_64","label":"44"}'
+
+# Undo it — a rollback goes *forward* in version, because a client that saw
+# the bad publish has to see a change when it is undone
+curl -X POST http://node:9090/api/v1/synonyms/images/fedora/rollback
+```
+
+**How a client knows whether it changed.** The name is stable, so the version
+carries the change. A client remembers the `version` it resolved and asks in
+one call:
+
+```bash
+# 200 with {"changed": false, …} — still what you hold
+curl 'http://node:9090/api/v1/synonyms/images/fedora?since=7'
+
+# The HTTP-native spelling: 304 Not Modified, or 200 with the new target
+curl -H 'If-None-Match: "7"' http://node:9090/api/v1/synonyms/images/fedora
+```
+
+Resolution also returns what the target *is* right now (size, `sealed`,
+`access`, `role`), so resolving a name and asking about the volume is one
+round trip. A target may be a volume on this node or storage another node
+serves (`"uri": "nvme-tcp://host:4420/<nqn>?nsid=1"`) — resolution says which,
+so a caller learns it is being sent off-node rather than discovering it when
+the I/O is slow. A synonym is usable wherever a volume is named by id or name;
+the volume manager is asked first, so a synonym can never shadow a real
+volume.
+
+A synonym does not pin: it resolves to whatever it points at *now*. A consumer
+that must not be moved under its feet records the `(version, target)` it
+resolved and compares at its next start.
+
 ### Where a volume is placed: `system` or `data`
 
 A volume lives in one half of the node's mutable storage — `system` (goldens,
