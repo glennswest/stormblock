@@ -1045,7 +1045,8 @@ impl VolumeManager {
         let virtual_size = source.lock().await.virtual_size;
         let opts = CreateOptions {
             redundancy: source.redundancy(),
-            placement: PlacementPolicy { role, ..Default::default() },
+            placement: PlacementPolicy::default(),
+            role: Some(role),
         };
         let dest_id = self.create_volume_with(name, virtual_size, opts).await?;
         let dest = self
