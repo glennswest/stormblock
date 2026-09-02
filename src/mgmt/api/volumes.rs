@@ -520,9 +520,12 @@ async fn create_volume(
     };
     let array_id = match req.array_id {
         Some(a) => Some(RaidArrayId(a)),
-        None if req.redundancy.is_some() => None,
+        // Naming a role is expressing slab placement, exactly as a redundancy
+        // policy is: the extents pick their own slabs, and an array binding
+        // would be a second, contradictory answer to where they go.
+        None if req.redundancy.is_some() || req.role.is_some() => None,
         None => return ApiError::bad_request(
-            "array_id is required (or use from_template, or give a redundancy policy)",
+            "array_id is required (or use from_template, a role, or a redundancy policy)",
         ),
     };
 
