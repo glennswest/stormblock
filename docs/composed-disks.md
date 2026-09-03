@@ -144,7 +144,6 @@ superblock's own flags already agree.
 ```json
 {
   "id": "…", "name": "node1.disk", "fs": {"kind": "gpt", "uuid": "…", "features": "lba=4096"},
-  "allocated_bytes": 0,
   "disk": {
     "lba": 4096, "size_bytes": 1073741824, "disk_guid": "…", "layout": "5b1c…",
     "head_golden": "…", "tail_golden": "…", "gpt_minted": true,
