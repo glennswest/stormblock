@@ -917,7 +917,7 @@ mod tests {
 
         // And a pallet store over it selects the pallet, as firmware would.
         let mut store = PalletStore::default();
-        store.add_drive("node1.disk".into(), dev.clone());
+        store.add_drive("node1.disk", dev.clone());
         let found = store.scan().await;
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "boot1");
