@@ -139,7 +139,7 @@ PALLET=$(api -X POST "http://$MGMT/api/v1/volumes/compose/pallet" -d "{
     {\"name\": \"initramfs\", \"role\": \"initramfs\", \"kind\": \"initramfs\", \"volume\": \"initrd.golden\", \"len\": \"$INITRD_LEN\"},
     {\"name\": \"cmdline\", \"role\": \"cmdline\", \"kind\": \"bootconfig\", \"text\": \"root=/dev/nvme0n1p2 ro console=ttyS0\"}
   ]}")
-echo "$PALLET" | j 'f"pallet {d[\"pallet\"][\"pallet\"]} v{d[\"pallet\"][\"version\"]}: shared {d[\"pallet\"][\"shared_bytes\"]} written {d[\"pallet\"][\"written_bytes\"]} size {d[\"virtual_size_human\"]}"'
+echo "pallet $(echo "$PALLET" | j 'd["pallet"]["pallet"]') v$(echo "$PALLET" | j 'd["pallet"]["version"]'): shared $(echo "$PALLET" | j 'd["pallet"]["shared_bytes"]') written $(echo "$PALLET" | j 'd["pallet"]["written_bytes"]') size $(echo "$PALLET" | j 'd["virtual_size_human"]')"
 KERNEL_OFF=$(echo "$PALLET" | j 'd["pallet"]["members"][0]["offset"]')
 KERNEL_DIGEST=$(echo "$PALLET" | j 'd["pallet"]["members"][0]["digest"]')
 [ "$(echo "$PALLET" | j 'd["pallet"]["members"][0]["shared"]')" = True ] || fail "the kernel was not shared"
@@ -154,7 +154,7 @@ DISK=$(api -X POST "http://$MGMT/api/v1/volumes/compose/disk" -d '{
     {"volume": "boot-v1", "priority": 5}
   ]}')
 DISK_ID=$(echo "$DISK" | j 'd["id"]')
-echo "$DISK" | j 'f"disk {d[\"name\"]} {d[\"virtual_size_human\"]}: lba {d[\"disk\"][\"lba\"]}, gpt minted {d[\"disk\"][\"gpt_minted\"]}, written {d[\"disk\"][\"written_bytes\"]}, allocated {d[\"allocated_human\"]}"'
+echo "disk $(echo "$DISK" | j 'd["name"]') $(echo "$DISK" | j 'd["virtual_size_human"]'): lba $(echo "$DISK" | j 'd["disk"]["lba"]'), gpt minted $(echo "$DISK" | j 'd["disk"]["gpt_minted"]'), written $(echo "$DISK" | j 'd["disk"]["written_bytes"]'), allocated $(echo "$DISK" | j 'd["allocated_human"]')"
 [ "$(echo "$DISK" | j 'd["disk"]["written_bytes"]')" = 0 ] || fail "a composed disk wrote bytes"
 PALLET_START=$(echo "$DISK" | j 'd["disk"]["partitions"][1]["start_bytes"]')
 
