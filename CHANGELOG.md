@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ### 2026-09-03
+- **feat (releases): `/api/v1/releases` — what this appliance publishes, and how
+  to get it.** An image on a shelf is not a release. A release is a version
+  someone can find, a link they can pull it from, a manifest saying what went
+  into it, and notes saying what changed; the surface serves all four.
+
+  - `GET /api/v1/releases` — the index, newest first, with sizes and links.
+  - `GET /api/v1/releases/index.html` — the same for a browser, because a
+    download link nobody can click is not much of a link.
+  - `GET /api/v1/releases/{version}` — the record, `/manifest`, `/notes`.
+  - `GET /api/v1/releases/{version}/image.img` — the image itself.
+  - `POST` publishes, `DELETE` withdraws.
+
+  **Publishing copies nothing.** A release names a volume the engine already
+  holds and the download streams straight out of it in 4 MiB chunks, so what a
+  caller pulls is the image being served over NVMe/TCP at that moment rather
+  than a copy that may have drifted from it. Withdrawing a release removes the
+  record and leaves the volume alone: "stop offering this" and "destroy this"
+  are different decisions and only one is reversible.
+
+  The index survives a restart (`releases.json`, written temp-and-rename beside
+  the volume metadata). A version is validated where it is published, since it
+  becomes a URL path segment and a filename.
 - **fix (exports): an NVMe-oF export survives a restart, with its namespace id
   intact.** Exports lived only in memory, so an engine that restarted stopped
   answering at addresses consumers had already written down — and firmware
