@@ -1593,6 +1593,287 @@ async fn read_volume_file(
     }
 }
 
+// ------------------------------------------------- composed pallets and disks
+
+#[derive(Debug, Deserialize)]
+pub struct ComposePalletMemberRequest {
+    pub name: String,
+    pub role: String,
+    /// `kernel`, `initramfs`, `bootconfig`, `rootimage`, … Defaults to `raw`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// A volume, by id or name — shared in by its map, never copied.
+    #[serde(default)]
+    pub volume: Option<String>,
+    /// Or inline text — a kernel command line — written.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Bytes to digest, when the content ends before the volume does.
+    #[serde(default)]
+    pub len: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComposePalletRequest {
+    /// The volume's name.
+    pub name: String,
+    /// The pallet's name. Defaults to `name`.
+    #[serde(default)]
+    pub pallet: Option<String>,
+    /// `boot`, `system`, `kernel`, `kube`, `app`, `runtime`, `data`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Omit to take one past the highest sealed version of this pallet name.
+    #[serde(default)]
+    pub version: Option<u64>,
+    #[serde(default)]
+    pub version_label: Option<String>,
+    /// LBA size of the disk this pallet will sit in. Defaults to 4096.
+    #[serde(default)]
+    pub lba: Option<u32>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub sealed: Option<bool>,
+    #[serde(default)]
+    pub read_only: Option<bool>,
+    pub members: Vec<ComposePalletMemberRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComposePalletResponse {
+    #[serde(flatten)]
+    pub volume: VolumeResponse,
+    pub pallet: crate::volume::disk::PalletVolumeReport,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComposeDiskPartitionRequest {
+    /// The volume that is the partition, by id or name.
+    pub volume: String,
+    /// GPT name. Defaults to the volume's.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `esp`, `pallet`, `linux`, `swap`, `basic`, or a GUID. Defaults to
+    /// what the volume is.
+    #[serde(default)]
+    pub r#type: Option<String>,
+    /// Pallet selection order. Defaults to 1.
+    #[serde(default)]
+    pub priority: Option<u8>,
+    #[serde(default)]
+    pub tries: Option<u8>,
+    #[serde(default)]
+    pub attributes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComposeDiskRequest {
+    pub name: String,
+    /// Total size. Omit for the chain plus the GPT.
+    #[serde(default)]
+    pub size: Option<String>,
+    /// LBA size. Defaults to 4096 — what the engine presents a volume at.
+    #[serde(default)]
+    pub lba: Option<u32>,
+    /// Give this disk its own GUID, at the cost of the two GPT slots.
+    #[serde(default)]
+    pub fresh_guid: Option<bool>,
+    #[serde(default)]
+    pub role: Option<String>,
+    pub partitions: Vec<ComposeDiskPartitionRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComposeDiskResponse {
+    #[serde(flatten)]
+    pub volume: VolumeResponse,
+    pub disk: crate::volume::disk::DiskReport,
+}
+
+/// The ordinary volume response for `id`, or none if it went away.
+async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Option<VolumeResponse> {
+    let handle = vm.get_volume_handle(&id)?;
+    let name = handle.name().await;
+    let allocated = handle.allocated().await;
+    let vsize = handle.capacity_bytes();
+    let d = describe(vm, &id).await;
+    Some(VolumeResponse {
+        id: id.0,
+        name,
+        virtual_size_bytes: vsize,
+        virtual_size_human: human_size(vsize),
+        allocated_bytes: allocated,
+        allocated_human: human_size(allocated),
+        array_id: None,
+        fs_uuid: d.fs_uuid,
+        redundancy: d.redundancy,
+        health: d.health,
+        physical_bytes: d.physical_bytes,
+        parent: d.parent,
+        sealed: d.sealed,
+        access: d.access,
+        writable: d.writable,
+        role: d.role,
+        fs: d.fs,
+    })
+}
+
+fn parse_role(role: &Option<String>) -> Result<Option<crate::drive::slab::SlabRole>, Response> {
+    match role.as_deref() {
+        Some(r) => match crate::drive::slab::SlabRole::parse(r) {
+            Some(role) => Ok(Some(role)),
+            None => Err(ApiError::bad_request(format!("unknown role '{r}': system or data"))),
+        },
+        None => Ok(None),
+    }
+}
+
+/// `POST /api/v1/volumes/compose/pallet` — a pallet as a sealed volume,
+/// sharing its members' slots.
+async fn compose_pallet(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ComposePalletRequest>,
+) -> Response {
+    use crate::volume::disk::{MemberSource, PalletMember, PalletVolumeSpec};
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "compose_pallet").increment(1);
+
+    if req.members.is_empty() {
+        return ApiError::bad_request("a composed pallet needs at least one member");
+    }
+    let role = match parse_role(&req.role) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let size = match super::fstemplates::resolve_size(&req.size, None) {
+        Ok(v) => v,
+        Err(e) => return ApiError::bad_request(e),
+    };
+
+    let mut vm = state.volume_manager.lock().await;
+    let mut members = Vec::with_capacity(req.members.len());
+    for m in &req.members {
+        let kind = m
+            .kind
+            .as_deref()
+            .map(crate::pallet::format::parse_member_kind)
+            .unwrap_or(crate::pallet::format::MemberKind::Raw);
+        let source = match (&m.volume, &m.text) {
+            (Some(v), None) => {
+                let id = match vm.find_volume(v).await {
+                    Some(id) => id,
+                    None => return ApiError::not_found(format!("member '{}': no volume named {v}", m.name)),
+                };
+                let len = match super::fstemplates::resolve_size(&m.len, None) {
+                    Ok(v) => v,
+                    Err(e) => return ApiError::bad_request(format!("member '{}': {e}", m.name)),
+                };
+                MemberSource::Volume { id, len }
+            }
+            (None, Some(t)) => MemberSource::Bytes(t.clone().into_bytes()),
+            _ => {
+                return ApiError::bad_request(format!(
+                    "member '{}': give exactly one of `volume` or `text`",
+                    m.name
+                ))
+            }
+        };
+        members.push(PalletMember { name: m.name.clone(), role: m.role.clone(), kind, source });
+    }
+
+    let mut spec = PalletVolumeSpec::new(
+        &req.name,
+        req.kind
+            .as_deref()
+            .map(crate::pallet::format::parse_pallet_kind)
+            .unwrap_or(crate::pallet::format::PalletKind::Unspecified),
+    );
+    spec.pallet = req.pallet.clone();
+    spec.version = req.version;
+    spec.version_label = req.version_label.clone().unwrap_or_default();
+    spec.lba = req.lba.unwrap_or(0);
+    spec.size = size;
+    spec.role = role;
+    spec.sealed = req.sealed.unwrap_or(true);
+    spec.read_only = req.read_only.unwrap_or(true);
+    spec.members = members;
+
+    let report = match vm.compose_pallet(spec).await {
+        Ok(r) => r,
+        Err(e) => return ApiError::bad_request(format!("failed to compose pallet: {e}")),
+    };
+    match volume_response(&vm, VolumeId(report.id)).await {
+        Some(volume) => {
+            (axum::http::StatusCode::CREATED, Json(ComposePalletResponse { volume, pallet: report })).into_response()
+        }
+        None => ApiError::internal("composed pallet vanished"),
+    }
+}
+
+/// `POST /api/v1/volumes/compose/disk` — a bootable disk as a chain of
+/// goldens: a GPT whose partitions are the volumes named.
+async fn compose_disk(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ComposeDiskRequest>,
+) -> Response {
+    use crate::volume::disk::{DiskPartition, DiskSpec};
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "compose_disk").increment(1);
+
+    if req.partitions.is_empty() {
+        return ApiError::bad_request("a composed disk needs at least one partition");
+    }
+    let role = match parse_role(&req.role) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let size = match super::fstemplates::resolve_size(&req.size, None) {
+        Ok(v) => v,
+        Err(e) => return ApiError::bad_request(e),
+    };
+
+    let mut vm = state.volume_manager.lock().await;
+    let mut partitions = Vec::with_capacity(req.partitions.len());
+    for p in &req.partitions {
+        let id = match vm.find_volume(&p.volume).await {
+            Some(id) => id,
+            None => return ApiError::not_found(format!("no volume named {}", p.volume)),
+        };
+        let type_guid = match p.r#type.as_deref() {
+            Some(t) => match crate::image::type_guid::parse(t) {
+                Some(g) => Some(g),
+                None => return ApiError::bad_request(format!("unknown partition type '{t}'")),
+            },
+            None => None,
+        };
+        partitions.push(DiskPartition {
+            volume: id,
+            name: p.name.clone(),
+            type_guid,
+            priority: p.priority,
+            tries: p.tries,
+            attributes: p.attributes,
+        });
+    }
+
+    let mut spec = DiskSpec::new(&req.name);
+    spec.size = size;
+    spec.lba = req.lba.unwrap_or(0);
+    spec.fresh_guid = req.fresh_guid.unwrap_or(false);
+    spec.role = role;
+    spec.partitions = partitions;
+
+    let report = match vm.compose_disk(spec).await {
+        Ok(r) => r,
+        Err(e) => return ApiError::bad_request(format!("failed to compose disk: {e}")),
+    };
+    match volume_response(&vm, VolumeId(report.id)).await {
+        Some(volume) => (axum::http::StatusCode::CREATED, Json(ComposeDiskResponse { volume, disk: report })).into_response(),
+        None => ApiError::internal("composed disk vanished"),
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_volumes).post(create_volume))
@@ -1615,5 +1896,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/cidata", axum::routing::post(write_cidata))
         .route("/snapshots", axum::routing::post(create_snapshot))
         .route("/compose", axum::routing::post(compose_volume))
+        .route("/compose/pallet", axum::routing::post(compose_pallet))
+        .route("/compose/disk", axum::routing::post(compose_disk))
         .with_state(state)
 }

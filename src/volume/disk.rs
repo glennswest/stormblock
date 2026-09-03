@@ -106,7 +106,10 @@ pub struct PalletVolumeSpec {
     /// carry. Defaults to the volume name.
     pub pallet: Option<String>,
     pub kind: PalletKind,
-    pub version: u64,
+    /// Monotonic per pallet name. `None` takes one past the highest version
+    /// any sealed pallet volume of this name carries, which is what makes
+    /// "cut a new version" a call with no bookkeeping.
+    pub version: Option<u64>,
     pub version_label: String,
     /// Block size the extent table counts in: the LBA size of the disk this
     /// pallet will sit in. Zero takes [`DEFAULT_LBA`].
@@ -127,7 +130,7 @@ impl PalletVolumeSpec {
             name: name.into(),
             pallet: None,
             kind,
-            version: 1,
+            version: None,
             version_label: String::new(),
             lba: 0,
             sealed: true,
@@ -287,6 +290,10 @@ impl VolumeManager {
             return Err(invalid(format!("lba {lba}: must be a power of two from 512 up to the {slot}-byte slot")));
         }
         let pallet_name = spec.pallet.clone().unwrap_or_else(|| spec.name.clone());
+        let version = match spec.version {
+            Some(v) => v,
+            None => self.highest_pallet_version(&pallet_name).await + 1,
+        };
 
         // Resolve every volume member first, so a bad one is refused before
         // anything exists.
@@ -331,7 +338,7 @@ impl VolumeManager {
             read_only: spec.read_only,
             required: true,
         };
-        let mut builder = PalletBuilder::new(pallet_name.clone(), spec.version)
+        let mut builder = PalletBuilder::new(pallet_name.clone(), version)
             .kind(spec.kind)
             .version_label(spec.version_label.clone())
             .attributes(attrs)
@@ -414,7 +421,7 @@ impl VolumeManager {
                 id: id.0,
                 name: spec.name.clone(),
                 pallet: pallet_name.clone(),
-                version: spec.version,
+                version,
                 kind: spec.kind.to_string(),
                 manifest_digest: hex::encode(built.manifest_digest),
                 lba,
@@ -709,6 +716,24 @@ impl VolumeManager {
         }
     }
 
+    /// The highest `pallet_version` among sealed pallet volumes named `name`,
+    /// or 0. Read off each one's superblock: the record says what a volume
+    /// is, the pallet says which version.
+    pub async fn highest_pallet_version(&self, name: &str) -> u64 {
+        let mut best = 0u64;
+        for (id, fs) in self.fs_info.iter() {
+            if fs.kind != "pallet" || fs.label != name || !self.is_sealed(id) {
+                continue;
+            }
+            if let Some(dev) = self.get_volume(id) {
+                if let Ok(p) = Pallet::read(&PartitionView::whole(dev)).await {
+                    best = best.max(p.version());
+                }
+            }
+        }
+        best
+    }
+
     /// A one-off golden: `size` bytes, `bytes` written at `at`, sealed.
     async fn mint_golden(
         &mut self,
@@ -752,7 +777,7 @@ mod tests {
         let dev = FileDevice::open_with_capacity(&path_str, 64 * 1024 * 1024).await.unwrap();
         let dev: Arc<dyn BlockDevice> = Arc::new(dev);
         let slab = Slab::format(dev, SLOT, StorageTier::Hot).await.unwrap();
-        let mut vm = VolumeManager::new(SLOT);
+        let vm = VolumeManager::new(SLOT);
         vm.registry().write().await.add(slab);
         (vm, path_str)
     }
@@ -831,6 +856,29 @@ mod tests {
         pallet.read_member(&c, &view, 0, &mut buf).await.unwrap();
         assert_eq!(&buf, b"root=PARTUUID=x ro");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Cutting a new version of a pallet is one call: the version follows
+    /// the last sealed one of that name.
+    #[tokio::test]
+    async fn a_new_version_follows_the_last() {
+        let (mut vm, path) = manager().await;
+        let kernel = golden(&mut vm, "kernel.golden", SLOT, 0x4B).await;
+        let initrd = golden(&mut vm, "initrd.golden", SLOT, 0x49).await;
+        let mut first = boot_pallet(kernel, initrd);
+        first.pallet = Some("boot".into());
+        let one = vm.compose_pallet(first).await.unwrap();
+        assert_eq!(one.version, 1);
+
+        let kernel2 = golden(&mut vm, "kernel2.golden", SLOT, 0x4C).await;
+        let mut second = boot_pallet(kernel2, initrd);
+        second.name = "boot2".into();
+        second.pallet = Some("boot".into());
+        let before = free_slots(&vm).await;
+        let two = vm.compose_pallet(second).await.unwrap();
+        assert_eq!(two.version, 2);
+        assert_eq!(before - free_slots(&vm).await, 2, "a new version is a header and a cmdline; the initramfs is shared");
         let _ = std::fs::remove_file(&path);
     }
 
