@@ -1,5 +1,6 @@
 //! GET/POST/DELETE /api/v1/exports — volume-to-target export mappings.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -77,6 +78,132 @@ async fn get_export(
         Some(e) => Json(export_to_response(e)).into_response(),
         None => ApiError::not_found(format!("export {uuid} not found")),
     }
+}
+
+/// Path of the persisted export table, when a data dir is configured.
+fn exports_path(state: &AppState) -> Option<PathBuf> {
+    state
+        .config
+        .management
+        .data_dir
+        .as_ref()
+        .map(|d| PathBuf::from(d).join("exports.json"))
+}
+
+/// Write the current export table to disk. Best-effort: a persistence failure
+/// must not fail the API call that triggered it.
+///
+/// An export is the address a consumer was given — a subsystem and a namespace
+/// number that something out there has written down, and that firmware booting
+/// over NVMe/TCP has baked into its configuration. Losing the table across a
+/// restart does not merely forget an API call: it silently stops answering at
+/// an address a machine is still dialling.
+pub async fn persist_exports(state: &AppState) {
+    let Some(path) = exports_path(state) else { return };
+
+    let snapshot: Vec<ExportEntry> = state.exports.read().await.clone();
+    let bytes = match serde_json::to_vec_pretty(&snapshot) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("failed to serialize export table: {e}");
+            return;
+        }
+    };
+
+    // Temp file and rename, so a crash mid-write cannot truncate the table
+    // that is already there.
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        tracing::warn!("failed to write export table to {}: {e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        tracing::warn!("failed to install export table at {}: {e}", path.display());
+    }
+}
+
+/// Re-wire persisted exports into the running targets.
+///
+/// **The namespace id is restored, not reassigned.** Handing a volume the next
+/// free nsid on restart would be a quiet renumbering, and everything that
+/// attached by the old one — a boot command line, a saved configuration, a
+/// machine's firmware — would come back pointing at a different volume or at
+/// nothing. The number is part of the address, so it is part of the record.
+///
+/// Individual failures are logged and skipped: one volume that did not come
+/// back must not stop the rest from being served.
+pub async fn restore_exports(state: &Arc<AppState>) -> usize {
+    let Some(path) = exports_path(state) else { return 0 };
+    let Ok(bytes) = std::fs::read(&path) else { return 0 };
+
+    let persisted: Vec<ExportEntry> = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("failed to parse {}: {e}", path.display());
+            return 0;
+        }
+    };
+
+    let mut restored = 0usize;
+    let mut entries = Vec::with_capacity(persisted.len());
+
+    for mut entry in persisted {
+        match entry.protocol {
+            #[cfg(feature = "nvmeof")]
+            ExportProtocol::Nvmeof => {
+                let Some(nsid) = entry.nsid else {
+                    tracing::warn!(
+                        "export {}: no namespace recorded, cannot restore", entry.id
+                    );
+                    continue;
+                };
+                let device = {
+                    let vm = state.volume_manager.lock().await;
+                    vm.get_volume(&VolumeId(entry.volume_id))
+                };
+                let Some(device) = device else {
+                    tracing::warn!(
+                        "export {}: volume {} is not attached, so nsid {nsid} stays unserved",
+                        entry.id, entry.volume_id
+                    );
+                    entry.status = ExportStatus::PendingRestart;
+                    entries.push(entry);
+                    continue;
+                };
+                match state.nvmeof_target.read().await.as_ref() {
+                    Some(target) => {
+                        target.add_namespace_dynamic(nsid, device).await;
+                        entry.status = ExportStatus::Active;
+                        restored += 1;
+                    }
+                    None => {
+                        tracing::warn!("NVMe-oF target not running; export stays pending");
+                        entry.status = ExportStatus::PendingRestart;
+                    }
+                }
+            }
+            #[cfg(not(feature = "nvmeof"))]
+            ExportProtocol::Nvmeof => {}
+
+            // iSCSI exports ride on the LUN table, which restores itself.
+            ExportProtocol::Iscsi => {
+                entry.status = ExportStatus::Active;
+                restored += 1;
+            }
+        }
+        entries.push(entry);
+    }
+
+    {
+        let mut exports = state.exports.write().await;
+        *exports = entries;
+        metrics::gauge!("stormblock_exports_total").set(exports.len() as f64);
+    }
+
+    if restored > 0 {
+        tracing::info!("restored {restored} export(s) from {}", path.display());
+    }
+    restored
 }
 
 async fn create_export(
@@ -170,6 +297,7 @@ async fn create_export(
         exports.push(entry);
         metrics::gauge!("stormblock_exports_total").set(exports.len() as f64);
     }
+    persist_exports(&state).await;
 
     (axum::http::StatusCode::CREATED, Json(resp)).into_response()
 }
@@ -214,6 +342,8 @@ async fn delete_export(
             target.remove_namespace(nsid).await;
         }
     }
+
+    persist_exports(&state).await;
 
     axum::http::StatusCode::NO_CONTENT.into_response()
 }

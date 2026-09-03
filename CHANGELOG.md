@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### 2026-09-03
+- **fix (exports): an NVMe-oF export survives a restart, with its namespace id
+  intact.** Exports lived only in memory, so an engine that restarted stopped
+  answering at addresses consumers had already written down — and firmware
+  booting over NVMe/TCP has the subsystem and namespace baked into its
+  configuration. The table is now written to `exports.json` beside the volume
+  metadata (temp file and rename, so a crash cannot truncate it) and re-wired
+  into the target at startup.
+
+  **The namespace id is restored, not reassigned.** Handing a volume the next
+  free nsid on restart would be a silent renumbering, and everything that
+  attached by the old one would come back pointing at a different volume or at
+  nothing. The number is part of the address, so it is part of the record.
+
+  A volume that did not come back leaves its export recorded and `pending`
+  rather than dropping it: an address that is temporarily unserved is a
+  different thing from one that was withdrawn, and only one of them should be
+  forgotten. Verified on forge: an export created, the service restarted, and a
+  remote initiator read the image back byte-identical over the same nsid.
+
 ## [v13.3.3] — 2026-09-02
 
 ### 2026-09-02

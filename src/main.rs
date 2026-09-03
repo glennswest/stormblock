@@ -1265,6 +1265,13 @@ async fn main() -> anyhow::Result<()> {
                 let mut guard = state.nvmeof_target.write().await;
                 *guard = Some(nvmeof.clone());
             }
+
+            // Re-wire exports created through the API in a previous run. An
+            // export is an address something out there has written down —
+            // firmware booting over NVMe/TCP has the subsystem and namespace
+            // in its configuration — so losing the table on restart stops
+            // answering at an address a machine is still dialling.
+            mgmt::api::exports::restore_exports(&state).await;
             let reactor_for_nvmeof = reactor.clone();
             tokio::spawn({
                 let nvmeof = nvmeof.clone();
