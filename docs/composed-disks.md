@@ -159,7 +159,10 @@ superblock's own flags already agree.
 ```
 
 `written_bytes` is zero. The second node of the same layout reports
-`gpt_minted: false`, the same `partuuid`s, and allocates nothing. The result
+`gpt_minted: false` and the same `partuuid`s. Note that `allocated_bytes` on
+a composed volume counts what it *maps*, shared or not; the slab's free-slot
+count is the number that says whether anything was written, and it does not
+move. The result
 is read back through the map — `Gpt::read` finds both headers, each pallet
 partition's manifest checks — before it is returned; the disk is recorded as
 `fs.kind = gpt` with its GUID, and is left *unsealed*: it is a node's disk and
@@ -173,6 +176,15 @@ one this engine can read and the node cannot boot
 pallet's extent table counts in the same unit, so `compose/pallet` takes the
 same `lba`. A disk meant to be copied onto a 512-byte drive says `"lba": 512`
 on both.
+
+**The ESP has to agree.** A FAT filesystem records its own sector size, and
+the kernel and firmware compare it with the device's: a 512-sector FAT image
+on a disk presented at 4096-byte LBAs is called vfat by `blkid` and refused
+by `mount` with "can't read superblock", and firmware's FAT driver makes the
+same comparison. Format the ESP for the disk it lands in — `mkfs.vfat -S 4096`
+— and give FAT16 at 4 KiB sectors at least 64 MiB, its 4085-cluster floor.
+`ci-compose-disk-verify.sh` found this; the first ESP it built mounted only
+after it was reformatted.
 
 ## 4. Cutting a new version
 

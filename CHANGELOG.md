@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v13.4.0] — 2026-09-03
+
 ### 2026-09-03
 - **feat (volume): composed disks — a per-node bootable disk is a chain of
   goldens, and costs its map.** `POST /api/v1/volumes/compose` (v13.3) made a

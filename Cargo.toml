@@ -6,7 +6,7 @@ members = ["crates/pallet-format"]
 
 [package]
 name = "stormblock"
-version = "13.3.3"
+version = "13.4.0"
 edition = "2021"
 authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"

@@ -1038,6 +1038,12 @@ composed disk over NVMe/TCP.
   never touched; the boot ladder writing `tries` into a disk's entry is the
   same COW.
 - **`ThinVolumeHandle::name()` is async**; `ThinVolume::name()` is not.
+- **The ESP must be formatted at the disk's sector size** (`mkfs.vfat -S
+  4096`, ≥ 64 MiB for FAT16). A 512-sector FAT on a 4Kn disk is vfat to
+  `blkid` and "can't read superblock" to `mount` and to firmware. Found by
+  `ci-compose-disk-verify.sh`, not by any test of ours.
+- **`allocated_bytes` on a composition counts what it maps.** The slab's
+  free-slot count is what says whether anything was written.
 - **A head golden alone is not a readable GPT** — its alternate LBA points
   past the golden's end. Read the header at LBA 1 directly, or read the
   composed disk.
