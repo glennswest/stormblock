@@ -13,6 +13,7 @@ pub mod redundancy;
 pub mod thin;
 pub mod snapshot;
 pub mod compose;
+pub mod disk;
 pub mod stripe;
 pub mod stripelog;
 #[cfg(feature = "stormfs-data")]

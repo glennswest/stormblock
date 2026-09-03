@@ -21,6 +21,27 @@ use crate::volume::FsInfo;
 /// Recognise a partition table or a read-only image on the volume.
 pub async fn detect(dev: &Arc<dyn BlockDevice>) -> DriveResult<Option<FsInfo>> {
     let cap = dev.capacity_bytes();
+    // A pallet: `STORMPAL` at 0. A composed pallet is a volume, and sealing it
+    // records what it is so a disk can be composed out of it by name.
+    if cap >= 4096 {
+        let mut sb = vec![0u8; 4096];
+        dev.read(0, &mut sb).await?;
+        if sb[..8] == crate::pallet::format::MAGIC {
+            let name = String::from_utf8_lossy(&sb[52..92])
+                .trim_end_matches('\0')
+                .to_string();
+            return Ok(Some(FsInfo {
+                kind: "pallet".into(),
+                journal: false,
+                features: Some(format!("lba={}", u32::from_le_bytes(sb[16..20].try_into().unwrap()))),
+                sixty_four_bit: false,
+                metadata_csum: false,
+                csum_seed: false,
+                label: name,
+                uuid: None,
+            }));
+        }
+    }
     // GPT: "EFI PART" at LBA 1 for a 512-byte or a 4096-byte LBA.
     for lba in [512u64, 4096] {
         if cap < lba * 2 {

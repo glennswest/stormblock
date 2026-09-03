@@ -35,7 +35,8 @@ use super::{
 const COPY_CHUNK: usize = 4 * 1024 * 1024;
 
 /// Tries a freshly published pallet gets before a consumer gives up on it.
-const DEFAULT_TRIES: u8 = 3;
+/// Boot attempts a freshly published pallet gets before the ladder skips it.
+pub const DEFAULT_TRIES: u8 = 3;
 
 /// The highest priority the 4-bit GPT field can hold — what activation sets.
 const TOP_PRIORITY: u8 = 15;

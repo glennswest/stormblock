@@ -51,6 +51,47 @@ impl Component {
     }
 }
 
+/// Share every component's extents into `dest`, at its offset.
+///
+/// This is the one place a golden's slots gain a referrer: `gather_into`
+/// copies the map, and the slabs' reference counts follow. Offsets must be
+/// slot-aligned — the callers check. Returns the number of slots shared.
+pub(crate) async fn share_into(
+    dest_id: VolumeId,
+    slot_size: u64,
+    components: &[Component],
+    gem: &mut GlobalExtentMap,
+    registry: &mut SlabRegistry,
+) -> Result<usize, VolumeError> {
+    let mut shared: HashMap<SlabId, Vec<u32>> = HashMap::new();
+    let mut count = 0usize;
+
+    for c in components {
+        let base_vext = c.at / slot_size;
+        for leg in gem.gather_into(c.source, dest_id, base_vext) {
+            shared.entry(leg.slab_id).or_default().push(leg.slot_idx);
+            count += 1;
+        }
+    }
+
+    // The slots are now referenced by one more volume than before. Grouped per
+    // slab so the slot table is written by sector: composing a disk out of
+    // fifty goldens costs sectors touched, not one round trip per extent.
+    for (slab_id, slots) in shared {
+        if let Some(slab) = registry.get_mut(&slab_id) {
+            slab.inc_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
+        } else {
+            // Refusing here would leave the map half-built; naming it is what
+            // lets someone find out why a composed disk reads short.
+            tracing::warn!(
+                volume = %dest_id, slab = %slab_id, extents = slots.len(),
+                "slab not in registry while composing — its extents are unprotected"
+            );
+        }
+    }
+    Ok(count)
+}
+
 /// Compose a volume from components, sharing their extents.
 ///
 /// `declared_size` fixes the composed volume's size; without one it is the end
@@ -112,30 +153,7 @@ pub async fn compose_volume(
     };
 
     let dest_id = VolumeId::new();
-    let mut shared: HashMap<SlabId, Vec<u32>> = HashMap::new();
-
-    for c in components {
-        let base_vext = c.at / slot_size;
-        for leg in gem.gather_into(c.source, dest_id, base_vext) {
-            shared.entry(leg.slab_id).or_default().push(leg.slot_idx);
-        }
-    }
-
-    // The slots are now referenced by one more volume than before. Grouped per
-    // slab so the slot table is written by sector: composing a disk out of
-    // fifty goldens costs sectors touched, not one round trip per extent.
-    for (slab_id, slots) in shared {
-        if let Some(slab) = registry.get_mut(&slab_id) {
-            slab.inc_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
-        } else {
-            // Refusing here would leave the map half-built; naming it is what
-            // lets someone find out why a composed disk reads short.
-            tracing::warn!(
-                volume = %dest_id, slab = %slab_id, extents = slots.len(),
-                "slab not in registry while composing — its extents are unprotected"
-            );
-        }
-    }
+    share_into(dest_id, slot_size, components, gem, registry).await?;
 
     Ok(ThinVolume {
         id: dest_id,

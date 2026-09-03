@@ -67,6 +67,12 @@ pub struct MemberSpec {
     pub kind: MemberKind,
     pub flags: u32,
     pub content: Arc<dyn MemberContent>,
+    /// Bytes the member's span must cover, when that is more than its
+    /// content. A golden shared into a pallet by its extent map brings its
+    /// *whole* virtual size along — every slot it owns — and the next member
+    /// has to be placed after all of it, whatever `byte_len` the manifest
+    /// digests. Zero means "the content's own length".
+    pub reserve: u64,
 }
 
 impl MemberSpec {
@@ -84,11 +90,18 @@ impl MemberSpec {
             kind,
             flags: FLAG_SEALED | FLAG_READ_ONLY | FLAG_DIGEST,
             content,
+            reserve: 0,
         }
     }
 
     pub fn with_flags(mut self, flags: u32) -> Self {
         self.flags = flags;
+        self
+    }
+
+    /// Span this member must occupy on disk, if more than its content.
+    pub fn with_reserve(mut self, reserve: u64) -> Self {
+        self.reserve = reserve;
         self
     }
 }
@@ -163,6 +176,11 @@ pub struct PalletBuilder {
     block_size: u32,
     attributes: Attributes,
     members: Vec<MemberSpec>,
+    /// Where member content may start: a power of two, at least 4 KiB. A
+    /// pallet that is a *volume* sets this to the slab slot size so every
+    /// member sits on an extent boundary and a golden can be shared in by its
+    /// map rather than copied.
+    content_align: Option<u64>,
 }
 
 fn align_up(v: u64, a: u64) -> u64 {
@@ -196,6 +214,7 @@ impl PalletBuilder {
             block_size: 4096,
             attributes: Attributes::default(),
             members: Vec::new(),
+            content_align: None,
         }
     }
 
@@ -209,6 +228,16 @@ impl PalletBuilder {
 
     pub fn attributes(mut self, attrs: Attributes) -> Self {
         self.attributes = attrs;
+        self
+    }
+
+    /// Place every member's content on a multiple of `align` bytes.
+    ///
+    /// The default is 4 KiB. A composed pallet asks for the slab slot size,
+    /// which is what lets a member that is already a golden be *shared* into
+    /// the pallet — an extent map can only express slot-aligned offsets.
+    pub fn content_align(mut self, align: u64) -> Self {
+        self.content_align = Some(align);
         self
     }
 
@@ -274,7 +303,15 @@ impl PalletBuilder {
         // media's, so a pre-kernel reader working in sectors needs no scaling.
         // Content is nonetheless *placed* on 4 KiB boundaries, because a 512
         // byte block size should not cost every member its alignment.
-        let content_align = bs.max(SUPERBLOCK_LEN as u64);
+        let mut content_align = bs.max(SUPERBLOCK_LEN as u64);
+        if let Some(a) = self.content_align {
+            if !a.is_power_of_two() || a < content_align {
+                return Err(PalletError::BadGeometry(format!(
+                    "content alignment {a}: must be a power of two, at least {content_align}"
+                )));
+            }
+            content_align = a;
+        }
         let tables_end = SUPERBLOCK_LEN + n * MEMBER_LEN + extent_count * EXTENT_LEN;
         let member_data_offset = align_up(tables_end as u64, content_align);
 
@@ -299,7 +336,10 @@ impl PalletBuilder {
                 let first = extent_idx as u32;
                 extent_idx += 1;
                 placements.push(Placement { member: i, offset: cursor, len, digest });
-                cursor += blocks * bs;
+                // A shared golden owns every slot of its virtual size, not
+                // only the bytes the manifest digests; the next member must
+                // start after all of it.
+                cursor += (blocks * bs).max(align_up(m.reserve, bs));
                 (first, 1u32)
             } else {
                 placements.push(Placement { member: i, offset: cursor, len: 0, digest });

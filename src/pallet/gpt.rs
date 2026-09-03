@@ -157,7 +157,14 @@ impl Gpt {
     /// An empty table in an explicit LBA size — for an image that must be
     /// readable by something with a fixed idea of its sector size.
     pub fn create_with_lba(device: &Arc<dyn BlockDevice>, bs: u32) -> Gpt {
-        let last_lba = device.capacity_bytes() / bs as u64 - 1;
+        Gpt::create_for(bs, device.capacity_bytes())
+    }
+
+    /// An empty table for a disk of `total_bytes`, with no device in hand —
+    /// for a table that is going to be a golden rather than written straight
+    /// onto something.
+    pub fn create_for(bs: u32, total_bytes: u64) -> Gpt {
+        let last_lba = total_bytes / bs as u64 - 1;
         let ent = entries_lbas(bs);
         Gpt {
             block_size: bs,
@@ -168,6 +175,22 @@ impl Gpt {
             entries: vec![GptEntry::empty(); NUM_ENTRIES as usize],
             recovered_from_backup: false,
         }
+    }
+
+    /// Byte length of the primary half: protective MBR, header, entry array.
+    pub fn head_bytes(&self) -> u64 {
+        (2 + entries_lbas(self.block_size)) * self.block_size as u64
+    }
+
+    /// Byte length of the backup half: entry array, then the header at the
+    /// last LBA.
+    pub fn tail_bytes(&self) -> u64 {
+        (1 + entries_lbas(self.block_size)) * self.block_size as u64
+    }
+
+    /// Where the backup half starts, in bytes from the start of the disk.
+    pub fn tail_offset(&self) -> u64 {
+        (self.alternate_lba - entries_lbas(self.block_size)) * self.block_size as u64
     }
 
     /// Read the table, preferring the primary and falling back to the backup
@@ -256,8 +279,22 @@ impl Gpt {
 
     /// Write protective MBR, primary header + entries, and the backup pair.
     pub async fn write(&self, device: &Arc<dyn BlockDevice>) -> Result<()> {
-        let bs = self.block_size as u64;
         let view = PartitionView::whole(device.clone());
+        let (head, tail) = self.render();
+        view.write_at(self.tail_offset(), &tail).await?;
+        view.write_at(0, &head).await?;
+        view.flush().await?;
+        Ok(())
+    }
+
+    /// The table as bytes: the primary half, which goes at offset 0, and the
+    /// backup half, which goes at [`Gpt::tail_offset`].
+    ///
+    /// Rendering is separate from writing so that the two halves can be
+    /// goldens — the first and last slot of a composed disk — and be shared
+    /// by every disk with the same layout rather than written per disk.
+    pub fn render(&self) -> (Vec<u8>, Vec<u8>) {
+        let bs = self.block_size as u64;
         let ent = entries_lbas(self.block_size);
 
         let mut arr = vec![0u8; entries_bytes() as usize];
@@ -268,28 +305,29 @@ impl Gpt {
 
         // Protective MBR — one 0xEE partition covering the disk, so a tool that
         // only understands MBR sees the disk as fully used rather than as free.
-        let mut mbr = vec![0u8; bs as usize];
-        let total_lba = device.capacity_bytes() / bs;
-        mbr[446] = 0x00;
-        mbr[447..450].copy_from_slice(&[0x00, 0x02, 0x00]);
-        mbr[450] = 0xEE;
-        mbr[451..454].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
-        wr_u32(&mut mbr, 454, 1);
-        wr_u32(&mut mbr, 458, (total_lba - 1).min(0xFFFF_FFFF) as u32);
-        mbr[510] = 0x55;
-        mbr[511] = 0xAA;
-        view.write_at(0, &mbr).await?;
+        let mut head = vec![0u8; self.head_bytes() as usize];
+        let total_lba = self.alternate_lba + 1;
+        head[446] = 0x00;
+        head[447..450].copy_from_slice(&[0x00, 0x02, 0x00]);
+        head[450] = 0xEE;
+        head[451..454].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+        wr_u32(&mut head, 454, 1);
+        wr_u32(&mut head, 458, (total_lba - 1).min(0xFFFF_FFFF) as u32);
+        head[510] = 0x55;
+        head[511] = 0xAA;
 
         let backup_entries_lba = self.alternate_lba - ent;
         let primary = self.header_bytes(1, self.alternate_lba, 2, arr_crc);
         let backup = self.header_bytes(self.alternate_lba, 1, backup_entries_lba, arr_crc);
 
-        view.write_at(2 * bs, &arr).await?;
-        view.write_at(backup_entries_lba * bs, &arr).await?;
-        view.write_at(bs, &primary).await?;
-        view.write_at(self.alternate_lba * bs, &backup).await?;
-        view.flush().await?;
-        Ok(())
+        head[bs as usize..2 * bs as usize].copy_from_slice(&primary);
+        head[2 * bs as usize..2 * bs as usize + arr.len()].copy_from_slice(&arr);
+
+        let mut tail = vec![0u8; self.tail_bytes() as usize];
+        tail[..arr.len()].copy_from_slice(&arr);
+        let ho = (ent * bs) as usize;
+        tail[ho..ho + bs as usize].copy_from_slice(&backup);
+        (head, tail)
     }
 
     fn header_bytes(&self, my_lba: u64, alt_lba: u64, entry_lba: u64, arr_crc: u32) -> Vec<u8> {
