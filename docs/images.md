@@ -1,7 +1,9 @@
 # Building images
 
 **Status: implemented, 2026-08-19** (stormblock v9.5.0). Companion to
-[docs/pallets.md](pallets.md), which specifies what a pallet is.
+[docs/pallets.md](pallets.md), which specifies what a pallet is, and
+[docs/composed-disks.md](composed-disks.md), which makes a *per-node* disk
+out of the same pallets without copying them.
 
 > A disk image is a GPT plus a concatenation of pallets.
 

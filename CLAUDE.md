@@ -1008,15 +1008,36 @@ of them (Glenn: "GPT could be in a golden, and beginning of the chain"):
   parses a GPT in the media's own block size (§2.4 of docs/pallets.md). A
   disk meant to be copied onto a 512-byte drive says `lba = 512`.
 
-Work plan:
-- [ ] `PalletBuilder::content_align`, `MemberSpec::reserve` (a member's span
-      may exceed its digested length, so a golden's whole extent set fits)
-- [ ] `Gpt::create_for` / `Gpt::render` — head and tail bytes without a device
-- [ ] `fs::disk::detect` recognises a pallet (`STORMPAL` at 0)
-- [ ] `volume/disk.rs`: `compose_pallet`, `compose_disk`, GPT goldens by layout
-- [ ] `POST /api/v1/volumes/compose/pallet`, `POST /api/v1/volumes/compose/disk`
-- [ ] tests: pallet volume verifies and allocates only its header; disk reads
-      back as a GPT with the pallet inside; two disks share the GPT goldens;
-      `fresh_guid` costs two slots; a `PalletStore` over the disk selects it
-- [ ] docs/composed-disks.md, CHANGELOG, README; build + test on dev; an
-      external `fdisk`/`sgdisk` read of a dumped disk
+Work plan — DONE (v13.4.0):
+- [x] `PalletBuilder::content_align`, `MemberSpec::reserve`
+- [x] `Gpt::create_for` / `Gpt::render` — head and tail bytes without a device
+- [x] `fs::disk::detect` recognises a pallet (`STORMPAL` at 0)
+- [x] `volume/disk.rs`: `compose_pallet`, `compose_disk`, GPT goldens by layout
+- [x] `POST /api/v1/volumes/compose/pallet`, `POST /api/v1/volumes/compose/disk`
+- [x] tests: 8 unit (`volume::disk`) + `tests/integration_compose_disk.rs`
+- [x] docs/composed-disks.md, CHANGELOG, README
+- [x] `ci-compose-disk-verify.sh` — the built binary, a real kernel and
+      initramfs, an ESP with shim + grub, ublk attach, then `fdisk`, `blkid`,
+      a mount, the kernel digest, `pallet verify`, and an OVMF boot
+
+Not done: a CLI subcommand; `image build` pointing at composed pallets; an
+ESP built from a directory over HTTP; a stormcos node actually booting from a
+composed disk over NVMe/TCP.
+
+### Worth not re-deriving
+
+- **"copied becomes non-zero"** is the retier report's `copied` count —
+  extents shared with another volume that demotion copies rather than moves.
+  While a node's disk was a byte copy of the image nothing was shared and it
+  was always zero; composed disks are what make it real.
+- **`DEFAULT_EXTENT_SIZE` is not `DEFAULT_SLOT_SIZE`** (4 MiB vs 1 MiB).
+  A member's span is its golden rounded up to a *slot*, so the HTTP test had
+  to be written in slots; the first version in megabytes failed on dev.
+- **The GPT goldens keep the layout's GUID.** A `fresh_guid` stamp lands on
+  the composed disk's copy-on-write slots, so the shared head and tail are
+  never touched; the boot ladder writing `tries` into a disk's entry is the
+  same COW.
+- **`ThinVolumeHandle::name()` is async**; `ThinVolume::name()` is not.
+- **A head golden alone is not a readable GPT** — its alternate LBA points
+  past the golden's end. Read the header at LBA 1 directly, or read the
+  composed disk.

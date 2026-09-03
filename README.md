@@ -70,6 +70,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
 - **REST API** — axum-based management (drives, arrays, volumes, exports, slabs, filesystem templates) with optional TLS.
 - **Kubernetes-shaped resources** — `/apis/storage.storm.io/v1/{volumes,slabs,drives,nodes}` with discovery, label selectors and `?watch=1`, served by the engine itself; stormdrive serves `drives`/`enclosures` in the same group. `kubectl`-shaped, no second store.
+- **Composed disks** — a per-node bootable disk that is a *chain of goldens*: a pallet is a sealed volume whose members are shared slab extents, the GPT is two goldens minted once per layout, and a disk is `compose(head, partitions…, tail)` — a map, with nothing written. Cutting a new version imports the changed component and composes; every unchanged golden stays shared. Verified by `fdisk`, `blkid`, a real mount and an OVMF boot. See [docs/composed-disks.md](docs/composed-disks.md).
 - **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
 - **312 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
 

@@ -3,6 +3,45 @@
 ## [Unreleased]
 
 ### 2026-09-03
+- **feat (volume): composed disks — a per-node bootable disk is a chain of
+  goldens, and costs its map.** `POST /api/v1/volumes/compose` (v13.3) made a
+  volume out of goldens but not a *disk*: it had no partition table, and every
+  pallet `image build` lays down is bytes, so a fleet of a hundred nodes was a
+  hundred copies of the same goldens. Now everything on a disk is a golden:
+  - **A pallet is a sealed volume** (`POST /api/v1/volumes/compose/pallet`,
+    `VolumeManager::compose_pallet`). `PalletBuilder::content_align` places
+    every member on a slab slot boundary, so a member that is already a golden
+    is shared in by its extent map rather than copied; only the header and any
+    inline `text` member are written. `MemberSpec::reserve` keeps a golden's
+    whole span even when the manifest digests fewer bytes, so the next member
+    lands after all of its slots. The result is read back and verified with
+    `Pallet::read` + `verify_all` before it is sealed as `fs.kind = pallet`; a
+    version left out follows the highest sealed version of that pallet name.
+  - **The GPT is two goldens.** `Gpt::render` produces the head (MBR, header,
+    entries) and tail (entries, backup header) as bytes; `compose_disk` mints
+    them once per *layout* — named by a digest of LBA size, disk size and the
+    ordered partitions — and every disk of that layout shares them. Disk and
+    partition GUIDs are derived from the layout, so `root=PARTUUID=` is the
+    same on every node; `fresh_guid: true` stamps a per-disk GUID at the cost
+    of the two GPT slots, on the disk's own copy-on-write slots.
+  - **A disk is `compose(head, partitions…, tail)`**
+    (`POST /api/v1/volumes/compose/disk`). Each partition is a volume laid
+    out in order on slot boundaries; the type follows what the volume is, a
+    pallet's `priority`/`tries` become its GPT attributes. The disk reads back
+    through the map — both GPT headers, every pallet's manifest — before it is
+    returned, and reports `written_bytes: 0`.
+
+  **The LBA size defaults to 4096**, because that is what NVMe/TCP and ublk
+  present a volume at and firmware parses a GPT in the media's own block size
+  (docs/pallets.md §2.4). Cutting a new version is: import the changed
+  component as a golden, compose a pallet, compose the disks — nothing else is
+  rewritten. `fs::disk::detect` recognises a pallet by its magic.
+  `ci-compose-disk-verify.sh` checks a composed disk with `fdisk`, `blkid`, a
+  real mount, the kernel bytes digesting to the file, `stormblock pallet
+  verify` against the ublk device, and an OVMF boot through shim and grub.
+  See docs/composed-disks.md.
+
+### 2026-09-03
 - **feat (tiering): demotion that does not drag the current image down with the
   old one.** `PlacementEngine::migrate_leg` relocates a slot and rewrites every
   map that named it — right for draining a failing drive, exactly wrong for

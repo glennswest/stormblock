@@ -692,6 +692,10 @@ tampered one.
 
 ## 11. What is guaranteed, and what is not yet
 
+A pallet need not be *written* to be on a disk: [docs/composed-disks.md](composed-disks.md)
+composes one as a sealed volume whose members are shared slab extents, and a
+disk as a chain of such volumes under a GPT that is itself a golden.
+
 Guaranteed, and asserted by tests:
 
 - The layout is pinned **by offset**, not by round-tripping through our own
