@@ -235,6 +235,12 @@ a ublk block device, and hands it to tools that are not ours:
 - **No node has yet booted a full stormcos from a composed disk over
   NVMe/TCP.** The OVMF stage above proves firmware and a boot loader read the
   disk; it does not run a stormcos kernel to a shell.
+- **GPT goldens are never swept.** Deleting a disk leaves its layout's head
+  and tail in place, deliberately: every other disk of that layout shares
+  them, as pallets share `kernel.golden`. A layout only becomes unused when a
+  pallet's size changes and every disk on the old layout is gone, which is a
+  version rollover, and what it strands is two slots. A node always has a
+  bootable disk, so this is a bounded cost, not a leak worth a collector.
 - **Nested slabs are not shared.** A `[slab]` inside a composed disk would be
   a slab written into a volume — copied bytes — so a network-booted node's
   mutable state should be its own volumes on the storage node, not a slab in
