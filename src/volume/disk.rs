@@ -510,7 +510,7 @@ impl VolumeManager {
             };
             let name = match &p.name {
                 Some(n) => n.clone(),
-                None => handle.name().to_string(),
+                None => handle.name().await,
             };
             let span = align_up(handle.capacity_bytes(), slot);
             laid.push(Laid { volume: p.volume, name, type_guid, attributes, start: cursor, span });
@@ -725,7 +725,7 @@ impl VolumeManager {
         let handle = self.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?;
         if let Err(e) = handle.write(at, bytes).await {
             let _ = self.delete_volume(id).await;
-            return Err(e);
+            return Err(VolumeError::Drive(e));
         }
         self.seal_volume(id, Some(fs)).await?;
         Ok(id)
@@ -765,7 +765,7 @@ mod tests {
         id
     }
 
-    async fn free_slots(vm: &VolumeManager) -> usize {
+    async fn free_slots(vm: &VolumeManager) -> u64 {
         vm.registry().read().await.total_free_slots()
     }
 
