@@ -5,6 +5,26 @@
 ## [v13.4.0] — 2026-09-03
 
 ### 2026-09-03
+- **feat (synonyms): a claim returns the tuple that reaches the clone.**
+  `POST /api/v1/synonyms/{ns}/{name}/claim` answered with a volume id, a name
+  and a size — nothing an initiator can act on. Firmware doing an NVMe/TCP boot
+  knows a volume exists somewhere and still has to ask where, which is a second
+  request from a client whose entire state machine is "get an address, attach,
+  boot", and a window in which the claim is held and nothing is served.
+
+  The response now carries `attach` — protocol, address, port, nqn, nsid and a
+  ready-made `nvme-tcp://` URI — matching what sbregistry's `/v1/clones/claim`
+  has always returned. An existing export is reused rather than a second one
+  minted: the nsid is part of the address, and issuing a new one for a volume
+  that already has an address changes it under whoever holds the old one. The
+  address is the advertised one, since a wildcard listen address tells a caller
+  nothing and loopback is worse.
+- **fix (releases): the change list is keyed by kind *and* name.** A name alone
+  is not unique — `stormblock` and seven others appear both as the binary that
+  was compiled and as the golden built around it, and they change for different
+  reasons. Keyed by name, one silently masked the other and the diff compared
+  the wrong pair: a real 10.21→10.22 diff reported 5 changed components where
+  the true answer was 7, hiding that stormblock's own binary had moved.
 - **feat (releases): a component carries its version and its own notes, and a
   release can say what changed.** A manifest entry had a name, a digest and a
   commit; it now also carries `version` — the number a person reads and compares

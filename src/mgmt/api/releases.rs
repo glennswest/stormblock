@@ -358,16 +358,28 @@ async fn changes(
         .into_response();
     };
 
-    let before: std::collections::HashMap<&str, &ManifestEntry> =
-        previous.manifest.iter().map(|m| (m.name.as_str(), m)).collect();
-    let after: std::collections::HashMap<&str, &ManifestEntry> =
-        this.manifest.iter().map(|m| (m.name.as_str(), m)).collect();
+    // Keyed by kind *and* name. A name alone is not unique: the same component
+    // appears as the binary that was compiled and as the golden built around
+    // it — `binary stormpump` and `golden stormpump` are two different things
+    // that change for different reasons, and eight of the names in a stormcos
+    // manifest are like that. Keyed by name only, one silently masks the other
+    // and the diff compares the wrong pair.
+    let before: std::collections::HashMap<(&str, &str), &ManifestEntry> = previous
+        .manifest
+        .iter()
+        .map(|m| ((m.kind.as_str(), m.name.as_str()), m))
+        .collect();
+    let after: std::collections::HashMap<(&str, &str), &ManifestEntry> = this
+        .manifest
+        .iter()
+        .map(|m| ((m.kind.as_str(), m.name.as_str()), m))
+        .collect();
 
     let mut changed = Vec::new();
     let mut added = Vec::new();
     let mut unchanged = 0usize;
     for m in &this.manifest {
-        match before.get(m.name.as_str()) {
+        match before.get(&(m.kind.as_str(), m.name.as_str())) {
             None => added.push(serde_json::json!({
                 "kind": m.kind, "name": m.name,
                 "version": m.version, "provenance": m.provenance, "digest": m.digest,
@@ -389,14 +401,14 @@ async fn changes(
     let removed: Vec<_> = previous
         .manifest
         .iter()
-        .filter(|m| !after.contains_key(m.name.as_str()))
+        .filter(|m| !after.contains_key(&(m.kind.as_str(), m.name.as_str())))
         .map(|m| serde_json::json!({
             "kind": m.kind, "name": m.name,
             "version": m.version, "provenance": m.provenance, "digest": m.digest,
         }))
         .collect();
 
-    changed.sort_by(|a, b| a.name.cmp(&b.name));
+    changed.sort_by(|a, b| (a.name.as_str(), a.kind.as_str()).cmp(&(b.name.as_str(), b.kind.as_str())));
     Json(serde_json::json!({
         "version": this.version,
         "since": previous.version,
@@ -833,6 +845,50 @@ mod tests {
             version: Some(version.into()),
             notes: None,
         }
+    }
+
+    /// The same name under two kinds is two components, not one.
+    ///
+    /// A stormcos manifest has eight of these — `stormblock`, `stormpump` and
+    /// six more each appear as the binary that was compiled and as the golden
+    /// built around it. They change for different reasons and at different
+    /// times. Keyed by name alone one masks the other, and a diff reports the
+    /// wrong pair while looking perfectly reasonable.
+    #[test]
+    fn a_name_under_two_kinds_is_two_components() {
+        let mut bin_old = entry("stormpump", "aaaa", "0.1.0");
+        bin_old.kind = "binary".into();
+        let mut gold_old = entry("stormpump", "bbbb", "0.1.0");
+        gold_old.kind = "golden".into();
+
+        let mut bin_new = entry("stormpump", "cccc", "0.2.0");
+        bin_new.kind = "binary".into();
+        let mut gold_new = entry("stormpump", "bbbb", "0.1.0");
+        gold_new.kind = "golden".into();
+
+        let old = vec![bin_old, gold_old];
+        let new = vec![bin_new, gold_new];
+
+        let before: std::collections::HashMap<(&str, &str), &ManifestEntry> = old
+            .iter()
+            .map(|m| ((m.kind.as_str(), m.name.as_str()), m))
+            .collect();
+        assert_eq!(before.len(), 2, "both rows must survive being indexed");
+
+        let changed: Vec<&str> = new
+            .iter()
+            .filter(|m| {
+                before
+                    .get(&(m.kind.as_str(), m.name.as_str()))
+                    .is_some_and(|o| o.digest != m.digest)
+            })
+            .map(|m| m.kind.as_str())
+            .collect();
+        assert_eq!(
+            changed,
+            vec!["binary"],
+            "the binary moved and the golden did not; keyed by name, one hides the other"
+        );
     }
 
     /// A rebuild is not news. Comparison is by digest, so a component built

@@ -407,6 +407,50 @@ fn yes() -> bool {
 /// call — resolve, clone, and (optionally) bind a name to the clone in the
 /// caller's own namespace, which is how one golden ends up behind many
 /// consumers each holding a name of their own.
+/// The tuple an initiator needs, for a volume this node serves.
+///
+/// Null rather than absent when there is no NVMe-oF target running: a caller
+/// that asked for somewhere to attach should be told plainly that there is
+/// nowhere, not left to infer it from a missing field.
+async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Value {
+    #[cfg(feature = "nvmeof")]
+    {
+        let Some(nsid) = super::v1::ensure_nvme_namespace(state, &volume.0.to_string(), Some(volume.0)).await
+        else {
+            return serde_json::Value::Null;
+        };
+        let listen: std::net::SocketAddr = match state.config.nvmeof.as_ref() {
+            Some(n) => n.listen_addr.parse().unwrap_or_else(|_| "0.0.0.0:4420".parse().unwrap()),
+            None => "0.0.0.0:4420".parse().unwrap(),
+        };
+        // The address a *remote* initiator should dial. A wildcard listen
+        // address tells a caller nothing and loopback is worse than nothing.
+        let host = state
+            .config
+            .management
+            .resolve_advertised_host(&listen.ip().to_string());
+        let nqn = state
+            .config
+            .nvmeof
+            .as_ref()
+            .map(|n| n.nqn.clone())
+            .unwrap_or_else(|| "nqn.2024.io.stormblock:default".to_string());
+        return json!({
+            "protocol": "nvme-tcp",
+            "address": host,
+            "port": listen.port(),
+            "nqn": nqn,
+            "nsid": nsid,
+            "uri": format!("nvme-tcp://{host}:{}/{nqn}?nsid={nsid}", listen.port()),
+        });
+    }
+    #[cfg(not(feature = "nvmeof"))]
+    {
+        let _ = (state, volume);
+        serde_json::Value::Null
+    }
+}
+
 async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequest) -> Response {
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(syn) = found else {
@@ -479,6 +523,20 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
         }
     };
 
+    // Export the clone and hand back the tuple that reaches it.
+    //
+    // A claim that returns only an id is not something firmware can act on: it
+    // knows a volume exists somewhere and still has to be told where. That is a
+    // second request, from a client whose whole state machine is "get an
+    // address, attach it, boot" — and a window in which the claim is held and
+    // nothing is served. sbregistry's `/v1/clones/claim` has always answered
+    // with attach info for exactly this reason; this now matches it.
+    //
+    // Reusing an existing export rather than minting a second one matters: the
+    // nsid is part of the address, and handing out a new one for a volume that
+    // already has an address would change it under whoever holds the old one.
+    let attach = attach_info(&state, c.volume_id).await;
+
     let mut out = json!({
         "claimed_from": {
             "synonym": synonym::key(namespace, name),
@@ -493,6 +551,7 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
             "sealed": false,
             "access": "rw",
         },
+        "attach": attach,
     });
     if let Some(b) = bound {
         out["synonym"] = body(&state, &b, None).await;
