@@ -14,7 +14,7 @@ use stormblock::drive::BlockDevice;
 use stormblock::mgmt::config::StormBlockConfig;
 use stormblock::mgmt::AppState;
 use stormblock::pallet::gpt::Gpt;
-use stormblock::pallet::{format::Pallet, PartitionView};
+use stormblock::pallet::format::Pallet;
 use stormblock::volume::{VolumeId, VolumeManager, DEFAULT_EXTENT_SIZE};
 
 use tempfile::TempDir;
@@ -67,7 +67,9 @@ async fn post(client: &reqwest::Client, url: &str, body: serde_json::Value) -> (
     (status, json)
 }
 
-const MIB: u64 = 1024 * 1024;
+/// Everything below is in slots: a member's span is its golden rounded up to
+/// one, so the arithmetic only reads if the sizes are.
+const SLOT: u64 = DEFAULT_EXTENT_SIZE;
 
 #[tokio::test]
 async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
@@ -76,9 +78,10 @@ async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
     let (base, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
 
-    golden(&state, "kernel.golden", 3 * MIB, 0x4B).await;
-    golden(&state, "initrd.golden", 2 * MIB, 0x49).await;
-    golden(&state, "esp.golden", 2 * MIB, 0xE5).await;
+    golden(&state, "kernel.golden", 3 * SLOT, 0x4B).await;
+    golden(&state, "initrd.golden", 2 * SLOT, 0x49).await;
+    golden(&state, "esp.golden", 2 * SLOT, 0xE5).await;
+    let kernel_len = 2 * SLOT + 4096;
     let before = free_slots(&state).await;
 
     // A boot pallet out of the goldens, by name.
@@ -91,7 +94,7 @@ async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
             "kind": "boot",
             "version_label": "6.12.0",
             "members": [
-                {"name": "kernel", "role": "kernel", "kind": "kernel", "volume": "kernel.golden", "len": "2560K"},
+                {"name": "kernel", "role": "kernel", "kind": "kernel", "volume": "kernel.golden", "len": kernel_len.to_string()},
                 {"name": "initramfs", "role": "initramfs", "kind": "initramfs", "volume": "initrd.golden"},
                 {"name": "cmdline", "role": "cmdline", "kind": "bootconfig", "text": "root=/dev/nvme0n1p2 ro"}
             ]
@@ -103,11 +106,11 @@ async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
     assert_eq!(pallet["fs"]["kind"], "pallet");
     assert_eq!(pallet["pallet"]["version"], 1);
     assert_eq!(pallet["pallet"]["lba"], 4096);
-    assert_eq!(pallet["pallet"]["shared_bytes"], 5 * MIB);
-    assert_eq!(pallet["pallet"]["members"][0]["offset"], MIB);
-    assert_eq!(pallet["pallet"]["members"][0]["len"], 2560 * 1024);
+    assert_eq!(pallet["pallet"]["shared_bytes"], 5 * SLOT);
+    assert_eq!(pallet["pallet"]["members"][0]["offset"], SLOT);
+    assert_eq!(pallet["pallet"]["members"][0]["len"], kernel_len);
     assert_eq!(pallet["pallet"]["members"][0]["shared"], true);
-    assert_eq!(pallet["pallet"]["members"][1]["offset"], 4 * MIB, "after the whole kernel golden");
+    assert_eq!(pallet["pallet"]["members"][1]["offset"], 4 * SLOT, "after the whole kernel golden");
     assert_eq!(pallet["pallet"]["members"][2]["shared"], false);
     assert_eq!(before - free_slots(&state).await, 2, "a header slot and a cmdline slot");
 
@@ -130,8 +133,8 @@ async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
     assert_eq!(disk["disk"]["lba"], 4096);
     assert_eq!(disk["disk"]["gpt_minted"], true);
     assert_eq!(disk["disk"]["written_bytes"], 0);
-    assert_eq!(disk["disk"]["partitions"][0]["start_bytes"], MIB);
-    assert_eq!(disk["disk"]["partitions"][1]["start_bytes"], 3 * MIB);
+    assert_eq!(disk["disk"]["partitions"][0]["start_bytes"], SLOT);
+    assert_eq!(disk["disk"]["partitions"][1]["start_bytes"], 3 * SLOT);
     assert_eq!(before - free_slots(&state).await, 2, "only the two GPT goldens are new");
     let disk_id = Uuid::parse_str(disk["id"].as_str().unwrap()).unwrap();
     let disk_guid = Uuid::parse_str(disk["disk"]["disk_guid"].as_str().unwrap()).unwrap();
@@ -183,7 +186,7 @@ async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
 
     // A new version of the pallet: the version follows, and the initramfs
     // is shared again.
-    golden(&state, "kernel2.golden", 3 * MIB, 0x4C).await;
+    golden(&state, "kernel2.golden", 3 * SLOT, 0x4C).await;
     let (status, v2) = post(
         &client,
         &format!("{base}/api/v1/volumes/compose/pallet"),
@@ -228,7 +231,7 @@ async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
     let (status, _) = post(
         &client,
         &format!("{base}/api/v1/volumes/compose/disk"),
-        serde_json::json!({"name": "bad", "size": "2M", "partitions": [{"volume": "boot-v1"}]}),
+        serde_json::json!({"name": "bad", "size": (2 * SLOT).to_string(), "partitions": [{"volume": "boot-v1"}]}),
     )
     .await;
     assert_eq!(status, 400);
