@@ -83,6 +83,19 @@ pub use gem::GlobalExtentMap;
 /// Default slot size for slabs created via add_backing_device.
 pub const DEFAULT_SLOT_SIZE: u64 = crate::drive::slab::DEFAULT_SLOT_SIZE;
 
+/// What moving a volume between tiers did.
+#[derive(Debug, Default)]
+pub struct RetierReport {
+    /// Extents nothing else referenced: relocated, and the space given back.
+    pub moved: usize,
+    /// Extents shared with another volume: copied, the original left in place.
+    pub copied: usize,
+    /// Extents already on the destination.
+    pub already: usize,
+    pub failed: usize,
+    pub destination: SlabId,
+}
+
 /// What an adoption found and what it did with it.
 #[derive(Debug, Default)]
 pub struct AdoptReport {
@@ -656,6 +669,79 @@ impl VolumeManager {
             self.persist().await;
         }
 
+        Ok(report)
+    }
+
+    /// Move a volume onto another tier, without dragging anything else with it.
+    ///
+    /// Extent by extent, so the volume keeps serving throughout, and shared
+    /// extents are copied rather than moved — see
+    /// [`ThinVolumeHandle::relocate_extent`]. What that yields is the demotion
+    /// rule an appliance actually wants: last month's image ends up whole on
+    /// the slow drive, whatever it still shares with this month's stays on the
+    /// fast one, and whatever nothing else references gives its space back.
+    ///
+    /// The caller decides *when*. This decides *what moves*.
+    pub async fn retier_volume(
+        &mut self,
+        id: VolumeId,
+        tier: StorageTier,
+    ) -> Result<RetierReport, VolumeError> {
+        let handle = self
+            .volumes
+            .get(&id)
+            .ok_or(VolumeError::VolumeNotFound(id))?
+            .clone();
+        let role = handle.placement_role();
+
+        let dest = {
+            let reg = self.registry.read().await;
+            reg.best_slab_for_tier_in_role(tier, role)
+                .ok_or_else(|| VolumeError::InvalidSize(format!(
+                    "no {tier} slab in the {role} role to move to"
+                )))?
+        };
+
+        let todo: Vec<u64> = {
+            let gem = self.gem.read().await;
+            gem.volume_extents(&id)
+                .map(|it| {
+                    it.filter(|(_, loc)| loc.legs().any(|l| l.slab_id != dest))
+                        .map(|(vext, _)| *vext)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let mut report = RetierReport { destination: dest, ..Default::default() };
+        for vext in todo {
+            match handle.relocate_extent(vext, dest).await {
+                Ok(crate::volume::thin::Relocated::Moved) => report.moved += 1,
+                Ok(crate::volume::thin::Relocated::Copied) => report.copied += 1,
+                Ok(_) => report.already += 1,
+                Err(e) => {
+                    report.failed += 1;
+                    tracing::warn!(volume = %id, extent = vext, "retier: {e}");
+                    // A handful of bad extents is worth reporting and pushing
+                    // past; a wall of them means something is wrong with the
+                    // destination and every further attempt makes it worse.
+                    if report.failed > 16 {
+                        tracing::error!(volume = %id, "retier: giving up after repeated failures");
+                        break;
+                    }
+                }
+            }
+            // One extent per iteration, so I/O to the volume interleaves with
+            // the move rather than queueing behind all of it.
+            tokio::task::yield_now().await;
+        }
+
+        self.persist().await;
+        tracing::info!(
+            volume = %id, tier = %tier,
+            moved = report.moved, copied = report.copied, failed = report.failed,
+            "retier complete"
+        );
         Ok(report)
     }
 

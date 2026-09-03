@@ -248,6 +248,103 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A manager with a fast slab and a slow one, so demotion has somewhere to
+    /// go.
+    async fn two_tiers() -> (VolumeManager, SlabId, SlabId, Vec<String>) {
+        use crate::drive::slab_registry::SlabRegistry;
+        let dir = std::env::temp_dir().join("stormblock-tier-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        let mut ids = Vec::new();
+        let mut reg = SlabRegistry::new();
+        for tier in [StorageTier::Hot, StorageTier::Cool] {
+            let path = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
+            let ps = path.to_str().unwrap().to_string();
+            let dev = FileDevice::open_with_capacity(&ps, 64 * 1024 * 1024).await.unwrap();
+            let dev: Arc<dyn BlockDevice> = Arc::new(dev);
+            let slab = Slab::format(dev, SLOT, tier).await.unwrap();
+            ids.push(slab.slab_id());
+            reg.add(slab);
+            paths.push(ps);
+        }
+        let mut vm = VolumeManager::new(SLOT);
+        *vm.registry().write().await = reg;
+        (vm, ids[0], ids[1], paths)
+    }
+
+    /// The demotion rule, which is the whole reason tiering exists here.
+    ///
+    /// An old image and a new one share some content. Demoting the old one must
+    /// put *all* of it on the slow tier — otherwise the archive is incomplete —
+    /// while leaving the shared part on the fast tier, because the new image is
+    /// still serving from it. And the part only the old image had must stop
+    /// occupying the fast tier, which is the space this is all for.
+    #[tokio::test]
+    async fn demoting_an_old_image_leaves_what_the_new_one_still_uses() {
+        let (mut vm, hot, cool, paths) = two_tiers().await;
+
+        // Two extents of shared content, and one the old image alone has.
+        let shared = golden(&mut vm, "shared.golden", 2 * SLOT, 0xAA).await;
+        let old = vm.compose_volume("old", None, &[(shared, 0)]).await.unwrap();
+        let new = vm.compose_volume("new", None, &[(shared, 0)]).await.unwrap();
+        let oh = vm.get_volume_handle(&old).unwrap();
+        oh.write(2 * SLOT, &vec![0xDD; SLOT as usize]).await.unwrap();
+
+        let hot_used_before = {
+            let reg = vm.registry().read().await;
+            reg.get(&hot).map(|s| s.allocated_slots()).unwrap_or(0)
+        };
+
+        let report = vm.retier_volume(old, StorageTier::Cool).await.unwrap();
+        assert_eq!(report.destination, cool);
+        assert_eq!(report.copied, 2, "the two shared extents are copied, not moved");
+        assert_eq!(report.moved, 1, "the exclusive extent is moved, freeing the fast tier");
+        assert_eq!(report.failed, 0);
+
+        // The old image reads the same, and is now entirely on the slow tier.
+        let mut buf = vec![0u8; SLOT as usize];
+        oh.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA), "shared content survived the move");
+        oh.read(2 * SLOT, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xDD), "exclusive content survived the move");
+        {
+            let gem = vm.gem().read().await;
+            let all_cool = gem
+                .volume_extents(&old)
+                .map(|it| it.map(|(_, l)| l.slab_id).all(|s| s == cool))
+                .unwrap_or(false);
+            assert!(all_cool, "the demoted image should be wholly on the slow tier");
+        }
+
+        // The new image did not follow it down.
+        {
+            let gem = vm.gem().read().await;
+            let all_hot = gem
+                .volume_extents(&new)
+                .map(|it| it.map(|(_, l)| l.slab_id).all(|s| s == hot))
+                .unwrap_or(false);
+            assert!(all_hot, "the current image must stay on the fast tier");
+        }
+        let nh = vm.get_volume_handle(&new).unwrap();
+        nh.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA), "and still read correctly");
+
+        // And the fast tier got back exactly the extent nothing else wanted.
+        let hot_used_after = {
+            let reg = vm.registry().read().await;
+            reg.get(&hot).map(|s| s.allocated_slots()).unwrap_or(0)
+        };
+        assert_eq!(
+            hot_used_before - hot_used_after,
+            1,
+            "only the extent the new image does not share should be freed"
+        );
+
+        for p in paths {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
     /// A slab whose slots are a different size from the manager's extents is
     /// refused outright. This is the shape of the defect that corrupted the
     /// serving path: divide by one size, address by another, and every extent

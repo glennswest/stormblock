@@ -332,54 +332,23 @@ async fn retier_volume(
     };
 
     // What has to move: everything not already there.
-    let todo: Vec<u64> = {
-        let gem = state.gem.read().await;
-        gem.volume_extents(&vol_id)
-            .map(|it| {
-                it.filter(|(_, loc)| loc.slab_id != dest)
-                    .map(|(vext, _)| *vext)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    let total = todo.len();
-    if total > 0 {
-        let gem_arc = state.gem.clone();
-        let reg_arc = state.slab_registry.clone();
-        tokio::spawn(async move {
-            let engine = crate::placement::PlacementEngine::new();
-            let (mut moved, mut failed) = (0usize, 0usize);
-            for vext in todo {
-                // One extent per lock cycle, so I/O to the volume interleaves
-                // with the move instead of stalling behind all of it.
-                let mut gem = gem_arc.write().await;
-                let mut reg = reg_arc.write().await;
-                match engine.migrate_extent(&mut gem, &mut reg, vol_id, vext, Some(dest)).await {
-                    Ok(_) => moved += 1,
-                    Err(e) => {
-                        failed += 1;
-                        tracing::warn!(volume = %vol_id, extent = vext, "retier: {e}");
-                        if failed > 16 {
-                            tracing::error!(volume = %vol_id, "retier: giving up after repeated failures");
-                            break;
-                        }
-                    }
-                }
-                drop(reg);
-                drop(gem);
-                tokio::task::yield_now().await;
-            }
-            tracing::info!(volume = %vol_id, moved, failed, "retier complete");
-        });
-    }
+    // The work is extent-by-extent and a 32 GB volume is ten thousand of them,
+    // so it runs behind the response. The slabs' free counts are how you watch
+    // it happen, and "retier complete" is logged when it is.
+    let vm_handle = state.volume_manager.clone();
+    tokio::spawn(async move {
+        let mut vm = vm_handle.lock().await;
+        if let Err(e) = vm.retier_volume(vol_id, tier).await {
+            tracing::error!(volume = %vol_id, "retier failed: {e}");
+        }
+    });
 
     (axum::http::StatusCode::ACCEPTED, Json(serde_json::json!({
         "volume": vol_id.0,
         "tier": tier.to_string(),
         "role": role.to_string(),
         "destination_slab": dest.0,
-        "extents_to_move": total,
+        "started": true,
     }))).into_response()
 }
 

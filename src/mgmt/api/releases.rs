@@ -79,6 +79,13 @@ pub struct PublishRequest {
     pub notes: Option<String>,
     #[serde(default)]
     pub manifest: Vec<ManifestEntry>,
+    /// Move the release this one replaces down to a tier — `cool`, `cold`.
+    ///
+    /// The policy lives with whoever publishes, because only they know
+    /// whether this build supersedes the last one or sits beside it. Absent,
+    /// nothing is demoted and the tiers are left as they are.
+    #[serde(default)]
+    pub demote_previous: Option<String>,
 }
 
 fn releases_path(state: &AppState) -> Option<PathBuf> {
@@ -517,6 +524,7 @@ async fn publish(State(state): State<Arc<AppState>>, Json(req): Json<PublishRequ
             .unwrap_or(0)
     });
 
+    let demote_previous = req.demote_previous.clone();
     let release = Release {
         version: req.version.clone(),
         volume: volume_name,
@@ -540,7 +548,48 @@ async fn publish(State(state): State<Arc<AppState>>, Json(req): Json<PublishRequ
         version = %release.version, volume = %release.volume,
         components = release.manifest.len(), "published a release"
     );
-    (StatusCode::CREATED, Json(summarise(&state, &release).await)).into_response()
+
+    // Demote what this one replaces, if the publisher asked for it. Shared
+    // extents are copied rather than moved, so what the new image still uses
+    // stays on the fast tier and what only the old one used gives its space
+    // back — which is the whole point of doing it here rather than by hand.
+    let mut demoting = serde_json::Value::Null;
+    if let Some(ref tier_name) = demote_previous {
+        let Some(tier) = super::slabs::parse_tier(tier_name) else {
+            return ApiError::bad_request(format!(
+                "invalid demote_previous tier '{tier_name}' (hot, warm, cool, cold)"
+            ));
+        };
+        let previous = sorted(releases.clone())
+            .into_iter()
+            .find(|r| r.version != release.version && r.volume_id != release.volume_id);
+        if let Some(prev) = previous {
+            demoting = serde_json::json!({
+                "version": prev.version,
+                "volume": prev.volume,
+                "to_tier": tier.to_string(),
+            });
+            tracing::info!(
+                superseded = %prev.version, by = %release.version, tier = %tier,
+                "demoting the release this one replaces"
+            );
+            let vm_handle = state.volume_manager.clone();
+            let prev_id = VolumeId(prev.volume_id);
+            tokio::spawn(async move {
+                let mut vm = vm_handle.lock().await;
+                if let Err(e) = vm.retier_volume(prev_id, tier).await {
+                    tracing::error!(volume = %prev_id, "demotion failed: {e}");
+                }
+            });
+        }
+    }
+
+    let mut body = serde_json::to_value(summarise(&state, &release).await)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("demoting".into(), demoting);
+    }
+    (StatusCode::CREATED, Json(body)).into_response()
 }
 
 async fn unpublish(State(state): State<Arc<AppState>>, Path(version): Path<String>) -> Response {

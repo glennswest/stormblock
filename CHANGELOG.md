@@ -3,6 +3,29 @@
 ## [Unreleased]
 
 ### 2026-09-03
+- **feat (tiering): demotion that does not drag the current image down with the
+  old one.** `PlacementEngine::migrate_leg` relocates a slot and rewrites every
+  map that named it — right for draining a failing drive, exactly wrong for
+  tiering, because demoting last month's image would pull the slots it shares
+  with this month's onto the slow drive and the current image with them.
+
+  `ThinVolumeHandle::relocate_extent` is copy-on-write with the same data, and
+  one path covers both cases because the difference falls out of the reference
+  count: a **shared** extent is copied to the destination and the original left
+  for whoever else names it; an **exclusive** one is copied and the last
+  reference dropped, which frees it. That is the demotion rule exactly — the old
+  image ends up whole on the slow tier, what the new one still uses stays on the
+  fast tier, and what nothing else references gives its space back.
+
+  `VolumeManager::retier_volume` applies it extent by extent, yielding between
+  each so the volume keeps serving, and reports moved/copied/failed separately
+  because those are different facts about what happened.
+- **feat (releases): `demote_previous` on publish.** A new release can move the
+  one it replaces down a tier in the same call. The policy lives with whoever
+  publishes, since only they know whether a build supersedes the last one or
+  sits beside it; absent, nothing is demoted. A replicated volume is refused
+  rather than half-relocated — moving one leg of a mirror is a resync decision,
+  not a tiering one.
 - **feat (releases): a download honours `Range`.** A 32 GB image over one HTTP
   request is a single dropped connection away from starting over. A `bytes=`
   range now returns 206 with `Content-Range`, a `Content-Length` of the slice,

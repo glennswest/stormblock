@@ -304,6 +304,20 @@ const SHARDS: usize = 64;
 ///
 /// The handle owns Arc references to the GEM and registry, allowing
 /// lock-free reads and serialized writes. Implements `BlockDevice`.
+/// What relocating one extent turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relocated {
+    /// It was shared, so the destination got a copy and the original stayed.
+    Copied,
+    /// Nothing else referenced it, so the original was freed: a move.
+    Moved,
+    /// Already on the destination.
+    AlreadyThere,
+    /// Nothing is mapped there; a sparse volume has holes and they cost nothing
+    /// to leave alone.
+    Unmapped,
+}
+
 pub struct ThinVolumeHandle {
     inner: tokio::sync::Mutex<ThinVolume>,
     device_id: DeviceId,
@@ -954,6 +968,106 @@ impl ThinVolumeHandle {
         buf: &[u8],
     ) -> DriveResult<()> {
         self.write_legs(vext_idx, loc, off_in_slot, buf).await
+    }
+
+    /// Move one extent onto `dest`, taking nobody else's copy with it.
+    ///
+    /// `PlacementEngine::migrate_leg` relocates a slot and rewrites **every**
+    /// map that named it, which is right for draining a failing drive and
+    /// exactly wrong for tiering: demoting last month's image would drag the
+    /// slots it shares with this month's onto the slow drive, and the current
+    /// image with them.
+    ///
+    /// So this is copy-on-write with the same data. One path covers both cases,
+    /// and the difference falls out of the reference count:
+    ///
+    /// * **shared** — the copy lands on `dest`, this volume points at it, and
+    ///   the original stays where it is for whoever else still names it.
+    /// * **exclusive** — the same copy, and dropping the last reference frees
+    ///   the original. That is a move, and the fast tier gets the space back.
+    ///
+    /// Which is the whole demotion rule: the old image ends up on the slow
+    /// tier, and what it no longer shares with the new one stops occupying the
+    /// fast one.
+    pub async fn relocate_extent(&self, vext_idx: u64, dest: SlabId) -> DriveResult<Relocated> {
+        let loc = {
+            let gem = self.gem.read().await;
+            gem.lookup(self.id, vext_idx).cloned()
+        };
+        let Some(loc) = loc else { return Ok(Relocated::Unmapped) };
+        if loc.legs().all(|l| l.slab_id == dest) {
+            return Ok(Relocated::AlreadyThere);
+        }
+        // A mirrored extent has a leg per domain and moving one of them is a
+        // resync decision, not a tiering one. Refuse rather than quietly
+        // relocate a single leg and leave the policy half-applied.
+        if loc.legs().count() > 1 {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "extent {vext_idx} of volume {} has {} legs; tiering a replicated \
+                 volume is a resync, not a copy",
+                self.id,
+                loc.legs().count()
+            )));
+        }
+
+        let shared = loc.ref_count > 1;
+        let data = self.read_full(vext_idx, &loc).await.ok_or_else(|| {
+            DriveError::Other(anyhow::anyhow!(
+                "extent {vext_idx} of volume {} could not be read, so it is not \
+                 going to be relocated",
+                self.id
+            ))
+        })?;
+
+        // Allocate on the destination specifically — this is a placement
+        // decision the caller has already made, not one to re-derive here.
+        let new = {
+            let mut reg = self.registry.write().await;
+            let generation = loc.generation + 1;
+            let slab = reg.get_mut(&dest).ok_or_else(|| {
+                DriveError::Other(anyhow::anyhow!("destination slab {} is not attached", dest.0))
+            })?;
+            let slot = slab.allocate_gen(self.id, vext_idx, generation).await?;
+            reg.reserve(dest, slot);
+            Leg::new(dest, slot)
+        };
+
+        if let Err(e) = self.write_leg(new, 0, &data).await {
+            self.give_back(&[new]).await;
+            return Err(e);
+        }
+
+        {
+            let mut gem = self.gem.write().await;
+            let mut fresh = ExtentLocation::new(new.slab_id, new.slot_idx);
+            fresh.generation = loc.generation + 1;
+            gem.insert(self.id, vext_idx, fresh);
+        }
+        self.commit_legs(&[new]).await;
+
+        // Let go of the original. Shared, it stays for the other holder;
+        // exclusive, this was the last reference and the slot is freed.
+        let mut synced = Vec::new();
+        {
+            let mut reg = self.registry.write().await;
+            for leg in loc.legs() {
+                if let Some(slab) = reg.get_mut(&leg.slab_id) {
+                    match slab.dec_ref(leg.slot_idx).await {
+                        Ok(_) => synced.push((
+                            leg,
+                            slab.get_slot(leg.slot_idx).map(|s| s.ref_count).unwrap_or(0),
+                        )),
+                        Err(e) => tracing::warn!(
+                            volume = %self.id, slot = leg.slot_idx,
+                            "relocate could not release the old extent: {e}"
+                        ),
+                    }
+                }
+            }
+        }
+        self.sync_refs(&synced).await;
+
+        Ok(if shared { Relocated::Copied } else { Relocated::Moved })
     }
 
     /// COW: copy old slot data to new slot(s), write new data, update GEM,
