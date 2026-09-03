@@ -158,7 +158,11 @@ echo "disk $(echo "$DISK" | j 'd["name"]') $(echo "$DISK" | j 'd["virtual_size_h
 [ "$(echo "$DISK" | j 'd["disk"]["written_bytes"]')" = 0 ] || fail "a composed disk wrote bytes"
 PALLET_START=$(echo "$DISK" | j 'd["disk"]["partitions"][1]["start_bytes"]')
 
-# A second node: nothing minted, nothing allocated.
+# A second node: nothing minted, and the slab has not lost a slot. (A composed
+# disk's `allocated_bytes` counts what it maps, shared or not, so the slab's
+# free count is the number that says whether anything was written.)
+free_slots() { api "http://$MGMT/api/v1/slabs" | j 'sum(s["free_slots"] for s in (d["items"] if isinstance(d, dict) else d))'; }
+FREE_BEFORE=$(free_slots)
 DISK2=$(api -X POST "http://$MGMT/api/v1/volumes/compose/disk" -d '{
   "name": "node2.disk",
   "partitions": [
@@ -166,8 +170,8 @@ DISK2=$(api -X POST "http://$MGMT/api/v1/volumes/compose/disk" -d '{
     {"volume": "boot-v1", "priority": 5}
   ]}')
 [ "$(echo "$DISK2" | j 'd["disk"]["gpt_minted"]')" = False ] || fail "the second disk minted a GPT"
-[ "$(echo "$DISK2" | j 'd["allocated_bytes"]')" = 0 ] || fail "the second disk allocated"
-echo "node2.disk: gpt reused, allocated $(echo "$DISK2" | j 'd["allocated_bytes"]') bytes"
+[ "$(free_slots)" = "$FREE_BEFORE" ] || fail "the second disk took slots from the slab"
+echo "node2.disk: gpt reused, slab free slots unchanged at $FREE_BEFORE"
 
 # ---------------------------------------------------------- serve it: ublk
 say "attach as a ublk device"
