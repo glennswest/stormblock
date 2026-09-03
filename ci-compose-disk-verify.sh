@@ -102,7 +102,11 @@ else
     echo hello > "$WORK/esp/EFI/BOOT/MARKER.TXT"
     BOOTABLE=0
 fi
-mkfs.vfat -F 16 -n EFI -C "$WORK/esp.img" 16384 >/dev/null
+# 4096-byte sectors: the disk this lands in is presented at 4096-byte LBAs,
+# and both the kernel's FAT driver and firmware's compare the BPB's
+# bytes-per-sector with the media's. A 512-sector ESP on a 4Kn disk reads as
+# "can't read superblock" — blkid still names it vfat, which is the trap.
+mkfs.vfat -F 16 -S 4096 -n EFI -C "$WORK/esp.img" 16384 >/dev/null
 mcopy -i "$WORK/esp.img" -s "$WORK/esp/EFI" ::/ >/dev/null
 
 # --------------------------------------------------------------- the goldens
