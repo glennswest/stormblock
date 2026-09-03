@@ -975,3 +975,48 @@ store.
       how a cloud image becomes a golden. VMDK (sparse, streamOptimized,
       flat descriptor) and the VMDK inside an OVA too; an ISO is raw and
       recognised as `iso9660`.
+
+### Composed disks — a per-node disk is a chain of goldens (2026-09-03)
+
+**Where it stood.** `POST /api/v1/volumes/compose` (v13.3) makes a volume
+that is a *list of* goldens, sharing their slots. It is not bootable: it has
+no partition table, and a pallet published by `image build` lays its members
+down as *partition bytes*, so a node's disk is still a copy of every golden
+it carries — 8.7 GB of pallets for 2.4 GB of content, per node.
+
+**The change.** Everything on a disk becomes a golden, and a disk is a chain
+of them (Glenn: "GPT could be in a golden, and beginning of the chain"):
+
+- **A pallet is a sealed volume.** `compose_pallet` builds the pallet header
+  and lays each member down at a **slot-aligned** offset
+  (`PalletBuilder::content_align`), so a member that is already a golden is
+  *shared in* by `gather_into` rather than copied. Only the header (and any
+  inline `text` member) is written. The result verifies through the ordinary
+  `Pallet::read` + `verify_all`, is sealed with `fs.kind = "pallet"`, and is
+  what every disk of that version composes in.
+- **The GPT is two goldens.** For a layout — LBA size, disk size, and the
+  ordered partitions with their types, sizes and attributes — the protective
+  MBR + primary header + entries fit in the first slot and the backup entries
+  + header in the last. Both are minted once per layout, named by a digest of
+  it, and reused by every disk with that layout. Partition GUIDs are derived
+  from the layout too, so `root=PARTUUID=` is fleet-stable.
+- **A disk is `compose(head, partitions…, tail)`.** Nothing is written:
+  `copied` is zero unless `fresh_guid` asks for a per-node disk GUID, which
+  costs the two GPT slots. The disk's `fs` is recorded as `gpt`.
+- **LBA size defaults to 4096**, because that is what the NVMe/TCP and ublk
+  paths present a volume at (`ThinVolumeHandle::block_size`), and firmware
+  parses a GPT in the media's own block size (§2.4 of docs/pallets.md). A
+  disk meant to be copied onto a 512-byte drive says `lba = 512`.
+
+Work plan:
+- [ ] `PalletBuilder::content_align`, `MemberSpec::reserve` (a member's span
+      may exceed its digested length, so a golden's whole extent set fits)
+- [ ] `Gpt::create_for` / `Gpt::render` — head and tail bytes without a device
+- [ ] `fs::disk::detect` recognises a pallet (`STORMPAL` at 0)
+- [ ] `volume/disk.rs`: `compose_pallet`, `compose_disk`, GPT goldens by layout
+- [ ] `POST /api/v1/volumes/compose/pallet`, `POST /api/v1/volumes/compose/disk`
+- [ ] tests: pallet volume verifies and allocates only its header; disk reads
+      back as a GPT with the pallet inside; two disks share the GPT goldens;
+      `fresh_guid` costs two slots; a `PalletStore` over the disk selects it
+- [ ] docs/composed-disks.md, CHANGELOG, README; build + test on dev; an
+      external `fdisk`/`sgdisk` read of a dumped disk
