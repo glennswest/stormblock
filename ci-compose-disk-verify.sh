@@ -44,7 +44,12 @@ cleanup() {
         umount "$WORK/mnt" 2>/dev/null
         api -X DELETE "http://$MGMT/api/v1/volumes/$DISK_ID/attach" >/dev/null 2>&1
     fi
-    [ -n "$ENGINE" ] && kill "$ENGINE" 2>/dev/null && wait "$ENGINE" 2>/dev/null
+    if [ -n "$ENGINE" ]; then
+        kill "$ENGINE" 2>/dev/null
+        for _ in $(seq 1 50); do kill -0 "$ENGINE" 2>/dev/null || break; sleep 0.1; done
+        kill -9 "$ENGINE" 2>/dev/null
+        wait "$ENGINE" 2>/dev/null
+    fi
     rm -f "$WORK/slab.img" "$WORK/esp.img" "$WORK/vars.fd"
     rm -rf "$WORK/data" "$WORK/esp"
 }
@@ -53,6 +58,8 @@ trap cleanup EXIT
 [ -x "$BIN" ] || fail "no binary at $BIN"
 [ -r "$KERNEL" ] || fail "no kernel at $KERNEL"
 [ -r "$INITRD" ] || fail "no initramfs at $INITRD"
+# A previous run that died mid-way may have left its engine behind.
+pkill -9 -f "stormblock -c $WORK/stormblock.toml" 2>/dev/null || true
 rm -rf "$WORK"; mkdir -p "$WORK/data" "$WORK/mnt" "$WORK/esp/EFI/BOOT" "$WORK/esp/EFI/fedora"
 
 # ---------------------------------------------------------------- the engine
@@ -106,7 +113,9 @@ fi
 # and both the kernel's FAT driver and firmware's compare the BPB's
 # bytes-per-sector with the media's. A 512-sector ESP on a 4Kn disk reads as
 # "can't read superblock" — blkid still names it vfat, which is the trap.
-mkfs.vfat -F 16 -S 4096 -n EFI -C "$WORK/esp.img" 16384 >/dev/null
+# 64 MiB: FAT16 needs 4085 clusters, which at one 4 KiB sector per cluster is
+# more than a 16 MiB image has.
+mkfs.vfat -F 16 -S 4096 -n EFI -C "$WORK/esp.img" 65536 >/dev/null
 mcopy -i "$WORK/esp.img" -s "$WORK/esp/EFI" ::/ >/dev/null
 
 # --------------------------------------------------------------- the goldens
