@@ -281,6 +281,66 @@ attach of a sealed volume is refused**, before a guest boots onto storage that
 will not take its writes, and the refusal names the way forward (clone it, or
 attach `mode=ro`).
 
+**A claim answers with somewhere to attach.** A volume id is not something
+firmware can act on: a machine doing an NVMe/TCP boot would learn that a volume
+exists and still have to ask where it is — a second request, from a client whose
+whole state machine is "get an address, attach it, boot", with a window in
+between where the claim is held and nothing is being served. So the claim
+carries the tuple:
+
+```json
+{
+  "claimed_from": {"synonym": "boothost/C2NR0Q2", "version": 1},
+  "volume": {"id": "42e3fbba-…", "name": "boothost-C2NR0Q2"},
+  "attach": {
+    "protocol": "nvme-tcp",
+    "address": "192.168.31.202", "port": 4420,
+    "nqn": "nqn.2026-09.lo.g16:stormcos", "nsid": 3,
+    "uri": "nvme-tcp://192.168.31.202:4420/nqn.2026-09.lo.g16:stormcos?nsid=3"
+  }
+}
+```
+
+An export that already exists is reused rather than a second one minted: **the
+nsid is part of the address**, and issuing a fresh one for a volume that already
+has an address changes it under whoever is holding the old one. The address
+reported is the advertised one — a wildcard listen address tells a caller
+nothing, and loopback is worse than nothing.
+
+### Naming a machine's image by its service tag
+
+Which image a machine boots is a fleet decision, and it belongs next to the
+images rather than in the network. A synonym in a `boothost` namespace, keyed on
+the machine's service tag, is that decision written down:
+
+```bash
+# This machine runs 10.22.
+curl -X POST http://forge:9090/api/v1/synonyms \
+  -d '{"namespace":"boothost","name":"C2NR0Q2","volume":"stormcos-sno-10.22","label":"10.22"}'
+
+# At boot: one request, and the answer is bootable.
+curl -X POST http://forge:9090/api/v1/synonyms/boothost/C2NR0Q2/claim
+#   → a copy-on-write clone of the sealed golden, costing nothing until written
+#   → and the nvme-tcp:// URI that reaches it
+
+# Move that machine to a new image, or put it back.
+curl -X PUT  http://forge:9090/api/v1/synonyms/boothost/C2NR0Q2 -d '{"volume":"stormcos-sno-10.23"}'
+curl -X POST http://forge:9090/api/v1/synonyms/boothost/C2NR0Q2/rollback
+```
+
+**Why not DHCP.** DHCP can carry a pointer — a `root_path`, a boot file — and
+it is the wrong home for one. A lease is not a source of truth; the mapping
+would live in the network layer while the thing it names lives here, which is
+two places to change and a way for them to disagree. It does not survive a
+change of boot method, because firmware with an NVMe/TCP boot extension takes
+its target from its own configuration rather than from a DHCP option. And a
+DHCP option is one static string, so it cannot answer the same name with
+different locations — which is what load balancing across appliances needs.
+DHCP's job stays the one it is good at: handing the machine an IP.
+
+A service tag is the right key because it is the machine, not a NIC: it
+survives a network card being swapped, which a MAC does not.
+
 ### Where a volume is placed: `system` or `data`
 
 A volume lives in one half of the node's mutable storage — `system` (goldens,

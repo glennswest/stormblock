@@ -5,6 +5,10 @@
 ## [v13.4.0] — 2026-09-03
 
 ### 2026-09-03
+- **docs:** README gains what a claim answers with and how a machine's image is
+  chosen — a `boothost/<service-tag>` synonym, claimed in one request that
+  returns both the copy-on-write clone and the `nvme-tcp://` URI reaching it —
+  and why that mapping does not belong in DHCP.
 - **feat (synonyms): a claim returns the tuple that reaches the clone.**
   `POST /api/v1/synonyms/{ns}/{name}/claim` answered with a volume id, a name
   and a size — nothing an initiator can act on. Firmware doing an NVMe/TCP boot
