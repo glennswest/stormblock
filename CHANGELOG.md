@@ -5,6 +5,22 @@
 ## [v13.4.0] — 2026-09-03
 
 ### 2026-09-03
+- **feat (releases): a component carries its version and its own notes, and a
+  release can say what changed.** A manifest entry had a name, a digest and a
+  commit; it now also carries `version` — the number a person reads and compares
+  — and `notes`, what changed in that component since the last release that
+  carried it. The three answer different questions and none substitutes for
+  another: the digest says whether the bytes moved, the commit says which source
+  produced them, the version is what anyone actually cites.
+
+  `GET /api/v1/releases/{version}/changes[?since=X]` answers the question a
+  release note exists for. Comparison is **by content digest**, so a component
+  rebuilt from the same source to the same bytes is not a change — a rebuild is
+  not news, and a list padded with things that did not move is one nobody reads
+  twice. Reports changed (with from/to version, commit and digest), added,
+  removed, and a count of the unchanged. Without `since` it compares against the
+  release published immediately before; the first release says so rather than
+  showing an empty diff.
 - **feat (volume): composed disks — a per-node bootable disk is a chain of
   goldens, and costs its map.** `POST /api/v1/volumes/compose` (v13.3) made a
   volume out of goldens but not a *disk*: it had no partition table, and every

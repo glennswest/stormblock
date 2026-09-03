@@ -44,6 +44,17 @@ pub struct ManifestEntry {
     /// Where it came from — a commit, a package version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<String>,
+    /// The component's own version, as it releases itself: `13.4.0`.
+    ///
+    /// Separate from the digest and from the commit because they answer
+    /// different questions. The digest says whether the bytes changed, the
+    /// commit says which source produced them, and the version is the only one
+    /// a person reads and compares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// What changed in this component since the last release that carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 /// A published version.
@@ -275,6 +286,126 @@ async fn manifest(State(state): State<Arc<AppState>>, Path(version): Path<String
         .into_response(),
         None => ApiError::not_found(format!("no release {version}")),
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentChange {
+    kind: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_provenance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to_provenance: Option<String>,
+    from_digest: String,
+    to_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+}
+
+/// `GET /api/v1/releases/{version}/changes[?since=X]` — what moved.
+///
+/// The manifest says what a release is made of; this says how it differs from
+/// the one before it, which is the question anyone actually asks of a release.
+/// Comparison is by content digest, so a component rebuilt from the same source
+/// with the same result is *not* a change — a rebuild is not news, and a list
+/// that says otherwise is one nobody reads twice.
+///
+/// `since` names a specific release to compare against; without it the
+/// comparison is against the release published immediately before this one.
+async fn changes(
+    State(state): State<Arc<AppState>>,
+    Path(version): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "releases", "method" => "changes").increment(1);
+
+    let releases = sorted(load(&state).await);
+    let Some(this) = releases.iter().find(|r| r.version == version) else {
+        return ApiError::not_found(format!("no release {version}"));
+    };
+
+    let previous = match q.get("since") {
+        Some(want) => match releases.iter().find(|r| &r.version == want) {
+            Some(r) => Some(r),
+            None => return ApiError::not_found(format!("no release {want} to compare against")),
+        },
+        // `sorted` is newest first, so the one after this is the one before it.
+        None => releases
+            .iter()
+            .skip_while(|r| r.version != version)
+            .nth(1),
+    };
+
+    let Some(previous) = previous else {
+        // The first release changed everything, and saying so beats an empty
+        // diff that reads as "nothing happened".
+        return Json(serde_json::json!({
+            "version": this.version,
+            "since": serde_json::Value::Null,
+            "first_release": true,
+            "added": this.manifest.iter().map(|m| serde_json::json!({
+                "kind": m.kind, "name": m.name,
+                "version": m.version, "provenance": m.provenance, "digest": m.digest,
+            })).collect::<Vec<_>>(),
+            "removed": Vec::<String>::new(),
+            "changed": Vec::<String>::new(),
+            "unchanged": 0,
+        }))
+        .into_response();
+    };
+
+    let before: std::collections::HashMap<&str, &ManifestEntry> =
+        previous.manifest.iter().map(|m| (m.name.as_str(), m)).collect();
+    let after: std::collections::HashMap<&str, &ManifestEntry> =
+        this.manifest.iter().map(|m| (m.name.as_str(), m)).collect();
+
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut unchanged = 0usize;
+    for m in &this.manifest {
+        match before.get(m.name.as_str()) {
+            None => added.push(serde_json::json!({
+                "kind": m.kind, "name": m.name,
+                "version": m.version, "provenance": m.provenance, "digest": m.digest,
+            })),
+            Some(old) if old.digest != m.digest => changed.push(ComponentChange {
+                kind: m.kind.clone(),
+                name: m.name.clone(),
+                from_version: old.version.clone(),
+                to_version: m.version.clone(),
+                from_provenance: old.provenance.clone(),
+                to_provenance: m.provenance.clone(),
+                from_digest: old.digest.clone(),
+                to_digest: m.digest.clone(),
+                notes: m.notes.clone(),
+            }),
+            Some(_) => unchanged += 1,
+        }
+    }
+    let removed: Vec<_> = previous
+        .manifest
+        .iter()
+        .filter(|m| !after.contains_key(m.name.as_str()))
+        .map(|m| serde_json::json!({
+            "kind": m.kind, "name": m.name,
+            "version": m.version, "provenance": m.provenance, "digest": m.digest,
+        }))
+        .collect();
+
+    changed.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(serde_json::json!({
+        "version": this.version,
+        "since": previous.version,
+        "changed": changed,
+        "added": added,
+        "removed": removed,
+        "unchanged": unchanged,
+    }))
+    .into_response()
 }
 
 async fn notes(State(state): State<Arc<AppState>>, Path(version): Path<String>) -> Response {
@@ -616,6 +747,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{version}", get(get_one).delete(unpublish))
         .route("/{version}/manifest", get(manifest))
         .route("/{version}/notes", get(notes))
+        .route("/{version}/changes", get(changes))
         .route("/{version}/image.img", get(download))
         .with_state(state)
 }
@@ -689,6 +821,66 @@ mod tests {
         // Several ranges at once: answered whole rather than with the first of
         // them, which would be a quiet lie about what was sent.
         assert_eq!(parse_range("bytes=0-99,200-299", TOTAL), RangeSpec::Whole);
+    }
+
+    fn entry(name: &str, digest: &str, version: &str) -> ManifestEntry {
+        ManifestEntry {
+            kind: "binary".into(),
+            name: name.into(),
+            digest: digest.into(),
+            size_bytes: None,
+            provenance: Some(format!("{name}@abc1234")),
+            version: Some(version.into()),
+            notes: None,
+        }
+    }
+
+    /// A rebuild is not news. Comparison is by digest, so a component built
+    /// again from the same source with the same bytes must not appear in a
+    /// change list — a release note padded with things that did not change is
+    /// one nobody reads twice.
+    #[test]
+    fn only_a_different_digest_counts_as_a_change() {
+        let old = vec![
+            entry("stormblock", "aaaa", "13.3.0"),
+            entry("rustkube", "bbbb", "0.7.35"),
+            entry("gone", "cccc", "1.0.0"),
+        ];
+        let new = vec![
+            entry("stormblock", "dddd", "13.4.0"),
+            entry("rustkube", "bbbb", "0.7.35"),
+            entry("arrived", "eeee", "0.1.0"),
+        ];
+
+        let before: std::collections::HashMap<&str, &ManifestEntry> =
+            old.iter().map(|m| (m.name.as_str(), m)).collect();
+        let after: std::collections::HashMap<&str, &ManifestEntry> =
+            new.iter().map(|m| (m.name.as_str(), m)).collect();
+
+        let changed: Vec<&str> = new
+            .iter()
+            .filter(|m| before.get(m.name.as_str()).is_some_and(|o| o.digest != m.digest))
+            .map(|m| m.name.as_str())
+            .collect();
+        let added: Vec<&str> = new
+            .iter()
+            .filter(|m| !before.contains_key(m.name.as_str()))
+            .map(|m| m.name.as_str())
+            .collect();
+        let removed: Vec<&str> = old
+            .iter()
+            .filter(|m| !after.contains_key(m.name.as_str()))
+            .map(|m| m.name.as_str())
+            .collect();
+        let unchanged = new
+            .iter()
+            .filter(|m| before.get(m.name.as_str()).is_some_and(|o| o.digest == m.digest))
+            .count();
+
+        assert_eq!(changed, vec!["stormblock"], "only the one whose bytes moved");
+        assert_eq!(added, vec!["arrived"]);
+        assert_eq!(removed, vec!["gone"]);
+        assert_eq!(unchanged, 1, "rustkube was rebuilt to the same bytes");
     }
 
     /// A version is a path segment and a filename, so anything that would stop
