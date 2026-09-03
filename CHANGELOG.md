@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### 2026-09-03
+- **feat (releases): a download honours `Range`.** A 32 GB image over one HTTP
+  request is a single dropped connection away from starting over. A `bytes=`
+  range now returns 206 with `Content-Range`, a `Content-Length` of the slice,
+  and only the requested bytes streamed off the volume; every response carries
+  `Accept-Ranges: bytes`. Open-ended (`bytes=1000-`) and suffix (`bytes=-512`)
+  forms both work, an end past the image is clamped rather than refused, and a
+  start past it earns 416 with `bytes */total`.
+
+  Ignoring `Range` was legal and awful: the caller asked for a megabyte and got
+  thirty-two gigabytes, which is how a stray `curl -r` filled the build box's
+  tmpfs. Anything unparseable, and a multi-range request, falls back to the
+  whole image rather than to a guess — answering the first of several ranges
+  would be a quiet lie about what was sent.
 - **feat (releases): `/api/v1/releases` — what this appliance publishes, and how
   to get it.** An image on a shelf is not a release. A release is a version
   someone can find, a link they can pull it from, a manifest saying what went

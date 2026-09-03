@@ -290,7 +290,11 @@ async fn notes(State(state): State<Arc<AppState>>, Path(version): Path<String>) 
 /// Nothing is staged: the bytes a caller downloads are read from the volume the
 /// release names, so the file they get is the image the engine is serving over
 /// NVMe/TCP at the same moment, not a copy that may have drifted from it.
-async fn download(State(state): State<Arc<AppState>>, Path(version): Path<String>) -> Response {
+async fn download(
+    State(state): State<Arc<AppState>>,
+    Path(version): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "releases", "method" => "download").increment(1);
 
     let releases = load(&state).await;
@@ -310,46 +314,151 @@ async fn download(State(state): State<Arc<AppState>>, Path(version): Path<String
     };
 
     let capacity = device.capacity_bytes();
+
+    // A 32 GB download that cannot resume is one dropped connection away from
+    // starting over, so a range is honoured rather than ignored. Ignoring it is
+    // legal — the client gets 200 and the whole image — but it is legal in the
+    // way that is worst for the caller: they asked for a slice and are handed
+    // thirty-two gigabytes.
+    let (start, end) = match headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|raw| parse_range(raw, capacity))
+    {
+        None | Some(RangeSpec::Whole) => (0, capacity.saturating_sub(1)),
+        Some(RangeSpec::Partial { start, end }) => (start, end),
+        Some(RangeSpec::Unsatisfiable) => {
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{capacity}"))],
+                format!("the image is {capacity} bytes"),
+            )
+                .into_response();
+        }
+    };
+    let partial = (start, end) != (0, capacity.saturating_sub(1));
+    let length = end.saturating_sub(start) + 1;
+
     let label = release.version.clone();
-    let stream = futures_util::stream::unfold((device, 0u64), move |(dev, offset)| {
+    let stream = futures_util::stream::unfold((device, start), move |(dev, offset)| {
         let label = label.clone();
         async move {
-        if offset >= capacity {
-            return None;
-        }
-        let len = CHUNK.min(capacity - offset) as usize;
-        let mut buf = vec![0u8; len];
-        match dev.read(offset, &mut buf).await {
-            Ok(_) => Some((
-                Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
-                (dev, offset + len as u64),
-            )),
-            Err(e) => {
-                // Ending the body early is the only signal available mid-stream;
-                // say why on the way out so it is not a silent truncation.
-                tracing::error!(
-                    version = %label, offset,
-                    "release download failed while reading the volume: {e}"
-                );
-                Some((Err(std::io::Error::other(e.to_string())), (dev, capacity)))
+            if offset > end {
+                return None;
             }
-        }
+            let len = CHUNK.min(end - offset + 1) as usize;
+            let mut buf = vec![0u8; len];
+            match dev.read(offset, &mut buf).await {
+                Ok(_) => Some((
+                    Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
+                    (dev, offset + len as u64),
+                )),
+                Err(e) => {
+                    // Ending the body early is the only signal available
+                    // mid-stream; say why on the way out so it is not a silent
+                    // truncation.
+                    tracing::error!(
+                        version = %label, offset,
+                        "release download failed while reading the volume: {e}"
+                    );
+                    Some((Err(std::io::Error::other(e.to_string())), (dev, end + 1)))
+                }
+            }
         }
     });
 
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (header::CONTENT_LENGTH, capacity.to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"stormcos-{version}.img\""),
-            ),
-        ],
-        Body::from_stream(stream),
-    )
-        .into_response()
+    let mut hdrs = axum::http::HeaderMap::new();
+    let set = |h: &mut axum::http::HeaderMap, k: header::HeaderName, v: String| {
+        if let Ok(val) = axum::http::HeaderValue::from_str(&v) {
+            h.insert(k, val);
+        }
+    };
+    set(&mut hdrs, header::CONTENT_TYPE, "application/octet-stream".into());
+    set(&mut hdrs, header::CONTENT_LENGTH, length.to_string());
+    set(&mut hdrs, header::ACCEPT_RANGES, "bytes".into());
+    set(
+        &mut hdrs,
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"stormcos-{version}.img\""),
+    );
+    let status = if partial {
+        set(
+            &mut hdrs,
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{capacity}"),
+        );
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+
+    (status, hdrs, Body::from_stream(stream)).into_response()
+}
+
+/// What a `Range` header asked for, once resolved against the real size.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeSpec {
+    /// No usable range, or one covering everything: serve 200.
+    Whole,
+    /// Inclusive byte offsets, both already clamped to the image.
+    Partial { start: u64, end: u64 },
+    /// Asked for something that is not there: 416.
+    Unsatisfiable,
+}
+
+/// Parse a single `bytes=` range.
+///
+/// Only one range is honoured. Multi-range replies are a multipart body that
+/// nothing downloading a disk image asks for, and answering the first range of
+/// several would be a quiet lie about what was sent — so a multi-range request
+/// falls back to the whole image, which is what RFC 9110 permits and what a
+/// caller can actually use.
+fn parse_range(raw: &str, total: u64) -> RangeSpec {
+    if total == 0 {
+        return RangeSpec::Unsatisfiable;
+    }
+    let Some(spec) = raw.trim().strip_prefix("bytes=") else {
+        return RangeSpec::Whole;
+    };
+    if spec.contains(',') {
+        return RangeSpec::Whole;
+    }
+    let Some((from, to)) = spec.split_once('-') else {
+        return RangeSpec::Whole;
+    };
+    let (from, to) = (from.trim(), to.trim());
+
+    let (start, end) = if from.is_empty() {
+        // `bytes=-N`: the last N bytes. N of 0 asks for nothing.
+        let Ok(n) = to.parse::<u64>() else { return RangeSpec::Whole };
+        if n == 0 {
+            return RangeSpec::Unsatisfiable;
+        }
+        (total.saturating_sub(n), total - 1)
+    } else {
+        let Ok(start) = from.parse::<u64>() else { return RangeSpec::Whole };
+        if start >= total {
+            return RangeSpec::Unsatisfiable;
+        }
+        let end = if to.is_empty() {
+            total - 1
+        } else {
+            match to.parse::<u64>() {
+                Ok(e) => e.min(total - 1),
+                Err(_) => return RangeSpec::Whole,
+            }
+        };
+        if end < start {
+            return RangeSpec::Unsatisfiable;
+        }
+        (start, end)
+    };
+
+    if start == 0 && end == total - 1 {
+        RangeSpec::Whole
+    } else {
+        RangeSpec::Partial { start, end }
+    }
 }
 
 /// Whether a version can be a version.
@@ -474,6 +583,63 @@ mod tests {
         assert_eq!(civil_date(1_756_800_000), "2025-09-02T08:00:00Z");
         // A leap day, which is where a hand-rolled calendar goes wrong.
         assert_eq!(civil_date(1_709_164_800), "2024-02-29T00:00:00Z");
+    }
+
+    const TOTAL: u64 = 34_359_738_368;
+
+    /// The ordinary cases a downloader sends.
+    #[test]
+    fn ranges_resolve() {
+        assert_eq!(
+            parse_range("bytes=0-99", TOTAL),
+            RangeSpec::Partial { start: 0, end: 99 }
+        );
+        // Open-ended: resume from where the last attempt stopped.
+        assert_eq!(
+            parse_range("bytes=1048576-", TOTAL),
+            RangeSpec::Partial { start: 1_048_576, end: TOTAL - 1 }
+        );
+        // Suffix: the last N bytes, which is how a backup GPT gets read.
+        assert_eq!(
+            parse_range("bytes=-512", TOTAL),
+            RangeSpec::Partial { start: TOTAL - 512, end: TOTAL - 1 }
+        );
+        // An end past the image is clamped, not refused.
+        assert_eq!(
+            parse_range("bytes=0-99999999999999", TOTAL),
+            RangeSpec::Whole
+        );
+        assert_eq!(
+            parse_range("bytes=10-99999999999999", TOTAL),
+            RangeSpec::Partial { start: 10, end: TOTAL - 1 }
+        );
+    }
+
+    /// A range covering the whole thing is served as 200, not as a 206 that
+    /// claims to be a slice of itself.
+    #[test]
+    fn a_range_over_everything_is_not_partial() {
+        assert_eq!(parse_range("bytes=0-", TOTAL), RangeSpec::Whole);
+        assert_eq!(parse_range(&format!("bytes=0-{}", TOTAL - 1), TOTAL), RangeSpec::Whole);
+        assert_eq!(parse_range(&format!("bytes=-{TOTAL}"), TOTAL), RangeSpec::Whole);
+    }
+
+    /// Asking for something that is not there earns a 416, and everything the
+    /// parser cannot make sense of falls back to the whole image rather than
+    /// to a guess.
+    #[test]
+    fn unsatisfiable_and_unparseable_are_different() {
+        assert_eq!(parse_range("bytes=34359738368-", TOTAL), RangeSpec::Unsatisfiable);
+        assert_eq!(parse_range("bytes=99-10", TOTAL), RangeSpec::Unsatisfiable);
+        assert_eq!(parse_range("bytes=-0", TOTAL), RangeSpec::Unsatisfiable);
+        assert_eq!(parse_range("bytes=0-99", 0), RangeSpec::Unsatisfiable);
+
+        for junk in ["", "items=0-99", "bytes=abc-def", "bytes=", "bytes=1-2-3"] {
+            assert_eq!(parse_range(junk, TOTAL), RangeSpec::Whole, "{junk:?}");
+        }
+        // Several ranges at once: answered whole rather than with the first of
+        // them, which would be a quiet lie about what was sent.
+        assert_eq!(parse_range("bytes=0-99,200-299", TOTAL), RangeSpec::Whole);
     }
 
     /// A version is a path segment and a filename, so anything that would stop
