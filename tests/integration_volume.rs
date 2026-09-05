@@ -475,3 +475,117 @@ async fn access_moves_both_ways_and_sealing_still_wins() {
     mgr.set_access(id, Access::ReadWrite).await.unwrap();
     assert!(mgr.writable(&id));
 }
+
+/// A metadata region too small for the record it must hold is reported, not
+/// swallowed.
+///
+/// This is the incident, reduced: on forge a data slab reserved 2 MiB per
+/// copy while the record encoded to 11 MB, every persist failed, and every
+/// failure was a `warn!` that the operation creating the volume ignored. The
+/// node acknowledged 38 volumes and came back from a restart with 9. What
+/// makes it dangerous is that nothing on the write path notices — so the
+/// assertion here is that the manager *knows*, and will say so when asked.
+#[tokio::test]
+async fn a_metadata_region_too_small_is_a_reported_fault_not_a_warning() {
+    use stormblock::drive::slab::{auto_metadata_bytes, Slab, SlabFormat};
+    use stormblock::placement::topology::StorageTier;
+
+    let dir = TempDir::new().unwrap();
+    let dev = common::create_file_devices(&dir, 1, 512 * 1024 * 1024)
+        .await
+        .remove(0);
+    let slot = 1024 * 1024;
+
+    // The smallest region the format will accept — standing in for one that
+    // was sized by a constant rather than by the drive.
+    let cramped = Slab::format_with(
+        dev.clone(),
+        SlabFormat::new(slot, StorageTier::Hot).with_metadata(8192),
+    )
+    .await
+    .unwrap();
+    let slab_id = cramped.slab_id();
+
+    let mut mgr = VolumeManager::new(slot);
+    mgr.attach_slab(stormblock::raid::RaidArrayId(uuid::Uuid::new_v4()), cramped)
+        .await
+        .unwrap();
+    mgr.persist_to_slab(slab_id);
+
+    // Enough extents that the record cannot fit: each one is an entry in the
+    // volume's map, and the map is what gets written.
+    let id = mgr.create_volume_any("too-big-to-record", 64 * slot).await.unwrap();
+    let v = mgr.get_volume(&id).unwrap();
+    for i in 0..64u64 {
+        v.write(i * slot, &vec![0xAB; 4096]).await.unwrap();
+    }
+    v.flush().await.unwrap();
+    drop(v);
+
+    assert!(
+        mgr.persist_checked().await.is_err(),
+        "a record that does not fit has to fail the caller that can be failed"
+    );
+
+    // And the background persist — the one a running node actually uses, which
+    // has no caller left to fail — records it instead of only logging.
+    mgr.persist().await;
+    let fault = mgr.durability_fault().expect(
+        "a persist that did not reach the disk must leave the node able to say so",
+    );
+    assert!(
+        fault.contains("metadata") || fault.contains("reserves"),
+        "the fault should name what went wrong: {fault}"
+    );
+
+    let pressure = mgr.metadata_pressure().await;
+    assert!(
+        pressure.iter().any(|p| !p.fits),
+        "the slab that cannot hold its record is the one reported: {pressure:?}"
+    );
+
+    // Sized from the drive instead of from a constant, the same record fits
+    // and the fault clears — which is the fix.
+    let roomy = Slab::format_with(
+        dev.clone(),
+        SlabFormat::new(slot, StorageTier::Hot)
+            .with_metadata(auto_metadata_bytes(512 * 1024 * 1024, slot)),
+    )
+    .await
+    .unwrap();
+    let roomy_id = roomy.slab_id();
+    let mut mgr = VolumeManager::new(slot);
+    mgr.attach_slab(stormblock::raid::RaidArrayId(uuid::Uuid::new_v4()), roomy)
+        .await
+        .unwrap();
+    mgr.persist_to_slab(roomy_id);
+    let id = mgr.create_volume_any("fits-now", 64 * slot).await.unwrap();
+    let v = mgr.get_volume(&id).unwrap();
+    for i in 0..64u64 {
+        v.write(i * slot, &vec![0xAB; 4096]).await.unwrap();
+    }
+    v.flush().await.unwrap();
+    drop(v);
+    mgr.persist().await;
+    assert_eq!(
+        mgr.durability_fault(),
+        None,
+        "an auto-sized region holds the record it was sized for"
+    );
+    assert!(mgr.metadata_pressure().await.iter().all(|p| p.fits));
+}
+
+/// The region a large drive gets is larger than the constant that was there.
+#[tokio::test]
+async fn auto_metadata_scales_past_the_flat_four_megabytes() {
+    use stormblock::drive::slab::auto_metadata_bytes;
+    let slot = 1024 * 1024;
+    let two_tb = 2u64 * 1000 * 1000 * 1000 * 1000;
+    assert!(
+        auto_metadata_bytes(two_tb, slot) > 4 * 1024 * 1024,
+        "a 2 TB data drive needs more than the 4 MiB the API used to reserve"
+    );
+    // And a small one does not spend itself on a region it will never fill.
+    let small = auto_metadata_bytes(64 * 1024 * 1024, slot);
+    assert!(small <= 64 * 1024 * 1024 / 8, "a small slab stays a slab: {small}");
+}
