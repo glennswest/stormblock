@@ -514,9 +514,9 @@ async fn a_metadata_region_too_small_is_a_reported_fault_not_a_warning() {
 
     // Enough extents that the record cannot fit: each one is an entry in the
     // volume's map, and the map is what gets written.
-    let id = mgr.create_volume_any("too-big-to-record", 64 * slot).await.unwrap();
+    let id = mgr.create_volume_any("too-big-to-record", 300 * slot).await.unwrap();
     let v = mgr.get_volume(&id).unwrap();
-    for i in 0..64u64 {
+    for i in 0..300u64 {
         v.write(i * slot, &vec![0xAB; 4096]).await.unwrap();
     }
     v.flush().await.unwrap();
@@ -559,9 +559,9 @@ async fn a_metadata_region_too_small_is_a_reported_fault_not_a_warning() {
         .await
         .unwrap();
     mgr.persist_to_slab(roomy_id);
-    let id = mgr.create_volume_any("fits-now", 64 * slot).await.unwrap();
+    let id = mgr.create_volume_any("fits-now", 300 * slot).await.unwrap();
     let v = mgr.get_volume(&id).unwrap();
-    for i in 0..64u64 {
+    for i in 0..300u64 {
         v.write(i * slot, &vec![0xAB; 4096]).await.unwrap();
     }
     v.flush().await.unwrap();
