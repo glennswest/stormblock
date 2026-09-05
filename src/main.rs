@@ -3152,11 +3152,47 @@ async fn handle_golden(
         })
         .unwrap_or_else(|| "golden".into());
 
-    // A fresh file every time: a golden built over the remains of an older one
-    // inherits whatever the older one had past the new end.
-    let _ = std::fs::remove_file(out);
-    let dev: Arc<dyn BlockDevice> =
-        Arc::new(stormblock::drive::filedev::FileDevice::open_with_capacity(out, bytes).await?);
+    // A block device is written in place; a file is made fresh.
+    //
+    // In place because the point of naming a device here is that the golden
+    // *is* the volume — attached from the appliance over NVMe/TCP, written
+    // once, sealed. A golden that has to be built as a file and then copied
+    // into a volume is a second full copy of every byte, and the copy is the
+    // thing worth removing: a disk is a map over goldens, so the goldens have
+    // to be volumes to be mapped.
+    //
+    // For a file, unlink first: a golden built over the remains of an older
+    // one inherits whatever that one had past the new end.
+    let on_device = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            std::fs::metadata(out).map(|m| m.file_type().is_block_device()).unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    let dev: Arc<dyn BlockDevice> = if on_device {
+        let dev = stormblock::drive::filedev::FileDevice::open(out).await?;
+        let have = dev.capacity_bytes();
+        if have < bytes {
+            anyhow::bail!(
+                "{out} is {have} bytes and --size asks for {bytes}: a golden cannot be \
+                 larger than the volume it is written into"
+            );
+        }
+        if have > bytes {
+            // Not an error: a volume is often rounded up to a slot boundary.
+            // The filesystem is made at --size and the rest is left alone.
+            println!("  {name}: {out} is {have} bytes, formatting {bytes}");
+        }
+        Arc::new(dev)
+    } else {
+        let _ = std::fs::remove_file(out);
+        Arc::new(stormblock::drive::filedev::FileDevice::open_with_capacity(out, bytes).await?)
+    };
 
     let params = Ext4Params {
         profile: FsProfile::Ext4,
