@@ -549,6 +549,59 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
         .name
         .clone()
         .unwrap_or_else(|| format!("{clone_ns}-{}", syn.name));
+    // A machine that reboots is not a new consumer.
+    //
+    // The initramfs claims on every boot, and it has to: what the firmware
+    // attached was a UEFI block device, and that ceases to exist the moment
+    // the kernel starts, so the node asks again in its own right. Minting a
+    // fresh clone each time would discard whatever the node had written to
+    // its root *and* leave the previous clone behind — once per boot, on
+    // every node, forever (#94).
+    //
+    // The clone's name is derived from the synonym, so an existing volume
+    // with that name whose parent is still what this synonym resolves to is
+    // this consumer's own clone. Hand it back, at the same address, because
+    // the nsid is part of that address. A synonym re-pointed at a different
+    // golden does not match — the parent differs — and correctly mints a new
+    // clone, which is what moving a machine to a new image means.
+    let reusable = {
+        let vm = state.volume_manager.lock().await;
+        match vm.find_volume(&clone_name).await {
+            Some(id) if vm.parent(&id) == Some(source) && !vm.is_sealed(&id) => vm
+                .get_volume_handle(&id)
+                .map(|h| (id, h.capacity_bytes(), vm.fs_info(&id).and_then(|f| f.uuid))),
+            _ => None,
+        }
+    };
+    if let Some((id, size_bytes, fs_uuid)) = reusable {
+        let attach = attach_info(&state, id).await;
+        tracing::info!(
+            volume = %id, synonym = %synonym::key(namespace, name),
+            "claim reused this consumer's existing clone"
+        );
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "claimed_from": {
+                    "synonym": synonym::key(namespace, name),
+                    "version": syn.version,
+                    "volume": source.0,
+                },
+                "volume": {
+                    "id": id.0,
+                    "name": clone_name,
+                    "size_bytes": size_bytes,
+                    "fs_uuid": fs_uuid,
+                    "sealed": false,
+                    "access": "rw",
+                },
+                "attach": attach,
+                "reused": true,
+            })),
+        )
+            .into_response();
+    }
+
     let mut spec = crate::fs::template::CloneSpec::new(&clone_name);
     spec.size_bytes = size;
     spec.label = req.label.clone();
