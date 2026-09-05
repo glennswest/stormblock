@@ -1392,6 +1392,35 @@ async fn resize_volume(
     }
 }
 
+/// `POST /api/v1/volumes/{id}/legs/clear` — try a volume's failed legs again.
+///
+/// A leg marked failed is sticky and persisted, so a marking made for a
+/// reason that has since gone away leaves a perfectly readable volume
+/// reporting no readable leg, across restarts. This clears the marking and
+/// reads the volume to prove it; anything still broken marks itself again.
+async fn clear_failed_legs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "legs_clear")
+        .increment(1);
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let mgr = state.volume_manager.lock().await;
+    match mgr.clear_failed_legs(VolumeId(uuid)).await {
+        Ok(r) => Json(serde_json::json!({
+            "volume": uuid.to_string(),
+            "cleared": r.cleared,
+            "still_failed": r.still_failed,
+            "healthy": r.still_failed.is_empty(),
+        }))
+        .into_response(),
+        Err(e) => ApiError::not_found(format!("{e}")),
+    }
+}
+
 /// `POST /api/v1/volumes/{id}/fsck` — check a volume's filesystem, and with
 /// `?repair=true` correct what can be corrected.
 ///
@@ -1892,6 +1921,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/import", get(list_imports).post(start_import))
         .route("/import/{id}", get(get_import))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
+        .route("/{id}/legs/clear", axum::routing::post(clear_failed_legs))
         .route("/{id}/files", get(read_volume_file).post(write_volume_files))
         .route("/{id}/cidata", axum::routing::post(write_cidata))
         .route("/snapshots", axum::routing::post(create_snapshot))

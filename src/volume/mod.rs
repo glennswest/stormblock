@@ -111,6 +111,13 @@ pub struct AdoptReport {
 }
 
 /// Manages volumes, slab allocation, and snapshots.
+/// Which of a volume's failed legs came back when it was asked to try again.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClearFailedReport {
+    pub cleared: Vec<String>,
+    pub still_failed: Vec<String>,
+}
+
 /// How much room one slab's volume record needs against what it has.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MetadataPressure {
@@ -1380,6 +1387,50 @@ impl VolumeManager {
                 *self.durability.lock().unwrap() = Some(e.to_string());
             }
         }
+    }
+
+    /// Stop treating a volume's slabs as failed, and prove it by reading.
+    ///
+    /// A leg marked failed stays marked and the marking is written into the
+    /// record, which is right when the media is gone and wrong when the
+    /// marking came from something else — a request the device refused, a
+    /// cable, a slab that was not attached yet. There was no way back short
+    /// of a restripe, so a volume could be permanently unreadable with
+    /// nothing actually wrong with it.
+    ///
+    /// Not a blind reset: the legs are cleared, the volume is read, and
+    /// anything that fails for real marks itself again on the way through.
+    /// The report says which slabs came back and which did not.
+    pub async fn clear_failed_legs(&self, id: VolumeId) -> anyhow::Result<ClearFailedReport> {
+        let handle = self
+            .volumes
+            .get(&id)
+            .ok_or_else(|| anyhow::anyhow!("volume {} not found", id.0))?
+            .clone();
+        let was: Vec<SlabId> = handle.failed_slabs();
+        if was.is_empty() {
+            return Ok(ClearFailedReport { cleared: Vec::new(), still_failed: Vec::new() });
+        }
+        handle.set_failed_slabs(Vec::new());
+
+        // One aligned block, so the read itself cannot be the thing that
+        // fails. Errors are ignored here on purpose — what matters is which
+        // slabs the read marked again, not what the caller sees.
+        let bs = handle.block_size().max(1) as usize;
+        let mut buf = crate::drive::dma::DmaBuf::zeroed(bs);
+        let _ = handle.read(0, &mut buf).await;
+
+        let still: Vec<SlabId> = handle.failed_slabs();
+        let cleared: Vec<String> = was
+            .iter()
+            .filter(|s| !still.contains(s))
+            .map(|s| s.0.to_string())
+            .collect();
+        self.persist().await;
+        Ok(ClearFailedReport {
+            cleared,
+            still_failed: still.iter().map(|s| s.0.to_string()).collect(),
+        })
     }
 
     /// Why the last persist failed, if it did. `None` while the record is
