@@ -3784,15 +3784,74 @@ async fn handle_adopt_ublk(
 /// restore volume metadata, export the boot volume as /dev/ublkb0.
 /// The local-slab → ublk-root path stormcos boots through (issue #12).
 #[allow(clippy::too_many_arguments)]
-/// Where a machine's own service tag is recorded by its firmware.
+/// Where a machine's own identity is recorded by its firmware, best first.
 ///
-/// `product_serial` is the service tag on Dell; `board_serial` is the
-/// fallback for boards that leave the first one unset. Both are root-only,
-/// which the initramfs is.
-const DMI_TAG_PATHS: [&str; 2] = [
+/// Every vendor has this field and every vendor calls it something else —
+/// Dell a *Service Tag*, HPE and Lenovo a *Serial Number*, Cisco a *Serial*
+/// — but it is the same SMBIOS System Information string in all of them, so
+/// one path covers the lot:
+///
+/// | Vendor                       | Called            | Looks like    |
+/// |------------------------------|-------------------|---------------|
+/// | Dell                         | Service Tag       | `C2NR0Q2`     |
+/// | HPE / HP                     | Serial Number     | `MXQ1234567`  |
+/// | Lenovo / ThinkSystem         | Serial Number     | `1234ABC`     |
+/// | Cisco UCS                    | Serial Number     | `FCH1234V5AB` |
+/// | Fujitsu, Asus, Gigabyte      | Serial Number     | varies        |
+///
+/// `board_serial` is second because the ODM boards — Supermicro, Quanta,
+/// Wiwynn, Inventec, and most whiteboxes — frequently leave the system
+/// serial as a placeholder and burn the real number into the *baseboard*
+/// instead. `chassis_serial` catches the remainder. `product_uuid` is last
+/// and is not a nice name, but it is always unique and always present, so a
+/// board that has nothing else can still be addressed rather than being
+/// unbootable.
+///
+/// All are root-only, which the initramfs is.
+const DMI_TAG_PATHS: [&str; 4] = [
     "/sys/class/dmi/id/product_serial",
     "/sys/class/dmi/id/board_serial",
+    "/sys/class/dmi/id/chassis_serial",
+    "/sys/class/dmi/id/product_uuid",
 ];
+
+/// Every identity this machine can be addressed by, best first.
+///
+/// A list rather than one value because synonyms are flexible: the claim
+/// tries each in turn, so a fleet can key on whatever its boards actually
+/// carry — the Dells on their service tags, the whiteboxes on a board serial
+/// — without anyone deciding centrally which field a given model populates.
+fn machine_identities() -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for p in DMI_TAG_PATHS {
+        let field = p.rsplit('/').next().unwrap_or(p);
+        if let Ok(v) = std::fs::read_to_string(p) {
+            if let Some(tag) = usable_tag(&v) {
+                if !out.iter().any(|(_, existing)| *existing == tag) {
+                    out.push((field, tag));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What this machine says it is, for the console.
+fn machine_description() -> String {
+    let read = |f: &str| {
+        std::fs::read_to_string(format!("/sys/class/dmi/id/{f}"))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
+    let v = read("sys_vendor");
+    let n = read("product_name");
+    match (v.is_empty(), n.is_empty()) {
+        (false, false) => format!("{v} {n}"),
+        (false, true) => v,
+        (true, false) => n,
+        _ => "unknown machine".to_string(),
+    }
+}
 
 /// A DMI string only counts as a service tag if it actually identifies *this*
 /// machine.
