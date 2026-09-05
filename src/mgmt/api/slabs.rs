@@ -77,7 +77,6 @@ fn default_tier() -> String {
 /// How much of a data slab is set aside for its own volume record. Two
 /// copies are kept, so this is the space for both; 4 MiB holds thousands of
 /// volumes and costs nothing on a drive measured in terabytes.
-const DEFAULT_SLAB_METADATA: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn parse_tier(s: &str) -> Option<StorageTier> {
     match s.to_lowercase().as_str() {
@@ -209,9 +208,21 @@ async fn format_slab(
     };
     // A data slab keeps its own record unless told otherwise: its reason for
     // existing is to survive the thing that would otherwise hold it.
-    let meta_bytes = req.metadata_bytes.unwrap_or(
-        if role == crate::drive::slab::SlabRole::Data { DEFAULT_SLAB_METADATA } else { 0 },
-    );
+    //
+    // Size that region from the drive, not from a constant. A volume record
+    // carries its whole extent map, so what the region has to hold scales
+    // with the slots the slab can hand out — an 11 GB volume is some eleven
+    // thousand extents on its own. A flat 4 MiB fits a small slab and is
+    // several times too small for a large one, and the way that failure
+    // presented was not "out of space": writes kept being acknowledged and
+    // nothing was durable, so a restart came back with a fraction of its
+    // volumes and a published release that had never been on disk.
+    let meta_bytes = req.metadata_bytes.unwrap_or(match role {
+        crate::drive::slab::SlabRole::Data => {
+            crate::drive::slab::auto_metadata_bytes(device.capacity_bytes(), slot_size)
+        }
+        _ => 0,
+    });
     let opts = crate::drive::slab::SlabFormat::new(slot_size, tier)
         .with_role(role)
         .with_metadata(meta_bytes);
@@ -464,6 +475,38 @@ pub async fn pool_status(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+/// Whether this node's volume record is reaching the disk, and how close each
+/// slab is to not being able to hold it.
+///
+/// Worth asking before trusting that anything created here will come back.
+/// The failure this reports is not one a caller ever sees: the volume is
+/// created, the write is acknowledged, and only a restart says otherwise.
+pub async fn durability(State(state): State<Arc<AppState>>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "slabs", "method" => "durability")
+        .increment(1);
+
+    let mgr = state.volume_manager.lock().await;
+    let fault = mgr.durability_fault();
+    let slabs = mgr.metadata_pressure().await;
+    drop(mgr);
+
+    let short: Vec<&crate::volume::MetadataPressure> =
+        slabs.iter().filter(|s| !s.fits).collect();
+    Json(serde_json::json!({
+        "ok": fault.is_none() && short.is_empty(),
+        "fault": fault,
+        "slabs": slabs,
+        "remedy": if short.is_empty() { serde_json::Value::Null } else {
+            serde_json::json!(
+                "a slab's metadata region is too small for the record it has to hold; \
+                 reformat it with a larger region (the size is chosen from capacity \
+                 automatically) or move volumes off it"
+            )
+        },
+    }))
+    .into_response()
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_slabs).post(format_slab))
@@ -471,6 +514,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/gc", get(gc_status).post(run_gc))
         // Likewise "pool": the aggregate over every slab, not one of them.
         .route("/pool", get(pool_status))
+        // Likewise "durability": whether the record is actually being written.
+        .route("/durability", get(durability))
         .route("/{id}", get(get_slab).delete(delete_slab))
         .route("/{id}/slots", get(list_slots))
         .with_state(state)

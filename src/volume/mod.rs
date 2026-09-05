@@ -111,6 +111,16 @@ pub struct AdoptReport {
 }
 
 /// Manages volumes, slab allocation, and snapshots.
+/// How much room one slab's volume record needs against what it has.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MetadataPressure {
+    pub slab_id: String,
+    pub volumes: usize,
+    pub needed_bytes: u64,
+    pub capacity_bytes: u64,
+    pub fits: bool,
+}
+
 pub struct VolumeManager {
     gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
@@ -139,6 +149,15 @@ pub struct VolumeManager {
     parents: HashMap<VolumeId, VolumeId>,
     /// What is known about the filesystem on each volume.
     fs_info: HashMap<VolumeId, FsInfo>,
+    /// Why the last attempt to write this manager's record failed, if it did.
+    ///
+    /// A background persist cannot fail the call that triggered it — the
+    /// volume is already created, the write already acknowledged. What it
+    /// must not do is let that pass unremarked: a node whose record is not
+    /// being written is a node that will come back missing volumes, and the
+    /// only warning of it was a line in a log. Kept here so the condition is
+    /// a thing the API can be asked about rather than something to notice.
+    durability: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl VolumeManager {
@@ -158,6 +177,7 @@ impl VolumeManager {
             retentions: HashMap::new(),
             parents: HashMap::new(),
             fs_info: HashMap::new(),
+            durability: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -175,6 +195,7 @@ impl VolumeManager {
             retentions: HashMap::new(),
             parents: HashMap::new(),
             fs_info: HashMap::new(),
+            durability: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -1342,8 +1363,57 @@ impl VolumeManager {
     /// COW snapshot's shared slots are recorded under the original writer,
     /// so without this file a snapshot reads as zeros after reattach (#13).
     pub async fn persist(&self) {
+        match self.persist_inner().await {
+            Ok(()) => {
+                if let Some(prev) = self.durability.lock().unwrap().take() {
+                    tracing::info!("volume metadata is being written again (was: {prev})");
+                }
+            }
+            Err(e) => {
+                // Not a warning. Every write this node acknowledges from here
+                // is one it cannot bring back, and the operation that caused
+                // this has already returned success to its caller.
+                tracing::error!(
+                    "DURABILITY: volume metadata was not written: {e}. Volumes created or \
+                     changed from now on will not survive a restart"
+                );
+                *self.durability.lock().unwrap() = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Why the last persist failed, if it did. `None` while the record is
+    /// being written.
+    pub fn durability_fault(&self) -> Option<String> {
+        self.durability.lock().unwrap().clone()
+    }
+
+    /// What each metadata slab's record currently encodes to, against what
+    /// that slab reserved for it.
+    ///
+    /// The margin here is the thing to watch: a record grows with every
+    /// volume and with every extent each volume maps, so a slab that fits
+    /// today stops fitting silently as it fills.
+    pub async fn metadata_pressure(&self) -> Vec<MetadataPressure> {
+        let mut out = Vec::new();
+        let reg = self.registry.read().await;
+        for (slab_id, meta) in self.per_slab_metadata().await {
+            let needed = MetadataStore::encode(&meta).map(|b| b.len() as u64).unwrap_or(0);
+            let capacity = reg.get(&slab_id).map(|s| s.metadata_capacity()).unwrap_or(0);
+            out.push(MetadataPressure {
+                slab_id: slab_id.0.to_string(),
+                volumes: meta.volumes.len(),
+                needed_bytes: needed,
+                capacity_bytes: capacity,
+                fits: capacity > 0 && needed <= capacity,
+            });
+        }
+        out
+    }
+
+    async fn persist_inner(&self) -> anyhow::Result<()> {
         if self.metadata_store.is_none() && self.metadata_slabs.is_empty() {
-            return;
+            return Ok(());
         }
 
         if let Some(store) = &self.metadata_store {
@@ -1362,34 +1432,39 @@ impl VolumeManager {
                     tracing::warn!(
                         "not overwriting a record of {had} volume(s) with an empty one —                          this manager has no volumes, which usually means its slabs are                          not attached rather than that the storage is empty"
                     );
-                    return;
+                    return Ok(());
                 }
             }
             let meta = self.snapshot_metadata().await;
-            if let Err(e) = store.save(&meta) {
-                tracing::warn!("Volume metadata persist failed: {e}");
-            }
+            store.save(&meta)?;
         }
 
+        // Report every copy that failed, not the first. A node with two data
+        // slabs where one is short of room still has to say so about that one
+        // while the other is written.
+        let mut failed: Vec<String> = Vec::new();
         for (slab_id, meta) in self.per_slab_metadata().await {
-            match MetadataStore::encode(&meta) {
-                Ok(bytes) => {
-                    let reg = self.registry.read().await;
-                    match reg.get(&slab_id) {
-                        Some(slab) => {
-                            if let Err(e) = slab.write_metadata(&bytes).await {
-                                tracing::warn!("Slab metadata persist failed: {e}");
-                            }
-                        }
-                        None => tracing::warn!(
-                            "Slab metadata persist failed: slab {} is not attached",
-                            slab_id.0
-                        ),
+            let bytes = match MetadataStore::encode(&meta) {
+                Ok(b) => b,
+                Err(e) => {
+                    failed.push(format!("slab {}: encode failed: {e}", slab_id.0));
+                    continue;
+                }
+            };
+            let reg = self.registry.read().await;
+            match reg.get(&slab_id) {
+                Some(slab) => {
+                    if let Err(e) = slab.write_metadata(&bytes).await {
+                        failed.push(format!("slab {}: {e}", slab_id.0));
                     }
                 }
-                Err(e) => tracing::warn!("Slab metadata encode failed: {e}"),
+                None => failed.push(format!("slab {} is not attached", slab_id.0)),
             }
         }
+        if !failed.is_empty() {
+            anyhow::bail!("{}", failed.join("; "));
+        }
+        Ok(())
     }
 
     /// One `volumes.dat` per metadata slab, each holding only what that slab
@@ -1570,18 +1645,7 @@ impl VolumeManager {
     /// there produces an image that cannot boot, so it has to fail the build
     /// rather than warn into a log nobody reads.
     pub async fn persist_checked(&self) -> anyhow::Result<()> {
-        if let Some(store) = &self.metadata_store {
-            store.save(&self.snapshot_metadata().await)?;
-        }
-        for (slab_id, meta) in self.per_slab_metadata().await {
-            let bytes = MetadataStore::encode(&meta)?;
-            let reg = self.registry.read().await;
-            let slab = reg
-                .get(&slab_id)
-                .ok_or_else(|| anyhow::anyhow!("slab {} is not attached", slab_id.0))?;
-            slab.write_metadata(&bytes).await?;
-        }
-        Ok(())
+        self.persist_inner().await
     }
 
     /// Restore volumes from persisted metadata. No-op if no data_dir or no metadata file.

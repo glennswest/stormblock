@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-09-05
+- **fix:** A data slab's metadata region is sized from the drive, not from a flat 4 MiB. A volume record carries its whole extent map, so what the region must hold scales with the slots the slab can hand out — an 11 GB volume is ~11k extents on its own. `POST /api/v1/slabs` and `stormblock slab format --role data` both use `auto_metadata_bytes` now; the CLI previously reserved **nothing at all** for a data slab.
+- **fix:** A failed metadata persist is no longer a `warn!` the operation ignores. `persist()` reports every copy that failed, logs at `error!` as a durability fault, and records it; `persist_checked()` is the same path. Losing this quietly meant volumes were created, acknowledged, and never written — a node came back with 9 of 38 volumes and a published release that had never been on disk.
+- **feat:** `GET /api/v1/slabs/durability` — whether the record is reaching the disk, and per-slab how large it encodes to against what that slab reserved.
 - **fix (synonyms): re-claiming releases the clone it supersedes.** A claim
   mints a clone, and re-claiming re-points the consumer's own name at the new
   one — leaving the previous clone alive and named by nothing. It is invisible

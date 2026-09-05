@@ -1384,10 +1384,17 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             let dev = Arc::new(
                 stormblock::drive::filedev::FileDevice::open(device).await?
             ) as Arc<dyn BlockDevice>;
-            let slab = Slab::format_with(
-                dev,
-                stormblock::drive::slab::SlabFormat::new(SLAB_SLOT_SIZE, tier).with_role(role),
-            ).await
+            // A data slab has to carry its own volume records, and how much
+            // room that takes scales with the slots it can hand out — leave
+            // it at the default of none and every write to it is acknowledged
+            // and lost at the next restart.
+            let capacity = dev.capacity_bytes();
+            let mut opts = stormblock::drive::slab::SlabFormat::new(SLAB_SLOT_SIZE, tier)
+                .with_role(role);
+            if role == SlabRole::Data {
+                opts = opts.with_auto_metadata(capacity);
+            }
+            let slab = Slab::format_with(dev, opts).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Slab formatted: {}", slab.slab_id());
             println!("  role: {}", slab.role());
