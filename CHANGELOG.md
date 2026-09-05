@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### 2026-09-05
+- **fix (fat): the ESP declares the medium's sector size too (stormcos#31,
+  second half).** Fixing the GPT made the partitions appear and the ESP be
+  typed correctly — and it still would not mount: `FAT-fs: logical sector size
+  too small for device`. The FAT builder had `const SECTOR = 512`, so an ESP
+  written onto a 4096-byte device declared 512-byte sectors and no FAT driver,
+  the kernel's or the firmware's, would touch it. Found, correctly typed, and
+  unreadable is not better than not found.
+
+  The sector size now comes from the device, as it does for the GPT. One
+  consequence is real and correct: FAT32 needs 65525 clusters and a cluster is
+  at least a sector, so at 4096 bytes a volume must be about eight times larger
+  to be FAT32 — a 64 MiB ESP is now FAT16, which UEFI accepts. A test fixture
+  that assumed 512-byte geometry was resized to match.
 - **fix (image): the GPT is written in the block size the medium presents, not
   512 (stormcos#31).** A partition table is found at LBA 1 — one *block* in, in
   the medium's own block size. `image build` defaulted to 512-byte sectors while

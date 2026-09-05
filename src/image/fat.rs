@@ -33,7 +33,13 @@ use super::{ImageError, Result};
 
 /// FAT sector size. Not the device's block size: a filesystem an unknown
 /// firmware has to read is written in the sector size everything assumes.
-const SECTOR: u32 = 512;
+/// The logical sector size a FAT declares when nothing else says.
+///
+/// A FAT's sector size has to match the medium it is read from. Fixed at
+/// 512, an ESP written onto a 4096-byte device declared 512-byte sectors and
+/// no FAT driver — the kernel's or the firmware's — would mount it. The
+/// partition was found and correctly typed, and unreadable (stormcos#31).
+const DEFAULT_SECTOR: u32 = 512;
 /// FAT32 keeps room for the FSInfo block and the backup boot sector.
 const FAT32_RESERVED: u32 = 32;
 const NUM_FATS: u32 = 2;
@@ -127,6 +133,8 @@ struct Fat32 {
     reserved_sectors: u32,
     sectors_per_cluster: u32,
     fat_sectors: u32,
+    /// The medium's logical sector size, which this FAT declares.
+    sector: u32,
     total_sectors: u32,
     cluster_count: u32,
     /// First data sector — after the FATs, and after the fixed root directory
@@ -140,9 +148,9 @@ struct Fat32 {
     volume_id: u32,
 }
 
-fn fat32_cluster_size(total_sectors: u32) -> u32 {
+fn fat32_cluster_size(total_sectors: u32, sector: u32) -> u32 {
     // The usual table, then walked down until the cluster count is legal.
-    let mb = total_sectors / (1024 * 1024 / SECTOR);
+    let mb = total_sectors / (1024 * 1024 / sector);
     let mut spc: u32 = match mb {
         0..=260 => 1,
         261..=8192 => 8,
@@ -174,7 +182,10 @@ fn fat16_cluster_size(total_sectors: u32) -> u32 {
 impl Fat32 {
     fn new(device: Arc<dyn BlockDevice>, label: &str) -> Result<Fat32> {
         let capacity = device.capacity_bytes();
-        let total_sectors = (capacity / SECTOR as u64) as u32;
+        // A FAT declares the medium's own sector size. Anything else is a
+        // filesystem that no reader of that medium will mount.
+        let sector = device.block_size();
+        let total_sectors = (capacity / sector as u64) as u32;
         if total_sectors < 2048 {
             return Err(ImageError::Spec(format!(
                 "{capacity} bytes is too small for a FAT volume"
@@ -193,9 +204,9 @@ impl Fat32 {
             FatKind::Fat32 => (FAT32_RESERVED, 0),
             FatKind::Fat16 => (1, FAT16_ROOT_ENTRIES),
         };
-        let root_dir_sectors = (root_entries * 32).div_ceil(SECTOR);
+        let root_dir_sectors = (root_entries * 32).div_ceil(sector);
         let spc = match kind {
-            FatKind::Fat32 => fat32_cluster_size(total_sectors),
+            FatKind::Fat32 => fat32_cluster_size(total_sectors, sector),
             FatKind::Fat16 => fat16_cluster_size(total_sectors),
         };
         let bytes_per_fat_entry = match kind {
@@ -212,7 +223,7 @@ impl Fat32 {
                 .saturating_sub(NUM_FATS * fat_sectors)
                 .saturating_sub(root_dir_sectors);
             let clusters = data_sectors / spc;
-            let needed = ((clusters + 2) * bytes_per_fat_entry).div_ceil(SECTOR).max(1);
+            let needed = ((clusters + 2) * bytes_per_fat_entry).div_ceil(sector).max(1);
             if needed == fat_sectors {
                 break;
             }
@@ -257,6 +268,7 @@ impl Fat32 {
         };
 
         Ok(Fat32 {
+            sector,
             kind,
             view,
             label: label.to_string(),
@@ -277,12 +289,12 @@ impl Fat32 {
     }
 
     fn cluster_bytes(&self) -> u64 {
-        self.sectors_per_cluster as u64 * SECTOR as u64
+        self.sectors_per_cluster as u64 * self.sector as u64
     }
 
     fn cluster_offset(&self, cluster: u32) -> u64 {
         (self.data_start as u64 + (cluster as u64 - 2) * self.sectors_per_cluster as u64)
-            * SECTOR as u64
+            * self.sector as u64
     }
 
     fn allocate_chain(&mut self, bytes: u64) -> Result<u32> {
@@ -405,7 +417,7 @@ impl Fat32 {
                 // A fixed root area cannot grow, which is the one real limit
                 // FAT16 imposes on an ESP. Say so rather than silently drop the
                 // entries past the end.
-                let capacity = (self.root_dir_sectors * SECTOR) as usize;
+                let capacity = (self.root_dir_sectors * self.sector) as usize;
                 if bytes.len() > capacity {
                     return Err(ImageError::Spec(format!(
                         "the root directory of this FAT16 volume holds {} entries and the tree \
@@ -417,7 +429,7 @@ impl Fat32 {
                 }
                 let mut area = vec![0u8; capacity];
                 area[..bytes.len()].copy_from_slice(&bytes);
-                let at = self.root_dir_sector as u64 * SECTOR as u64;
+                let at = self.root_dir_sector as u64 * self.sector as u64;
                 self.view.write_at(at, &area).await?;
                 Ok(())
             }
@@ -468,10 +480,10 @@ impl Fat32 {
 
         if self.kind == FatKind::Fat32 {
             self.view
-                .write_at(BACKUP_BOOT_SECTOR as u64 * SECTOR as u64, &boot)
+                .write_at(BACKUP_BOOT_SECTOR as u64 * self.sector as u64, &boot)
                 .await?;
 
-            let mut fsinfo = vec![0u8; SECTOR as usize];
+            let mut fsinfo = vec![0u8; self.sector as usize];
             fsinfo[0..4].copy_from_slice(&0x4161_5252u32.to_le_bytes());
             fsinfo[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes());
             let free = self.cluster_count + 2 - self.next_free;
@@ -479,17 +491,17 @@ impl Fat32 {
             fsinfo[492..496].copy_from_slice(&self.next_free.to_le_bytes());
             fsinfo[508..512].copy_from_slice(&[0x00, 0x00, 0x55, 0xAA]);
             self.view
-                .write_at(FSINFO_SECTOR as u64 * SECTOR as u64, &fsinfo)
+                .write_at(FSINFO_SECTOR as u64 * self.sector as u64, &fsinfo)
                 .await?;
             self.view
                 .write_at(
-                    (BACKUP_BOOT_SECTOR + FSINFO_SECTOR) as u64 * SECTOR as u64,
+                    (BACKUP_BOOT_SECTOR + FSINFO_SECTOR) as u64 * self.sector as u64,
                     &fsinfo,
                 )
                 .await?;
         }
 
-        let mut fat_bytes = vec![0u8; (self.fat_sectors * SECTOR) as usize];
+        let mut fat_bytes = vec![0u8; (self.fat_sectors * self.sector) as usize];
         for (i, e) in self.fat.iter().enumerate() {
             match self.kind {
                 FatKind::Fat32 => {
@@ -509,7 +521,7 @@ impl Fat32 {
             }
         }
         for n in 0..NUM_FATS {
-            let at = (self.reserved_sectors + n * self.fat_sectors) as u64 * SECTOR as u64;
+            let at = (self.reserved_sectors + n * self.fat_sectors) as u64 * self.sector as u64;
             self.view.write_at(at, &fat_bytes).await?;
         }
         self.view.flush().await?;
@@ -517,10 +529,10 @@ impl Fat32 {
     }
 
     fn boot_sector(&self) -> Vec<u8> {
-        let mut b = vec![0u8; SECTOR as usize];
+        let mut b = vec![0u8; self.sector as usize];
         b[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
         b[3..11].copy_from_slice(b"MSWIN4.1");
-        b[11..13].copy_from_slice(&(SECTOR as u16).to_le_bytes());
+        b[11..13].copy_from_slice(&(self.sector as u16).to_le_bytes());
         b[13] = self.sectors_per_cluster as u8;
         b[14..16].copy_from_slice(&(self.reserved_sectors as u16).to_le_bytes());
         b[16] = NUM_FATS as u8;
@@ -727,7 +739,7 @@ fn lfn_entries(name: &str, short: &[u8; 11]) -> Vec<u8> {
 
 /// The smallest volume this can format at all, as FAT16.
 pub fn minimum_size() -> u64 {
-    (FAT16_MIN_CLUSTERS as u64 + 1 + 32 + 2 * 32) * SECTOR as u64
+    (FAT16_MIN_CLUSTERS as u64 + 1 + 32 + 2 * 32) * DEFAULT_SECTOR as u64
 }
 
 /// Which width a volume of this size will be formatted as. Callers sizing an
@@ -735,7 +747,7 @@ pub fn minimum_size() -> u64 {
 /// count of 512-byte sectors, so 32 MiB is the ceiling for optical boot, and
 /// FAT32's 65,525-cluster floor puts it just above that.
 pub fn kind_for(capacity: u64) -> FatKind {
-    let total_sectors = (capacity / SECTOR as u64) as u32;
+    let total_sectors = (capacity / DEFAULT_SECTOR as u64) as u32;
     if total_sectors.saturating_sub(FAT32_RESERVED) >= MIN_CLUSTERS {
         FatKind::Fat32
     } else {
@@ -791,10 +803,16 @@ mod tests {
         assert_eq!(&boot[510..512], &[0x55, 0xAA]);
     }
 
+    /// FAT32 needs 65525 clusters, and a cluster is at least one sector — so
+    /// how big a volume has to be before it can be FAT32 scales with the
+    /// medium's sector size. At 512 bytes a 64 MiB volume clears it; at 4096,
+    /// which is what every device here presents, the same 64 MiB has an eighth
+    /// as many sectors and is correctly FAT16. This asks for a volume big
+    /// enough to be FAT32 at the sector size it will actually be read at.
     #[tokio::test]
     async fn a_fat32_volume_declares_itself_fat32() {
         let dir = tempfile::TempDir::new().unwrap();
-        let dev = volume(&dir, "esp32.img", 64 * 1024 * 1024).await;
+        let dev = volume(&dir, "esp32.img", 512 * 1024 * 1024).await;
         format(dev.clone(), "EFI").await.unwrap();
 
         let mut boot = vec![0u8; 512];
