@@ -623,14 +623,84 @@ else
 echo "Configuring network..."
 ip link set lo up
 
-# Find first non-loopback interface
-IFACE=""
-for dev in /sys/class/net/*; do
+# Pick an uplink: carrier first, then speed.
+#
+# This used to take the first non-loopback interface. "First" is a kernel
+# enumeration order, not a statement about which port has a cable in it. On a
+# Dell R230 booting over NVMe/TCP it picked eth0 of a two-port Mellanox while
+# the cable was in eth1, bridged the dead port, and sat in DHCP for four
+# minutes with nothing on the console (stormpump#17). stormbootx, one stage
+# earlier and with no drivers at all, had already enumerated the same four
+# NICs, filtered to link up, and confirmed one answered before committing.
+# Running after Linux has enumerated the same hardware, this should not know
+# less than the firmware did.
+#
+# Carrier cannot be read from a down interface, so every candidate is brought
+# up first and the link is given time to negotiate. That wait is not a fixed
+# sleep: it ends as soon as anything reports carrier, so a machine whose link
+# is already up does not pay for one that is slow.
+# --- BEGIN uplink selection (covered by tests/initramfs-nic-selection.sh)
+LINK_WAIT="${STORM_LINK_WAIT:-10}"
+# Injectable only so the selection can be tested against a fake tree; nothing
+# on a node ever sets it.
+NET_SYSFS="${NET_SYSFS:-/sys/class/net}"
+
+net_speed() {
+    _s=$(cat "$NET_SYSFS/$1/speed" 2>/dev/null) || _s=0
+    case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+    echo "$_s"
+}
+
+net_carrier() {
+    cat "$NET_SYSFS/$1/carrier" 2>/dev/null || echo 0
+}
+
+# Physical ports only. A real one has a device symlink, which skips lo, the
+# bridge this script is about to create, and any veth or ublk device.
+ALL_PHYS=""
+for dev in "$NET_SYSFS"/*; do
     name=$(basename "$dev")
     [ "$name" = "lo" ] && continue
-    IFACE="$name"
-    break
+    [ -e "$dev/device" ] || continue
+    ALL_PHYS="$ALL_PHYS $name"
+    ip link set "$name" up 2>/dev/null || true
 done
+
+waited=0
+while [ "$waited" -lt "$LINK_WAIT" ]; do
+    for name in $ALL_PHYS; do
+        [ "$(net_carrier "$name")" = "1" ] && break 2
+    done
+    sleep 1
+    waited=$((waited + 1))
+done
+
+# What it saw, always — on a machine that will not boot this console is all
+# anyone gets, and "no network" without the evidence is not a diagnosis.
+if [ -n "$ALL_PHYS" ]; then
+    echo "  interfaces after ${waited}s:"
+    for name in $ALL_PHYS; do
+        echo "    $name  mac $(cat "$NET_SYSFS/$name/address" 2>/dev/null)  speed $(net_speed "$name")  carrier $(net_carrier "$name")"
+    done
+fi
+
+# Fastest first, same rule stormbootx uses.
+CANDIDATES=$(
+    for name in $ALL_PHYS; do
+        [ "$(net_carrier "$name")" = "1" ] || continue
+        printf '%012d %s\n' "$(net_speed "$name")" "$name"
+    done | sort -r | awk '{print $2}'
+)
+
+if [ -z "$CANDIDATES" ] && [ -n "$ALL_PHYS" ]; then
+    # Nothing reported a cable. Still try: carrier can be wrong, and a node
+    # that refuses to try is worse than one that fails a DHCP and says so.
+    echo "WARNING: no interface reported carrier after ${LINK_WAIT}s - trying all of them"
+    CANDIDATES="$ALL_PHYS"
+fi
+
+IFACE=$(echo $CANDIDATES | awk '{print $1}')
+# --- END uplink selection
 
 if [ -z "$IFACE" ]; then
     if [ "$BOOT_MODE" = "local" ]; then
@@ -655,8 +725,6 @@ if [ -z "$IFACE" ]; then
 fi
 if [ -z "${NO_NETWORK:-}" ]; then
 
-ip link set "$IFACE" up
-
 # Bring the node up **on a bridge**, the way every hypervisor does.
 #
 # A VM's NIC is a tap, and a tap has to hang off something. Attaching one
@@ -672,28 +740,55 @@ ip link set "$IFACE" up
 # carries on with plain DHCP on the uplink — a node with no VM networking is a
 # node; a node with no networking is a recovery job.
 BRIDGE="${STORM_BRIDGE:-stormbr0}"
-UPLINK="$IFACE"
-if [ -z "${NO_BRIDGE:-}" ] && ip link add name "$BRIDGE" type bridge 2>/dev/null; then
-    if ip link set "$IFACE" master "$BRIDGE" 2>/dev/null && ip link set "$BRIDGE" up; then
-        # Everything below configures the bridge instead: it is the interface
-        # that now holds the address, and the uplink is one of its ports.
-        echo "  bridged: $IFACE is a port of $BRIDGE"
-        IFACE="$BRIDGE"
-    else
-        echo "WARNING: could not enslave $IFACE to $BRIDGE — no VM networking"
-        ip link del "$BRIDGE" 2>/dev/null || true
+
+# Put one uplink on the bridge and leave $IFACE naming whatever now holds the
+# address. A function because a lease has to be able to fail and be retried on
+# the next candidate, and each attempt has to start from the same state.
+net_bring_up() {
+    _up="$1"
+    ip link set "$_up" up
+    IFACE="$_up"
+    if [ -z "${NO_BRIDGE:-}" ] && ip link add name "$BRIDGE" type bridge 2>/dev/null; then
+        if ip link set "$_up" master "$BRIDGE" 2>/dev/null && ip link set "$BRIDGE" up; then
+            # Everything below configures the bridge instead: it is the
+            # interface that now holds the address, and the uplink is one of
+            # its ports.
+            echo "  bridged: $_up is a port of $BRIDGE"
+            IFACE="$BRIDGE"
+        else
+            echo "WARNING: could not enslave $_up to $BRIDGE — no VM networking"
+            ip link del "$BRIDGE" 2>/dev/null || true
+        fi
     fi
-fi
+}
+
+# Undo a failed attempt, so the next candidate starts clean rather than
+# inheriting a bridge with a dead port still in it.
+net_teardown() {
+    ip addr flush dev "$BRIDGE" 2>/dev/null || true
+    ip link set "$1" nomaster 2>/dev/null || true
+    ip link del "$BRIDGE" 2>/dev/null || true
+    ip addr flush dev "$1" 2>/dev/null || true
+}
 
 if [ -n "$IP_CONF" ] && [ "$IP_CONF" != "dhcp" ]; then
-    # Static IP from kernel cmdline (ip=addr::gw:mask::iface:none)
+    # Static IP from kernel cmdline (ip=addr::gw:mask::iface:none). One
+    # candidate only: the address was chosen for a particular port, and
+    # putting it on a different one is not a fallback, it is a wrong answer.
+    net_bring_up "$IFACE"
     ADDR=$(echo "$IP_CONF" | cut -d: -f1)
     GW=$(echo "$IP_CONF" | cut -d: -f3)
     MASK=$(echo "$IP_CONF" | cut -d: -f4)
     ip addr add "$ADDR/$MASK" dev "$IFACE"
     [ -n "$GW" ] && ip route add default via "$GW"
 else
-    # DHCP.
+    # DHCP, over each candidate in turn until one answers.
+    #
+    # Carrier says a cable is in the port. It does not say the port reaches a
+    # DHCP server — a link to a switch with no route to one has carrier and
+    # no lease. So a lease is the actual test, and failing it moves to the
+    # next candidate instead of falling to link-local with three good ports
+    # untried.
     #
     # udhcpc does not configure anything itself: it obtains a lease and hands
     # the values to a script, and everything an interface needs happens there.
@@ -701,8 +796,31 @@ else
     # visible in the server's lease table, which made it look like it had
     # worked — and applied none of it. The node came up with an address
     # allocated to it and no address on it.
-    if ! udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t 10; then
-        echo "WARNING: DHCP failed, trying link-local..."
+    #
+    # Fewer retries per candidate when there is more than one, so trying four
+    # ports does not take four times as long as trying the only one there is.
+    DHCP_TRIES=5
+    [ "$(echo $CANDIDATES | wc -w)" -le 1 ] && DHCP_TRIES=10
+
+    LEASED=""
+    for UPLINK in $CANDIDATES; do
+        echo "  trying $UPLINK (speed $(net_speed "$UPLINK"), carrier $(net_carrier "$UPLINK"))"
+        net_bring_up "$UPLINK"
+        if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES"; then
+            LEASED="$UPLINK"
+            break
+        fi
+        echo "  no lease on $UPLINK"
+        net_teardown "$UPLINK"
+    done
+
+    if [ -z "$LEASED" ]; then
+        # Name every port that was tried. The old message said only "DHCP
+        # failed", which on a four-port machine does not say whether it tried
+        # one port or all of them — the difference between a dead switch and
+        # a cable in the wrong socket.
+        echo "WARNING: DHCP failed on every candidate ($CANDIDATES), trying link-local..."
+        net_bring_up "$(echo $CANDIDATES | awk '{print $1}')"
         ip addr add 169.254.1.1/16 dev "$IFACE"
     fi
 fi

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-09-05
+- **fix(initramfs): the uplink is chosen by carrier and speed, not by enumeration order.** It took the first non-loopback interface. "First" is a kernel enumeration order, not a statement about which port has a cable in it: on a Dell R230 booting over NVMe/TCP it picked `eth0` of a two-port Mellanox while the cable was in `eth1`, bridged the dead port, and sat in DHCP for four minutes before falling to link-local — with the hostname derived from the dead port's MAC. stormbootx, a stage earlier and with no drivers at all, had already enumerated the same four NICs, filtered to link up and confirmed one *answered* before committing; running after Linux has enumerated the same hardware, this should not know less than the firmware did.
+
+  Every physical port is brought up first (carrier cannot be read from a down interface), the link is given time to negotiate — ending as soon as anything reports carrier, so a fast link does not wait for a slow one — and the candidates are ordered fastest first. DHCP then runs over each in turn: carrier says a cable is in the port, not that the port reaches a DHCP server, so the lease is the real test and failing it moves to the next candidate instead of falling to link-local with three good ports untried. Link-local remains the last resort, and now names every port that was tried.
+- **test:** `tests/initramfs-nic-selection.sh` runs the shipped selection against a fake `/sys/class/net`, extracted from the generated init between markers so the test cannot drift from what runs. Covers the R230 layout, speed ordering, single port, no carrier anywhere, loopback and bridges, and an unreadable speed.
+
 ## [v13.5.0] — 2026-09-05
 
 ### 2026-09-05
