@@ -323,10 +323,10 @@ async fn manifest_html(
             html_escape(&m.name),
             html_escape(m.version.as_deref().unwrap_or("—")),
             was,
-            human_size(m.size_bytes),
+            m.size_bytes.map(human_size).unwrap_or_else(|| "—".to_string()),
             html_escape(&m.digest),
             html_escape(&m.digest[..m.digest.len().min(12)]),
-            html_escape(&m.provenance),
+            html_escape(m.provenance.as_deref().unwrap_or("—")),
         ));
         let _ = status;
     }
