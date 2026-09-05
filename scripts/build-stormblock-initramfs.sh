@@ -430,6 +430,7 @@ IP_CONF=""
 SLAB=""
 BOOTHOST=""
 BOOTTAG=""
+HOSTNQN=""
 META=""
 VOLUME=""
 OVERLAY=""
@@ -449,6 +450,11 @@ for param in $(cat /proc/cmdline); do
         # boots it, so it names the appliance, never the namespace.
         rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
+        # What to call ourselves on every NVMe connect. stormbootx composed
+        # this from SMBIOS and presented it to load the kernel; presenting the
+        # same name here means the appliance sees one machine across the
+        # handover instead of a nameless second initiator.
+        rd.stormblock.hostnqn=*)     HOSTNQN="${param#*=}" ;;
         rd.stormblock.meta=*)        META="${param#*=}" ;;
         rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
         rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
@@ -889,6 +895,16 @@ fi
 # Start stormblock with ublk export
 echo "Starting StormBlock..."
 if [ "$BOOT_MODE" = "local" ]; then
+    # One identity for every connect this boot makes, rather than threading it
+    # through each call. Composed by the firmware, echoed here: the format
+    # lives in stormbootx and nothing re-derives it.
+    if [ -n "$HOSTNQN" ]; then
+        export STORMBLOCK_HOST_NQN="$HOSTNQN"
+        echo "Host NQN: $HOSTNQN"
+    elif [ -n "$BOOTTAG" ]; then
+        echo "NOTE: no rd.stormblock.hostnqn= — this node will connect anonymously"
+    fi
+
     # Diskless: this machine's slab is a namespace on the appliance, and which
     # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
     # on the service tag. The firmware made the same claim a stage earlier to
@@ -1300,6 +1316,7 @@ echo ""
 echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
 echo "  netboot: root=/dev/ublkb0 rd.stormblock.boothost=<appliance-url> rd.stormblock.tag=<tag>"
+echo "           [rd.stormblock.hostnqn=<nqn>]  — the name firmware presented, echoed on every connect"
 echo "           — claims boothost/<tag> and uses the namespace it names as the slab"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file-or-nvme-tcp://...> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
 echo "         [rd.stormblock.overlay=tmpfs[:SIZE]|<blockdev>]  — writable overlay over a read-only (erofs) root"

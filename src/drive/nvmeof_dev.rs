@@ -41,7 +41,41 @@ const IO_DSM: u8 = 0x09;
 const CNS_NAMESPACE: u8 = 0x00;
 const CNS_CONTROLLER: u8 = 0x01;
 
+/// What an initiator calls itself when nothing more specific is set.
+///
+/// A constant is the wrong answer for a node: every stormblock initiator in
+/// the fleet presents this same string, so a target cannot tell one caller
+/// from another. That matters because the host NQN is the one identity NVMe
+/// already carries — stormbootx composes `nqn.…:host-<service-tag>` from
+/// SMBIOS and presents it on every connect, which is how the appliance knows
+/// which machine is asking before anything else exists.
+///
+/// So this stays as the fallback and [`set_default_host_nqn`] overrides it,
+/// letting a node present the *same* name Linux-side that its firmware
+/// presented a stage earlier.
 const HOST_NQN: &str = "nqn.2024.io.stormblock:initiator";
+
+static DEFAULT_HOST_NQN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the host NQN every connect presents unless its spec names one.
+///
+/// First call wins: this is boot-time identity, not a runtime knob, and a
+/// second caller changing it under open controllers would mean one node
+/// answering to two names.
+pub fn set_default_host_nqn(nqn: impl Into<String>) -> &'static str {
+    DEFAULT_HOST_NQN.get_or_init(|| nqn.into())
+}
+
+/// The host NQN to present when a spec does not name one.
+///
+/// `STORMBLOCK_HOST_NQN` is read once as a fallback so the initramfs can set
+/// it for every connect the boot makes without threading it through each
+/// call site.
+pub fn default_host_nqn() -> &'static str {
+    DEFAULT_HOST_NQN
+        .get_or_init(|| std::env::var("STORMBLOCK_HOST_NQN").unwrap_or_else(|_| HOST_NQN.to_string()))
+        .as_str()
+}
 /// Per-op transfer cap: fits every target's defaults (our ICResp
 /// advertises maxh2cdata 131072) and keeps NLB well inside 16 bits.
 const MAX_CHUNK: usize = 128 * 1024;
@@ -54,6 +88,10 @@ pub struct NvmeTcpSpec {
     pub addr: String,
     pub nqn: String,
     pub nsid: u32,
+    /// What to call ourselves on this connection. `None` uses
+    /// [`default_host_nqn`], which is the usual case — a node has one
+    /// identity, not one per volume.
+    pub host_nqn: Option<String>,
 }
 
 impl NvmeTcpSpec {
@@ -73,10 +111,17 @@ impl NvmeTcpSpec {
             return None;
         }
         let mut nsid = 1u32;
+        let mut host_nqn = None;
         if let Some(q) = query {
             for kv in q.split('&') {
                 if let Some(v) = kv.strip_prefix("nsid=") {
                     nsid = v.parse().ok()?;
+                } else if let Some(v) = kv.strip_prefix("hostnqn=") {
+                    // Spelled as nvme-cli spells it, so an operator moving
+                    // between the two does not have to translate.
+                    if !v.is_empty() {
+                        host_nqn = Some(v.to_string());
+                    }
                 }
             }
         }
@@ -84,11 +129,22 @@ impl NvmeTcpSpec {
             addr: addr.to_string(),
             nqn: nqn.to_string(),
             nsid,
+            host_nqn,
         })
     }
 
     pub fn uri(&self) -> String {
-        format!("nvme-tcp://{}/{}?nsid={}", self.addr, self.nqn, self.nsid)
+        let mut u = format!("nvme-tcp://{}/{}?nsid={}", self.addr, self.nqn, self.nsid);
+        if let Some(h) = &self.host_nqn {
+            u.push_str("&hostnqn=");
+            u.push_str(h);
+        }
+        u
+    }
+
+    /// The name to present on this connection.
+    pub fn effective_host_nqn(&self) -> &str {
+        self.host_nqn.as_deref().unwrap_or_else(default_host_nqn)
     }
 }
 
@@ -133,7 +189,7 @@ struct Conn {
 
 impl Conn {
     /// TCP connect + ICReq/ICResp + Fabric Connect for `qid`.
-    async fn establish(addr: &str, nqn: &str, qid: u16) -> io::Result<Self> {
+    async fn establish(addr: &str, nqn: &str, host_nqn: &str, qid: u16) -> io::Result<Self> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
         let (reader, writer) = stream.into_split();
@@ -143,7 +199,7 @@ impl Conn {
             cid: 1,
         };
         conn.ic_handshake().await?;
-        conn.fabric_connect(nqn, qid).await?;
+        conn.fabric_connect_as(nqn, host_nqn, qid).await?;
         Ok(conn)
     }
 
@@ -176,7 +232,12 @@ impl Conn {
         Ok(())
     }
 
-    async fn fabric_connect(&mut self, nqn: &str, qid: u16) -> io::Result<()> {
+    async fn fabric_connect_as(
+        &mut self,
+        nqn: &str,
+        host_nqn: &str,
+        qid: u16,
+    ) -> io::Result<()> {
         let cid = self.next_cid();
         let mut sqe = [0u8; 64];
         sqe[0] = NVME_FABRIC_OPC;
@@ -194,8 +255,11 @@ impl Conn {
         data[17] = 0xFF;
         let n = nqn.as_bytes();
         data[256..256 + n.len().min(256)].copy_from_slice(&n[..n.len().min(256)]);
-        let h = HOST_NQN.as_bytes();
-        data[512..512 + h.len()].copy_from_slice(h);
+        // Offset 512 of the Connect data is the host NQN — the identity the
+        // target sees, and the only one NVMe carries on its own.
+        let h = host_nqn.as_bytes();
+        let n = h.len().min(256);
+        data[512..512 + n].copy_from_slice(&h[..n]);
 
         self.send_capsule(&sqe, &data).await?;
         let cqe = self.read_capsule_resp().await?;
@@ -409,7 +473,7 @@ impl NvmeofDevice {
             spec.nqn,
             spec.nsid
         );
-        let mut admin = Conn::establish(&spec.addr, &spec.nqn, 0)
+        let mut admin = Conn::establish(&spec.addr, &spec.nqn, spec.effective_host_nqn(), 0)
             .await
             .map_err(DriveError::Io)?;
         let ctrl = admin.identify(CNS_CONTROLLER, 0).await.map_err(DriveError::Io)?;
@@ -442,7 +506,7 @@ impl NvmeofDevice {
         );
         drop(admin);
 
-        let io_conn = Conn::establish(&spec.addr, &spec.nqn, 1)
+        let io_conn = Conn::establish(&spec.addr, &spec.nqn, spec.effective_host_nqn(), 1)
             .await
             .map_err(DriveError::Io)?;
 
@@ -475,7 +539,7 @@ impl NvmeofDevice {
         let mut guard = self.conn.lock().await;
         if guard.is_none() {
             *guard = Some(
-                Conn::establish(&self.spec.addr, &self.spec.nqn, 1)
+                Conn::establish(&self.spec.addr, &self.spec.nqn, self.spec.effective_host_nqn(), 1)
                     .await
                     .map_err(DriveError::Io)?,
             );
@@ -656,5 +720,42 @@ mod tests {
         let a = Uuid::new_v5(&Uuid::NAMESPACE_URL, s.uri().as_bytes());
         let b = Uuid::new_v5(&Uuid::NAMESPACE_URL, s.uri().as_bytes());
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod host_nqn_tests {
+    use super::NvmeTcpSpec;
+
+    /// The identity travels with the address, so a claim's URI can carry it
+    /// and every later reconnect presents the same name.
+    #[test]
+    fn a_uri_can_name_the_host() {
+        let s = NvmeTcpSpec::parse(
+            "nvme-tcp://10.0.0.5:4420/nqn.2026-09.lo.g16:stormcos?nsid=7&hostnqn=nqn.2026-09.lo.storm:host-C2NR0Q2",
+        )
+        .expect("parses");
+        assert_eq!(s.nsid, 7);
+        assert_eq!(s.host_nqn.as_deref(), Some("nqn.2026-09.lo.storm:host-C2NR0Q2"));
+        assert_eq!(s.effective_host_nqn(), "nqn.2026-09.lo.storm:host-C2NR0Q2");
+        // Round-trips, so a spec that came from a URI can be written back out.
+        assert_eq!(NvmeTcpSpec::parse(&s.uri()).unwrap(), s);
+    }
+
+    /// Without one, a node still connects — it just does not say who it is,
+    /// which is the behaviour every existing caller had.
+    #[test]
+    fn a_uri_without_a_host_falls_back() {
+        let s = NvmeTcpSpec::parse("nvme-tcp://10.0.0.5:4420/nqn.x?nsid=1").unwrap();
+        assert_eq!(s.host_nqn, None);
+        assert!(!s.effective_host_nqn().is_empty());
+        assert_eq!(NvmeTcpSpec::parse(&s.uri()).unwrap(), s);
+    }
+
+    /// An empty value is not an identity; it must not become one.
+    #[test]
+    fn an_empty_host_is_ignored() {
+        let s = NvmeTcpSpec::parse("nvme-tcp://10.0.0.5:4420/nqn.x?hostnqn=").unwrap();
+        assert_eq!(s.host_nqn, None);
     }
 }
