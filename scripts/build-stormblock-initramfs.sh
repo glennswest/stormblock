@@ -921,11 +921,24 @@ if [ "$BOOT_MODE" = "local" ]; then
         case "$SLAB" in
         *://*) ;;
         *)
+            # Positive evidence, not absence of a known error. A device that
+            # is a slab says so:
+            #
+            #   /dev/sdb: slab 7661cf8b-... (role=data, tier=hot, ...)
+            #
+            # Anything else — "not a slab", "cannot open", an empty removable
+            # drive — means ask. The first version of this looked for the
+            # words "not a slab" and was caught out immediately: on the R230
+            # /dev/sda is sometimes the WD disk and sometimes the iDRAC
+            # virtual floppy, and an empty floppy answers ENOMEDIUM rather
+            # than "not a slab", so the probe passed and the boot died on
+            # "No medium found". A device path is not a stable identity.
             if [ ! -e "$SLAB" ]; then
                 echo "No $SLAB on this machine — asking $BOOTHOST instead"
                 SLAB=""
-            elif /usr/sbin/stormblock slab list "$SLAB" 2>/dev/null | grep -q "not a slab"; then
-                echo "$SLAB holds no slab — asking $BOOTHOST instead"
+            elif ! /usr/sbin/stormblock slab list "$SLAB" 2>/dev/null \
+                 | grep -qE ": slab [0-9a-f-]{36}"; then
+                echo "$SLAB is not a slab — asking $BOOTHOST instead"
                 SLAB=""
             fi
             ;;
