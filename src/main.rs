@@ -3839,9 +3839,12 @@ async fn handle_boot_claim(
     let url = format!("{base}/api/v1/synonyms/{namespace}/{tag}/claim");
     eprintln!("boot-claim: {url}");
 
-    let client = reqwest::Client::builder()
+    // The in-house client, not reqwest: the binary deliberately does not carry
+    // reqwest, and this runs in the initramfs where the binary is the payload.
+    let client = crate::http::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .build()?;
+        .build()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Retry rather than fail: a node and the appliance it boots from can come
     // back from a power cut together, and whichever loses the race should
@@ -3876,7 +3879,7 @@ async fn handle_boot_claim(
                 // A tag nobody has decided for is a fleet decision that has
                 // not been made. Say which name was missing: it is the thing
                 // an operator has to create.
-                if status == reqwest::StatusCode::NOT_FOUND {
+                if status.as_u16() == 404 {
                     anyhow::bail!(
                         "no image is assigned to this machine: {namespace}/{tag} does not exist \
                          on {base}. Create it with PUT /api/v1/synonyms/{namespace}/{tag}"
