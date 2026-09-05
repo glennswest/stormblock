@@ -295,6 +295,36 @@ enum SubCommand {
     },
     /// Boot from a local slab — attach an existing slab + metadata
     /// non-destructively and export the boot volume as /dev/ublkb0
+    /// Ask the appliance which image this machine boots, and print somewhere
+    /// to attach it from.
+    ///
+    /// The kernel command line is baked into the image and is therefore the
+    /// same on every node that boots it, so it cannot name a per-machine
+    /// namespace. The service tag can: it identifies the machine rather than
+    /// one of its network cards, and survives a card being swapped. This is
+    /// the same `boothost/<tag>` claim the firmware makes one stage earlier —
+    /// by the time Linux is up the firmware's block device is gone with the
+    /// UEFI that published it, so the node has to ask again in its own right.
+    ///
+    /// Prints the attach URI on stdout and nothing else, so it can be used
+    /// directly as `--slab`:
+    ///
+    ///   stormblock boot-local --slab "$(stormblock boot-claim --boothost URL)"
+    BootClaim {
+        /// The appliance, e.g. http://192.168.31.202:9090
+        #[arg(long, required = true)]
+        boothost: String,
+        /// Service tag. Read from DMI when not given.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Synonym namespace holding the per-machine decision.
+        #[arg(long, default_value = "boothost")]
+        namespace: String,
+        /// How long to keep trying. A node boots faster than the appliance
+        /// reboots, and a machine that gives up first needs a human.
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+    },
     BootLocal {
         /// Slab device or file path(s) (e.g. root.slab). Paired with the
         /// array records in volumes.dat in order.
@@ -714,6 +744,9 @@ async fn main() -> anyhow::Result<()> {
                     slab, volumes, meta.as_deref(), api.as_deref(), data_dir.as_deref(),
                     &cli.config,
                 ).await;
+            }
+            SubCommand::BootClaim { boothost, tag, namespace, timeout_secs } => {
+                return handle_boot_claim(boothost, tag.as_deref(), namespace, *timeout_secs).await;
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier, check,
@@ -3751,6 +3784,116 @@ async fn handle_adopt_ublk(
 /// restore volume metadata, export the boot volume as /dev/ublkb0.
 /// The local-slab → ublk-root path stormcos boots through (issue #12).
 #[allow(clippy::too_many_arguments)]
+/// Where a machine's own service tag is recorded by its firmware.
+///
+/// `product_serial` is the service tag on Dell; `board_serial` is the
+/// fallback for boards that leave the first one unset. Both are root-only,
+/// which the initramfs is.
+const DMI_TAG_PATHS: [&str; 2] = [
+    "/sys/class/dmi/id/product_serial",
+    "/sys/class/dmi/id/board_serial",
+];
+
+fn service_tag_from_dmi() -> Option<String> {
+    for p in DMI_TAG_PATHS {
+        if let Ok(v) = std::fs::read_to_string(p) {
+            let v = v.trim().to_string();
+            // Boards with nothing burned in say so in a variety of ways, and
+            // claiming `boothost/To be filled by O.E.M.` would resolve for
+            // every such machine at once.
+            let junk = v.is_empty()
+                || v.eq_ignore_ascii_case("none")
+                || v.eq_ignore_ascii_case("unknown")
+                || v.to_ascii_lowercase().contains("to be filled")
+                || v.to_ascii_lowercase().contains("not specified")
+                || v.chars().all(|c| c == '0' || c == '.' || c == '-');
+            if !junk {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve this machine's image and print where to attach it.
+///
+/// Everything diagnostic goes to stderr so stdout is exactly the URI and
+/// nothing else — the caller substitutes it straight into `--slab`.
+async fn handle_boot_claim(
+    boothost: &str,
+    tag: Option<&str>,
+    namespace: &str,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    let tag = match tag {
+        Some(t) => t.to_string(),
+        None => service_tag_from_dmi().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no service tag in DMI ({}) and none given with --tag",
+                DMI_TAG_PATHS.join(", ")
+            )
+        })?,
+    };
+    let base = boothost.trim_end_matches('/');
+    let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
+    let url = format!("{base}/api/v1/synonyms/{namespace}/{tag}/claim");
+    eprintln!("boot-claim: {url}");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    // Retry rather than fail: a node and the appliance it boots from can come
+    // back from a power cut together, and whichever loses the race should
+    // wait rather than drop someone to an initramfs shell.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut last = String::new();
+    loop {
+        match client.post(&url).json(&serde_json::json!({})).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                        anyhow::anyhow!("claim returned {status} but not JSON: {e}: {body}")
+                    })?;
+                    let uri = v
+                        .get("attach")
+                        .and_then(|a| a.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "claim answered without an attach URI — a volume id alone is not \
+                                 bootable: {body}"
+                            )
+                        })?;
+                    if let Some(name) = v.get("volume").and_then(|x| x.get("name")).and_then(|x| x.as_str()) {
+                        eprintln!("boot-claim: {tag} -> {name}");
+                    }
+                    println!("{uri}");
+                    return Ok(());
+                }
+                // A tag nobody has decided for is a fleet decision that has
+                // not been made. Say which name was missing: it is the thing
+                // an operator has to create.
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    anyhow::bail!(
+                        "no image is assigned to this machine: {namespace}/{tag} does not exist \
+                         on {base}. Create it with PUT /api/v1/synonyms/{namespace}/{tag}"
+                    );
+                }
+                last = format!("{status}: {body}");
+            }
+            Err(e) => last = e.to_string(),
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("boot-claim failed after {timeout_secs}s: {last}");
+        }
+        eprintln!("boot-claim: {last} - retrying");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
 async fn handle_boot_local(
     slab_paths: &[String],
     meta: Option<&str>,

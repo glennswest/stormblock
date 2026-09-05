@@ -428,6 +428,8 @@ LAYOUT=""
 PORT="3260"
 IP_CONF=""
 SLAB=""
+BOOTHOST=""
+BOOTTAG=""
 META=""
 VOLUME=""
 OVERLAY=""
@@ -442,6 +444,11 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.layout=*)      LAYOUT="${param#*=}" ;;
         rd.stormblock.port=*)        PORT="${param#*=}" ;;
         rd.stormblock.slab=*)        SLAB="${param#*=}" ;;
+        # Diskless: ask the appliance which image this machine boots. The
+        # cmdline is baked into the image and identical on every node that
+        # boots it, so it names the appliance, never the namespace.
+        rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
+        rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         rd.stormblock.meta=*)        META="${param#*=}" ;;
         rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
         rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
@@ -459,6 +466,11 @@ done
 # initramfs carries a boot.toml handoff and no iSCSI portal was given.
 BOOT_MODE="iscsi"
 if [ -n "$SLAB" ]; then
+    BOOT_MODE="local"
+elif [ -n "$BOOTHOST" ]; then
+    # Same path as a local slab from here on: only *where the slab is* differs,
+    # and stormblock opens a fabric URI wherever it opens a device path. The
+    # claim itself has to wait for the network, so it happens after that is up.
     BOOT_MODE="local"
 elif [ -z "$PORTAL" ] && [ -f /etc/stormblock/boot.toml ] && [ -f /etc/stormblock/slab ]; then
     # /etc/stormblock/slab: one line naming the slab device/file
@@ -615,7 +627,7 @@ fi
 # So a local boot brings the network up too, when the command line asks for it
 # with `ip=dhcp` or `ip=<addr>::<gw>:<mask>::<iface>:none`. Without `ip=` it
 # stays as it was: loopback only, and nothing waits on DHCP that did not ask.
-if [ "$BOOT_MODE" = "local" ] && [ -z "$IP_CONF" ]; then
+if [ "$BOOT_MODE" = "local" ] && [ -z "$IP_CONF" ] && [ -z "$BOOTHOST" ]; then
     # No network asked for. Load ublk and jump straight to the local attach.
     ip link set lo up 2>/dev/null || true
     :
@@ -877,22 +889,54 @@ fi
 # Start stormblock with ublk export
 echo "Starting StormBlock..."
 if [ "$BOOT_MODE" = "local" ]; then
-    # The slab device appears asynchronously after its driver loads — wait
-    # bounded instead of letting boot-local open a nonexistent path (#14).
-    if [ ! -e "$SLAB" ]; then
-        echo "Waiting for slab device $SLAB..."
-        TIMEOUT=30
-        while [ ! -e "$SLAB" ] && [ $TIMEOUT -gt 0 ]; do
-            sleep 1
-            TIMEOUT=$((TIMEOUT - 1))
-        done
+    # Diskless: this machine's slab is a namespace on the appliance, and which
+    # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
+    # on the service tag. The firmware made the same claim a stage earlier to
+    # load the kernel, but what it published was a UEFI block device and that
+    # ceased to exist when the kernel started, so the node asks in its own
+    # right rather than inheriting anything.
+    if [ -z "$SLAB" ] && [ -n "$BOOTHOST" ]; then
+        echo "Asking $BOOTHOST which image this machine boots..."
+        TAGARG=""
+        [ -n "$BOOTTAG" ] && TAGARG="--tag $BOOTTAG"
+        SLAB=$(/usr/sbin/stormblock boot-claim --boothost "$BOOTHOST" $TAGARG)
+        if [ -z "$SLAB" ]; then
+            echo "FATAL: no image is assigned to this machine"
+            echo "  service tag: $(cat /sys/class/dmi/id/product_serial 2>/dev/null)"
+            echo "  appliance:   $BOOTHOST"
+            echo "Dropping to shell..."
+            exec /bin/sh
+        fi
+        echo "  slab: $SLAB"
     fi
-    if [ ! -e "$SLAB" ]; then
-        echo "FATAL: slab device $SLAB never appeared (storage driver missing?)"
-        echo "Loaded modules:"; cat /proc/modules 2>/dev/null | cut -d' ' -f1
-        echo "Dropping to shell..."
-        exec /bin/sh
-    fi
+
+    # A fabric URI is not a path and will never appear as one. stormblock
+    # opens `nvme-tcp://` wherever it opens a device path, so there is nothing
+    # to wait for — waiting is what turned a diskless boot into 30 seconds and
+    # an initramfs shell.
+    case "$SLAB" in
+    *://*)
+        echo "Slab is remote: $SLAB"
+        ;;
+    *)
+        # The slab device appears asynchronously after its driver loads — wait
+        # bounded instead of letting boot-local open a nonexistent path (#14).
+        if [ ! -e "$SLAB" ]; then
+            echo "Waiting for slab device $SLAB..."
+            TIMEOUT=30
+            while [ ! -e "$SLAB" ] && [ $TIMEOUT -gt 0 ]; do
+                sleep 1
+                TIMEOUT=$((TIMEOUT - 1))
+            done
+        fi
+        if [ ! -e "$SLAB" ]; then
+            echo "FATAL: slab device $SLAB never appeared (storage driver missing?)"
+            echo "Loaded modules:"; cat /proc/modules 2>/dev/null | cut -d' ' -f1
+            echo "Dropping to shell..."
+            exec /bin/sh
+        fi
+        ;;
+    esac
 
     # Writable thin volumes: each becomes a --writable to boot-local, exported
     # at the next ublk index after root (0) and image-store (1 if present).
@@ -1245,7 +1289,9 @@ fi
 echo ""
 echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
-echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
+echo "  netboot: root=/dev/ublkb0 rd.stormblock.boothost=<appliance-url> [rd.stormblock.tag=<service-tag>]"
+echo "           — claims boothost/<tag> and uses the namespace it names as the slab"
+echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file-or-nvme-tcp://...> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
 echo "         [rd.stormblock.overlay=tmpfs[:SIZE]|<blockdev>]  — writable overlay over a read-only (erofs) root"
 echo "         [rd.stormblock.mount=<vol>:<path>,...]  — export and MOUNT these into the real root"
 echo "                 for a PID 1 that is not systemd (stormpump reads directories, not fstab)"
