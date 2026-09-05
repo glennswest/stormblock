@@ -222,13 +222,15 @@ async fn index_html(State(state): State<Arc<AppState>>) -> Response {
         let s = summarise(&state, r).await;
         rows.push_str(&format!(
             "<tr><td><strong>{}</strong></td><td>{}</td><td>{}</td><td>{}</td>\
-             <td><a href=\"{}\">image.img</a></td><td><a href=\"{}\">manifest</a></td>\
+             <td><a href=\"{}\">image.img</a></td>\
+             <td><a href=\"{}.html\">table</a> · <a href=\"{}\">json</a></td>\
              <td>{}</td></tr>",
             html_escape(&s.version),
             s.created,
             s.size_human,
             s.components,
             s.image_url,
+            s.manifest_url,
             s.manifest_url,
             if s.has_notes {
                 format!("<a href=\"{}\">notes</a>", s.notes_url)
@@ -249,6 +251,140 @@ async fn index_html(State(state): State<Arc<AppState>>) -> Response {
          <h1>stormcos releases</h1>\
          <table><tr><th>version<th>published<th>size<th>components<th>image<th>manifest<th>notes</tr>\
          {rows}</table>"
+    ))
+    .into_response()
+}
+
+
+/// `GET /api/v1/releases/{version}/manifest.html` — the manifest as a table,
+/// with what changed since the release before it.
+///
+/// The JSON manifest is the record; this is the thing a person reads. Fifty-four
+/// components is too many to diff by eye across two `curl`s, and the question
+/// actually being asked at a release is never "what is in it" but "what moved".
+/// So every row carries its status against the previous release and the page
+/// opens filtered to nothing — type to narrow, or click a status to see only
+/// those.
+async fn manifest_html(
+    State(state): State<Arc<AppState>>,
+    Path(version): Path<String>,
+) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "releases", "method" => "manifest_html").increment(1);
+
+    let releases = sorted(load(&state).await);
+    let Some(this) = releases.iter().find(|r| r.version == version) else {
+        return ApiError::not_found(format!("no release {version}"));
+    };
+    let previous = releases.iter().skip_while(|r| r.version != version).nth(1);
+
+    // Keyed by kind *and* name, for the reason `changes` documents: the same
+    // name appears as a binary and as the golden built around it, and keyed by
+    // name alone one masks the other.
+    let before: std::collections::HashMap<(&str, &str), &ManifestEntry> = previous
+        .map(|p| {
+            p.manifest
+                .iter()
+                .map(|m| ((m.kind.as_str(), m.name.as_str()), m))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut entries: Vec<&ManifestEntry> = this.manifest.iter().collect();
+    entries.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.name.cmp(&b.name)));
+
+    let mut rows = String::new();
+    let (mut n_new, mut n_changed) = (0usize, 0usize);
+    for m in &entries {
+        let prev = before.get(&(m.kind.as_str(), m.name.as_str()));
+        let (status, cls) = match prev {
+            None if previous.is_some() => {
+                n_new += 1;
+                ("new", "new")
+            }
+            None => ("—", "same"),
+            Some(p) if p.digest != m.digest => {
+                n_changed += 1;
+                ("changed", "changed")
+            }
+            Some(_) => ("same", "same"),
+        };
+        // What it changed *from* is the useful half of "changed".
+        let was = match prev {
+            Some(p) if p.digest != m.digest => {
+                let pv = p.version.clone().unwrap_or_else(|| p.digest[..12].to_string());
+                format!("<div class=was>was {}</div>", html_escape(&pv))
+            }
+            _ => String::new(),
+        };
+        rows.push_str(&format!(
+            "<tr class={cls} data-s=\"{cls}\"><td>{}</td><td>{}</td><td>{}{}</td>\
+             <td class=num>{}</td><td><code title=\"{}\">{}</code></td><td class=prov>{}</td></tr>",
+            html_escape(&m.kind),
+            html_escape(&m.name),
+            html_escape(m.version.as_deref().unwrap_or("—")),
+            was,
+            human_size(m.size_bytes),
+            html_escape(&m.digest),
+            html_escape(&m.digest[..m.digest.len().min(12)]),
+            html_escape(&m.provenance),
+        ));
+        let _ = status;
+    }
+
+    let since = match previous {
+        Some(p) => format!(
+            "{} changed, {} new since <strong>{}</strong>",
+            n_changed,
+            n_new,
+            html_escape(&p.version)
+        ),
+        None => "first release — everything in it is new".to_string(),
+    };
+
+    Html(format!(
+        "<!doctype html><meta charset=utf-8><title>stormcos {v} manifest</title>\
+         <style>body{{font:14px/1.5 system-ui,sans-serif;margin:2rem;max-width:72rem}}\
+         table{{border-collapse:collapse;width:100%}}\
+         th,td{{text-align:left;padding:.35rem .7rem;border-bottom:1px solid #ddd;vertical-align:top}}\
+         th{{font-weight:600;border-bottom:2px solid #999}}\
+         code{{font:12px/1.4 ui-monospace,monospace;color:#555}}\
+         .num{{text-align:right;white-space:nowrap}}\
+         .prov{{color:#666;font-size:12px;word-break:break-all;max-width:22rem}}\
+         .was{{color:#a60;font-size:12px}}\
+         tr.changed td:first-child{{box-shadow:inset 3px 0 #d80}}\
+         tr.new td:first-child{{box-shadow:inset 3px 0 #0a0}}\
+         .bar{{margin:.8rem 0;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}}\
+         input,button{{font:inherit;padding:.25rem .5rem}}\
+         button{{cursor:pointer}} button.on{{background:#333;color:#fff}}\
+         .muted{{color:#666}}</style>\
+         <h1>stormcos {v} <span class=muted>manifest</span></h1>\
+         <p class=muted>{n} components · {since} · \
+         <a href=\"/api/v1/releases/index.html\">all releases</a> · \
+         <a href=\"/api/v1/releases/{v}/manifest\">json</a> · \
+         <a href=\"/api/v1/releases/{v}/notes\">notes</a></p>\
+         <div class=bar><input id=q placeholder=\"filter by name, kind, version or digest\" size=44>\
+         <button data-f=all class=on>all</button>\
+         <button data-f=changed>changed</button>\
+         <button data-f=new>new</button></div>\
+         <table><tr><th>kind<th>name<th>version<th class=num>size<th>digest<th>provenance</tr>\
+         {rows}</table>\
+         <script>\
+         var f='all';\
+         function apply(){{var t=document.getElementById('q').value.toLowerCase();\
+         document.querySelectorAll('tbody tr').forEach(function(r){{\
+         var okf=(f=='all'||r.dataset.s==f);\
+         var okt=(!t||r.textContent.toLowerCase().indexOf(t)>=0);\
+         r.style.display=(okf&&okt)?'':'none';}});}}\
+         document.getElementById('q').addEventListener('input',apply);\
+         document.querySelectorAll('button[data-f]').forEach(function(b){{\
+         b.addEventListener('click',function(){{f=b.dataset.f;\
+         document.querySelectorAll('button[data-f]').forEach(function(x){{x.classList.remove('on')}});\
+         b.classList.add('on');apply();}});}});\
+         </script>",
+        v = html_escape(&this.version),
+        n = entries.len(),
+        since = since,
+        rows = rows,
     ))
     .into_response()
 }
@@ -770,6 +906,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/index.html", get(index_html))
         .route("/{version}", get(get_one).delete(unpublish))
         .route("/{version}/manifest", get(manifest))
+        .route("/{version}/manifest.html", get(manifest_html))
         .route("/{version}/notes", get(notes))
         .route("/{version}/changes", get(changes))
         .route("/{version}/image.img", get(download))
