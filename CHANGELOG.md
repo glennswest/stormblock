@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### 2026-09-05
+- **fix (synonyms): re-claiming releases the clone it supersedes.** A claim
+  mints a clone, and re-claiming re-points the consumer's own name at the new
+  one — leaving the previous clone alive and named by nothing. It is invisible
+  by construction: a clone shares every extent with its golden, so nothing runs
+  short and nothing complains. Thirty-five accumulated behind a single service
+  tag on forge before anyone looked.
+
+  A consumer re-claiming is saying it is done with what it had, so the volume it
+  has just stopped naming is released, along with its export — an export
+  outliving its volume is a namespace answering for nothing. Deliberately timid:
+  it happens only when nothing else names the volume, it is not sealed, and it
+  is a clone of the same golden. Any of those failing leaves it alone and says
+  so, because the cost of being wrong here is someone else's data.
+- **refactor (exports): `drop_export` is shared.** Tearing an export down is not
+  only something a caller asks for — releasing the volume behind it has to do
+  the same.
 - **fix (fat): the ESP declares the medium's sector size too (stormcos#31,
   second half).** Fixing the GPT made the partitions appear and the ESP be
   typed correctly — and it still would not mount: `FAT-fs: logical sector size

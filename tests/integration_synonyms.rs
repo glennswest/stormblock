@@ -412,3 +412,65 @@ async fn claiming_a_name_hands_out_a_clone_not_the_golden() {
 
     server.abort();
 }
+
+/// Re-claiming releases the clone the consumer just stopped naming.
+///
+/// A claim mints a clone every time, and re-claiming re-points the consumer's
+/// own name at the new one. That used to leave the previous clone alive and
+/// named by nothing — invisible, because a clone shares every extent with its
+/// golden and so costs almost no space: nothing runs short and nothing
+/// complains. Thirty-five accumulated behind one service tag before anyone
+/// looked.
+#[tokio::test]
+async fn re_claiming_releases_the_clone_it_supersedes() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    state
+        .volume_manager
+        .lock().await
+        .seal_volume(stormblock::volume::VolumeId(v1), None)
+        .await
+        .unwrap();
+
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "TAG1", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let resp = client
+            .post(format!("{base}/api/v1/synonyms/boothost/TAG1/claim"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": "TAG1-root", "verify": false}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 201);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        ids.push(body["volume"]["id"].as_str().unwrap().to_string());
+    }
+    assert_ne!(ids[0], ids[1], "a claim mints a fresh clone every time");
+
+    let volumes: serde_json::Value = client
+        .get(format!("{base}/api/v1/volumes"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let present: Vec<&str> = volumes["items"]
+        .as_array().unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+
+    assert!(
+        !present.contains(&ids[0].as_str()),
+        "the superseded clone should be released, not left alive and unnamed"
+    );
+    assert!(present.contains(&ids[1].as_str()), "the clone now named stays");
+    assert!(
+        present.contains(&v1.to_string().as_str()),
+        "and the sealed golden is never touched by this path"
+    );
+
+    server.abort();
+}

@@ -312,11 +312,24 @@ async fn delete_export(
         Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
     };
 
+    if !drop_export(&state, uuid).await {
+        return ApiError::not_found(format!("export {uuid} not found"));
+    }
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
+/// Take an export out of the table and stop serving it.
+///
+/// Factored out because tearing an export down is not only something a
+/// caller asks for: releasing the volume behind it has to do the same, and an
+/// export that outlives its volume is a namespace answering for nothing.
+///
+/// Returns whether there was one to remove.
+pub(crate) async fn drop_export(state: &Arc<AppState>, id: Uuid) -> bool {
     // Take the entry out first so we know what to tear down on the target.
     let removed = {
         let mut exports = state.exports.write().await;
-        let idx = exports.iter().position(|e| e.id == uuid);
-        match idx {
+        match exports.iter().position(|e| e.id == id) {
             Some(i) => {
                 let e = exports.remove(i);
                 metrics::gauge!("stormblock_exports_total").set(exports.len() as f64);
@@ -326,15 +339,13 @@ async fn delete_export(
         }
     };
 
-    let Some(entry) = removed else {
-        return ApiError::not_found(format!("export {uuid} not found"));
-    };
+    let Some(entry) = removed else { return false };
 
-    // Stop serving it — an export that outlives its record would keep the
-    // volume pinned and its LUN number allocated.
+    // An export that outlives its record would keep the volume pinned and its
+    // LUN number allocated.
     #[cfg(feature = "iscsi")]
     if let Some(lun) = entry.lun_id {
-        super::luns::detach_lun(&state, lun).await;
+        super::luns::detach_lun(state, lun).await;
     }
     #[cfg(feature = "nvmeof")]
     if let Some(nsid) = entry.nsid {
@@ -343,9 +354,8 @@ async fn delete_export(
         }
     }
 
-    persist_exports(&state).await;
-
-    axum::http::StatusCode::NO_CONTENT.into_response()
+    persist_exports(state).await;
+    true
 }
 
 pub fn router(state: Arc<AppState>) -> Router {

@@ -407,6 +407,66 @@ fn yes() -> bool {
 /// call — resolve, clone, and (optionally) bind a name to the clone in the
 /// caller's own namespace, which is how one golden ends up behind many
 /// consumers each holding a name of their own.
+/// Release the clone a consumer has just stopped naming.
+///
+/// Deliberately timid, because the cost of being wrong is someone else's data.
+/// Three things must all hold, and any of them failing means leaving it alone
+/// and saying so:
+///
+/// * **nothing else names it** — another synonym pointing here is a reference
+///   held by something that knows what it is doing;
+/// * **it is not sealed** — a sealed volume is what clones descend *from*, and
+///   nothing here should ever delete a golden;
+/// * **it is a clone of the same source** — which is what makes it this claim
+///   path's own leftover rather than a volume that merely had the name.
+async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, source: VolumeId) {
+    {
+        let store = state.synonyms.read().await;
+        let named_by = store.pointing_at(&old);
+        if !named_by.is_empty() {
+            tracing::debug!(volume = %old, "superseded clone is still named; leaving it");
+            return;
+        }
+    }
+    {
+        let vm = state.volume_manager.lock().await;
+        if vm.is_sealed(&old) {
+            tracing::warn!(volume = %old, "refusing to release a sealed volume");
+            return;
+        }
+        if vm.parent(&old) != Some(source) {
+            tracing::debug!(
+                volume = %old,
+                "superseded volume is not a clone of this golden; leaving it"
+            );
+            return;
+        }
+    }
+
+    // Its export goes first: an export outliving its volume is a namespace
+    // that answers for nothing.
+    #[cfg(feature = "nvmeof")]
+    {
+        let ids: Vec<uuid::Uuid> = state
+            .exports
+            .read()
+            .await
+            .iter()
+            .filter(|e| e.volume_id == old.0)
+            .map(|e| e.id)
+            .collect();
+        for id in ids {
+            super::exports::drop_export(state, id).await;
+        }
+    }
+
+    let mut vm = state.volume_manager.lock().await;
+    match vm.delete_volume(old).await {
+        Ok(()) => tracing::info!(volume = %old, "released the clone this claim superseded"),
+        Err(e) => tracing::warn!(volume = %old, "could not release superseded clone: {e}"),
+    }
+}
+
 /// The tuple an initiator needs, for a volume this node serves.
 ///
 /// Null rather than absent when there is no NVMe-oF target running: a caller
@@ -506,11 +566,17 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // Bind a name to the clone when one was asked for. A claim that hands
     // back only a uuid puts the caller back where it started: holding an id
     // it has to remember for itself.
+    // What this consumer's name pointed at before, so the clone it is about to
+    // stop naming can be released instead of leaked.
+    let mut superseded: Option<VolumeId> = None;
     let bound = match &req.name {
         _ if req.namespace.is_none() && req.name.is_none() => None,
         _ => {
             let mut store = state.synonyms.write().await;
             let target = Target::Volume { id: c.volume_id };
+            superseded = store
+                .get(&clone_ns, &clone_name)
+                .and_then(|s| s.target.volume_id());
             match store.create(&clone_ns, &clone_name, target.clone(), syn.label.clone(), None) {
                 Ok(s) => Some(s.clone()),
                 // A consumer claiming again is re-pointing its own name at
@@ -522,6 +588,18 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
             }
         }
     };
+
+    // A claim mints a clone, and re-claiming re-points the consumer's own name
+    // at the new one — which left the previous clone alive and named by
+    // nothing. It is invisible: it costs almost no space, because it shares
+    // every extent with the golden, so nothing runs short and nothing
+    // complains. Thirty-five of them accumulated behind one service tag before
+    // anyone looked.
+    //
+    // A consumer re-claiming is saying it is done with what it had.
+    if let Some(old) = superseded.filter(|o| *o != c.volume_id) {
+        release_superseded_clone(&state, old, source).await;
+    }
 
     // Export the clone and hand back the tuple that reaches it.
     //
