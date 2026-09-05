@@ -905,6 +905,33 @@ if [ "$BOOT_MODE" = "local" ]; then
         echo "NOTE: no rd.stormblock.hostnqn= — this node will connect anonymously"
     fi
 
+    # One image, two lives, one command line.
+    #
+    # A node netboots once to install itself and then boots from the disk it
+    # installed onto — with the same cmdline, because the cmdline is a pallet
+    # member and there is only one of it. So the local slab is tried first and
+    # the appliance is the fallback: on the bootstrap boot the disk holds no
+    # slab and the node asks, and after the install it does, so the node stops
+    # asking. Nothing has to be rewritten between the two.
+    #
+    # Existence is not the test. The R230 that found this has a 2 TB disk with
+    # four partitions on it from a previous life, so /dev/sda is very much
+    # there and is not a slab.
+    if [ -n "$SLAB" ] && [ -n "$BOOTHOST" ]; then
+        case "$SLAB" in
+        *://*) ;;
+        *)
+            if [ ! -e "$SLAB" ]; then
+                echo "No $SLAB on this machine — asking $BOOTHOST instead"
+                SLAB=""
+            elif /usr/sbin/stormblock slab list "$SLAB" 2>/dev/null | grep -q "not a slab"; then
+                echo "$SLAB holds no slab — asking $BOOTHOST instead"
+                SLAB=""
+            fi
+            ;;
+        esac
+    fi
+
     # Diskless: this machine's slab is a namespace on the appliance, and which
     # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
     # on the service tag. The firmware made the same claim a stage earlier to
