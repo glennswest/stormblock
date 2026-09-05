@@ -896,14 +896,24 @@ if [ "$BOOT_MODE" = "local" ]; then
     # ceased to exist when the kernel started, so the node asks in its own
     # right rather than inheriting anything.
     if [ -z "$SLAB" ] && [ -n "$BOOTHOST" ]; then
-        echo "Asking $BOOTHOST which image this machine boots..."
-        TAGARG=""
-        [ -n "$BOOTTAG" ] && TAGARG="--tag $BOOTTAG"
-        SLAB=$(/usr/sbin/stormblock boot-claim --boothost "$BOOTHOST" $TAGARG)
+        # The identity is not worked out here. stormbootx read it from SMBIOS
+        # and claimed on it before Linux existed; this asks again in its own
+        # right — the firmware's block device went with the UEFI that
+        # published it — but on the *same* name, handed down rather than
+        # rediscovered. Two implementations of "who is this machine" drift,
+        # and the one in firmware is the one proven on hardware.
+        if [ -z "$BOOTTAG" ]; then
+            echo "FATAL: rd.stormblock.boothost= without rd.stormblock.tag="
+            echo "  This node has to be told which machine it is. The firmware"
+            echo "  already knows: stormbootx claimed boothost/<tag> to load"
+            echo "  this kernel. That name has to reach the kernel command line."
+            echo "Dropping to shell..."
+            exec /bin/sh
+        fi
+        echo "Asking $BOOTHOST which image $BOOTTAG boots..."
+        SLAB=$(/usr/sbin/stormblock boot-claim --boothost "$BOOTHOST" --tag "$BOOTTAG")
         if [ -z "$SLAB" ]; then
-            echo "FATAL: no image is assigned to this machine"
-            echo "  service tag: $(cat /sys/class/dmi/id/product_serial 2>/dev/null)"
-            echo "  appliance:   $BOOTHOST"
+            echo "FATAL: no image is assigned to $BOOTTAG on $BOOTHOST"
             echo "Dropping to shell..."
             exec /bin/sh
         fi
@@ -1289,7 +1299,7 @@ fi
 echo ""
 echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
-echo "  netboot: root=/dev/ublkb0 rd.stormblock.boothost=<appliance-url> [rd.stormblock.tag=<service-tag>]"
+echo "  netboot: root=/dev/ublkb0 rd.stormblock.boothost=<appliance-url> rd.stormblock.tag=<tag>"
 echo "           — claims boothost/<tag> and uses the namespace it names as the slab"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file-or-nvme-tcp://...> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
 echo "         [rd.stormblock.overlay=tmpfs[:SIZE]|<blockdev>]  — writable overlay over a read-only (erofs) root"

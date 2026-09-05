@@ -314,9 +314,15 @@ enum SubCommand {
         /// The appliance, e.g. http://192.168.31.202:9090
         #[arg(long, required = true)]
         boothost: String,
-        /// Service tag. Read from DMI when not given.
-        #[arg(long)]
-        tag: Option<String>,
+        /// The machine's identity, exactly as the synonym names it.
+        ///
+        /// Not discovered here. stormbootx reads it from SMBIOS and claims on
+        /// it before Linux exists (`smbios.rs`, `registry.rs`); this is that
+        /// same string handed down. Two implementations of "who is this
+        /// machine" would drift, and the one in firmware is the one that has
+        /// been proven on hardware.
+        #[arg(long, required = true)]
+        tag: String,
         /// Synonym namespace holding the per-machine decision.
         #[arg(long, default_value = "boothost")]
         namespace: String,
@@ -746,7 +752,7 @@ async fn main() -> anyhow::Result<()> {
                 ).await;
             }
             SubCommand::BootClaim { boothost, tag, namespace, timeout_secs } => {
-                return handle_boot_claim(boothost, tag.as_deref(), namespace, *timeout_secs).await;
+                return handle_boot_claim(boothost, tag, namespace, *timeout_secs).await;
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier, check,
@@ -3784,174 +3790,16 @@ async fn handle_adopt_ublk(
 /// restore volume metadata, export the boot volume as /dev/ublkb0.
 /// The local-slab → ublk-root path stormcos boots through (issue #12).
 #[allow(clippy::too_many_arguments)]
-/// Where a machine's own identity is recorded by its firmware, best first.
-///
-/// Every vendor has this field and every vendor calls it something else —
-/// Dell a *Service Tag*, HPE and Lenovo a *Serial Number*, Cisco a *Serial*
-/// — but it is the same SMBIOS System Information string in all of them, so
-/// one path covers the lot:
-///
-/// | Vendor                       | Called            | Looks like    |
-/// |------------------------------|-------------------|---------------|
-/// | Dell                         | Service Tag       | `C2NR0Q2`     |
-/// | HPE / HP                     | Serial Number     | `MXQ1234567`  |
-/// | Lenovo / ThinkSystem         | Serial Number     | `1234ABC`     |
-/// | Cisco UCS                    | Serial Number     | `FCH1234V5AB` |
-/// | Fujitsu, Asus, Gigabyte      | Serial Number     | varies        |
-///
-/// `board_serial` is second because the ODM boards — Supermicro, Quanta,
-/// Wiwynn, Inventec, and most whiteboxes — frequently leave the system
-/// serial as a placeholder and burn the real number into the *baseboard*
-/// instead. `chassis_serial` catches the remainder. `product_uuid` is last
-/// and is not a nice name, but it is always unique and always present, so a
-/// board that has nothing else can still be addressed rather than being
-/// unbootable.
-///
-/// All are root-only, which the initramfs is.
-const DMI_TAG_PATHS: [&str; 4] = [
-    "/sys/class/dmi/id/product_serial",
-    "/sys/class/dmi/id/board_serial",
-    "/sys/class/dmi/id/chassis_serial",
-    "/sys/class/dmi/id/product_uuid",
-];
-
-/// Every identity this machine can be addressed by, best first.
-///
-/// A list rather than one value because synonyms are flexible: the claim
-/// tries each in turn, so a fleet can key on whatever its boards actually
-/// carry — the Dells on their service tags, the whiteboxes on a board serial
-/// — without anyone deciding centrally which field a given model populates.
-fn machine_identities() -> Vec<(&'static str, String)> {
-    let mut out: Vec<(&'static str, String)> = Vec::new();
-    for p in DMI_TAG_PATHS {
-        let field = p.rsplit('/').next().unwrap_or(p);
-        if let Ok(v) = std::fs::read_to_string(p) {
-            if let Some(tag) = usable_tag(&v) {
-                if !out.iter().any(|(_, existing)| *existing == tag) {
-                    out.push((field, tag));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// What this machine says it is, for the console.
-fn machine_description() -> String {
-    let read = |f: &str| {
-        std::fs::read_to_string(format!("/sys/class/dmi/id/{f}"))
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default()
-    };
-    let v = read("sys_vendor");
-    let n = read("product_name");
-    match (v.is_empty(), n.is_empty()) {
-        (false, false) => format!("{v} {n}"),
-        (false, true) => v,
-        (true, false) => n,
-        _ => "unknown machine".to_string(),
-    }
-}
-
-/// A DMI string only counts as a service tag if it actually identifies *this*
-/// machine.
-///
-/// Boards with nothing burned in do not leave the field empty — they fill it
-/// with a placeholder, and every board of that model carries the same one. A
-/// node claiming `boothost/To be filled by O.E.M.` would resolve to whatever
-/// the last machine with that placeholder was assigned, which is worse than
-/// failing: it boots, and it boots as somebody else.
-pub(crate) fn usable_tag(raw: &str) -> Option<String> {
-    let v = raw.trim();
-    if v.is_empty() {
-        return None;
-    }
-    let low = v.to_ascii_lowercase();
-    let placeholder = low == "none"
-        || low == "unknown"
-        || low == "default string"
-        || low == "system serial number"
-        || low == "not applicable"
-        || low.contains("to be filled")
-        || low.contains("not specified")
-        || low.contains("o.e.m.")
-        || low.contains("invalid")
-        // All-zero, all-dash or all-dot fields are the other way a board says
-        // nothing, and they are equally shared.
-        || v.chars().all(|c| c == '0' || c == '.' || c == '-' || c == ' ');
-    if placeholder {
-        None
-    } else {
-        Some(v.to_string())
-    }
-}
-
-fn service_tag_from_dmi() -> Option<String> {
-    for p in DMI_TAG_PATHS {
-        if let Ok(v) = std::fs::read_to_string(p) {
-            if let Some(tag) = usable_tag(&v) {
-                return Some(tag);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod boot_claim_tests {
-    use super::usable_tag;
-
-    #[test]
-    fn a_real_service_tag_is_used() {
-        // The R230 this was built for.
-        assert_eq!(usable_tag("C2NR0Q2\n").as_deref(), Some("C2NR0Q2"));
-        assert_eq!(usable_tag("  7X8Y9Z1  ").as_deref(), Some("7X8Y9Z1"));
-    }
-
-    #[test]
-    fn a_placeholder_is_not_a_tag() {
-        // Every one of these is shared by every board of its model, so a node
-        // claiming on it would boot as another machine's node.
-        for junk in [
-            "",
-            "   ",
-            "None",
-            "unknown",
-            "Default string",
-            "System Serial Number",
-            "To be filled by O.E.M.",
-            "To Be Filled By O.E.M.",
-            "Not Specified",
-            "Not Applicable",
-            "0000000",
-            "..........",
-            "-------",
-            "Invalid",
-        ] {
-            assert!(usable_tag(junk).is_none(), "{junk:?} must not be used as a service tag");
-        }
-    }
-}
-
 /// Resolve this machine's image and print where to attach it.
 ///
 /// Everything diagnostic goes to stderr so stdout is exactly the URI and
 /// nothing else — the caller substitutes it straight into `--slab`.
 async fn handle_boot_claim(
     boothost: &str,
-    tag: Option<&str>,
+    tag: &str,
     namespace: &str,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
-    let tag = match tag {
-        Some(t) => t.to_string(),
-        None => service_tag_from_dmi().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no service tag in DMI ({}) and none given with --tag",
-                DMI_TAG_PATHS.join(", ")
-            )
-        })?,
-    };
     let base = boothost.trim_end_matches('/');
     let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
     let url = format!("{base}/api/v1/synonyms/{namespace}/{tag}/claim");
