@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 
+## [v13.5.0] — 2026-09-05
+
 ### 2026-09-05
+- **fix:** The release download reads an aligned window into a `DmaBuf` and returns the slice asked for. A byte range from an HTTP client is arbitrary in offset, length and buffer address, and the volume underneath may be a device opened `O_DIRECT` where all three must be block multiples — so `curl -r 4096-4103` against a published release returned EINVAL.
+- **fix:** `DriveError::is_media_failure()` — EINVAL, `NotAligned`, `BufferTooSmall`, `NoSpace` and `ReadOnly` are the request being refused, not the media going away, and `mark_failed` leaves the leg alone for them. The marking is sticky and persisted, so without this a bad range request took a sealed 11 GB release offline across restarts. Same reasoning as #92.
+- **feat:** `POST /api/v1/volumes/{id}/legs/clear` — try a volume's failed legs again. Clears the markings and reads the volume to prove it; anything still broken marks itself again and the response says which slabs came back.
 - **fix:** A data slab's metadata region is sized from the drive, not from a flat 4 MiB. A volume record carries its whole extent map, so what the region must hold scales with the slots the slab can hand out — an 11 GB volume is ~11k extents on its own. `POST /api/v1/slabs` and `stormblock slab format --role data` both use `auto_metadata_bytes` now; the CLI previously reserved **nothing at all** for a data slab.
 - **fix:** A failed metadata persist is no longer a `warn!` the operation ignores. `persist()` reports every copy that failed, logs at `error!` as a durability fault, and records it; `persist_checked()` is the same path. Losing this quietly meant volumes were created, acknowledged, and never written — a node came back with 9 of 38 volumes and a published release that had never been on disk.
 - **feat:** `GET /api/v1/slabs/durability` — whether the record is reaching the disk, and per-slab how large it encodes to against what that slab reserved.
