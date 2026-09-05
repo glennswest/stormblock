@@ -144,7 +144,10 @@ impl NvmeTcpSpec {
 
     /// The name to present on this connection.
     pub fn effective_host_nqn(&self) -> &str {
-        self.host_nqn.as_deref().unwrap_or_else(default_host_nqn)
+        match self.host_nqn.as_deref() {
+            Some(h) => h,
+            None => default_host_nqn(),
+        }
     }
 }
 
