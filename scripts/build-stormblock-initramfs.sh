@@ -1295,11 +1295,56 @@ exec switch_root /sysroot /sbin/init
 INITSCRIPT
 chmod +x "$INITRD_DIR/init"
 
-# Build cpio archive (compressed with zstd)
+# CPU microcode, as an early uncompressed cpio ahead of the real one.
+#
+# The kernel applies microcode before it brings up the other CPUs, and the
+# only way to hand it any that early is a plain cpio prepended to the
+# initramfs holding `kernel/x86/microcode/{GenuineIntel,AuthenticAMD}.bin`.
+# It must be uncompressed and it must be first; the kernel consumes it and
+# hands the remainder to the real initramfs, so nothing else changes.
+#
+# Without it a node runs whatever its BIOS shipped, for the life of the
+# machine. The R230 this was written for reported:
+#
+#   x86/CPU: Running old microcode        (BIOS 2.4.3, 31 Jan 2018)
+#   MDS/TAA/SRBDS/MMIO Stale Data/GDS: Vulnerable ... no microcode
+#
+# — five mitigations the CPU cannot apply, every one of them shipped after
+# that BIOS. Updating firmware fixes one machine once; this fixes every node
+# that boots the image, and versions the microcode with the image.
+#
+# Absent on the build host it is skipped with a warning rather than failing:
+# an image without microcode still boots, and a build that stops because a
+# firmware package is missing helps nobody.
+UCODE_DIR="$INITRD_DIR.ucode"
+rm -rf "$UCODE_DIR"
+mkdir -p "$UCODE_DIR/kernel/x86/microcode"
+UCODE_FOUND=""
+if ls /lib/firmware/intel-ucode/* >/dev/null 2>&1; then
+    # Every file concatenated: the kernel walks the blob and picks the one
+    # matching this CPU's family/model/stepping, so one image serves any of
+    # them. It is ~5 MB, and it is not compressed on purpose.
+    cat /lib/firmware/intel-ucode/* > "$UCODE_DIR/kernel/x86/microcode/GenuineIntel.bin"
+    UCODE_FOUND="$UCODE_FOUND Intel($(ls /lib/firmware/intel-ucode | wc -l) revisions)"
+fi
+if ls /lib/firmware/amd-ucode/*.bin >/dev/null 2>&1; then
+    cat /lib/firmware/amd-ucode/*.bin > "$UCODE_DIR/kernel/x86/microcode/AuthenticAMD.bin"
+    UCODE_FOUND="$UCODE_FOUND AMD"
+fi
+
 echo ""
 echo "Building cpio archive..."
+if [ -n "$UCODE_FOUND" ]; then
+    echo "  early microcode:$UCODE_FOUND"
+    ( cd "$UCODE_DIR" && find . | cpio -o -H newc --quiet 2>/dev/null ) > "$OUTPUT"
+else
+    echo "  WARNING: no CPU microcode on this build host — nodes will run whatever"
+    echo "           their BIOS shipped. Install microcode_ctl and amd-ucode-firmware."
+    : > "$OUTPUT"
+fi
 cd "$INITRD_DIR"
-find . | cpio -o -H newc --quiet 2>/dev/null | zstd -19 -T0 > "$OUTPUT"
+find . | cpio -o -H newc --quiet 2>/dev/null | zstd -19 -T0 >> "$OUTPUT"
+rm -rf "$UCODE_DIR"
 
 echo ""
 echo "Built: $OUTPUT"
