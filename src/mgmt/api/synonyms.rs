@@ -419,7 +419,12 @@ fn yes() -> bool {
 ///   nothing here should ever delete a golden;
 /// * **it is a clone of the same source** — which is what makes it this claim
 ///   path's own leftover rather than a volume that merely had the name.
-async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, source: VolumeId) {
+async fn release_superseded_clone(
+    state: &Arc<AppState>,
+    old: VolumeId,
+    syn: &synonym::Synonym,
+    source: VolumeId,
+) {
     {
         let store = state.synonyms.read().await;
         let named_by = store.pointing_at(&old);
@@ -434,10 +439,21 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, source: 
             tracing::warn!(volume = %old, "refusing to release a sealed volume");
             return;
         }
-        if vm.parent(&old) != Some(source) {
+        // A clone of *anything this name has ever pointed at*, not only what
+        // it points at now. Moving a machine to a new image is exactly when
+        // the old clone becomes garbage, and requiring the current golden
+        // meant that case — the one that matters — was the one skipped.
+        let parent = vm.parent(&old);
+        let ours = parent == Some(source)
+            || syn
+                .history
+                .iter()
+                .filter_map(|h| h.target.volume_id())
+                .any(|prev| parent == Some(prev));
+        if !ours {
             tracing::debug!(
                 volume = %old,
-                "superseded volume is not a clone of this golden; leaving it"
+                "superseded volume is not a clone of anything this name has named; leaving it"
             );
             return;
         }
@@ -549,6 +565,21 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
         .name
         .clone()
         .unwrap_or_else(|| format!("{clone_ns}-{}", syn.name));
+    // The clone this one replaces, found by name rather than by whether the
+    // caller asked for a synonym.
+    //
+    // A claim's clone is named `<namespace>-<name>` deterministically, so the
+    // volume already carrying that name *is* this consumer's previous clone.
+    // Looking it up here rather than inside the naming branch is the whole
+    // fix: the boot path claims with an empty body, so it never took that
+    // branch, never computed a predecessor, and left one clone behind on
+    // every boot. Thirteen accumulated behind a single service tag on forge
+    // before a machine had even finished booting once (#94).
+    let predecessor: Option<VolumeId> = {
+        let vm = state.volume_manager.lock().await;
+        vm.find_volume(&clone_name).await
+    };
+
     let mut spec = crate::fs::template::CloneSpec::new(&clone_name);
     spec.size_bytes = size;
     spec.label = req.label.clone();
@@ -597,8 +628,11 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // anyone looked.
     //
     // A consumer re-claiming is saying it is done with what it had.
-    if let Some(old) = superseded.filter(|o| *o != c.volume_id) {
-        release_superseded_clone(&state, old, source).await;
+    // `superseded` is what the consumer's own synonym pointed at; `predecessor`
+    // is what carried the clone name. They are the same volume whenever both
+    // exist — the second is simply the one the boot path can see.
+    if let Some(old) = superseded.or(predecessor).filter(|o| *o != c.volume_id) {
+        release_superseded_clone(&state, old, &syn, source).await;
     }
 
     // Export the clone and hand back the tuple that reaches it.
