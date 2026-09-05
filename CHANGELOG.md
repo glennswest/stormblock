@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### 2026-09-05
+- **fix (image): the GPT is written in the block size the medium presents, not
+  512 (stormcos#31).** A partition table is found at LBA 1 — one *block* in, in
+  the medium's own block size. `image build` defaulted to 512-byte sectors while
+  every medium it lands on presents 4096, so the header was written at byte 512
+  and every reader looked at byte 4096, found zeros, and concluded the disk had
+  no partition table. The image was intact and unbootable: a PowerEdge R230
+  attached `stormcos-sno-10.22` over NVMe/TCP and reported that it published no
+  ESP; `blkid` saw only `PTTYPE="PMBR"` and made no partition devices.
+
+  The default now follows the output device. `block_size` in a spec is still
+  honoured — an image built for media the builder is not writing onto is a real
+  case — but a spec that disagrees with the device is warned about, naming the
+  byte the header will land on and the byte a reader will look at.
+
+  An existing test asserted `block_size == 512` and had to change: it was
+  pinning the default that caused this.
+
 ## [v13.4.0] — 2026-09-03
 
 ### 2026-09-03

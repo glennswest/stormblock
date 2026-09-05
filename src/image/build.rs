@@ -209,7 +209,6 @@ impl ImageBuilder {
 
     /// Build the raw image at `out`.
     pub async fn build(&self, out: &Path) -> Result<BuildReport> {
-        let lba = self.spec.block_size.unwrap_or(512);
         let declared = size_of(&self.spec.size)?;
         let rest_count = self.count_rest();
         if rest_count > 1 {
@@ -272,6 +271,34 @@ impl ImageBuilder {
                 tokio::fs::remove_file(out).await?;
             }
             Arc::new(FileDevice::open_with_capacity(out_str, total).await?)
+        };
+
+        // A GPT is read in the medium's own block size. Firmware — and the
+        // Linux partition code — look for the header at LBA 1, which is one
+        // *block* in, so a table written for 512-byte sectors onto a device
+        // that presents 4096 puts its header at byte 512 where nothing looks:
+        // no GPT is found, no partitions appear, and an image whose ESP is
+        // perfectly intact is unbootable. That is stormcos#31, and it cost a
+        // machine that attached its image and then reported having no ESP.
+        //
+        // So the default follows the device rather than a constant. A spec may
+        // still name a size explicitly — an image built for media the builder
+        // is not writing to has a legitimate reason to — but it is told when
+        // that disagrees with what it is being written onto.
+        let lba = match self.spec.block_size {
+            Some(explicit) if explicit != device.block_size() => {
+                tracing::warn!(
+                    "image spec asks for a {explicit}-byte GPT on a device presenting \
+                     {}-byte blocks: the header will be written at byte {explicit} and \
+                     a reader of this device will look at byte {}, find nothing, and \
+                     conclude the disk has no partition table",
+                    device.block_size(),
+                    device.block_size(),
+                );
+                explicit
+            }
+            Some(explicit) => explicit,
+            None => device.block_size(),
         };
 
         let mut gpt = Gpt::create_with_lba(&device, lba);

@@ -72,7 +72,11 @@ async fn an_image_is_a_gpt_plus_a_concatenation_of_pallets() {
     // And it is a real image: the table reads back, and the pallet in it
     // verifies against the manifest's digests.
     let gpt = stormblock::image::build::table_of(&out).await.unwrap();
-    assert_eq!(gpt.block_size, 512, "an image is read as 512-byte sectors");
+    // 4096, not 512: a GPT is read in the block size the medium presents, and
+    // FileDevice presents 4096. This assertion used to say 512 — pinning the
+    // default that made stormcos-sno-10.22 unbootable (stormcos#31), because a
+    // header at byte 512 is invisible to anything reading a 4K device.
+    assert_eq!(gpt.block_size, 4096, "an image is read in the medium's block size");
     assert_eq!(gpt.partitions().count(), 3);
     let pallets = stormblock::image::build::pallets_in(&out).await.unwrap();
     assert_eq!(pallets.len(), 1);
@@ -1099,4 +1103,64 @@ tier = "hot"
         data.volumes.iter().any(|v| v.allocated_bytes > 0),
         "the data slab reported no allocated bytes — nothing was written into it"
     );
+}
+
+/// stormcos#31: the GPT must be readable by whatever the image is served on.
+///
+/// A partition table is found at LBA 1 — one *block* in, in the medium's own
+/// block size. Built for 512-byte sectors and served on a device presenting
+/// 4096, the header sits at byte 512 and every reader looks at byte 4096,
+/// finds zeros and concludes the disk has no partition table. The image is
+/// perfectly intact and completely unbootable: a Dell R230 attached
+/// stormcos-sno-10.22 over NVMe/TCP and reported that it published no ESP.
+///
+/// So the default follows the device it is written to, and the header lands
+/// where a reader of that device will look for it.
+#[tokio::test]
+async fn the_gpt_is_written_in_the_block_size_the_medium_presents() {
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+    let out = tmp.path().join("image.raw");
+
+    let spec = ImageSpec::from_toml(&spec_toml(tmp.path(), "")).unwrap();
+    let report = ImageBuilder::new(spec)
+        .build(&out)
+        .await
+        .expect("image builds");
+
+    // FileDevice presents 4096-byte blocks, so that is where the header goes.
+    assert_eq!(
+        report.block_size, 4096,
+        "the table must be written in the block size the medium presents"
+    );
+
+    let raw = std::fs::read(&out).unwrap();
+    assert_eq!(
+        &raw[4096..4104],
+        b"EFI PART",
+        "LBA 1 of a 4096-byte device is byte 4096, and that is where a reader looks"
+    );
+    // And nothing at the 512-byte offset, which is what the broken image had.
+    assert_ne!(
+        &raw[512..520],
+        b"EFI PART",
+        "a header at byte 512 is the bug: no 4K reader will ever find it"
+    );
+}
+
+/// A spec may still name a block size — an image built for media the builder
+/// is not writing onto is a real case — and it is honoured.
+#[tokio::test]
+async fn an_explicit_block_size_is_still_obeyed() {
+    let tmp = TempDir::new().unwrap();
+    make_sources(tmp.path());
+    let out = tmp.path().join("image-512.raw");
+
+    let toml = spec_toml(tmp.path(), "").replace("size = \"192M\"", "size = \"192M\"\nblock_size = 512");
+    let spec = ImageSpec::from_toml(&toml).unwrap();
+    let report = ImageBuilder::new(spec).build(&out).await.expect("image builds");
+
+    assert_eq!(report.block_size, 512);
+    let raw = std::fs::read(&out).unwrap();
+    assert_eq!(&raw[512..520], b"EFI PART");
 }
