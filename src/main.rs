@@ -3841,7 +3841,7 @@ async fn handle_boot_claim(
 
     // The in-house client, not reqwest: the binary deliberately does not carry
     // reqwest, and this runs in the initramfs where the binary is the payload.
-    let client = crate::http::Client::builder()
+    let client = stormblock::http::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
