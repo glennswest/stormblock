@@ -474,3 +474,120 @@ async fn re_claiming_releases_the_clone_it_supersedes() {
 
     server.abort();
 }
+
+/// A boot does not leak a clone.
+///
+/// The boot path claims with an **empty body** — firmware wants the attach
+/// tuple and nothing else, so it names no clone. That skipped the branch that
+/// worked out which clone the new one replaced, so nothing was ever released
+/// and every boot left one behind. Thirteen accumulated behind a single
+/// service tag on forge before a machine had finished booting once (#94).
+#[tokio::test]
+async fn an_unnamed_claim_still_releases_the_clone_it_replaces() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    state
+        .volume_manager
+        .lock().await
+        .seal_volume(stormblock::volume::VolumeId(v1), None)
+        .await
+        .unwrap();
+
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "TAG9", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    // Exactly what the initramfs sends: no name, no namespace.
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let resp = client
+            .post(format!("{base}/api/v1/synonyms/boothost/TAG9/claim"))
+            .json(&serde_json::json!({}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 201);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        ids.push(body["volume"]["id"].as_str().unwrap().to_string());
+    }
+
+    let volumes: serde_json::Value = client
+        .get(format!("{base}/api/v1/volumes"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let clones: Vec<&str> = volumes["items"]
+        .as_array().unwrap()
+        .iter()
+        .filter(|v| v["name"] == "boothost-TAG9")
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(
+        clones.len(), 1,
+        "one clone per consumer, not one per boot — three boots left {clones:?}"
+    );
+    assert_eq!(clones[0], ids[2], "the surviving clone is the newest");
+    server.abort();
+}
+
+/// Moving a machine to a new image releases the clone of the old one.
+///
+/// The guard used to require the superseded clone's parent to be the golden
+/// the synonym resolves to *now*. Re-pointing is exactly when the old clone
+/// becomes garbage, so the case that mattered was the one it skipped.
+#[tokio::test]
+async fn repointing_to_a_new_golden_releases_the_clone_of_the_old_one() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    {
+        let mut vm = state.volume_manager.lock().await;
+        vm.seal_volume(stormblock::volume::VolumeId(v1), None).await.unwrap();
+        vm.seal_volume(stormblock::volume::VolumeId(v2), None).await.unwrap();
+    }
+
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "TAG8", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    let first: serde_json::Value = client
+        .post(format!("{base}/api/v1/synonyms/boothost/TAG8/claim"))
+        .json(&serde_json::json!({})).send().await.unwrap()
+        .json().await.unwrap();
+    let on_old = first["volume"]["id"].as_str().unwrap().to_string();
+
+    // The machine is moved to the next image, and boots again.
+    client
+        .put(format!("{base}/api/v1/synonyms/boothost/TAG8"))
+        .json(&serde_json::json!({"volume": v2.to_string()}))
+        .send().await.unwrap();
+    let second: serde_json::Value = client
+        .post(format!("{base}/api/v1/synonyms/boothost/TAG8/claim"))
+        .json(&serde_json::json!({})).send().await.unwrap()
+        .json().await.unwrap();
+    let on_new = second["volume"]["id"].as_str().unwrap().to_string();
+
+    assert_ne!(on_old, on_new);
+    let volumes: serde_json::Value = client
+        .get(format!("{base}/api/v1/volumes"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let present: Vec<&str> = volumes["items"]
+        .as_array().unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+
+    assert!(
+        !present.contains(&on_old.as_str()),
+        "the clone of the image this machine no longer boots should be released"
+    );
+    assert!(present.contains(&on_new.as_str()));
+    assert!(present.contains(&v1.to_string().as_str()), "goldens are never touched");
+    assert!(present.contains(&v2.to_string().as_str()));
+    server.abort();
+}
