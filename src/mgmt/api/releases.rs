@@ -497,10 +497,22 @@ async fn download(
                 return None;
             }
             let len = CHUNK.min(end - offset + 1) as usize;
-            let mut buf = vec![0u8; len];
-            match dev.read(offset, &mut buf).await {
+            // Read an aligned window and hand back the slice that was asked
+            // for. The volume underneath may be a device opened O_DIRECT,
+            // where an offset, a length or a buffer address that is not a
+            // multiple of the block size is EINVAL — and a byte range from
+            // an HTTP client is arbitrary on all three counts. Serving a
+            // range is not a reason to issue an I/O no device would accept.
+            let bs = dev.block_size().max(1) as u64;
+            let aligned_start = offset - (offset % bs);
+            let skip = (offset - aligned_start) as usize;
+            let span = ((skip + len) as u64).div_ceil(bs) * bs;
+            let mut buf = crate::drive::dma::DmaBuf::zeroed(span as usize);
+            match dev.read(aligned_start, &mut buf).await {
                 Ok(_) => Some((
-                    Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
+                    Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(
+                        &buf[skip..skip + len],
+                    )),
                     (dev, offset + len as u64),
                 )),
                 Err(e) => {

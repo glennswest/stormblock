@@ -538,7 +538,17 @@ impl ThinVolumeHandle {
     }
 
     /// Stop trusting a slab for this volume. Idempotent; logs the first time.
-    fn mark_failed(&self, slab: SlabId, why: &str) {
+    fn mark_failed(&self, slab: SlabId, why: &DriveError) {
+        if !why.is_media_failure() {
+            // The request was refused, not the storage. Marking here would
+            // persist, and every later read of this volume would report a
+            // leg that is perfectly readable as gone.
+            tracing::warn!(
+                volume = %self.id, slab = %slab,
+                "read refused by the device, not counted as a leg failure: {why}"
+            );
+            return;
+        }
         if self.failed.write().unwrap().insert(slab) {
             tracing::warn!(volume = %self.id, slab = %slab, "leg failed, slab marked failed for this volume: {why}");
         }
@@ -827,7 +837,7 @@ impl ThinVolumeHandle {
             match self.read_leg(leg, off, buf).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    self.mark_failed(leg.slab_id, &e.to_string());
+                    self.mark_failed(leg.slab_id, &e);
                     last = Some(e);
                 }
             }
@@ -863,7 +873,7 @@ impl ThinVolumeHandle {
             match r {
                 Ok(()) => ok += 1,
                 Err(e) => {
-                    self.mark_failed(leg.slab_id, &e.to_string());
+                    self.mark_failed(leg.slab_id, &e);
                     last = Some(e);
                 }
             }
@@ -880,7 +890,7 @@ impl ThinVolumeHandle {
         for leg in self.usable_legs(loc, vext) {
             match self.read_leg(leg, 0, &mut data).await {
                 Ok(()) => return Some(data),
-                Err(e) => self.mark_failed(leg.slab_id, &e.to_string()),
+                Err(e) => self.mark_failed(leg.slab_id, &e),
             }
         }
         None
@@ -939,7 +949,7 @@ impl ThinVolumeHandle {
             match r {
                 Ok(()) => good.push(*leg),
                 Err(e) => {
-                    self.mark_failed(leg.slab_id, &e.to_string());
+                    self.mark_failed(leg.slab_id, &e);
                     bad.push(*leg);
                 }
             }
@@ -1116,7 +1126,7 @@ impl ThinVolumeHandle {
                 Ok(()) => good.push(*leg),
                 Err(e) => {
                     if !policy.is_none() {
-                        self.mark_failed(leg.slab_id, &e.to_string());
+                        self.mark_failed(leg.slab_id, &e);
                     }
                     bad.push((*leg, e));
                 }
@@ -1275,7 +1285,7 @@ impl ThinVolumeHandle {
                     Ok(()) => {
                         if i == 0 { p = Some(buf) } else { q = Some(buf) }
                     }
-                    Err(e) => self.mark_failed(leg.slab_id, &e.to_string()),
+                    Err(e) => self.mark_failed(leg.slab_id, &e),
                 }
             }
         }
@@ -1385,7 +1395,7 @@ impl ThinVolumeHandle {
             .await;
             match r {
                 Ok(()) => wrote += 1,
-                Err(e) => self.mark_failed(leg.slab_id, &e.to_string()),
+                Err(e) => self.mark_failed(leg.slab_id, &e),
             }
         }
         if wrote == 0 && !group.legs.is_empty() {
@@ -1433,7 +1443,7 @@ impl ThinVolumeHandle {
                     Some(leg) => match self.read_leg(leg, off, &mut old).await {
                         Ok(()) => true,
                         Err(e) => {
-                            self.mark_failed(leg.slab_id, &e.to_string());
+                            self.mark_failed(leg.slab_id, &e);
                             false
                         }
                     },
@@ -1783,7 +1793,7 @@ impl ThinVolumeHandle {
                 if let Err(e) = self.write_leg(new, 0, &data).await {
                     self.give_back(&[new]).await;
                     report.errors.push(format!("extent {vext}: rebuilt leg failed to write: {e}"));
-                    self.mark_failed(new.slab_id, &e.to_string());
+                    self.mark_failed(new.slab_id, &e);
                     continue;
                 }
                 // Carry the share count so the slot table agrees with the map.

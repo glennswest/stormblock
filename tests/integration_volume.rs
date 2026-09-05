@@ -611,3 +611,32 @@ async fn the_metadata_ceiling_covers_a_full_slab_of_that_size() {
         );
     }
 }
+
+/// A request the device refuses is not a leg that died.
+///
+/// The release download read an arbitrary byte range straight from a volume
+/// whose slab sits on an O_DIRECT device. The unaligned read came back
+/// EINVAL, the leg was marked failed, the marking was persisted, and a sealed
+/// 11 GB release was offline across restarts — from a `curl -r`. Alignment is
+/// fixed at the caller, but the classification is the part that keeps a
+/// caller's mistake from becoming an outage.
+#[test]
+fn a_refused_request_is_not_a_media_failure() {
+    use stormblock::drive::DriveError;
+
+    let einval = DriveError::Io(std::io::Error::from_raw_os_error(22));
+    assert!(
+        !einval.is_media_failure(),
+        "EINVAL is the device refusing the I/O, not the media going away"
+    );
+    assert!(!DriveError::NotAligned { offset: 8, block_size: 4096 }.is_media_failure());
+    assert!(!DriveError::BufferTooSmall { need: 4096, have: 8 }.is_media_failure());
+    assert!(!DriveError::NoSpace("full".into()).is_media_failure());
+    assert!(!DriveError::ReadOnly("sealed".into()).is_media_failure());
+
+    // A real one still is.
+    assert!(
+        DriveError::Io(std::io::Error::from_raw_os_error(5)).is_media_failure(),
+        "EIO is the media"
+    );
+}

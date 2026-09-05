@@ -97,6 +97,34 @@ pub enum DriveError {
     Other(anyhow::Error),
 }
 
+impl DriveError {
+    /// Whether this is a reason to stop trusting the storage underneath.
+    ///
+    /// Marking a leg failed is sticky and it is written into the volume's
+    /// record, so it has to mean the media and not the request. `EINVAL` is
+    /// the device refusing an I/O it was never going to accept — an offset,
+    /// a length or a buffer address that is not a multiple of the block size
+    /// under `O_DIRECT`. The same read issued correctly succeeds, so taking
+    /// the volume offline for it turns a caller's mistake into an outage
+    /// that survives a restart. Same reasoning as #92: answer at the layer
+    /// the fault is actually in.
+    pub fn is_media_failure(&self) -> bool {
+        match self {
+            DriveError::Io(e) => !matches!(
+                e.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
+            ),
+            DriveError::NotAligned { .. }
+            | DriveError::OutOfRange { .. }
+            | DriveError::BufferTooSmall { .. }
+            | DriveError::NoSpace(_)
+            | DriveError::ReadOnly(_) => false,
+            _ => true,
+        }
+    }
+}
+
+
 impl fmt::Display for DriveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
