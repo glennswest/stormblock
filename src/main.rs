@@ -3794,25 +3794,84 @@ const DMI_TAG_PATHS: [&str; 2] = [
     "/sys/class/dmi/id/board_serial",
 ];
 
+/// A DMI string only counts as a service tag if it actually identifies *this*
+/// machine.
+///
+/// Boards with nothing burned in do not leave the field empty — they fill it
+/// with a placeholder, and every board of that model carries the same one. A
+/// node claiming `boothost/To be filled by O.E.M.` would resolve to whatever
+/// the last machine with that placeholder was assigned, which is worse than
+/// failing: it boots, and it boots as somebody else.
+pub(crate) fn usable_tag(raw: &str) -> Option<String> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return None;
+    }
+    let low = v.to_ascii_lowercase();
+    let placeholder = low == "none"
+        || low == "unknown"
+        || low == "default string"
+        || low == "system serial number"
+        || low == "not applicable"
+        || low.contains("to be filled")
+        || low.contains("not specified")
+        || low.contains("o.e.m.")
+        || low.contains("invalid")
+        // All-zero, all-dash or all-dot fields are the other way a board says
+        // nothing, and they are equally shared.
+        || v.chars().all(|c| c == '0' || c == '.' || c == '-' || c == ' ');
+    if placeholder {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
 fn service_tag_from_dmi() -> Option<String> {
     for p in DMI_TAG_PATHS {
         if let Ok(v) = std::fs::read_to_string(p) {
-            let v = v.trim().to_string();
-            // Boards with nothing burned in say so in a variety of ways, and
-            // claiming `boothost/To be filled by O.E.M.` would resolve for
-            // every such machine at once.
-            let junk = v.is_empty()
-                || v.eq_ignore_ascii_case("none")
-                || v.eq_ignore_ascii_case("unknown")
-                || v.to_ascii_lowercase().contains("to be filled")
-                || v.to_ascii_lowercase().contains("not specified")
-                || v.chars().all(|c| c == '0' || c == '.' || c == '-');
-            if !junk {
-                return Some(v);
+            if let Some(tag) = usable_tag(&v) {
+                return Some(tag);
             }
         }
     }
     None
+}
+
+#[cfg(test)]
+mod boot_claim_tests {
+    use super::usable_tag;
+
+    #[test]
+    fn a_real_service_tag_is_used() {
+        // The R230 this was built for.
+        assert_eq!(usable_tag("C2NR0Q2\n").as_deref(), Some("C2NR0Q2"));
+        assert_eq!(usable_tag("  7X8Y9Z1  ").as_deref(), Some("7X8Y9Z1"));
+    }
+
+    #[test]
+    fn a_placeholder_is_not_a_tag() {
+        // Every one of these is shared by every board of its model, so a node
+        // claiming on it would boot as another machine's node.
+        for junk in [
+            "",
+            "   ",
+            "None",
+            "unknown",
+            "Default string",
+            "System Serial Number",
+            "To be filled by O.E.M.",
+            "To Be Filled By O.E.M.",
+            "Not Specified",
+            "Not Applicable",
+            "0000000",
+            "..........",
+            "-------",
+            "Invalid",
+        ] {
+            assert!(usable_tag(junk).is_none(), "{junk:?} must not be used as a service tag");
+        }
+    }
 }
 
 /// Resolve this machine's image and print where to attach it.
