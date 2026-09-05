@@ -49,7 +49,14 @@ const META_ALIGN: u64 = 4096;
 /// dozen clones of it before the region has to be sized by hand.
 const META_BYTES_PER_SLOT: u64 = 256;
 const META_MIN: u64 = 64 * 1024;
-const META_MAX: u64 = 64 * 1024 * 1024;
+/// The ceiling is address space, not write cost: `write_metadata` writes the
+/// header and the payload rounded up to a block, never the whole region, so
+/// reserving generously costs disk and nothing else. It has to be generous —
+/// a 2 TB slab of 1 MiB slots is two million extents, and at ~45 bytes each
+/// that record is past 64 MiB long before the drive is full. A cap that a
+/// full slab can outgrow is the same fault as a region sized by a constant,
+/// arriving later.
+const META_MAX: u64 = 256 * 1024 * 1024;
 
 /// Unique identifier for a slab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

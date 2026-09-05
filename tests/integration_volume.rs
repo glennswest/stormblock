@@ -589,3 +589,25 @@ async fn auto_metadata_scales_past_the_flat_four_megabytes() {
     let small = auto_metadata_bytes(64 * 1024 * 1024, slot);
     assert!(small <= 64 * 1024 * 1024 / 8, "a small slab stays a slab: {small}");
 }
+
+/// The ceiling clears what a full slab of that size can actually map.
+///
+/// The cap is the same fault as a constant-sized region, only later: a 2 TB
+/// slab of 1 MiB slots maps two million extents, and a region that cannot
+/// hold that record fails at the far end of filling the drive — which is
+/// exactly when losing the record costs most.
+#[tokio::test]
+async fn the_metadata_ceiling_covers_a_full_slab_of_that_size() {
+    use stormblock::drive::slab::auto_metadata_bytes;
+    let slot = 1024 * 1024u64;
+    for capacity in [800u64 * (1 << 30), 2 * (1u64 << 40)] {
+        let slots = capacity / slot;
+        // Both copies, minus the per-copy header, against a generous 64 bytes
+        // for every extent a full slab could map.
+        let per_copy = auto_metadata_bytes(capacity, slot) / 2;
+        assert!(
+            per_copy >= slots * 64,
+            "a {capacity}-byte slab maps up to {slots} extents and reserves only {per_copy} per copy"
+        );
+    }
+}
