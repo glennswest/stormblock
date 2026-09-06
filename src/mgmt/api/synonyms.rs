@@ -455,15 +455,15 @@ fn claims() -> &'static std::sync::Mutex<std::collections::HashMap<VolumeId, std
 /// the machine this was measured on — with room for a slow POST. Short enough
 /// that it never protects a clone from the *next boot*, which is what the
 /// release is for.
+/// Read every time, not cached: a `OnceLock` here means the first caller in a
+/// process fixes it for every later one, which silently disables the setting
+/// for anything sharing the process. This is a claim path, not a hot loop.
 fn claim_grace() -> std::time::Duration {
-    static G: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
-    *G.get_or_init(|| {
-        std::env::var("STORMBLOCK_CLAIM_GRACE_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(std::time::Duration::from_secs)
-            .unwrap_or(std::time::Duration::from_secs(600))
-    })
+    std::env::var("STORMBLOCK_CLAIM_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(600))
 }
 
 fn note_claim(id: VolumeId) {
