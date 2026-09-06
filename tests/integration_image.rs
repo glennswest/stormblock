@@ -1175,6 +1175,8 @@ async fn an_explicit_block_size_is_still_obeyed() {
 /// releases (stormpump#20).
 #[tokio::test]
 async fn a_pallet_can_be_published_as_the_whole_volume() {
+    use std::sync::Arc;
+
     use stormblock::pallet::manager::{PalletManager, PublishSpec};
     use stormblock::pallet::store::PalletStore;
     use stormblock::pallet::PalletKind;
