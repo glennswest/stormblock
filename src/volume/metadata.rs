@@ -319,6 +319,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     failed_slabs: v.failed_slabs,
                     parent: v.parent,
                     sealed: v.sealed,
+                    template: false,
                     // Nothing before V6 could say otherwise, and a volume
                     // that was writable before an upgrade must stay writable
                     // across it: sealing still refuses writes on its own.
