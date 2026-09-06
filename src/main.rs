@@ -2246,6 +2246,13 @@ async fn data_slab_on(path: &str) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
+/// A slab named as a fabric URI (`nvme-tcp://…`) rather than a local path.
+/// stormblock opens one wherever it opens a device path — attaching instead of
+/// statting — so a remote root is an ordinary slab.
+fn is_fabric_uri(path: &str) -> bool {
+    path.contains("://")
+}
+
 async fn open_slabs_and_restore(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -2258,10 +2265,12 @@ async fn open_slabs_and_restore(
     //    image has no filesystem to keep one in, and the "meta" directory
     //    beside `/dev/sda4` is `/dev/meta`, which is nothing (#62).
     for path in slab_paths {
-        // FileDevice::open would create a missing path as an empty file and
-        // die later with a misleading "bad slab magic" — name the real
-        // problem (storage driver not loaded / wrong device) instead (#14).
-        if !Path::new(path).exists() {
+        // A fabric URI is opened by attaching, not by statting a file — see the
+        // scheme dispatch below. Only a local path is required to exist first:
+        // FileDevice::open would create a missing path as an empty file and die
+        // later with a misleading "bad slab magic", so name the real problem
+        // (storage driver not loaded / wrong device) instead (#14).
+        if !is_fabric_uri(path) && !Path::new(path).exists() {
             anyhow::bail!(
                 "slab device {path} does not exist — storage driver not loaded or wrong path?"
             );
@@ -2273,8 +2282,17 @@ async fn open_slabs_and_restore(
     // `slab_paths` is no longer 1:1 with `slabs`.
     let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
     for path in slab_paths {
-        let dev: Arc<dyn BlockDevice> =
-            Arc::new(stormblock::drive::filedev::FileDevice::open(path).await?);
+        // A slab is either a local device/image (FileDevice) or a namespace on
+        // the fabric (NvmeofDevice). The diskless boot hands boot-local an
+        // `nvme-tcp://` URI from the appliance claim; attaching it here is what
+        // makes a remote root an ordinary slab, exactly as a local one.
+        let dev: Arc<dyn BlockDevice> = if is_fabric_uri(path) {
+            let spec = stormblock::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
+                .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
+            Arc::new(stormblock::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
+        } else {
+            Arc::new(stormblock::drive::filedev::FileDevice::open(path).await?)
+        };
         match Slab::open(dev.clone()).await {
             Ok(s) => {
                 slabs.push(s);
