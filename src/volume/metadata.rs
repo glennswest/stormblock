@@ -324,7 +324,8 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     // across it: sealing still refuses writes on its own.
                     access: Access::ReadWrite,
                     fs: v.fs,
-                })
+                    template: false,
+                    })
                 .collect(),
         }
     }
@@ -787,6 +788,7 @@ mod tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
+                template: false,
                 }],
         }
     }
@@ -920,6 +922,7 @@ mod tests {
                     label: "root".into(),
                     uuid: Some(Uuid::from_u128(9)),
                 }),
+                    template: false,
                     }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1002,6 +1005,7 @@ mod tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
+                template: false,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1171,6 +1175,7 @@ mod retention_tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
+                template: false,
                 }],
         }
     }
