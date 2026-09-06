@@ -43,7 +43,7 @@ const MAGIC: [u8; 8] = *b"STRMVOL\0";
 /// says what a volume is and only moves one way in practice; access is a
 /// setting on a clone that moves both ways over its life. A V5 record loads
 /// read-write, which is what every volume that predates the question was.
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 /// Whether a volume takes writes.
 ///
@@ -268,6 +268,74 @@ impl From<LegacyLocation> for ExtentLocation {
 
 fn convert_legacy_extents(m: BTreeMap<u64, LegacyLocation>) -> BTreeMap<u64, ExtentLocation> {
     m.into_iter().map(|(k, v)| (k, v.into())).collect()
+}
+
+/// V6 payload shapes — decode-only, converted on load. Everything a V7
+/// record carries except `template`.
+///
+/// This module exists because `VolumeRecord` is encoded with bincode, which
+/// is *not* self-describing: a field added to the current shape does not
+/// default on read, it makes every record written before it undecodable.
+/// `#[serde(default)]` is no help. So a new field is a new version, always —
+/// which is what every module below is.
+mod v6 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: Option<RaidArrayId>,
+        pub extents: BTreeMap<u64, ExtentLocation>,
+        pub retention: Retention,
+        pub redundancy: RedundancyPolicy,
+        pub parity: BTreeMap<u64, ParityGroup>,
+        pub failed_slabs: Vec<SlabId>,
+        pub parent: Option<VolumeId>,
+        pub sealed: bool,
+        pub access: Access,
+        pub fs: Option<FsInfo>,
+    }
+}
+
+impl From<v6::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v6::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: v.array_id,
+                    extents: v.extents,
+                    retention: v.retention,
+                    redundancy: v.redundancy,
+                    parity: v.parity,
+                    failed_slabs: v.failed_slabs,
+                    parent: v.parent,
+                    sealed: v.sealed,
+                    access: v.access,
+                    fs: v.fs,
+                    // Nothing before V7 could say which goldens were blanks.
+                    // A slab written then simply has no templates, which is
+                    // what it had anyway.
+                    template: false,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// V5 payload shapes — decode-only, converted on load. Everything a V6
@@ -663,6 +731,12 @@ impl MetadataStore {
             let (old, _): (v4::VolumeMetadata, _) =
                 bincode::serde::decode_from_slice(payload, bincode::config::standard())
                     .map_err(|e| io::Error::other(format!("bincode decode (v4): {e}")))?;
+            return Ok(old.into());
+        }
+        if version == 6 {
+            let (old, _): (v6::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v6): {e}")))?;
             return Ok(old.into());
         }
         if version == 5 {
