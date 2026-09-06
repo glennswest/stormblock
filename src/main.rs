@@ -2539,6 +2539,17 @@ async fn start_serving(
                 reactor.clone(),
                 wiring,
             ));
+            // Tell the API how to serve a volume as a subsystem of its own.
+            // The settings live in the serve config and the API cannot see it,
+            // so publish them: a claim then hands out the address that names
+            // the volume rather than a namespace number in a shared subsystem
+            // (#98).
+            *state.per_volume.write().await = Some(stormblock::mgmt::PerVolumeServing {
+                nqn_prefix: ctx.cfg.nqn_prefix.clone(),
+                portal_base: ctx.cfg.portal_base,
+                portal_span: ctx.cfg.portal_span,
+                reactor: reactor.clone(),
+            });
             // Readiness reflects what this engine has actually done.
             //
             // These flags were set by the profile that owned the serving layer

@@ -158,6 +158,33 @@ pub struct PersistedLun {
 }
 
 /// Shared application state for the management API.
+/// What `serve` knows about giving a volume its own subsystem.
+#[derive(Clone)]
+pub struct PerVolumeServing {
+    /// `nqn.2026-08.lo.storm`, to which `:vol-<uuid>` is appended. The volume
+    /// GUID *is* the address (#98, #99).
+    pub nqn_prefix: String,
+    pub portal_base: u16,
+    pub portal_span: u16,
+    /// The same reactor the rest of the data path runs on — a subsystem
+    /// started here must not bring its own thread pool.
+    pub reactor: std::sync::Arc<crate::target::reactor::ReactorPool>,
+}
+
+/// One volume served as its own subsystem.
+pub struct VolumeSubsystem {
+    pub nqn: String,
+    pub port: u16,
+    /// Dropping this aborts the listener.
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for VolumeSubsystem {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 pub struct AppState {
     pub drives: tokio::sync::RwLock<Vec<DriveInfo>>,
     pub arrays: tokio::sync::RwLock<HashMap<RaidArrayId, ArrayInfo>>,
@@ -188,6 +215,16 @@ pub struct AppState {
     /// until a volume has been wired, which is why the claim still falls back
     /// to the shared subsystem.
     pub nvme_portals: tokio::sync::RwLock<HashMap<uuid::Uuid, (String, u16)>>,
+    /// How to serve a volume as a subsystem of its own, published by `serve`
+    /// at startup because the settings live in its config and the API cannot
+    /// see them.
+    ///
+    /// `None` when nothing is serving — the API then has no way to start a
+    /// subsystem and the claim falls back to the shared one.
+    pub per_volume: tokio::sync::RwLock<Option<PerVolumeServing>>,
+    /// Subsystems this side started, kept alive. Dropping the handle stops the
+    /// listener, so a volume stops answering when its entry goes.
+    pub volume_subsystems: tokio::sync::Mutex<HashMap<uuid::Uuid, VolumeSubsystem>>,
     /// How long a freshly claimed clone is protected from being released by
     /// the next claim. See `api::synonyms` — a machine claims twice per boot
     /// and the first clone is still attached when the second arrives.
@@ -289,6 +326,8 @@ impl AppState {
                 None => api::stormfs::StormFsState::default(),
             }),
             nvme_portals: tokio::sync::RwLock::new(HashMap::new()),
+            per_volume: tokio::sync::RwLock::new(None),
+            volume_subsystems: tokio::sync::Mutex::new(HashMap::new()),
             claim_grace: std::time::Duration::from_secs(
                 std::env::var("STORMBLOCK_CLAIM_GRACE_SECS")
                     .ok()

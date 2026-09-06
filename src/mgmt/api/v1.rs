@@ -771,6 +771,76 @@ fn account_static_nodes(v1: &mut V1State, replicas: &[Replica], size: u64, charg
 /// replay is idempotent and does not leak namespaces. Connected hosts are
 /// notified by the target, so no reconnect is needed.
 #[cfg(feature = "nvmeof")]
+/// Serve a volume as a subsystem of its own, and remember where.
+///
+/// The NQN carries the volume GUID, so the address names what it serves:
+/// nothing to go stale, a deleted volume stops answering rather than
+/// resolving to whatever inherited its namespace number, and the same volume
+/// served from several places is the same NQN — which is what NVMe multipath
+/// is and the reason a shared subsystem cannot express it (#98, #99).
+///
+/// Idempotent: a volume already served keeps its address, because handing out
+/// a new one would change it under whoever holds the old.
+pub(crate) async fn ensure_volume_subsystem(
+    state: &AppState,
+    volume: Uuid,
+) -> Option<(String, u16)> {
+    if let Some(found) = state.nvme_portals.read().await.get(&volume).cloned() {
+        return Some(found);
+    }
+    let cfg = state.per_volume.read().await.clone()?;
+    let device = state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume(&EngineVolumeId(volume))?;
+
+    let nqn = format!("{}:vol-{volume}", cfg.nqn_prefix);
+
+    // Walk the range until one binds. Bind failure is the allocator: another
+    // holder of the port is a fact, and asking the kernel beats keeping a
+    // second opinion about what is free.
+    let span = cfg.portal_span.max(1);
+    for i in 0..span {
+        let port = cfg.portal_base.saturating_add(i);
+        let listener =
+            match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+        let target = std::sync::Arc::new(crate::target::nvmeof::NvmeofTarget::new(
+            crate::target::nvmeof::NvmeofConfig {
+                nqn: nqn.clone(),
+                ..Default::default()
+            },
+        ));
+        // Namespace 1, always: the volume is the only namespace here, so the
+        // number carries no information and nothing can disagree about it.
+        target.add_namespace_dynamic(1, device).await;
+        let runner = target.clone();
+        let reactor = cfg.reactor.clone();
+        let log_nqn = nqn.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = runner.run_with_listener(listener, &reactor).await {
+                tracing::error!("nvme subsystem {log_nqn} on {port} stopped: {e}");
+            }
+        });
+        state.volume_subsystems.lock().await.insert(
+            volume,
+            crate::mgmt::VolumeSubsystem { nqn: nqn.clone(), port, task },
+        );
+        state.nvme_portals.write().await.insert(volume, (nqn.clone(), port));
+        tracing::info!("volume {volume} served as {nqn} on port {port}");
+        return Some((nqn, port));
+    }
+    tracing::warn!(
+        "no free port in {}..{} to serve volume {volume} on its own subsystem",
+        cfg.portal_base,
+        cfg.portal_base.saturating_add(span)
+    );
+    None
+}
+
 pub(crate) async fn ensure_nvme_namespace(
     state: &AppState,
     volume_id: &str,

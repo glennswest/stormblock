@@ -560,7 +560,11 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Val
         // whatever inherited its namespace number. It is also the only form
         // that can describe a volume reachable by several paths, which is
         // where this is going (#98).
-        if let Some((nqn, port)) = state.nvme_portals.read().await.get(&volume.0).cloned() {
+        // Give it a subsystem of its own if it has not got one. A claim is
+        // exactly the moment a volume acquires a consumer, so it is the right
+        // moment to start serving it under its own name.
+        let own = super::v1::ensure_volume_subsystem(state, volume.0).await;
+        if let Some((nqn, port)) = own {
             if !nqn.is_empty() {
                 let host = state.config.management.resolve_advertised_host("0.0.0.0");
                 return json!({
