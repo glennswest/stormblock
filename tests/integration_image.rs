@@ -1203,10 +1203,14 @@ async fn a_pallet_can_be_published_as_the_whole_volume() {
     let mut spec = PublishSpec::new("kernel1", PalletKind::Boot);
     spec.whole_drive = true;
     spec.drive = Some(0);
-    spec.members = vec![stormblock::pallet::manager::MemberSpec::file(
-        "payload",
-        member.to_str().unwrap(),
-    )];
+    spec.members = vec![stormblock::pallet::manager::file_member(
+        "payload".to_string(),
+        "raw".to_string(),
+        stormblock::pallet::MemberKind::Raw,
+        member.clone(),
+    )
+    .await
+    .unwrap()];
 
     let loc = mgr.publish(spec).await.expect("publish as the whole volume");
     assert_eq!(loc.name, "kernel1");
