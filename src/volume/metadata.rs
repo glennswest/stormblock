@@ -197,7 +197,7 @@ pub struct VolumeRecord {
     pub access: Access,
     /// The filesystem on it, when the engine knows.
     pub fs: Option<FsInfo>,
-}}
+}
 
 /// What is supposed to happen to a volume's divergence from its golden.
 ///
@@ -296,9 +296,7 @@ mod v5 {
         pub parent: Option<VolumeId>,
         pub sealed: bool,
         pub fs: Option<FsInfo>,
-    },
-    template: false,
-}
+    }
 }
 
 impl From<v5::VolumeMetadata> for VolumeMetadata {
@@ -327,7 +325,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     // across it: sealing still refuses writes on its own.
                     access: Access::ReadWrite,
                     fs: v.fs,
-                }})
+                })
                 .collect(),
         }
     }
@@ -355,9 +353,7 @@ mod v4 {
         pub redundancy: RedundancyPolicy,
         pub parity: BTreeMap<u64, ParityGroup>,
         pub failed_slabs: Vec<SlabId>,
-    },
-    template: false,
-}
+    }
 }
 
 impl From<v4::VolumeMetadata> for VolumeMetadata {
@@ -384,9 +380,8 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
-                },
                     template: false,
-                })
+                    })
                 .collect(),
         }
     }
@@ -417,9 +412,7 @@ mod v3 {
         pub array_id: Option<RaidArrayId>,
         pub extents: BTreeMap<u64, LegacyLocation>,
         pub retention: Retention,
-    },
-    template: false,
-}
+    }
 }
 
 impl From<v3::VolumeMetadata> for VolumeMetadata {
@@ -445,9 +438,8 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
-                },
                     template: false,
-                })
+                    })
                 .collect(),
         }
     }
@@ -471,9 +463,7 @@ mod v2 {
         pub virtual_size: u64,
         pub array_id: Option<RaidArrayId>,
         pub extents: BTreeMap<u64, LegacyLocation>,
-    },
-    template: false,
-}
+    }
 }
 
 impl From<v2::VolumeMetadata> for VolumeMetadata {
@@ -500,9 +490,8 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
-                },
                     template: false,
-                })
+                    })
                 .collect(),
         }
     }
@@ -526,9 +515,7 @@ mod v1 {
         pub virtual_size: u64,
         pub array_id: RaidArrayId,
         pub extent_map: BTreeMap<u64, PhysicalExtent>,
-    },
-    template: false,
-}
+    }
 }
 
 impl From<v1::VolumeMetadata> for VolumeMetadata {
@@ -558,9 +545,8 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
-                },
                     template: false,
-                })
+                    })
                 .collect(),
         }
     }
@@ -802,9 +788,8 @@ mod tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
-            },
                 template: false,
-            }],
+                }],
         }
     }
 
@@ -835,9 +820,8 @@ mod tests {
                     parent: Some(VolumeId(Uuid::from_u128(54))),
                     sealed: false,
                     fs: None,
-                },
                     template: false,
-                },
+                    },
                 v5::VolumeRecord {
                     id: VolumeId(Uuid::from_u128(56)),
                     name: "golden".into(),
@@ -851,9 +835,8 @@ mod tests {
                     parent: None,
                     sealed: true,
                     fs: None,
-                },
                     template: false,
-                },
+                    },
             ],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
@@ -894,9 +877,8 @@ mod tests {
                 redundancy: RedundancyPolicy::mirror(2),
                 parity: BTreeMap::new(),
                 failed_slabs: vec![slab_id],
-            },
                 template: false,
-            }],
+                }],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
         let mut buf = Vec::new();
@@ -943,9 +925,8 @@ mod tests {
                     label: "root".into(),
                     uuid: Some(Uuid::from_u128(9)),
                 }),
-            },
                     template: false,
-                }],
+                    }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
         let v = &back.volumes[0];
@@ -973,9 +954,8 @@ mod tests {
                 array_id: None,
                 extents,
                 retention: Retention::Ephemeral,
-            },
                 template: false,
-            }],
+                }],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
         let mut buf = Vec::new();
@@ -1029,9 +1009,8 @@ mod tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
-            },
                 template: false,
-            }],
+                }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
         let v = &back.volumes[0];
@@ -1080,9 +1059,8 @@ mod tests {
                 virtual_size: 100 * 1024 * 1024,
                 array_id,
                 extent_map,
-            },
                 template: false,
-            }],
+                }],
         };
 
         // Hand-build a version-1 envelope around the V1 payload.
@@ -1202,9 +1180,8 @@ mod retention_tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
-            },
                 template: false,
-            }],
+                }],
         }
     }
 
@@ -1233,9 +1210,8 @@ mod retention_tests {
                 virtual_size: 4096,
                 array_id: None,
                 extents: BTreeMap::new(),
-            },
                 template: false,
-            }],
+                }],
         };
         let payload =
             bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
