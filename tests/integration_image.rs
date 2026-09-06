@@ -1230,3 +1230,84 @@ async fn a_pallet_can_be_published_as_the_whole_volume() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].name, "kernel1");
 }
+
+/// A blank travels as a blank, so a node can derive its templates.
+///
+/// The image knows which goldens are blanks — `data1` declares them
+/// `role = "blank"` — but that lived on the pallet member and did not survive
+/// onto the volume. So a netbooted R230 attached its slab, had every blank it
+/// needed, and no way to know which they were: `TemplateStore` is a separate
+/// registry kept under a data directory, and a node booting over the network
+/// has none (#100).
+///
+/// Recording it on the volume means templates are *derived* from what is
+/// attached. Nothing to register, nothing to keep in sync, and a blank added
+/// to an image is a template on the next boot.
+#[tokio::test]
+async fn a_golden_marked_template_is_still_a_template_after_a_restart() {
+    use std::sync::Arc;
+    use stormblock::volume::VolumeManager;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("slab.img");
+    let dev: Arc<dyn stormblock::drive::BlockDevice> = Arc::new(
+        stormblock::drive::filedev::FileDevice::open_with_capacity(
+            path.to_str().unwrap(),
+            256 * 1024 * 1024,
+        )
+        .await
+        .unwrap(),
+    );
+    let meta = stormblock::drive::slab::auto_metadata_bytes(256 * 1024 * 1024, 1024 * 1024);
+    let slab = stormblock::drive::slab::Slab::format_with(
+        dev.clone(),
+        stormblock::drive::slab::SlabFormat::new(
+            1024 * 1024,
+            stormblock::placement::topology::StorageTier::Hot,
+        )
+        .with_metadata(meta),
+    )
+    .await
+    .unwrap();
+    let slab_id = slab.slab_id();
+
+    let blank = {
+        let mut mgr = VolumeManager::new(1024 * 1024);
+        mgr.attach_slab(stormblock::raid::RaidArrayId(uuid::Uuid::new_v4()), slab)
+            .await
+            .unwrap();
+        mgr.persist_to_slab(slab_id);
+
+        let blank = mgr.create_volume_any("pvc-1G", 16 * 1024 * 1024).await.unwrap();
+        let running = mgr.create_volume_any("stormpump", 16 * 1024 * 1024).await.unwrap();
+        mgr.seal_volume(blank, None).await.unwrap();
+        mgr.mark_template(blank);
+
+        assert!(mgr.is_template(&blank), "marked");
+        assert!(!mgr.is_template(&running), "a volume to run is not a template");
+        mgr.persist_checked().await.unwrap();
+        blank
+    };
+
+    // Reattach, the way a node does when it boots.
+    let dev2: Arc<dyn stormblock::drive::BlockDevice> = Arc::new(
+        stormblock::drive::filedev::FileDevice::open(path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let reopened = stormblock::drive::slab::Slab::open(dev2).await.unwrap();
+    let mut mgr = VolumeManager::new(1024 * 1024);
+    mgr.attach_slab(stormblock::raid::RaidArrayId(uuid::Uuid::new_v4()), reopened)
+        .await
+        .unwrap();
+    mgr.persist_to_slab(slab_id);
+    mgr.restore().await.unwrap();
+
+    assert!(
+        mgr.is_template(&blank),
+        "the blank is still a blank after the slab is reattached"
+    );
+    let found = mgr.templates().await;
+    assert_eq!(found.len(), 1, "exactly the one blank: {found:?}");
+    assert_eq!(found[0].1, "pvc-1G");
+}

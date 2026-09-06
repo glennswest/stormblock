@@ -655,6 +655,14 @@ impl ImageBuilder {
                 .await
                 .map_err(|e| ImageError::Other(format!("seal golden '{golden_name}': {e}")))?;
 
+            // A blank travels as a blank. The image already knows which these
+            // are; recording it on the volume is what lets a node attaching
+            // the slab derive its templates instead of needing a registry
+            // that a netbooted node has nowhere to keep (#100).
+            if g.template {
+                mgr.mark_template(golden_id);
+            }
+
             let clone_id = mgr
                 .create_snapshot(golden_id, &clone_name)
                 .await
