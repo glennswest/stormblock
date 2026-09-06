@@ -419,12 +419,64 @@ fn yes() -> bool {
 ///   nothing here should ever delete a golden;
 /// * **it is a clone of the same source** — which is what makes it this claim
 ///   path's own leftover rather than a volume that merely had the name.
+/// When each claim clone was minted.
+///
+/// A machine claims **twice per boot**: stormbootx claims to load the kernel,
+/// and the initramfs claims again because the firmware's block device ceased
+/// to exist when the kernel started. The supersede path reads that second
+/// claim as "this consumer is done with what it had" and releases the first
+/// clone — while the machine is still attached to it. On an R230 that is a
+/// boot loop, and the log shows it plainly: a clone hot-added and attached at
+/// 15:09:15, released at 15:09:49 with the controller still connected (#97).
+///
+/// Ownership is what the other guards check — nothing else names it, it is not
+/// sealed, it is a clone of this lineage. None of them ask whether it is *in
+/// use*. Until the target can answer that per namespace, age is the proxy:
+/// two claims within one boot are seconds apart, two boots are not.
+static CLAIMED_AT: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<VolumeId, std::time::Instant>>,
+> = std::sync::OnceLock::new();
+
+fn claims() -> &'static std::sync::Mutex<std::collections::HashMap<VolumeId, std::time::Instant>> {
+    CLAIMED_AT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// How long a fresh clone is protected from being released by the next claim.
+///
+/// Long enough to cover firmware handing over to the initramfs — seconds on
+/// the machine this was measured on — with room for a slow POST. Short enough
+/// that it never protects a clone from the *next boot*, which is what the
+/// release is for.
+const CLAIM_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn note_claim(id: VolumeId) {
+    let mut m = claims().lock().unwrap();
+    m.retain(|_, t| t.elapsed() < CLAIM_GRACE * 4);
+    m.insert(id, std::time::Instant::now());
+}
+
+fn claimed_within_grace(id: VolumeId) -> Option<std::time::Duration> {
+    let m = claims().lock().unwrap();
+    m.get(&id).map(|t| t.elapsed()).filter(|e| *e < CLAIM_GRACE)
+}
+
 async fn release_superseded_clone(
     state: &Arc<AppState>,
     old: VolumeId,
     syn: &synonym::Synonym,
     source: VolumeId,
 ) {
+    // Still being booted from? A clone minted moments ago is the stage before
+    // this one, not an abandoned predecessor.
+    if let Some(age) = claimed_within_grace(old) {
+        tracing::info!(
+            volume = %old, age_secs = age.as_secs(),
+            "not releasing a clone claimed {}s ago - the machine that claimed it is \
+             probably still attached (#97)",
+            age.as_secs()
+        );
+        return;
+    }
     {
         let store = state.synonyms.read().await;
         let named_by = store.pointing_at(&old);
@@ -647,6 +699,7 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // Reusing an existing export rather than minting a second one matters: the
     // nsid is part of the address, and handing out a new one for a volume that
     // already has an address would change it under whoever holds the old one.
+    note_claim(c.volume_id);
     let attach = attach_info(&state, c.volume_id).await;
 
     let mut out = json!({
