@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **fix(synonyms): a claim no longer releases the clone the machine is booting on (#97).** A node claims **twice per boot** — stormbootx to load the kernel, the initramfs to find the root — and the supersede path read the second claim as "this consumer is done with what it had", releasing the first clone while the machine was still attached. On an R230 that was a boot loop: hot-added and attached at 15:09:15, released at 15:09:49 with the controller connected. The other guards all ask about *ownership*; none asks about **use** — and NVMe cannot be asked here, because one subsystem exposes every namespace, so a connected controller sees all of them. Age is the only signal there is: a clone younger than `claim_grace` (default 10 minutes, held on `AppState`) is the stage before this one, not an abandoned predecessor. The cost is at most one extra clone per boot cycle, collected by the next boot — the right way round, since the alternative is pulling a namespace out from under a booting machine.
+
 - **feat(pallet): a pallet can be published as the whole volume** (`PublishSpec::whole_drive`) — superblock at byte zero, no partition table. The layout `whole_drive_pallet` already *read*; it could not be written, because publish always allocated a GPT slot first. That was the one thing blocking a release from being a composition: `compose/disk` maps partition **volumes**, and a pallet written into a GPT'd drive is a drive, not a partition. So every release copied every pallet again instead of mapping the ones that had not changed — 10.25 through 10.31 are seven near-identical 11 GB volumes where a few changed pallets plus seven GPTs would do (stormpump#20).
 
 ### 2026-09-06
