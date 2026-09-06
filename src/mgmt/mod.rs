@@ -173,6 +173,14 @@ pub struct AppState {
     /// Taken **before** the volume manager wherever both are needed.
     #[cfg(feature = "stormfs-data")]
     pub stormfs: tokio::sync::Mutex<api::stormfs::StormFsState>,
+    /// How long a freshly claimed clone is protected from being released by
+    /// the next claim. See `api::synonyms` — a machine claims twice per boot
+    /// and the first clone is still attached when the second arrives.
+    ///
+    /// Held here rather than read from the environment because a process-wide
+    /// setting cannot be varied per instance, and two tests exercising the two
+    /// sides of this would clobber each other.
+    pub claim_grace: std::time::Duration,
     /// The serving runtime, when this node serves volumes (#60). Unset only
     /// when it was deliberately turned off or could not be built — the router
     /// mounts `/serve/v1` whenever it is here, so no profile has to remember
@@ -265,6 +273,12 @@ impl AppState {
                 Some(dir) => api::stormfs::StormFsState::load(std::path::Path::new(dir)),
                 None => api::stormfs::StormFsState::default(),
             }),
+            claim_grace: std::time::Duration::from_secs(
+                std::env::var("STORMBLOCK_CLAIM_GRACE_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(600),
+            ),
             fstemplates: Arc::new(tokio::sync::Mutex::new(
                 match config.management.data_dir.as_ref() {
                     Some(dir) => crate::fs::TemplateStore::load(std::path::Path::new(dir)),

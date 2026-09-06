@@ -484,10 +484,10 @@ async fn re_claiming_releases_the_clone_it_supersedes() {
 /// service tag on forge before a machine had finished booting once (#94).
 #[tokio::test]
 async fn an_unnamed_claim_still_releases_the_clone_it_replaces() {
-    // This test is about the release. The in-boot protection is the next test.
-    unsafe { std::env::set_var("STORMBLOCK_CLAIM_GRACE_SECS", "0") };
+    // About the release itself; the in-boot protection is its own test.
     let dir = TempDir::new().unwrap();
-    let (state, v1, _v2) = setup(&dir).await;
+    let (mut state, v1, _v2) = setup(&dir).await;
+    std::sync::Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
     let (base, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
 
@@ -541,10 +541,10 @@ async fn an_unnamed_claim_still_releases_the_clone_it_replaces() {
 /// becomes garbage, so the case that mattered was the one it skipped.
 #[tokio::test]
 async fn repointing_to_a_new_golden_releases_the_clone_of_the_old_one() {
-    // This test is about the release. The in-boot protection is the next test.
-    unsafe { std::env::set_var("STORMBLOCK_CLAIM_GRACE_SECS", "0") };
+    // About the release itself; the in-boot protection is its own test.
     let dir = TempDir::new().unwrap();
-    let (state, v1, v2) = setup(&dir).await;
+    let (mut state, v1, v2) = setup(&dir).await;
+    std::sync::Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
     let (base, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
 
@@ -608,9 +608,11 @@ async fn repointing_to_a_new_golden_releases_the_clone_of_the_old_one() {
 /// NVMe cannot be asked "is this one in use". Age is the only signal there is.
 #[tokio::test]
 async fn a_freshly_claimed_clone_survives_the_next_claim() {
-    unsafe { std::env::set_var("STORMBLOCK_CLAIM_GRACE_SECS", "600") };
     let dir = TempDir::new().unwrap();
     let (state, v1, _v2) = setup(&dir).await;
+    // The default grace already protects it; stated here so the test says what
+    // it depends on rather than inheriting it.
+    assert!(state.claim_grace >= std::time::Duration::from_secs(60));
     let (base, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
 

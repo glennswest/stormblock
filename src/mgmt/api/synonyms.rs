@@ -455,26 +455,20 @@ fn claims() -> &'static std::sync::Mutex<std::collections::HashMap<VolumeId, std
 /// the machine this was measured on — with room for a slow POST. Short enough
 /// that it never protects a clone from the *next boot*, which is what the
 /// release is for.
-/// Read every time, not cached: a `OnceLock` here means the first caller in a
-/// process fixes it for every later one, which silently disables the setting
-/// for anything sharing the process. This is a claim path, not a hot loop.
-fn claim_grace() -> std::time::Duration {
-    std::env::var("STORMBLOCK_CLAIM_GRACE_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(std::time::Duration::from_secs(600))
-}
+
 
 fn note_claim(id: VolumeId) {
     let mut m = claims().lock().unwrap();
-    m.retain(|_, t| t.elapsed() < claim_grace() * 4 + std::time::Duration::from_secs(60));
+    m.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(3600));
     m.insert(id, std::time::Instant::now());
 }
 
-fn claimed_within_grace(id: VolumeId) -> Option<std::time::Duration> {
+fn claimed_within_grace(
+    id: VolumeId,
+    grace: std::time::Duration,
+) -> Option<std::time::Duration> {
     let m = claims().lock().unwrap();
-    m.get(&id).map(|t| t.elapsed()).filter(|e| *e < claim_grace())
+    m.get(&id).map(|t| t.elapsed()).filter(|e| *e < grace)
 }
 
 async fn release_superseded_clone(
@@ -485,7 +479,7 @@ async fn release_superseded_clone(
 ) {
     // Still being booted from? A clone minted moments ago is the stage before
     // this one, not an abandoned predecessor.
-    if let Some(age) = claimed_within_grace(old) {
+    if let Some(age) = claimed_within_grace(old, state.claim_grace) {
         tracing::info!(
             volume = %old, age_secs = age.as_secs(),
             "not releasing a clone claimed {}s ago - the machine that claimed it is \
