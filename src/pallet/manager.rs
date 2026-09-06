@@ -160,6 +160,16 @@ pub struct PublishSpec {
     /// Which drive to land on. `None` takes the first with room — several
     /// pallets per drive and several drives per node are both normal.
     pub drive: Option<usize>,
+    /// Write the pallet as the whole device, superblock at byte zero, with no
+    /// partition table.
+    ///
+    /// The layout `whole_drive_pallet` already reads. Publishing it matters
+    /// because a composed disk maps partition *volumes*: for a pallet to be a
+    /// partition of a composed disk it has to be a volume holding nothing but
+    /// the pallet, and a pallet written into a GPT'd drive is a drive, not a
+    /// partition. Without this every release copies every pallet again
+    /// instead of mapping the ones that did not change (stormpump#20).
+    pub whole_drive: bool,
     /// Partition size. `None` fits the content. Sparse is free to a consumer
     /// that only does block reads, so sizing for headroom costs nothing but
     /// address space.
@@ -190,6 +200,7 @@ impl PublishSpec {
             version_label: String::new(),
             members: Vec::new(),
             drive: None,
+            whole_drive: false,
             size_bytes: None,
             block_size: None,
             read_only: true,
@@ -567,6 +578,38 @@ impl PalletManager {
                 spec.size_bytes.unwrap_or(b.total_bytes).max(b.total_bytes),
                 ALIGN_BYTES,
             );
+
+            // The whole device *is* the pallet: no table to allocate in, no
+            // entry to name it by, and the caller has already sized the volume.
+            if spec.whole_drive {
+                if drive.device.capacity_bytes() < want {
+                    last_err = Some(PalletError::NoSpace {
+                        need: want,
+                        largest_free: drive.device.capacity_bytes(),
+                    });
+                    continue;
+                }
+                let view = PartitionView::whole(drive.device.clone());
+                builder.write(b, &view).await?;
+                let loc = self
+                    .store
+                    .whole_drive_pallet(idx)
+                    .await
+                    .ok_or_else(|| PalletError::Refused(
+                        "published a whole-drive pallet that does not read back".into(),
+                    ))?;
+                // Verified through the same reader a consumer uses, rather
+                // than by the id a GPT would have given it — there is none.
+                let p = Pallet::read(&view).await?;
+                if p.name() != spec.name {
+                    return Err(PalletError::Refused(format!(
+                        "published pallet reads back as {:?}, not {:?}",
+                        p.name(),
+                        spec.name
+                    )));
+                }
+                return Ok(loc);
+            }
 
             // Allocate the partition first: it is the claim on the range, and
             // two publishes racing for the same free run would otherwise both
