@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **feat(pallet): a pallet can be published as the whole volume** (`PublishSpec::whole_drive`) — superblock at byte zero, no partition table. The layout `whole_drive_pallet` already *read*; it could not be written, because publish always allocated a GPT slot first. That was the one thing blocking a release from being a composition: `compose/disk` maps partition **volumes**, and a pallet written into a GPT'd drive is a drive, not a partition. So every release copied every pallet again instead of mapping the ones that had not changed — 10.25 through 10.31 are seven near-identical 11 GB volumes where a few changed pallets plus seven GPTs would do (stormpump#20).
+
 ### 2026-09-06
 - **fix(initramfs): console output is ASCII.** Twelve diagnostics carried em-dashes, and a serial console is 7-bit in practice — a UTF-8 em-dash arrives as two bytes of noise in the middle of the line you are trying to read. On a headless node the serial log is the only record there is, so the messages that matter most were the ones being corrupted. Comments keep their typography; only what is printed changed.
 
