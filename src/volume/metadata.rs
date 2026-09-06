@@ -835,8 +835,7 @@ mod tests {
                     parent: None,
                     sealed: true,
                     fs: None,
-                    template: false,
-                    },
+                },
             ],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
