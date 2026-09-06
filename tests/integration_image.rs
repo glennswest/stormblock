@@ -1164,3 +1164,63 @@ async fn an_explicit_block_size_is_still_obeyed() {
     let raw = std::fs::read(&out).unwrap();
     assert_eq!(&raw[512..520], b"EFI PART");
 }
+
+/// A pallet can be the whole volume, so a composed disk can map it.
+///
+/// A composed disk names partition *volumes*. For a pallet to be one of those
+/// partitions it has to be a volume holding nothing but the pallet — and a
+/// pallet published into a GPT'd drive is a drive, not a partition. Without
+/// this every release copies every pallet again rather than mapping the ones
+/// that did not change, which is seven near-identical 11 GB volumes for seven
+/// releases (stormpump#20).
+#[tokio::test]
+async fn a_pallet_can_be_published_as_the_whole_volume() {
+    use stormblock::pallet::manager::{PalletManager, PublishSpec};
+    use stormblock::pallet::store::PalletStore;
+    use stormblock::pallet::PalletKind;
+
+    let dir = TempDir::new().unwrap();
+    let member = dir.path().join("payload.bin");
+    tokio::fs::write(&member, vec![0xC5u8; 256 * 1024]).await.unwrap();
+
+    // A bare device with no partition table at all.
+    let path = dir.path().join("pallet.vol");
+    let dev: Arc<dyn stormblock::drive::BlockDevice> = Arc::new(
+        stormblock::drive::filedev::FileDevice::open_with_capacity(
+            path.to_str().unwrap(),
+            32 * 1024 * 1024,
+        )
+        .await
+        .unwrap(),
+    );
+
+    let mut store = PalletStore::default();
+    store.add_drive(path.display().to_string(), dev.clone());
+    let mgr = PalletManager::new(store);
+
+    let mut spec = PublishSpec::new("kernel1", PalletKind::Boot);
+    spec.whole_drive = true;
+    spec.drive = Some(0);
+    spec.members = vec![stormblock::pallet::manager::MemberSpec::file(
+        "payload",
+        member.to_str().unwrap(),
+    )];
+
+    let loc = mgr.publish(spec).await.expect("publish as the whole volume");
+    assert_eq!(loc.name, "kernel1");
+    assert!(loc.is_whole_drive(), "it should occupy the device, not a partition");
+    assert_eq!(loc.start_bytes, 0, "the superblock is at byte zero");
+
+    // And there is no partition table: byte 512 and byte 4096 both stay clear,
+    // which is what lets a composed disk put its own GPT over the top.
+    let mut sig = vec![0u8; 8];
+    dev.read(512, &mut sig).await.unwrap();
+    assert_ne!(&sig, b"EFI PART", "a whole-volume pallet writes no GPT");
+    dev.read(4096, &mut sig).await.unwrap();
+    assert_ne!(&sig, b"EFI PART");
+
+    // It reads back through the same path a consumer uses.
+    let found = mgr.list().await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].name, "kernel1");
+}
