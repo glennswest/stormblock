@@ -264,6 +264,18 @@ pub struct GoldenSpec {
     /// Name of the golden itself. Defaults to `<name>.golden`.
     #[serde(default)]
     pub golden_name: Option<String>,
+    /// This golden is a blank template: something to be cloned from, not
+    /// something to run.
+    ///
+    /// The image already says so — `data1` declares its blanks
+    /// `role = "blank"` — but that lives on the pallet member and does not
+    /// survive onto the volume, so a node attaching the slab has every blank
+    /// it needs and no way to know which they are. Recorded here so the fact
+    /// travels with the golden and templates can be *derived* at attach
+    /// rather than registered in a store that needs a filesystem to exist
+    /// (#100).
+    #[serde(default)]
+    pub template: bool,
     /// Volume size. Defaults to the content, rounded up to a slot.
     #[serde(default)]
     pub size: Option<String>,

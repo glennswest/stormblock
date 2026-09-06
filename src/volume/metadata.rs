@@ -187,6 +187,12 @@ pub struct VolumeRecord {
     pub parent: Option<VolumeId>,
     /// Sealed: refuses writes; what clones are taken from.
     pub sealed: bool,
+    /// A blank to clone from rather than a volume to run.
+    ///
+    /// `default` so a record written before this existed still loads: an old
+    /// slab simply has no templates, which is what it had anyway.
+    #[serde(default)]
+    pub template: bool,
     /// Whether the volume takes writes at all right now. See [`Access`].
     pub access: Access,
     /// The filesystem on it, when the engine knows.

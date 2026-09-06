@@ -154,6 +154,13 @@ pub struct VolumeManager {
     retentions: HashMap<VolumeId, Retention>,
     /// Lineage: which volume each one was cloned from (#76).
     parents: HashMap<VolumeId, VolumeId>,
+    /// Volumes that are blanks to clone from rather than volumes to run.
+    ///
+    /// Held with the volumes rather than in a separate registry on purpose:
+    /// the slab is already the record of what it holds, which is why it
+    /// carries its own `volumes.dat`. A node that attaches a slab should know
+    /// what is in it without a filesystem to look the answer up in (#100).
+    templates: std::collections::HashSet<VolumeId>,
     /// What is known about the filesystem on each volume.
     fs_info: HashMap<VolumeId, FsInfo>,
     /// Why the last attempt to write this manager's record failed, if it did.
@@ -183,6 +190,7 @@ impl VolumeManager {
             metadata_slabs: Vec::new(),
             retentions: HashMap::new(),
             parents: HashMap::new(),
+            templates: std::collections::HashSet::new(),
             fs_info: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -201,12 +209,39 @@ impl VolumeManager {
             metadata_slabs: Vec::new(),
             retentions: HashMap::new(),
             parents: HashMap::new(),
+            templates: std::collections::HashSet::new(),
             fs_info: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
     // ── Lineage, sealing, filesystem identity (#76) ────────────────────
+
+    /// Mark a volume as a blank to clone from.
+    pub fn mark_template(&mut self, id: VolumeId) {
+        self.templates.insert(id);
+    }
+
+    /// Is this a blank to clone from?
+    pub fn is_template(&self, id: &VolumeId) -> bool {
+        self.templates.contains(id)
+    }
+
+    /// Every blank this node can clone from, smallest first.
+    ///
+    /// Derived from what is attached rather than read from a registry: a
+    /// blank added to an image is a template on the next boot with nothing to
+    /// register and nothing to keep in sync.
+    pub async fn templates(&self) -> Vec<(VolumeId, String, u64)> {
+        let mut out: Vec<(VolumeId, String, u64)> = Vec::new();
+        for id in &self.templates {
+            if let Some(h) = self.volumes.get(id) {
+                out.push((*id, h.name().await, h.capacity_bytes()));
+            }
+        }
+        out.sort_by_key(|(_, _, size)| *size);
+        out
+    }
 
     /// The volume this one was cloned from.
     pub fn parent(&self, id: &VolumeId) -> Option<VolumeId> {
@@ -673,6 +708,9 @@ impl VolumeManager {
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
+            if vrec.template {
+                self.templates.insert(vrec.id);
+            }
             handle.set_access(vrec.access);
             if let Some(fs) = vrec.fs.clone() {
                 self.fs_info.insert(vrec.id, fs);
@@ -1669,6 +1707,7 @@ impl VolumeManager {
                 retention: self.retentions.get(&id).copied().unwrap_or_default(),
                 parent: self.parents.get(&id).copied(),
                 sealed,
+                template: self.templates.contains(&id),
                 access,
                 fs: self.fs_info.get(&id).cloned(),
                 extents: gem
@@ -1828,6 +1867,9 @@ impl VolumeManager {
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
+            if vrec.template {
+                self.templates.insert(vrec.id);
+            }
             handle.set_access(vrec.access);
             if let Some(p) = vrec.parent {
                 self.parents.insert(vrec.id, p);
