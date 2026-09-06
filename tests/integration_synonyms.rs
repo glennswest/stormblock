@@ -423,8 +423,11 @@ async fn claiming_a_name_hands_out_a_clone_not_the_golden() {
 /// looked.
 #[tokio::test]
 async fn re_claiming_releases_the_clone_it_supersedes() {
+    // About the release itself, so no in-boot protection; that is covered by
+    // a_freshly_claimed_clone_survives_the_next_claim.
     let dir = TempDir::new().unwrap();
-    let (state, v1, _v2) = setup(&dir).await;
+    let (mut state, v1, _v2) = setup(&dir).await;
+    std::sync::Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
     let (base, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
 
