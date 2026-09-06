@@ -1258,9 +1258,26 @@ async fn delete_volume(
     match vm.delete_volume(vol_id).await {
         Ok(()) => {
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
+            drop(vm);
+            // Stop serving it. An address that outlives what it names is the
+            // whole failure this addressing was meant to end: the NQN would
+            // keep answering, on a bound port, for a volume that is gone
+            // (#98).
+            stop_volume_subsystem(&state, uuid).await;
             axum::http::StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => ApiError::not_found(format!("volume {uuid}: {e}")),
+    }
+}
+
+/// Stop a volume's own subsystem and stop advertising it.
+///
+/// Dropping the handle aborts the listener, which releases the port.
+pub(crate) async fn stop_volume_subsystem(state: &Arc<AppState>, volume: Uuid) {
+    let gone = state.volume_subsystems.lock().await.remove(&volume);
+    state.nvme_portals.write().await.remove(&volume);
+    if let Some(s) = gone {
+        tracing::info!("volume {volume} no longer served as {} on port {}", s.nqn, s.port);
     }
 }
 
