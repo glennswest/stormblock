@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-09-06
+- **fix(initramfs): console output is ASCII.** Twelve diagnostics carried em-dashes, and a serial console is 7-bit in practice — a UTF-8 em-dash arrives as two bytes of noise in the middle of the line you are trying to read. On a headless node the serial log is the only record there is, so the messages that matter most were the ones being corrupted. Comments keep their typography; only what is printed changed.
+
 ### 2026-09-05
 - **fix(initramfs): the local-slab probe requires positive evidence.** It fell back to the appliance when `slab list` said *"not a slab"*, which assumed the only alternative to a slab is a disk that answers. On the R230 `/dev/sda` is sometimes the WD disk and sometimes the iDRAC virtual floppy: an empty removable drive answers `ENOMEDIUM`, not "not a slab", so the probe passed and the boot died on `Error: I/O error: No medium found (os error 123)`. It now falls back unless the device positively identifies itself (`: slab <uuid>`). A device path is not a stable identity.
 - **feat(releases): a manifest table viewer** at `/api/v1/releases/{version}/manifest.html` — 54 components with kind, name, version, size, digest and provenance, each row marked `changed`/`new` against the previous release and showing what a changed component was before. Filter by text or status. Keyed by `(kind, name)` like `/changes`, since the same name appears as a binary and as the golden built around it.

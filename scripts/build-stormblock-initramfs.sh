@@ -579,7 +579,7 @@ if [ -n "$MODTREE" ]; then
     REJECTED="$(dmesg 2>/dev/null | grep -c 'Unknown symbol' || true)"
     if [ "${REJECTED:-0}" -gt 0 ]; then
         echo "  WARNING: the kernel rejected $REJECTED module load(s) on unresolved"
-        echo "           symbols — a driver is present but its dependency is not:"
+        echo "           symbols - a driver is present but its dependency is not:"
         dmesg | grep 'Unknown symbol' | sed 's/^/    /' | head -5
     fi
 else
@@ -610,7 +610,7 @@ for m in ublk_drv erofs overlay ext4 xfs vfat; do
 done
 
 if [ ! -c /dev/ublk-control ]; then
-    echo "WARNING: /dev/ublk-control not found — ublk_drv may not be loaded"
+    echo "WARNING: /dev/ublk-control not found - ublk_drv may not be loaded"
 fi
 
 # RHEL10 ships kernel.io_uring_disabled=2 (hardening); ublk IS io_uring,
@@ -725,7 +725,7 @@ if [ -z "$IFACE" ]; then
         # The root is on this disk; the network is for what runs later. A node
         # that boots without an address is degraded and can be looked at. One
         # that drops to a shell in the initramfs cannot be looked at at all.
-        echo "WARNING: no network interface found — continuing without one"
+        echo "WARNING: no network interface found - continuing without one"
         # What it did see, because "not found" on its own is not a diagnosis
         # and this console is all anyone gets on a machine that will not boot.
         echo "  /sys/class/net: $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
@@ -774,7 +774,7 @@ net_bring_up() {
             echo "  bridged: $_up is a port of $BRIDGE"
             IFACE="$BRIDGE"
         else
-            echo "WARNING: could not enslave $_up to $BRIDGE — no VM networking"
+            echo "WARNING: could not enslave $_up to $BRIDGE - no VM networking"
             ip link del "$BRIDGE" 2>/dev/null || true
         fi
     fi
@@ -870,7 +870,7 @@ if [ -n "$NETADDR" ]; then
 else
     # An empty summary is the symptom that hid a broken DHCP script for as
     # long as it did; say what it means instead of printing a blank.
-    echo "WARNING: $IFACE has no address — nothing on this node will be reachable"
+    echo "WARNING: $IFACE has no address - nothing on this node will be reachable"
 fi
 
 # The clock is not set here.
@@ -902,7 +902,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         export STORMBLOCK_HOST_NQN="$HOSTNQN"
         echo "Host NQN: $HOSTNQN"
     elif [ -n "$BOOTTAG" ]; then
-        echo "NOTE: no rd.stormblock.hostnqn= — this node will connect anonymously"
+        echo "NOTE: no rd.stormblock.hostnqn= - this node will connect anonymously"
     fi
 
     # One image, two lives, one command line.
@@ -934,11 +934,11 @@ if [ "$BOOT_MODE" = "local" ]; then
             # than "not a slab", so the probe passed and the boot died on
             # "No medium found". A device path is not a stable identity.
             if [ ! -e "$SLAB" ]; then
-                echo "No $SLAB on this machine — asking $BOOTHOST instead"
+                echo "No $SLAB on this machine - asking $BOOTHOST instead"
                 SLAB=""
             elif ! /usr/sbin/stormblock slab list "$SLAB" 2>/dev/null \
                  | grep -qE ": slab [0-9a-f-]{36}"; then
-                echo "$SLAB is not a slab — asking $BOOTHOST instead"
+                echo "$SLAB is not a slab - asking $BOOTHOST instead"
                 SLAB=""
             fi
             ;;
@@ -1047,7 +1047,7 @@ if [ "$BOOT_MODE" = "local" ]; then
             mname="${entry%%:*}"
             mmnt="${entry#*:}"
             if [ -z "$mname" ] || [ "$mname" = "$entry" ]; then
-                echo "  WARNING: rd.stormblock.mount entry '$entry' has no :<path> — ignored"
+                echo "  WARNING: rd.stormblock.mount entry '$entry' has no :<path> - ignored"
                 IFS=,; continue
             fi
             WR_ARGS="$WR_ARGS --writable $mname"
@@ -1228,7 +1228,7 @@ if [ -n "$IMAGE_STORE" ]; then
         echo "$ISDEV $ISMNT erofs ro,nofail 0 0" >> /sysroot/etc/fstab
         echo "  image-store: $ISDEV -> $ISMNT (ro)"
     else
-        echo "  WARNING: $ISDEV never appeared — preloaded images will NOT be available"
+        echo "  WARNING: $ISDEV never appeared - preloaded images will NOT be available"
     fi
 fi
 
@@ -1262,7 +1262,7 @@ if [ -d /sysroot/usr/lib/kernel/lib/modules ]; then
             && echo "  firmware: /usr/lib/kernel -> /lib/firmware"
     fi
 else
-    echo "  WARNING: no modules golden at /usr/lib/kernel — this node has only the"
+    echo "  WARNING: no modules golden at /usr/lib/kernel - this node has only the"
     echo "           drivers the initramfs carried"
 fi
 
@@ -1278,7 +1278,7 @@ fi
 # network came up long ago and this does nothing.
 if [ -z "$(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ')" ] \
    && [ -d /sysroot/usr/lib/kernel/lib/firmware ]; then
-    echo "No address yet — retrying with the full firmware set"
+    echo "No address yet - retrying with the full firmware set"
     mount --bind /sysroot/usr/lib/kernel/lib/firmware /lib/firmware 2>/dev/null || true
     for ma in /sys/bus/*/devices/*/modalias; do
         [ -f "$ma" ] || continue
