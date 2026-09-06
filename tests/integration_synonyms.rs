@@ -484,6 +484,8 @@ async fn re_claiming_releases_the_clone_it_supersedes() {
 /// service tag on forge before a machine had finished booting once (#94).
 #[tokio::test]
 async fn an_unnamed_claim_still_releases_the_clone_it_replaces() {
+    // This test is about the release. The in-boot protection is the next test.
+    unsafe { std::env::set_var("STORMBLOCK_CLAIM_GRACE_SECS", "0") };
     let dir = TempDir::new().unwrap();
     let (state, v1, _v2) = setup(&dir).await;
     let (base, server) = start(state.clone()).await;
@@ -539,6 +541,8 @@ async fn an_unnamed_claim_still_releases_the_clone_it_replaces() {
 /// becomes garbage, so the case that mattered was the one it skipped.
 #[tokio::test]
 async fn repointing_to_a_new_golden_releases_the_clone_of_the_old_one() {
+    // This test is about the release. The in-boot protection is the next test.
+    unsafe { std::env::set_var("STORMBLOCK_CLAIM_GRACE_SECS", "0") };
     let dir = TempDir::new().unwrap();
     let (state, v1, v2) = setup(&dir).await;
     let (base, server) = start(state.clone()).await;
@@ -589,5 +593,63 @@ async fn repointing_to_a_new_golden_releases_the_clone_of_the_old_one() {
     assert!(present.contains(&on_new.as_str()));
     assert!(present.contains(&v1.to_string().as_str()), "goldens are never touched");
     assert!(present.contains(&v2.to_string().as_str()));
+    server.abort();
+}
+
+/// A claim does not release a clone the machine is still booting on.
+///
+/// A node claims twice per boot: stormbootx to load the kernel, the initramfs
+/// to find the root. The second claim is not a consumer replacing what it had,
+/// it is the same consumer at the next stage — and the first clone is still
+/// attached. Releasing it took an R230 into a boot loop: hot-added and
+/// attached at 15:09:15, released at 15:09:49 with the controller connected.
+///
+/// One subsystem exposes every namespace, so a controller sees all of them and
+/// NVMe cannot be asked "is this one in use". Age is the only signal there is.
+#[tokio::test]
+async fn a_freshly_claimed_clone_survives_the_next_claim() {
+    unsafe { std::env::set_var("STORMBLOCK_CLAIM_GRACE_SECS", "600") };
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    state
+        .volume_manager
+        .lock().await
+        .seal_volume(stormblock::volume::VolumeId(v1), None)
+        .await
+        .unwrap();
+
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "TAG7", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    // Firmware claims, then the initramfs claims — the same boot, seconds apart.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let body: serde_json::Value = client
+            .post(format!("{base}/api/v1/synonyms/boothost/TAG7/claim"))
+            .json(&serde_json::json!({})).send().await.unwrap()
+            .json().await.unwrap();
+        ids.push(body["volume"]["id"].as_str().unwrap().to_string());
+    }
+
+    let volumes: serde_json::Value = client
+        .get(format!("{base}/api/v1/volumes"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let present: Vec<&str> = volumes["items"]
+        .as_array().unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+
+    assert!(
+        present.contains(&ids[0].as_str()),
+        "the clone firmware is still attached to must survive the initramfs claim"
+    );
+    assert!(present.contains(&ids[1].as_str()));
     server.abort();
 }

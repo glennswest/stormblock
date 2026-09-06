@@ -431,8 +431,16 @@ fn yes() -> bool {
 ///
 /// Ownership is what the other guards check — nothing else names it, it is not
 /// sealed, it is a clone of this lineage. None of them ask whether it is *in
-/// use*. Until the target can answer that per namespace, age is the proxy:
-/// two claims within one boot are seconds apart, two boots are not.
+/// use*. And the target cannot answer it: one subsystem exposes every
+/// namespace, so a connected controller sees all of them and "is this one
+/// attached" is not a question NVMe can be asked here.
+///
+/// So age is the only signal, and the contract is explicit: a claim releases
+/// the clone it supersedes **unless that clone is younger than the grace**.
+/// Two claims within one boot are seconds apart; two boots are minutes. The
+/// cost is at most one extra clone per boot cycle, collected by the next
+/// boot — which is the right way round, since the alternative is pulling a
+/// namespace out from under a machine that is booting on it.
 static CLAIMED_AT: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<VolumeId, std::time::Instant>>,
 > = std::sync::OnceLock::new();
@@ -447,17 +455,26 @@ fn claims() -> &'static std::sync::Mutex<std::collections::HashMap<VolumeId, std
 /// the machine this was measured on — with room for a slow POST. Short enough
 /// that it never protects a clone from the *next boot*, which is what the
 /// release is for.
-const CLAIM_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+fn claim_grace() -> std::time::Duration {
+    static G: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *G.get_or_init(|| {
+        std::env::var("STORMBLOCK_CLAIM_GRACE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(std::time::Duration::from_secs(600))
+    })
+}
 
 fn note_claim(id: VolumeId) {
     let mut m = claims().lock().unwrap();
-    m.retain(|_, t| t.elapsed() < CLAIM_GRACE * 4);
+    m.retain(|_, t| t.elapsed() < claim_grace() * 4 + std::time::Duration::from_secs(60));
     m.insert(id, std::time::Instant::now());
 }
 
 fn claimed_within_grace(id: VolumeId) -> Option<std::time::Duration> {
     let m = claims().lock().unwrap();
-    m.get(&id).map(|t| t.elapsed()).filter(|e| *e < CLAIM_GRACE)
+    m.get(&id).map(|t| t.elapsed()).filter(|e| *e < claim_grace())
 }
 
 async fn release_superseded_clone(
