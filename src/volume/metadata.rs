@@ -379,6 +379,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    template: false,
                     })
                 .collect(),
         }
@@ -436,6 +437,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    template: false,
                     })
                 .collect(),
         }
@@ -487,6 +489,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    template: false,
                     })
                 .collect(),
         }
@@ -541,6 +544,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    template: false,
                     })
                 .collect(),
         }
