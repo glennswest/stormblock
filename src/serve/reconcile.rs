@@ -273,6 +273,20 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
                             }
                         }
                     }
+                    // And where it is served, so a claim can hand out the
+                    // address that names the volume rather than a namespace
+                    // number in a shared subsystem (#98). This is the only
+                    // place the port is known — the wiring assigns it.
+                    {
+                        let mut p = ctx.state.nvme_portals.write().await;
+                        p.insert(
+                            row.volume_id,
+                            (
+                                row.nqn.clone().unwrap_or_default(),
+                                row.portal_port,
+                            ),
+                        );
+                    }
                     dirty = true;
                     newly_active.push(row.export_id);
                     tracing::info!(
@@ -425,6 +439,9 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         }
         drop(w);
         ctx.drain_deadlines.lock().await.remove(&row.export_id);
+        // Stop advertising it. An address that outlives what it names is how
+        // a consumer attaches someone else's volume (#96, #98).
+        ctx.state.nvme_portals.write().await.remove(&row.volume_id);
         dirty = true;
         tracing::info!(
             "export {} withdrawn — {} released, port {} closed",

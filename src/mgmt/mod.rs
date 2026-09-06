@@ -173,6 +173,21 @@ pub struct AppState {
     /// Taken **before** the volume manager wherever both are needed.
     #[cfg(feature = "stormfs-data")]
     pub stormfs: tokio::sync::Mutex<api::stormfs::StormFsState>,
+    /// Where each volume is served as a subsystem of its own: volume id ->
+    /// (NQN, port).
+    ///
+    /// A per-volume subsystem is self-describing — the NQN contains the volume
+    /// uuid, so there is no namespace number to go stale and a deleted volume
+    /// stops answering rather than resolving to a stranger. It is also the
+    /// only form that can express a volume whose legs are in several places,
+    /// which is what NVMe multipath is: one subsystem, several portals
+    /// (#98).
+    ///
+    /// Written by the reconciler, which assigns the port, and read by the
+    /// claim so a consumer is told the address that names its volume. Empty
+    /// until a volume has been wired, which is why the claim still falls back
+    /// to the shared subsystem.
+    pub nvme_portals: tokio::sync::RwLock<HashMap<uuid::Uuid, (String, u16)>>,
     /// How long a freshly claimed clone is protected from being released by
     /// the next claim. See `api::synonyms` — a machine claims twice per boot
     /// and the first clone is still attached when the second arrives.
@@ -273,6 +288,7 @@ impl AppState {
                 Some(dir) => api::stormfs::StormFsState::load(std::path::Path::new(dir)),
                 None => api::stormfs::StormFsState::default(),
             }),
+            nvme_portals: tokio::sync::RwLock::new(HashMap::new()),
             claim_grace: std::time::Duration::from_secs(
                 std::env::var("STORMBLOCK_CLAIM_GRACE_SECS")
                     .ok()

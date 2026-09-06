@@ -554,6 +554,31 @@ async fn release_superseded_clone(
 async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Value {
     #[cfg(feature = "nvmeof")]
     {
+        // A subsystem of this volume's own, if it has one. The NQN carries
+        // the volume uuid, so the address names what it serves: nothing to go
+        // stale, and a deleted volume stops answering rather than resolving to
+        // whatever inherited its namespace number. It is also the only form
+        // that can describe a volume reachable by several paths, which is
+        // where this is going (#98).
+        if let Some((nqn, port)) = state.nvme_portals.read().await.get(&volume.0).cloned() {
+            if !nqn.is_empty() {
+                let host = state.config.management.resolve_advertised_host("0.0.0.0");
+                return json!({
+                    "protocol": "nvme-tcp",
+                    "address": host,
+                    "port": port,
+                    "nqn": nqn,
+                    // Always 1: the volume is the only namespace of its own
+                    // subsystem, so the number carries no information and
+                    // nothing can disagree about it.
+                    "nsid": 1,
+                    "uri": format!("nvme-tcp://{host}:{port}/{nqn}"),
+                });
+            }
+        }
+
+        // Not wired as its own subsystem yet — fall back to the shared one so
+        // a node mid-boot keeps working while the two schemes overlap.
         let Some(nsid) = super::v1::ensure_nvme_namespace(state, &volume.0.to_string(), Some(volume.0)).await
         else {
             return serde_json::Value::Null;
