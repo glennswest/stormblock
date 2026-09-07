@@ -390,6 +390,13 @@ case "$1" in
         case "$rootpath" in
             http://*|https://*|nvme-tcp://*) echo "$rootpath" > /run/stormblock-boothost ;;
         esac
+        # Who answered, and who they named as the boot server. Written down
+        # rather than acted on: on a network that says nothing else, one of
+        # these two usually is the appliance, and on a network that does say
+        # something they are simply not needed. Which is which is settled by
+        # asking them, not by assuming.
+        [ -n "$serverid" ] && echo "$serverid" > /run/dhcp-serverid
+        [ -n "$siaddr" ] && echo "$siaddr" > /run/dhcp-siaddr
         ;;
     deconfig)
         ip addr flush dev "$interface" 2>/dev/null
@@ -920,30 +927,54 @@ if [ "$BOOT_MODE" = "local" ]; then
     # Never baked into the image. An address in a pallet member is an image
     # that belongs to one network, and the moment there are two networks it
     # is an image per network - the same mistake as a service tag on the
-    # command line, one level up. Three sources, most specific first:
+    # command line, one level up.
+    #
+    # So the node asks the network it is actually on, and every source it
+    # tries is one a network either already provides or can provide without
+    # being rebuilt:
     #
     #   rd.stormblock.boothost=   an operator overriding, or a lab with no DHCP
-    #   DHCP option 17            what this network answered (root-path)
-    #   http://boothost:PORT      a name every network resolves for itself
+    #   DHCP option 17            root-path, when the lease carries a URL
+    #   boothost.<search domain>  one A record, and the name is the same
+    #                             everywhere - each network answers with its own
+    #   the DHCP next-server      what the lease named for booting
+    #   the DHCP server itself    the last thing known to be up and listening
     #
-    # The last is a convention, not a host: `boothost` resolves through the
-    # search domain the same lease provided, so each network answers with its
-    # own appliance and the image says nothing about any of them.
-    if [ -z "$BOOTHOST" ] && [ -s /run/stormblock-boothost ]; then
-        BOOTHOST=$(cat /run/stormblock-boothost)
-        echo "Appliance from DHCP (option 17): $BOOTHOST"
-    fi
-    if [ -z "$BOOTHOST" ] && [ -s /etc/resolv.conf ]; then
-        # Qualified from the lease's own search domain rather than left to
-        # the resolver: a short name that fails to resolve looks exactly like
-        # an appliance that is down, and the two want different answers.
-        BOOTDOM=$(awk '/^search/ { print $2; exit }' /etc/resolv.conf)
-        if [ -n "$BOOTDOM" ]; then
-            BOOTHOST="http://boothost.$BOOTDOM:${BOOTPORT:-9090}"
+    # None of them is trusted on sight: each is *asked*, and the first that
+    # answers as an engine is the appliance. A candidate that is right by
+    # coincidence and one that is right by configuration are the same thing
+    # to a node that has to boot, and a candidate that is wrong costs three
+    # seconds. That is what makes this work on a network nobody prepared:
+    # with no record and no option 17, the DHCP server is tried, and on a
+    # small network it is very often the appliance.
+    if [ -z "$BOOTHOST" ]; then
+        BOOTPORT="${BOOTPORT:-9090}"
+        CANDIDATE_HOSTS=""
+        [ -s /run/stormblock-boothost ] && CANDIDATE_HOSTS="$(cat /run/stormblock-boothost)"
+        # Qualified from the lease's own search domain rather than left to the
+        # resolver: a short name that fails to resolve looks exactly like an
+        # appliance that is down, and the two want different answers.
+        BOOTDOM=$(awk '/^search/ { print $2; exit }' /etc/resolv.conf 2>/dev/null)
+        [ -n "$BOOTDOM" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost.$BOOTDOM:$BOOTPORT"
+        CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost:$BOOTPORT"
+        for f in /run/dhcp-siaddr /run/dhcp-serverid; do
+            [ -s "$f" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://$(cat "$f"):$BOOTPORT"
+        done
+        for c in $CANDIDATE_HOSTS; do
+            case "$c" in
+            nvme-tcp://*) BOOTHOST="$c"; break ;;
+            esac
+            if wget -q -T 3 -O /dev/null "$c/api/v1/health" 2>/dev/null; then
+                BOOTHOST="$c"
+                break
+            fi
+            echo "  no engine at $c"
+        done
+        if [ -n "$BOOTHOST" ]; then
+            echo "Appliance: $BOOTHOST"
         else
-            BOOTHOST="http://boothost:${BOOTPORT:-9090}"
+            echo "No appliance answered. Tried:$CANDIDATE_HOSTS"
         fi
-        echo "Appliance by convention: $BOOTHOST"
     fi
 
     # One image, two lives, one command line.
