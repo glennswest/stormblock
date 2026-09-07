@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-09-07
+- **fix(initramfs): the appliance is discovered, never baked.** A diskless
+  node has to reach an appliance, and its address is the most
+  network-specific fact there is — so an image carrying one is an image per
+  network, the same mistake as a service tag on the command line one level
+  up. Three sources, most specific first: `rd.stormblock.boothost=`, then
+  **DHCP option 17** (root-path, taken only when it is a URL — option 17 is
+  classically an NFS export and a path is not an appliance), then
+  `http://boothost:9090`, a name each network resolves for itself through the
+  search domain the same lease provided. The image says nothing about any of
+  them.
 - **fix(initramfs): a netbooting node reads its service tag from SMBIOS when
   the command line does not carry one, and composes its host NQN from it.**
   The init insisted on `rd.stormblock.tag=` on the grounds that the firmware

@@ -379,6 +379,17 @@ case "$1" in
         # DHCP option 12, if the server has an opinion about what this machine
         # is called. It usually knows better than the machine does.
         [ -n "$hostname" ] && echo "$hostname" > /run/dhcp-hostname
+        # Where this network keeps its images: DHCP option 17, root-path.
+        #
+        # A diskless node has to reach an appliance, and the address of one is
+        # the single most network-specific fact there is - so it cannot be in
+        # the image, and it is not this node's to guess. The network already
+        # answers questions like this: the same lease says which resolver and
+        # which clock to use. Only a URL is taken, because option 17 is
+        # classically an NFS export and a path is not an appliance.
+        case "$rootpath" in
+            http://*|https://*|nvme-tcp://*) echo "$rootpath" > /run/stormblock-boothost ;;
+        esac
         ;;
     deconfig)
         ip addr flush dev "$interface" 2>/dev/null
@@ -449,6 +460,7 @@ for param in $(cat /proc/cmdline); do
         # cmdline is baked into the image and identical on every node that
         # boots it, so it names the appliance, never the namespace.
         rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
+        rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the
@@ -901,6 +913,29 @@ if [ "$BOOT_MODE" = "local" ]; then
     if [ -n "$HOSTNQN" ]; then
         export STORMBLOCK_HOST_NQN="$HOSTNQN"
         echo "Host NQN: $HOSTNQN"
+    fi
+
+    # Which appliance to ask, when this machine has no slab of its own.
+    #
+    # Never baked into the image. An address in a pallet member is an image
+    # that belongs to one network, and the moment there are two networks it
+    # is an image per network - the same mistake as a service tag on the
+    # command line, one level up. Three sources, most specific first:
+    #
+    #   rd.stormblock.boothost=   an operator overriding, or a lab with no DHCP
+    #   DHCP option 17            what this network answered (root-path)
+    #   http://boothost:PORT      a name every network resolves for itself
+    #
+    # The last is a convention, not a host: `boothost` resolves through the
+    # search domain the same lease provided, so each network answers with its
+    # own appliance and the image says nothing about any of them.
+    if [ -z "$BOOTHOST" ] && [ -s /run/stormblock-boothost ]; then
+        BOOTHOST=$(cat /run/stormblock-boothost)
+        echo "Appliance from DHCP (option 17): $BOOTHOST"
+    fi
+    if [ -z "$BOOTHOST" ] && [ -s /etc/resolv.conf ]; then
+        BOOTHOST="http://boothost:${BOOTPORT:-9090}"
+        echo "Appliance by convention: $BOOTHOST"
     fi
 
     # One image, two lives, one command line.
@@ -1415,7 +1450,9 @@ fi
 echo ""
 echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
-echo "  netboot: root=/dev/ublkb0 rd.stormblock.boothost=<appliance-url> rd.stormblock.tag=<tag>"
+echo "  netboot: root=/dev/ublkb0   — both parameters below are optional:"
+echo "           rd.stormblock.boothost=<url>  overrides DHCP option 17, then http://boothost:9090"
+echo "           rd.stormblock.tag=<tag>       overrides the SMBIOS service tag"
 echo "           [rd.stormblock.hostnqn=<nqn>]  — the name firmware presented, echoed on every connect"
 echo "           — claims boothost/<tag> and uses the namespace it names as the slab"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file-or-nvme-tcp://...> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
