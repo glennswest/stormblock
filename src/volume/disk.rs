@@ -499,6 +499,8 @@ impl VolumeManager {
             let type_guid = p.type_guid.unwrap_or(match fs_kind.as_str() {
                 "pallet" => PALLET_TYPE_GUID,
                 "vfat" | "fat" | "fat16" | "fat32" => type_guid::ESP,
+                "slab" => type_guid::SLAB,
+                "data-slab" => type_guid::SLAB_DATA,
                 _ => type_guid::LINUX,
             });
             let attributes = match p.attributes {
@@ -754,6 +756,368 @@ impl VolumeManager {
         }
         self.seal_volume(id, Some(fs)).await?;
         Ok(id)
+    }
+}
+
+// ------------------------------------------------------------------- slab
+
+/// One golden of a composed slab, and the clones taken of it.
+///
+/// The golden's content is a volume this engine already holds — a sealed
+/// blob, a golden from another image — and it is shared into the slab by its
+/// map. Nothing is read to put it there.
+pub struct SlabGolden {
+    /// Base name: the golden is `<name>.golden` and the first clone `<name>`
+    /// unless told otherwise, which is what the kernel command line resolves.
+    pub name: String,
+    /// The volume whose extents become the golden's slots.
+    pub source: VolumeId,
+    pub golden_name: Option<String>,
+    pub clone: Option<String>,
+    /// Further clones, each its own CoW snapshot of the same golden.
+    pub clones: Vec<String>,
+    /// A blank to be cloned from rather than run (#100).
+    pub template: bool,
+    /// Volume size inside the slab. Defaults to the source, rounded to a slot.
+    pub size: Option<u64>,
+}
+
+/// What to compose a slab out of.
+pub struct SlabVolumeSpec {
+    pub name: String,
+    /// The slab's whole size — what the partition will be.
+    pub size: u64,
+    /// System or data: written into the header, and what the node reads to
+    /// tell the half an install replaces from the half it keeps (#88).
+    pub role: SlabRole,
+    pub tier: crate::placement::topology::StorageTier,
+    /// Bytes reserved for the slab's own `volumes.dat`. Sized from the slab
+    /// when absent.
+    pub meta_bytes: Option<u64>,
+    pub goldens: Vec<SlabGolden>,
+    /// Where on *this* engine the composed volume is placed. `None` follows
+    /// the first golden.
+    pub placement: Option<SlabRole>,
+}
+
+/// One volume inside a composed slab.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ComposedSlabVolume {
+    pub id: Uuid,
+    pub name: String,
+    pub size_bytes: u64,
+    /// First slot of the slab this volume occupies, and how many.
+    pub first_slot: u32,
+    pub slots: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clone_of: Option<Uuid>,
+    pub template: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fs_uuid: Option<Uuid>,
+}
+
+/// What composing a slab produced.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SlabVolumeReport {
+    pub id: Uuid,
+    pub name: String,
+    pub role: String,
+    /// The slab's own identity, as its header carries it.
+    pub slab_uuid: Uuid,
+    pub slot_size: u64,
+    pub total_slots: u64,
+    /// Where the slots begin inside the volume — every golden's first slot
+    /// sits on an engine slot boundary from here.
+    pub data_offset: u64,
+    pub volumes: Vec<ComposedSlabVolume>,
+    /// Bytes that are the goldens' own slots, shared in.
+    pub shared_bytes: u64,
+    /// Bytes this slab had to write: its header, slot table and volume
+    /// record, plus one slot per clone that was stamped an identity.
+    pub written_bytes: u64,
+}
+
+impl VolumeManager {
+    /// Compose a slab as a volume: the goldens' slots are shared in by the
+    /// map, and only the slab's own record is written.
+    ///
+    /// A slab formatted inside a volume is a slab; the node opens it and
+    /// finds volumes exactly as it would in one `image build` laid down. The
+    /// difference is what it cost. `image build` copies every golden into
+    /// the slab — the same bytes the pallets already carry, written again.
+    /// Here the nested slab's slot size is the engine's, so a nested slot
+    /// *is* an engine slot, and a golden's slots inside the slab are mapped
+    /// onto the volume that holds its content. What gets written is the
+    /// superblock, the slot table, `volumes.dat`, and one slot for every
+    /// clone stamped with its own filesystem identity (#76) — the CoW that
+    /// stamp forces.
+    ///
+    /// Slots are taken in order from a fresh slab, so each golden's run is
+    /// contiguous and the outer map can be laid over it in one component.
+    /// That is checked, not assumed: a run that came back with a gap would
+    /// share the wrong slot, and the fault would surface as a golden that
+    /// reads as a different golden a slot in.
+    pub async fn compose_slab(&mut self, spec: SlabVolumeSpec) -> Result<SlabVolumeReport, VolumeError> {
+        use crate::drive::slab::{auto_metadata_bytes, Slab, SlabFormat};
+        use crate::raid::RaidArrayId;
+        use crate::volume::gem::ExtentLocation;
+
+        if spec.goldens.is_empty() {
+            return Err(invalid("a composed slab needs at least one golden"));
+        }
+        let slot = self.slot_size;
+        let size = align_up(spec.size, slot);
+
+        // Every source resolved and every name checked before anything
+        // exists. A name a boot resolves has to be unique inside the slab.
+        let mut taken = std::collections::HashSet::new();
+        let mut placement = spec.placement;
+        struct Planned {
+            golden_name: String,
+            clone_names: Vec<String>,
+            source: VolumeId,
+            source_bytes: u64,
+            size: u64,
+            template: bool,
+        }
+        let mut planned = Vec::with_capacity(spec.goldens.len());
+        for g in &spec.goldens {
+            let handle = self.get_volume_handle(&g.source).ok_or(VolumeError::VolumeNotFound(g.source))?;
+            if !self.is_sealed(&g.source) {
+                return Err(invalid(format!(
+                    "golden '{}': volume {} is not sealed; a golden that can change under a map is not a golden",
+                    g.name, g.source
+                )));
+            }
+            if placement.is_none() {
+                placement = self.volume_role(&g.source);
+            }
+            let cap = handle.capacity_bytes();
+            let gsize = align_up(g.size.unwrap_or(cap), slot);
+            if gsize < cap {
+                return Err(invalid(format!(
+                    "golden '{}' is {cap} bytes and its size is {gsize}",
+                    g.name
+                )));
+            }
+            let golden_name = g.golden_name.clone().unwrap_or_else(|| format!("{}.golden", g.name));
+            let mut clone_names = vec![g.clone.clone().unwrap_or_else(|| g.name.clone())];
+            clone_names.extend(g.clones.iter().cloned());
+            for n in std::iter::once(&golden_name).chain(clone_names.iter()) {
+                if !taken.insert(n.clone()) {
+                    return Err(invalid(format!(
+                        "two volumes in the slab would both be called '{n}'; a boot resolves a volume by name, so the names have to be distinct"
+                    )));
+                }
+            }
+            planned.push(Planned {
+                golden_name,
+                clone_names,
+                source: g.source,
+                source_bytes: cap,
+                size: gsize,
+                template: g.template,
+            });
+        }
+
+        let id = self
+            .create_volume_with(&spec.name, size, CreateOptions::default().in_role_opt(placement))
+            .await?;
+
+        let result: Result<SlabVolumeReport, VolumeError> = async {
+            let handle = self.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?;
+            let dev: Arc<dyn BlockDevice> = handle.clone();
+
+            // The slab's own record lives inside it: an image has no
+            // filesystem to keep one anywhere else.
+            let meta = spec.meta_bytes.unwrap_or_else(|| auto_metadata_bytes(size, slot));
+            let slab = Slab::format_with(
+                dev.clone(),
+                SlabFormat::new(slot, spec.tier).with_metadata(meta).with_role(spec.role),
+            )
+            .await
+            .map_err(VolumeError::Drive)?;
+            let slab_id = slab.slab_id();
+            let data_offset = slab.data_offset();
+            let total_slots = slab.total_slots();
+            if data_offset % slot != 0 {
+                return Err(invalid(format!(
+                    "the slab's data region starts at {data_offset}, which is not on a {slot}-byte slot boundary"
+                )));
+            }
+            let mut written = data_offset;
+            let mut shared = 0u64;
+
+            let mut nested = VolumeManager::new(slot);
+            nested.attach_slab(RaidArrayId(Uuid::new_v4()), slab).await?;
+            nested.persist_to_slab(slab_id);
+
+            let mut volumes = Vec::new();
+            let mut free = total_slots;
+            for p in &planned {
+                let slots = p.size / slot;
+                if slots > free {
+                    return Err(invalid(format!(
+                        "golden '{}' needs {slots} slots and the slab has {free} left of {total_slots}",
+                        p.golden_name
+                    )));
+                }
+                free -= slots;
+
+                let gid = nested
+                    .create_volume_with(&p.golden_name, p.size, CreateOptions::default().in_role(spec.role))
+                    .await?;
+
+                // Take the golden's slots explicitly — a thin volume maps
+                // nothing until written, and nothing is going to be written.
+                let run: Vec<u32> = {
+                    let mut reg = nested.registry.write().await;
+                    let s = reg
+                        .get_mut(&slab_id)
+                        .ok_or_else(|| VolumeError::AllocatorError("nested slab vanished".into()))?;
+                    let mut run = Vec::with_capacity(slots as usize);
+                    for vext in 0..slots {
+                        run.push(s.allocate(gid, vext).await.map_err(VolumeError::Drive)?);
+                    }
+                    run
+                };
+                if run.windows(2).any(|w| w[1] != w[0] + 1) {
+                    return Err(VolumeError::AllocatorError(format!(
+                        "golden '{}' was not given a contiguous run of slots ({:?}...)",
+                        p.golden_name,
+                        &run[..run.len().min(4)]
+                    )));
+                }
+                {
+                    let mut gem = nested.gem.write().await;
+                    for (vext, &s) in run.iter().enumerate() {
+                        gem.insert(gid, vext as u64, ExtentLocation::new(slab_id, s));
+                    }
+                }
+                {
+                    let mut reg = nested.registry.write().await;
+                    for &s in &run {
+                        reg.commit(slab_id, s);
+                    }
+                }
+
+                // Now the outer map: the bytes of those nested slots are the
+                // source's slots. From here on the golden reads as its content.
+                let at = data_offset + run[0] as u64 * slot;
+                let comp = Component { source: p.source, at, span: p.size };
+                {
+                    let mut gem = self.gem.write().await;
+                    let mut reg = self.registry.write().await;
+                    compose::share_into(id, slot, &[comp], &mut gem, &mut reg).await?;
+                }
+                shared += align_up(p.source_bytes, slot);
+
+                let fs = {
+                    let vol = nested.get_volume(&gid).ok_or(VolumeError::VolumeNotFound(gid))?;
+                    crate::fs::disk::probe(&vol).await
+                };
+                nested.seal_volume(gid, fs.clone()).await?;
+                if p.template {
+                    nested.mark_template(gid);
+                }
+                volumes.push(ComposedSlabVolume {
+                    id: gid.0,
+                    name: p.golden_name.clone(),
+                    size_bytes: p.size,
+                    first_slot: run[0],
+                    slots,
+                    clone_of: None,
+                    template: p.template,
+                    fs_uuid: fs.as_ref().and_then(|f| f.uuid),
+                });
+
+                for cname in &p.clone_names {
+                    let cid = nested.create_snapshot(gid, cname).await?;
+                    // A clone is a filesystem of its own (#76). Stamping it
+                    // is the one write a clone costs: the slot the superblock
+                    // sits in is copied, and the rest stays shared.
+                    let mut fresh = None;
+                    if let Some(f) = &fs {
+                        let cdev = nested.get_volume(&cid).ok_or(VolumeError::VolumeNotFound(cid))?;
+                        fresh = if f.kind == "ext4" {
+                            let u = Uuid::new_v4();
+                            crate::fs::ext4::stamp_uuid(&cdev, u, false)
+                                .await
+                                .map_err(|e| VolumeError::AllocatorError(format!("stamp clone '{cname}': {e}")))?;
+                            Some(u)
+                        } else {
+                            crate::fs::disk::stamp(&cdev, f).await.map_err(VolumeError::Drive)?
+                        };
+                        if fresh.is_some() {
+                            written += slot;
+                        }
+                    }
+                    if let Some(u) = fresh {
+                        nested.set_fs_uuid(cid, u).await?;
+                    }
+                    volumes.push(ComposedSlabVolume {
+                        id: cid.0,
+                        name: cname.clone(),
+                        size_bytes: p.size,
+                        first_slot: run[0],
+                        slots,
+                        clone_of: Some(gid.0),
+                        template: false,
+                        fs_uuid: fresh,
+                    });
+                }
+            }
+
+            // The record. A slab that cannot say what is in it boots to "no
+            // volume metadata", so this failing is the composition failing.
+            nested
+                .persist_checked()
+                .await
+                .map_err(|e| VolumeError::AllocatorError(format!("slab metadata: {e}")))?;
+            handle.flush().await?;
+
+            Ok(SlabVolumeReport {
+                id: id.0,
+                name: spec.name.clone(),
+                role: spec.role.to_string(),
+                slab_uuid: slab_id.0,
+                slot_size: slot,
+                total_slots,
+                data_offset,
+                volumes,
+                shared_bytes: shared,
+                written_bytes: written,
+            })
+        }
+        .await;
+
+        match result {
+            Ok(report) => {
+                let fs = FsInfo {
+                    kind: match spec.role {
+                        SlabRole::System => "slab".into(),
+                        SlabRole::Data => "data-slab".into(),
+                    },
+                    journal: false,
+                    features: Some(format!("slot={slot}")),
+                    sixty_four_bit: false,
+                    metadata_csum: false,
+                    csum_seed: false,
+                    label: spec.name,
+                    uuid: Some(report.slab_uuid),
+                };
+                self.seal_volume(id, Some(fs)).await?;
+                Ok(report)
+            }
+            Err(e) => {
+                // Half a slab holds references to every golden it got to and
+                // describes none of them.
+                if let Err(d) = self.delete_volume(id).await {
+                    tracing::warn!(volume = %id, "composed slab failed ({e}) and its volume could not be removed: {d}");
+                }
+                Err(e)
+            }
+        }
     }
 }
 

@@ -1739,6 +1739,54 @@ pub struct ComposeDiskResponse {
     pub disk: crate::volume::disk::DiskReport,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ComposeSlabGoldenRequest {
+    /// Base name: the golden is `<name>.golden`, the first clone `<name>`.
+    pub name: String,
+    /// The volume whose extents become the golden's slots — id or name.
+    pub volume: String,
+    #[serde(default)]
+    pub golden_name: Option<String>,
+    #[serde(default)]
+    pub clone: Option<String>,
+    #[serde(default)]
+    pub clones: Vec<String>,
+    #[serde(default)]
+    pub template: bool,
+    /// Size inside the slab. Defaults to the volume's, rounded to a slot.
+    #[serde(default)]
+    pub size: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComposeSlabRequest {
+    pub name: String,
+    /// The slab's whole size — what the partition will be.
+    pub size: String,
+    /// `system` or `data`: the role written into the slab's header.
+    pub role: String,
+    /// `hot`, `cool`, `cold`. Defaults to hot.
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// Bytes reserved for the slab's own `volumes.dat`. Sized from the slab
+    /// when absent.
+    #[serde(default)]
+    pub meta_size: Option<String>,
+    /// Where on this engine the composed volume is placed: `system` or
+    /// `data`. Follows the first golden when absent.
+    #[serde(default)]
+    pub placement: Option<String>,
+    pub goldens: Vec<ComposeSlabGoldenRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComposeSlabResponse {
+    #[serde(flatten)]
+    pub volume: VolumeResponse,
+    pub slab: crate::volume::disk::SlabVolumeReport,
+}
+
+
 /// The ordinary volume response for `id`, or none if it went away.
 async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Option<VolumeResponse> {
     let handle = vm.get_volume_handle(&id)?;
@@ -1920,6 +1968,85 @@ async fn compose_disk(
     }
 }
 
+/// `POST /api/v1/volumes/compose/slab` — a slab as a sealed volume: its
+/// header, slot table and volume record written, every golden's slots the
+/// source volume's slots shared in, every first clone a CoW snapshot.
+async fn compose_slab(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ComposeSlabRequest>,
+) -> Response {
+    use crate::volume::disk::{SlabGolden, SlabVolumeSpec};
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "compose_slab").increment(1);
+
+    if req.goldens.is_empty() {
+        return ApiError::bad_request("a composed slab needs at least one golden");
+    }
+    let role = match crate::drive::slab::SlabRole::parse(&req.role) {
+        Some(r) => r,
+        None => return ApiError::bad_request(format!("unknown role '{}': system or data", req.role)),
+    };
+    let placement = match parse_role(&req.placement) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let tier = match req.tier.as_deref() {
+        None => crate::placement::topology::StorageTier::Hot,
+        Some(t) => match super::slabs::parse_tier(t) {
+            Some(t) => t,
+            None => return ApiError::bad_request(format!("unknown tier '{t}': hot, cool or cold")),
+        },
+    };
+    let size = match super::fstemplates::resolve_size(&Some(req.size.clone()), None) {
+        Ok(Some(v)) => v,
+        Ok(None) => return ApiError::bad_request("a composed slab needs a size"),
+        Err(e) => return ApiError::bad_request(e),
+    };
+    let meta_bytes = match super::fstemplates::resolve_size(&req.meta_size, None) {
+        Ok(v) => v,
+        Err(e) => return ApiError::bad_request(format!("meta_size: {e}")),
+    };
+
+    let mut vm = state.volume_manager.lock().await;
+    let mut goldens = Vec::with_capacity(req.goldens.len());
+    for g in &req.goldens {
+        let source = match vm.find_volume(&g.volume).await {
+            Some(id) => id,
+            None => return ApiError::not_found(format!("golden '{}': no volume named {}", g.name, g.volume)),
+        };
+        let size = match super::fstemplates::resolve_size(&g.size, None) {
+            Ok(v) => v,
+            Err(e) => return ApiError::bad_request(format!("golden '{}': {e}", g.name)),
+        };
+        goldens.push(SlabGolden {
+            name: g.name.clone(),
+            source,
+            golden_name: g.golden_name.clone(),
+            clone: g.clone.clone(),
+            clones: g.clones.clone(),
+            template: g.template,
+            size,
+        });
+    }
+
+    let spec = SlabVolumeSpec {
+        name: req.name.clone(),
+        size,
+        role,
+        tier,
+        meta_bytes,
+        goldens,
+        placement,
+    };
+    let report = match vm.compose_slab(spec).await {
+        Ok(r) => r,
+        Err(e) => return ApiError::bad_request(format!("failed to compose slab: {e}")),
+    };
+    match volume_response(&vm, VolumeId(report.id)).await {
+        Some(volume) => (axum::http::StatusCode::CREATED, Json(ComposeSlabResponse { volume, slab: report })).into_response(),
+        None => ApiError::internal("composed slab vanished"),
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_volumes).post(create_volume))
@@ -1945,5 +2072,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/compose", axum::routing::post(compose_volume))
         .route("/compose/pallet", axum::routing::post(compose_pallet))
         .route("/compose/disk", axum::routing::post(compose_disk))
+        .route("/compose/slab", axum::routing::post(compose_slab))
         .with_state(state)
 }

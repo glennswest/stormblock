@@ -1015,6 +1015,12 @@ impl Slab {
         self.header.total_slots
     }
 
+    /// Where the slots begin, in bytes from the start of the device. Slot
+    /// `n` is at `data_offset + n * slot_size`.
+    pub fn data_offset(&self) -> u64 {
+        self.header.data_offset
+    }
+
     /// Number of free slots.
     pub fn free_slots(&self) -> u64 {
         self.free_count
