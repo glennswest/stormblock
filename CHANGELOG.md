@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 2026-09-07
+- **fix(thin):** a thin volume honours the block size it advertises, in both
+  directions. It reported 4096 and passed sub-block reads and writes straight
+  down, so anything beneath it saw I/O it had every right to refuse. Short
+  requests now cover the whole blocks they land in.
+  Not a corner case: ext4 puts its superblock at byte 1024 and its group
+  descriptors are smaller than a block, so every mkfs issues short requests.
+  Cheap where it matters, because an unmapped extent is answered with zeros
+  and no device I/O; the read only becomes real once the extent is allocated,
+  which is exactly when skipping it would destroy the rest of the block. It
+  cannot leak, because a slot is zero-filled across its whole length on first
+  write.
+- **fix(ext4):** device errors name the operation and its length. "device I/O
+  failed at offset 45056" does not say whether a read, a write or a discard
+  was refused, and the three have different causes.
+
 ## [v13.6.0] — 2026-09-06
 
 - **fix(drive): `SasDevice` honours the `O_DIRECT` contract it opened the fd with (mkfs.ext4.rs#5, the half that was never explained).** Every ext4 template format on a 4 KiB-sector appliance failed at the first inode-table zeroing — 45056 for 64M, 593920 for 1024M, 2756608 for 5120M — with `EINVAL` at an offset and a length that were both whole 4096-byte blocks, and it kept failing byte-for-byte after the crate-side fixes. The offset was never the problem. `SasDevice` opens the drive `O_DIRECT` and submitted the caller's buffer pointer to io_uring as it was; `O_DIRECT` needs the buffer *address* aligned to the logical block too, and a `Vec` from malloc is 16-byte aligned. Reproduced on `losetup -b 4096`: a 4096-byte write from a `Vec` at offset 0 is `EINVAL`, the same bytes from a `DmaBuf` are written. The drive now bounces any buffer that is not block-aligned through a page-aligned `DmaBuf` on read and write, and an offset or length that is not whole blocks comes back as `DriveError::NotAligned` instead of the kernel's bare errno. Two tests run against a real 4 KiB loop device (`STORMBLOCK_4K_LOOP`, `--ignored`): the malloc-buffer round trip, and the whole provisioning path — slab, thin volume, ext4 format, fsck clean.
