@@ -1458,4 +1458,91 @@ mod tests {
         assert_eq!(gpt.last_usable_lba, 31 * SLOT / 4096 - 1);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// A composed slab is a slab — it opens, restores its volumes, and each
+    /// golden reads as the volume it was mapped onto — and it costs its own
+    /// record and nothing of the goldens.
+    #[tokio::test]
+    async fn a_composed_slab_opens_as_a_slab_and_shares_its_goldens() {
+        let (mut vm, path) = manager().await;
+        let a = golden(&mut vm, "a.blob", 3 * SLOT, 0x41).await;
+        let b = golden(&mut vm, "b.blob", 2 * SLOT, 0x42).await;
+        let before = free_slots(&vm).await;
+
+        let spec = SlabVolumeSpec {
+            name: "system-1".into(),
+            size: 96 * SLOT,
+            role: SlabRole::System,
+            tier: StorageTier::Hot,
+            meta_bytes: None,
+            placement: None,
+            goldens: vec![
+                SlabGolden {
+                    name: "a".into(),
+                    source: a,
+                    golden_name: None,
+                    clone: None,
+                    clones: vec!["a-two".into()],
+                    template: false,
+                    size: None,
+                },
+                SlabGolden {
+                    name: "b".into(),
+                    source: b,
+                    golden_name: Some("bee.golden".into()),
+                    clone: Some("bee".into()),
+                    clones: vec![],
+                    template: true,
+                    size: None,
+                },
+            ],
+        };
+        let report = vm.compose_slab(spec).await.unwrap();
+        let spent = before - free_slots(&vm).await;
+
+        // The goldens' five slots were shared, not allocated: everything
+        // this cost lies before the data region.
+        assert_eq!(report.shared_bytes, 5 * SLOT);
+        assert!(spent >= 1 && spent <= report.data_offset / SLOT, "spent {spent} slots, data at slot {}", report.data_offset / SLOT);
+        assert_eq!(report.data_offset % SLOT, 0);
+        assert_eq!(report.volumes.len(), 5, "two goldens, three clones");
+        assert_eq!(report.volumes[0].name, "a.golden");
+        assert_eq!(report.volumes[1].name, "a");
+        assert_eq!(report.volumes[2].name, "a-two");
+        assert_eq!(report.volumes[3].name, "bee.golden");
+        assert!(report.volumes[3].template);
+        assert_eq!(report.volumes[3].first_slot, report.volumes[0].first_slot + 3, "b follows a's whole run");
+        let id = VolumeId(report.id);
+        assert!(vm.is_sealed(&id));
+        assert_eq!(vm.fs_info(&id).unwrap().kind, "slab");
+
+        // Open it the way a node does.
+        let dev = vm.get_volume(&id).unwrap();
+        let slab = Slab::open(dev).await.unwrap();
+        assert_eq!(slab.role(), SlabRole::System);
+        assert_eq!(slab.slot_size(), SLOT);
+        let slab_id = slab.slab_id();
+        let mut node = VolumeManager::new(SLOT);
+        node.attach_slab(crate::raid::RaidArrayId(Uuid::new_v4()), slab).await.unwrap();
+        node.persist_to_slab(slab_id);
+        node.restore().await.unwrap();
+
+        let names: Vec<String> = node.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
+        for n in ["a.golden", "a", "a-two", "bee.golden", "bee"] {
+            assert!(names.contains(&n.to_string()), "{n} missing from {names:?}");
+        }
+        let ag = node.find_volume("a.golden").await.unwrap();
+        assert!(node.is_sealed(&ag));
+        let clone = node.get_volume(&node.find_volume("a").await.unwrap()).unwrap();
+        let mut buf = vec![0u8; 4096];
+        clone.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 0x41), "a's first block is a.blob's");
+        clone.read(3 * SLOT - 4096, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 0x41), "a's last block is a.blob's");
+        let bee = node.get_volume(&node.find_volume("bee").await.unwrap()).unwrap();
+        bee.read(SLOT, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 0x42), "bee's second slot is b.blob's");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
