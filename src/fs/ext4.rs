@@ -71,9 +71,20 @@ impl VolumeDevice {
     }
 
     fn io(offset: u64, e: crate::drive::DriveError) -> Ext4Error {
+        Self::io_op("io", offset, 0, e)
+    }
+
+    /// The same, naming the operation and its length.
+    ///
+    /// "device I/O failed at offset 45056" says nothing about whether the
+    /// device refused a read, a write or a discard, and the three have
+    /// different causes. An afternoon went into guessing which one produced an
+    /// `EINVAL` here; the error should have said.
+    fn io_op(op: &str, offset: u64, len: u64, e: crate::drive::DriveError) -> Ext4Error {
+        tracing::warn!(op, offset, len, error = %e, "device refused an operation");
         Ext4Error::Io {
             offset,
-            source: std::io::Error::other(format!("{e}")),
+            source: std::io::Error::other(format!("{op} of {len} bytes: {e}")),
         }
     }
 }
@@ -103,7 +114,7 @@ impl mkfs_ext4::BlockDevice for VolumeDevice {
                 .dev
                 .read(offset + done as u64, &mut buf[done..end])
                 .await
-                .map_err(|e| Self::io(offset + done as u64, e))?;
+                .map_err(|e| Self::io_op("read", offset + done as u64, (end - done) as u64, e))?;
             if n == 0 {
                 return Err(Ext4Error::Io {
                     offset: offset + done as u64,
@@ -122,7 +133,7 @@ impl mkfs_ext4::BlockDevice for VolumeDevice {
                 .dev
                 .write(offset + done as u64, &buf[done..])
                 .await
-                .map_err(|e| Self::io(offset + done as u64, e))?;
+                .map_err(|e| Self::io_op("write", offset + done as u64, (buf.len() - done) as u64, e))?;
             if n == 0 {
                 return Err(Ext4Error::Io {
                     offset: offset + done as u64,
@@ -155,7 +166,7 @@ impl mkfs_ext4::BlockDevice for VolumeDevice {
         self.dev
             .discard(first, last - first)
             .await
-            .map_err(|e| Self::io(first, e))?;
+            .map_err(|e| Self::io_op("discard", first, last - first, e))?;
         default_write_zeroes(self, last, offset + len - last).await
     }
 }

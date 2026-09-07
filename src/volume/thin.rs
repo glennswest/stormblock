@@ -538,13 +538,15 @@ impl ThinVolumeHandle {
     }
 
     /// Stop trusting a slab for this volume. Idempotent; logs the first time.
+    #[track_caller]
     fn mark_failed(&self, slab: SlabId, why: &DriveError) {
+        let at = std::panic::Location::caller();
         if !why.is_media_failure() {
             // The request was refused, not the storage. Marking here would
             // persist, and every later read of this volume would report a
             // leg that is perfectly readable as gone.
             tracing::warn!(
-                volume = %self.id, slab = %slab,
+                volume = %self.id, slab = %slab, at = %format!("{}:{}", at.file(), at.line()),
                 "read refused by the device, not counted as a leg failure: {why}"
             );
             return;
@@ -837,6 +839,11 @@ impl ThinVolumeHandle {
             match self.read_leg(leg, off, buf).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
+                    tracing::warn!(
+                        vext, off, len = buf.len(), slab = %leg.slab_id,
+                        slot = leg.slot_idx, error = %e,
+                        "leg read failed"
+                    );
                     self.mark_failed(leg.slab_id, &e);
                     last = Some(e);
                 }
@@ -1991,90 +1998,9 @@ impl ThinVolumeHandle {
             }
         }
     }
-}
 
-#[async_trait]
-impl BlockDevice for ThinVolumeHandle {
-    fn id(&self) -> &DeviceId {
-        &self.device_id
-    }
-
-    fn capacity_bytes(&self) -> u64 {
-        self.virtual_size.load(Ordering::Relaxed)
-    }
-
-    fn block_size(&self) -> u32 {
-        4096
-    }
-
-    fn optimal_io_size(&self) -> u32 {
-        4096
-    }
-
-    /// Space comes back a whole slab slot at a time — `discard` only frees
-    /// fully-covered slots, so a smaller discard reclaims nothing (#25).
-    fn discard_granularity(&self) -> u32 {
-        self.slot_size.min(u32::MAX as u64) as u32
-    }
-
-    fn device_type(&self) -> DriveType {
-        DriveType::File
-    }
-
-    async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
-        let buf_len = buf.len() as u64;
-        let mut bytes_read = 0u64;
-        let mut pos = offset;
-
-        while bytes_read < buf_len {
-            let vext_idx = pos / self.slot_size;
-            let off_in_slot = pos % self.slot_size;
-            let remaining_in_slot = self.slot_size - off_in_slot;
-            let remaining_in_buf = buf_len - bytes_read;
-            let to_read = remaining_in_slot.min(remaining_in_buf) as usize;
-
-            let buf_start = bytes_read as usize;
-            let buf_end = buf_start + to_read;
-
-            // Look up extent in GEM
-            let location = {
-                let gem = self.gem.read().await;
-                gem.lookup(self.id, vext_idx).cloned()
-            };
-
-            match location {
-                Some(loc) => {
-                    self.read_extent(vext_idx, &loc, off_in_slot, &mut buf[buf_start..buf_end]).await?;
-                }
-                None => {
-                    // Unallocated — return zeros
-                    buf[buf_start..buf_end].fill(0);
-                }
-            }
-
-            bytes_read += to_read as u64;
-            pos += to_read as u64;
-        }
-
-        Ok(bytes_read as usize)
-    }
-
-    /// Write, taking the per-volume lock only when the mapping must change.
-    ///
-    /// A steady-state write lands on an extent this volume already owns
-    /// exclusively, which needs no serialisation — holding the volume lock for
-    /// the whole call (as this used to) meant every write to a volume queued
-    /// behind every other, no matter which extent it touched.
-    ///
-    /// Allocation and COW do change the mapping, so those re-check the extent
-    /// under the lock before acting: two writers can both observe "unmapped"
-    /// before either allocates, and without the re-check the second would
-    /// allocate a duplicate slot and discard the first writer's data.
-    ///
-    /// A parity volume is serialised per stripe instead: its read-modify-
-    /// write of parity is the thing that must not interleave, and two
-    /// writers in different stripes never touch the same parity slot.
-    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+    /// Whole blocks only, which is what everything below this expects.
+    async fn write_blocks(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         self.refuse_if_sealed()?;
         let buf_len = buf.len() as u64;
         let mut bytes_written = 0u64;
@@ -2148,6 +2074,193 @@ impl BlockDevice for ThinVolumeHandle {
         }
 
         Ok(bytes_written as usize)
+    }
+
+    /// A short write, padded out to the blocks it lands in.
+    ///
+    /// This device reports a 4096-byte block, so it owes its callers
+    /// 4096-byte behaviour: whatever is underneath must only ever see whole
+    /// blocks. Without this a sub-block write reached the syscall unchanged
+    /// and came back `EINVAL`, which surfaced as "formatting ext4: device I/O
+    /// failed at offset 45056" and blocked every blank template — and with
+    /// them every PVC, and every golden that has to be built into a volume.
+    ///
+    /// It is not a corner case. ext4 puts its superblock at byte 1024 and its
+    /// group descriptors are smaller than a block, so *every* mkfs issues
+    /// short writes. The kernel's block layer does exactly this, for exactly
+    /// this reason: a filesystem is not wrong to write 1 KiB, and a device
+    /// advertising 4 KiB is wrong to pass it on.
+    ///
+    /// **It is not the expensive read it looks like.** `read` answers an
+    /// unmapped extent with zeros and no device I/O at all, so on a volume
+    /// being formatted for the first time — every extent unmapped — this is a
+    /// `memset` and one block-aligned write. Padding with zeros and reading
+    /// first are the same operation there.
+    ///
+    /// **And it cannot leak.** The read only becomes real once the extent is
+    /// allocated, and a slot is zero-filled across its whole length on first
+    /// write, so the bytes around a short write are this volume's zeros and
+    /// never a previous tenant's data. Skipping the read and padding with
+    /// zeros unconditionally is what would be unsafe: it would erase the rest
+    /// of a block this volume had already written.
+    async fn write_padded_to_block(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let bs = u64::from(self.block_size());
+        let first = offset - (offset % bs);
+        let span_end = (offset + buf.len() as u64).div_ceil(bs) * bs;
+
+        let mut block = vec![0u8; (span_end - first) as usize];
+        self.read(first, &mut block).await?;
+
+        let at = (offset - first) as usize;
+        block[at..at + buf.len()].copy_from_slice(buf);
+        self.write_blocks(first, &block).await?;
+
+        // The caller's length, not the padded one. A caller told it wrote 4096
+        // when it supplied 1024 will treat three kilobytes of padding as data
+        // it produced.
+        Ok(buf.len())
+    }
+
+
+    /// Whole blocks only, which is what everything below this expects.
+    async fn read_blocks(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        let buf_len = buf.len() as u64;
+        let mut bytes_read = 0u64;
+        let mut pos = offset;
+
+        while bytes_read < buf_len {
+            let vext_idx = pos / self.slot_size;
+            let off_in_slot = pos % self.slot_size;
+            let remaining_in_slot = self.slot_size - off_in_slot;
+            let remaining_in_buf = buf_len - bytes_read;
+            let to_read = remaining_in_slot.min(remaining_in_buf) as usize;
+
+            let buf_start = bytes_read as usize;
+            let buf_end = buf_start + to_read;
+
+            // Look up extent in GEM
+            let location = {
+                let gem = self.gem.read().await;
+                gem.lookup(self.id, vext_idx).cloned()
+            };
+
+            match location {
+                Some(loc) => {
+                    self.read_extent(vext_idx, &loc, off_in_slot, &mut buf[buf_start..buf_end]).await?;
+                }
+                None => {
+                    // Unallocated — return zeros
+                    buf[buf_start..buf_end].fill(0);
+                }
+            }
+
+            bytes_read += to_read as u64;
+            pos += to_read as u64;
+        }
+
+        Ok(bytes_read as usize)
+    }
+
+    /// A short read, widened to the blocks it lands in.
+    ///
+    /// The mirror of `write_padded_to_block`, and needed for the same reason:
+    /// this device reports a 4096-byte block, so nothing beneath it may be
+    /// asked for less. Padding only the writes left `mkfs` reading its own
+    /// 1024-byte superblock back and the device refusing it —
+    ///
+    /// ```text
+    /// read refused by the device, not counted as a leg failure:
+    ///   I/O error: Invalid argument (os error 22)
+    /// ```
+    ///
+    /// — which is the same `EINVAL`, one direction over, and it kept every
+    /// blank template failing after the writes were fixed.
+    ///
+    /// Cheap for the same reason: an unmapped extent is answered with zeros
+    /// and no device I/O, so widening a read on a volume being formatted costs
+    /// a slightly larger `memset` and nothing else.
+    async fn read_padded_to_block(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let bs = u64::from(self.block_size());
+        let first = offset - (offset % bs);
+        let span_end = (offset + buf.len() as u64).div_ceil(bs) * bs;
+
+        let mut block = vec![0u8; (span_end - first) as usize];
+        self.read_blocks(first, &mut block).await?;
+
+        let at = (offset - first) as usize;
+        buf.copy_from_slice(&block[at..at + buf.len()]);
+
+        // The caller's length. It asked for this many bytes and it has them;
+        // the widening is this layer's business, not the caller's.
+        Ok(buf.len())
+    }
+
+}
+
+#[async_trait]
+impl BlockDevice for ThinVolumeHandle {
+    fn id(&self) -> &DeviceId {
+        &self.device_id
+    }
+
+    fn capacity_bytes(&self) -> u64 {
+        self.virtual_size.load(Ordering::Relaxed)
+    }
+
+    fn block_size(&self) -> u32 {
+        4096
+    }
+
+    fn optimal_io_size(&self) -> u32 {
+        4096
+    }
+
+    /// Space comes back a whole slab slot at a time — `discard` only frees
+    /// fully-covered slots, so a smaller discard reclaims nothing (#25).
+    fn discard_granularity(&self) -> u32 {
+        self.slot_size.min(u32::MAX as u64) as u32
+    }
+
+    fn device_type(&self) -> DriveType {
+        DriveType::File
+    }
+
+    async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        let bs = u64::from(self.block_size());
+        if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
+            return self.read_blocks(offset, buf).await;
+        }
+        self.read_padded_to_block(offset, buf).await
+    }
+
+    /// Write, taking the per-volume lock only when the mapping must change.
+    ///
+    /// A steady-state write lands on an extent this volume already owns
+    /// exclusively, which needs no serialisation — holding the volume lock for
+    /// the whole call (as this used to) meant every write to a volume queued
+    /// behind every other, no matter which extent it touched.
+    ///
+    /// Allocation and COW do change the mapping, so those re-check the extent
+    /// under the lock before acting: two writers can both observe "unmapped"
+    /// before either allocates, and without the re-check the second would
+    /// allocate a duplicate slot and discard the first writer's data.
+    ///
+    /// A parity volume is serialised per stripe instead: its read-modify-
+    /// write of parity is the thing that must not interleave, and two
+    /// writers in different stripes never touch the same parity slot.
+    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        self.refuse_if_sealed()?;
+        let bs = u64::from(self.block_size());
+        if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
+            return self.write_blocks(offset, buf).await;
+        }
+        self.write_padded_to_block(offset, buf).await
     }
 
     async fn flush(&self) -> DriveResult<()> {
@@ -2291,6 +2404,78 @@ mod tests {
 
         assert_eq!(handle.extent_count().await, 1);
         assert!(handle.allocated().await > 0);
+
+        cleanup(&paths);
+    }
+
+
+    #[tokio::test]
+    async fn a_sub_block_write_is_padded_and_reads_back_exactly() {
+        // ext4 writes its superblock at byte 1024. Before this, that reached
+        // the syscall as a 1024-byte request and came back EINVAL, which is
+        // what blocked every blank template — and with them every PVC.
+        let (handle, paths) = setup_test_volume(65536).await;
+
+        let n = handle.write(1024, &[0xC3; 1024]).await.unwrap();
+        assert_eq!(n, 1024, "the caller wrote 1024 and must be told 1024");
+
+        let mut back = vec![0xFF_u8; 4096];
+        handle.read(0, &mut back).await.unwrap();
+        assert!(back[..1024].iter().all(|&b| b == 0), "padding before must be zeros");
+        assert!(back[1024..2048].iter().all(|&b| b == 0xC3), "the data must survive");
+        assert!(back[2048..].iter().all(|&b| b == 0), "padding after must be zeros");
+
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn padding_a_short_write_does_not_erase_the_rest_of_the_block() {
+        // Why this reads before writing. Padding with zeros unconditionally
+        // would wipe neighbouring bytes this volume had already written — the
+        // same block, a different part of it.
+        let (handle, paths) = setup_test_volume(65536).await;
+
+        handle.write(0, &[0xAA; 4096]).await.unwrap();
+        handle.write(1024, &[0x55; 512]).await.unwrap();
+
+        let mut back = vec![0_u8; 4096];
+        handle.read(0, &mut back).await.unwrap();
+        assert!(back[..1024].iter().all(|&b| b == 0xAA), "bytes before must survive");
+        assert!(back[1024..1536].iter().all(|&b| b == 0x55), "the short write must land");
+        assert!(back[1536..].iter().all(|&b| b == 0xAA), "bytes after must survive");
+
+        cleanup(&paths);
+    }
+
+    #[tokio::test]
+    async fn an_unaligned_span_crossing_a_block_boundary_is_written_whole() {
+        let (handle, paths) = setup_test_volume(65536).await;
+
+        let n = handle.write(4000, &[0x7E; 200]).await.unwrap();
+        assert_eq!(n, 200);
+
+        let mut back = vec![0_u8; 8192];
+        handle.read(0, &mut back).await.unwrap();
+        assert!(back[..4000].iter().all(|&b| b == 0));
+        assert!(back[4000..4200].iter().all(|&b| b == 0x7E));
+        assert!(back[4200..].iter().all(|&b| b == 0));
+
+        cleanup(&paths);
+    }
+
+
+    #[tokio::test]
+    async fn a_sub_block_read_is_widened_and_returns_exactly_what_was_asked() {
+        // mkfs reads its 1024-byte superblock back. Padding only writes left
+        // that read going down as 1024 bytes and coming back EINVAL, which
+        // kept every blank template failing after the writes were fixed.
+        let (handle, paths) = setup_test_volume(65536).await;
+        handle.write(0, &[0x9D; 4096]).await.unwrap();
+
+        let mut buf = vec![0_u8; 1024];
+        let n = handle.read(1024, &mut buf).await.unwrap();
+        assert_eq!(n, 1024, "the caller asked for 1024 and must be told 1024");
+        assert!(buf.iter().all(|&b| b == 0x9D));
 
         cleanup(&paths);
     }
@@ -2623,6 +2808,7 @@ mod redundancy_tests {
         assert_eq!(back, data);
         cleanup(&paths);
     }
+
 
     #[tokio::test]
     async fn mirror_zero_fills_the_rest_of_the_slot_on_every_leg() {
