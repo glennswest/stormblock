@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v13.6.0] — 2026-09-06
+
 - **fix(drive): `SasDevice` honours the `O_DIRECT` contract it opened the fd with (mkfs.ext4.rs#5, the half that was never explained).** Every ext4 template format on a 4 KiB-sector appliance failed at the first inode-table zeroing — 45056 for 64M, 593920 for 1024M, 2756608 for 5120M — with `EINVAL` at an offset and a length that were both whole 4096-byte blocks, and it kept failing byte-for-byte after the crate-side fixes. The offset was never the problem. `SasDevice` opens the drive `O_DIRECT` and submitted the caller's buffer pointer to io_uring as it was; `O_DIRECT` needs the buffer *address* aligned to the logical block too, and a `Vec` from malloc is 16-byte aligned. Reproduced on `losetup -b 4096`: a 4096-byte write from a `Vec` at offset 0 is `EINVAL`, the same bytes from a `DmaBuf` are written. The drive now bounces any buffer that is not block-aligned through a page-aligned `DmaBuf` on read and write, and an offset or length that is not whole blocks comes back as `DriveError::NotAligned` instead of the kernel's bare errno. Two tests run against a real 4 KiB loop device (`STORMBLOCK_4K_LOOP`, `--ignored`): the malloc-buffer round trip, and the whole provisioning path — slab, thin volume, ext4 format, fsck clean.
 
 - **chore(deps): mkfs-ext4 v3.0.0, fio-ext4 v1.7.0.** Both crates clippy-clean under `-D warnings`; mkfs-ext4's major is the `no_std` `BlockReader` error type, which nothing here uses. Both pins move together so cargo resolves one copy of `mkfs-ext4` and one `BlockDevice` trait.
