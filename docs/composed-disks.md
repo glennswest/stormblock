@@ -185,6 +185,52 @@ same comparison. Format the ESP for the disk it lands in — `mkfs.vfat -S 4096`
 `ci-compose-disk-verify.sh` found this; the first ESP it built mounted only
 after it was reformatted.
 
+## 3b. A slab is a composed volume too
+
+The half of a stormcos disk that was still copied. `image build` lays the
+`[slab]` and `[data_slab]` by writing every golden into them — the same bytes
+the pallets carry, written a second time, and the bulk of every release.
+
+```json
+POST /api/v1/volumes/compose/slab
+{
+  "name": "stormblock-10.38",
+  "size": "20G",
+  "role": "system",
+  "goldens": [
+    {"name": "stormpump", "volume": "blob-4aee70b9abacec1e"},
+    {"name": "fedora",    "volume": "blob-97dce83fad0cf113"},
+    {"name": "pvc-1G",    "volume": "blob-f5752972260b0bea", "template": true}
+  ]
+}
+```
+
+A slab is formatted inside a fresh volume of `size`: superblock, metadata
+region, slot table. Then, for each golden in order, its slots are **taken
+explicitly** from that nested slab — a thin volume maps nothing until it is
+written, and nothing is going to be written — and the outer map is laid over
+them: the composed volume's extents at `data_offset + first_slot × slot` are
+the source volume's extents, shared by `share_into` like a pallet member. The
+nested slot size is the engine's, so a nested slot *is* an engine slot and the
+two maps line up by construction. The runs are checked contiguous; a gap would
+share the wrong slot and read as a different golden a slot in.
+
+The golden is sealed with the filesystem the probe finds through the map,
+marked a template when asked (#100), and the first clone — `<name>`, what the
+kernel command line resolves — is a CoW snapshot inside the slab, stamped its
+own identity (#76). That stamp is the one write a clone costs: the slot the
+superblock sits in. `volumes.dat` is written last, into the slab's own
+metadata region, because a slab that cannot say what is in it boots to "no
+volume metadata".
+
+What is written: the slab's record and one slot per stamped clone. What is
+shared: every golden. The volume is sealed with kind `slab` or `data-slab`,
+and `compose/disk` gives it the matching GPT type without being told.
+
+A node opens it as it opens any slab: `Slab::open`, attach, restore. The test
+does exactly that and reads a golden's first and last blocks back as the blob
+they were mapped from.
+
 ## 4. Cutting a new version
 
 This is what the design is for. A new kernel:
@@ -226,9 +272,11 @@ a ublk block device, and hands it to tools that are not ours:
 ## 6. Not done
 
 - **No CLI subcommand.** Both operations are REST and library only.
-- **`image build` still lays pallets as bytes.** An image spec could be
-  pointed at composed pallets — that is the natural next step, and it would
-  make an image file and a composed disk the same layout from the same code.
+- **`image build` still lays pallets and slabs as bytes.** It is the file
+  path; a release is composed instead (stormpump's `deploy/compose-release.py`
+  runs `compose/pallet`, `compose/slab` and `compose/disk` from the same
+  `image.toml`). Making `image build` itself compose when its output is a
+  volume on an engine would leave one code path.
 - **An ESP is imported as a golden**, built elsewhere (`mkfs.vfat` +
   `mcopy`, or `image build`'s FAT writer through the library). Building one
   from a directory over HTTP is not there.
@@ -241,7 +289,9 @@ a ublk block device, and hands it to tools that are not ours:
   pallet's size changes and every disk on the old layout is gone, which is a
   version rollover, and what it strands is two slots. A node always has a
   bootable disk, so this is a bounded cost, not a leak worth a collector.
-- **Nested slabs are not shared.** A `[slab]` inside a composed disk would be
-  a slab written into a volume — copied bytes — so a network-booted node's
-  mutable state should be its own volumes on the storage node, not a slab in
-  its disk.
+- **A composed slab is not reproducible by content.** Its superblock carries a
+  fresh UUID and timestamps, and every clone a fresh filesystem UUID, so two
+  compositions of the same goldens are two slab volumes. They share the
+  goldens; what they do not share is the record — a few slots. Pallets and
+  the ESP are content-addressed and reused across releases; slabs are per
+  release.
