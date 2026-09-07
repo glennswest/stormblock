@@ -403,7 +403,19 @@ case "$1" in
             ip route add default via "$r" dev "$interface" 2>/dev/null && break
         done
         : > /etc/resolv.conf
-        [ -n "$domain" ] && echo "search $domain" >> /etc/resolv.conf
+        # Either option: 15 is a single domain name, 119 is a search list, and
+        # a server may send one, the other, or both. This network sends 119
+        # only, so reading `$domain` alone found nothing — and the node then
+        # asked for `boothost` unqualified, which resolves nowhere.
+        dhcp_domain="$domain"
+        [ -z "$dhcp_domain" ] && dhcp_domain="${search%% *}"
+        if [ -n "$dhcp_domain" ]; then
+            echo "search $dhcp_domain" >> /etc/resolv.conf
+            # Written down as well as configured. What the resolver was told
+            # and what this domain *is* are two questions, and the second one
+            # should not be answered by parsing the answer to the first.
+            echo "$dhcp_domain" > /run/dhcp-domain
+        fi
         for d in $dns; do
             echo "nameserver $d" >> /etc/resolv.conf
         done
@@ -989,7 +1001,8 @@ if [ "$BOOT_MODE" = "local" ]; then
         # Qualified from the lease's own search domain rather than left to the
         # resolver: a short name that fails to resolve looks exactly like an
         # appliance that is down, and the two want different answers.
-        BOOTDOM=$(awk '/^search/ { print $2; exit }' /etc/resolv.conf 2>/dev/null)
+        BOOTDOM=$(cat /run/dhcp-domain 2>/dev/null)
+        [ -n "$BOOTDOM" ] || BOOTDOM=$(awk '/^search/ { print $2; exit }' /etc/resolv.conf 2>/dev/null)
         [ -n "$BOOTDOM" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost.$BOOTDOM:$BOOTPORT"
         CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost:$BOOTPORT"
         for f in /run/dhcp-siaddr /run/dhcp-serverid; do
