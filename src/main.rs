@@ -174,6 +174,20 @@ enum SubCommand {
         /// simply has none.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         whiteouts: bool,
+        /// Format it as what it is: a filesystem nothing will ever write to.
+        ///
+        /// A content golden is sealed at build time and mounted read-only for
+        /// the life of the image; a workload that needs to write takes a PVC.
+        /// So it needs no journal — a journal exists to make a write
+        /// survivable, and there are no writes — and none of the 5% of blocks
+        /// ext4 reserves for root to recover a full filesystem. Both are pure
+        /// overhead in every clone, on every node, for ever.
+        ///
+        /// Not the default, and deliberately: a blank template is cloned and
+        /// then written, and one of those without a journal is a data loss
+        /// waiting for a power cut.
+        #[arg(long = "read-only")]
+        read_only: bool,
         /// Check the result before writing it out. A golden that does not
         /// check out is one every clone of it inherits.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -739,8 +753,8 @@ async fn main() -> anyhow::Result<()> {
                     slab, meta.as_deref(), out, volumes, *no_contents, *max_file_mb,
                 ).await;
             }
-            SubCommand::Golden { out, size, label, tars, whiteouts, fsck } => {
-                return handle_golden(out, size, label.as_deref(), tars, *whiteouts, *fsck).await;
+            SubCommand::Golden { out, size, label, tars, whiteouts, fsck, read_only } => {
+                return handle_golden(out, size, label.as_deref(), tars, *whiteouts, *fsck, *read_only).await;
             }
             SubCommand::Attach { slab, meta, volumes, all, mount, ro, force } => {
                 return handle_attach(
@@ -3179,6 +3193,7 @@ async fn handle_golden(
     tars: &[String],
     whiteouts: bool,
     fsck: bool,
+    read_only: bool,
 ) -> anyhow::Result<()> {
     use stormblock::fs::ext4::{Ext4Params, FsProfile};
 
@@ -3239,6 +3254,11 @@ async fn handle_golden(
         profile: FsProfile::Ext4,
         label: name.clone(),
         uuid: uuid::Uuid::new_v4(),
+        // Nothing will write to this, so it carries neither the machinery for
+        // surviving a write nor the space set aside for recovering from a full
+        // filesystem. Both would be inherited by every clone on every node.
+        journal: if read_only { Some(false) } else { None },
+        reserved_percent: if read_only { 0.0 } else { 5.0 },
         ..Default::default()
     };
     let report = stormblock::fs::ext4::format(&dev, &params).await?;
