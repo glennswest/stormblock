@@ -901,8 +901,6 @@ if [ "$BOOT_MODE" = "local" ]; then
     if [ -n "$HOSTNQN" ]; then
         export STORMBLOCK_HOST_NQN="$HOSTNQN"
         echo "Host NQN: $HOSTNQN"
-    elif [ -n "$BOOTTAG" ]; then
-        echo "NOTE: no rd.stormblock.hostnqn= - this node will connect anonymously"
     fi
 
     # One image, two lives, one command line.
@@ -958,13 +956,30 @@ if [ "$BOOT_MODE" = "local" ]; then
         # published it — but on the *same* name, handed down rather than
         # rediscovered. Two implementations of "who is this machine" drift,
         # and the one in firmware is the one proven on hardware.
+        #
+        # When nothing handed it down, read it where the firmware read it.
+        # Nothing appends to the command line between the pallet and the
+        # kernel, so a tag on it was a tag typed into the image spec - one
+        # image per machine, which is the opposite of an image. SMBIOS type 1
+        # serial is the Dell service tag, and the same field stormbootx
+        # claims on, so the name is the same by construction.
+        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_serial ]; then
+            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_serial)
+            [ -n "$BOOTTAG" ] && echo "Service tag from SMBIOS: $BOOTTAG"
+        fi
         if [ -z "$BOOTTAG" ]; then
-            echo "FATAL: rd.stormblock.boothost= without rd.stormblock.tag="
-            echo "  This node has to be told which machine it is. The firmware"
-            echo "  already knows: stormbootx claimed boothost/<tag> to load"
-            echo "  this kernel. That name has to reach the kernel command line."
+            echo "FATAL: rd.stormblock.boothost= and no service tag: not on the"
+            echo "  command line (rd.stormblock.tag=) and SMBIOS has none."
             echo "Dropping to shell..."
             exec /bin/sh
+        fi
+        # The host NQN follows the tag the same way, in the format stormbootx
+        # composes (src/main.rs): what the firmware presented on its connect
+        # is what Linux presents on its own.
+        if [ -z "$HOSTNQN" ]; then
+            HOSTNQN="nqn.2026-09.lo.storm:host-$BOOTTAG"
+            export STORMBLOCK_HOST_NQN="$HOSTNQN"
+            echo "Host NQN: $HOSTNQN (from the service tag)"
         fi
         echo "Asking $BOOTHOST which image $BOOTTAG boots..."
         SLAB=$(/usr/sbin/stormblock boot-claim --boothost "$BOOTHOST" --tag "$BOOTTAG")

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### 2026-09-07
+- **fix(initramfs): a netbooting node reads its service tag from SMBIOS when
+  the command line does not carry one, and composes its host NQN from it.**
+  The init insisted on `rd.stormblock.tag=` on the grounds that the firmware
+  would hand the name down - but nothing appends to the command line between
+  the pallet and the kernel, so every image that booted diskless had the tag
+  typed into its spec, one image per machine. `/sys/class/dmi/id/product_serial`
+  is SMBIOS type 1 serial, the field stormbootx claims on, so the two names
+  agree by construction. `rd.stormblock.tag=` and `rd.stormblock.hostnqn=`
+  still win when present.
+
 ## [v13.7.0] — 2026-09-07
 
 ### 2026-09-07
