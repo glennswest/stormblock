@@ -250,6 +250,41 @@ do
     cp -a "$MODDIR/$tree" "$DEST/$(dirname "$tree")/"
 done
 
+# What a whole subtree brings that this initramfs cannot use.
+#
+# `kernel/drivers/net` is taken whole on purpose — a node has to DHCP on
+# whatever card it has, and a list of model numbers is a list that goes stale.
+# But "whole" is a promise about *the tree it is given*, and that tree grew: an
+# earlier build had only `kernel-modules-core`, and adding `kernel-modules`
+# put every wireless driver in Fedora under `drivers/net` as well. They came
+# in, and their stacks came with them through the dependency closure below —
+# 802.11, Bluetooth for the combo chips, SDIO for the ones on an MMC bus. The
+# archive went from 65.7 MB to 97.5 MB, and every byte of it is read into RAM
+# on every boot of every node.
+#
+# None of it can be a boot path. This initramfs has two jobs: reach the root
+# disk, and get a lease on the wire. A node does not netboot over Wi-Fi, or
+# over cellular, or over CAN. Whole *classes*, not model numbers, so nothing
+# here goes stale and the promise above still holds for every card that could
+# actually carry a boot.
+#
+# Pruned before the closure runs, deliberately: anything genuinely depended on
+# by a driver that stays is copied back by the closure, so this can remove too
+# much but cannot remove something needed.
+PRUNE_CLASSES="wireless wwan can ieee802154 wan hamradio"
+pruned_bytes=0
+pruned_dirs=""
+for class in $PRUNE_CLASSES; do
+    d="$DEST/kernel/drivers/net/$class"
+    [ -d "$d" ] || continue
+    pruned_bytes=$((pruned_bytes + $(du -sk "$d" | cut -f1)))
+    pruned_dirs="$pruned_dirs $class"
+    rm -rf "$d"
+done
+if [ -n "$pruned_dirs" ]; then
+    echo "  modules:    dropped$pruned_dirs — $((pruned_bytes / 1024)) MB that cannot carry a boot"
+fi
+
 for f in modules.builtin modules.builtin.modinfo modules.order; do
     [ -f "$MODDIR/$f" ] && cp "$MODDIR/$f" "$DEST/$f"
 done
