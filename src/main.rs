@@ -421,6 +421,14 @@ enum ImageAction {
         /// Path to the image spec
         #[arg(long, default_value = "image.toml")]
         spec: String,
+        /// The engine holding any `volume:` goldens the spec names.
+        ///
+        /// A golden that is a sealed volume is read from the appliance rather
+        /// than from a file on the build box, so nothing is converted, copied
+        /// or duplicated to build an image out of it. Only needed when the
+        /// spec actually names one.
+        #[arg(long, env = "STORMBLOCK_ENGINE")]
+        engine: Option<String>,
         /// Output path. The format is taken from its extension unless
         /// --format says otherwise
         #[arg(long)]
@@ -1573,7 +1581,7 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
                 println!("{:<6} .{}", f.as_str(), f.extension());
             }
         }
-        ImageAction::Build { spec, out, format, keep_raw } => {
+        ImageAction::Build { spec, out, format, keep_raw, engine } => {
             let format = resolve(out, format)?;
             let spec_dir = Path::new(spec).parent().map(PathBuf::from);
             let image_spec = ImageSpec::load(spec).await.map_err(ie)?;
@@ -1590,7 +1598,11 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
                 out_path.with_extension("raw.img")
             };
 
-            let report = ImageBuilder::new(image_spec).build(&raw_path).await.map_err(ie)?;
+            let report = ImageBuilder::new(image_spec)
+                .engine(engine.clone())
+                .build(&raw_path)
+                .await
+                .map_err(ie)?;
             println!(
                 "{} — {} in {} partitions, GPT in {}-byte LBAs",
                 raw_path.display(),

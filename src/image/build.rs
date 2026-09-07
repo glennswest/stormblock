@@ -114,6 +114,8 @@ async fn is_block_device(path: &std::path::Path) -> bool {
 /// Builds an image from a spec.
 pub struct ImageBuilder {
     spec: ImageSpec,
+    /// The engine holding any `volume:` goldens the spec names.
+    engine: Option<String>,
 }
 
 fn align_up(v: u64, a: u64) -> u64 {
@@ -137,8 +139,18 @@ async fn file_len(p: &Path) -> Result<u64> {
 }
 
 impl ImageBuilder {
+    /// Where to find goldens the spec names as `volume:<name>`.
+    ///
+    /// Not part of the spec: the spec says *which* golden, the invocation says
+    /// which engine holds it, so neither file pins the other.
+    pub fn engine(mut self, engine: Option<String>) -> Self {
+        self.engine = engine;
+        self
+    }
+
     pub fn new(spec: ImageSpec) -> Self {
-        ImageBuilder { spec }
+        ImageBuilder {
+            engine: None, spec }
     }
 
     pub fn spec(&self) -> &ImageSpec {
@@ -742,6 +754,17 @@ impl ImageBuilder {
             }
         };
 
+        if let Some(name) = from.strip_prefix("volume:") {
+            let engine = self.engine.as_deref().ok_or_else(|| {
+                ImageError::Spec(format!(
+                    "golden '{}' is `volume:{name}`, but no engine was given. \
+                     Pass --engine, or set STORMBLOCK_ENGINE.",
+                    g.name
+                ))
+            })?;
+            return GoldenSource::open_volume(engine, name).await;
+        }
+
         let Some(rest) = from.strip_prefix("pallet:") else {
             return GoldenSource::open_file(Path::new(&from)).await;
         };
@@ -903,9 +926,144 @@ enum GoldenSource {
         view: PartitionView,
         member: crate::pallet::format::Member,
     },
+    /// A sealed volume on an engine, read over NVMe/TCP.
+    ///
+    /// The golden is the volume. Nothing is exported to a file, converted, or
+    /// copied onto the build box to get an image out of it — the bytes are
+    /// read from the thing that already holds them, which is also the thing a
+    /// release will eventually compose over rather than copy.
+    Volume {
+        dev: std::sync::Arc<dyn crate::drive::BlockDevice>,
+        len: u64,
+        /// Withdrawn when the build finishes. An export left behind is a
+        /// volume served to the network that nobody is using.
+        export: Option<VolumeExport>,
+    },
+}
+
+/// An export opened so the build could read a volume, and the engine that owns
+/// it, so it can be withdrawn again.
+pub struct VolumeExport {
+    engine: String,
+    id: String,
+}
+
+impl Drop for VolumeExport {
+    fn drop(&mut self) {
+        // Best effort, and deliberately not async: this runs when the source
+        // is dropped, including on the failure path, and an export surviving a
+        // failed build is worse than a slow one.
+        let (engine, id) = (self.engine.clone(), self.id.clone());
+        tokio::task::spawn(async move {
+            let client = match crate::http::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let url = format!("{}/api/v1/exports/{}", engine.trim_end_matches('/'), id);
+            let _ = client.delete(&url).send().await;
+        });
+    }
 }
 
 impl GoldenSource {
+    /// Open a sealed volume on an engine and read it as a golden.
+    ///
+    /// The volume is exported over NVMe/TCP for the length of the build and
+    /// withdrawn afterwards. Nothing is written to the build box: the golden
+    /// stays the single artefact, on the appliance, where a release will
+    /// eventually compose over it instead of copying it at all.
+    async fn open_volume(engine: &str, name: &str) -> Result<GoldenSource> {
+        let base = engine.trim_end_matches('/');
+        let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
+        let client = crate::http::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| ImageError::Spec(format!("{e}")))?;
+
+        let spec_err = |e: String| ImageError::Spec(e);
+
+        // Resolve the name. Named, not addressed: a spec says which golden it
+        // wants and the invocation says which engine holds it, so neither
+        // pins the other.
+        let list = client
+            .get(&format!("{base}/api/v1/volumes"))
+            .send()
+            .await
+            .map_err(|e| spec_err(format!("asking {base} for volumes: {e}")))?
+            .text()
+            .await
+            .map_err(|e| spec_err(format!("reading the volume list: {e}")))?;
+        let list: serde_json::Value =
+            serde_json::from_str(&list).map_err(|e| spec_err(format!("volume list: {e}")))?;
+        let vol = list
+            .get("items")
+            .and_then(|i| i.as_array())
+            .and_then(|items| {
+                items.iter().find(|v| v.get("name").and_then(|n| n.as_str()) == Some(name))
+            })
+            .ok_or_else(|| spec_err(format!("no volume named {name} on {base}")))?;
+        let id = vol
+            .get("id")
+            .and_then(|i| i.as_str())
+            .ok_or_else(|| spec_err(format!("volume {name} has no id")))?
+            .to_string();
+        let len = vol
+            .get("virtual_size_bytes")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| spec_err(format!("volume {name} has no size")))?;
+
+        let body = serde_json::json!({ "volume_id": id, "protocol": "nvmeof" });
+        let resp = client
+            .post(&format!("{base}/api/v1/exports"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| spec_err(format!("exporting {name}: {e}")))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(spec_err(format!("exporting {name}: {status}: {text}")));
+        }
+        let export: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| spec_err(format!("export reply: {e}")))?;
+        let export_id = export
+            .get("id")
+            .and_then(|i| i.as_str())
+            .ok_or_else(|| spec_err("export reply carried no id".to_string()))?
+            .to_string();
+        let nqn = export
+            .get("nqn")
+            .and_then(|n| n.as_str())
+            .ok_or_else(|| spec_err("export reply carried no nqn".to_string()))?;
+        let nsid = export.get("nsid").and_then(|n| n.as_u64()).unwrap_or(1) as u32;
+        let port = export.get("port").and_then(|n| n.as_u64()).unwrap_or(4420) as u16;
+
+        let host = base
+            .split("://")
+            .nth(1)
+            .and_then(|h| h.split(':').next())
+            .ok_or_else(|| spec_err(format!("cannot tell the host from {base}")))?;
+
+        let spec = crate::drive::nvmeof_dev::NvmeTcpSpec {
+            addr: format!("{host}:{port}"),
+            nqn: nqn.to_string(),
+            nsid,
+            host_nqn: None,
+        };
+        let dev = crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec)
+            .await
+            .map_err(|e| spec_err(format!("attaching {name} over {}: {e}", spec.addr)))?;
+
+        Ok(GoldenSource::Volume {
+            dev: std::sync::Arc::new(dev),
+            len,
+            export: Some(VolumeExport { engine: base, id: export_id }),
+        })
+    }
+
     async fn open_file(path: &Path) -> Result<GoldenSource> {
         match crate::image::decode::detect_file(path).await {
             Ok(crate::image::decode::SourceFormat::Raw) | Err(_) => {}
@@ -928,6 +1086,7 @@ impl GoldenSource {
             GoldenSource::File { len, .. } => *len,
             GoldenSource::Decoded(src) => src.virtual_size(),
             GoldenSource::Member { member, .. } => member.byte_len,
+            GoldenSource::Volume { len, .. } => *len,
         }
     }
 
@@ -947,6 +1106,22 @@ impl GoldenSource {
                 .read_at(offset, buf)
                 .await
                 .map_err(|e| ImageError::Other(format!("decoding golden content: {e}"))),
+            GoldenSource::Volume { dev, .. } => {
+                let mut done = 0usize;
+                while done < buf.len() {
+                    let n = dev
+                        .read(offset + done as u64, &mut buf[done..])
+                        .await
+                        .map_err(|e| ImageError::Spec(format!("reading golden volume: {e}")))?;
+                    if n == 0 {
+                        return Err(ImageError::Spec(
+                            "golden volume returned a short read".to_string(),
+                        ));
+                    }
+                    done += n;
+                }
+                Ok(())
+            }
             GoldenSource::Member { pallet, view, member } => {
                 pallet.read_member(member, view, offset, buf).await?;
                 Ok(())
