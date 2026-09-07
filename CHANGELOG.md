@@ -2,7 +2,34 @@
 
 ## [Unreleased]
 
+## [v13.7.0] — 2026-09-07
+
 ### 2026-09-07
+- **feat(volumes): a slab can be composed — `POST /api/v1/volumes/compose/slab`.**
+  The last copy in a release. `compose/pallet` and `compose/disk` already
+  built a pallet and a GPT over goldens by their maps, but the slab a node
+  clones and runs from was still laid by `image build`, which writes every
+  golden into it a second time — the same bytes the pallets carry. A composed
+  slab is formatted inside a fresh volume, each golden's slots are taken
+  explicitly from the nested slab (a thin volume maps nothing until written,
+  and nothing is written), and those slots are mapped onto the source volume's
+  slots through the engine's own extent map. The nested slot size is the
+  engine's, so a nested slot *is* an engine slot. What is written: the
+  superblock, the slot table, `volumes.dat`, and one slot per clone stamped
+  with its own filesystem identity (#76). The runs are checked contiguous —
+  a gap would share the wrong slot and read as a different golden a slot in.
+  The result opens as any slab does: `Slab::open`, attach, restore, and the
+  goldens read as the volumes they map onto. `compose/disk` now types a slab
+  volume from its recorded kind (`slab`, `data-slab`), so the composed disk
+  carries the GPT types a node's discovery looks for.
+- **feat(image): a golden can be a volume on an engine.** `GoldenSpec` accepts
+  `from = "volume:<name>"`, resolved against `--engine` (or
+  `STORMBLOCK_ENGINE`): the volume is exported over NVMe/TCP for the length
+  of the build and withdrawn afterwards, so a golden that lives on the
+  appliance needs no file on the build box. Named, not addressed: the spec
+  says which golden, the invocation says which engine holds it. This removes
+  the duplicate artefact; it does not remove the copy, which is what the
+  composed slab above does instead.
 - **fix(thin):** a thin volume honours the block size it advertises, in both
   directions. It reported 4096 and passed sub-block reads and writes straight
   down, so anything beneath it saw I/O it had every right to refuse. Short
