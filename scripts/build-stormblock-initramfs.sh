@@ -934,7 +934,15 @@ if [ "$BOOT_MODE" = "local" ]; then
         echo "Appliance from DHCP (option 17): $BOOTHOST"
     fi
     if [ -z "$BOOTHOST" ] && [ -s /etc/resolv.conf ]; then
-        BOOTHOST="http://boothost:${BOOTPORT:-9090}"
+        # Qualified from the lease's own search domain rather than left to
+        # the resolver: a short name that fails to resolve looks exactly like
+        # an appliance that is down, and the two want different answers.
+        BOOTDOM=$(awk '/^search/ { print $2; exit }' /etc/resolv.conf)
+        if [ -n "$BOOTDOM" ]; then
+            BOOTHOST="http://boothost.$BOOTDOM:${BOOTPORT:-9090}"
+        else
+            BOOTHOST="http://boothost:${BOOTPORT:-9090}"
+        fi
         echo "Appliance by convention: $BOOTHOST"
     fi
 
