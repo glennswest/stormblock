@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### 2026-09-07
+- **fix(initramfs): the driver classes that cannot carry a boot are dropped.**
+  The archive went from 65.7 MB to 97.5 MB with no change to this script. The
+  cause was the tree it is built from: an earlier build extracted only
+  `kernel-modules-core`, and adding `kernel-modules` put every wireless driver
+  in Fedora under `drivers/net` — which is copied whole, on purpose, so a node
+  can DHCP on whatever card it has. Their stacks followed through the
+  dependency closure: 802.11, Bluetooth for the combo chips, SDIO for the ones
+  on an MMC bus. **431 extra modules, 31.6 MB**, read into RAM on every boot of
+  every node. Proved by fetching the older initramfs back off the appliance —
+  it is still there as a content-addressed blob — and diffing the two
+  archives. `wireless wwan can ieee802154 wan hamradio` are now pruned:
+  whole *classes*, not model numbers, so `drivers/net` stays a promise about
+  every card a boot could arrive on. Pruned before the closure runs, so
+  anything genuinely depended on by a driver that stays is copied back. 80.1 MB,
+  and the only modules the older archive had that this does not are five
+  cellular modems.
 - **fix(initramfs): the appliance is discovered, never baked, and nothing is
   trusted on sight.** A diskless node has to reach an appliance, and its
   address is the most network-specific fact there is — so an image carrying
