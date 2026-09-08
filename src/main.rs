@@ -4535,6 +4535,63 @@ async fn handle_boot_local(
         // local disk, for a node whose root was reachable the whole time.
         let flow_over: anyhow::Result<Option<stormblock::drive::handover::FlowOver>> = async {
             let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let dest_dev: Arc<dyn BlockDevice> =
+                Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+            let mut layout =
+                stormblock::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
+            layout.slot_size = mgr.slot_size();
+            layout.tier = tier;
+
+            // **A drive that is already this node's is updated, not replaced.**
+            //
+            // A reinstall is "boot a fresh image and flow over onto the disk
+            // the last install used", and that disk carries two things: the
+            // goldens, which this boot exists to replace, and the data slab,
+            // which holds the node's CA key and its ServiceAccount signing key
+            // and cannot be made again. Laying a fresh table destroys the
+            // second to refresh the first; refusing the drive leaves the node
+            // running from the appliance for the rest of its life. Neither is
+            // an install.
+            //
+            // The partition types say which half is which — that is what they
+            // are for (#88) — so the system half is formatted afresh, the data
+            // half is opened and left alone, and the node boots normally with
+            // the identity it already had. No force, because nothing is
+            // destroyed that an install is not meant to destroy.
+            if !local_disk_force
+                && stormblock::image::local::node_layout(&dest_dev).await?.is_some()
+            {
+                println!(
+                    "Flow-over: {disk} is already this node's — replacing the system half, \
+                     keeping the data half"
+                );
+                let laid = stormblock::image::local::update_system_slab(dest_dev, &layout)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("updating the system slab on {disk}: {e}"))?;
+                let data_id = laid.data.slab_id();
+                let system_id = laid.system.slab_id();
+                println!(
+                    "Flow-over: {disk} updated — data slab {data_id} kept ({}), system slab \
+                     {system_id} replaced ({})",
+                    stormblock::mgmt::config::human_size(laid.data_bytes),
+                    stormblock::mgmt::config::human_size(laid.system_bytes),
+                );
+                let flow = stormblock::drive::handover::FlowOver {
+                    disk: disk.to_string(),
+                    system_slab: system_id.0.to_string(),
+                    data_slab: data_id.0.to_string(),
+                };
+                {
+                    let mut reg = mgr.registry().write().await;
+                    reg.add(laid.data);
+                    reg.add(laid.system);
+                }
+                println!(
+                    "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
+                );
+                return Ok(Some(flow));
+            }
+
             // The target is about to be formatted. An operator supplies a path,
             // and a path proves nothing about what is on the device — so ask the
             // device (#88). A reinstall is exactly "boot a fresh image and flow
@@ -4568,11 +4625,6 @@ async fn handle_boot_local(
                 println!("Flow-over: {what} — destroying it, as --local-disk-force was given.");
                 tracing::warn!("flow-over: --local-disk-force overrides the identity guard: {what}");
             }
-            // Nor may a data slab be *drained* into the system disk: moving those
-            // extents puts identity back in the half the next image replaces.
-            let dest_dev: Arc<dyn BlockDevice> =
-                Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
-
             // Both halves, each onto a slab of its own role.
             //
             // This formatted the whole device as one slab — which takes
@@ -4585,9 +4637,6 @@ async fn handle_boot_local(
             // The layout is the image's own, for the image's own reason: an
             // install replaces the system end and leaves the data end alone, and
             // the two are told apart from the partition table (#88).
-            let mut layout = stormblock::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
-            layout.slot_size = mgr.slot_size();
-            layout.tier = tier;
             let laid = stormblock::image::local::lay_node_slabs(dest_dev, &layout)
                 .await
                 .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;

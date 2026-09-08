@@ -1686,6 +1686,29 @@ if [ "$BOOT_MODE" = "local" ]; then
                         echo "  $dev already carries a stormblock slab - taking it anyway (force)"
                         break
                     fi
+                    # A drive that is *this node's own layout* — both halves,
+                    # data and system — is taken and updated rather than left
+                    # alone. That is what an install is: `boot-local` replaces
+                    # the system half, where the goldens live, and keeps the
+                    # data half, which holds the CA key and the ServiceAccount
+                    # signing key. Nothing irreplaceable is destroyed, so this
+                    # needs no `force`.
+                    #
+                    # Leaving it alone is what made a reinstall a dead end: the
+                    # node booted the fresh image, refused its own disk, and
+                    # ran from the appliance for the rest of its life.
+                    #
+                    # Both halves are required. A lone data slab is an
+                    # abandoned install and only `force` answers for it; a lone
+                    # system slab is somebody else's arrangement, and the
+                    # policy still says leave it.
+                    if [ "$ASSIMILATE" != blank ] \
+                       && printf '%s\n' "$probe" | grep -q "role=data" \
+                       && printf '%s\n' "$probe" | grep -q "role=system"; then
+                        LOCAL_DISK="$dev"
+                        echo "  $dev is this node's own layout - taking it to replace the system half"
+                        break
+                    fi
                     echo "  $dev is already a stormblock slab - leaving it" ;;
                 *)
                     if [ "$ASSIMILATE" = blank ] && \

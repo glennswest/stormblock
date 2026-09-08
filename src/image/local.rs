@@ -78,6 +78,103 @@ fn align_down(v: u64, a: u64) -> u64 {
     v / a * a
 }
 
+/// Is this drive one this node already installed onto?
+///
+/// Both partitions, by type, in the layout `lay_node_slabs` writes. `None`
+/// means the drive is something else — a foreign table, a bare slab, an empty
+/// disk — and taking it means laying a new table over it.
+///
+/// Deliberately a question about the *table*, not about a path: a path proves
+/// nothing about what is on a device (#88), and the two halves are told apart
+/// by their partition types precisely so that an install can replace one and
+/// leave the other.
+pub async fn node_layout(device: &Arc<dyn BlockDevice>) -> Result<Option<(usize, usize)>> {
+    let Ok(gpt) = Gpt::read(device).await else { return Ok(None) };
+    let mut data = None;
+    let mut system = None;
+    for (i, e) in gpt.partitions() {
+        if e.type_guid == type_guid::SLAB_DATA && data.is_none() {
+            data = Some(i);
+        } else if e.type_guid == type_guid::SLAB && system.is_none() {
+            system = Some(i);
+        }
+    }
+    Ok(match (data, system) {
+        (Some(d), Some(s)) => Some((d, s)),
+        _ => None,
+    })
+}
+
+/// Reinstall onto a drive that is already this node's: **replace the system
+/// half, keep the data half, and let the node boot normally.**
+///
+/// This is what an install *is*. A node that netboots this image to be
+/// installed, onto the drive a previous install used, has one thing on that
+/// drive that cannot be made again — the data slab, holding its CA key and
+/// its ServiceAccount signing key — and one thing that is meant to be
+/// replaced, the goldens in the system slab. Laying a fresh table over both
+/// destroys the first to refresh the second; refusing the drive leaves the
+/// node running from the appliance forever. Neither is an install.
+///
+/// So: no wipe, no new table, the data slab opened and left exactly as it is,
+/// and only the system partition formatted afresh for the goldens the
+/// flow-over is about to copy into it.
+///
+/// The data slab is *opened*, not assumed. A drive whose data partition will
+/// not open as a data slab is the abandoned-install case, and that is the one
+/// `--local-disk-force` exists for: this returns an error rather than
+/// guessing, because guessing here costs a node its identity.
+pub async fn update_system_slab(
+    device: Arc<dyn BlockDevice>,
+    opts: &LocalLayout,
+) -> Result<LocalSlabs> {
+    let gpt = Gpt::read(&device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let (data_i, system_i) = node_layout(&device)
+        .await?
+        .ok_or_else(|| ImageError::Spec("this drive does not carry a node layout".into()))?;
+    let lba = gpt.block_size;
+
+    let part = |i: usize| -> Result<Arc<PartitionDevice>> {
+        let e = &gpt.entries[i];
+        PartitionDevice::new(device.clone(), e.start_bytes(lba), e.size_bytes(lba))
+            .map(Arc::new)
+            .map_err(|err| ImageError::Other(format!("partition {}: {err}", i + 1)))
+    };
+
+    let data_part = part(data_i)?;
+    let data_bytes = data_part.capacity_bytes();
+    let data = Slab::open(data_part).await.map_err(|e| {
+        ImageError::Other(format!(
+            "the data partition on this drive will not open as a slab ({e}) — it holds this \
+             node's identity and this will not guess at it"
+        ))
+    })?;
+    if !data.is_data() {
+        return Err(ImageError::Other(
+            "the partition typed as a data slab says it is a system slab; not touching this drive"
+                .into(),
+        ));
+    }
+
+    // The system half, and only it. Formatted rather than adopted: what is on
+    // it is the last install's goldens, and this boot is the next install.
+    let system_part = part(system_i)?;
+    let system_bytes = system_part.capacity_bytes();
+    let meta = auto_metadata_bytes(system_bytes, opts.slot_size);
+    let system = Slab::format_with(
+        system_part,
+        SlabFormat::new(opts.slot_size, opts.tier)
+            .with_metadata(meta)
+            .with_role(SlabRole::System),
+    )
+    .await
+    .map_err(|e| ImageError::Other(format!("formatting the system slab: {e}")))?;
+
+    Ok(LocalSlabs { data, system, data_bytes, system_bytes, lba })
+}
+
 /// Write a GPT with a data slab and a system slab, and format both.
 ///
 /// **This destroys whatever is on the device**, and deliberately more than the
@@ -273,6 +370,81 @@ mod tests {
         // old table's.
         let tail = window(&path, CAP - 1024 * 1024, 1024 * 1024);
         assert!(!found(&tail, OLD_TAIL), "the tail still carries what was there");
+    }
+
+    /// A reinstall keeps what cannot be made again and replaces what this boot
+    /// exists to replace.
+    ///
+    /// The node's identity lives in the data slab — its CA key, its
+    /// ServiceAccount signing key — and the goldens live in the system slab.
+    /// Laying a fresh table over a drive that is already ours destroys the
+    /// first to refresh the second; refusing the drive leaves the node running
+    /// from the appliance forever. Neither is an install.
+    #[tokio::test]
+    async fn a_reinstall_keeps_the_data_half_and_replaces_the_system_half() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installed.disk").to_string_lossy().to_string();
+
+        let mut layout = LocalLayout::for_drive(CAP);
+        layout.slot_size = 1024 * 1024;
+
+        // The install that came before.
+        let (data_id, system_id, data_start) = {
+            let dev: Arc<dyn BlockDevice> =
+                Arc::new(FileDevice::open_with_capacity(&path, CAP).await.unwrap());
+            let laid = lay_node_slabs(dev.clone(), &layout).await.unwrap();
+            let gpt = Gpt::read(&dev).await.unwrap();
+            let (d, _s) = node_layout(&dev).await.unwrap().unwrap();
+            let start = gpt.entries[d].start_bytes(gpt.block_size);
+            (laid.data.slab_id(), laid.system.slab_id(), start)
+        };
+
+        // This node's identity, written into the data half the way anything
+        // else would: through the slab, at a slot it owns.
+        const IDENTITY: &[u8] = b"THIS-NODE-CA-KEY";
+        {
+            let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&path).await.unwrap());
+            let gpt = Gpt::read(&dev).await.unwrap();
+            let (d, _) = node_layout(&dev).await.unwrap().unwrap();
+            let e = &gpt.entries[d];
+            let part: Arc<dyn BlockDevice> = Arc::new(
+                PartitionDevice::new(dev, e.start_bytes(gpt.block_size), e.size_bytes(gpt.block_size))
+                    .unwrap(),
+            );
+            let slab = Slab::open(part.clone()).await.unwrap();
+            let at = slab.data_offset();
+            let mut buf = vec![0u8; 4096];
+            buf[..IDENTITY.len()].copy_from_slice(IDENTITY);
+            part.write(at, &buf).await.unwrap();
+            part.flush().await.unwrap();
+        }
+
+        // The reinstall.
+        let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&path).await.unwrap());
+        assert!(node_layout(&dev).await.unwrap().is_some(), "the drive is ours");
+        let updated = update_system_slab(dev.clone(), &layout).await.unwrap();
+
+        // The data half is the same slab, in the same place, with what was
+        // written to it still there.
+        assert_eq!(updated.data.slab_id(), data_id, "the data slab was replaced");
+        assert!(updated.data.is_data());
+        let gpt = Gpt::read(&dev).await.unwrap();
+        let (d, _) = node_layout(&dev).await.unwrap().unwrap();
+        assert_eq!(
+            gpt.entries[d].start_bytes(gpt.block_size),
+            data_start,
+            "the data partition moved"
+        );
+        let keep = window(&path, data_start + updated.data.data_offset(), 4096);
+        assert!(
+            keep.windows(IDENTITY.len()).any(|w| w == IDENTITY),
+            "the node's identity did not survive its own reinstall"
+        );
+
+        // The system half is a new slab: this boot is the next install.
+        assert_ne!(updated.system.slab_id(), system_id, "the system slab was kept");
+        assert_eq!(updated.system.role(), SlabRole::System);
+        assert_eq!(updated.system.free_slots(), updated.system.total_slots());
     }
 
     /// The wipe is bounded by the drive, so a small one is not asked for more
