@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v15.1.0] — 2026-09-08
+
 ### 2026-09-08 (later still)
 - **feat(initramfs): `/init` asks a boot hook before probing the device the
   command line names (#109).** The local-slab probe asks whether *the one

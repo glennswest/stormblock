@@ -721,6 +721,61 @@ after publication.
 
 ---
 
+## Session 2026-09-08 (later still) — #109, #108
+
+Two halves of one question: **who decides where a node boots from, and what
+can they actually check.**
+
+### #109 — the decision is a hook's to make
+
+`/init` runs every executable in `/etc/stormblock/boot.d`, then
+`/sbin/zeroboot`, before its own probe, and honours `boot-local` (exit 0) or
+`ask-appliance` (exit 2). Generic on purpose — this repo takes no dependency
+on zeroboot — and inert when nothing is installed.
+
+- **`eval` on a hook's stdout is a hole, not a convenience.** The contract is
+  `KEY='value'` lines because busybox has no `jq`, and the issue's own sketch
+  was `eval "$(hook boot)"`. In PID 1 that makes a stray log line a command
+  run as root before there is a system to run it on. The four values are read
+  out with `sed`; the test installs a hook that prints a command among its
+  assignments and checks it did not run.
+- **A hook is asked, never obeyed.** Exit 0 with no slab, a slab that is not
+  on this machine, or an action that disagrees with the exit status → the next
+  hook, then the ordinary probe. Believing it trades a working fallback for a
+  boot that commits and then drops to a shell.
+- The block carries `# --- BEGIN/END boot hook` markers and is sourced by
+  `tests/initramfs-boot-hook.sh` — the same pattern as the uplink selection —
+  and is run under **busybox ash** on dev, which is the shell that actually
+  runs it.
+
+### #108 — and what it can check: `stormblock slab volumes`
+
+Offline, read-only, no daemon/reactor/ublk/root. Reads the slab's own
+metadata region the way `slab info` reads the header.
+
+- **Three answers, not two.** `holds no volumes` (the slab can say, and is
+  empty — the flow-over case) and `keeps no volume metadata` (the slab cannot
+  say; the records are wherever `rd.stormblock.meta=` points) are different
+  facts, and `read_metadata` returns `Ok(None)` for both — the discriminator
+  is `has_metadata_region()`. A caller that conflates them boots off a disk
+  that was formatted and never filled.
+- **The probe was broken and nobody had noticed.** It checked the boot volume
+  with `image inspect "$SLAB"`, which reads a *disk* and wants a GPT. Handed
+  the partition a loader entry names (`/dev/sda2`) it fails with "no usable
+  GPT on this device", which the branch read as "no boot volume" — so such a
+  node asked the appliance on every boot however good its disk. Found by
+  running the command, not by reading it.
+- **`FileDevice::open` creates what it cannot find**, and opens it for
+  writing. A survey command must not: `open_read_only` is the door for
+  anything that inspects, and `slab volumes /dev/sdz` no longer creates
+  `/dev/sdz`.
+- `slab format --role system` reserves **no** metadata region (only `--role
+  data` does, via `with_auto_metadata`); a system slab that is self-describing
+  got that region from `image build`. Worth knowing before testing this by
+  hand.
+
+---
+
 ## Pallets — engine support (2026-08-19, #51/#52)
 
 A **pallet** is a GPT partition holding a named, versioned, self-contained set
