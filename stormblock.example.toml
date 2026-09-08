@@ -5,6 +5,19 @@
 listen_addr = "0.0.0.0:9090"
 # tls_cert = "/etc/stormblock/cert.pem"
 # tls_key = "/etc/stormblock/key.pem"
+# Where volume metadata, LUNs and a minted API token are kept.
+# data_dir = "/var/lib/stormblock"
+#
+# Require a bearer token on every request except the health probes. The node
+# takes one from api_token, $STORMBLOCK_API_TOKEN or token_file, and mints one
+# into token_file (default <data_dir>/api_token, mode 0600) when there is
+# none. Leave it unset and this API is open to anything that can reach the
+# port — which can delete volumes and choose what a machine boots. See
+# docs/auth.md.
+# require_auth = true
+# api_token = "..."          # a shared token, e.g. across a cluster
+# admin_token = "..."        # destructive verbs need this one instead
+# token_file = "/var/lib/stormblock/api_token"
 # Offer the local ublk fast path to CSI: when a volume is attached on the node
 # that holds its master, export it as /dev/ublkbN (no NVMe-oF/TCP round trip).
 # Requires Linux 6.0+ with ublk_drv loaded; falls back to nvme-tcp otherwise.

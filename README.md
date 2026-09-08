@@ -143,6 +143,11 @@ uring_sqpoll = true
 
 [management]
 listen_addr = "0.0.0.0:9090"
+# Require a bearer token on every request. The node mints one at boot into
+# <data_dir>/api_token (mode 0600) and keeps it across restarts. Without
+# this a node is open to anything that can reach the port — see
+# docs/auth.md, which is also why an open node says so on every boot.
+require_auth = true
 # Where API-created LUNs and volume metadata are persisted, so exports
 # come back after a restart.
 data_dir = "/var/lib/stormblock"
@@ -152,7 +157,8 @@ data_dir = "/var/lib/stormblock"
 advertised_addr = "192.168.200.21"
 ```
 
-See [stormblock-spec.md](docs/stormblock-spec.md) for the full specification.
+See [stormblock-spec.md](docs/stormblock-spec.md) for the full specification,
+and [auth.md](docs/auth.md) for who may call a node's API.
 
 ### Exporting a volume
 

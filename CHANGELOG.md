@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+### 2026-09-08
+- **BREAKING fix(mgmt): the management API is guarded, and a node that is not
+  says so out loud (#107).** From a workstation, with no credential of any
+  kind, a node on the fleet network answered `GET /api/v1/volumes`,
+  `GET /serve/v1/exports` and — the telling one — `POST /api/v1/fstemplates`
+  with a 422: a rejected credential returns 401 *before* the body is parsed, so
+  422 means the request was accepted and only the body was wrong. The mechanism
+  to stop that was already written — `serve::api::require_token`, with a read
+  token, an admin token for destructive verbs and a public-path exemption —
+  and **nothing ever wired it to the engine's router**. `management.api_token`
+  guarded `/v1` alone, so a node whose config named a token still served every
+  other surface openly on `0.0.0.0:9090`: create, clone, seal and delete
+  volumes, add and withdraw exports, publish releases, and re-point
+  `boothost/<tag>`, which chooses what a machine boots at its next power cycle.
+  A configured token made the whole node read as closed. **Breaking:** a node
+  with `management.api_token` set now requires it on `/api/v1`, `/serve/v1`,
+  the kube surface and `/metrics`, not only on `/v1`.
+- **feat(mgmt): a node can mint its own token.** `management.require_auth =
+  true` takes one from `api_token`, `$STORMBLOCK_API_TOKEN` or
+  `management.token_file`, and mints one into that file (default
+  `<data_dir>/api_token`, mode `0600`) when there is none — a token cannot be
+  baked into an image, because every node booting that image would carry the
+  same one, so it is made on the node at boot and read there by whatever else
+  runs on that machine. With nowhere to keep one, startup **fails** rather
+  than falling back to open. `management.admin_token` (also
+  `$STORMBLOCK_ADMIN_TOKEN`) reserves destructive verbs for a second token.
+- **feat(mgmt): an open node cannot be silent.** It logs, on every boot, that
+  its API is unauthenticated, what that exposes and how to close it; and
+  `GET /api/v1/health` reports `auth: required|none`, so a fleet can be asked
+  which of its nodes are open without trying to break into each one. The
+  default is still open, deliberately: a machine claims its boot image before
+  it has any credential, so closing the fleet from inside the engine would
+  stop machines booting. That is a migration — distribute the token, then set
+  `require_auth` — not a default. What is not deferred is the silence, because
+  nothing fails while this is wrong.
+- **fix(mgmt): `/api/v1/health` is public and `/metrics` is not.** Health is
+  how an initramfs establishes that the address DHCP gave it is an appliance
+  at all, before it has any credential; a 401 there reads as "not an
+  appliance" and drops a booting node to a shell. A scrape, by contrast, names
+  this node's volumes and says how full it is — `is_public` has said since it
+  was written that a scrape is not a probe, and `/metrics` was being served
+  beside the guarded router rather than inside it.
+- **fix(http): peer and tool clients present a token when the fleet was given
+  one.** Cluster replication and migration handoffs, `image build` reading a
+  golden off an appliance, and `boot-claim --token` (or
+  `$STORMBLOCK_API_TOKEN`). Only a *shared* token is presented outward: a
+  minted one identifies a caller to the node that minted it, and means nothing
+  to a peer.
+- **docs:** [docs/auth.md](docs/auth.md).
+
 ### 2026-09-07
 - **fix(initramfs): the driver classes that cannot carry a boot are dropped.**
   The archive went from 65.7 MB to 97.5 MB with no change to this script. The
