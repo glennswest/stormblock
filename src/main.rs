@@ -1402,9 +1402,33 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down...");
-    {
+    // Bounded, because a stop that waits on a lock is a stop that does not
+    // happen.
+    //
+    // This took the volume manager's mutex and flushed under it. Any task
+    // holding that lock — a compose, a reconciler pass, a claim — holds it
+    // against the shutdown too, so `systemctl stop` sat for its full timeout
+    // and systemd escalated to SIGKILL. A process killed there leaves its
+    // io_uring and ublk teardown unrun, and a thread stuck in the kernel
+    // cannot be reaped: forge carried an unreapable process in the unit's
+    // cgroup for four days, and *every* restart after it ended in "failed
+    // mode" because systemd found something it could not kill.
+    //
+    // Ten seconds is enough for a flush and short enough to be a stop. What
+    // is lost by giving up is nothing that is not recoverable: each slab
+    // keeps its own copy of the volume record, which is what a node reads at
+    // boot and what adoption rebuilds from.
+    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let vm = state.volume_manager.lock().await;
         vm.persist().await;
+    })
+    .await
+    {
+        Ok(()) => tracing::info!("volume metadata flushed"),
+        Err(_) => tracing::warn!(
+            "volume metadata not flushed within 10s — something still holds the manager. \
+             Each slab's own copy stands, which is what adoption reads."
+        ),
     }
     #[cfg(feature = "cluster")]
     if let Some(ref _cluster_mgr) = state.cluster {
