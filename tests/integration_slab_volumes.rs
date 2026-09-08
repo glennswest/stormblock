@@ -126,6 +126,50 @@ async fn a_slab_with_no_metadata_region_says_it_cannot_say() {
     assert!(out.contains("keeps no volume metadata"), "{out}");
 }
 
+/// Every role gets a region, because a slab that cannot say what is on it can
+/// only be read by attaching it — and `image build` has always given both
+/// roles one, so a disk formatted by hand and a disk the builder laid down
+/// were not the same kind of thing.
+#[tokio::test]
+async fn a_system_slab_formatted_by_the_cli_can_say_what_it_holds() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("system.slab").to_string_lossy().to_string();
+    std::fs::write(&path, vec![0u8; CAP as usize]).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+        .args(["slab", "format", &path, "--role", "system"])
+        .output()
+        .expect("spawn stormblock slab format");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("role: system"), "{text}");
+    assert!(text.contains("own record: "), "the reserved region is reported: {text}");
+    assert!(!text.contains("own record: none"), "a system slab reserves one: {text}");
+
+    // "Holds no volumes" — it can answer, and the answer is that it is empty.
+    // That is the answer a boot decision needs: the other one, "keeps no
+    // volume metadata", would mean the question cannot be settled here.
+    let out = slab_volumes(&[&path]);
+    assert!(out.contains("holds no volumes"), "{out}");
+}
+
+/// And the door out, for a slab that deliberately keeps no record of itself.
+#[tokio::test]
+async fn metadata_bytes_zero_formats_a_slab_that_keeps_no_record() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("bare.slab").to_string_lossy().to_string();
+    std::fs::write(&path, vec![0u8; CAP as usize]).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+        .args(["slab", "format", &path, "--metadata-bytes", "0"])
+        .output()
+        .expect("spawn stormblock slab format");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("own record: none"), "{text}");
+    assert!(slab_volumes(&[&path]).contains("keeps no volume metadata"));
+}
+
 /// Read-only, and never creates what it was asked to look at: this is the
 /// command something runs on a machine it knows nothing about.
 #[tokio::test]
