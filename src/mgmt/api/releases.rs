@@ -164,6 +164,9 @@ struct ReleaseSummary {
     size_human: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     digest: Option<String>,
+    /// `available` — the image can be downloaded. `archived` — the record
+    /// stands, the bytes are gone, and `image.img` answers 410 (#106).
+    state: &'static str,
     created: String,
     components: usize,
     has_notes: bool,
@@ -172,21 +175,63 @@ struct ReleaseSummary {
     notes_url: String,
 }
 
-async fn size_of(state: &AppState, r: &Release) -> u64 {
+/// The size of a release's image, or `None` when there is no volume behind it
+/// any more.
+///
+/// The distinction is the whole of #106: eight releases stood in the index
+/// with manifests, digests and download links for bytes that had been
+/// reclaimed. Nothing said which of those a consumer could actually fetch.
+async fn size_of(state: &AppState, r: &Release) -> Option<u64> {
     let vm = state.volume_manager.lock().await;
-    vm.get_volume(&VolumeId(r.volume_id))
-        .map(|d| d.capacity_bytes())
-        .unwrap_or(0)
+    vm.get_volume(&VolumeId(r.volume_id)).map(|d| d.capacity_bytes())
+}
+
+/// What a release is: something that can be downloaded, or a record of one
+/// that could.
+///
+/// Derived, never stored. A stored flag would be a second copy of a fact the
+/// volume manager already holds, and it would be wrong exactly when it
+/// mattered — after the volume went, which is the event nothing was watching
+/// for in the first place. It also reads correctly on a node whose slab is not
+/// attached yet: the release is archived until the bytes are back.
+pub const STATE_AVAILABLE: &str = "available";
+pub const STATE_ARCHIVED: &str = "archived";
+
+fn state_of(size: Option<u64>) -> &'static str {
+    if size.is_some() { STATE_AVAILABLE } else { STATE_ARCHIVED }
+}
+
+/// Which published releases name `volume_id`.
+///
+/// Asked by the shared "what is still using this volume" guard: a release with
+/// no volume is a manifest promising a download that cannot happen, so
+/// deleting the volume is refused while the release stands. Withdraw the
+/// release first — `DELETE /api/v1/releases/{version}` — which is the
+/// deliberate act the guard exists to require (#106).
+pub async fn naming_volume(state: &AppState, volume_id: uuid::Uuid) -> Vec<String> {
+    load(state)
+        .await
+        .into_iter()
+        .filter(|r| r.volume_id == volume_id)
+        .map(|r| r.version)
+        .collect()
+}
+
+/// Every volume a published release names.
+pub async fn published_volumes(state: &AppState) -> std::collections::HashSet<uuid::Uuid> {
+    load(state).await.into_iter().map(|r| r.volume_id).collect()
 }
 
 async fn summarise(state: &AppState, r: &Release) -> ReleaseSummary {
     let size = size_of(state, r).await;
+    let bytes = size.unwrap_or(0);
     ReleaseSummary {
         version: r.version.clone(),
         volume: r.volume.clone(),
-        size_bytes: size,
-        size_human: human_size(size),
+        size_bytes: bytes,
+        size_human: if size.is_some() { human_size(bytes) } else { "—".to_string() },
         digest: r.digest.clone(),
+        state: state_of(size),
         created: civil_date(r.created_unix),
         components: r.manifest.len(),
         has_notes: r.notes.is_some(),
@@ -220,16 +265,24 @@ async fn index_html(State(state): State<Arc<AppState>>) -> Response {
     let mut rows = String::new();
     for r in &releases {
         let s = summarise(&state, r).await;
+        // An archived release keeps its row — the history is the point — but
+        // it must not offer a link that 410s. A download nobody can take is
+        // exactly the promise #106 is about.
+        let image = if s.state == STATE_ARCHIVED {
+            "<span class=archived>archived</span>".to_string()
+        } else {
+            format!("<a href=\"{}\">image.img</a>", s.image_url)
+        };
         rows.push_str(&format!(
             "<tr><td><strong>{}</strong></td><td>{}</td><td>{}</td><td>{}</td>\
-             <td><a href=\"{}\">image.img</a></td>\
+             <td>{}</td>\
              <td><a href=\"{}.html\">table</a> · <a href=\"{}\">json</a></td>\
              <td>{}</td></tr>",
             html_escape(&s.version),
             s.created,
             s.size_human,
             s.components,
-            s.image_url,
+            image,
             s.manifest_url,
             s.manifest_url,
             if s.has_notes {
@@ -247,7 +300,8 @@ async fn index_html(State(state): State<Arc<AppState>>) -> Response {
          <style>body{{font:14px/1.5 system-ui,sans-serif;margin:2rem;max-width:60rem}}\
          table{{border-collapse:collapse;width:100%}}\
          th,td{{text-align:left;padding:.4rem .8rem;border-bottom:1px solid #ddd}}\
-         th{{font-weight:600;border-bottom:2px solid #999}}</style>\
+         th{{font-weight:600;border-bottom:2px solid #999}}\
+         .archived{{color:#888;font-style:italic}}</style>\
          <h1>stormcos releases</h1>\
          <table><tr><th>version<th>published<th>size<th>components<th>image<th>manifest<th>notes</tr>\
          {rows}</table>"
@@ -400,8 +454,9 @@ async fn get_one(State(state): State<Arc<AppState>>, Path(version): Path<String>
             let size = size_of(&state, r).await;
             Json(serde_json::json!({
                 "release": r,
-                "size_bytes": size,
-                "size_human": human_size(size),
+                "state": state_of(size),
+                "size_bytes": size.unwrap_or(0),
+                "size_human": size.map(human_size).unwrap_or_else(|| "\u{2014}".to_string()),
                 "created": civil_date(r.created_unix),
                 "image_url": format!("/api/v1/releases/{version}/image.img"),
             }))
@@ -593,10 +648,27 @@ async fn download(
         vm.get_volume(&VolumeId(release.volume_id))
     };
     let Some(device) = device else {
-        return ApiError::not_found(format!(
-            "release {version} names volume {}, which is not attached",
-            release.volume
-        ));
+        // **410, not 404.** The release exists — its manifest, notes and
+        // digests are right here — and what is gone is the image. A 404 says
+        // "no such release", which sends a consumer looking for a typo in a
+        // version that is on the index page in front of them (#106). Gone
+        // says what actually happened and that retrying will not help.
+        return (
+            StatusCode::GONE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "release {version} is archived: the volume it names ({}) is no longer on \
+                     this node, so there is nothing to download. Its manifest and notes stand \
+                     as the record of what it contained.",
+                    release.volume
+                ),
+                "code": 410,
+                "state": STATE_ARCHIVED,
+                "version": version,
+                "manifest_url": format!("/api/v1/releases/{version}/manifest"),
+            })),
+        )
+            .into_response();
     };
 
     let capacity = device.capacity_bytes();

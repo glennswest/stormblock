@@ -233,6 +233,14 @@ pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<Str
     if state.ublk_exports.lock().await.is_exported(&volume_id.to_string()) {
         busy.push("a ublk device".to_string());
     }
+    // A published release is a reference too, and the only one that survives
+    // this process. Nothing was checking it, so eight releases ended up naming
+    // volumes that had been reclaimed — manifests promising a download that
+    // cannot happen (#106). Withdrawing the release is the deliberate act;
+    // deleting the volume under it is not.
+    for version in releases::naming_volume(state, volume_id).await {
+        busy.push(format!("published release {version} (unpublish it first)"));
+    }
     busy
 }
 
@@ -273,6 +281,9 @@ pub async fn volumes_in_use(state: &AppState) -> std::collections::HashSet<uuid:
             in_use.insert(id);
         }
     }
+    drop(ublk);
+    // Anything a published release names, for the same reason (#106).
+    in_use.extend(releases::published_volumes(state).await);
     in_use
 }
 
