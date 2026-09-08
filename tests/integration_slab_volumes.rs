@@ -57,8 +57,12 @@ async fn a_slab_says_what_it_holds_with_nothing_attached() {
         let dev: Arc<dyn BlockDevice> =
             Arc::new(FileDevice::open(&path).await.unwrap());
         let slab = Slab::open(dev).await.unwrap();
+        let slab_id = slab.slab_id();
         let mut mgr = VolumeManager::new(SLOT);
         mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab).await.unwrap();
+        // The records go *into* the slab, which is the whole point: this is
+        // storage that arrived as a file and has no data directory beside it.
+        mgr.persist_to_slab(slab_id);
 
         let boot = mgr.create_volume_any("boot-cp-01", 8 * 1024 * 1024).await.unwrap();
         let store = mgr
