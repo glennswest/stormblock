@@ -3875,6 +3875,115 @@ async fn handle_attach(
     anyhow::bail!("attach exports volumes through ublk, which is Linux-only")
 }
 
+/// Put the writable half on the local disk, **now**, before anything is
+/// exported.
+///
+/// The flow-over moves the goldens and deliberately does not move the data
+/// slab, because migrating a slab while a filesystem on it is being written
+/// corrupts it — tried on hardware, and within a minute the node reported
+/// `EXT4-fs error (device ublkb26): __ext4_find_entry: checksumming directory
+/// block 0` with its state store's superblock gone. That reasoning is sound
+/// and it left a hole: the data half was then never populated at all, so a
+/// drive that had flowed over held `stormpump` and every golden and none of
+/// `stormcert-data`, `stormcos-state`, `registry-data` or the logs. The node
+/// attached its own disk, restored 75 volumes, dropped 5712 extent mappings
+/// pointing into the appliance's slabs, and died on
+///
+///     Error: volume 'stormcert-data' not found in slab metadata
+///
+/// The window where copying it *is* safe is this one. `boot-local` has
+/// attached the slabs and resolved the volumes, and it has not exported a
+/// single ublk device yet — so nothing is mounted, no filesystem is open, and
+/// not one byte has been written to any of these volumes this boot. It is the
+/// same argument the migration comment already makes for where the writable
+/// volumes belong; this is that place.
+///
+/// Synchronous on purpose. It is the difference between a node that boots from
+/// its own disk next time and one that asks the appliance forever, and it is
+/// bounded — the data half is logs and state, not goldens.
+///
+/// **Only into an empty data half.** A data slab that holds volumes holds this
+/// node's identity, and copying over it would destroy a CA key that cannot be
+/// minted again. Empty is the whole test, and it is asked of the drive rather
+/// than assumed from which code path got here.
+#[cfg(target_os = "linux")]
+async fn seed_data_half(
+    mgr: &stormblock::volume::VolumeManager,
+    dest: stormblock::drive::slab::SlabId,
+    disk: &str,
+) -> anyhow::Result<()> {
+    // Its own handle on the drive. The one the caller had was consumed laying
+    // the slabs, and reading a partition table is cheap next to what follows.
+    let dev: Arc<dyn BlockDevice> =
+        Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+    match stormblock::image::local::data_slab_volumes(&dev).await {
+        Ok(Some(have)) if !have.is_empty() => {
+            println!(
+                "Flow-over: the data half of {disk} already holds {} volume(s) — leaving it,                  that is this node's identity",
+                have.len()
+            );
+            return Ok(());
+        }
+        Ok(Some(_)) => {}
+        // Cannot say. An unanswerable question about identity is answered by
+        // doing nothing: the node runs its writes on the appliance, which is
+        // slower and is not destructive.
+        Ok(None) | Err(_) => {
+            println!(
+                "Flow-over: cannot read the data half of {disk} — leaving it alone; writes stay                  on the appliance"
+            );
+            return Ok(());
+        }
+    }
+
+    let sources: Vec<stormblock::drive::slab::SlabId> = {
+        let reg = mgr.registry().read().await;
+        reg.iter()
+            .filter(|(id, s)| s.is_data() && **id != dest)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    if sources.is_empty() {
+        println!("Flow-over: no data slab to copy from; writes stay where they are");
+        return Ok(());
+    }
+
+    let engine = stormblock::placement::PlacementEngine::new();
+    let started = std::time::Instant::now();
+    let (mut moved, mut failed) = (0u64, 0u64);
+    for source in sources {
+        loop {
+            let mut gem = mgr.gem().write().await;
+            let mut reg = mgr.registry().write().await;
+            let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next() else {
+                break;
+            };
+            match engine.migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest)).await {
+                Ok(_) => moved += 1,
+                Err(e) => {
+                    failed += 1;
+                    tracing::error!("seeding the data half: extent {vol:?}/{vext}: {e}");
+                    // Giving up here is safe and leaves a half-copied data
+                    // slab, which the local-slab probe rejects — the node
+                    // boots from the appliance rather than from an identity
+                    // with holes in it.
+                    if failed > 8 {
+                        anyhow::bail!(
+                            "gave up seeding the data half of {disk} after {failed} failures;                              {moved} extent(s) had moved"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "Flow-over: data half seeded — {moved} extent(s) onto {disk} in {:.1}s{}",
+        started.elapsed().as_secs_f64(),
+        if failed > 0 { format!(", {failed} failed") } else { String::new() }
+    );
+    Ok(())
+}
+
 /// Move the goldens onto the disk the boot laid out, in the background.
 ///
 /// Only the system half, and only ever the system half. A data slab is being
@@ -4637,6 +4746,7 @@ async fn handle_boot_local(
                     reg.add(laid.data);
                     reg.add(laid.system);
                 }
+                seed_data_half(&mgr, data_id, disk).await?;
                 println!(
                     "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
                 );
@@ -4740,6 +4850,7 @@ async fn handle_boot_local(
                 reg.add(laid.data);
                 reg.add(laid.system);
             }
+            seed_data_half(&mgr, data_id, disk).await?;
             println!(
                 "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
             );

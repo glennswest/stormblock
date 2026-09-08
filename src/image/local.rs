@@ -148,6 +148,44 @@ pub async fn system_slab_volumes(
     Ok(Some(meta.volumes.into_iter().map(|v| v.id.0).collect()))
 }
 
+/// What the *data* half of a drive already holds, read offline.
+///
+/// The same question as `system_slab_volumes` and a far more consequential
+/// answer: this partition is where a node's CA key and its ServiceAccount
+/// signing key live, and nothing can mint them again. So the only safe thing
+/// to do with a data slab that holds volumes is leave it alone, and the only
+/// way to know is to ask it before anything is attached.
+///
+/// `Some(empty)` is the case that matters — a data half that was laid and
+/// never filled, which is every drive this node has taken so far, because the
+/// flow-over deliberately migrates only the system half. `None` means the
+/// question cannot be answered, and an unanswerable question about identity is
+/// answered by doing nothing.
+pub async fn data_slab_volumes(
+    device: &Arc<dyn BlockDevice>,
+) -> Result<Option<std::collections::HashSet<uuid::Uuid>>> {
+    let Some((data_i, _)) = node_layout(device).await? else { return Ok(None) };
+    let gpt = Gpt::read(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let e = &gpt.entries[data_i];
+    let part = Arc::new(
+        PartitionDevice::new(device.clone(), e.start_bytes(gpt.block_size), e.size_bytes(gpt.block_size))
+            .map_err(|err| ImageError::Other(format!("data partition: {err}")))?,
+    );
+    let Ok(slab) = Slab::open(part).await else { return Ok(None) };
+    if !slab.has_metadata_region() {
+        return Ok(None);
+    }
+    let bytes = match slab.read_metadata().await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Ok(Some(std::collections::HashSet::new())),
+        Err(_) => return Ok(None),
+    };
+    let Ok(meta) = crate::volume::MetadataStore::decode(&bytes) else { return Ok(None) };
+    Ok(Some(meta.volumes.into_iter().map(|v| v.id.0).collect()))
+}
+
 /// Reinstall onto a drive that is already this node's: **replace the system
 /// half, keep the data half, and let the node boot normally.**
 ///
