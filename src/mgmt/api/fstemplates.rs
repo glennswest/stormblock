@@ -276,6 +276,7 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
             state: crate::fs::template::TemplateState::Ready,
             raw_volume_id: None,
             sealed_volume_id: Some(id.0),
+            parent_id: None,
             clones: 0,
             seeded: Vec::new(),
             standing: None,
