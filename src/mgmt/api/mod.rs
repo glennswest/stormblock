@@ -35,9 +35,43 @@ use serde::Serialize;
 
 use super::AppState;
 
+/// `GET /api/v1/health` — is there an engine here, and which one.
+///
+/// The one endpoint whose answer is the question. Everything else needs a
+/// noun: a volume, a slab, a release. A machine that has just come up on a
+/// network it was told nothing about has no noun to ask for yet — it is
+/// trying to establish whether the thing at this address is an appliance at
+/// all, and it has to do that before it can ask for anything.
+///
+/// Its absence cost five boots. The initramfs probes every candidate address
+/// it can find with this path, and it 404'd on the appliance exactly as it
+/// did on the machines that were not one, so a node that had been handed the
+/// right address by DHCP reported "no engine" about it and dropped to a
+/// shell.
+///
+/// Cheap on purpose: no locks, no I/O, no counting. A discovery probe runs
+/// against several addresses on every boot of every node, and one that reads
+/// state is one that answers slowly when the appliance is busy — which is
+/// when a node most wants an answer.
+async fn health() -> Response {
+    #[derive(Serialize)]
+    struct Health {
+        status: &'static str,
+        service: &'static str,
+        version: &'static str,
+    }
+    Json(Health {
+        status: "ok",
+        service: "stormblock",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+    .into_response()
+}
+
 /// Build the complete API router.
 pub fn router(state: Arc<AppState>) -> Router {
     let r = Router::new()
+        .route("/api/v1/health", axum::routing::get(health))
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/volumes", volumes::router(state.clone()))

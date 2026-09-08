@@ -1036,7 +1036,13 @@ if [ "$BOOT_MODE" = "local" ]; then
             case "$c" in
             nvme-tcp://*) BOOTHOST="$c"; break ;;
             esac
-            if wget -q -T 3 -O /dev/null "$c/api/v1/health" 2>/dev/null; then
+            # Two paths, because an appliance that predates the health
+            # endpoint answers 404 to it and would be passed over. `slabs` is
+            # not a health check — it reads state — but it is engine-specific
+            # and it exists everywhere, so it settles the question for an
+            # appliance that has not been updated yet.
+            if wget -q -T 3 -O /dev/null "$c/api/v1/health" 2>/dev/null \
+               || wget -q -T 3 -O /dev/null "$c/api/v1/slabs" 2>/dev/null; then
                 BOOTHOST="$c"
                 break
             fi
