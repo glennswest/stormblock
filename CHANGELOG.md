@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-09-08 (boot testing)
+- **fix(slab list, slab volumes):** a disk whose *partitions* are slabs is a
+  slab disk. The boot path has walked the GPT for a long time — it is how
+  `rd.stormblock.slab=/dev/sda` works on a composed disk — and these two did
+  not, so the same drive gave two answers depending on which asked. A node
+  that had just migrated 4399 extents onto its own drive read `/dev/sda is not
+  a slab` from its own boot probe, went back to the appliance, and left every
+  one of them unused. The drive survey read the same answer and offered the
+  drive up to be taken again.
 - **fix(flow-over):** the engine that adopts the boot finishes the migration,
   and the initramfs engine no longer starts one it cannot finish. Laying the
   slabs is fast and bounded; copying the goldens onto them is minutes. The

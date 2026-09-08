@@ -1659,14 +1659,41 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 match stormblock::drive::filedev::FileDevice::open(device).await {
                     Ok(dev) => {
                         let dev = Arc::new(dev) as Arc<dyn BlockDevice>;
-                        match Slab::open(dev).await {
+                        match Slab::open(dev.clone()).await {
                             Ok(slab) => {
                                 println!("{}: slab {} (role={}, tier={}, {} slots, {} free)",
                                     device, slab.slab_id(), slab.role(), slab.tier(),
                                     slab.total_slots(), slab.free_slots());
                             }
+                            // A disk whose *partitions* are slabs is a slab
+                            // disk, and saying "not a slab" about it is
+                            // wrong in the way that matters most.
+                            //
+                            // The boot path has walked the GPT for a long
+                            // time — it is how `rd.stormblock.slab=/dev/sda`
+                            // works on a composed disk — and this did not, so
+                            // the same drive gave two answers depending on
+                            // which asked. The node that flowed over onto its
+                            // own disk then read `/dev/sda is not a slab` from
+                            // its own probe and went back to the appliance,
+                            // with 4399 migrated extents sitting unused on the
+                            // drive underneath it.
                             Err(e) => {
-                                println!("{}: not a slab ({e})", device);
+                                let found =
+                                    stormblock::drive::discover::slabs_in_partitions(&dev).await;
+                                if found.is_empty() {
+                                    println!("{}: not a slab ({e})", device);
+                                } else {
+                                    for f in found {
+                                        println!(
+                                            "{}: slab {} (role={}, tier={}, {} slots, {} free, \
+                                             in {})",
+                                            device, f.slab.slab_id(), f.slab.role(),
+                                            f.slab.tier(), f.slab.total_slots(),
+                                            f.slab.free_slots(), f.label,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -1709,13 +1736,27 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                let slab = match Slab::open(dev).await {
-                    Ok(s) => s,
+                // A whole disk whose partitions are slabs answers for all
+                // of them. `rd.stormblock.slab=/dev/sda` names a disk, and
+                // this is the command the boot probe runs to decide whether
+                // that disk can boot the node — so it has to look where the
+                // boot itself looks. It did not, and a node that had just
+                // migrated 4399 extents onto its own drive read `/dev/sda is
+                // not a slab` from its own probe and went back to the
+                // appliance, leaving every one of them unused.
+                let slabs: Vec<Slab> = match Slab::open(dev.clone()).await {
+                    Ok(s) => vec![s],
                     Err(e) => {
-                        println!("{device}: not a slab ({e})");
-                        continue;
+                        let found =
+                            stormblock::drive::discover::slabs_in_partitions(&dev).await;
+                        if found.is_empty() {
+                            println!("{device}: not a slab ({e})");
+                            continue;
+                        }
+                        found.into_iter().map(|f| f.slab).collect()
                     }
                 };
+                for slab in slabs {
                 // Said apart from "no volumes", because they are different
                 // facts: one is a slab that cannot answer and the other is a
                 // slab that answered "nothing". A caller that treats them the
@@ -1777,6 +1818,7 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                         notes,
                         v.id
                     );
+                }
                 }
             }
         }
