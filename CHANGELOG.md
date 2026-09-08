@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### 2026-09-08 (boot testing)
+- **feat(boot-local):** `--local-disk-force`, and `rd.stormblock.assimilate=force`
+  in front of it. The identity guard cannot tell a dead identity from a live
+  one: a drive carrying a data slab from an install that was abandoned —
+  interrupted mid-migration, corrupted, replaced — looks exactly like a drive
+  carrying the identity of a node that is running, so the guard refuses both,
+  on every boot, with no sequence of boots that recovers the drive. `force` is
+  that sequence. It is deliberately not a fleet policy in the sense `any` is:
+  `any` says local drives are ours, this says *this drive is spent*. It names
+  what it destroys before destroying it.
+- **fix(initramfs):** the force flag travels with the policy, not with the
+  survey branch that chose the drive. `slab list` and `boot-local` do not ask
+  the same question — this drive answered "not a slab" to the survey, having
+  no whole-device slab magic, and was chosen as nobody's; `boot-local` then
+  read its GPT, found a partition typed as a data slab and refused it.
+- **fix(initramfs):** the wipe reads back what it wrote. `dd` exiting 0 is not
+  the bytes being gone: the first wipe printed `front cleared` and `back
+  cleared`, and the next boot still found a GPT on the drive.
 - **fix(boot-local):** a flow-over failure no longer takes the boot down with
   it. Every step of taking a local disk can fail for reasons that have nothing
   to do with the root filesystem, and the root is already attached and serving

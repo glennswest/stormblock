@@ -386,6 +386,11 @@ enum SubCommand {
         /// Tier for the --local-disk destination slab
         #[arg(long, default_value = "hot")]
         local_tier: String,
+        /// Take --local-disk even though it already carries a data slab,
+        /// destroying the identity on it. Never inferred: a policy cannot
+        /// decide this, only somebody who knows the drive is spent.
+        #[arg(long)]
+        local_disk_force: bool,
         /// Validate the artifact and resolve the boot volume, then exit
         /// without exporting (no ublk needed)
         #[arg(long)]
@@ -818,7 +823,8 @@ async fn main() -> anyhow::Result<()> {
                 return handle_boot_claim(boothost, tag, namespace, *timeout_secs, token.as_deref()).await;
             }
             SubCommand::BootLocal {
-                slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier, check,
+                slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier,
+                local_disk_force, check,
             } => {
                 return handle_boot_local(
                     slab,
@@ -829,6 +835,7 @@ async fn main() -> anyhow::Result<()> {
                     writable,
                     local_disk.as_deref(),
                     local_tier,
+                    *local_disk_force,
                     *check,
                 ).await;
             }
@@ -4253,6 +4260,7 @@ async fn handle_boot_local(
     writable: &[String],
     local_disk: Option<&str>,
     local_tier: &str,
+    local_disk_force: bool,
     check: bool,
 ) -> anyhow::Result<()> {
     let mgr = open_slabs_and_restore(slab_paths, meta).await?;
@@ -4387,12 +4395,32 @@ async fn handle_boot_local(
             // over onto the disk the previous install was on", and that disk is
             // where this node's CA and its ServiceAccount signing key live.
             if let Some(what) = data_slab_on(disk).await? {
-                anyhow::bail!(
-                    "refusing to format {disk} for flow-over: {what}. That partition holds this \
-                     node's identity — its CA key and its ServiceAccount signing key — and nothing \
-                     can mint it again. Point --local-disk at the system partition, or at a drive \
-                     that carries no data slab"
-                );
+                // The override exists because the guard cannot tell a live
+                // identity from a dead one.
+                //
+                // A drive carrying a data slab from an install that was
+                // abandoned — interrupted mid-migration, corrupted, replaced
+                // — looks exactly like a drive carrying the identity of a
+                // node that is running. The guard refuses both, forever, and
+                // no sequence of boots recovers the drive: zeroing a header
+                // is not something a node does to itself, and every policy
+                // the survey offers is still refused right here.
+                //
+                // `--local-disk-force` is that sequence, and it is
+                // deliberately not a policy. `assimilate=any` is a statement
+                // about a fleet; this is a statement about one drive that
+                // somebody has looked at. It names what it destroys first.
+                if !local_disk_force {
+                    anyhow::bail!(
+                        "refusing to format {disk} for flow-over: {what}. That partition holds \
+                         this node's identity — its CA key and its ServiceAccount signing key — \
+                         and nothing can mint it again. Point --local-disk at the system \
+                         partition, at a drive that carries no data slab, or pass \
+                         --local-disk-force if that identity is spent and you mean to destroy it"
+                    );
+                }
+                println!("Flow-over: {what} — destroying it, as --local-disk-force was given.");
+                tracing::warn!("flow-over: --local-disk-force overrides the identity guard: {what}");
             }
             // Nor may a data slab be *drained* into the system disk: moving those
             // extents puts identity back in the half the next image replaces.

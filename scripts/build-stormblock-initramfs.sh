@@ -1167,13 +1167,38 @@ if [ "$BOOT_MODE" = "local" ]; then
     # It has to be asked for by name, every time, and it is never a policy:
     # this clears the front and back of a disk, which is the partition table
     # and the first slab superblock. Nothing infers it and nothing retries it.
-    if [ -n "${WIPE:-}" ] && [ -b "$WIPE" ]; then
+    if [ -n "${WIPE:-}" ] && [ -n "${WIPE_DONE:-}" ]; then
+        : # a wipe runs once per boot, never per retry
+    elif [ -n "${WIPE:-}" ] && [ -b "$WIPE" ]; then
+        WIPE_DONE=1
+        # Say which device, by size, before touching it. `/dev/sda` is not a
+        # stable identity on this hardware — it has been the 2 TB disk and it
+        # has been the iDRAC virtual floppy — and a wipe that reports success
+        # against the wrong one is the worst outcome available here.
         echo "Wiping the partition table and slab headers on $WIPE (rd.stormblock.wipe)"
+        echo "  device:  $(blockdev --getsize64 "$WIPE" 2>/dev/null || echo "size unknown") bytes"
         dd if=/dev/zero of="$WIPE" bs=1M count=8 conv=fsync 2>/dev/null \
             && echo "  front cleared"
         END=$(( $(blockdev --getsize64 "$WIPE" 2>/dev/null || echo 0) / 1048576 - 8 ))
         [ "$END" -gt 0 ] && dd if=/dev/zero of="$WIPE" bs=1M count=8 seek="$END" conv=fsync \
             2>/dev/null && echo "  back cleared (the mirror GPT)"
+        # Read it back, because "dd exited 0" is not "the bytes are gone".
+        #
+        # The first wipe printed `front cleared` and `back cleared` and the
+        # very next boot still found a GPT on the drive with a data slab in
+        # partition 1 — read off the device itself, not out of the kernel's
+        # cached table. One of those two statements was false and nothing in
+        # the log said which. So: count the non-zero bytes in the sector the
+        # GPT header lives in, and in the protective MBR before it.
+        for probe in 0 1; do
+            left=$(dd if="$WIPE" bs=512 skip="$probe" count=1 2>/dev/null \
+                   | tr -d '\000' | wc -c)
+            if [ "${left:-1}" -eq 0 ]; then
+                echo "  LBA $probe: clear"
+            else
+                echo "  LBA $probe: $left byte(s) still set — THE WIPE DID NOT TAKE"
+            fi
+        done
         # Clearing the bytes is not clearing the partition table.
         #
         # The kernel read that table when it saw the disk, and it keeps it:
@@ -1555,15 +1580,23 @@ if [ "$BOOT_MODE" = "local" ]; then
     #   off    (default) never take a drive
     #   blank  take a drive that carries no slab and no partition table
     #   any    take any drive that is not already a stormblock slab
+    #   force  take it even then, destroying the identity on it
     #
     # `any` is a fleet-wide statement that local drives are ours to use, not a
     # fact about one machine. A drive that already carries a *data* slab is
     # refused by boot-local itself, whatever the policy says, because that
     # partition holds this node's CA key and nothing can mint it again.
+    #
+    # `force` is the exception, and it is a different kind of statement: not
+    # "local drives are ours" but "this drive is spent". It is what recovers a
+    # machine whose drive carries an install that was abandoned half-written,
+    # which is otherwise refused by the survey and by boot-local both, on
+    # every boot, with no way out — the guard cannot tell a dead identity from
+    # a live one, so it protects both.
     LOCAL_DISK=""
     case "${ASSIMILATE:-off}" in
     off|"") ;;
-    blank|any)
+    blank|any|force)
         for d in /sys/block/sd? /sys/block/nvme?n?; do
             [ -e "$d" ] || continue
             dev="/dev/$(basename "$d")"
@@ -1574,6 +1607,17 @@ if [ "$BOOT_MODE" = "local" ]; then
             probe=$(/usr/sbin/stormblock slab list "$dev" 2>&1)
             case "$probe" in
                 *": slab "*|*"data slab"*)
+                    # `force` is the one policy that answers "and take it
+                    # anyway". A drive carrying a slab from an install that
+                    # was abandoned is indistinguishable from one carrying a
+                    # live node's identity, and under every other policy that
+                    # drive is refused for the life of the machine — here by
+                    # the survey, and again by `boot-local`'s own guard.
+                    if [ "$ASSIMILATE" = force ]; then
+                        LOCAL_DISK="$dev"
+                        echo "  $dev already carries a stormblock slab - taking it anyway (force)"
+                        break
+                    fi
                     echo "  $dev is already a stormblock slab - leaving it" ;;
                 *)
                     if [ "$ASSIMILATE" = blank ] && \
@@ -1587,8 +1631,21 @@ if [ "$BOOT_MODE" = "local" ]; then
             esac
         done
         [ -z "$LOCAL_DISK" ] && echo "  no local drive to take; writes stay on the appliance"
+        # The override travels with the policy, not with the branch that
+        # picked the drive.
+        #
+        # `slab list` and `boot-local` do not ask the same question. This
+        # drive answered "not a slab" here — no whole-device slab magic — and
+        # was chosen as nobody's, and then boot-local read its GPT, found a
+        # partition typed as a data slab, and refused it. Setting the flag
+        # only where the survey *saw* a slab left the common case, a drive
+        # with a partition table from an abandoned install, still stuck.
+        if [ "$ASSIMILATE" = force ] && [ -n "$LOCAL_DISK" ]; then
+            FORCE_LOCAL=1
+            echo "  policy is 'force': whatever $LOCAL_DISK carries will be destroyed"
+        fi
         ;;
-    *) echo "  unknown rd.stormblock.assimilate='$ASSIMILATE' (off|blank|any)" ;;
+    *) echo "  unknown rd.stormblock.assimilate='$ASSIMILATE' (off|blank|any|force)" ;;
     esac
 
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
@@ -1597,6 +1654,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
         ${LOCAL_DISK:+--local-disk "$LOCAL_DISK"} \
+        ${LOCAL_DISK:+${FORCE_LOCAL:+--local-disk-force}} \
         ${META:+--meta "$META"} \
         ${IMAGE_STORE:+--image-store "$IMAGE_STORE"} \
         ${VOLUME:+--volume "$VOLUME"} \
