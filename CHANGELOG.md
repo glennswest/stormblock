@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v15.0.0] — 2026-09-08
+
 ### 2026-09-08 (later)
 - **fix(shutdown): a stop takes the kernel devices down with it (#105).**
   Nothing told the ublk exports to stop. The daemon handled SIGTERM, flushed
@@ -35,7 +37,7 @@
   rather than offering one that cannot be taken. Its manifest and notes stand:
   the record of what a version contained is worth keeping after the bytes are
   not.
-- **fix(volumes): a volume a published release names cannot be deleted
+- **BREAKING fix(volumes): a volume a published release names cannot be deleted
   (#106).** The release joins exports, LUNs, ublk devices and StormFS pins in
   the one shared "what is still using this volume" answer, so delete *and* the
   move guard *and* the template sweep all refuse it, naming the version and
