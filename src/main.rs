@@ -4263,14 +4263,34 @@ async fn handle_boot_local(
             stormblock::mgmt::config::human_size(laid.system_bytes),
         );
 
-        // Paired before either is registered, so a slab never migrates into
-        // itself.
+        // The system half only. **Do not migrate a live data slab.**
+        //
+        // Tried, on hardware, and it corrupts. The flow-over moves extents
+        // out from under mounted, actively-written filesystems, and the data
+        // slab is exactly the half that is being written — logs, state,
+        // claims. Within a minute the node reported
+        //
+        //   EXT4-fs error (device ublkb26): __ext4_find_entry:
+        //       checksumming directory block 0
+        //   capturing state: no ext2/3/4 superblock found (magic was 0x0000)
+        //
+        // and stormdrive was in a restart loop. The goldens survive it
+        // because nothing writes to them; a data volume does not.
+        //
+        // The local data slab is still laid down and still registered, so it
+        // is there to be *allocated into*. What must not happen is moving
+        // extents that a mounted filesystem is using. Putting the writable
+        // volumes on it belongs before `switch_root`, where nothing has
+        // written a byte yet — which is the argument zeroboot#2 makes and the
+        // reason it runs in the initramfs (stormcos#36).
         let source_slabs: Vec<(_, _)> = {
             let reg = mgr.registry().read().await;
             reg.iter()
-                .map(|(id, s)| (*id, if s.is_data() { data_id } else { system_id }))
+                .filter(|(_, s)| !s.is_data())
+                .map(|(id, _)| (*id, system_id))
                 .collect()
         };
+        let _ = data_id;
         {
             let mut reg = mgr.registry().write().await;
             reg.add(laid.data);
