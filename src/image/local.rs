@@ -478,6 +478,48 @@ mod tests {
         assert_eq!(updated.system.free_slots(), updated.system.total_slots());
     }
 
+    /// "Already up to date" has to be answerable from the drive alone, before
+    /// anything is attached — otherwise the only way to find out whether a
+    /// copy is needed is to do it.
+    #[tokio::test]
+    async fn the_system_half_says_which_volumes_it_holds() {
+        use crate::raid::RaidArrayId;
+        use crate::volume::VolumeManager;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.disk").to_string_lossy().to_string();
+        let mut layout = LocalLayout::for_drive(CAP);
+        layout.slot_size = 1024 * 1024;
+
+        // A drive that is nobody's cannot answer.
+        {
+            let dev: Arc<dyn BlockDevice> =
+                Arc::new(FileDevice::open_with_capacity(&path, CAP).await.unwrap());
+            assert!(system_slab_volumes(&dev).await.unwrap().is_none());
+        }
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&path).await.unwrap());
+        let laid = lay_node_slabs(dev.clone(), &layout).await.unwrap();
+        // Freshly laid and empty: it can answer, and the answer is nothing.
+        let held = system_slab_volumes(&dev).await.unwrap();
+        assert_eq!(held, Some(std::collections::HashSet::new()));
+
+        // The goldens arrive.
+        let system_id = laid.system.slab_id();
+        let wanted = {
+            let mut mgr = VolumeManager::new(layout.slot_size);
+            mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), laid.system).await.unwrap();
+            mgr.persist_to_slab(system_id);
+            let a = mgr.create_volume_any("stormpump", 4 * 1024 * 1024).await.unwrap();
+            let b = mgr.create_volume_any("stormcos-0.1.0", 4 * 1024 * 1024).await.unwrap();
+            mgr.persist().await;
+            std::collections::HashSet::from([a.0, b.0])
+        };
+
+        let held = system_slab_volumes(&dev).await.unwrap().unwrap();
+        assert_eq!(held, wanted, "the system half must name what it holds");
+    }
+
     /// The wipe is bounded by the drive, so a small one is not asked for more
     /// than it has — and still comes out with both halves.
     #[tokio::test]
