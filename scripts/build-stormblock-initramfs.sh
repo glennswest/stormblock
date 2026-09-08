@@ -64,6 +64,11 @@ INITRD_DIR=$(mktemp -d)
 trap 'rm -rf "$INITRD_DIR"' EXIT
 
 mkdir -p "$INITRD_DIR"/{bin,sbin,usr/sbin,lib/modules,dev,proc,sys,sysroot,etc,run,tmp,var}
+# Where a boot hook goes (#109). Created empty and always present, so an image
+# that carries no hook and one that does differ by a file rather than by a
+# path: /init tests for executables in here and does nothing when there are
+# none.
+mkdir -p "$INITRD_DIR/etc/stormblock/boot.d"
 
 # Busybox (static) + a symlink for **every applet it has**.
 #
@@ -461,6 +466,41 @@ chmod 755 "$INITRD_DIR/usr/share/udhcpc/default.script"
 cat > "$INITRD_DIR/etc/mdev.conf" << 'MDEV'
 ublk[bc].* 0:0 0660
 MDEV
+
+# Boot hooks — who decides where this node boots from (#109).
+#
+# `BOOT_HOOKS="/path/to/zeroboot /path/to/50-something"` installs them into
+# /etc/stormblock/boot.d, where /init runs them in name order before it probes
+# the device the command line names. The installer that owns a hook may also
+# drop it in itself; this is here so that a build that knows about one does not
+# have to unpack and repack the image to add it.
+#
+# **A dynamically linked hook is refused.** There is no loader in this
+# initramfs, so a glibc build fails at boot as "not found" — on a file that is
+# plainly there, with the executable bit set, which is as misleading as an
+# error gets. Static musl, or a shell script.
+for hook_src in ${BOOT_HOOKS:-}; do
+    if [ ! -f "$hook_src" ]; then
+        echo "ERROR: boot hook not found: $hook_src"
+        exit 1
+    fi
+    if head -c 4 "$hook_src" | LC_ALL=C grep -aq ELF; then
+        if LC_ALL=C grep -aq -e '/ld-linux' -e '/ld-musl' "$hook_src"; then
+            echo "ERROR: boot hook $hook_src is dynamically linked."
+            echo "  There is no loader in this initramfs: it would fail at boot as"
+            echo "  'not found' on a file that is plainly there. Build it static."
+            exit 1
+        fi
+    elif head -c 2 "$hook_src" | grep -q '#!'; then
+        hook_interp=$(head -c 128 "$hook_src" | sed -n '1s|^#! *\([^ ]*\).*|\1|p')
+        case "$hook_interp" in
+            /bin/sh|/bin/ash|/bin/busybox) ;;
+            *) echo "  WARNING: boot hook $(basename "$hook_src") wants $hook_interp, which this image may not have" ;;
+        esac
+    fi
+    install -m 755 "$hook_src" "$INITRD_DIR/etc/stormblock/boot.d/$(basename "$hook_src")"
+    echo "  boot hook:  $(basename "$hook_src") ($(du -h "$hook_src" | cut -f1))"
+done
 
 # /init script — the LinuxBoot entry point
 cat > "$INITRD_DIR/init" << 'INITSCRIPT'
@@ -1138,6 +1178,113 @@ if [ "$BOOT_MODE" = "local" ]; then
         echo "rd.stormblock.wipe=$WIPE is not a block device - ignoring"
     fi
 
+    # --- BEGIN boot hook (covered by tests/initramfs-boot-hook.sh)
+    #
+    # Ask an installed hook where this node boots from, *before* probing the
+    # device the command line names (#109).
+    #
+    # The probe below is deliberately narrow: it asks whether the one device
+    # the cmdline names is a slab this node can boot. That is the right
+    # question for the image the cmdline belongs to and the wrong one for a
+    # machine, three ways, all of them seen on hardware:
+    #
+    #   - The cmdline is a pallet member and is identical on every machine
+    #     that boots the image, so `rd.stormblock.slab=/dev/sda2` is a guess
+    #     about enumeration order. The slab may be on another disk entirely.
+    #   - A slab is not the same thing as a bootable disk. One formatted and
+    #     never filled answers "2047 slots, 2047 free" and boots nothing.
+    #   - Nothing in a slab superblock records an owner, so a disk moved
+    #     between chassis is indistinguishable from one that was always here
+    #     — and the hostname on it is the node CA's subject CN.
+    #
+    # A hook can answer all three, because it may look wherever it likes.
+    # This takes a dependency on no particular one: anything executable in
+    # /etc/stormblock/boot.d runs, in order, and /sbin/zeroboot is tried last
+    # because that is the hook that exists today. Install nothing and this
+    # loop does nothing — the probe below decides exactly as it always has.
+    #
+    #   exit 0   ZB_ACTION=boot-local, with ZB_SLAB (and ZB_SLAB_ID,
+    #            ZB_VOLUME, ZB_DRIVE, which are reported)
+    #   exit 2   ZB_ACTION=ask-appliance, with ZB_REASON
+    #   exit 1   ZB_ACTION=error, with ZB_REASON
+    #
+    # Anything else — a hook that exits 0 and names no slab, or names one
+    # that is not here — is treated as an error: the next hook runs, and with
+    # none left the probe decides. A hook is asked, never obeyed blindly.
+    #
+    # **Nothing a hook prints is executed.** The contract is `KEY='value'`
+    # lines because the consumer is busybox `sh` with no `jq`, and the
+    # obvious reading of that is `eval "$(hook boot)"` — but this is PID 1,
+    # and there `eval` makes a stray log line on stdout a command this shell
+    # runs as root before there is a system to run it on. The four values
+    # wanted are read out with `sed` instead. The worst a misbehaving hook
+    # can do is be ignored.
+    hook_value() { # key -> the last value the hook printed for it
+        printf '%s\n' "$HOOK_OUT" \
+            | sed -n "s/^$1=//p" \
+            | tail -n 1 \
+            | sed "s/^'//; s/'$//; s/'\\\\''/'/g"
+    }
+    HOOK_DECIDED=""
+    for hook in "${STORM_BOOT_HOOK_DIR:-/etc/stormblock/boot.d}"/* \
+                "${STORM_BOOT_HOOK_LEGACY:-/sbin/zeroboot}"; do
+        [ -n "$HOOK_DECIDED" ] && break
+        [ -f "$hook" ] && [ -x "$hook" ] || continue
+        echo "Boot hook: $hook"
+        # stdout is captured; stderr and /dev/kmsg are the hook's own voice
+        # and go straight to the console, which is where its progress belongs.
+        HOOK_OUT=$("$hook" boot)
+        HOOK_RC=$?
+        ZB_ACTION=$(hook_value ZB_ACTION)
+        ZB_REASON=$(hook_value ZB_REASON)
+        case "$HOOK_RC" in
+        0)
+            case "$ZB_ACTION" in
+            ""|boot-local) ;;
+            *)
+                echo "  exited 0 but said '$ZB_ACTION' - ignoring it"
+                continue
+                ;;
+            esac
+            ZB_SLAB=$(hook_value ZB_SLAB)
+            if [ -z "$ZB_SLAB" ]; then
+                echo "  says boot-local and names no slab - ignoring it"
+                continue
+            fi
+            case "$ZB_SLAB" in
+            *://*) ;;
+            *)
+                if [ ! -e "$ZB_SLAB" ]; then
+                    echo "  says boot from $ZB_SLAB, which is not on this machine - ignoring it"
+                    continue
+                fi
+                ;;
+            esac
+            SLAB="$ZB_SLAB"
+            HOOK_DECIDED="local"
+            ZB_SLAB_ID=$(hook_value ZB_SLAB_ID)
+            ZB_DRIVE=$(hook_value ZB_DRIVE)
+            ZB_VOLUME=$(hook_value ZB_VOLUME)
+            echo "  boot local: $SLAB${ZB_DRIVE:+ (drive $ZB_DRIVE)}${ZB_SLAB_ID:+ slab $ZB_SLAB_ID}"
+            # The cmdline wins when it named a volume: that is an operator
+            # saying *which*, and the hook is answering *where*.
+            if [ -n "$ZB_VOLUME" ] && [ -z "$VOLUME" ]; then
+                VOLUME="$ZB_VOLUME"
+                echo "  boot volume: $VOLUME (named by the hook)"
+            fi
+            ;;
+        2)
+            SLAB=""
+            HOOK_DECIDED="appliance"
+            echo "  ask the appliance${ZB_REASON:+: $ZB_REASON}"
+            ;;
+        *)
+            echo "  failed (exit $HOOK_RC)${ZB_REASON:+: $ZB_REASON} - carrying on without it"
+            ;;
+        esac
+    done
+    # --- END boot hook
+
     # One image, two lives, one command line.
     #
     # A node netboots once to install itself and then boots from the disk it
@@ -1150,7 +1297,11 @@ if [ "$BOOT_MODE" = "local" ]; then
     # Existence is not the test. The R230 that found this has a 2 TB disk with
     # four partitions on it from a previous life, so /dev/sda is very much
     # there and is not a slab.
-    if [ -n "$SLAB" ] && [ -n "$BOOTHOST" ]; then
+    # A hook that decided is not second-guessed here: it looked at more than
+    # this can — the whole of /sys/block, the ESP, the loader entry, whose
+    # disk it is — and a probe that can only re-ask the narrower question
+    # would overrule a better answer with a worse one.
+    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ] && [ -n "$BOOTHOST" ]; then
         case "$SLAB" in
         *://*) ;;
         *)
@@ -1717,6 +1868,13 @@ echo "  Size: $(du -h "$OUTPUT" | cut -f1)"
 echo ""
 echo "Contents:"
 echo "  /init                      — LinuxBoot init script"
+if ls "$INITRD_DIR/etc/stormblock/boot.d/"* >/dev/null 2>&1; then
+    for h in "$INITRD_DIR/etc/stormblock/boot.d/"*; do
+        echo "  /etc/stormblock/boot.d/$(basename "$h") — boot hook, asked before the local-slab probe"
+    done
+else
+    echo "  /etc/stormblock/boot.d/    — empty: no boot hook, the local-slab probe decides"
+fi
 echo "  /usr/sbin/stormblock       — $(du -h "$INITRD_DIR/usr/sbin/stormblock" | cut -f1) static binary"
 echo "  /bin/busybox               — $(du -h "$INITRD_DIR/bin/busybox" | cut -f1) shell + tools"
 if ls "$INITRD_DIR/lib/modules/"*ublk_drv* >/dev/null 2>&1; then
@@ -1731,6 +1889,8 @@ echo "           rd.stormblock.tag=<tag>       overrides the SMBIOS service tag"
 echo "           [rd.stormblock.hostnqn=<nqn>]  — the name firmware presented, echoed on every connect"
 echo "           — claims boothost/<tag> and uses the namespace it names as the slab"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file-or-nvme-tcp://...> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
+echo "         — a hook in /etc/stormblock/boot.d may answer this instead: see docs/boot-hooks.md,"
+echo "           and BOOT_HOOKS=\"/path/to/hook ...\" to install one into this image"
 echo "         [rd.stormblock.overlay=tmpfs[:SIZE]|<blockdev>]  — writable overlay over a read-only (erofs) root"
 echo "         [rd.stormblock.mount=<vol>:<path>,...]  — export and MOUNT these into the real root"
 echo "                 for a PID 1 that is not systemd (stormpump reads directories, not fstab)"
