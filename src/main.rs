@@ -3853,6 +3853,15 @@ async fn handle_adopt_ublk(
             core_count: 0,
             pin_cores: cfg!(target_os = "linux"),
         }));
+        // The blanks this node's slabs carry are templates, here too.
+        //
+        // A node that took its devices over from the initramfs comes up
+        // through this path and not through `serve`, so seeding the template
+        // store in one of them seeds it on a build box and never on a node —
+        // which is exactly what happened: the fix shipped, the node still
+        // reported "0 of 5 blank size(s) sealed", and the difference was
+        // which of the two ways of becoming this node's engine it had taken.
+        mgmt::api::fstemplates::adopt_slab_templates(&state).await;
         start_serving(&config, &state, "0.0.0.0:3260", "0.0.0.0:4420", &reactor).await;
 
         // Push the working directory down to the volume, on a timer.
