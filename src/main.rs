@@ -4234,21 +4234,49 @@ async fn handle_boot_local(
         }
         // Nor may a data slab be *drained* into the system disk: moving those
         // extents puts identity back in the half the next image replaces.
-        let source_slabs: Vec<_> = {
-            let reg = mgr.registry().read().await;
-            reg.iter()
-                .filter(|(_, s)| !s.is_data())
-                .map(|(id, _)| *id)
-                .collect()
-        };
         let dest_dev: Arc<dyn BlockDevice> =
             Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
-        let dest_slab = Slab::format(dest_dev, mgr.slot_size(), tier)
+
+        // Both halves, each onto a slab of its own role.
+        //
+        // This formatted the whole device as one slab — which takes
+        // `SlabRole`'s default, System — and then drained only the non-data
+        // slabs onto it. So the goldens came local and the *writes* did not:
+        // every log line, every claim and every byte of `stormcos-state`
+        // still landed in a clone on the appliance, for the life of the node.
+        // One node can afford that. Twenty write to one appliance.
+        //
+        // The layout is the image's own, for the image's own reason: an
+        // install replaces the system end and leaves the data end alone, and
+        // the two are told apart from the partition table (#88).
+        let mut layout = stormblock::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
+        layout.slot_size = mgr.slot_size();
+        layout.tier = tier;
+        let laid = stormblock::image::local::lay_node_slabs(dest_dev, &layout)
             .await
-            .map_err(|e| anyhow::anyhow!("format local disk {disk}: {e}"))?;
-        let dest_id = dest_slab.slab_id();
-        mgr.registry().write().await.add(dest_slab);
-        println!("Flow-over: migrating to local slab {dest_id} on {disk} in background");
+            .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
+        let data_id = laid.data.slab_id();
+        let system_id = laid.system.slab_id();
+        println!(
+            "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({})",
+            stormblock::mgmt::config::human_size(laid.data_bytes),
+            stormblock::mgmt::config::human_size(laid.system_bytes),
+        );
+
+        // Paired before either is registered, so a slab never migrates into
+        // itself.
+        let source_slabs: Vec<(_, _)> = {
+            let reg = mgr.registry().read().await;
+            reg.iter()
+                .map(|(id, s)| (*id, if s.is_data() { data_id } else { system_id }))
+                .collect()
+        };
+        {
+            let mut reg = mgr.registry().write().await;
+            reg.add(laid.data);
+            reg.add(laid.system);
+        }
+        println!("Flow-over: migrating {} slab(s) to {disk} in background", source_slabs.len());
 
         let gem_arc = mgr.gem().clone();
         let reg_arc = mgr.registry().clone();
@@ -4257,7 +4285,7 @@ async fn handle_boot_local(
             let engine = stormblock::placement::PlacementEngine::new();
             let mut moved = 0u64;
             let mut failed = 0u64;
-            for source in source_slabs {
+            for (source, dest_id) in source_slabs {
                 loop {
                     if *flow_shutdown.borrow_and_update() {
                         return;
