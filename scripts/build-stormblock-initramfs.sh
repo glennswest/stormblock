@@ -1421,6 +1421,42 @@ if [ "$BOOT_MODE" = "local" ]; then
                     if ! printf '%s\n' "$VOLS" | grep -qE ": volume $VOL | $VOL\$"; then
                         echo "$SLAB has no '$VOL' volume - asking $BOOTHOST instead"
                         SLAB=""
+                    else
+                        # The root is not the whole boot.
+                        #
+                        # A flow-over moves the *system* half — the goldens —
+                        # and deliberately leaves the data half where it is,
+                        # because migrating a slab that is being written
+                        # corrupts it. So a drive part-way through is a drive
+                        # that has `stormpump` and every golden on it and none
+                        # of the writable volumes, and answering this probe on
+                        # the root volume alone declared it bootable.
+                        #
+                        # It was not. The node attached its own disk, restored
+                        # 75 volumes, dropped 5712 extent mappings that pointed
+                        # into the appliance's slabs, and died on
+                        #
+                        #   Error: volume 'stormcert-data' not found in slab
+                        #   metadata
+                        #
+                        # after listing the seventy-five it did have. Every
+                        # volume the command line mounts has to be here, or
+                        # this disk cannot boot this node yet.
+                        MISSING=""
+                        for entry in $(printf '%s' "$MOUNTS" | tr ',' ' '); do
+                            name="${entry%%:*}"
+                            [ -n "$name" ] || continue
+                            printf '%s\n' "$VOLS" \
+                                | grep -qE ": volume $name | $name\$" && continue
+                            MISSING="$MISSING $name"
+                        done
+                        if [ -n "$MISSING" ]; then
+                            set -- $MISSING
+                            echo "$SLAB has '$VOL' but is missing $# mounted volume(s) -" \
+                                 "asking $BOOTHOST instead"
+                            echo "  first few:$(printf '%s' "$MISSING" | cut -c1-60)"
+                            SLAB=""
+                        fi
                     fi
                     ;;
                 esac

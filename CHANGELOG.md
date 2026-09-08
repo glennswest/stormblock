@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-09-08 (boot testing)
+- **fix(initramfs):** the local-slab probe requires every volume the command
+  line mounts, not just the root. A flow-over moves the *system* half and
+  deliberately leaves the data half where it is, because migrating a slab that
+  is being written corrupts it — so a drive part-way through has `stormpump`
+  and every golden on it and none of the writable volumes. Answering on the
+  root volume alone declared that bootable: the node attached its own disk,
+  restored 75 volumes, dropped 5712 extent mappings pointing into the
+  appliance's slabs, and died on `volume 'stormcert-data' not found in slab
+  metadata` after listing the seventy-five it did have.
 - **fix(slab list, slab volumes):** a disk whose *partitions* are slabs is a
   slab disk. The boot path has walked the GPT for a long time — it is how
   `rd.stormblock.slab=/dev/sda` works on a composed disk — and these two did
