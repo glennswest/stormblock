@@ -131,7 +131,19 @@ pub async fn system_slab_volumes(
             .map_err(|err| ImageError::Other(format!("system partition: {err}")))?,
     );
     let Ok(slab) = Slab::open(part).await else { return Ok(None) };
-    let Ok(Some(bytes)) = slab.read_metadata().await else { return Ok(None) };
+    // "Holds nothing" and "cannot say" are different answers, and the
+    // difference is the region rather than its contents (#108, one layer up).
+    // A freshly laid system half has a region and no record in it: it can
+    // answer, and the answer is that it holds nothing, which is exactly the
+    // case that must go on to copy.
+    if !slab.has_metadata_region() {
+        return Ok(None);
+    }
+    let bytes = match slab.read_metadata().await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Ok(Some(std::collections::HashSet::new())),
+        Err(_) => return Ok(None),
+    };
     let Ok(meta) = crate::volume::MetadataStore::decode(&bytes) else { return Ok(None) };
     Ok(Some(meta.volumes.into_iter().map(|v| v.id.0).collect()))
 }
