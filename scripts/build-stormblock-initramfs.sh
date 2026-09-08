@@ -419,6 +419,9 @@ case "$1" in
         for d in $dns; do
             echo "nameserver $d" >> /etc/resolv.conf
         done
+        # What the lease actually offered, written down so the next thing that
+        # needs it does not have to infer it from a file it may not have got.
+        [ -n "$dns" ] && echo "$dns" > /run/dhcp-dns
         # The lease usually carries NTP servers (DHCP option 42). Written down
         # rather than used here, because the clock is set once, after the
         # network is up, and not on every renewal.
@@ -1001,8 +1004,29 @@ if [ "$BOOT_MODE" = "local" ]; then
         # Qualified from the lease's own search domain rather than left to the
         # resolver: a short name that fails to resolve looks exactly like an
         # appliance that is down, and the two want different answers.
+        # Say what is actually known before guessing from it.
+        #
+        # The last two boots failed here and the message named the candidates
+        # without naming what they were built from, so the same wrong theory
+        # was fixed twice. A resolver that was never configured and a domain
+        # that was never offered produce the same symptom — a name that does
+        # not resolve — and they need different fixes.
+        echo "  resolver:  $(tr '\n' ' ' < /etc/resolv.conf 2>/dev/null || echo 'no /etc/resolv.conf')"
+        echo "  from DHCP: domain='$(cat /run/dhcp-domain 2>/dev/null)' dns='$(cat /run/dhcp-dns 2>/dev/null)'"
+
         BOOTDOM=$(cat /run/dhcp-domain 2>/dev/null)
         [ -n "$BOOTDOM" ] || BOOTDOM=$(awk '/^search/ { print $2; exit }' /etc/resolv.conf 2>/dev/null)
+        # Failing that, ask the resolver what it calls itself. A nameserver's
+        # own address is the one piece of DNS configuration every lease
+        # carries, and its PTR names the domain it serves — `192.168.31.252`
+        # is `dns.g16.lo`, so the domain is there for the asking without the
+        # server having to offer option 15 or 119 at all.
+        if [ -z "$BOOTDOM" ]; then
+            for ns in $(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null); do
+                BOOTDOM=$(nslookup "$ns" 2>/dev/null | sed -n 's/.*name = [^.]*\.\(.*\)\.$/\1/p' | head -1)
+                [ -n "$BOOTDOM" ] && { echo "  domain from the resolver's own PTR: $BOOTDOM"; break; }
+            done
+        fi
         [ -n "$BOOTDOM" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost.$BOOTDOM:$BOOTPORT"
         CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost:$BOOTPORT"
         for f in /run/dhcp-siaddr /run/dhcp-serverid; do
