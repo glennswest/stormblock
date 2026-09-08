@@ -1688,7 +1688,13 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 let bytes = match slab.read_metadata().await {
                     Ok(Some(b)) => b,
                     Ok(None) => {
-                        println!("{device}: slab {} keeps no volume metadata", slab.slab_id());
+                        // The region is there and no copy has ever been
+                        // written: this slab is *empty*, which is a different
+                        // answer from "cannot say" and the one #108 was filed
+                        // about — a slab formatted and never filled boots
+                        // nothing, and reads as fine to everything that only
+                        // asks whether a slab is there.
+                        println!("{device}: slab {} holds no volumes", slab.slab_id());
                         continue;
                     }
                     Err(e) => {
