@@ -1657,7 +1657,13 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
         }
         SlabAction::Volumes { devices } => {
             for device in devices {
-                let dev = match stormblock::drive::filedev::FileDevice::open(device).await {
+                // Read-only, and never created: this is the command something
+                // runs on a machine it knows nothing about, before deciding
+                // whether that machine's disk is one to touch. The ordinary
+                // door creates what it cannot find, so `slab volumes /dev/sdz`
+                // made a zero-byte /dev/sdz and called it "not a slab" — true,
+                // and not what happened.
+                let dev = match stormblock::drive::filedev::FileDevice::open_read_only(device).await {
                     Ok(d) => Arc::new(d) as Arc<dyn BlockDevice>,
                     Err(e) => {
                         println!("{device}: cannot open ({e})");

@@ -23,6 +23,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 sed -n '/# --- BEGIN boot hook/,/# --- END boot hook/p' "$GEN" > "$WORK/hook.sh"
 [ -s "$WORK/hook.sh" ] || { echo "FAIL: could not extract the boot hook block"; exit 1; }
+sed -n '/# --- BEGIN local-slab probe/,/# --- END local-slab probe/p' "$GEN" > "$WORK/probe.sh"
+[ -s "$WORK/probe.sh" ] || { echo "FAIL: could not extract the local-slab probe"; exit 1; }
 
 fail=0
 check() { # name expected actual
@@ -162,5 +164,94 @@ check "the hook names the boot volume when nothing else did" "local|$REAL|stormp
 check "and the cmdline's volume wins when there is one" "local|$REAL|myroot" \
     "$(decide "$d" "" myroot)"
 
-[ "$fail" -eq 0 ] && echo "all boot hook checks passed"
+# ---------------------------------------------------------------------------
+# The probe the hook runs ahead of: what /init does when no hook decided.
+# ---------------------------------------------------------------------------
+
+# A stub `stormblock`, so the probe can be driven without a slab or a kernel.
+# `slab list` answers from the file's first line, `slab volumes` from the rest.
+STUB="$WORK/stormblock"
+cat > "$STUB" <<'STUBEOF'
+#!/bin/sh
+# $1 = slab, $2 = list|volumes, $3 = device
+answers="$STUB_ANSWERS/$(basename "$3")"
+case "$2" in
+list)    sed -n '1p' "$answers" 2>/dev/null ;;
+volumes) sed -n '2,$p' "$answers" 2>/dev/null ;;
+esac
+exit 0
+STUBEOF
+chmod +x "$STUB"
+
+answer_for() { # device-basename first-line rest...
+    mkdir -p "$WORK/answers"
+    f="$WORK/answers/$1"; shift
+    printf '%s\n' "$@" > "$f"
+}
+
+probe() { # slab-path [VOLUME] [META] -> the SLAB the probe leaves behind
+    (
+        set +e
+        STORM_STORMBLOCK="$STUB"
+        STUB_ANSWERS="$WORK/answers"
+        export STORM_STORMBLOCK STUB_ANSWERS
+        HOOK_DECIDED=""
+        SLAB="$1"
+        VOLUME="${2:-}"
+        META="${3:-}"
+        BOOTHOST="http://boothost:9090"
+        . "$WORK/probe.sh" >/dev/null 2>&1
+        echo "$SLAB"
+    )
+}
+
+echo "local-slab probe:"
+
+# The partition case, which is what a loader entry names. Before #108 this
+# ran `image inspect`, which wants a GPT and fails on a partition — so a node
+# whose cmdline named /dev/sda2 asked the appliance every boot, however good
+# its disk was.
+part="$WORK/sda2"; : > "$part"
+answer_for sda2 "$part: slab 88d5da3f-1111-2222-3333-444455556666" \
+    "$part: volume stormpump (2.1 GB, 540 slots) 9f1c0000-0000-0000-0000-000000000001"
+check "a partition holding the boot volume is kept" "$part" "$(probe "$part")"
+
+# The volume can be named by uuid as well as by name.
+check "the boot volume may be named by uuid" "$part" \
+    "$(probe "$part" 9f1c0000-0000-0000-0000-000000000001)"
+
+# A slab formatted and never filled: the failure #108 was filed for. It passes
+# `slab list` and boots nothing.
+empty="$WORK/sdb2"; : > "$empty"
+answer_for sdb2 "$empty: slab 77770000-1111-2222-3333-444455556666" \
+    "$empty: slab 77770000-1111-2222-3333-444455556666 holds no volumes"
+check "a slab with no volumes sends the node to the appliance" "" "$(probe "$empty")"
+
+# A slab holding somebody else's volumes is not this node's boot disk.
+other="$WORK/sdc2"; : > "$other"
+answer_for sdc2 "$other: slab 66660000-1111-2222-3333-444455556666" \
+    "$other: volume something-else (8.4 GB, 2100 slots) 9f1c0000-0000-0000-0000-000000000002"
+check "a slab without the named volume goes to the appliance" "" "$(probe "$other")"
+
+# Cannot answer is not the same as answering no. A slab that keeps no metadata
+# is trusted only when the cmdline says where the records are instead.
+nometa="$WORK/sdd2"; : > "$nometa"
+answer_for sdd2 "$nometa: slab 55550000-1111-2222-3333-444455556666" \
+    "$nometa: slab 55550000-1111-2222-3333-444455556666 keeps no volume metadata"
+check "a slab that cannot answer, with rd.stormblock.meta=, is kept" "$nometa" \
+    "$(probe "$nometa" "" /var/lib/stormblock)"
+check "and without one, the appliance decides" "" "$(probe "$nometa")"
+
+# Not a slab at all, and not there at all.
+notslab="$WORK/sde2"; : > "$notslab"
+answer_for sde2 "$notslab: not a slab (bad slab magic)"
+check "a device that is not a slab goes to the appliance" "" "$(probe "$notslab")"
+check "a device that is not on this machine goes to the appliance" "" \
+    "$(probe "$WORK/not-here")"
+
+# A fabric URI is not probed at all: there is no local device to ask about.
+check "a remote slab is left alone" "nvme-tcp://10.0.0.1:4420/nqn.x" \
+    "$(probe nvme-tcp://10.0.0.1:4420/nqn.x)"
+
+[ "$fail" -eq 0 ] && echo "all boot hook and probe checks passed"
 exit "$fail"

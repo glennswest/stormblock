@@ -35,7 +35,7 @@ impl FileDevice {
     pub async fn open(path: &str) -> DriveResult<Self> {
         let pb = PathBuf::from(path);
 
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -44,6 +44,36 @@ impl FileDevice {
             .await
             .map_err(DriveError::Io)?;
 
+        Self::from_file(path, file).await
+    }
+
+    /// Open a device or image **read-only**, and only if it is already there.
+    ///
+    /// [`open`](Self::open) creates what it cannot find and opens it for
+    /// writing, which is right for formatting an image file and wrong for
+    /// looking at a disk: `stormblock slab volumes /dev/sdz` on a machine you
+    /// know nothing about must not *create* `/dev/sdz` — and it did, a
+    /// zero-byte file reported as "not a slab", which is true and is not what
+    /// happened (#108).
+    ///
+    /// A device opened this way refuses writes at the kernel rather than by
+    /// convention, which is the property an inspection wants: it cannot
+    /// change what it is looking at even by mistake.
+    pub async fn open_read_only(path: &str) -> DriveResult<Self> {
+        let pb = PathBuf::from(path);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create(false)
+            .open(&pb)
+            .await
+            .map_err(DriveError::Io)?;
+        Self::from_file(path, file).await
+    }
+
+    /// Everything both doors have in common: how big the thing is, and what
+    /// kind of thing it is.
+    async fn from_file(path: &str, mut file: File) -> DriveResult<Self> {
         let metadata = file.metadata().await.map_err(DriveError::Io)?;
         let is_block_device = {
             #[cfg(unix)]

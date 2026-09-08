@@ -1301,6 +1301,8 @@ if [ "$BOOT_MODE" = "local" ]; then
     # this can — the whole of /sys/block, the ESP, the loader entry, whose
     # disk it is — and a probe that can only re-ask the narrower question
     # would overrule a better answer with a worse one.
+    # --- BEGIN local-slab probe (covered by tests/initramfs-boot-hook.sh)
+    SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
     if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ] && [ -n "$BOOTHOST" ]; then
         case "$SLAB" in
         *://*) ;;
@@ -1320,12 +1322,11 @@ if [ "$BOOT_MODE" = "local" ]; then
             if [ ! -e "$SLAB" ]; then
                 echo "No $SLAB on this machine - asking $BOOTHOST instead"
                 SLAB=""
-            elif ! /usr/sbin/stormblock slab list "$SLAB" 2>/dev/null \
+            elif ! $SB slab list "$SLAB" 2>/dev/null \
                  | grep -qE ": slab [0-9a-f-]{36}"; then
                 echo "$SLAB is not a slab - asking $BOOTHOST instead"
                 SLAB=""
-            elif ! /usr/sbin/stormblock image inspect "$SLAB" 2>/dev/null \
-                 | grep -qE "^ +volume ${VOLUME:-stormpump} "; then
+            else
                 # A slab is not the same thing as a slab this node can boot.
                 #
                 # The test was "is there a slab here", and a *half* slab
@@ -1341,12 +1342,47 @@ if [ "$BOOT_MODE" = "local" ]; then
                 # that cannot answer that is not this node's boot disk, and
                 # the appliance is - which is the same fallback that already
                 # covers a disk with no slab at all.
-                echo "$SLAB has no '${VOLUME:-stormpump}' volume - asking $BOOTHOST instead"
-                SLAB=""
+                #
+                # `slab volumes` rather than `image inspect` (#108). Inspect
+                # reads a *disk*: it wants a GPT, finds the slab partitions in
+                # it and reports what each holds. Handed the partition itself
+                # — which is what a loader entry names, `rd.stormblock.slab=
+                # /dev/sda2` — it fails with "no usable GPT on this device",
+                # and this branch read that as "no boot volume" and sent every
+                # such node to the appliance. `slab volumes` asks the slab in
+                # front of it, whether that is a partition, a whole disk or a
+                # file.
+                VOL="${VOLUME:-stormpump}"
+                VOLS=$($SB slab volumes "$SLAB" 2>/dev/null)
+                case "$VOLS" in
+                *"keeps no volume metadata"*)
+                    # The slab cannot answer, which is not the same as
+                    # answering no. Old slabs keep their records beside them
+                    # rather than on them, and `rd.stormblock.meta=` is the
+                    # node saying where. With nowhere named there is nothing
+                    # to check and nothing to trust, so the appliance decides.
+                    if [ -n "$META" ]; then
+                        echo "$SLAB keeps no volume metadata - trusting rd.stormblock.meta=$META"
+                    else
+                        echo "$SLAB keeps no volume metadata and no rd.stormblock.meta= - asking $BOOTHOST instead"
+                        SLAB=""
+                    fi
+                    ;;
+                *)
+                    # By name or by uuid, because `stormblock.volume=` takes
+                    # either and the line carries both — the name after
+                    # ": volume " and the uuid at the end.
+                    if ! printf '%s\n' "$VOLS" | grep -qE ": volume $VOL | $VOL\$"; then
+                        echo "$SLAB has no '$VOL' volume - asking $BOOTHOST instead"
+                        SLAB=""
+                    fi
+                    ;;
+                esac
             fi
             ;;
         esac
     fi
+    # --- END local-slab probe
 
     # Diskless: this machine's slab is a namespace on the appliance, and which
     # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
