@@ -51,7 +51,11 @@ toml = { package = "basic-toml", version = "0.1" }
 serde_json = "1"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+# `env` for `#[arg(env = ...)]`. It was reaching main.rs by feature unification
+# through a default-only dependency, so the RouterOS profile
+# (--no-default-features) was the one build that saw the truth and did not
+# compile.
+clap = { version = "4", features = ["derive", "env"] }
 
 # Error handling
 anyhow = "1"
