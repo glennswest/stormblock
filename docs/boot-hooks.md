@@ -54,10 +54,32 @@ background, after root is up. `/init` picks that drive today from
 
 | policy | takes |
 |---|---|
-| `off` (default) | nothing |
+| `any` (default) | any drive that is not already a stormblock slab |
 | `blank` | a drive with no slab and no partition table |
-| `any` | any drive that is not already a stormblock slab |
-| `force` | that drive even when it is one, destroying what it carries |
+| `off` | nothing |
+| `force` | a drive even when it is one of ours, destroying the identity on it |
+
+**The default is to take one, because this image is an installer.** It was
+`off`, which made the common case — one drive, netbooted to be installed — do
+nothing and keep every write on the appliance until somebody knew to add a
+kernel parameter. Nobody netboots an installer at a machine whose disk they
+mean to keep; a node that must not touch its drive says `off`.
+
+A drive carrying somebody's ext4, or a previous life's partition table, is not
+a reason to stop either. Garbage cannot be interpreted safely, so
+`lay_node_slabs` destroys the ends of the drive before it lays its table: a
+fresh GPT leaves everything the old one described exactly where it was — an
+ext4 backup superblock, an LVM label, an mdraid superblock at the tail, a
+stale *backup* GPT whose header sits at a different offset because the old
+table used a different LBA size — and each of those is read by something that
+scans rather than asks. The alternative to installing over it is a setup API
+and a remote UI to drive it, which is a great deal of machinery to decide
+something the boot already decided.
+
+What `any` still refuses is a drive carrying one of *our* slabs. That is not
+caution about garbage: the data partition holds this node's CA key and its
+ServiceAccount signing key, and nothing can mint those again. `force` is the
+deliberate act for a drive whose identity is spent.
 
 Those are *fleet* statements, applied by a scan that can only ask `slab list`
 whether a drive is one of ours. That is the right question for a policy and a
@@ -77,8 +99,10 @@ word.
 Precedence, most specific first:
 
 1. `rd.stormblock.assimilate=off` — an operator saying no, and it means no.
-2. A drive the policy chose — a scan the operator asked for, on this machine.
-3. The hook's offer — including on the default of no policy at all.
+2. A policy *named on the kernel command line*, and the drive its scan chose.
+3. The hook's offer — which beats the **default** scan, because the default is
+   not an instruction and the hook looked harder: the scan can only ask
+   `slab list` whether a drive is one of ours, and the hook read the drive.
 
 `/init` refuses an offer that is not on this machine, and one that names the
 drive this boot is reading from: offering that would hand the node its own

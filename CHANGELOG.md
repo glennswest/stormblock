@@ -68,6 +68,33 @@
   partition 1, naming a partition that no longer existed on the disk.
 
 ### 2026-09-08 (later still, cont.)
+- **BREAKING feat(initramfs): assimilation defaults to `any` — the drive is
+  ours.** A node that netboots this image is being installed, and `off` made
+  the common case (one drive, netbooted to be installed) do nothing and keep
+  every write on the appliance until somebody knew to add a kernel parameter.
+  Nobody netboots an installer at a machine whose disk they mean to keep; a
+  node that must not touch its drive says `rd.stormblock.assimilate=off`.
+  `any` still refuses a drive carrying one of *our* slabs — that is the node's
+  identity, not garbage: the data partition holds the CA key and the
+  ServiceAccount signing key, and nothing can mint those again. `force` stays
+  the deliberate act for a drive whose identity is spent.
+- **fix(image): taking a drive destroys what was on it.** `lay_node_slabs`
+  wrote a fresh GPT over whatever was there, which leaves everything the old
+  table described exactly where it was: an ext4 backup superblock, an LVM
+  label, an mdraid superblock at the tail, a stale *backup* GPT whose header
+  sits at a different offset because the old table used a different LBA size.
+  Each is read by something that scans rather than asks — udev naming a drive
+  after a filesystem that is gone, mdadm assembling an array out of a slab, a
+  rescue tool offering to restore the table we replaced. The first and last
+  few megabytes are zeroed before the table goes down, so the drive stops
+  being what it was rather than merely stopping being described that way.
+  Garbage cannot be interpreted safely, and the alternative to installing over
+  it is a setup API and a remote UI to drive it — a great deal of machinery to
+  decide something the boot already decided.
+- **fix(initramfs): a hook's offer beats the default scan** and yields only to
+  a policy named on the command line: the default is not an instruction, and
+  the scan can only ask `slab list` whether a drive is ours while the hook
+  read the drive.
 - **feat(initramfs): a boot hook can also name the drive to assimilate onto
   (#109).** `ZB_TAKEABLE` becomes `boot-local --local-disk`. The
   `rd.stormblock.assimilate=` policies are fleet statements applied by a scan
