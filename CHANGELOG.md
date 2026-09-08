@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### 2026-09-08 (boot testing)
+- **fix(flow-over):** the engine that adopts the boot finishes the migration,
+  and the initramfs engine no longer starts one it cannot finish. Laying the
+  slabs is fast and bounded; copying the goldens onto them is minutes. The
+  process doing the copying had seconds to live — twenty-six of them on this
+  hardware, between laying the slabs and the successor adopting its ublk
+  devices, with `switch_root` having already deleted the filesystem its binary
+  came from. Every run was killed part-way, leaving a slab that is real,
+  incomplete and unable to boot the node: exactly the shape the local-slab
+  probe has to reject on the next boot. The boot lays the structure and writes
+  down what it laid; the long-lived process does the long-running job.
+- **fix(handover):** the record is written *after* the flow-over and names the
+  disk it laid. Written before, it listed only the appliance's slabs, so the
+  engine that took the devices over never learned there was a local disk at
+  all — by 380 milliseconds.
 - **feat(boot-local):** `--local-disk-force`, and `rd.stormblock.assimilate=force`
   in front of it. The identity guard cannot tell a dead identity from a live
   one: a drive carrying a data slab from an install that was abandoned —
