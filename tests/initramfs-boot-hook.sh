@@ -25,6 +25,8 @@ sed -n '/# --- BEGIN boot hook/,/# --- END boot hook/p' "$GEN" > "$WORK/hook.sh"
 [ -s "$WORK/hook.sh" ] || { echo "FAIL: could not extract the boot hook block"; exit 1; }
 sed -n '/# --- BEGIN local-slab probe/,/# --- END local-slab probe/p' "$GEN" > "$WORK/probe.sh"
 [ -s "$WORK/probe.sh" ] || { echo "FAIL: could not extract the local-slab probe"; exit 1; }
+sed -n '/# --- BEGIN hook takeable/,/# --- END hook takeable/p' "$GEN" > "$WORK/takeable.sh"
+[ -s "$WORK/takeable.sh" ] || { echo "FAIL: could not extract the takeable block"; exit 1; }
 
 fail=0
 check() { # name expected actual
@@ -67,6 +69,20 @@ decide() { # hooks-dir [initial SLAB] [initial VOLUME] [legacy hook path]
 # ignored rather than believed.
 REAL="$WORK/real-slab.img"
 : > "$REAL"
+
+# The same, reporting the drive the hook offered to assimilate onto.
+offered() { # hooks-dir -> HOOK_TAKEABLE
+    (
+        set +e
+        STORM_BOOT_HOOK_DIR="$1"
+        STORM_BOOT_HOOK_LEGACY="$WORK/no-such-legacy-hook"
+        export STORM_BOOT_HOOK_DIR STORM_BOOT_HOOK_LEGACY
+        SLAB=""
+        VOLUME=""
+        . "$WORK/hook.sh" >/dev/null 2>&1
+        echo "${HOOK_TAKEABLE:-}"
+    )
+}
 
 echo "initramfs boot hook:"
 
@@ -164,6 +180,25 @@ check "the hook names the boot volume when nothing else did" "local|$REAL|stormp
 check "and the cmdline's volume wins when there is one" "local|$REAL|myroot" \
     "$(decide "$d" "" myroot)"
 
+# A drive to assimilate onto travels with either decision (#109). In practice
+# it comes with ask-appliance: a node with nothing of its own boots from the
+# appliance and takes the blank drive on the way, which is one boot, not two.
+d=$(hooks_dir offer)
+install_hook "$d" 10-offer \
+    "printf \"ZB_ACTION='ask-appliance'\nZB_REASON='nothing of ours here yet'\nZB_TAKEABLE='/dev/sdb'\n\"; exit 2"
+check "ask-appliance can still name a drive to take" "/dev/sdb" "$(offered "$d")"
+
+d=$(hooks_dir offer2)
+install_hook "$d" 10-offer \
+    "printf \"ZB_ACTION='boot-local'\nZB_SLAB='$REAL'\nZB_TAKEABLE='/dev/sdb'\n\"; exit 0"
+check "and so can boot-local" "/dev/sdb" "$(offered "$d")"
+
+# A hook that failed is not a hook that offered.
+d=$(hooks_dir offer3)
+install_hook "$d" 10-offer \
+    "printf \"ZB_ACTION='error'\nZB_REASON='could not read /sys/block'\nZB_TAKEABLE='/dev/sdb'\n\"; exit 1"
+check "an erroring hook offers nothing" "" "$(offered "$d")"
+
 # ---------------------------------------------------------------------------
 # The probe the hook runs ahead of: what /init does when no hook decided.
 # ---------------------------------------------------------------------------
@@ -253,5 +288,52 @@ check "a device that is not on this machine goes to the appliance" "" \
 check "a remote slab is left alone" "nvme-tcp://10.0.0.1:4420/nqn.x" \
     "$(probe nvme-tcp://10.0.0.1:4420/nqn.x)"
 
-[ "$fail" -eq 0 ] && echo "all boot hook and probe checks passed"
+# ---------------------------------------------------------------------------
+# The drive a hook offers to assimilate onto (ZB_TAKEABLE).
+# ---------------------------------------------------------------------------
+
+takeable() { # HOOK_TAKEABLE LOCAL_DISK ASSIMILATE SLAB -> the LOCAL_DISK left behind
+    (
+        set +e
+        HOOK_TAKEABLE="$1"
+        LOCAL_DISK="${2:-}"
+        ASSIMILATE="${3:-}"
+        SLAB="${4:-}"
+        . "$WORK/takeable.sh" >/dev/null 2>&1
+        echo "$LOCAL_DISK"
+    )
+}
+
+echo "hook takeable:"
+
+drive="$WORK/sdb"; : > "$drive"
+
+# The case from the issue: nothing of ours on this machine, a blank drive
+# beside it, so the node boots from the appliance and assimilates on the way.
+check "an offered drive becomes the flow-over target" "$drive" "$(takeable "$drive")"
+
+# `off` is the one way an operator says no, so it has to mean no.
+check "rd.stormblock.assimilate=off refuses the offer" "" "$(takeable "$drive" "" off)"
+
+# A policy that already chose is more specific than the hook: it is a scan the
+# operator asked for, on this machine.
+check "a drive the policy chose is kept" "/dev/sdc" "$(takeable "$drive" /dev/sdc any)"
+
+# A policy that found nothing leaves the offer standing.
+check "a policy that found nothing still takes the offer" "$drive" \
+    "$(takeable "$drive" "" any)"
+
+# Offered a drive that is not here.
+check "a drive that is not on this machine is refused" "" \
+    "$(takeable "$WORK/not-here" "" any)"
+
+# Offered the drive this boot is running from — the one mistake that costs the
+# node its root. `/dev/sda2` came from `/dev/sda`.
+check "the boot drive is never taken as its own flow-over target" "" \
+    "$(takeable /dev/sda "" any /dev/sda2)"
+
+# No offer at all is what every boot without a hook looks like.
+check "no offer changes nothing" "/dev/sdc" "$(takeable "" /dev/sdc any)"
+
+[ "$fail" -eq 0 ] && echo "all boot hook, probe and takeable checks passed"
 exit "$fail"

@@ -1254,6 +1254,12 @@ if [ "$BOOT_MODE" = "local" ]; then
     #   exit 2   ZB_ACTION=ask-appliance, with ZB_REASON
     #   exit 1   ZB_ACTION=error, with ZB_REASON
     #
+    # A deciding hook may also name a drive this node could take, in
+    # ZB_TAKEABLE — see the assimilation policy further down. It travels with
+    # *either* decision, and in practice with `ask-appliance`: a node with
+    # nothing of its own boots from the appliance and assimilates a blank
+    # drive on the way, which is one boot, not two.
+    #
     # Anything else — a hook that exits 0 and names no slab, or names one
     # that is not here — is treated as an error: the next hook runs, and with
     # none left the probe decides. A hook is asked, never obeyed blindly.
@@ -1272,6 +1278,7 @@ if [ "$BOOT_MODE" = "local" ]; then
             | sed "s/^'//; s/'$//; s/'\\\\''/'/g"
     }
     HOOK_DECIDED=""
+    HOOK_TAKEABLE=""
     for hook in "${STORM_BOOT_HOOK_DIR:-/etc/stormblock/boot.d}"/* \
                 "${STORM_BOOT_HOOK_LEGACY:-/sbin/zeroboot}"; do
         [ -n "$HOOK_DECIDED" ] && break
@@ -1308,6 +1315,7 @@ if [ "$BOOT_MODE" = "local" ]; then
             esac
             SLAB="$ZB_SLAB"
             HOOK_DECIDED="local"
+            HOOK_TAKEABLE=$(hook_value ZB_TAKEABLE)
             ZB_SLAB_ID=$(hook_value ZB_SLAB_ID)
             ZB_DRIVE=$(hook_value ZB_DRIVE)
             ZB_VOLUME=$(hook_value ZB_VOLUME)
@@ -1322,6 +1330,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         2)
             SLAB=""
             HOOK_DECIDED="appliance"
+            HOOK_TAKEABLE=$(hook_value ZB_TAKEABLE)
             echo "  ask the appliance${ZB_REASON:+: $ZB_REASON}"
             ;;
         *)
@@ -1683,6 +1692,57 @@ if [ "$BOOT_MODE" = "local" ]; then
         ;;
     *) echo "  unknown rd.stormblock.assimilate='$ASSIMILATE' (off|blank|any|force)" ;;
     esac
+
+    # --- BEGIN hook takeable (covered by tests/initramfs-boot-hook.sh)
+    # A hook may name the drive instead (#109).
+    #
+    # The policies above are a *fleet* statement — "local drives are ours" —
+    # applied by a scan that can only ask `slab list` whether a drive is one
+    # of ours. That is the right question for a policy and a weak one for a
+    # drive: a foreign ext4, or the four partitions from a previous life that
+    # a second-hand R230 actually carries, answers "not a slab" and is taken.
+    # An operator typing `--local-disk /dev/sda` has looked at the drive,
+    # which is the premise that makes the policy safe; the moment the path is
+    # chosen by something other than a person, that premise is gone.
+    #
+    # A hook closes that: `ZB_TAKEABLE` is offered only for a drive it judged
+    # blank — no table, no filesystem signature, no slab, nothing over the
+    # network, nothing removable, and read back zero. That is strictly
+    # stronger than "carries no data slab", so nothing offered here can trip
+    # `boot-local`'s own guard, and the guard stays the last word.
+    #
+    # Precedence, most specific first:
+    #
+    #   assimilate=off      an operator saying no, and it means no
+    #   a policy's choice   a scan the operator asked for, on this machine
+    #   the hook's offer    what is left, including the default of no policy
+    #
+    # Never with `--local-disk-force`: force destroys whatever a drive
+    # carries, and a drive that had to be forced is by definition not the
+    # blank one a hook offered.
+    if [ -n "$HOOK_TAKEABLE" ]; then
+        # Offering the drive this boot is reading from would hand the node its
+        # own root to reformat. zeroboot does not, and this is not the place to
+        # find out that something else does. Matched the way the scan above
+        # matches, so `/dev/sda` is recognised as where `/dev/sda2` came from.
+        takeable_is_root=""
+        case "$SLAB" in
+        *"$(basename "$HOOK_TAKEABLE")"*) takeable_is_root=1 ;;
+        esac
+        if [ "${ASSIMILATE:-}" = off ]; then
+            echo "  hook offers $HOOK_TAKEABLE, and rd.stormblock.assimilate=off says no"
+        elif [ -n "$LOCAL_DISK" ]; then
+            echo "  hook offers $HOOK_TAKEABLE; keeping $LOCAL_DISK, which the policy chose"
+        elif [ ! -b "$HOOK_TAKEABLE" ] && [ ! -f "$HOOK_TAKEABLE" ]; then
+            echo "  hook offers $HOOK_TAKEABLE, which is not on this machine - ignoring it"
+        elif [ -n "$takeable_is_root" ]; then
+            echo "  hook offers $HOOK_TAKEABLE, which is where this boot is coming from - ignoring it"
+        else
+            LOCAL_DISK="$HOOK_TAKEABLE"
+            echo "  hook offers $LOCAL_DISK to assimilate onto - taking it"
+        fi
+    fi
+    # --- END hook takeable
 
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
     # Volume comes from --volume if given, else /etc/stormblock/boot.toml.

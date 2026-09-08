@@ -68,6 +68,22 @@
   partition 1, naming a partition that no longer existed on the disk.
 
 ### 2026-09-08 (later still, cont.)
+- **feat(initramfs): a boot hook can also name the drive to assimilate onto
+  (#109).** `ZB_TAKEABLE` becomes `boot-local --local-disk`. The
+  `rd.stormblock.assimilate=` policies are fleet statements applied by a scan
+  that can only ask `slab list` whether a drive is one of ours — the right
+  question for a policy and a weak one for a drive, since a foreign ext4 or
+  the four partitions a second-hand server carries from a previous life
+  answers "not a slab" and is taken. An operator typing `--local-disk` has
+  looked at the drive; that premise is gone the moment something other than a
+  person chooses the path. A hook closes it by offering only a drive it read
+  back as blank, which is strictly stronger than "carries no data slab", so
+  nothing offered can trip `boot-local`'s guard and the guard stays the last
+  word. Precedence: `assimilate=off` (an operator saying no) beats a policy's
+  own choice, which beats the hook's offer. `/init` refuses an offer that is
+  not on this machine or that names the drive this boot is reading from, and
+  never passes `--local-disk-force` for one — a drive that had to be forced is
+  by definition not the blank one a hook offered.
 - **fix(slab): every slab this engine formats can say what is on it.**
   `slab format` and `POST /api/v1/slabs` reserved a metadata region for `data`
   alone. The reasoning went as far as it went — a data slab has to outlive

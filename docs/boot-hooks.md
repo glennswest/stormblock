@@ -28,8 +28,8 @@ and go straight to the console, which is where its progress belongs.
 
 | exit | meaning | keys |
 |---|---|---|
-| 0 | `ZB_ACTION=boot-local` — boot from this slab | `ZB_SLAB` (required), `ZB_SLAB_ID`, `ZB_VOLUME`, `ZB_DRIVE` |
-| 2 | `ZB_ACTION=ask-appliance` — do not boot locally | `ZB_REASON` |
+| 0 | `ZB_ACTION=boot-local` — boot from this slab | `ZB_SLAB` (required), `ZB_SLAB_ID`, `ZB_VOLUME`, `ZB_DRIVE`, `ZB_TAKEABLE` |
+| 2 | `ZB_ACTION=ask-appliance` — do not boot locally | `ZB_REASON`, `ZB_TAKEABLE` |
 | 1 | `ZB_ACTION=error` — the hook could not tell | `ZB_REASON` |
 
 The `ZB_` prefix is the contract as `zeroboot` already emits it; the mechanism
@@ -39,7 +39,52 @@ is not zeroboot's, and anything can drop a hook in.
   is not on this machine is not believed — see below.
 - `ZB_VOLUME` names the boot volume, and is used only when the command line
   did not name one: the hook answers *where*, an operator answers *which*.
+- `ZB_TAKEABLE` names a drive this node may assimilate onto — see below. It
+  travels with either decision, and in practice with `ask-appliance`: a node
+  with nothing of its own boots from the appliance and takes a blank drive on
+  the way, which is one boot rather than two.
 - Anything else the hook prints is ignored.
+
+## The drive to assimilate onto
+
+`boot-local --local-disk <drive>` is the flow-over: it lays a data slab and a
+system slab on a local drive and migrates the node's writes onto them in the
+background, after root is up. `/init` picks that drive today from
+`rd.stormblock.assimilate=`:
+
+| policy | takes |
+|---|---|
+| `off` (default) | nothing |
+| `blank` | a drive with no slab and no partition table |
+| `any` | any drive that is not already a stormblock slab |
+| `force` | that drive even when it is one, destroying what it carries |
+
+Those are *fleet* statements, applied by a scan that can only ask `slab list`
+whether a drive is one of ours. That is the right question for a policy and a
+weak one for a drive: a foreign ext4, or the four partitions a second-hand
+server carries from a previous life, answers "not a slab" and is taken. An
+operator typing `--local-disk /dev/sda` has looked at the drive — which is the
+premise that makes this safe, and it is gone the moment the path is chosen by
+something other than a person.
+
+A hook closes that gap by naming a drive it has actually examined. `zeroboot`
+offers one only when it read the whole thing back as zero — no partition
+table, no filesystem signature, no slab, nothing over the network, nothing
+removable — which is strictly stronger than "carries no data slab", so nothing
+a hook offers can trip `boot-local`'s own guard, and that guard stays the last
+word.
+
+Precedence, most specific first:
+
+1. `rd.stormblock.assimilate=off` — an operator saying no, and it means no.
+2. A drive the policy chose — a scan the operator asked for, on this machine.
+3. The hook's offer — including on the default of no policy at all.
+
+`/init` refuses an offer that is not on this machine, and one that names the
+drive this boot is reading from: offering that would hand the node its own
+root to reformat. It never passes `--local-disk-force` for an offered drive —
+force destroys whatever a drive carries, and a drive that had to be forced is
+by definition not the blank one a hook offered.
 
 ### A hook is asked, never obeyed
 
@@ -81,6 +126,10 @@ cannot, all seen on hardware:
 3. **Whose disk is it.** Nothing in a slab superblock records an owner, so a
    disk moved between chassis is indistinguishable from one that was always
    there — and the hostname on it is the node CA's subject CN.
+
+And one thing it can contribute rather than answer: **which drive is free**,
+in `ZB_TAKEABLE`. The assimilation itself stays where it is — `boot-local`
+implements it, and a hook has no business reimplementing that.
 
 ## Installing one
 
