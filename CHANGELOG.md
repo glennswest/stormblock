@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+### 2026-09-08 (later still)
+- **feat(initramfs): `/init` asks a boot hook before probing the device the
+  command line names (#109).** The local-slab probe asks whether *the one
+  device the cmdline names* is a slab this node can boot — the right question
+  for the image the cmdline belongs to and the wrong one for a machine: the
+  cmdline is a pallet member and identical on every machine that boots the
+  image, a slab formatted and never filled boots nothing, and nothing in a
+  superblock records whose disk it is. `/init` now runs every executable in
+  `/etc/stormblock/boot.d` in order, then `/sbin/zeroboot`, and honours the
+  first that decides — `boot-local` with a slab (exit 0) or `ask-appliance`
+  (exit 2). Generic rather than zeroboot by name: nothing here depends on any
+  particular hook, and no hook installed means the probe decides exactly as
+  before.
+- **fix(initramfs): nothing a hook prints is executed.** The contract is
+  `KEY='value'` lines because the consumer is busybox `sh` with no `jq`, and
+  the obvious reading of that is `eval "$(hook boot)"` — but this is PID 1,
+  where `eval` makes a stray log line a command run as root before there is a
+  system to run it on. The values are read out with `sed`. A hook is also
+  asked rather than obeyed: exit 0 naming no slab, or one that is not on this
+  machine, or an action disagreeing with the exit status, is refused and the
+  next hook runs — believing it would trade the appliance fallback for a boot
+  that commits and then drops to a shell.
+- **feat(cli): `stormblock slab volumes <dev>` — what a slab holds, offline
+  (#108).** The volume records are on the device, in the region the header's
+  `meta_offset`/`meta_size` name, and the only way to read them was
+  `attach`: the kernel module, root, a reactor, and the volume made live —
+  a lot of machinery for a read-only question, and machinery you cannot use
+  while still deciding whether this slab is one to touch at all. Positive
+  evidence in `slab list`'s shape, and three distinct answers, because a boot
+  decision turns on which: a volume list, `holds no volumes` (the slab says it
+  is empty), and `keeps no volume metadata` (the slab cannot say — its records
+  are wherever `rd.stormblock.meta=` points).
+- **fix(initramfs): the boot-volume check reads the slab, not a disk (#108).**
+  The probe ran `image inspect "$SLAB"`, which reads a *disk*: it wants a GPT,
+  finds the slab partitions in it and reports what each holds. A loader entry
+  names the partition — `rd.stormblock.slab=/dev/sda2` — and inspect answers
+  that with "no usable GPT on this device", which this branch read as "no boot
+  volume" and sent the node to the appliance, every boot, however good its
+  disk. It now uses `slab volumes`, accepts the volume by uuid as well as by
+  name, and trusts a slab that cannot answer only when `rd.stormblock.meta=`
+  says where the records are instead.
+- **fix(drive): `FileDevice::open_read_only` — an inspection cannot change
+  what it inspects.** The ordinary door creates what it cannot find and opens
+  it for writing, so `slab volumes /dev/sdz` on an unknown machine made a
+  zero-byte `/dev/sdz` and called it "not a slab" — true, and not what
+  happened.
+- **feat(initramfs): `BOOT_HOOKS="/path/to/hook ..."` installs hooks into the
+  image** and refuses a dynamically linked binary: there is no loader in this
+  initramfs, so a glibc build fails at boot as "not found" on a file that is
+  plainly there.
+- **test:** `tests/initramfs-boot-hook.sh` — 24 checks against the shipped
+  `/init`, extracted between markers so the test cannot drift from what runs,
+  under busybox `ash` as well as the host shell. Includes a hook that prints a
+  command among its assignments, to prove it is not run.
+  `tests/integration_slab_volumes.rs` drives the real binary against a slab
+  file, including that a missing path is not created and the slab comes back
+  byte-identical.
+- **docs:** [docs/boot-hooks.md](docs/boot-hooks.md), and README on reading a
+  slab without attaching it.
+
 ## [v15.0.0] — 2026-09-08
 
 ### 2026-09-08 (later)

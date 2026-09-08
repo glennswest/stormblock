@@ -640,6 +640,46 @@ The state is derived on every read from whether the volume resolves, never
 stored — a stored flag would be a second copy of a fact the volume manager
 already holds, wrong exactly when it mattered.
 
+### Reading a slab without attaching it
+
+`stormblock slab list` and `slab info` answer from a slab's header without a
+daemon, a reactor or ublk. `slab volumes` does the same for what is *in* it:
+
+```
+$ stormblock slab volumes /dev/sda2
+/dev/sda2: volume boot-cp-01 (2.1 GB, 540 slots, sealed) 88d5da3f-…
+/dev/sda2: volume image-store-stormcos-0.1.0 (8.4 GB, 2100 slots) 3f2b…
+```
+
+The records are on the device, in the region the header's `meta_offset` and
+`meta_size` name, and until #108 the only way to read them was to attach the
+slab — which needs the kernel module and root, and makes the volume live. That
+is the wrong thing to do while you are still deciding whether this is a disk to
+touch at all: an initramfs asking "does this slab actually hold the volume the
+loader entry names" must be able to ask without committing.
+
+Read-only in the strict sense: the device is opened `O_RDONLY`, and a path that
+does not exist is *not created* — the ordinary door creates what it cannot
+find, which turned `slab volumes /dev/sdz` into a zero-byte `/dev/sdz`
+reported as "not a slab".
+
+Three answers, deliberately distinct, because a boot decision turns on which:
+
+| output | means |
+|---|---|
+| `: volume <name> (…)` | positive evidence, greppable, in `slab list`'s shape |
+| `slab <id> holds no volumes` | the slab can say, and says it is empty — formatted and never filled |
+| `slab <id> keeps no volume metadata` | the slab cannot say; its records live wherever `rd.stormblock.meta=` points |
+
+### Booting: who decides where
+
+The initramfs decides where a node boots from, and `docs/boot-hooks.md`
+describes how to take that decision over: any executable in
+`/etc/stormblock/boot.d` is asked first, and `/init` honours `boot-local` or
+`ask-appliance`. With no hook installed the built-in probe decides exactly as
+before — and that probe now uses `slab volumes`, so it works on the partition
+a loader entry names rather than only on a whole disk with a GPT.
+
 ### Stopping a node
 
 Every step of shutdown is bounded, and that is a correctness property rather
