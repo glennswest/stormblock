@@ -315,9 +315,14 @@ check "an offered drive becomes the flow-over target" "$drive" "$(takeable "$dri
 # `off` is the one way an operator says no, so it has to mean no.
 check "rd.stormblock.assimilate=off refuses the offer" "" "$(takeable "$drive" "" off)"
 
-# A policy that already chose is more specific than the hook: it is a scan the
-# operator asked for, on this machine.
-check "a drive the policy chose is kept" "/dev/sdc" "$(takeable "$drive" /dev/sdc any)"
+# A policy *named on the command line* is more specific than the hook: it is a
+# scan the operator asked for, on this machine.
+check "a drive an explicit policy chose is kept" "/dev/sdc" \
+    "$(takeable "$drive" /dev/sdc any)"
+
+# The default policy is not an instruction, and its scan can only ask whether a
+# drive is one of ours. The hook read the drive, so its offer wins.
+check "the hook beats the default scan's pick" "$drive" "$(takeable "$drive" /dev/sdc)"
 
 # A policy that found nothing leaves the offer standing.
 check "a policy that found nothing still takes the offer" "$drive" \

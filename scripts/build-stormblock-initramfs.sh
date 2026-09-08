@@ -1622,10 +1622,33 @@ if [ "$BOOT_MODE" = "local" ]; then
     # removable bay answering ENOMEDIUM - is not evidence of emptiness. The
     # policy decides what to do with that:
     #
-    #   off    (default) never take a drive
+    #   any    (default) take any drive that is not already a stormblock slab
     #   blank  take a drive that carries no slab and no partition table
-    #   any    take any drive that is not already a stormblock slab
-    #   force  take it even then, destroying the identity on it
+    #   off    never take a drive
+    #   force  take it even when it is one of ours, destroying the identity
+    #
+    # **The default is to take one, because this image is an installer.** It
+    # was `off`, which made the common case - a machine with one drive, booted
+    # from the network to be installed - do nothing and keep every write on the
+    # appliance, until somebody knew to add a cmdline parameter. Booting this
+    # image *is* the decision: nobody netboots an installer at a machine whose
+    # disk they mean to keep, and a node that must not touch its drive says
+    # `off`.
+    #
+    # And a drive with somebody else's ext4 or a previous life's partition
+    # table is not a reason to stop. Garbage cannot be interpreted safely -
+    # a stale backup GPT, an LVM label, an mdraid superblock at the end of the
+    # device are each read by something that scans rather than asks - so
+    # `lay_node_slabs` destroys the ends of the drive before it lays the
+    # table. The alternative to installing over it is a setup API and a remote
+    # UI to drive it, which is a great deal of machinery to decide something
+    # the boot already decided.
+    #
+    # `any` still refuses a drive that carries one of *our* slabs. That is not
+    # caution about garbage, it is the node's identity: the data partition
+    # holds the CA key and the ServiceAccount signing key, and nothing can
+    # mint those again. `force` is the deliberate act for a drive whose
+    # identity is spent.
     #
     # `any` is a fleet-wide statement that local drives are ours to use, not a
     # fact about one machine. A drive that already carries a *data* slab is
@@ -1639,8 +1662,8 @@ if [ "$BOOT_MODE" = "local" ]; then
     # every boot, with no way out — the guard cannot tell a dead identity from
     # a live one, so it protects both.
     LOCAL_DISK=""
-    case "${ASSIMILATE:-off}" in
-    off|"") ;;
+    case "${ASSIMILATE:-any}" in
+    off) echo "  rd.stormblock.assimilate=off: leaving every local drive alone" ;;
     blank|any|force)
         for d in /sys/block/sd? /sys/block/nvme?n?; do
             [ -e "$d" ] || continue
@@ -1714,8 +1737,11 @@ if [ "$BOOT_MODE" = "local" ]; then
     # Precedence, most specific first:
     #
     #   assimilate=off      an operator saying no, and it means no
-    #   a policy's choice   a scan the operator asked for, on this machine
-    #   the hook's offer    what is left, including the default of no policy
+    #   a policy *named on the cmdline*, and the drive its scan chose
+    #   the hook's offer    which beats the default scan, because the default
+    #                       is not an instruction and the hook looked harder:
+    #                       the scan can only ask `slab list` whether a drive
+    #                       is ours, and the hook read the drive
     #
     # Never with `--local-disk-force`: force destroys whatever a drive
     # carries, and a drive that had to be forced is by definition not the
@@ -1731,8 +1757,8 @@ if [ "$BOOT_MODE" = "local" ]; then
         esac
         if [ "${ASSIMILATE:-}" = off ]; then
             echo "  hook offers $HOOK_TAKEABLE, and rd.stormblock.assimilate=off says no"
-        elif [ -n "$LOCAL_DISK" ]; then
-            echo "  hook offers $HOOK_TAKEABLE; keeping $LOCAL_DISK, which the policy chose"
+        elif [ -n "$LOCAL_DISK" ] && [ -n "${ASSIMILATE:-}" ]; then
+            echo "  hook offers $HOOK_TAKEABLE; keeping $LOCAL_DISK, which rd.stormblock.assimilate=$ASSIMILATE chose"
         elif [ ! -b "$HOOK_TAKEABLE" ] && [ ! -f "$HOOK_TAKEABLE" ]; then
             echo "  hook offers $HOOK_TAKEABLE, which is not on this machine - ignoring it"
         elif [ -n "$takeable_is_root" ]; then
