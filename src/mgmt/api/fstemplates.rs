@@ -219,6 +219,75 @@ pub(crate) fn resolve_size(
     }
 }
 
+/// Adopt the blanks the slabs already carry as templates.
+///
+/// A template is a blank filesystem something clones from. There are two
+/// records of one: `TemplateStore`, kept under `management.data_dir`, and the
+/// `template` flag on a volume, which travels *inside the slab*. Only the
+/// second survives a netboot — a node booting over the network has no data
+/// directory, so the store loads empty however many blanks the image laid
+/// down (stormblock#100).
+///
+/// The flag was added for exactly this and nothing ever read it:
+/// `VolumeManager::templates()` had no callers, so a node with five sealed
+/// blanks in its data slab reported "0 of 5 blank size(s) sealed — BUILD
+/// DEFECT: no template for 1m, 16m, 64m, 256m, 1024m" on every boot, and
+/// every claim of those sizes was formatted on demand and slow.
+///
+/// Adopted, not created: the volume is already there and already sealed, so
+/// this records what it is rather than making anything. Anything the store
+/// already knows about is left alone, so a node with a real data directory
+/// keeps whatever it had.
+pub async fn adopt_slab_templates(state: &Arc<AppState>) {
+    let derived = {
+        let vm = state.volume_manager.lock().await;
+        let mut out = Vec::new();
+        for (id, name, size) in vm.templates().await {
+            let fs = vm.fs_info(&id).cloned();
+            out.push((id, name, size, fs));
+        }
+        out
+    };
+    if derived.is_empty() {
+        return;
+    }
+    let mut store = state.fstemplates.lock().await;
+    let mut adopted = 0usize;
+    for (id, name, size, fs) in derived {
+        if store.templates.iter().any(|t| t.sealed_volume_id == Some(id.0)) {
+            continue;
+        }
+        // `pvc-1G.golden` is the volume; `pvc-1G` is the template. The clone
+        // taken from it already carries the shorter name, so using it here
+        // keeps one name for one thing.
+        let tname = name.strip_suffix(".golden").unwrap_or(&name).to_string();
+        store.insert(crate::fs::template::FsTemplate {
+            id: Uuid::new_v4(),
+            name: tname,
+            fs: FsKind::Ext4,
+            size_bytes: size,
+            journal: fs.as_ref().map(|f| f.journal).unwrap_or(true),
+            label: fs.as_ref().map(|f| f.label.clone()).unwrap_or_default(),
+            features: fs.as_ref().and_then(|f| f.features.clone()),
+            sixty_four_bit: fs.as_ref().map(|f| f.sixty_four_bit).unwrap_or(false),
+            metadata_csum: fs.as_ref().map(|f| f.metadata_csum).unwrap_or(false),
+            csum_seed: fs.as_ref().map(|f| f.csum_seed).unwrap_or(false),
+            fs_uuid: fs.as_ref().and_then(|f| f.uuid),
+            state: crate::fs::template::TemplateState::Ready,
+            raw_volume_id: None,
+            sealed_volume_id: Some(id.0),
+            clones: 0,
+            seeded: Vec::new(),
+            standing: None,
+            minting: false,
+        });
+        adopted += 1;
+    }
+    if adopted > 0 {
+        tracing::info!("adopted {adopted} blank(s) from the slabs as templates");
+    }
+}
+
 async fn list_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "list")
         .increment(1);

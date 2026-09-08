@@ -1332,6 +1332,9 @@ async fn main() -> anyhow::Result<()> {
             // firmware booting over NVMe/TCP has the subsystem and namespace
             // in its configuration — so losing the table on restart stops
             // answering at an address a machine is still dialling.
+            // Before the exports, because a template is a fact about a
+            // volume and an export is a decision about one.
+            mgmt::api::fstemplates::adopt_slab_templates(&state).await;
             mgmt::api::exports::restore_exports(&state).await;
             let reactor_for_nvmeof = reactor.clone();
             tokio::spawn({
