@@ -38,7 +38,12 @@ ExecStartPre=-/bin/sh -c 'test ! -e /proc/sys/kernel/io_uring_disabled || echo 0
 ExecStart=/usr/sbin/stormblock --config /etc/stormblock/stormblock.toml
 Restart=on-failure
 RestartSec=2
-# The engine tears down targets + flushes journals on SIGINT/SIGTERM.
+# The engine tears down targets, stops its ublk devices and flushes metadata
+# on SIGINT/SIGTERM. Every step of that is bounded — worst case ~13 s — and
+# this number has to stay above it: a SIGKILL landing in the middle of a ublk
+# teardown leaves a thread stuck in the kernel, and a thread stuck in the
+# kernel cannot be reaped, which is what makes *every subsequent* restart end
+# in failed mode (#105).
 KillSignal=SIGTERM
 TimeoutStopSec=30
 LimitNOFILE=1048576

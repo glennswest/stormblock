@@ -1504,6 +1504,40 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Wait for ublk export threads to finish their teardown, up to `budget`.
+///
+/// `JoinHandle::join` has no deadline, and a teardown that wedges in the
+/// kernel would hold the whole stop open until systemd sends SIGKILL — which
+/// is what leaves a thread stuck and a process that cannot be reaped (#105).
+/// So poll, and leave: the process is exiting, and a thread that is not going
+/// to finish is not going to finish because we waited longer.
+///
+/// Returns how many were still running when the budget ran out.
+// Every caller is behind `cfg(target_os = "linux")` — ublk is a Linux
+// interface — so a macOS build has none.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn join_ublk_threads<T>(
+    threads: Vec<std::thread::JoinHandle<T>>,
+    budget: std::time::Duration,
+) -> usize {
+    let deadline = std::time::Instant::now() + budget;
+    let mut pending = threads;
+    loop {
+        let (done, still): (Vec<_>, Vec<_>) = pending.into_iter().partition(|t| t.is_finished());
+        for t in done {
+            let _ = t.join();
+        }
+        if still.is_empty() {
+            return 0;
+        }
+        if std::time::Instant::now() >= deadline {
+            return still.len();
+        }
+        pending = still;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn parse_tier(s: &str) -> Result<StorageTier, String> {
     match s.to_lowercase().as_str() {
         "hot" => Ok(StorageTier::Hot),
@@ -2206,10 +2240,11 @@ async fn handle_boot_iscsi(
         tokio::signal::ctrl_c().await?;
         println!("Shutting down...");
 
-        // Signal all ublk servers to stop
+        // Signal all ublk servers to stop, and wait — bounded (#105).
         let _ = shutdown_tx.send(true);
-        for t in ublk_threads {
-            let _ = t.join();
+        let stuck = join_ublk_threads(ublk_threads, std::time::Duration::from_secs(10));
+        if stuck > 0 {
+            eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
         }
     }
 
@@ -3554,8 +3589,9 @@ async fn handle_attach(
         }
     }
     let _ = shutdown_tx.send(true);
-    for t in threads {
-        let _ = t.join();
+    let stuck = join_ublk_threads(threads, std::time::Duration::from_secs(10));
+    if stuck > 0 {
+        eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
     }
     Ok(())
 }
@@ -3795,9 +3831,7 @@ async fn handle_adopt_ublk(
     let live = threads.iter().filter(|t| !t.is_finished()).count();
     if live == 0 {
         let _ = shutdown_tx.send(true);
-        for t in threads {
-            let _ = t.join();
-        }
+        join_ublk_threads(threads, std::time::Duration::from_secs(10));
         anyhow::bail!(
             "adopted none of {} device(s) — the errors above are the reason; the root \
              filesystem is still served by whoever had it before this ran",
@@ -3963,8 +3997,9 @@ async fn handle_adopt_ublk(
         }
     }
     let _ = shutdown_tx.send(true);
-    for t in threads {
-        let _ = t.join();
+    let stuck = join_ublk_threads(threads, std::time::Duration::from_secs(10));
+    if stuck > 0 {
+        eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
     }
     Ok(())
 }
@@ -4330,8 +4365,9 @@ async fn handle_boot_local(
         }
         println!("Shutting down...");
         let _ = shutdown_tx.send(true);
-        for t in ublk_threads {
-            let _ = t.join();
+        let stuck = join_ublk_threads(ublk_threads, std::time::Duration::from_secs(10));
+        if stuck > 0 {
+            eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
         }
         // Capture extent maps mutated while serving (COW allocations) so
         // snapshots stay bootable across the next reattach (#13).
