@@ -626,6 +626,50 @@ rather than treated as confirmed.
 
 ---
 
+## Session 2026-09-08 — the management API had no gate (#107) — DONE (v14.0.0)
+
+A node answered `GET /api/v1/volumes` and `POST /api/v1/fstemplates` from a
+workstation with no credential. The mechanism to stop it — `require_token`,
+with a read token, an admin token for destructive verbs, a public-path
+exemption — **had been written and never wired to anything.**
+`management.api_token` was checked by `/v1` alone, so a node whose config
+named a token still served create/clone/seal/delete, exports, releases and
+synonyms openly on `0.0.0.0:9090`. See [docs/auth.md](docs/auth.md).
+
+Worth not re-deriving:
+
+- **A guard on one surface is worse than a guard on none.** The setting
+  existed and the token was configured, so the node read as closed. There is
+  now exactly one check (`serve::api::decide`) behind one layer, over the
+  whole router; `/v1` keeps its `{code, message}` envelope by prefix, not by
+  a second middleware.
+- **`/api/v1/health` must stay public.** It is the question a booting node
+  asks of every address DHCP gave it, before it has any credential; a 401
+  there is indistinguishable from "not an appliance" and drops the node to a
+  shell. It reports `auth: required|none`, which is also how a fleet can be
+  asked which of its nodes are open.
+- **`/metrics` is not a probe** and `is_public` had always said so — but the
+  engine merged the metrics router *beside* the guarded one, so the answer
+  the code gave and the answer the process gave differed. It is merged inside
+  now.
+- **The default is still open, deliberately.** `boot-claim` — and the
+  firmware a stage earlier — claims a machine's image before it has any
+  credential, so flipping the fleet closed from inside the engine would stop
+  machines booting. Closing it is a migration: distribute the token, then set
+  `require_auth = true`. What was fixed unconditionally is the *silence*: an
+  open node names what is exposed on every boot.
+- **A minted token is local.** It authenticates a caller to the node that
+  minted it and means nothing to a peer, so only a *shared* token
+  (`api_token` / `$STORMBLOCK_API_TOKEN`) is presented outward — cluster
+  replication, migration handoffs, `image build`, `boot-claim --token`.
+- **The RouterOS profile had not compiled since `c709b7c`**, and the default
+  build could not see it: `#[arg(env = ...)]` was reaching clap through
+  feature unification from a default-only dependency. `--no-default-features`
+  is the build that tells the truth about features — the same lesson as
+  building on dev rather than the Mac, one layer down.
+
+---
+
 ## Pallets — engine support (2026-08-19, #51/#52)
 
 A **pallet** is a GPT partition holding a named, versioned, self-contained set

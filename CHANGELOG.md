@@ -53,6 +53,12 @@
   minted one identifies a caller to the node that minted it, and means nothing
   to a peer.
 - **docs:** [docs/auth.md](docs/auth.md).
+- **build: clap's `env` feature is declared rather than borrowed.**
+  `#[arg(env = "STORMBLOCK_ENGINE")]` compiled under the default feature set
+  because something else in it turned clap's `env` on; the RouterOS profile
+  (`--no-default-features`, no openraft) lost the feature with it and had not
+  compiled since `c709b7c`. Found building the profile to check this change,
+  not by the change.
 
 ### 2026-09-07
 - **fix(initramfs): the driver classes that cannot carry a boot are dropped.**
