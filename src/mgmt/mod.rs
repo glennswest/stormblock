@@ -1,6 +1,7 @@
 //! Management plane — REST API (axum), Prometheus metrics, config.
 
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod metrics;
 pub mod discovery;
@@ -260,6 +261,15 @@ pub struct AppState {
     pub moves: tokio::sync::RwLock<HashMap<Uuid, crate::volume::relocate::VolumeMove>>,
     /// Where persisted management state lives, when there is anywhere.
     pub data_dir: Option<std::path::PathBuf>,
+    /// What a caller must present. Resolved at startup by
+    /// `start_management_server` (config, environment, token file, or minted)
+    /// and read on every request by `auth::require_token`.
+    ///
+    /// Seeded from the config alone so that a router built in-process — a
+    /// test, an embedder — enforces a token the moment one is configured, and
+    /// a `RwLock` rather than a `OnceLock` because startup then replaces it
+    /// with the resolved answer, which may include a token no config names.
+    auth: std::sync::RwLock<Arc<crate::serve::api::AuthConfig>>,
     /// Pallet name → drives it should be on (#56). Persisted as
     /// `<data_dir>/pallet_mirrors.json`; the drives carry no record of it.
     pub pallet_mirrors: tokio::sync::RwLock<HashMap<String, u8>>,
@@ -293,6 +303,33 @@ impl AppState {
     /// This node's name in the /v1 surface and in discovery beacons.
     pub fn local_node_name(&self) -> String {
         local_node_name(&self.config)
+    }
+
+    /// What a caller must present, as of now.
+    pub fn auth(&self) -> Arc<crate::serve::api::AuthConfig> {
+        // A poisoned lock here would mean a panic while swapping the token at
+        // startup; the token itself is still whatever was in there, and
+        // failing every request over it would be a worse answer than serving
+        // with the credential that is in force.
+        match self.auth.read() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Put the resolved credential in force. Called once, at startup, before
+    /// the listener binds.
+    pub fn set_auth(&self, auth: crate::serve::api::AuthConfig) {
+        match self.auth.write() {
+            Ok(mut g) => *g = Arc::new(auth),
+            Err(p) => *p.into_inner() = Arc::new(auth),
+        }
+    }
+
+    /// Whether this node requires a credential — reported by `/api/v1/health`
+    /// so a fleet can be asked which of its nodes are open (#107).
+    pub fn auth_enforced(&self) -> bool {
+        self.auth().api_token.is_some()
     }
 
     pub fn new(
@@ -354,6 +391,10 @@ impl AppState {
                 None => HashMap::new(),
             }),
             data_dir: config.management.data_dir.as_ref().map(std::path::PathBuf::from),
+            auth: std::sync::RwLock::new(Arc::new(crate::serve::api::AuthConfig {
+                api_token: config.management.api_token.clone(),
+                admin_token: config.management.admin_token.clone(),
+            })),
             pallet_mirrors: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::pallets::load_mirrors(std::path::Path::new(dir)),
                 None => HashMap::new(),
@@ -426,6 +467,21 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
     }
 
     let listen_addr = &state.config.management.listen_addr;
+
+    // Who may call this, decided before anything can be called (#107). A
+    // failure here — `require_auth` set with nowhere to keep a token — stops
+    // the server starting; the one thing it must never do is fall through to
+    // serving the whole API to anyone who can reach the port.
+    let resolved = auth::resolve(&state.config.management)?;
+    auth::log_mode(&resolved, listen_addr, &state.config.management);
+    state.set_auth(resolved.auth.clone());
+    // Only a token this node was *given* is presented to peers — see
+    // `auth::fleet_token`.
+    auth::set_fleet_token(match resolved.source {
+        auth::Source::Config | auth::Source::Env => resolved.auth.api_token.clone(),
+        _ => None,
+    });
+
     let mut router = api::router(state.clone())
         .merge(metrics::metrics_router(state.clone()));
 

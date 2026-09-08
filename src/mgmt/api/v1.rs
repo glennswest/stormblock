@@ -18,9 +18,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{Path, Query, State},
     http::StatusCode,
-    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -239,6 +238,10 @@ pub enum V1Error {
     StaleEpoch(Epoch),
     OutOfSpace(String),
     BadRequest(String),
+    /// Kept because it names this contract's 401 body; the check that raises
+    /// it is `mgmt::auth::require_token`, which builds the same envelope for
+    /// any `/v1` path.
+    #[allow(dead_code)]
     Unauthorized,
     Internal(String),
 }
@@ -1927,25 +1930,10 @@ async fn get_node_capacity(
 // Router + optional bearer auth
 // ---------------------------------------------------------------------------
 
-async fn require_bearer(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    if let Some(expected) = &state.config.management.api_token {
-        let ok = req
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| t == expected)
-            .unwrap_or(false);
-        if !ok {
-            return V1Error::Unauthorized.into_response();
-        }
-    }
-    next.run(req).await
-}
+// The bearer check that used to live here now covers the whole engine
+// (`mgmt::auth::require_token`, #107) — this surface was the only one that had
+// it, which is precisely what made `/api/v1` beside it look guarded. It still
+// answers 401 in this contract's envelope: the layer picks the body by prefix.
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -1973,7 +1961,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/nodes/capacity", get(list_node_capacities))
         .route("/nodes/{node}/capacity", get(get_node_capacity))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), require_bearer))
         .with_state(state)
 }
 

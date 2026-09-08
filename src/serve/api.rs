@@ -104,12 +104,29 @@ pub struct AuthConfig {
     pub admin_token: Option<String>,
 }
 
-/// Endpoints reachable without a token: liveness and readiness only, so a
-/// supervisor probe never needs a credential.
+/// Endpoints reachable without a token: liveness, readiness and telemetry, so
+/// a supervisor probe never needs a credential.
+///
+/// `/api/v1/health` is here for a reason that is not convenience. It is the
+/// question "is the thing at this address an appliance at all", and an
+/// initramfs asks it of every candidate address DHCP gave it *before* it has
+/// any credential — a 401 there is indistinguishable from "not an appliance"
+/// and drops the node to a shell. It answers a constant: name, version, and
+/// whether authentication is on. Nothing about this node's volumes.
+///
+/// `/metrics` is public because a fleet scraper cannot hold a token that is
+/// minted per node. It is the one read surface that is exposed by policy, and
+/// the cost is that a scrape reveals capacity and volume counts. Put the
+/// engine behind TLS and a network boundary if that matters.
 fn is_public(path: &str) -> bool {
     matches!(
         path,
-        "/serve/v1/ready" | "/serve/v1/health" | "/mk/v1/ready" | "/mk/v1/health"
+        "/serve/v1/ready"
+            | "/serve/v1/health"
+            | "/mk/v1/ready"
+            | "/mk/v1/health"
+            | "/api/v1/health"
+            | "/metrics"
     )
 }
 
@@ -169,21 +186,37 @@ fn bearer(req: &Request) -> Option<&str> {
     req.headers().get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
 }
 
-pub async fn require_token(
-    State(auth): State<Arc<AuthConfig>>,
-    req: Request,
-    next: Next,
-) -> Response {
+/// Why a request was refused. One sentence, because it is the whole body a
+/// caller gets: saying which token is wanted is not a leak — the token itself
+/// is the secret, not its existence.
+pub const MISSING_TOKEN: &str = "missing or invalid bearer token";
+pub const NEEDS_ADMIN: &str = "admin token required for destructive operations";
+
+/// The decision, on its own, so every surface answers the same way.
+///
+/// Separate from the middleware because there are two of them — this one, and
+/// the engine-wide layer in `mgmt::auth` that covers `/api/v1`, `/v1` and the
+/// kube surface. Two implementations of "may this caller do this" drift, and
+/// the drift is not visible until something that should have been refused was
+/// not.
+///
+/// `Ok(())` means let it through. `Err(msg)` is the message to return with a
+/// 401.
+pub fn decide(
+    auth: &AuthConfig,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    presented: Option<&str>,
+) -> Result<(), &'static str> {
     let Some(expected) = auth.api_token.as_deref() else {
-        return next.run(req).await; // explicit insecure mode
+        return Ok(()); // explicit insecure mode
     };
-    let path = req.uri().path().to_string();
-    if is_public(&path) {
-        return next.run(req).await;
+    if is_public(path) {
+        return Ok(());
     }
 
-    let presented = bearer(&req).map(|s| s.to_string());
-    let destructive = is_destructive(req.method(), &path, req.uri().query());
+    let destructive = is_destructive(method, path, query);
     let accepted: Vec<&str> = match (&auth.admin_token, destructive) {
         // A distinct admin token, on a destructive verb: only that token.
         (Some(admin), true) => vec![admin.as_str()],
@@ -191,15 +224,24 @@ pub async fn require_token(
         (None, _) => vec![expected],
     };
 
-    match presented.as_deref() {
-        Some(t) if accepted.iter().any(|a| *a == t) => next.run(req).await,
-        _ => {
+    match presented {
+        Some(t) if accepted.iter().any(|a| *a == t) => Ok(()),
+        _ if destructive && auth.admin_token.is_some() => Err(NEEDS_ADMIN),
+        _ => Err(MISSING_TOKEN),
+    }
+}
+
+pub async fn require_token(
+    State(auth): State<Arc<AuthConfig>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let presented = bearer(&req).map(|s| s.to_string());
+    match decide(&auth, req.method(), &path, req.uri().query(), presented.as_deref()) {
+        Ok(()) => next.run(req).await,
+        Err(msg) => {
             tracing::warn!("unauthorized {} {}", req.method(), path);
-            let msg = if destructive && auth.admin_token.is_some() {
-                "admin token required for destructive operations"
-            } else {
-                "missing or invalid bearer token"
-            };
             (StatusCode::UNAUTHORIZED, Json(json!({ "error": msg, "code": 401 })))
                 .into_response()
         }

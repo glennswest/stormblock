@@ -92,6 +92,7 @@ pub fn ensure_crypto_provider() {
 pub struct ClientBuilder {
     timeout: Duration,
     root_pem: Vec<Vec<u8>>,
+    bearer: Option<String>,
 }
 
 impl ClientBuilder {
@@ -104,6 +105,16 @@ impl ClientBuilder {
     /// Trust this CA (PEM) in addition to the WebPKI roots.
     pub fn add_root_certificate_pem(mut self, pem: Vec<u8>) -> Self {
         self.root_pem.push(pem);
+        self
+    }
+
+    /// Present this bearer token on every request unless one overrides it.
+    ///
+    /// For a client that only ever talks to one place — a peer node, an
+    /// appliance — where forgetting it on one call out of five is a failure
+    /// that only shows up under load.
+    pub fn bearer(mut self, token: Option<String>) -> Self {
+        self.bearer = token;
         self
     }
 
@@ -133,7 +144,7 @@ impl ClientBuilder {
             .enable_http1()
             .build();
         let inner = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
-        Ok(Client { inner, timeout: self.timeout })
+        Ok(Client { inner, timeout: self.timeout, bearer: self.bearer })
     }
 }
 
@@ -142,6 +153,7 @@ impl ClientBuilder {
 pub struct Client {
     inner: Inner,
     timeout: Duration,
+    bearer: Option<String>,
 }
 
 impl Default for Client {
@@ -157,7 +169,7 @@ impl Client {
     }
 
     pub fn builder() -> ClientBuilder {
-        ClientBuilder { timeout: Duration::from_secs(30), root_pem: Vec::new() }
+        ClientBuilder { timeout: Duration::from_secs(30), root_pem: Vec::new(), bearer: None }
     }
 
     pub fn post(&self, url: impl AsRef<str>) -> RequestBuilder {
@@ -184,6 +196,7 @@ impl Client {
             body: Ok(Bytes::new()),
             content_type: None,
             timeout: None,
+            bearer: self.bearer.clone(),
         }
     }
 }
@@ -196,6 +209,7 @@ pub struct RequestBuilder {
     body: Result<Bytes, Error>,
     content_type: Option<&'static str>,
     timeout: Option<Duration>,
+    bearer: Option<String>,
 }
 
 impl RequestBuilder {
@@ -215,6 +229,18 @@ impl RequestBuilder {
         self
     }
 
+    /// Present a bearer token, when there is one to present. `None` clears
+    /// whatever the client was built with.
+    ///
+    /// Takes an `Option` because every caller of this has the same shape — a
+    /// node that may or may not have been given a credential — and unwrapping
+    /// it at each call site is how one of them ends up sending the literal
+    /// string "None".
+    pub fn bearer(mut self, token: Option<&str>) -> Self {
+        self.bearer = token.map(|t| t.to_string());
+        self
+    }
+
     /// A deadline for this request alone.
     pub fn timeout(mut self, d: Duration) -> Self {
         self.timeout = Some(d);
@@ -229,6 +255,9 @@ impl RequestBuilder {
             req = req.header(hyper::header::CONTENT_TYPE, ct);
         }
         req = req.header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")));
+        if let Some(t) = &self.bearer {
+            req = req.header(hyper::header::AUTHORIZATION, format!("Bearer {t}"));
+        }
         let req = req.body(Full::new(body)).map_err(|e| Error::Request(e.to_string()))?;
         let deadline = self.timeout.unwrap_or(self.client.timeout);
         let fut = async {

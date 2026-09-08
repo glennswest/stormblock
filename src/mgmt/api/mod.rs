@@ -53,17 +53,23 @@ use super::AppState;
 /// against several addresses on every boot of every node, and one that reads
 /// state is one that answers slowly when the appliance is busy — which is
 /// when a node most wants an answer.
-async fn health() -> Response {
+/// It reports `auth` for the reason #107 exists: a fleet has to be able to ask
+/// which of its nodes are open without trying to break into each one. Saying
+/// "a token is required here" tells an attacker nothing they do not learn from
+/// the first 401.
+async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
     struct Health {
         status: &'static str,
         service: &'static str,
         version: &'static str,
+        auth: &'static str,
     }
     Json(Health {
         status: "ok",
         service: "stormblock",
         version: env!("CARGO_PKG_VERSION"),
+        auth: if state.auth_enforced() { "required" } else { "none" },
     })
     .into_response()
 }
@@ -71,7 +77,7 @@ async fn health() -> Response {
 /// Build the complete API router.
 pub fn router(state: Arc<AppState>) -> Router {
     let r = Router::new()
-        .route("/api/v1/health", axum::routing::get(health))
+        .route("/api/v1/health", axum::routing::get(health).with_state(state.clone()))
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/volumes", volumes::router(state.clone()))
@@ -122,7 +128,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         r
     };
 
-    r
+    // One credential check, over every surface this router serves (#107).
+    //
+    // It goes on last so it wraps `/api/v1`, `/v1`, `/serve/v1` and the kube
+    // resources alike — and unmatched paths too, which is right: a 404 is
+    // still an answer about what this node is. `/v1` used to check a token by
+    // itself and everything beside it was open, which is the shape of hole
+    // that survives review: the setting existed, so the surface read as
+    // guarded.
+    //
+    // What it enforces is whatever the node resolved at startup
+    // (`mgmt::auth::resolve`). A router built in-process with no resolution
+    // enforces the config's own token, or nothing.
+    r.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        crate::mgmt::auth::require_token,
+    ))
 }
 
 /// Standard error response.

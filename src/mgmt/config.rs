@@ -273,8 +273,47 @@ pub struct ManagementConfig {
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub data_dir: Option<String>,
-    /// Optional bearer token required on /v1 requests (Authorization: Bearer).
+    /// Bearer token required on **every** management request
+    /// (`Authorization: Bearer <token>`), except the public probes listed in
+    /// `serve::api::is_public`.
+    ///
+    /// It used to guard `/v1` alone, which was the whole of the hole in #107:
+    /// `/api/v1` — create, clone, seal, delete, re-point a synonym, publish a
+    /// release — was open on `0.0.0.0:9090` on a node whose config named a
+    /// token. One surface being guarded and the rest not is worse than
+    /// neither, because the configured token reads as protection.
     pub api_token: Option<String>,
+    /// When set, destructive verbs (delete, seal, repair, apply a trim,
+    /// collect extents, write into a filesystem) require **this** token and
+    /// the ordinary one is not enough. Unset means `api_token` covers them.
+    pub admin_token: Option<String>,
+    /// Where a minted token is kept, so something else on this node can read
+    /// it. Defaults to `<data_dir>/api_token`, then
+    /// `/etc/stormblock/api_token`.
+    ///
+    /// A token cannot be baked into an image — every node that booted it would
+    /// share it — so a node that wants one mints its own at boot and writes it
+    /// here, `0600`. That is the file the registry on the same machine reads.
+    pub token_file: Option<String>,
+    /// Whether a token is required.
+    ///
+    /// * `Some(true)` — required. One is taken from `api_token`, then
+    ///   `$STORMBLOCK_API_TOKEN`, then `token_file`; if there is still none,
+    ///   the node mints one into `token_file` at boot. Startup fails if it
+    ///   cannot.
+    /// * `Some(false)` — deliberately open. The node still says so on every
+    ///   boot; what it stops saying is that nobody chose this.
+    /// * `None` (the default) — enforced when a token is configured or a
+    ///   token file exists, open otherwise, and **loud** about it on every
+    ///   boot.
+    ///
+    /// The default is open because a node's engine is what a machine claims
+    /// its boot image from before it has any credential (`boot-claim`, and
+    /// the firmware one stage earlier): flipping the fleet to closed from
+    /// inside the engine would stop machines booting with no way to hand them
+    /// the token first. That is a migration, not a default. What is not
+    /// deferred is the silence — see `mgmt::auth::log_mode`.
+    pub require_auth: Option<bool>,
     /// This node's name in the /v1 surface. Falls back to $STORMBLOCK_NODE,
     /// then $HOSTNAME, then "localhost".
     pub node_name: Option<String>,
@@ -330,6 +369,9 @@ impl Default for ManagementConfig {
             tls_key: None,
             data_dir: None,
             api_token: None,
+            admin_token: None,
+            token_file: None,
+            require_auth: None,
             node_name: None,
             topology: std::collections::BTreeMap::new(),
             discovery_disabled: false,

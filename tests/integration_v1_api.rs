@@ -844,7 +844,9 @@ async fn v1_bearer_auth_enforced_when_configured() {
         .as_u16();
     assert_eq!(s, 200);
 
-    // Legacy /api/v1 surface stays open (unchanged behavior).
+    // And the engine's own surface with it (#107). It used to stay open while
+    // /v1 was guarded, which is worse than neither being guarded: the token in
+    // the config made the whole node read as closed.
     let s = c
         .get(format!("{base}/api/v1/volumes"))
         .send()
@@ -852,7 +854,25 @@ async fn v1_bearer_auth_enforced_when_configured() {
         .unwrap()
         .status()
         .as_u16();
+    assert_eq!(s, 401);
+
+    let s = c
+        .get(format!("{base}/api/v1/volumes"))
+        .bearer_auth("sekrit")
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
     assert_eq!(s, 200);
+
+    // The probe an initramfs uses to find an appliance answers without one —
+    // a 401 there is indistinguishable from "not an appliance" and drops a
+    // booting node to a shell.
+    let health = c.get(format!("{base}/api/v1/health")).send().await.unwrap();
+    assert_eq!(health.status().as_u16(), 200);
+    let body: serde_json::Value = health.json().await.unwrap();
+    assert_eq!(body["auth"], "required");
 
     server.abort();
 }

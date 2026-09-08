@@ -69,8 +69,10 @@ pub async fn migrate_volume(
     chunk_size: usize,
     rate_limit_mbps: Option<u64>,
 ) -> Result<MigrationStatus, anyhow::Error> {
+    // A peer's API needs a credential when the fleet was given one (#107).
     let client = crate::http::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
+        .bearer(crate::mgmt::auth::fleet_token())
         .build()?;
 
     let total_bytes = volume.capacity_bytes();

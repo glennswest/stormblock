@@ -82,8 +82,14 @@ impl ReplicatedVolume {
         replica_addrs: Vec<String>,
         sync_mode: bool,
     ) -> Self {
+        // Replicas want a credential when the fleet was given one (#107). The
+        // token goes on the client rather than each call: this one is cloned
+        // into the background retry task, and a retry that authenticates
+        // differently from the write it is retrying is a bug nobody would
+        // find until a peer was slow.
         let client = crate::http::Client::builder()
             .timeout(Duration::from_secs(30))
+            .bearer(crate::mgmt::auth::fleet_token())
             .build()
             .unwrap_or_default();
 

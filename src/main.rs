@@ -344,6 +344,16 @@ enum SubCommand {
         /// reboots, and a machine that gives up first needs a human.
         #[arg(long, default_value_t = 120)]
         timeout_secs: u64,
+        /// Bearer token, for an appliance that requires one (#107). Falls
+        /// back to `$STORMBLOCK_API_TOKEN`.
+        ///
+        /// A claim is a write — it hands this machine a clone and marks it
+        /// taken — so on a closed appliance it needs a credential. The kernel
+        /// command line is the only place an initramfs has to carry one, and
+        /// that means every machine booting that image shares it: it is a
+        /// fleet token, worth no more than the boot network it travels on.
+        #[arg(long)]
+        token: Option<String>,
     },
     BootLocal {
         /// Slab device or file path(s) (e.g. root.slab). Paired with the
@@ -773,8 +783,8 @@ async fn main() -> anyhow::Result<()> {
                     &cli.config,
                 ).await;
             }
-            SubCommand::BootClaim { boothost, tag, namespace, timeout_secs } => {
-                return handle_boot_claim(boothost, tag, namespace, *timeout_secs).await;
+            SubCommand::BootClaim { boothost, tag, namespace, timeout_secs, token } => {
+                return handle_boot_claim(boothost, tag, namespace, *timeout_secs, token.as_deref()).await;
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier, check,
@@ -3932,6 +3942,7 @@ async fn handle_boot_claim(
     tag: &str,
     namespace: &str,
     timeout_secs: u64,
+    token: Option<&str>,
 ) -> anyhow::Result<()> {
     let base = boothost.trim_end_matches('/');
     let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
@@ -3940,8 +3951,13 @@ async fn handle_boot_claim(
 
     // The in-house client, not reqwest: the binary deliberately does not carry
     // reqwest, and this runs in the initramfs where the binary is the payload.
+    let token = token
+        .map(|t| t.to_string())
+        .or_else(|| std::env::var("STORMBLOCK_API_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty());
     let client = stormblock::http::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .bearer(token)
         .build()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
