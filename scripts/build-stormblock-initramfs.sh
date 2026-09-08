@@ -943,9 +943,30 @@ if [ -n "$NETADDR" ]; then
         MYIP=$(ip -4 -o addr show dev "$IFACE" 2>/dev/null \
                | awk '{ print $4 }' | cut -d/ -f1 | head -1)
         if [ -n "$MYIP" ]; then
-            NODE_NAME=$(nslookup "$MYIP" 2>/dev/null \
-                        | sed -n 's/.*name = \([^.]*\)\..*/\1/p' | head -1)
-            [ -n "$NODE_NAME" ] && echo "  name from DNS: $NODE_NAME ($MYIP)"
+            PTRNAME=$(nslookup "$MYIP" 2>/dev/null \
+                      | sed -n 's/.*name = \(.*\)\.$/\1/p' | head -1)
+            # Forward-confirmed, or not at all.
+            #
+            # A reverse record outlives whatever held the address. This pool
+            # hands out 192.168.30.1 and its PTR still said
+            # `minint-fsmpc1o.g16.lo` hours after a stormcos node had the
+            # lease — a Windows box that held it previously, whose own A
+            # record points at .2. Taking a name on the strength of a PTR
+            # alone would have named this node after that machine.
+            #
+            # So the name has to round-trip: whatever the PTR says must
+            # resolve back to the address asking. A stale record fails that,
+            # and the node falls through to naming itself.
+            if [ -n "$PTRNAME" ]; then
+                BACK=$(nslookup "$PTRNAME" 2>/dev/null \
+                       | awk '/^Address: /{ print $2 }' | tail -1)
+                if [ "$BACK" = "$MYIP" ]; then
+                    NODE_NAME=${PTRNAME%%.*}
+                    echo "  name from DNS: $NODE_NAME ($MYIP, confirmed)"
+                else
+                    echo "  DNS calls $MYIP '$PTRNAME', which resolves to '${BACK:-nothing}' - ignoring"
+                fi
+            fi
         fi
     fi
 
