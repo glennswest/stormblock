@@ -25,6 +25,7 @@
 //! behind it.
 
 pub mod build;
+pub mod local;
 pub mod decode;
 pub mod import;
 pub mod fat;
