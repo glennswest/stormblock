@@ -4561,6 +4561,57 @@ async fn handle_boot_local(
             if !local_disk_force
                 && stormblock::image::local::node_layout(&dest_dev).await?.is_some()
             {
+                // **And if it is already up to date, do nothing at all.**
+                //
+                // A node that netboots regularly would otherwise reformat its
+                // own system half and re-copy every golden on every boot —
+                // destroying a working local half to rebuild the same bytes,
+                // and running from the appliance for the minutes that takes,
+                // each time.
+                //
+                // By volume id, which is what a migration preserves: the
+                // flow-over moves a volume's extents, it does not make a new
+                // volume, so a system half that has already had this image
+                // flowed onto it holds the same ids. A new build makes new
+                // volumes and this comes out false, which is what should
+                // happen.
+                //
+                // Conservative in the direction that costs least: a wrong
+                // "not up to date" reformats and re-copies, which is wasteful;
+                // a wrong "up to date" leaves the node booting from the
+                // appliance. Neither loses anything, and only a superset
+                // counts as up to date.
+                let want: std::collections::HashSet<uuid::Uuid> = mgr
+                    .list_volumes()
+                    .await
+                    .into_iter()
+                    .map(|(id, ..)| id.0)
+                    .collect();
+                let have = stormblock::image::local::system_slab_volumes(&dest_dev)
+                    .await
+                    .unwrap_or(None);
+                if let Some(have) = have {
+                    if !want.is_empty() && want.iter().all(|id| have.contains(id)) {
+                        println!(
+                            "Flow-over: {disk} already holds all {} volume(s) this boot would \
+                             copy — nothing to do",
+                            want.len()
+                        );
+                        println!(
+                            "Flow-over: leaving it as it stands; the node boots from it next \
+                             time, which is what the local-slab probe is for."
+                        );
+                        return Ok(None);
+                    }
+                    let missing = want.iter().filter(|id| !have.contains(id)).count();
+                    println!(
+                        "Flow-over: {disk} holds {} of the {} volume(s) this boot carries; {} \
+                         to copy",
+                        want.len() - missing,
+                        want.len(),
+                        missing
+                    );
+                }
                 println!(
                     "Flow-over: {disk} is already this node's — replacing the system half, \
                      keeping the data half"

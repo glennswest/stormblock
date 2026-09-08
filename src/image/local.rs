@@ -105,6 +105,37 @@ pub async fn node_layout(device: &Arc<dyn BlockDevice>) -> Result<Option<(usize,
     })
 }
 
+/// What the system half already holds, by volume id, according to the slab
+/// itself.
+///
+/// Read offline, from the slab's own metadata region: no attach, no daemon,
+/// nothing made live. `None` means the question cannot be answered here — the
+/// drive is not a node layout, or the slab keeps no record of itself — and a
+/// caller must then assume it holds nothing.
+///
+/// This is what makes "no need to do anything" a decision rather than a
+/// guess. A node that netboots regularly would otherwise reformat its own
+/// system half and re-copy every golden on every boot, destroying a working
+/// local half to rebuild the same bytes — and running from the appliance for
+/// the minutes that takes, each time.
+pub async fn system_slab_volumes(
+    device: &Arc<dyn BlockDevice>,
+) -> Result<Option<std::collections::HashSet<uuid::Uuid>>> {
+    let Some((_, system_i)) = node_layout(device).await? else { return Ok(None) };
+    let gpt = Gpt::read(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let e = &gpt.entries[system_i];
+    let part = Arc::new(
+        PartitionDevice::new(device.clone(), e.start_bytes(gpt.block_size), e.size_bytes(gpt.block_size))
+            .map_err(|err| ImageError::Other(format!("system partition: {err}")))?,
+    );
+    let Ok(slab) = Slab::open(part).await else { return Ok(None) };
+    let Ok(Some(bytes)) = slab.read_metadata().await else { return Ok(None) };
+    let Ok(meta) = crate::volume::MetadataStore::decode(&bytes) else { return Ok(None) };
+    Ok(Some(meta.volumes.into_iter().map(|v| v.id.0).collect()))
+}
+
 /// Reinstall onto a drive that is already this node's: **replace the system
 /// half, keep the data half, and let the node boot normally.**
 ///
