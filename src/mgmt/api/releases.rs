@@ -999,6 +999,19 @@ mod tests {
         assert_eq!(civil_date(1_709_164_800), "2024-02-29T00:00:00Z");
     }
 
+    /// A release is what it can still do, not what it was recorded as. The
+    /// eight orphans on forge were `available` by their records and archived
+    /// in fact, and nothing reconciled the two because nothing derived it
+    /// (#106).
+    #[test]
+    fn a_release_with_no_volume_is_archived() {
+        assert_eq!(state_of(Some(34_359_738_368)), STATE_AVAILABLE);
+        // Zero bytes is still a volume — an empty image is a build that
+        // produced nothing, which is a different problem and not this one.
+        assert_eq!(state_of(Some(0)), STATE_AVAILABLE);
+        assert_eq!(state_of(None), STATE_ARCHIVED);
+    }
+
     const TOTAL: u64 = 34_359_738_368;
 
     /// The ordinary cases a downloader sends.
