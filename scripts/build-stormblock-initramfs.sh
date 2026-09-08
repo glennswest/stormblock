@@ -1825,15 +1825,40 @@ else
 fi
 STORMBLOCK_PID=$!
 
+# Long enough for a first boot that is also doing work.
+#
+# Thirty seconds was the whole budget, and it was set when the only thing
+# between here and the root device was opening a slab. A node taking its local
+# disk now seeds the writable half *before* exporting anything — deliberately,
+# because that is the one moment when nothing is mounted and not a byte has
+# been written — and on this hardware that took 28.3 seconds for 3041 extents.
+# The boot gave up 1.7 seconds before the work it was waiting for landed:
+#
+#   Flow-over: seeding the data half of /dev/sda - 32 volume(s), 3041 extent(s)
+#   FATAL: root device /dev/ublkb0 not found after 30s
+#   Flow-over: data half seeded - 3041 extent(s) onto /dev/sda in 28.3s
+#
+# A copy proportional to what a node stores cannot share a deadline with
+# "opening a device took too long". The failure this guards against — an
+# engine that died, a slab that will not open — is not more likely at five
+# minutes than at thirty seconds, it just takes longer to say so, and it says
+# so on a machine that would otherwise sit at a prompt forever.
 echo "Waiting for root device $ROOTDEV..."
-TIMEOUT=30
+TIMEOUT=${ROOT_TIMEOUT:-300}
+WAITED=0
 while [ ! -b "$ROOTDEV" ] && [ $TIMEOUT -gt 0 ]; do
     sleep 1
     TIMEOUT=$((TIMEOUT - 1))
+    WAITED=$((WAITED + 1))
+    # Say something while a long first boot is working, so a wait that is
+    # doing something is distinguishable from one that is not.
+    case $WAITED in 30|60|120|180|240)
+        echo "  still waiting for $ROOTDEV (${WAITED}s) - a first boot may be copying to local disk" ;;
+    esac
 done
 
 if [ ! -b "$ROOTDEV" ]; then
-    echo "FATAL: root device $ROOTDEV not found after 30s"
+    echo "FATAL: root device $ROOTDEV not found after ${WAITED}s"
     echo "StormBlock PID: $STORMBLOCK_PID"
     echo "Available block devices:"
     ls -la /dev/ublk* 2>/dev/null || echo "  (none)"
