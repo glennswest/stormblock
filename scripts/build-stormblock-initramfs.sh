@@ -519,6 +519,7 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
         rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
         rd.stormblock.assimilate=*)  ASSIMILATE="${param#*=}" ;;
+        rd.stormblock.wipe=*)        WIPE="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the
@@ -1329,6 +1330,28 @@ if [ "$BOOT_MODE" = "local" ]; then
     # fact about one machine. A drive that already carries a *data* slab is
     # refused by boot-local itself, whatever the policy says, because that
     # partition holds this node's CA key and nothing can mint it again.
+    # An explicit, one-shot wipe.
+    #
+    # There is no other way to clear a drive. `/dev` inside a container is
+    # minimal — `/dev/sda` there is a regular empty file, so a shell on the
+    # running node reads zero bytes from it and `blockdev` answers
+    # "Inappropriate ioctl for device". The initramfs is the only place with
+    # the real device.
+    #
+    # It has to be asked for by name, every time, and it is never a policy:
+    # this clears the front and back of a disk, which is the partition table
+    # and the first slab superblock. Nothing infers it and nothing retries it.
+    if [ -n "${WIPE:-}" ] && [ -b "$WIPE" ]; then
+        echo "Wiping the partition table and slab headers on $WIPE (rd.stormblock.wipe)"
+        dd if=/dev/zero of="$WIPE" bs=1M count=8 conv=fsync 2>/dev/null \
+            && echo "  front cleared"
+        END=$(( $(blockdev --getsize64 "$WIPE" 2>/dev/null || echo 0) / 1048576 - 8 ))
+        [ "$END" -gt 0 ] && dd if=/dev/zero of="$WIPE" bs=1M count=8 seek="$END" conv=fsync \
+            2>/dev/null && echo "  back cleared (the mirror GPT)"
+    elif [ -n "${WIPE:-}" ]; then
+        echo "rd.stormblock.wipe=$WIPE is not a block device - ignoring"
+    fi
+
     LOCAL_DISK=""
     case "${ASSIMILATE:-off}" in
     off|"") ;;
