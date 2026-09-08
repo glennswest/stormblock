@@ -1476,6 +1476,7 @@ async fn main() -> anyhow::Result<()> {
         let vm = state.volume_manager.lock().await;
         vm.persist().await;
     });
+    let ublk_count = ublk.len();
     let (flushed, stuck) = tokio::join!(flush, ublk.settle(std::time::Duration::from_secs(10)));
     match flushed {
         Ok(()) => tracing::info!("volume metadata flushed"),
@@ -1485,7 +1486,9 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
     if stuck.is_empty() {
-        tracing::info!("ublk exports stopped");
+        if ublk_count > 0 {
+            tracing::info!("{ublk_count} ublk export(s) stopped");
+        }
     } else {
         // Named, because this is the log line that says why the next restart
         // ends in failed mode.
