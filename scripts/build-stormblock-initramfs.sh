@@ -1150,6 +1150,25 @@ if [ "$BOOT_MODE" = "local" ]; then
                  | grep -qE ": slab [0-9a-f-]{36}"; then
                 echo "$SLAB is not a slab - asking $BOOTHOST instead"
                 SLAB=""
+            elif ! /usr/sbin/stormblock image inspect "$SLAB" 2>/dev/null \
+                 | grep -qE "^ +volume ${VOLUME:-stormpump} "; then
+                # A slab is not the same thing as a slab this node can boot.
+                #
+                # The test was "is there a slab here", and a *half* slab
+                # passes it. This machine took its drive over, the flow-over
+                # was still copying goldens onto it when it was rebooted, and
+                # the next boot found the incomplete slab, believed it, and
+                # came up with a login prompt and no services. Nothing said
+                # what was wrong, because from the probe's point of view
+                # nothing was.
+                #
+                # So the evidence has to be the thing actually needed: the
+                # root volume, by the name the command line asks for. A slab
+                # that cannot answer that is not this node's boot disk, and
+                # the appliance is - which is the same fallback that already
+                # covers a disk with no slab at all.
+                echo "$SLAB has no '${VOLUME:-stormpump}' volume - asking $BOOTHOST instead"
+                SLAB=""
             fi
             ;;
         esac
