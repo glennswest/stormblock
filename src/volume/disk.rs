@@ -1527,6 +1527,16 @@ mod tests {
         node.persist_to_slab(slab_id);
         node.restore().await.unwrap();
 
+        // The flag has to survive into the slab's own record, because that is
+        // the only copy a netbooted node has: it has no data directory, so
+        // the separate template store loads empty however many blanks the
+        // image laid down (#100). A node reported "0 of 5 blank size(s)
+        // sealed" with five sealed blanks in front of it.
+        let tmpl: Vec<String> = node.templates().await.into_iter().map(|(_, n, _)| n).collect();
+        assert!(tmpl.contains(&"bee.golden".to_string()),
+                "the template flag did not survive into the slab record: {tmpl:?}");
+        assert!(!tmpl.contains(&"a.golden".to_string()), "only the blank is a template");
+
         let names: Vec<String> = node.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
         for n in ["a.golden", "a", "a-two", "bee.golden", "bee"] {
             assert!(names.contains(&n.to_string()), "{n} missing from {names:?}");
