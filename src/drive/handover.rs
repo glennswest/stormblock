@@ -40,6 +40,33 @@ pub struct Device {
     pub volume: String,
 }
 
+/// A local disk the boot laid out but did not fill.
+///
+/// The migration is minutes of background copying and the process that laid
+/// the slabs has seconds to live: it is the initramfs engine, and `switch_root`
+/// deletes the filesystem its binary came from the moment the successor takes
+/// the ublk devices over. Running the copy there meant it was killed part-way
+/// through, every time, leaving a slab that is real, incomplete, and unable to
+/// boot the node — which is the shape the local-slab probe now has to reject.
+///
+/// So the long-lived process does the long-running job. The boot lays the
+/// structure, which is fast and bounded, writes down what it laid, and the
+/// engine that adopts the devices moves the extents at its leisure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlowOver {
+    /// The disk, for the log line. Nothing resolves anything through it.
+    pub disk: String,
+    /// The slab the goldens are migrating *into*, by id. By id rather than by
+    /// role, because after the successor opens both the appliance's slabs and
+    /// this disk's there are two system slabs registered and one of them is
+    /// the source.
+    pub system_slab: String,
+    /// The local data slab, laid at the same time. Writable volumes belong on
+    /// it — that is the whole point of taking the drive — and it is named here
+    /// so the successor does not have to guess which of the two it is.
+    pub data_slab: String,
+}
+
 /// Everything the successor needs to take over without being told.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Record {
@@ -51,6 +78,11 @@ pub struct Record {
     pub meta: Option<String>,
     /// Every device that was exported, in device order.
     pub devices: Vec<Device>,
+    /// A local disk laid out by this boot, waiting to be filled. Absent on a
+    /// node that has no local disk, and on every record written before this
+    /// field existed — which is why it defaults rather than being required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_over: Option<FlowOver>,
 }
 
 impl Record {
@@ -95,6 +127,7 @@ mod tests {
         Record {
             slabs: vec!["/dev/sda4".into()],
             meta: None,
+            flow_over: None,
             devices: vec![
                 Device { dev_id: 0, volume: "stormpump".into() },
                 Device { dev_id: 2, volume: "sbregistry".into() },
@@ -122,6 +155,31 @@ mod tests {
         rec.write(&path).expect("writes");
         assert_eq!(Record::read(&path), Some(rec));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_without_a_flow_over_still_reads() {
+        // Every record written before the field existed lacks it, and a node
+        // mid-upgrade reads one of those with a binary that has it. Absence
+        // has to mean "no local disk", not "unreadable record" — which would
+        // send the successor to the explicit --volume list and stand down
+        // every device it was supposed to adopt.
+        let json = br#"{"slabs":["/dev/sda4"],"devices":[{"dev_id":0,"volume":"stormpump"}]}"#;
+        let rec: Record = serde_json::from_slice(json).expect("reads without flow_over");
+        assert_eq!(rec.flow_over, None);
+        assert_eq!(rec.volumes_in_device_order(), vec!["stormpump"]);
+    }
+
+    #[test]
+    fn a_flow_over_round_trips() {
+        let mut rec = a_record();
+        rec.flow_over = Some(FlowOver {
+            disk: "/dev/sda".into(),
+            system_slab: "8aa6b985-3f4d-4130-99cb-154b56dcb68b".into(),
+            data_slab: "f86ee673-57da-4aa5-961c-168c263de265".into(),
+        });
+        let bytes = serde_json::to_vec(&rec).expect("encodes");
+        assert_eq!(serde_json::from_slice::<Record>(&bytes).expect("decodes"), rec);
     }
 
     #[test]
