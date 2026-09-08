@@ -3916,24 +3916,40 @@ async fn seed_data_half(
     // the slabs, and reading a partition table is cheap next to what follows.
     let dev: Arc<dyn BlockDevice> =
         Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
-    match stormblock::image::local::data_slab_volumes(&dev).await {
-        Ok(Some(have)) if !have.is_empty() => {
-            println!(
-                "Flow-over: the data half of {disk} already holds {} volume(s) — leaving it,                  that is this node's identity",
-                have.len()
-            );
-            return Ok(());
-        }
-        Ok(Some(_)) => {}
+    // Per volume, not per slab.
+    //
+    // "Empty, or leave it alone" was too blunt by exactly one case, and it is
+    // the case this node was in. The local data half is registered with the
+    // engine from the boot that laid it, so ordinary allocation put *some*
+    // volumes on it — twenty of them — while the ones the command line mounts
+    // stayed on the appliance. A slab-wide test called that occupied and
+    // skipped it, and the probe went on refusing the drive for seven missing
+    // volumes, boot after boot, with the fix sitting behind a guard that would
+    // never open.
+    //
+    // A volume already on this slab is this node's and is not touched. A
+    // volume that is not here cannot be overwritten by being copied here,
+    // because there is nothing of it here to overwrite. That is the whole
+    // safety argument, and it holds per volume, which is the granularity the
+    // danger actually has.
+    let have = match stormblock::image::local::data_slab_volumes(&dev).await {
+        Ok(Some(have)) => have,
         // Cannot say. An unanswerable question about identity is answered by
         // doing nothing: the node runs its writes on the appliance, which is
         // slower and is not destructive.
         Ok(None) | Err(_) => {
             println!(
-                "Flow-over: cannot read the data half of {disk} — leaving it alone; writes stay                  on the appliance"
+                "Flow-over: cannot read the data half of {disk} - leaving it alone; \
+                 writes stay on the appliance"
             );
             return Ok(());
         }
+    };
+    if !have.is_empty() {
+        println!(
+            "Flow-over: the data half of {disk} already holds {} volume(s); those stay as they are",
+            have.len()
+        );
     }
 
     let sources: Vec<stormblock::drive::slab::SlabId> = {
@@ -3948,36 +3964,63 @@ async fn seed_data_half(
         return Ok(());
     }
 
+    // The work is decided before any of it is done.
+    //
+    // The old loop asked the map for "an extent still on the source" and
+    // repeated until there were none, which cannot express "all but these".
+    // Listing first, filtering by volume, then moving what is left says
+    // exactly what will happen and lets it be counted before it starts.
+    let todo: Vec<(stormblock::volume::VolumeId, u64)> = {
+        let gem = mgr.gem().read().await;
+        sources
+            .iter()
+            .flat_map(|s| gem.slab_extents(*s))
+            .filter(|(vol, _, _)| !have.contains(&vol.0))
+            .map(|(vol, vext, _)| (vol, vext))
+            .collect()
+    };
+    if todo.is_empty() {
+        println!("Flow-over: the data half of {disk} has everything this boot would copy");
+        return Ok(());
+    }
+    let volumes = {
+        let mut v: Vec<_> = todo.iter().map(|(vol, _)| *vol).collect();
+        v.sort();
+        v.dedup();
+        v.len()
+    };
+    println!(
+        "Flow-over: seeding the data half of {disk} - {} volume(s), {} extent(s)",
+        volumes,
+        todo.len()
+    );
+
     let engine = stormblock::placement::PlacementEngine::new();
     let started = std::time::Instant::now();
     let (mut moved, mut failed) = (0u64, 0u64);
-    for source in sources {
-        loop {
-            let mut gem = mgr.gem().write().await;
-            let mut reg = mgr.registry().write().await;
-            let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next() else {
-                break;
-            };
-            match engine.migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest)).await {
-                Ok(_) => moved += 1,
-                Err(e) => {
-                    failed += 1;
-                    tracing::error!("seeding the data half: extent {vol:?}/{vext}: {e}");
-                    // Giving up here is safe and leaves a half-copied data
-                    // slab, which the local-slab probe rejects — the node
-                    // boots from the appliance rather than from an identity
-                    // with holes in it.
-                    if failed > 8 {
-                        anyhow::bail!(
-                            "gave up seeding the data half of {disk} after {failed} failures;                              {moved} extent(s) had moved"
-                        );
-                    }
+    for (vol, vext) in todo {
+        let mut gem = mgr.gem().write().await;
+        let mut reg = mgr.registry().write().await;
+        match engine.migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest)).await {
+            Ok(_) => moved += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::error!("seeding the data half: extent {vol:?}/{vext}: {e}");
+                // Giving up is safe and leaves a data half with holes, which
+                // the local-slab probe rejects - the node boots from the
+                // appliance rather than from an identity that is missing
+                // pieces.
+                if failed > 8 {
+                    anyhow::bail!(
+                        "gave up seeding the data half of {disk} after {failed} failures; \
+                         {moved} extent(s) had moved"
+                    );
                 }
             }
         }
     }
     println!(
-        "Flow-over: data half seeded — {moved} extent(s) onto {disk} in {:.1}s{}",
+        "Flow-over: data half seeded - {moved} extent(s) onto {disk} in {:.1}s{}",
         started.elapsed().as_secs_f64(),
         if failed > 0 { format!(", {failed} failed") } else { String::new() }
     );
