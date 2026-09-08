@@ -2742,16 +2742,49 @@ async fn open_slabs_and_restore(
     for ((path, slab), doc) in slab_sources.iter().zip(slabs).zip(&embedded) {
         let array_id = match doc.as_ref().and_then(|d| d.arrays.first()) {
             Some(rec) => rec.array_id,
-            None => {
-                let next = *fallback.iter().find(|a| !claimed.contains(a)).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "slab {path} carries no metadata of its own and the record names no \
-                         further array to pair it with"
-                    )
-                })?;
-                claimed.push(next);
-                next
-            }
+            None => match fallback.iter().find(|a| !claimed.contains(a)) {
+                Some(next) => {
+                    let next = *next;
+                    claimed.push(next);
+                    next
+                }
+                // An empty slab is a new array, not a pairing failure.
+                //
+                // The positional fallback exists for the old single-document
+                // layout, where a slab's record lived in another slab's
+                // document — so a slab with no metadata means "find its
+                // record over there". A slab that was formatted a second ago
+                // and has never held an extent has no record anywhere,
+                // because there is nothing to record. Refusing it broke the
+                // boot that laid one: `boot-local` formatted a local disk,
+                // put it in the handover, and the engine that adopted the
+                // devices died on
+                //
+                //   slab /dev/sda carries no metadata of its own and the
+                //   record names no further array to pair it with
+                //
+                // leaving the node with a login prompt, no engine, and a
+                // registry reporting "stormblockmk not ready after 120s".
+                //
+                // Emptiness is the whole test, and it is not a guess: a slab
+                // with allocated slots holds extents that belong to *some*
+                // array, and minting a new id for it would orphan them.
+                None if slab.allocated_slots() == 0 => {
+                    let fresh = RaidArrayId(uuid::Uuid::new_v4());
+                    tracing::info!(
+                        "slab {path} is empty and names no array — opening it as a new one \
+                         ({fresh})"
+                    );
+                    claimed.push(fresh);
+                    fresh
+                }
+                None => anyhow::bail!(
+                    "slab {path} holds {} allocated slot(s), carries no metadata of its own, \
+                     and the record names no further array to pair it with — its extents \
+                     belong to an array this boot cannot name",
+                    slab.allocated_slots()
+                ),
+            },
         };
         let role = slab.role();
         if slab.has_metadata_region() {
