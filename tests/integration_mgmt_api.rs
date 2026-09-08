@@ -20,8 +20,9 @@ async fn start_mgmt_server(state: Arc<AppState>) -> (String, tokio::task::JoinHa
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
 
-    let router = stormblock::mgmt::api::router(state.clone())
-        .merge(stormblock::mgmt::metrics::metrics_router(state.clone()));
+    // `/metrics` is part of the router now — it is behind the same credential
+    // check as everything else (#107), and merging it twice panics.
+    let router = stormblock::mgmt::api::router(state.clone());
 
     let handle = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();

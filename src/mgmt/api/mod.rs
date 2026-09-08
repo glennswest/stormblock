@@ -128,6 +128,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         r
     };
 
+    // `/metrics` is served here rather than beside this router so that the
+    // credential check below covers it too: telemetry names this node's
+    // volumes and how full it is, and `serve::api::is_public` has always said
+    // a scrape is not a probe. A scraper presents the token like anything
+    // else.
+    let r = r.merge(crate::mgmt::metrics::metrics_router(state.clone()));
+
     // One credential check, over every surface this router serves (#107).
     //
     // It goes on last so it wraps `/api/v1`, `/v1`, `/serve/v1` and the kube

@@ -114,10 +114,10 @@ pub struct AuthConfig {
 /// and drops the node to a shell. It answers a constant: name, version, and
 /// whether authentication is on. Nothing about this node's volumes.
 ///
-/// `/metrics` is public because a fleet scraper cannot hold a token that is
-/// minted per node. It is the one read surface that is exposed by policy, and
-/// the cost is that a scrape reveals capacity and volume counts. Put the
-/// engine behind TLS and a network boundary if that matters.
+/// `/metrics` is deliberately *not* here, and that predates #107: a scrape
+/// names this node's volumes and says how full it is, which is a read of the
+/// node's state rather than a question about whether it is alive. A scraper
+/// presents the token like any other client.
 fn is_public(path: &str) -> bool {
     matches!(
         path,
@@ -126,7 +126,6 @@ fn is_public(path: &str) -> bool {
             | "/mk/v1/ready"
             | "/mk/v1/health"
             | "/api/v1/health"
-            | "/metrics"
     )
 }
 
@@ -1265,6 +1264,9 @@ mod tests {
     fn only_probes_are_public() {
         assert!(is_public("/mk/v1/ready"));
         assert!(is_public("/mk/v1/health"));
+        // The question a booting node asks of every address DHCP gave it,
+        // before it has any credential (#107).
+        assert!(is_public("/api/v1/health"));
         assert!(!is_public("/mk/v1/status"));
         assert!(!is_public("/api/v1/volumes"));
         assert!(!is_public("/metrics"));
