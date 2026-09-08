@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### 2026-09-08 (boot testing)
+- **fix(boot-local):** a flow-over failure no longer takes the boot down with
+  it. Every step of taking a local disk can fail for reasons that have nothing
+  to do with the root filesystem, and the root is already attached and serving
+  from the appliance by then — which is where it lived before flow-over
+  existed. `refusing to format /dev/sda for flow-over` propagated out of
+  `boot-local`, so `/dev/ublkb0` was never exported and the boot ended at
+  `FATAL: root device /dev/ublkb0 not found after 30s`: a failure naming the
+  root device, saying nothing about the local disk, on a node whose root was
+  reachable throughout. It warns on the console now and boots.
+- **fix(initramfs):** `rd.stormblock.wipe` re-reads the partition table.
+  Clearing the bytes is not clearing the table — the kernel keeps what it read
+  when it saw the disk, so `/dev/sda1` stays and anything that asks the kernel
+  gets the answer from before the wipe. The wipe reported "front cleared" and
+  the very next step still refused the drive for carrying a data slab in
+  partition 1, naming a partition that no longer existed on the disk.
+
 ## [v15.1.0] — 2026-09-08
 
 ### 2026-09-08 (later still)

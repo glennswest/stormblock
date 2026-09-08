@@ -4328,125 +4328,156 @@ async fn handle_boot_local(
     //    background, one extent per lock cycle so root I/O keeps flowing.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     if let Some(disk) = local_disk {
-        let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
-        // The target is about to be formatted. An operator supplies a path,
-        // and a path proves nothing about what is on the device — so ask the
-        // device (#88). A reinstall is exactly "boot a fresh image and flow
-        // over onto the disk the previous install was on", and that disk is
-        // where this node's CA and its ServiceAccount signing key live.
-        if let Some(what) = data_slab_on(disk).await? {
-            anyhow::bail!(
-                "refusing to format {disk} for flow-over: {what}. That partition holds this \
-                 node's identity — its CA key and its ServiceAccount signing key — and nothing \
-                 can mint it again. Point --local-disk at the system partition, or at a drive \
-                 that carries no data slab"
+        // Flow-over is an optimisation, and an optimisation may not decide
+        // whether a node boots.
+        //
+        // Every one of these steps can fail for a reason that has nothing to
+        // do with the root filesystem: the drive already carries a data slab,
+        // it is smaller than a slab needs, it has developed a fault. The root
+        // is already attached and serving by this point — from the appliance,
+        // which is exactly where it lived before any of this existed. Failing
+        // the whole boot for it costs a node that was otherwise fine.
+        //
+        // It did. `refusing to format /dev/sda for flow-over` propagated out
+        // of `boot-local`, so `/dev/ublkb0` was never exported and the boot
+        // ended as
+        //
+        //     FATAL: root device /dev/ublkb0 not found after 30s
+        //     Dropping to shell...
+        //
+        // — a failure that names the root device and says nothing about the
+        // local disk, for a node whose root was reachable the whole time.
+        let flow_over: anyhow::Result<()> = async {
+            let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // The target is about to be formatted. An operator supplies a path,
+            // and a path proves nothing about what is on the device — so ask the
+            // device (#88). A reinstall is exactly "boot a fresh image and flow
+            // over onto the disk the previous install was on", and that disk is
+            // where this node's CA and its ServiceAccount signing key live.
+            if let Some(what) = data_slab_on(disk).await? {
+                anyhow::bail!(
+                    "refusing to format {disk} for flow-over: {what}. That partition holds this \
+                     node's identity — its CA key and its ServiceAccount signing key — and nothing \
+                     can mint it again. Point --local-disk at the system partition, or at a drive \
+                     that carries no data slab"
+                );
+            }
+            // Nor may a data slab be *drained* into the system disk: moving those
+            // extents puts identity back in the half the next image replaces.
+            let dest_dev: Arc<dyn BlockDevice> =
+                Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+
+            // Both halves, each onto a slab of its own role.
+            //
+            // This formatted the whole device as one slab — which takes
+            // `SlabRole`'s default, System — and then drained only the non-data
+            // slabs onto it. So the goldens came local and the *writes* did not:
+            // every log line, every claim and every byte of `stormcos-state`
+            // still landed in a clone on the appliance, for the life of the node.
+            // One node can afford that. Twenty write to one appliance.
+            //
+            // The layout is the image's own, for the image's own reason: an
+            // install replaces the system end and leaves the data end alone, and
+            // the two are told apart from the partition table (#88).
+            let mut layout = stormblock::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
+            layout.slot_size = mgr.slot_size();
+            layout.tier = tier;
+            let laid = stormblock::image::local::lay_node_slabs(dest_dev, &layout)
+                .await
+                .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
+            let data_id = laid.data.slab_id();
+            let system_id = laid.system.slab_id();
+            println!(
+                "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({})",
+                stormblock::mgmt::config::human_size(laid.data_bytes),
+                stormblock::mgmt::config::human_size(laid.system_bytes),
             );
-        }
-        // Nor may a data slab be *drained* into the system disk: moving those
-        // extents puts identity back in the half the next image replaces.
-        let dest_dev: Arc<dyn BlockDevice> =
-            Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
 
-        // Both halves, each onto a slab of its own role.
-        //
-        // This formatted the whole device as one slab — which takes
-        // `SlabRole`'s default, System — and then drained only the non-data
-        // slabs onto it. So the goldens came local and the *writes* did not:
-        // every log line, every claim and every byte of `stormcos-state`
-        // still landed in a clone on the appliance, for the life of the node.
-        // One node can afford that. Twenty write to one appliance.
-        //
-        // The layout is the image's own, for the image's own reason: an
-        // install replaces the system end and leaves the data end alone, and
-        // the two are told apart from the partition table (#88).
-        let mut layout = stormblock::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
-        layout.slot_size = mgr.slot_size();
-        layout.tier = tier;
-        let laid = stormblock::image::local::lay_node_slabs(dest_dev, &layout)
-            .await
-            .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
-        let data_id = laid.data.slab_id();
-        let system_id = laid.system.slab_id();
-        println!(
-            "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({})",
-            stormblock::mgmt::config::human_size(laid.data_bytes),
-            stormblock::mgmt::config::human_size(laid.system_bytes),
-        );
+            // The system half only. **Do not migrate a live data slab.**
+            //
+            // Tried, on hardware, and it corrupts. The flow-over moves extents
+            // out from under mounted, actively-written filesystems, and the data
+            // slab is exactly the half that is being written — logs, state,
+            // claims. Within a minute the node reported
+            //
+            //   EXT4-fs error (device ublkb26): __ext4_find_entry:
+            //       checksumming directory block 0
+            //   capturing state: no ext2/3/4 superblock found (magic was 0x0000)
+            //
+            // and stormdrive was in a restart loop. The goldens survive it
+            // because nothing writes to them; a data volume does not.
+            //
+            // The local data slab is still laid down and still registered, so it
+            // is there to be *allocated into*. What must not happen is moving
+            // extents that a mounted filesystem is using. Putting the writable
+            // volumes on it belongs before `switch_root`, where nothing has
+            // written a byte yet — which is the argument zeroboot#2 makes and the
+            // reason it runs in the initramfs (stormcos#36).
+            let source_slabs: Vec<(_, _)> = {
+                let reg = mgr.registry().read().await;
+                reg.iter()
+                    .filter(|(_, s)| !s.is_data())
+                    .map(|(id, _)| (*id, system_id))
+                    .collect()
+            };
+            let _ = data_id;
+            {
+                let mut reg = mgr.registry().write().await;
+                reg.add(laid.data);
+                reg.add(laid.system);
+            }
+            println!("Flow-over: migrating {} slab(s) to {disk} in background", source_slabs.len());
 
-        // The system half only. **Do not migrate a live data slab.**
-        //
-        // Tried, on hardware, and it corrupts. The flow-over moves extents
-        // out from under mounted, actively-written filesystems, and the data
-        // slab is exactly the half that is being written — logs, state,
-        // claims. Within a minute the node reported
-        //
-        //   EXT4-fs error (device ublkb26): __ext4_find_entry:
-        //       checksumming directory block 0
-        //   capturing state: no ext2/3/4 superblock found (magic was 0x0000)
-        //
-        // and stormdrive was in a restart loop. The goldens survive it
-        // because nothing writes to them; a data volume does not.
-        //
-        // The local data slab is still laid down and still registered, so it
-        // is there to be *allocated into*. What must not happen is moving
-        // extents that a mounted filesystem is using. Putting the writable
-        // volumes on it belongs before `switch_root`, where nothing has
-        // written a byte yet — which is the argument zeroboot#2 makes and the
-        // reason it runs in the initramfs (stormcos#36).
-        let source_slabs: Vec<(_, _)> = {
-            let reg = mgr.registry().read().await;
-            reg.iter()
-                .filter(|(_, s)| !s.is_data())
-                .map(|(id, _)| (*id, system_id))
-                .collect()
-        };
-        let _ = data_id;
-        {
-            let mut reg = mgr.registry().write().await;
-            reg.add(laid.data);
-            reg.add(laid.system);
-        }
-        println!("Flow-over: migrating {} slab(s) to {disk} in background", source_slabs.len());
-
-        let gem_arc = mgr.gem().clone();
-        let reg_arc = mgr.registry().clone();
-        let mut flow_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            let engine = stormblock::placement::PlacementEngine::new();
-            let mut moved = 0u64;
-            let mut failed = 0u64;
-            for (source, dest_id) in source_slabs {
-                loop {
-                    if *flow_shutdown.borrow_and_update() {
-                        return;
-                    }
-                    // One extent per lock cycle: ublk I/O interleaves between
-                    // iterations instead of stalling for the whole migration.
-                    let mut gem = gem_arc.write().await;
-                    let mut reg = reg_arc.write().await;
-                    let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next()
-                    else {
-                        break;
-                    };
-                    match engine
-                        .migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest_id))
-                        .await
-                    {
-                        Ok(_) => moved += 1,
-                        Err(e) => {
-                            failed += 1;
-                            tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
-                            if failed > 16 {
-                                tracing::error!("flow-over: aborting after repeated failures");
-                                return;
+            let gem_arc = mgr.gem().clone();
+            let reg_arc = mgr.registry().clone();
+            let mut flow_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let engine = stormblock::placement::PlacementEngine::new();
+                let mut moved = 0u64;
+                let mut failed = 0u64;
+                for (source, dest_id) in source_slabs {
+                    loop {
+                        if *flow_shutdown.borrow_and_update() {
+                            return;
+                        }
+                        // One extent per lock cycle: ublk I/O interleaves between
+                        // iterations instead of stalling for the whole migration.
+                        let mut gem = gem_arc.write().await;
+                        let mut reg = reg_arc.write().await;
+                        let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next()
+                        else {
+                            break;
+                        };
+                        match engine
+                            .migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest_id))
+                            .await
+                        {
+                            Ok(_) => moved += 1,
+                            Err(e) => {
+                                failed += 1;
+                                tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
+                                if failed > 16 {
+                                    tracing::error!("flow-over: aborting after repeated failures");
+                                    return;
+                                }
                             }
                         }
                     }
                 }
-            }
-            tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
-            println!("Flow-over complete: {moved} extent(s) now on local disk");
-        });
+                tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
+                println!("Flow-over complete: {moved} extent(s) now on local disk");
+            });
+            Ok(())
+        }
+        .await;
+        if let Err(e) = flow_over {
+            // Said plainly, and on the console, because this is the one line
+            // that explains why a node that was going to run locally is
+            // running from the appliance instead.
+            println!("Flow-over: not taking {disk} — {e}");
+            println!("Flow-over: the node boots from the appliance, unaffected.");
+            tracing::warn!("flow-over disabled for {disk}: {e}");
+        }
     }
 
     // 5. Export via ublk (Linux 6.0+ with ublk_drv).

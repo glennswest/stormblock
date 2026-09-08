@@ -1174,6 +1174,27 @@ if [ "$BOOT_MODE" = "local" ]; then
         END=$(( $(blockdev --getsize64 "$WIPE" 2>/dev/null || echo 0) / 1048576 - 8 ))
         [ "$END" -gt 0 ] && dd if=/dev/zero of="$WIPE" bs=1M count=8 seek="$END" conv=fsync \
             2>/dev/null && echo "  back cleared (the mirror GPT)"
+        # Clearing the bytes is not clearing the partition table.
+        #
+        # The kernel read that table when it saw the disk, and it keeps it:
+        # /dev/sda1 and /dev/sda2 stay, `blkid` still names them, and anything
+        # that asks the *kernel* what is on this drive gets the answer from
+        # before the wipe. So the wipe ran, reported "front cleared", and the
+        # very next step still refused the drive:
+        #
+        #     refusing to format /dev/sda for flow-over: /dev/sda partition 1
+        #     (stormblock-data) is typed as a stormblock data slab
+        #
+        # naming a partition that no longer existed on the disk it named.
+        if blockdev --rereadpt "$WIPE" 2>/dev/null; then
+            echo "  partition table re-read - the kernel now sees a blank drive"
+        else
+            # A drive with something open on it refuses the re-read, and then
+            # the stale table is still live: say so rather than let the next
+            # step fail describing partitions that are already gone.
+            echo "  WARNING: the kernel would not re-read $WIPE's partition table."
+            echo "           Its old partitions are still live; a reboot clears them."
+        fi
     elif [ -n "${WIPE:-}" ]; then
         echo "rd.stormblock.wipe=$WIPE is not a block device - ignoring"
     fi
