@@ -518,6 +518,7 @@ for param in $(cat /proc/cmdline); do
         # boots it, so it names the appliance, never the namespace.
         rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
         rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
+        rd.stormblock.assimilate=*)  ASSIMILATE="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the
@@ -1271,11 +1272,67 @@ if [ "$BOOT_MODE" = "local" ]; then
         IFS=$OIFS
     fi
 
+    # Is there a local drive worth putting this node's writes on?
+    #
+    # A netbooted node's writable volumes are clones served from the
+    # appliance: writable, and not durable, because a fresh clone is minted
+    # every boot. `stormcos-state` makes it concrete — PID 1 reads the
+    # hostname out of it and that hostname is the node CA's subject CN, so a
+    # node whose state is remote cannot keep its own identity across a
+    # reboot. And twenty nodes writing their logs across the network land on
+    # one appliance.
+    #
+    # Looking comes before taking. A drive is only a candidate if it says
+    # what it is: `stormblock slab list` prints `: slab <uuid>` for a slab and
+    # names the role, and anything else - a foreign partition table, an empty
+    # removable bay answering ENOMEDIUM - is not evidence of emptiness. The
+    # policy decides what to do with that:
+    #
+    #   off    (default) never take a drive
+    #   blank  take a drive that carries no slab and no partition table
+    #   any    take any drive that is not already a stormblock slab
+    #
+    # `any` is a fleet-wide statement that local drives are ours to use, not a
+    # fact about one machine. A drive that already carries a *data* slab is
+    # refused by boot-local itself, whatever the policy says, because that
+    # partition holds this node's CA key and nothing can mint it again.
+    LOCAL_DISK=""
+    case "${ASSIMILATE:-off}" in
+    off|"") ;;
+    blank|any)
+        for d in /sys/block/sd? /sys/block/nvme?n?; do
+            [ -e "$d" ] || continue
+            dev="/dev/$(basename "$d")"
+            [ "$(cat "$d/removable" 2>/dev/null)" = "1" ] && continue
+            [ "$(cat "$d/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
+            # Do not eat the disk this boot is running from.
+            case "$SLAB" in *"$(basename "$d")"*) continue ;; esac
+            probe=$(/usr/sbin/stormblock slab list "$dev" 2>&1)
+            case "$probe" in
+                *": slab "*|*"data slab"*)
+                    echo "  $dev is already a stormblock slab - leaving it" ;;
+                *)
+                    if [ "$ASSIMILATE" = blank ] && \
+                       /usr/sbin/stormblock slab list "$dev" 2>&1 | grep -q "partition"; then
+                        echo "  $dev carries partitions and the policy is 'blank' - leaving it"
+                    else
+                        LOCAL_DISK="$dev"
+                        echo "  $dev is nobody's - this node will take it"
+                        break
+                    fi ;;
+            esac
+        done
+        [ -z "$LOCAL_DISK" ] && echo "  no local drive to take; writes stay on the appliance"
+        ;;
+    *) echo "  unknown rd.stormblock.assimilate='$ASSIMILATE' (off|blank|any)" ;;
+    esac
+
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
     # Volume comes from --volume if given, else /etc/stormblock/boot.toml.
     # shellcheck disable=SC2086
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
+        ${LOCAL_DISK:+--local-disk "$LOCAL_DISK"} \
         ${META:+--meta "$META"} \
         ${IMAGE_STORE:+--image-store "$IMAGE_STORE"} \
         ${VOLUME:+--volume "$VOLUME"} \
