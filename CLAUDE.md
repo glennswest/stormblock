@@ -769,10 +769,13 @@ metadata region the way `slab info` reads the header.
   writing. A survey command must not: `open_read_only` is the door for
   anything that inspects, and `slab volumes /dev/sdz` no longer creates
   `/dev/sdz`.
-- `slab format --role system` reserves **no** metadata region (only `--role
-  data` does, via `with_auto_metadata`); a system slab that is self-describing
-  got that region from `image build`. Worth knowing before testing this by
-  hand.
+- `slab format --role system` reserved **no** metadata region — fixed in the
+  same session. `image build` had always given both roles one, so the two
+  ways of making a disk produced different things, and the hand-made one
+  could only be read by attaching it. Every formatting path now auto-sizes a
+  region (`--metadata-bytes 0` opts out); `Slab::format` stays the plain
+  primitive that reserves nothing, because ~20 callers and tests depend on
+  its geometry.
 
 ---
 

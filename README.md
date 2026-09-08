@@ -671,6 +671,15 @@ Three answers, deliberately distinct, because a boot decision turns on which:
 | `slab <id> holds no volumes` | the slab can say, and says it is empty — formatted and never filled |
 | `slab <id> keeps no volume metadata` | the slab cannot say; its records live wherever `rd.stormblock.meta=` points |
 
+Every slab this engine formats reserves a region for that record — `slab
+format`, `POST /api/v1/slabs` and the pool-growth path alike, sized from the
+device. It used to be `data` slabs alone, on the reasoning that outliving
+whatever formatted it is the point of that role; `image build` has always
+given both roles one, so a disk formatted by hand and a disk the builder laid
+down were not the same kind of thing, and the hand-formatted one could only be
+read by attaching it. `--metadata-bytes 0` (or `metadata_bytes: 0`) formats a
+slab that deliberately keeps no record of itself.
+
 ### Booting: who decides where
 
 The initramfs decides where a node boots from, and `docs/boot-hooks.md`
