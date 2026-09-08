@@ -234,10 +234,25 @@ mod tests {
 
         // Somebody else's life on it, at both ends — which is where every
         // scanner looks.
+        //
+        // A recognisable *string*, not a byte value: what replaces this is a
+        // GPT, whose entries are GUIDs, and a single byte value turns up in
+        // random data often enough to fail a test that is looking at the wrong
+        // thing.
+        const OLD_FRONT: &[u8] = b"OLD-FILESYSTEM-SUPERBLOCK";
+        const OLD_TAIL: &[u8] = b"OLD-MDRAID-SUPERBLOCK-AT-THE-END";
         {
             let dev = FileDevice::open_with_capacity(&path, CAP).await.unwrap();
-            dev.write(0, &vec![0xAB_u8; 1024 * 1024]).await.unwrap();
-            dev.write(CAP - 1024 * 1024, &vec![0xCD_u8; 1024 * 1024]).await.unwrap();
+            let mut front = vec![0u8; 1024 * 1024];
+            for chunk in front.chunks_mut(4096) {
+                chunk[..OLD_FRONT.len()].copy_from_slice(OLD_FRONT);
+            }
+            let mut tail = vec![0u8; 1024 * 1024];
+            for chunk in tail.chunks_mut(4096) {
+                chunk[..OLD_TAIL.len()].copy_from_slice(OLD_TAIL);
+            }
+            dev.write(0, &front).await.unwrap();
+            dev.write(CAP - 1024 * 1024, &tail).await.unwrap();
             dev.flush().await.unwrap();
         }
 
@@ -248,13 +263,16 @@ mod tests {
         assert_eq!(laid.data.role(), SlabRole::Data);
         assert_eq!(laid.system.role(), SlabRole::System);
 
+        let found = |hay: &[u8], needle: &[u8]| {
+            hay.windows(needle.len()).any(|w| w == needle)
+        };
         let front = window(&path, 0, 4 * 1024 * 1024);
-        assert!(!front.contains(&0xAB), "the front still carries what was there");
+        assert!(!found(&front, OLD_FRONT), "the front still carries what was there");
         // The tail is the half a fresh GPT alone would not have touched: our
         // backup header lands there only if the LBA size happens to match the
         // old table's.
         let tail = window(&path, CAP - 1024 * 1024, 1024 * 1024);
-        assert!(!tail.contains(&0xCD), "the tail still carries what was there");
+        assert!(!found(&tail, OLD_TAIL), "the tail still carries what was there");
     }
 
     /// The wipe is bounded by the drive, so a small one is not asked for more
