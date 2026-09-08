@@ -1014,13 +1014,25 @@ if [ -n "$NETADDR" ]; then
             # resolve back to the address asking. A stale record fails that,
             # and the node falls through to naming itself.
             if [ -n "$PTRNAME" ]; then
+                # Among its addresses, not equal to the last of them.
+                #
+                # A node with two NICs on one network has one name and two A
+                # records, which is the ordinary arrangement and not a
+                # mistake: `stormblock1.g16.lo` answers 192.168.30.1 and
+                # 192.168.30.2. Taking the *last* address the resolver
+                # happened to list and demanding it equal this interface's
+                # made the check a coin toss — the same node, the same DNS,
+                # confirmed or rejected depending on the order of an answer
+                # nobody controls. Membership is the question forward-confirmed
+                # reverse DNS actually asks: does the name the PTR gave resolve
+                # back to the address that asked.
                 BACK=$(nslookup "$PTRNAME" 2>/dev/null \
-                       | awk '/^Address: /{ print $2 }' | tail -1)
-                if [ "$BACK" = "$MYIP" ]; then
+                       | awk '/^Address: /{ print $2 }')
+                if printf '%s\n' "$BACK" | grep -qxF "$MYIP"; then
                     NODE_NAME=${PTRNAME%%.*}
                     echo "  name from DNS: $NODE_NAME ($MYIP, confirmed)"
                 else
-                    echo "  DNS calls $MYIP '$PTRNAME', which resolves to '${BACK:-nothing}' - ignoring"
+                    echo "  DNS calls $MYIP '$PTRNAME', which resolves to '$(printf '%s' "${BACK:-nothing}" | tr '\n' ' ')' - ignoring"
                 fi
             fi
         fi
