@@ -540,7 +540,21 @@ done
 
 # Local-slab boot (stormcos) when a slab is named on the cmdline, or when the
 # initramfs carries a boot.toml handoff and no iSCSI portal was given.
-BOOT_MODE="iscsi"
+#
+# iSCSI is the mode that has to be *asked for*, because it needs a portal, an
+# IQN and a layout and none of those can be discovered. Everything else is a
+# stormblock boot.
+#
+# This used to require a slab or an appliance named on the command line, and
+# defaulted to iSCSI when neither was there. Both are discovered now — the
+# slab from the local disk, the appliance from DHCP — and discovery runs
+# *after* this point, so an image that names neither chose iSCSI, failed
+# validation for want of a portal, and never reached the code that would have
+# found what it needed.
+BOOT_MODE="local"
+if [ -n "$PORTAL" ] && [ -z "$SLAB" ] && [ -z "$BOOTHOST" ]; then
+    BOOT_MODE="iscsi"
+fi
 if [ -n "$SLAB" ]; then
     BOOT_MODE="local"
 elif [ -n "$BOOTHOST" ]; then
