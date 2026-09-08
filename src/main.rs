@@ -3983,12 +3983,10 @@ async fn seed_data_half(
         println!("Flow-over: the data half of {disk} has everything this boot would copy");
         return Ok(());
     }
-    let volumes = {
-        let mut v: Vec<_> = todo.iter().map(|(vol, _)| *vol).collect();
-        v.sort();
-        v.dedup();
-        v.len()
-    };
+    // By uuid, because VolumeId is an identity and deliberately not ordered.
+    let volumes: std::collections::HashSet<uuid::Uuid> =
+        todo.iter().map(|(vol, _)| vol.0).collect();
+    let volumes = volumes.len();
     println!(
         "Flow-over: seeding the data half of {disk} - {} volume(s), {} extent(s)",
         volumes,
