@@ -436,6 +436,30 @@ enum SlabAction {
         /// Device path of the slab
         device: String,
     },
+    /// List the volumes a slab says it holds — offline, read-only (#108).
+    ///
+    /// The volume records live on the device, in the region the header's
+    /// `meta_offset`/`meta_size` name, and this reads them exactly the way
+    /// `slab info` reads the header: no daemon, no reactor, no ublk, no root
+    /// and nothing attached. It is the check something has to make *before*
+    /// it decides whether this slab is one to touch at all — an initramfs
+    /// deciding whether to boot from this disk or ask the appliance, and a
+    /// disk formatted and never filled passes every other check and boots
+    /// nothing.
+    ///
+    /// Prints positive evidence, in the shape `slab list` uses, so a caller
+    /// can require a match rather than infer one from the absence of an
+    /// error:
+    ///
+    ///   /dev/sda2: volume boot-cp-01 (2.1 GB, 540 slots)
+    ///
+    /// A slab with no metadata region says so rather than reporting no
+    /// volumes: "keeps no volume metadata" and "holds no volumes" are
+    /// different answers, and only one of them means the disk is empty.
+    Volumes {
+        /// Device paths, partitions or image files to read
+        devices: Vec<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -1630,6 +1654,80 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 slab.total_slots() * slab.slot_size()));
             println!("  free: {}", stormblock::mgmt::config::human_size(
                 slab.free_slots() * slab.slot_size()));
+        }
+        SlabAction::Volumes { devices } => {
+            for device in devices {
+                let dev = match stormblock::drive::filedev::FileDevice::open(device).await {
+                    Ok(d) => Arc::new(d) as Arc<dyn BlockDevice>,
+                    Err(e) => {
+                        println!("{device}: cannot open ({e})");
+                        continue;
+                    }
+                };
+                let slab = match Slab::open(dev).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("{device}: not a slab ({e})");
+                        continue;
+                    }
+                };
+                // Said apart from "no volumes", because they are different
+                // facts: one is a slab that cannot answer and the other is a
+                // slab that answered "nothing". A caller that treats them the
+                // same boots off an empty disk.
+                if !slab.has_metadata_region() {
+                    println!("{device}: slab {} keeps no volume metadata", slab.slab_id());
+                    continue;
+                }
+                let bytes = match slab.read_metadata().await {
+                    Ok(Some(b)) => b,
+                    Ok(None) => {
+                        println!("{device}: slab {} keeps no volume metadata", slab.slab_id());
+                        continue;
+                    }
+                    Err(e) => {
+                        println!("{device}: slab {} metadata unreadable ({e})", slab.slab_id());
+                        continue;
+                    }
+                };
+                let meta = match stormblock::volume::MetadataStore::decode(&bytes) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        println!("{device}: slab {} metadata will not decode ({e})", slab.slab_id());
+                        continue;
+                    }
+                };
+                let mut volumes = meta.volumes;
+                volumes.sort_by(|a, b| a.name.cmp(&b.name));
+                if volumes.is_empty() {
+                    println!("{device}: slab {} holds no volumes", slab.slab_id());
+                    continue;
+                }
+                for v in &volumes {
+                    // Slots, not extents: an extent *is* a slot, and slots are
+                    // what `slab list` counts, so the two numbers on a screen
+                    // are in the same unit.
+                    let slots = v.extents.len() as u64;
+                    let mut notes = String::new();
+                    if v.sealed {
+                        notes.push_str(", sealed");
+                    }
+                    if v.template {
+                        notes.push_str(", template");
+                    }
+                    if let Some(parent) = v.parent {
+                        notes.push_str(&format!(", clone of {parent}"));
+                    }
+                    println!(
+                        "{device}: volume {} ({}, {} slots{}) {}",
+                        v.name,
+                        stormblock::mgmt::config::human_size(v.virtual_size),
+                        slots,
+                        notes,
+                        v.id
+                    );
+                }
+            }
         }
     }
     Ok(())
