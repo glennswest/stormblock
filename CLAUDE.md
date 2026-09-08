@@ -670,6 +670,57 @@ Worth not re-deriving:
 
 ---
 
+## Session 2026-09-08 (later) — #105, #106
+
+Two faults that are the same shape: **a promise nothing was checking.**
+
+### #105 — a stop that leaves the kernel holding the devices
+
+The flush was already bounded (`da62b4b`). What was missing is that *nothing
+ever told the ublk exports to stop*: the daemon flushed and returned while
+every export's queue threads sat in `io_uring_enter`. A process that exits
+without STOP_DEV and DEL_DEV leaves those threads in the kernel, and a thread
+stuck in the kernel cannot be reaped — which is the four-day defunct process
+on forge, and why *every* restart after it ended in failed mode.
+
+- The signal goes out **before** anything is waited on, and the flush and the
+  teardown settle together — a stop's budget is the sum of what it does in
+  series.
+- Waiting is done on a flag each export's thread sets, not on `JoinHandle`:
+  `join` cannot be given a deadline. The subcommand paths (`boot-local`,
+  `boot-iscsi`, `adopt-ublk`) *did* join, unbounded, which is the same fault
+  one level down and on the node's own root path.
+- **A unit's `TimeoutStopSec` must stay above the engine's budget (~13 s).**
+  SIGKILL landing mid-teardown is what manufactures the unreapable thread, so
+  the two numbers are one mechanism, not two settings.
+- Verified on metal on dev: attach → `/dev/ublkb0`, SIGTERM, "stopping 1 ublk
+  export(s)" → worker exits → device removed, 0.16 s, no defunct process.
+  Deliberately did **not** demo the "before" — reproducing it on a shared
+  build box leaves a zombie only a reboot clears.
+
+### #106 — a release that outlived its volume
+
+Eight versions with manifests, digests and download links for bytes that were
+gone. The module's own rule ("all four or none") was right and unenforced
+after publication.
+
+- **State is derived, never stored.** `available`/`archived` comes from
+  whether the volume resolves on every read. A stored flag would be a second
+  copy of a fact the volume manager holds, and would be wrong exactly after
+  the volume went — the event nothing was watching for in the first place. It
+  also reads correctly on a node whose slab is not attached yet.
+- **410, not 404.** The release *exists*; what is gone is the image. A 404
+  sends someone looking for a typo in a version printed on the page in front
+  of them.
+- The reference goes in `what_is_serving`, not in the delete handler, so the
+  move guard and the template sweep inherit it. `force=true` deliberately does
+  not cover it: that flag is for a dangling synonym.
+- Still not done, and deliberately (the issue's option 3): no automatic sweep
+  of archived releases, and nothing here touches the 43 unpublished-artifact
+  volumes on forge — that is `/build/forge-cleanup.py`, operational.
+
+---
+
 ## Pallets — engine support (2026-08-19, #51/#52)
 
 A **pallet** is a GPT partition holding a named, versioned, self-contained set

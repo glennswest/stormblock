@@ -616,6 +616,45 @@ with nothing to undo it. `VolumeManager::shrink_volume` exists for a caller
 that means it. Moving a volume onto a smaller one, with its data, is a copy —
 a different operation.
 
+### Releases: available, or archived
+
+A release names a volume; it never copies one, so the download streams out of
+the image that was built. That also means a release can outlive its volume, and
+until #106 nothing said which had: eight versions stood in the index with
+manifests, digests and download links for bytes that had been reclaimed.
+
+Two answers, in both directions:
+
+- **A volume a published release names cannot be deleted.** It comes back
+  `409`, naming the release, the same way a volume with a live export does —
+  `DELETE /api/v1/releases/{version}` first, which withdraws the promise
+  deliberately.
+- **A release whose volume is gone reports `state: "archived"`**, and
+  `GET /api/v1/releases/{version}/image.img` answers **410 Gone** rather than
+  a 404 that reads as "no such version". Its manifest and notes still answer:
+  the record of what a version contained is worth keeping after the bytes are
+  not. The browser index drops the download link rather than offering one that
+  cannot be taken.
+
+The state is derived on every read from whether the volume resolves, never
+stored — a stored flag would be a second copy of a fact the volume manager
+already holds, wrong exactly when it mattered.
+
+### Stopping a node
+
+Every step of shutdown is bounded, and that is a correctness property rather
+than politeness. The engine flushes volume metadata (10 s, then it carries on —
+each slab keeps its own copy of the record, which is what adoption reads) and
+stops its ublk devices (10 s), the two together rather than in series.
+
+The ublk half is the one that bites. An export's queue threads sit in
+`io_uring_enter` waiting for the kernel; a process that exits without STOP_DEV
+and DEL_DEV leaves them there, and **a thread stuck in the kernel cannot be
+reaped** — systemd then finds a process it cannot kill and every subsequent
+restart ends in `failed` mode. So a unit's `TimeoutStopSec` must stay above the
+engine's own budget (~13 s), or SIGKILL lands in the middle of a teardown and
+makes exactly that.
+
 ## Module Structure
 
 ```

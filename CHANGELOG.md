@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+### 2026-09-08 (later)
+- **fix(shutdown): a stop takes the kernel devices down with it (#105).**
+  Nothing told the ublk exports to stop. The daemon handled SIGTERM, flushed
+  metadata and returned — while every export's queue threads sat in
+  `io_uring_enter` waiting for work the kernel would never send. The process
+  exited with the devices still up, leaving threads in the kernel; **a thread
+  stuck in the kernel cannot be reaped**, which is how forge came to carry a
+  defunct process in its unit's cgroup for four days and why every restart
+  after it ended in "failed mode": systemd found something it could not kill.
+  `UblkExportManager::shutdown_all` now signals every export and returns a
+  `ShutdownWait` the caller settles with a deadline of its own (a flag set by
+  each export's thread, not a `JoinHandle` — `join` takes no deadline, and the
+  one thing a stop must not do is wait forever). The daemon signals before it
+  waits on anything, then flushes and settles together: ~13 s worst case,
+  inside the unit's `TimeoutStopSec`, which is the number that decides whether
+  SIGKILL lands in the middle of a teardown. Proven on metal: attach →
+  `/dev/ublkb0`, SIGTERM, device removed, stop in 0.16 s, no defunct process.
+- **fix(shutdown): the subcommand paths join their ublk threads with a
+  deadline.** `boot-local`, `boot-iscsi`, `adopt-ublk` already signalled and
+  joined, but joined unbounded — one wedged teardown held the whole stop open
+  until systemd escalated, which is the same fault on the node's own root
+  path. `join_ublk_threads` bounds them and says how many did not finish.
+- **feat(releases): a release says whether it can still be downloaded
+  (#106).** Eight published versions on forge named volumes that had been
+  reclaimed: manifests, digests and download links, with nothing behind them,
+  and nothing distinguishing them from a release a consumer could fetch. Every
+  release now reports `state` — `available` or `archived` — derived on read
+  from whether its volume resolves, never stored. An archived release's
+  `image.img` answers **410 Gone**, not a 404 that reads as "no such version",
+  and says where its manifest still is; the browser index drops the link
+  rather than offering one that cannot be taken. Its manifest and notes stand:
+  the record of what a version contained is worth keeping after the bytes are
+  not.
+- **fix(volumes): a volume a published release names cannot be deleted
+  (#106).** The release joins exports, LUNs, ublk devices and StormFS pins in
+  the one shared "what is still using this volume" answer, so delete *and* the
+  move guard *and* the template sweep all refuse it, naming the version and
+  saying to unpublish first. `force=true` does not cover it — that flag is for
+  a dangling synonym, and orphaning a release is a different decision.
+
 ## [v14.0.0] — 2026-09-08
 
 ### 2026-09-08
