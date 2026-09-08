@@ -68,6 +68,24 @@
   partition 1, naming a partition that no longer existed on the disk.
 
 ### 2026-09-08 (later still, cont.)
+- **feat(boot): a reinstall replaces the system half and keeps the data
+  half.** The drive a node installed onto carries two things — the goldens,
+  which a fresh boot exists to replace, and the data slab, which holds the
+  node's CA key and its ServiceAccount signing key and cannot be made again.
+  Laying a new table destroys the second to refresh the first; refusing the
+  drive leaves the node running from the appliance for the rest of its life.
+  Those were the only two answers. A drive that is already this node's layout
+  — both halves, told apart by their partition types, which is what those
+  types are for (#88) — is now *updated*: the system partition formatted
+  afresh for the goldens the flow-over is about to copy in, the data partition
+  opened and left exactly as it is, and the node boots normally with the
+  identity it already had. No wipe, no new table, and no
+  `--local-disk-force`, because nothing is destroyed that an install is not
+  meant to destroy. The data slab is opened rather than assumed: a data
+  partition that will not open as one is the abandoned-install case, and that
+  is what `force` is for. `/init` takes such a drive instead of stepping over
+  it — "already a stormblock slab, leaving it" is what made a reinstall a dead
+  end.
 - **BREAKING feat(initramfs): assimilation defaults to `any` — the drive is
   ours.** A node that netboots this image is being installed, and `off` made
   the common case (one drive, netbooted to be installed) do nothing and keep

@@ -76,10 +76,19 @@ scans rather than asks. The alternative to installing over it is a setup API
 and a remote UI to drive it, which is a great deal of machinery to decide
 something the boot already decided.
 
-What `any` still refuses is a drive carrying one of *our* slabs. That is not
-caution about garbage: the data partition holds this node's CA key and its
-ServiceAccount signing key, and nothing can mint those again. `force` is the
-deliberate act for a drive whose identity is spent.
+A drive carrying one of *our* slabs is a different question, because what is
+on it is not garbage. Three cases, and they get three answers:
+
+| the drive | what happens |
+|---|---|
+| this node's own layout — a data half and a system half | **updated**: the system half is formatted afresh for the new goldens, the data half is opened and kept, and the node boots normally with the identity it already had. This is what an install *is*, and it needs no `force`. |
+| a lone data slab | refused. That is an install abandoned part-way, and it is indistinguishable from a live node's identity — `--local-disk-force` is the deliberate act for a drive whose identity is spent. |
+| a lone system slab | left alone; the policy is about drives that are nobody's. |
+
+The data half holds this node's CA key and its ServiceAccount signing key, and
+nothing can mint those again — which is why it is opened rather than assumed:
+a data partition that will not open as a data slab stops the flow-over instead
+of being guessed at.
 
 Those are *fleet* statements, applied by a scan that can only ask `slab list`
 whether a drive is one of ours. That is the right question for a policy and a
