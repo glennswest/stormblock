@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v14.0.0] — 2026-09-08
+
 ### 2026-09-08
 - **BREAKING fix(mgmt): the management API is guarded, and a node that is not
   says so out loud (#107).** From a workstation, with no credential of any
