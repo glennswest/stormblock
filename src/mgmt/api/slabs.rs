@@ -63,9 +63,20 @@ pub struct FormatSlabRequest {
     ///
     /// A slab with no metadata region cannot say what volumes are on it, so
     /// the only statement of that lives wherever the engine happened to keep
-    /// it — and storage that arrived as a drive has no such place. A `data`
-    /// slab therefore reserves one by default: outliving whatever formatted it
-    /// is the entire point of the role.
+    /// it — and storage that arrived as a drive has no such place.
+    ///
+    /// **Every role reserves one by default**, sized from the device. It was
+    /// `data` alone, on the reasoning that outliving whatever formatted it is
+    /// the entire point of that role — true, and not a reason for a system
+    /// slab to be unable to answer. `image build` has always given both roles
+    /// a region, so a disk this API formatted and a disk the image builder
+    /// laid down behaved differently: `stormblock slab volumes` answered
+    /// "keeps no volume metadata" for the first, the initramfs boot probe
+    /// could not verify its boot volume, and the fallback the shutdown flush
+    /// relies on — "each slab keeps its own copy, which is what adoption
+    /// reads" — did not exist for it.
+    ///
+    /// Pass `0` for a slab that deliberately keeps no record of itself.
     #[serde(default)]
     pub metadata_bytes: Option<u64>,
 }
@@ -206,8 +217,10 @@ async fn format_slab(
         },
         None => None,
     };
-    // A data slab keeps its own record unless told otherwise: its reason for
-    // existing is to survive the thing that would otherwise hold it.
+    // Every slab keeps its own record unless told otherwise. For a data slab
+    // that is the reason the role exists — surviving the thing that would
+    // otherwise hold it — and for a system slab it is what lets anything ask
+    // what is on the disk without attaching it.
     //
     // Size that region from the drive, not from a constant. A volume record
     // carries its whole extent map, so what the region has to hold scales
@@ -217,12 +230,9 @@ async fn format_slab(
     // presented was not "out of space": writes kept being acknowledged and
     // nothing was durable, so a restart came back with a fraction of its
     // volumes and a published release that had never been on disk.
-    let meta_bytes = req.metadata_bytes.unwrap_or(match role {
-        crate::drive::slab::SlabRole::Data => {
-            crate::drive::slab::auto_metadata_bytes(device.capacity_bytes(), slot_size)
-        }
-        _ => 0,
-    });
+    let meta_bytes = req
+        .metadata_bytes
+        .unwrap_or_else(|| crate::drive::slab::auto_metadata_bytes(device.capacity_bytes(), slot_size));
     let opts = crate::drive::slab::SlabFormat::new(slot_size, tier)
         .with_role(role)
         .with_metadata(meta_bytes);

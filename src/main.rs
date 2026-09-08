@@ -425,6 +425,13 @@ enum SlabAction {
         /// `data` (identity and state, which no install may reformat)
         #[arg(long, default_value = "system")]
         role: String,
+        /// Bytes reserved for the slab's own record of what it holds.
+        ///
+        /// Sized from the device by default, for every role: a slab that
+        /// cannot say what is on it can only be read by attaching it. `0`
+        /// formats one that deliberately keeps no record of itself.
+        #[arg(long)]
+        metadata_bytes: Option<u64>,
     },
     /// List slabs on specified devices
     List {
@@ -1577,7 +1584,7 @@ fn parse_tier(s: &str) -> Result<StorageTier, String> {
 
 async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
     match action {
-        SlabAction::Format { device, tier, role } => {
+        SlabAction::Format { device, tier, role, metadata_bytes } => {
             let tier = parse_tier(tier)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let role = SlabRole::parse(role)
@@ -1595,21 +1602,46 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             let dev = Arc::new(
                 stormblock::drive::filedev::FileDevice::open(device).await?
             ) as Arc<dyn BlockDevice>;
-            // A data slab has to carry its own volume records, and how much
-            // room that takes scales with the slots it can hand out — leave
-            // it at the default of none and every write to it is acknowledged
-            // and lost at the next restart.
+            // Every slab carries its own volume records, whatever its role,
+            // and how much room that takes scales with the slots it can hand
+            // out — leave it at none and every write to it is acknowledged and
+            // lost at the next restart.
+            //
+            // This reserved a region for `data` alone, and the reasoning was
+            // sound as far as it went: a data slab has to outlive whatever
+            // formatted it. But `image build` gives *both* roles a region, so
+            // a disk formatted here and a disk the image builder laid down
+            // were not the same kind of thing. A system slab formatted by this
+            // command could not say what was on it: `slab volumes` answered
+            // "keeps no volume metadata", the initramfs boot probe could not
+            // verify the volume the loader entry names, and the fallback the
+            // bounded shutdown flush leans on — each slab keeps its own copy,
+            // which is what adoption reads — did not exist for it.
+            //
+            // `--metadata-bytes 0` is the door out for a slab that
+            // deliberately keeps no record of itself.
             let capacity = dev.capacity_bytes();
-            let mut opts = stormblock::drive::slab::SlabFormat::new(SLAB_SLOT_SIZE, tier)
-                .with_role(role);
-            if role == SlabRole::Data {
-                opts = opts.with_auto_metadata(capacity);
-            }
+            let meta = metadata_bytes.unwrap_or_else(|| {
+                stormblock::drive::slab::auto_metadata_bytes(capacity, SLAB_SLOT_SIZE)
+            });
+            let opts = stormblock::drive::slab::SlabFormat::new(SLAB_SLOT_SIZE, tier)
+                .with_role(role)
+                .with_metadata(meta);
             let slab = Slab::format_with(dev, opts).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Slab formatted: {}", slab.slab_id());
             println!("  role: {}", slab.role());
             println!("  tier: {}", slab.tier());
+            // Said out loud, because "keeps no volume metadata" from
+            // `slab volumes` later is otherwise the first anyone hears of it.
+            println!(
+                "  own record: {}",
+                if slab.has_metadata_region() {
+                    stormblock::mgmt::config::human_size(slab.metadata_capacity())
+                } else {
+                    "none — this slab cannot say what is on it".to_string()
+                }
+            );
             println!("  slot size: {} bytes", slab.slot_size());
             println!("  total slots: {}", slab.total_slots());
             println!("  capacity: {}", stormblock::mgmt::config::human_size(

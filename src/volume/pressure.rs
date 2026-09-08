@@ -386,9 +386,23 @@ impl PressureWatcher {
                     self.slot_size
                 ))
             }
-            Err(_) => Slab::format(device, self.slot_size, StorageTier::Hot)
+            Err(_) => {
+                // With a region for its own record, like every other slab this
+                // engine formats: a volume placed on storage the pool grew into
+                // must be readable from that storage, not only from whatever
+                // directory this engine happened to be keeping records in.
+                let meta = crate::drive::slab::auto_metadata_bytes(
+                    device.capacity_bytes(),
+                    self.slot_size,
+                );
+                Slab::format_with(
+                    device,
+                    crate::drive::slab::SlabFormat::new(self.slot_size, StorageTier::Hot)
+                        .with_metadata(meta),
+                )
                 .await
-                .map_err(|e| format!("formatting: {e}"))?,
+                .map_err(|e| format!("formatting: {e}"))?
+            }
         };
 
         let added = slab.total_slots() * slab.slot_size();
