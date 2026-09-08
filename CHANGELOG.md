@@ -68,6 +68,18 @@
   partition 1, naming a partition that no longer existed on the disk.
 
 ### 2026-09-08 (later still, cont.)
+- **feat(boot): a system half that is already up to date is left alone.** An
+  update has to include not updating: a node that netboots regularly would
+  otherwise reformat its own system half and re-copy every golden on every
+  boot, destroying a working local half to rebuild the same bytes and running
+  from the appliance for the minutes that takes. The flow-over reads what the
+  local system slab already holds — offline, from the slab's own record,
+  nothing attached — and compares it by volume id, which is what a migration
+  preserves: it moves a volume's extents rather than making a new volume, so a
+  half this image has already flowed onto holds the same ids and a new build
+  makes new ones. Only a superset counts as up to date, because a wrong "not
+  up to date" merely re-copies while a wrong "up to date" leaves the node on
+  the appliance — and neither loses anything.
 - **feat(boot): a reinstall replaces the system half and keeps the data
   half.** The drive a node installed onto carries two things — the goldens,
   which a fresh boot exists to replace, and the data slab, which holds the

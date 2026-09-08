@@ -82,6 +82,7 @@ on it is not garbage. Three cases, and they get three answers:
 | the drive | what happens |
 |---|---|
 | this node's own layout — a data half and a system half | **updated**: the system half is formatted afresh for the new goldens, the data half is opened and kept, and the node boots normally with the identity it already had. This is what an install *is*, and it needs no `force`. |
+| the same, already holding what this boot carries | **nothing at all.** The system half's own record is read offline and compared by volume id; if it already holds everything this boot would copy, it is left exactly as it is and the node boots from it. An update that has nothing to update must not reformat a working half and re-copy the same bytes. |
 | a lone data slab | refused. That is an install abandoned part-way, and it is indistinguishable from a live node's identity — `--local-disk-force` is the deliberate act for a drive whose identity is spent. |
 | a lone system slab | left alone; the policy is about drives that are nobody's. |
 
