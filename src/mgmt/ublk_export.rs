@@ -43,6 +43,58 @@ struct Export {
     /// `None` only in tests, which inject an export without a kernel behind it.
     #[cfg(target_os = "linux")]
     server: Option<Arc<crate::drive::ublk::UblkServer>>,
+    /// Set by the export's own thread when `run` has returned — that is, when
+    /// STOP_DEV and DEL_DEV are done and its io_uring queues are closed.
+    ///
+    /// A flag rather than a `JoinHandle` because shutdown has to be *bounded*:
+    /// `join` cannot be given a deadline, and the one thing a stop must not do
+    /// is wait forever (#105).
+    done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Teardowns in flight: what was signalled, and how to wait for it.
+///
+/// Returned by [`UblkExportManager::shutdown_all`] so the caller can do
+/// something else — flush metadata — while the kernel devices go away, and
+/// then wait for them with a deadline it chooses.
+pub struct ShutdownWait {
+    devices: Vec<(String, Arc<std::sync::atomic::AtomicBool>)>,
+}
+
+impl ShutdownWait {
+    /// Nothing was signalled.
+    pub fn none() -> Self {
+        ShutdownWait { devices: Vec::new() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.devices.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.devices.is_empty()
+    }
+
+    /// Wait for every signalled export to finish its teardown, up to `budget`.
+    /// Returns the devices that were still going when it ran out — which is
+    /// what a log line should name, because a process that exits over one of
+    /// those is how an unreapable thread is made.
+    pub async fn settle(self, budget: std::time::Duration) -> Vec<String> {
+        use std::sync::atomic::Ordering;
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let outstanding: Vec<String> = self
+                .devices
+                .iter()
+                .filter(|(_, done)| !done.load(Ordering::SeqCst))
+                .map(|(path, _)| path.clone())
+                .collect();
+            if outstanding.is_empty() || tokio::time::Instant::now() >= deadline {
+                return outstanding;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
 }
 
 /// Tracks the live per-volume ublk exports on this node.
@@ -112,6 +164,35 @@ impl UblkExportManager {
         Ok(false)
     }
 
+    /// Take every export down, for a process that is stopping (#105).
+    ///
+    /// This is not tidiness. A ublk export's queue threads sit in
+    /// `io_uring_enter` waiting for the kernel to hand them I/O; a process
+    /// that exits without STOP_DEV and DEL_DEV leaves them there, and a thread
+    /// stuck in the kernel cannot be reaped — forge carried a defunct process
+    /// in its unit's cgroup for four days, and *every* restart after it ended
+    /// in "failed mode" because systemd found something it could not kill.
+    ///
+    /// Signals, and returns; the caller waits with a deadline of its own.
+    #[cfg(target_os = "linux")]
+    pub fn shutdown_all(&mut self) -> ShutdownWait {
+        let devices = self
+            .exports
+            .drain()
+            .map(|(_volume, export)| {
+                let _ = export.shutdown.send(true);
+                (export.device_path, export.done)
+            })
+            .collect();
+        ShutdownWait { devices }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn shutdown_all(&mut self) -> ShutdownWait {
+        self.exports.clear();
+        ShutdownWait::none()
+    }
+
     /// Tear down the export for `volume_id`, if any (detach / delete).
     pub fn remove(&mut self, volume_id: &str) {
         if let Some(_e) = self.exports.remove(volume_id) {
@@ -155,6 +236,8 @@ impl UblkExportManager {
         let server = Arc::new(UblkServer::new(device));
         let runner = server.clone();
         let id = seq;
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_done = done.clone();
         // UblkServer::run() holds non-Send raw pointers, so it must run on a
         // dedicated OS thread with its own runtime (same pattern as the
         // boot-iscsi ublk export in main.rs).
@@ -173,6 +256,10 @@ impl UblkExportManager {
                         tracing::error!("ublk-csi {id}: export failed: {e}");
                     }
                 });
+                // Last thing this thread does: the device is stopped, deleted
+                // and its queues closed, so a shutdown waiting on it can stop
+                // waiting (#105).
+                thread_done.store(true, std::sync::atomic::Ordering::SeqCst);
             })
             .ok()?;
         // The path is not known until the kernel has assigned one, so wait
@@ -253,7 +340,7 @@ impl UblkExportManager {
         self.next_id += 1;
         self.exports.insert(
             volume_id.to_string(),
-            Export { device_path: device_path.clone(), shutdown, server: Some(server) },
+            Export { device_path: device_path.clone(), shutdown, server: Some(server), done },
         );
         tracing::info!(
             volume = volume_id,
@@ -352,6 +439,7 @@ mod tests {
                     shutdown: tokio::sync::watch::channel(false).0,
                     #[cfg(target_os = "linux")]
                     server: None,
+                    done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 },
             );
         }
@@ -366,6 +454,60 @@ mod tests {
         assert_eq!(mgr.device_path("vol-1"), None);
         // Removing an unknown volume is a no-op.
         mgr.remove("vol-unknown");
+    }
+
+    #[tokio::test]
+    async fn settle_returns_when_every_teardown_has_finished() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let quick = Arc::new(AtomicBool::new(false));
+        let wait = ShutdownWait {
+            devices: vec![("/dev/ublkb1".to_string(), quick.clone())],
+        };
+        let flip = quick.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            flip.store(true, Ordering::SeqCst);
+        });
+        let stuck = wait.settle(std::time::Duration::from_secs(5)).await;
+        assert!(stuck.is_empty(), "a finished teardown must not be reported stuck");
+    }
+
+    /// The case that matters: a teardown that never finishes is *named* and
+    /// the stop carries on. Waiting for it is what produced the minute-long
+    /// restart in #105.
+    #[tokio::test]
+    async fn settle_gives_up_and_names_what_is_stuck() {
+        use std::sync::atomic::AtomicBool;
+        let wait = ShutdownWait {
+            devices: vec![
+                ("/dev/ublkb1".to_string(), Arc::new(AtomicBool::new(true))),
+                ("/dev/ublkb2".to_string(), Arc::new(AtomicBool::new(false))),
+            ],
+        };
+        let started = std::time::Instant::now();
+        let stuck = wait.settle(std::time::Duration::from_millis(100)).await;
+        assert_eq!(stuck, vec!["/dev/ublkb2".to_string()]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "settle must be bounded");
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_empties_the_registry() {
+        let mut mgr = UblkExportManager::new();
+        mgr.insert_fake("vol-1", "/dev/ublkb7");
+        mgr.insert_fake("vol-2", "/dev/ublkb8");
+        let wait = mgr.shutdown_all();
+        assert!(mgr.device_path("vol-1").is_none());
+        assert!(mgr.device_path("vol-2").is_none());
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(wait.len(), 2);
+            // Nothing sets these flags — the fakes have no thread — so the
+            // budget is what ends the wait.
+            let stuck = wait.settle(std::time::Duration::from_millis(50)).await;
+            assert_eq!(stuck.len(), 2);
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert!(wait.is_empty());
     }
 
     #[test]

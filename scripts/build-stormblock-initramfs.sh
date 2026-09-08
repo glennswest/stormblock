@@ -922,9 +922,33 @@ if [ -n "$NETADDR" ]; then
     # Without it the kernel's hostname is "(none)", and every node on the
     # multicast stream says so — which is fine for one node and useless for
     # the second. DHCP's own name wins when it offers one, because a site that
-    # names its machines has already decided; otherwise the MAC, which is the
-    # one identifier a machine has before anyone has configured anything.
+    # names its machines has already decided. Then DNS, which holds the same
+    # decision in the other direction. Only then the MAC — the one identifier
+    # a machine has before anyone has told it anything, and a name nobody
+    # chose.
     NODE_NAME="$(cat /run/dhcp-hostname 2>/dev/null || true)"
+
+    # Then ask DNS what this address is called.
+    #
+    # A name is a fact about a network, not about a machine, and the network
+    # already holds it: the address this node was just leased has a PTR. A
+    # site that names its machines has named this one, and asking is how the
+    # node finds out — `storm-<mac>` below is a name nobody chose, which the
+    # node made up because it had not asked.
+    #
+    # The short form, not the FQDN: the domain travels separately, and a
+    # hostname carrying it turns up doubled in every certificate subject and
+    # log line that appends one.
+    if [ -z "$NODE_NAME" ] && [ -s /etc/resolv.conf ]; then
+        MYIP=$(ip -4 -o addr show dev "$IFACE" 2>/dev/null \
+               | awk '{ print $4 }' | cut -d/ -f1 | head -1)
+        if [ -n "$MYIP" ]; then
+            NODE_NAME=$(nslookup "$MYIP" 2>/dev/null \
+                        | sed -n 's/.*name = \([^.]*\)\..*/\1/p' | head -1)
+            [ -n "$NODE_NAME" ] && echo "  name from DNS: $NODE_NAME ($MYIP)"
+        fi
+    fi
+
     if [ -z "$NODE_NAME" ]; then
         # The *uplink's* MAC, not the bridge's: a bridge takes a random
         # address until it has a port, so naming a node after it would give

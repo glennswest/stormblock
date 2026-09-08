@@ -1415,6 +1415,41 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down...");
+
+    // **Kernel devices first, and signalled before anything is waited on.**
+    //
+    // A ublk export's queue threads sit in `io_uring_enter` waiting for work.
+    // Nothing here used to tell them to stop, so the process exited with the
+    // devices still up: the threads stayed in the kernel, and a thread stuck
+    // in the kernel cannot be reaped. forge carried a defunct process in its
+    // unit's cgroup for four days, and *every* restart after it ended in
+    // "failed mode" because systemd found something it could not kill (#105).
+    //
+    // The lock is bounded too, for the same reason the flush below is: a
+    // claim in flight holds this map, and a stop that waits on a lock is a
+    // stop that does not happen.
+    let ublk = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        state.ublk_exports.lock(),
+    )
+    .await
+    {
+        Ok(mut mgr) => {
+            let wait = mgr.shutdown_all();
+            if !wait.is_empty() {
+                tracing::info!("stopping {} ublk export(s)", wait.len());
+            }
+            wait
+        }
+        Err(_) => {
+            tracing::warn!(
+                "ublk exports not signalled: something still holds the export map. \
+                 Their devices stay up and their threads with them."
+            );
+            mgmt::ublk_export::ShutdownWait::none()
+        }
+    };
+
     // Bounded, because a stop that waits on a lock is a stop that does not
     // happen.
     //
@@ -1431,17 +1466,34 @@ async fn main() -> anyhow::Result<()> {
     // is lost by giving up is nothing that is not recoverable: each slab
     // keeps its own copy of the volume record, which is what a node reads at
     // boot and what adoption rebuilds from.
-    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    //
+    // Run alongside the ublk teardown rather than after it: they contend for
+    // nothing, and a stop's budget is the sum of what it does in series. The
+    // whole of this is ~13 s worst case, comfortably inside the unit's
+    // `TimeoutStopSec` — which is the number that decides whether systemd
+    // sends SIGKILL into the middle of a device teardown.
+    let flush = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let vm = state.volume_manager.lock().await;
         vm.persist().await;
-    })
-    .await
-    {
+    });
+    let (flushed, stuck) = tokio::join!(flush, ublk.settle(std::time::Duration::from_secs(10)));
+    match flushed {
         Ok(()) => tracing::info!("volume metadata flushed"),
         Err(_) => tracing::warn!(
             "volume metadata not flushed within 10s — something still holds the manager. \
              Each slab's own copy stands, which is what adoption reads."
         ),
+    }
+    if stuck.is_empty() {
+        tracing::info!("ublk exports stopped");
+    } else {
+        // Named, because this is the log line that says why the next restart
+        // ends in failed mode.
+        tracing::warn!(
+            "ublk teardown unfinished after 10s for {} — exiting anyway; \
+             a thread of this process may be left in the kernel",
+            stuck.join(", ")
+        );
     }
     #[cfg(feature = "cluster")]
     if let Some(ref _cluster_mgr) = state.cluster {
