@@ -3916,6 +3916,32 @@ async fn seed_data_half(
     // the slabs, and reading a partition table is cheap next to what follows.
     let dev: Arc<dyn BlockDevice> =
         Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+    // **Off unless asked for.** `rd.stormblock.seed-data=1`, or the
+    // environment variable, and never by default.
+    //
+    // Moving the writable half onto the local disk is the right idea and this
+    // implementation is not finished. It moves the extents correctly — 3041 of
+    // them, verified — and then the *records* for those volumes do not survive
+    // to the next boot: the manager persists its map to the metadata slabs it
+    // chose when it opened, which are the appliance's, and the local slabs are
+    // registered afterwards. So the engine that adopts the boot opens the
+    // drive, restores 68 volumes, and every data volume is missing:
+    //
+    //   Error: volume 'stormcert-data' not found in slab metadata
+    //     (have: ... every golden and every *-logs, and none of the rest)
+    //
+    // and nothing on the node starts. A node that boots from the appliance is
+    // slower than one that does not; a node that does not boot is worse than
+    // both. The system half still flows over, which is the part that works and
+    // the part that carries the bytes.
+    if std::env::var("STORMBLOCK_SEED_DATA").is_err() {
+        println!(
+            "Flow-over: leaving the data half where it is — writes stay on the appliance \
+             (STORMBLOCK_SEED_DATA=1 to move them)"
+        );
+        return Ok(());
+    }
+
     // Per volume, not per slab.
     //
     // "Empty, or leave it alone" was too blunt by exactly one case, and it is
