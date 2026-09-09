@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v16.0.0] — 2026-09-09
+
 ### 2026-09-08 (boot testing)
 - **fix(initramfs):** the local-slab probe requires every volume the command
   line mounts, not just the root. A flow-over moves the *system* half and
