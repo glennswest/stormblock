@@ -66,6 +66,43 @@
   gets the answer from before the wipe. The wipe reported "front cleared" and
   the very next step still refused the drive for carrying a data slab in
   partition 1, naming a partition that no longer existed on the disk.
+- **feat(boot):** the data half is seeded onto the local disk before anything
+  is exported. The flow-over moves the goldens and deliberately not the data
+  slab — migrating a slab while a filesystem on it is being written corrupts
+  it — which left the data half never populated at all: a drive that had
+  flowed over held `stormpump` and every golden and none of `stormcert-data`,
+  `stormcos-state`, `registry-data` or the logs, and the node restored 75
+  volumes and died on "volume stormcert-data not found". The window where
+  copying it is safe is the one moment nothing is mounted and not a byte has
+  been written this boot: after `boot-local` has attached the slabs and
+  resolved the volumes, before it exports a single ublk device. Synchronous,
+  because it is the difference between a node that boots from its own disk and
+  one that asks the appliance forever.
+- **fix(boot):** the data half is seeded **per volume**, not per slab. "Empty,
+  or leave it alone" was too blunt by exactly one case, and it is the case the
+  node was in: the local data half is registered from the boot that laid it,
+  so ordinary allocation had put twenty volumes on it while the ones the
+  command line mounts stayed on the appliance. A slab-wide test called that
+  occupied and skipped it, and the probe went on refusing the drive for seven
+  missing volumes, boot after boot, with the fix behind a guard that would
+  never open. A volume already on the slab is this node's and is untouched; a
+  volume that is not here cannot be overwritten by being copied here, and that
+  is the whole safety argument at the granularity the danger has.
+- **fix(boot):** seeded volumes are counted by uuid — `VolumeId` is an
+  identity and deliberately not `Ord`.
+- **fix(initramfs):** the root-device wait is not a deadline for copying a
+  disk. Thirty seconds was set when the only thing between there and the root
+  device was opening a slab; seeding the writable half took 28.3 s for 3041
+  extents on this hardware, so the boot gave up 1.7 s before the work it was
+  waiting for landed. A copy proportional to what a node stores cannot share a
+  deadline with "opening a device took too long", and progress is printed now,
+  so a wait that is doing something looks different from one that is not.
+- **fix(initramfs):** forward-confirmed reverse DNS asks about **membership**.
+  A node with two NICs on one network has one name and two A records — the
+  ordinary arrangement — so taking the last address the resolver happened to
+  list and demanding it equal this interface's made the check a coin toss:
+  same node, same DNS, confirmed or rejected by the order of an answer nobody
+  controls.
 
 ### 2026-09-08 (later still, cont.)
 - **feat(boot): a system half that is already up to date is left alone.** An
