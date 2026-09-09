@@ -167,6 +167,12 @@ pub struct PlacementEngine {
     cold_copies: HashMap<Uuid, ColdCopy>,
     /// Volume → list of cold copy IDs.
     volume_copies: HashMap<VolumeId, Vec<Uuid>>,
+    /// Source slots a migration has stopped referencing but has not yet freed.
+    ///
+    /// See `move_slot`: the free is owed until the map that no longer names
+    /// the slot is on disk, because a slot table and a map that disagree
+    /// across a crash is a volume with a hole in it. `release_owed` pays them.
+    owed: std::sync::Mutex<Vec<(SlabId, u32)>>,
 }
 
 impl PlacementEngine {
@@ -176,7 +182,42 @@ impl PlacementEngine {
             devices: HashMap::new(),
             cold_copies: HashMap::new(),
             volume_copies: HashMap::new(),
+            owed: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Free the source slots of migrations whose map is now durable.
+    ///
+    /// **Call this only after persisting the map**, never before. Called
+    /// early it reintroduces exactly the failure it exists to prevent: a slot
+    /// table that says "free" and a map on disk that still points there.
+    ///
+    /// Returns how many were released. A slot that will not free is logged
+    /// and dropped from the list — it is leaked capacity, which is the mild
+    /// half of this trade and never a reason to stop.
+    pub async fn release_owed(&self, registry: &mut SlabRegistry) -> usize {
+        let owed: Vec<(SlabId, u32)> = {
+            let mut held = self.owed.lock().unwrap();
+            std::mem::take(&mut *held)
+        };
+        let mut freed = 0;
+        for (slab_id, slot_idx) in owed {
+            if let Some(slab) = registry.get_mut(&slab_id) {
+                match slab.free(slot_idx).await {
+                    Ok(_) => freed += 1,
+                    Err(e) => tracing::warn!(
+                        slab = %slab_id, slot = slot_idx,
+                        "migration could not release the source extent: {e}"
+                    ),
+                }
+            }
+        }
+        freed
+    }
+
+    /// How many source slots are waiting on a durable map.
+    pub fn owed_count(&self) -> usize {
+        self.owed.lock().unwrap().len()
     }
 
     /// Register a storage device with the placement engine.
@@ -535,17 +576,30 @@ impl PlacementEngine {
         moves.insert(old, new);
         gem.rewrite_legs(&moves);
 
-        // Nothing references the source slot any more: free it outright.
-        if let Some(slab) = registry.get_mut(&source_slab_id) {
-            if let Err(e) = slab.free(source_slot_idx).await {
-                // The extent now lives on the destination, so this only
-                // strands the source copy — but that is still lost capacity.
-                tracing::warn!(
-                    volume = %volume_id, slab = %source_slab_id, slot = source_slot_idx,
-                    "migration could not release the source extent: {e}"
-                );
-            }
-        }
+        // **The source is not freed here.** It is owed, and paid once the map
+        // that no longer names it is on disk.
+        //
+        // A slot table is written to the slab the moment a slot is allocated
+        // or freed; the map that says which extent lives in which slot is in
+        // memory until something persists it. Freeing the source here made
+        // those two disagree across a crash: the slot table said "source
+        // free, destination allocated" and the persisted map still pointed at
+        // the source, so the extent had no home. A machine power-cycled during
+        // a migration came back with twelve volumes reporting
+        //
+        //   EXT4-fs error (device ublkb3): ext4_lookup:1787: inode #16385:
+        //       iget: checksum invalid
+        //
+        // and thousands of "slot table is newer than the record, taking it" —
+        // goldens and data volumes alike, because a flow-over touches both.
+        //
+        // Deferring the free makes every interruption survivable, in either
+        // direction. Crash before the map is persisted: it still names the
+        // source, the source is still allocated, the volume is whole, and the
+        // destination slot is an unreferenced leak. Crash after: the map names
+        // the destination, which holds the data, and the source is the leak. A
+        // leaked slot is capacity to reclaim; a torn map is a filesystem.
+        self.owed.lock().unwrap().push((source_slab_id, source_slot_idx));
 
         Ok(new)
     }

@@ -3997,6 +3997,7 @@ async fn seed_data_half(
     let started = std::time::Instant::now();
     let (mut moved, mut failed) = (0u64, 0u64);
     for (vol, vext) in todo {
+        {
         let mut gem = mgr.gem().write().await;
         let mut reg = mgr.registry().write().await;
         match engine.migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest)).await {
@@ -4015,6 +4016,19 @@ async fn seed_data_half(
                     );
                 }
             }
+        }
+        }
+        // Durable map first, then the source slots it no longer names.
+        //
+        // The locks are dropped above so the persist can take what it needs.
+        // Doing this per extent rather than at the end is what makes an
+        // interruption harmless: the most a crash can cost is one extent's
+        // worth of leaked slot, and never a volume that points at a slot the
+        // slab has already freed.
+        mgr.persist().await;
+        {
+            let mut reg = mgr.registry().write().await;
+            engine.release_owed(&mut reg).await;
         }
     }
     println!(
@@ -4050,6 +4064,9 @@ fn spawn_flow_over(state: &Arc<AppState>, flow: stormblock::drive::handover::Flo
     };
     let gem_arc = state.gem.clone();
     let reg_arc = state.slab_registry.clone();
+    // Weak, so a migration in flight cannot keep the whole engine alive past
+    // a shutdown that is trying to end.
+    let state_for_persist = Arc::downgrade(state);
     tokio::spawn(async move {
         // Every slab that is not a data slab and is not the destination. On a
         // node that has just adopted, that is the appliance's system slab —
@@ -4075,6 +4092,7 @@ fn spawn_flow_over(state: &Arc<AppState>, flow: stormblock::drive::handover::Flo
         let (mut moved, mut failed) = (0u64, 0u64);
         for source in sources {
             loop {
+                let done = {
                 let mut gem = gem_arc.write().await;
                 let mut reg = reg_arc.write().await;
                 let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next() else {
@@ -4098,6 +4116,21 @@ fn spawn_flow_over(state: &Arc<AppState>, flow: stormblock::drive::handover::Flo
                             return;
                         }
                     }
+                }
+                ()
+                };
+                let _ = done;
+                // The map, then the slots it no longer names. Same order and
+                // same reason as the data half: this runs for minutes on a
+                // machine that can lose power at any point in them, and a
+                // slot table that has run ahead of the map is a volume with a
+                // hole in it.
+                if let Some(state) = state_for_persist.upgrade() {
+                    state.volume_manager.lock().await.persist().await;
+                }
+                {
+                    let mut reg = reg_arc.write().await;
+                    engine.release_owed(&mut reg).await;
                 }
             }
         }
