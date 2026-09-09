@@ -60,6 +60,54 @@ fn run_boot_local(args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// Run `boot-local` that is **expected to keep running**, and stop it once it
+/// has said what it was going to say.
+///
+/// A flow-over failure no longer takes the boot down: the node is served from
+/// the appliance and `boot-local` goes on being the server, forever, which is
+/// right and is not something `Command::output()` can wait for — it waits for
+/// a process that has no intention of exiting. So: capture to a file, watch
+/// for the line under test, and kill it.
+fn boot_local_until(args: &[&str], marker: &str) -> String {
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let path = out.path().to_path_buf();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+        .arg("boot-local")
+        .args(args)
+        .stdout(std::fs::File::create(&path).unwrap())
+        .stderr(std::fs::File::create(path.with_extension("err")).unwrap())
+        .spawn()
+        .expect("spawn stormblock boot-local");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let read = || {
+        format!(
+            "{}{}",
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            std::fs::read_to_string(path.with_extension("err")).unwrap_or_default()
+        )
+    };
+    loop {
+        let text = read();
+        if text.contains(marker) {
+            break;
+        }
+        // It may also simply exit — a refusal that happens before anything is
+        // exported, or a platform with no ublk.
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("boot-local never said '{marker}':\n{}", read());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    read()
+}
+
 #[tokio::test]
 async fn boot_local_attaches_and_resolves_by_name() {
     let dir = TempDir::new().unwrap();
@@ -187,17 +235,27 @@ async fn flow_over_refuses_a_target_that_carries_a_data_slab() {
     .await
     .unwrap();
 
-    let (ok, text) = run_boot_local(&[
-        "--slab",
-        slab.to_str().unwrap(),
-        "--volume",
-        "boot-machine-a",
-        "--local-disk",
-        identity.to_str().unwrap(),
-    ]);
-    assert!(!ok, "flow-over onto a data slab must fail:\n{text}");
+    // The refusal is a *warning* now, not a failure: an optimisation may not
+    // decide whether a node boots, so boot-local says why it is not taking the
+    // drive and goes on serving the root it already has. So watch for the
+    // line rather than waiting for an exit that is not coming.
+    let text = boot_local_until(
+        &[
+            "--slab",
+            slab.to_str().unwrap(),
+            "--volume",
+            "boot-machine-a",
+            "--local-disk",
+            identity.to_str().unwrap(),
+        ],
+        "refusing to format",
+    );
     assert!(text.contains("refusing to format"), "unclear refusal:\n{text}");
     assert!(text.contains("is itself a data slab"), "did not name why:\n{text}");
+    assert!(
+        text.contains("boots from the appliance") || text.contains("not taking"),
+        "the refusal must say the boot carries on:\n{text}"
+    );
 
     // The slab is still there: the refusal happened before the format.
     let reopened = Slab::open(Arc::new(
