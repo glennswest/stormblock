@@ -114,6 +114,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             }
         }
         None => Described {
+            shared_bytes: 0,
             redundancy: "none".into(),
             health: "healthy".into(),
             physical_bytes: 0,
@@ -426,8 +427,11 @@ async fn compose_volume(
         virtual_size_human: human_size(virtual_size),
         allocated_bytes: allocated,
         allocated_human: human_size(allocated),
-        shared_bytes: d.shared_bytes,
-        shared_human: human_size(d.shared_bytes),
+        // A volume that was just created shares nothing: a clone's shared
+        // extents are counted from its map, and this one has not been read
+        // back yet. The next list reports it properly.
+        shared_bytes: 0,
+        shared_human: human_size(0),
         array_id: None,
         fs_uuid: None,
         redundancy: vm.redundancy(&id).map(|r| r.spelling()).unwrap_or_else(|| "none".into()),
