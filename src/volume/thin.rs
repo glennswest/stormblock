@@ -620,7 +620,31 @@ impl ThinVolumeHandle {
     }
 
     /// Bytes of data mapped (one slot per extent, whatever the policy).
+    /// Bytes this volume alone holds — what freeing it would give back.
+    ///
+    /// Counted from extents it is the only holder of, not from extents it
+    /// maps. A copy-on-write clone maps all of its parent's on the day it is
+    /// made and owns none, so counting mapped extents reported a fresh clone
+    /// of an 11 GB golden as 11 GB of disk.
     pub async fn allocated(&self) -> u64 {
+        let gem = self.gem.read().await;
+        gem.get_volume_map(&self.id)
+            .map(|m| m.exclusive() as u64 * self.slot_size)
+            .unwrap_or(0)
+    }
+
+    /// Bytes this volume reads through but does not own — its parent's, still
+    /// shared. Real on the drive, not this volume's to free.
+    pub async fn shared(&self) -> u64 {
+        let gem = self.gem.read().await;
+        gem.get_volume_map(&self.id)
+            .map(|m| m.shared() as u64 * self.slot_size)
+            .unwrap_or(0)
+    }
+
+    /// Every extent this volume maps, owned or shared — its addressable
+    /// content, which is what a filesystem inside it sees.
+    pub async fn mapped(&self) -> u64 {
         let gem = self.gem.read().await;
         gem.get_volume_map(&self.id)
             .map(|m| m.len() as u64 * self.slot_size)
@@ -632,7 +656,7 @@ impl ThinVolumeHandle {
     pub async fn physical(&self) -> u64 {
         let gem = self.gem.read().await;
         gem.get_volume_map(&self.id)
-            .map(|m| m.all_legs().count() as u64 * self.slot_size)
+            .map(|m| m.exclusive_legs() as u64 * self.slot_size)
             .unwrap_or(0)
     }
 

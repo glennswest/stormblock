@@ -160,6 +160,43 @@ impl VolumeExtentMap {
         self.extents.is_empty()
     }
 
+    /// Extents this volume is the only holder of — what it actually costs.
+    ///
+    /// A copy-on-write clone maps every extent of its parent on the day it is
+    /// made and owns none of them: the slots are the parent's, shared in by
+    /// reference, and the clone occupies nothing until it is written to. So a
+    /// count of *mapped* extents is the volume's size, never its cost, and
+    /// reporting that as "allocated" made a fresh clone of an 11 GB golden
+    /// look like 11 GB of disk — which is the exact claim the whole design
+    /// exists to falsify.
+    ///
+    /// `ref_count == 1` is the test: one holder, so freeing this volume frees
+    /// the slot.
+    pub fn exclusive(&self) -> usize {
+        self.extents.values().filter(|l| l.ref_count <= 1).count()
+    }
+
+    /// Extents shared with at least one other volume — real bytes on the
+    /// drive, but not this volume's to free.
+    ///
+    /// Worth reporting beside the exclusive count rather than hidden: a clone
+    /// showing 0 allocated and nothing else says "empty", when what is true
+    /// is "costs nothing yet, and reads 11 GB".
+    pub fn shared(&self) -> usize {
+        self.extents.values().filter(|l| l.ref_count > 1).count()
+    }
+
+    /// Physical legs of the extents this volume exclusively owns — what the
+    /// redundancy policy costs on top.
+    pub fn exclusive_legs(&self) -> usize {
+        self.extents
+            .values()
+            .filter(|l| l.ref_count <= 1)
+            .flat_map(|l| l.legs())
+            .count()
+            + self.parity.values().filter(|g| g.ref_count <= 1).flat_map(|g| g.legs.iter()).count()
+    }
+
     /// Every slot this map references: data legs and parity legs alike.
     pub fn all_legs(&self) -> impl Iterator<Item = Leg> + '_ {
         self.extents

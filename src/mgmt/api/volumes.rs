@@ -25,8 +25,23 @@ pub struct VolumeResponse {
     pub name: String,
     pub virtual_size_bytes: u64,
     pub virtual_size_human: String,
+    /// Bytes this volume alone holds — what freeing it would give back.
+    ///
+    /// **Not its size, and not what it reads.** A copy-on-write clone maps
+    /// every extent of its parent and owns none of them until it is written
+    /// to, so a fresh clone of an 11 GB golden is 0 here. This counted mapped
+    /// extents until now, which reported every clone at full size and made
+    /// the thin-provisioning the whole engine is built on invisible.
     pub allocated_bytes: u64,
     pub allocated_human: String,
+    /// Bytes this volume reads through but does not own — its parent's,
+    /// shared. Real on the drive; not this volume's to free.
+    ///
+    /// Reported beside `allocated` rather than folded into it, because a
+    /// clone showing 0 allocated and nothing else reads as empty, when what
+    /// is true is "costs nothing yet, and contains 11 GB".
+    pub shared_bytes: u64,
+    pub shared_human: String,
     pub array_id: Option<Uuid>,
     /// Filesystem UUID, for a volume cloned from a preformatted template. Each
     /// clone gets its own, stamped at clone time (#38).
@@ -37,7 +52,9 @@ pub struct VolumeResponse {
     /// `healthy`, `degraded` or `failed` — what the policy asks for versus
     /// what is on trusted slabs.
     pub health: String,
-    /// Physical bytes the volume occupies, every leg and parity slot counted.
+    /// Physical bytes this volume occupies — every leg and parity slot of the
+    /// extents it exclusively owns, which is what its redundancy policy costs
+    /// on top of `allocated_bytes`.
     pub physical_bytes: u64,
     /// The volume this one was cloned from (#76).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +81,7 @@ pub struct VolumeResponse {
 
 /// Everything about a volume the response carries beyond name and size.
 struct Described {
+    shared_bytes: u64,
     redundancy: String,
     health: String,
     physical_bytes: u64,
@@ -82,6 +100,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             let h = handle.health().await;
             let fs = vm.fs_info(id);
             Described {
+                shared_bytes: handle.shared().await,
                 redundancy: h.redundancy,
                 health: h.state.to_string(),
                 physical_bytes: handle.physical().await,
@@ -188,6 +207,8 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             virtual_size_human: human_size(*vsize),
             allocated_bytes: *allocated,
             allocated_human: human_size(*allocated),
+            shared_bytes: d.shared_bytes,
+            shared_human: human_size(d.shared_bytes),
             array_id: None,
             fs_uuid: d.fs_uuid,
             redundancy: d.redundancy,
@@ -230,6 +251,8 @@ async fn get_volume(
                 virtual_size_human: human_size(vsize),
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
+                shared_bytes: d.shared_bytes,
+                shared_human: human_size(d.shared_bytes),
                 array_id: None,
                 fs_uuid: d.fs_uuid,
                 redundancy: d.redundancy,
@@ -403,6 +426,8 @@ async fn compose_volume(
         virtual_size_human: human_size(virtual_size),
         allocated_bytes: allocated,
         allocated_human: human_size(allocated),
+        shared_bytes: d.shared_bytes,
+        shared_human: human_size(d.shared_bytes),
         array_id: None,
         fs_uuid: None,
         redundancy: vm.redundancy(&id).map(|r| r.spelling()).unwrap_or_else(|| "none".into()),
@@ -832,6 +857,8 @@ async fn clone_volume(
                 virtual_size_human: human_size(c.size_bytes),
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
+                shared_bytes: d.shared_bytes,
+                shared_human: human_size(d.shared_bytes),
                 array_id: None,
                 fs_uuid: c.fs_uuid.or(d.fs_uuid),
                 redundancy: d.redundancy,
@@ -1318,6 +1345,8 @@ async fn create_snapshot(
                 virtual_size_human: human_size(vsize),
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
+                shared_bytes: d.shared_bytes,
+                shared_human: human_size(d.shared_bytes),
                 array_id: None,
                 fs_uuid: d.fs_uuid,
                 redundancy: d.redundancy,
@@ -1391,6 +1420,8 @@ async fn resize_volume(
                 virtual_size_human: human_size(vsize),
                 allocated_bytes: allocated,
                 allocated_human: human_size(allocated),
+                shared_bytes: d.shared_bytes,
+                shared_human: human_size(d.shared_bytes),
                 array_id: None,
                 fs_uuid: d.fs_uuid,
                 redundancy: d.redundancy,
@@ -1801,6 +1832,8 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
         virtual_size_human: human_size(vsize),
         allocated_bytes: allocated,
         allocated_human: human_size(allocated),
+        shared_bytes: d.shared_bytes,
+        shared_human: human_size(d.shared_bytes),
         array_id: None,
         fs_uuid: d.fs_uuid,
         redundancy: d.redundancy,
