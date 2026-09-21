@@ -2574,3 +2574,16 @@ our target.
   drifting against this one. `default-features = false` there now leaves the
   `no_std` core, so consumers that want the formatter ask for `std` explicitly.
   Both pins move together so cargo still resolves a single copy of mkfs-ext4.
+- **feat:** the initramfs bonds the uplinks that are alike. A node was running
+  on one port with a second cabled and idle, and `bond0` existed, was down and
+  had no members — because loading the `bonding` module creates one empty bond
+  by default and nothing ever put anything in it. Two cables into a machine
+  mean somebody intended redundancy.
+  `active-backup` by default, and that is a safety decision rather than a
+  preference: 802.3ad needs a LAG configured on the switch, and pointing an
+  LACP bond at a switch that has none leaves the ports unreliable — on the one
+  step of the boot that can strand a node, from an initramfs with no way to
+  ask. `rd.stormblock.bond=802.3ad` opts in on a node whose switch is known;
+  `rd.stormblock.bond=off` disables it. A bond that cannot get a lease falls
+  back to the single ports, and only ports at the top speed are bonded — a
+  slow port is a fallback, not a peer.

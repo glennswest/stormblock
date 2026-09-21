@@ -560,6 +560,7 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
         rd.stormblock.assimilate=*)  ASSIMILATE="${param#*=}" ;;
         rd.stormblock.wipe=*)        WIPE="${param#*=}" ;;
+        rd.stormblock.bond=*)        BOND_MODE="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the
@@ -884,6 +885,92 @@ if [ -z "${NO_NETWORK:-}" ]; then
 # node; a node with no networking is a recovery job.
 BRIDGE="${STORM_BRIDGE:-stormbr0}"
 
+# Bond the uplinks that are alike, so a node with two cables has two paths.
+#
+# A node was running on one port with a second cabled and idle, and `bond0`
+# existed, was down, and had no members — because loading the `bonding` module
+# creates one empty bond by default and nothing had ever put anything in it.
+# Two cables into a machine mean somebody intended redundancy.
+#
+# **active-backup by default, and that is a safety decision rather than a
+# preference.** 802.3ad needs a LAG configured on the switch; point an LACP
+# bond at a switch that has none and the ports do not come up reliably — on
+# the one step of the boot that can strand a node, from an initramfs with no
+# way to ask. active-backup needs nothing of the switch, survives one cable
+# being pulled, and is right on any switch anyone might plug this into.
+# `rd.stormblock.bond=802.3ad` asks for the other, deliberately, on a node
+# whose switch is known.
+#
+# `rd.stormblock.bond=off` turns it off entirely.
+BOND="${STORM_BOND_DEV:-bond0}"
+BOND_MODE="${BOND_MODE:-active-backup}"
+
+# Which uplinks to bond: the ones at the top speed, and only those.
+#
+# Bonding a 10G port with a 1G one gives a 1G bond in active-backup and a
+# confusing one in 802.3ad. A slow port is a fallback, not a peer.
+net_bond_members() {
+    _top=""
+    for _c in $CANDIDATES; do
+        _s=$(net_speed "$_c")
+        [ -z "$_top" ] && _top="$_s"
+        [ "$_s" = "$_top" ] && printf '%s ' "$_c"
+    done
+}
+
+# Build the bond. Prints the device on success, nothing on failure.
+net_make_bond() {
+    _members="$(net_bond_members)"
+    set -- $_members
+    # One port is not a bond. Two cables are the reason this exists.
+    [ $# -ge 2 ] || return 1
+
+    # The module may have made an empty bond0 already; reuse it rather than
+    # fight it, but take it down first — mode cannot be set on a live bond,
+    # and a mode that silently did not apply is worse than no bond.
+    ip link add name "$BOND" type bond 2>/dev/null || true
+    ip link set "$BOND" down 2>/dev/null || true
+    if ! echo "$BOND_MODE" > "/sys/class/net/$BOND/bonding/mode" 2>/dev/null; then
+        echo "WARNING: $BOND does not take mode $BOND_MODE"
+        return 1
+    fi
+    # Without a link monitor a bond never notices a cable being pulled, which
+    # is the entire thing it was made for.
+    echo 100 > "/sys/class/net/$BOND/bonding/miimon" 2>/dev/null || true
+
+    _joined=0
+    for _m in $_members; do
+        # A port must be down to be enslaved, and must carry no address of
+        # its own once it is.
+        ip addr flush dev "$_m" 2>/dev/null || true
+        ip link set "$_m" down 2>/dev/null || true
+        if ip link set "$_m" master "$BOND" 2>/dev/null; then
+            _joined=$((_joined + 1))
+        else
+            echo "WARNING: $_m would not join $BOND"
+            ip link set "$_m" up 2>/dev/null || true
+        fi
+    done
+    if [ "$_joined" -lt 2 ]; then
+        echo "WARNING: only $_joined port(s) joined $BOND - not bonding"
+        net_unbond
+        return 1
+    fi
+    ip link set "$BOND" up 2>/dev/null || { net_unbond; return 1; }
+    echo "  bonded: $_members as $BOND ($BOND_MODE)" >&2
+    printf '%s' "$BOND"
+}
+
+# Put it back exactly as it was, so a failed bond costs nothing.
+net_unbond() {
+    for _m in $(net_bond_members); do
+        ip link set "$_m" nomaster 2>/dev/null || true
+        ip link set "$_m" up 2>/dev/null || true
+    done
+    ip link set "$BOND" down 2>/dev/null || true
+    ip link del "$BOND" 2>/dev/null || true
+}
+
 # Put one uplink on the bridge and leave $IFACE naming whatever now holds the
 # address. A function because a lease has to be able to fail and be retried on
 # the next candidate, and each attempt has to start from the same state.
@@ -945,8 +1032,28 @@ else
     DHCP_TRIES=5
     [ "$(echo $CANDIDATES | wc -w)" -le 1 ] && DHCP_TRIES=10
 
+    # The bond first, when there is one to make.
+    #
+    # Tried ahead of the single ports and falls back to them: a bond that
+    # cannot get a lease is a bond pointed at a switch that is not expecting
+    # one, and the answer to that is the port that worked before, not a node
+    # that will not boot.
     LEASED=""
-    for UPLINK in $CANDIDATES; do
+    if [ "$BOND_MODE" != "off" ] && [ -z "${NO_BRIDGE:-}" ]; then
+        BONDED=$(net_make_bond) || BONDED=""
+        if [ -n "$BONDED" ]; then
+            net_bring_up "$BONDED"
+            if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES"; then
+                LEASED="$BONDED"
+            else
+                echo "  no lease on $BONDED - falling back to single ports"
+                net_teardown "$BONDED"
+                net_unbond
+            fi
+        fi
+    fi
+
+    [ -n "$LEASED" ] || for UPLINK in $CANDIDATES; do
         echo "  trying $UPLINK (speed $(net_speed "$UPLINK"), carrier $(net_carrier "$UPLINK"))"
         net_bring_up "$UPLINK"
         if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES"; then
