@@ -885,6 +885,24 @@ if [ -z "${NO_NETWORK:-}" ]; then
 # node; a node with no networking is a recovery job.
 BRIDGE="${STORM_BRIDGE:-stormbr0}"
 
+# What the network step decided, written where the booted system can read it.
+#
+# Everything here is echoed to the console, and on a machine whose console is
+# not wired to anything that is the same as not saying it. A node came up with
+# its address on the raw uplink and no bridge, Cilium died for want of
+# `stormbr0`, and there was no way to find out *why* without rebooting with a
+# serial capture — which the BIOS was not redirecting anyway.
+#
+# `/run` survives the switch_root, so this is readable from the running system
+# for as long as it matters.
+NETLOG=/run/stormblock/network.log
+mkdir -p /run/stormblock 2>/dev/null || true
+: > "$NETLOG" 2>/dev/null || true
+netsay() {
+    echo "$@"
+    echo "$@" >> "$NETLOG" 2>/dev/null || true
+}
+
 # Bond the uplinks that are alike, so a node with two cables has two paths.
 #
 # A node was running on one port with a second cabled and idle, and `bond0`
@@ -995,17 +1013,23 @@ net_bring_up() {
     # Cilium — which is configured with `devices: stormbr0` because
     # auto-detection skips bridges — died at "unable to determine direct
     # routing device". A node with a working DHCP lease and no pod network.
-    if [ -z "${NO_BRIDGE:-}" ] \
-       && { ip link add name "$BRIDGE" type bridge 2>/dev/null \
-            || [ -d "/sys/class/net/$BRIDGE" ]; }; then
+    if [ -n "${NO_BRIDGE:-}" ]; then
+        netsay "  no bridge: NO_BRIDGE is set"
+    elif ! ip link add name "$BRIDGE" type bridge 2>/dev/null \
+         && [ ! -d "/sys/class/net/$BRIDGE" ]; then
+        # Neither created nor already present: say which, because a node with
+        # no bridge has no pod network and this is the only place that knows.
+        netsay "WARNING: could not create $BRIDGE ($(ip link add name "$BRIDGE" type bridge 2>&1 | head -1)) - no VM networking"
+    fi
+    if [ -z "${NO_BRIDGE:-}" ] && [ -d "/sys/class/net/$BRIDGE" ]; then
         if ip link set "$_up" master "$BRIDGE" 2>/dev/null && ip link set "$BRIDGE" up; then
             # Everything below configures the bridge instead: it is the
             # interface that now holds the address, and the uplink is one of
             # its ports.
-            echo "  bridged: $_up is a port of $BRIDGE"
+            netsay "  bridged: $_up is a port of $BRIDGE"
             IFACE="$BRIDGE"
         else
-            echo "WARNING: could not enslave $_up to $BRIDGE - no VM networking"
+            netsay "WARNING: could not enslave $_up to $BRIDGE - no VM networking"
             ip link del "$BRIDGE" 2>/dev/null || true
         fi
     fi
@@ -1084,13 +1108,13 @@ else
     fi
 
     [ -n "$LEASED" ] || for UPLINK in $CANDIDATES; do
-        echo "  trying $UPLINK (speed $(net_speed "$UPLINK"), carrier $(net_carrier "$UPLINK"))"
+        netsay "  trying $UPLINK (speed $(net_speed "$UPLINK"), carrier $(net_carrier "$UPLINK"))"
         net_bring_up "$UPLINK"
         if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES"; then
             LEASED="$UPLINK"
             break
         fi
-        echo "  no lease on $UPLINK"
+        netsay "  no lease on $UPLINK"
         net_teardown "$UPLINK"
     done
 
