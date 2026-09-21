@@ -77,6 +77,13 @@ pub struct VolumeResponse {
     /// The filesystem on it, when the engine knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<serde_json::Value>,
+    /// What this volume belongs to (#115).
+    ///
+    /// Absent means nothing has claimed it — which for a clone is the
+    /// definition of an orphan, and for a golden or a blank is simply what
+    /// it is. `?unowned=true` on the listing asks the question directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 /// Everything about a volume the response carries beyond name and size.
@@ -92,6 +99,7 @@ struct Described {
     role: String,
     fs: Option<serde_json::Value>,
     fs_uuid: Option<Uuid>,
+    owner: Option<crate::volume::metadata::Owner>,
 }
 
 async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described {
@@ -111,6 +119,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
                 role: handle.placement_role().to_string(),
                 fs: fs.map(|f| f.json()),
                 fs_uuid: fs.and_then(|f| f.uuid),
+                owner: vm.owner(id).cloned(),
             }
         }
         None => Described {
@@ -125,6 +134,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             role: crate::drive::slab::SlabRole::System.to_string(),
             fs: None,
             fs_uuid: None,
+            owner: None,
         },
     }
 }
@@ -161,6 +171,19 @@ pub struct CreateVolumeRequest {
     /// slab and found none (#93).
     #[serde(default)]
     pub role: Option<String>,
+    /// What the new volume belongs to (#115). Set here rather than patched
+    /// afterwards so a volume is never briefly an orphan — the window where
+    /// a cleanup would find it unclaimed.
+    #[serde(default)]
+    pub owner: Option<crate::volume::metadata::Owner>,
+}
+
+/// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
+/// a null owner, that nothing does.
+#[derive(Debug, Deserialize)]
+pub struct OwnerRequest {
+    #[serde(default)]
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +244,7 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             writable: d.writable,
             role: d.role.clone(),
             fs: d.fs,
+            owner: d.owner.clone(),
         });
     }
     let count = items.len();
@@ -265,6 +289,7 @@ async fn get_volume(
                 writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
+                owner: d.owner.clone(),
             };
             Json(resp).into_response()
         }
@@ -484,7 +509,11 @@ async fn create_volume(
                 Err(e) => return super::fstemplates::err(e),
             }
         };
-        let vm = state.volume_manager.lock().await;
+        let mut vm = state.volume_manager.lock().await;
+        // Before the volume is described, so it is never briefly an orphan.
+        if req.owner.is_some() {
+            let _ = vm.set_owner(vol_id, req.owner.clone()).await;
+        }
         let allocated = match vm.get_volume_handle(&vol_id) {
             Some(h) => h.allocated().await,
             None => 0,
@@ -510,6 +539,7 @@ async fn create_volume(
             writable: d.writable,
             role: d.role.clone(),
             fs: d.fs,
+            owner: d.owner.clone(),
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -637,6 +667,40 @@ async fn set_redundancy(
         Ok(()) => Json(serde_json::json!({ "id": uuid, "redundancy": policy.spelling() })).into_response(),
         Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
         Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => ApiError::conflict(e.to_string()),
+        Err(e) => ApiError::bad_request(e.to_string()),
+    }
+}
+
+/// `PUT /api/v1/volumes/{id}/owner` — record what a volume belongs to (#115).
+///
+/// A `null` owner forgets it, which is a real operation: a claim deleted
+/// while its volume is retained leaves storage that genuinely belongs to
+/// nobody, and saying so is better than leaving a dangling reference to an
+/// object that no longer exists.
+async fn set_owner(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<OwnerRequest>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    if let Some(o) = &req.owner {
+        if o.kind.trim().is_empty() || o.name.trim().is_empty() {
+            return ApiError::bad_request(
+                "an owner needs a kind and a name — a partial one is worse than none, \
+                 because it looks like an answer"
+                    .to_string(),
+            );
+        }
+    }
+    let mut vm = state.volume_manager.lock().await;
+    match vm.set_owner(VolumeId(uuid), req.owner.clone()).await {
+        Ok(()) => Json(serde_json::json!({ "id": uuid, "owner": req.owner })).into_response(),
+        Err(crate::volume::VolumeError::VolumeNotFound(_)) => {
+            ApiError::not_found(format!("volume {uuid} not found"))
+        }
         Err(e) => ApiError::bad_request(e.to_string()),
     }
 }
@@ -807,6 +871,13 @@ pub struct CloneRequest {
     /// boundary properly, as a real copy that shares nothing (#88).
     #[serde(default)]
     pub role: Option<String>,
+    /// What the clone belongs to (#115).
+    ///
+    /// Not inherited from the source, deliberately: a clone of a golden
+    /// belongs to whoever asked for it, and inheriting would make every
+    /// container root claim to belong to the image it came from.
+    #[serde(default)]
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 fn default_true() -> bool {
@@ -852,7 +923,11 @@ async fn clone_volume(
     spec.role = role;
     match crate::fs::template::clone_volume(&state.volume_manager, VolumeId(uuid), &spec).await {
         Ok(c) => {
-            let vm = state.volume_manager.lock().await;
+            let mut vm = state.volume_manager.lock().await;
+            // Before the clone is described, so it is never briefly an orphan.
+            if req.owner.is_some() {
+                let _ = vm.set_owner(c.volume_id, req.owner.clone()).await;
+            }
             let d = describe(&vm, &c.volume_id).await;
             let allocated = match vm.get_volume_handle(&c.volume_id) {
                 Some(h) => h.allocated().await,
@@ -878,6 +953,7 @@ async fn clone_volume(
                 writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
+                owner: d.owner.clone(),
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
@@ -1366,6 +1442,7 @@ async fn create_snapshot(
                 writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
+                owner: d.owner.clone(),
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -1441,6 +1518,7 @@ async fn resize_volume(
                 writable: d.writable,
                 role: d.role.clone(),
                 fs: d.fs,
+                owner: d.owner.clone(),
             };
             Json(resp).into_response()
         }
@@ -1853,6 +1931,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
         writable: d.writable,
         role: d.role,
         fs: d.fs,
+        owner: d.owner.clone(),
     })
 }
 
@@ -2095,6 +2174,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/resize", axum::routing::patch(resize_volume))
         .route("/{id}/health", get(volume_health))
         .route("/{id}/redundancy", axum::routing::put(set_redundancy))
+        .route("/{id}/owner", axum::routing::put(set_owner))
         .route("/{id}/resync", axum::routing::post(resync_volume))
         .route("/{id}/tier", axum::routing::post(retier_volume))
         .route("/{id}/restripe", axum::routing::post(restripe_volume))

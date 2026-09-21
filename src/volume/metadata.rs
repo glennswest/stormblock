@@ -197,6 +197,44 @@ pub struct VolumeRecord {
     pub access: Access,
     /// The filesystem on it, when the engine knows.
     pub fs: Option<FsInfo>,
+    /// What this volume belongs to (#115).
+    ///
+    /// `default` so a slab written before owners existed still loads: those
+    /// volumes simply have no owner recorded, which is the truth about them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Owner>,
+}
+
+/// What a volume belongs to.
+///
+/// Ownership used to live in the *name*, by convention: `vmimages-data` means
+/// "vmimages' data volume" because somebody wrote it that way, not because
+/// anything recorded it. A convention a human maintains is not a relationship
+/// a program can follow, and three questions depended on following it — what
+/// is safe to delete, whether a PVC and a service's data volume are the same
+/// thing (they are), and who to ask before draining a slab.
+///
+/// Deliberately shaped like a Kubernetes owner reference without being one:
+/// the engine must be able to say "this belongs to a VirtualMachineInstance"
+/// on a node whose apiserver is down, and must not grow a dependency on the
+/// API to answer it. `kind` is a free string for the same reason — the engine
+/// does not get to decide which kinds of thing may own storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Owner {
+    /// `PersistentVolumeClaim`, `VirtualMachineInstance`, `CloudImage`, …
+    pub kind: String,
+    /// Empty for a cluster-scoped owner.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub namespace: String,
+    pub name: String,
+    /// The owner's uid, when the setter knows it.
+    ///
+    /// What tells a claim from the claim that replaced it under the same
+    /// name — which is exactly the case where a wrong answer deletes live
+    /// data, so it is carried when it is known and absent rather than
+    /// guessed when it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
 }
 
 /// What is supposed to happen to a volume's divergence from its golden.

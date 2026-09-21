@@ -163,6 +163,8 @@ pub struct VolumeManager {
     templates: std::collections::HashSet<VolumeId>,
     /// What is known about the filesystem on each volume.
     fs_info: HashMap<VolumeId, FsInfo>,
+    /// What each volume belongs to, for the volumes anything has said (#115).
+    owners: HashMap<VolumeId, crate::volume::metadata::Owner>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -192,6 +194,7 @@ impl VolumeManager {
             parents: HashMap::new(),
             templates: std::collections::HashSet::new(),
             fs_info: HashMap::new(),
+            owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -211,6 +214,7 @@ impl VolumeManager {
             parents: HashMap::new(),
             templates: std::collections::HashSet::new(),
             fs_info: HashMap::new(),
+            owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
         })
     }
@@ -328,6 +332,54 @@ impl VolumeManager {
 
     pub fn fs_info(&self, id: &VolumeId) -> Option<&FsInfo> {
         self.fs_info.get(id)
+    }
+
+    /// What this volume belongs to, when anything has said.
+    pub fn owner(&self, id: &VolumeId) -> Option<&crate::volume::metadata::Owner> {
+        self.owners.get(id)
+    }
+
+    /// Record what a volume belongs to, or forget it with `None` (#115).
+    ///
+    /// Settable after the fact and not only at create time, because the
+    /// volumes that most need an owner are the ones that already exist: a
+    /// node's data volumes were cloned at boot by `stormpump`, before there
+    /// was an apiserver to own them, and adopting them is how the Kubernetes
+    /// view is rebuilt from the storage rather than the other way round.
+    pub async fn set_owner(
+        &mut self,
+        id: VolumeId,
+        owner: Option<crate::volume::metadata::Owner>,
+    ) -> Result<(), VolumeError> {
+        if !self.volumes.contains_key(&id) {
+            return Err(VolumeError::VolumeNotFound(id));
+        }
+        match owner {
+            Some(o) => {
+                self.owners.insert(id, o);
+            }
+            None => {
+                self.owners.remove(&id);
+            }
+        }
+        self.persist().await;
+        Ok(())
+    }
+
+    /// Every volume nothing claims — the orphan question, answerable at last.
+    ///
+    /// Templates and sealed volumes are excluded: a blank is owned by the
+    /// node and a golden is owned by whatever clones descend from it, and
+    /// neither is a candidate for cleanup on the strength of having no owner.
+    pub fn unowned(&self) -> Vec<VolumeId> {
+        let mut v: Vec<VolumeId> = self
+            .volumes
+            .keys()
+            .filter(|id| !self.owners.contains_key(id) && !self.templates.contains(id))
+            .copied()
+            .collect();
+        v.sort_by_key(|id| id.0);
+        v
     }
 
     pub async fn set_fs_info(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
@@ -715,6 +767,9 @@ impl VolumeManager {
             if let Some(fs) = vrec.fs.clone() {
                 self.fs_info.insert(vrec.id, fs);
             }
+            if let Some(owner) = vrec.owner.clone() {
+                self.owners.insert(vrec.id, owner);
+            }
             self.volumes.insert(vrec.id, handle);
             if let Some(parent) = vrec.parent {
                 self.parents.insert(vrec.id, parent);
@@ -1083,6 +1138,7 @@ impl VolumeManager {
             .ok_or(VolumeError::VolumeNotFound(id))?;
         self.parents.remove(&id);
         self.fs_info.remove(&id);
+        self.owners.remove(&id);
         self.retentions.remove(&id);
 
         // Remove all extents from GEM and dec_ref on slabs
@@ -1710,6 +1766,7 @@ impl VolumeManager {
                 template: self.templates.contains(&id),
                 access,
                 fs: self.fs_info.get(&id).cloned(),
+                owner: self.owners.get(&id).cloned(),
                 extents: gem
                     .get_volume_map(&id)
                     .map(|m| m.extents.clone())
