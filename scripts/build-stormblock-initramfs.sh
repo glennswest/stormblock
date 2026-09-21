@@ -1004,6 +1004,21 @@ net_bring_up() {
     _up="$1"
     ip link set "$_up" up
     IFACE="$_up"
+    # Load the bridge module before asking for a bridge.
+    #
+    # `ip link add type bridge` does not autoload it here, and the kernel then
+    # answers **"RTNETLINK answers: Not supported"** — which reads like the
+    # kernel lacking bridge support rather than a module nobody loaded. The
+    # node came up with its address on the raw uplink, no `stormbr0`, and
+    # Cilium dead at "unable to determine direct routing device", because it
+    # is configured with `devices: stormbr0`.
+    #
+    # `bridge.ko` is in this initramfs — `kernel/net/bridge/` is shipped — so
+    # this is a modprobe that was never called, not a module that is missing.
+    # Silent and unconditional: it is already loaded on a kernel that builds
+    # it in, and a failure here shows up as the warning below with the real
+    # reason attached.
+    modprobe bridge 2>/dev/null || true
     # Create the bridge, or use the one that is already there.
     #
     # This was `ip link add … && …`, which is false when the bridge *exists* —

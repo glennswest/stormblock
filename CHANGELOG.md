@@ -2599,3 +2599,10 @@ our target.
   `devices: stormbr0` precisely because auto-detection skips bridges.
   The bridge is now created *or reused*, warnings go to stderr, and a bond
   device that is not in `/sys/class/net` is refused whatever it claims to be.
+- **fix:** the initramfs never loaded `bridge.ko`, so `ip link add type bridge`
+  failed with `RTNETLINK answers: Not supported` and the node came up with its
+  address on the raw uplink and no `stormbr0`. Cilium is configured with
+  `devices: stormbr0` — auto-detection skips bridges — so it died at "unable
+  to determine direct routing device" and the node had no pod network while
+  looking perfectly healthy from the outside. The module ships in the
+  initramfs; nothing called `modprobe`.
