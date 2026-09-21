@@ -931,7 +931,7 @@ net_make_bond() {
     ip link add name "$BOND" type bond 2>/dev/null || true
     ip link set "$BOND" down 2>/dev/null || true
     if ! echo "$BOND_MODE" > "/sys/class/net/$BOND/bonding/mode" 2>/dev/null; then
-        echo "WARNING: $BOND does not take mode $BOND_MODE"
+        echo "WARNING: $BOND does not take mode $BOND_MODE" >&2
         return 1
     fi
     # Without a link monitor a bond never notices a cable being pulled, which
@@ -947,12 +947,12 @@ net_make_bond() {
         if ip link set "$_m" master "$BOND" 2>/dev/null; then
             _joined=$((_joined + 1))
         else
-            echo "WARNING: $_m would not join $BOND"
+            echo "WARNING: $_m would not join $BOND" >&2
             ip link set "$_m" up 2>/dev/null || true
         fi
     done
     if [ "$_joined" -lt 2 ]; then
-        echo "WARNING: only $_joined port(s) joined $BOND - not bonding"
+        echo "WARNING: only $_joined port(s) joined $BOND - not bonding" >&2
         net_unbond
         return 1
     fi
@@ -978,7 +978,18 @@ net_bring_up() {
     _up="$1"
     ip link set "$_up" up
     IFACE="$_up"
-    if [ -z "${NO_BRIDGE:-}" ] && ip link add name "$BRIDGE" type bridge 2>/dev/null; then
+    # Create the bridge, or use the one that is already there.
+    #
+    # This was `ip link add … && …`, which is false when the bridge *exists* —
+    # so a second call, after a first attempt had created it and a teardown
+    # had not fully removed it, silently skipped bridging altogether. The
+    # address then went straight onto the uplink, there was no `stormbr0`, and
+    # Cilium — which is configured with `devices: stormbr0` because
+    # auto-detection skips bridges — died at "unable to determine direct
+    # routing device". A node with a working DHCP lease and no pod network.
+    if [ -z "${NO_BRIDGE:-}" ] \
+       && { ip link add name "$BRIDGE" type bridge 2>/dev/null \
+            || [ -d "/sys/class/net/$BRIDGE" ]; }; then
         if ip link set "$_up" master "$BRIDGE" 2>/dev/null && ip link set "$BRIDGE" up; then
             # Everything below configures the bridge instead: it is the
             # interface that now holds the address, and the uplink is one of
@@ -1041,6 +1052,17 @@ else
     LEASED=""
     if [ "$BOND_MODE" != "off" ] && [ -z "${NO_BRIDGE:-}" ]; then
         BONDED=$(net_make_bond) || BONDED=""
+        # Only if it named a real interface.
+        #
+        # Belt and braces after a warning printed to stdout inside that
+        # function was captured as the device name, and the boot then tried to
+        # bring up an interface called "WARNING: ...". Anything that is not a
+        # device in /sys is not a device, whatever it says.
+        if [ -n "$BONDED" ] && [ ! -d "/sys/class/net/$BONDED" ]; then
+            echo "WARNING: the bond step returned '$BONDED', which is not an interface" >&2
+            BONDED=""
+            net_unbond
+        fi
         if [ -n "$BONDED" ]; then
             net_bring_up "$BONDED"
             if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES"; then

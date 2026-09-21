@@ -2587,3 +2587,15 @@ our target.
   `rd.stormblock.bond=off` disables it. A bond that cannot get a lease falls
   back to the single ports, and only ports at the top speed are bonded — a
   slow port is a fallback, not a peer.
+- **fix:** a failed bond could leave a node with no bridge, and therefore no
+  pod network. Two faults, both mine, both introduced with the bonding
+  change: warnings inside `net_make_bond` printed to stdout and were captured
+  as the device name, so the boot tried to bring up an interface called
+  `WARNING: …`; and `net_bring_up` bridged only when `ip link add` *succeeded*,
+  which is false when the bridge already exists — so the retry after a failed
+  bond silently skipped bridging and put the address straight on the uplink.
+  The node got a DHCP lease, had no `stormbr0`, and Cilium died at "unable to
+  determine direct routing device" because it is configured with
+  `devices: stormbr0` precisely because auto-detection skips bridges.
+  The bridge is now created *or reused*, warnings go to stderr, and a bond
+  device that is not in `/sys/class/net` is refused whatever it claims to be.
