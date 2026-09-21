@@ -903,7 +903,15 @@ BRIDGE="${STORM_BRIDGE:-stormbr0}"
 #
 # `rd.stormblock.bond=off` turns it off entirely.
 BOND="${STORM_BOND_DEV:-bond0}"
-BOND_MODE="${BOND_MODE:-active-backup}"
+# **Off by default, until it has earned a default.**
+#
+# It broke the network twice in one evening and in two different ways, and it
+# is not load-bearing: every release before it ran on a single uplink. A
+# feature that costs a node its pod network is not one to leave on while it is
+# still being proven, so it is opt-in with `rd.stormblock.bond=active-backup`
+# (or `802.3ad` on a switch with a LAG) and the single-uplink path — the one
+# that has worked all along — is what a node does unless told otherwise.
+BOND_MODE="${BOND_MODE:-off}"
 
 # Which uplinks to bond: the ones at the top speed, and only those.
 #
