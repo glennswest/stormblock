@@ -437,6 +437,12 @@ async fn compose_volume(
 
     // What it cost is the interesting number, so report it: a composition
     // that shares everything allocates nothing of its own.
+    // Recorded, not just echoed. A response naming an owner the engine did
+    // not keep is worse than one with no owner: the caller has been told the
+    // volume is claimed.
+    if req.owner.is_some() {
+        let _ = vm.set_owner(id, req.owner.clone()).await;
+    }
     let (virtual_size, allocated) = vm
         .list_volumes()
         .await
@@ -471,6 +477,9 @@ async fn compose_volume(
             .map(|h| h.placement_role().to_string())
             .unwrap_or_else(|| crate::drive::slab::SlabRole::System.to_string()),
         fs: None,
+        // What the request asked for. Echoed rather than read back, because
+        // this response is built before the volume is described again.
+        owner: req.owner.clone(),
     };
     metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
     (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -600,6 +609,9 @@ async fn create_volume(
     };
     match created {
         Ok(vol_id) => {
+            if req.owner.is_some() {
+                let _ = vm.set_owner(vol_id, req.owner.clone()).await;
+            }
             let resp = VolumeResponse {
                 id: vol_id.0,
                 name: req.name,
@@ -622,6 +634,7 @@ async fn create_volume(
                 // was asked for: a node with no system slab places in data.
                 role: vm.volume_role(&vol_id).unwrap_or_default().to_string(),
                 fs: None,
+                owner: req.owner.clone(),
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
