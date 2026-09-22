@@ -366,6 +366,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     sealed: v.sealed,
                     access: v.access,
                     fs: v.fs,
+                    owner: None,
                     // Nothing before V7 could say which goldens were blanks.
                     // A slab written then simply has no templates, which is
                     // what it had anyway.
@@ -430,6 +431,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     // across it: sealing still refuses writes on its own.
                     access: Access::ReadWrite,
                     fs: v.fs,
+                    owner: None,
                     template: false,
                     })
                 .collect(),
@@ -486,6 +488,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    owner: None,
                     template: false,
                     })
                 .collect(),
@@ -544,6 +547,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    owner: None,
                     template: false,
                     })
                 .collect(),
@@ -596,6 +600,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    owner: None,
                     template: false,
                     })
                 .collect(),
@@ -651,6 +656,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     sealed: false,
                     access: Access::ReadWrite,
                     fs: None,
+                    owner: None,
                     template: false,
                     })
                 .collect(),
@@ -900,6 +906,7 @@ mod tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
+                owner: None,
                 template: false,
                 }],
         }
@@ -932,6 +939,7 @@ mod tests {
                     parent: Some(VolumeId(Uuid::from_u128(54))),
                     sealed: false,
                     fs: None,
+                    owner: None,
                     },
                 v5::VolumeRecord {
                     id: VolumeId(Uuid::from_u128(56)),
@@ -946,6 +954,7 @@ mod tests {
                     parent: None,
                     sealed: true,
                     fs: None,
+                    owner: None,
                 },
             ],
         };
@@ -1117,6 +1126,7 @@ mod tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
+                owner: None,
                 template: false,
                 }],
         };
@@ -1287,6 +1297,7 @@ mod retention_tests {
                 sealed: false,
                 access: Access::ReadWrite,
                 fs: None,
+                owner: None,
                 template: false,
                 }],
         }
