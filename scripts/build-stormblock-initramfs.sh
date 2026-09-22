@@ -766,6 +766,17 @@ if [ "$BOOT_MODE" = "local" ] && [ -z "$IP_CONF" ] && [ -z "$BOOTHOST" ]; then
 else
 echo "Configuring network..."
 ip link set lo up
+# The instance metadata address.
+#
+# 169.254.169.254 is where every cloud image asks who it is — cloud-init,
+# Afterburn and tinycloudinit all probe it before anything else — and it has
+# to exist before the service that answers can bind it.
+#
+# On loopback, not on a NIC. The address is link-local and identical on every
+# cloud by design, so putting it on an interface would answer for it on that
+# segment, for machines this node does not run. Guests reach it because the
+# node routes to its own loopback.
+ip addr add 169.254.169.254/32 dev lo 2>/dev/null || true
 
 # Pick an uplink: carrier first, then speed.
 #
