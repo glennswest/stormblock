@@ -2606,3 +2606,16 @@ our target.
   to determine direct routing device" and the node had no pod network while
   looking perfectly healthy from the outside. The module ships in the
   initramfs; nothing called `modprobe`.
+- **feat(initramfs):** a machine with no SMBIOS serial identifies itself by its
+  SMBIOS UUID (stormcos#46). A Dell has a service tag and a VM has none —
+  Proxmox sets `uuid=` and leaves `serial=` empty — so a machine that was not
+  hardware could not be told which image was its own, and dropped to a shell
+  saying SMBIOS had no tag, which was true and not useful. The UUID is the
+  same kind of fact: one per machine rather than per interface, stable across
+  a NIC being replaced, already set by every hypervisor. A MAC was the other
+  candidate and is worse on both counts. Serial still wins when it is set, so
+  a deliberately-assigned `boothost/flow-1` beats a generated hex string, and
+  nothing about the hardware path changes — on a Dell the serial *is* the
+  service tag. Placeholder serials (`Not Specified`, `Default string`, `To Be
+  Filled By O.E.M.`) are rejected: every VM from one hypervisor would
+  otherwise answer the same string and claim each other's images.

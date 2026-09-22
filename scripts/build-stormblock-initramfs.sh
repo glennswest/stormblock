@@ -1685,11 +1685,41 @@ if [ "$BOOT_MODE" = "local" ]; then
         # claims on, so the name is the same by construction.
         if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_serial ]; then
             BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_serial)
+            # "Not Specified" and friends are what firmware writes when it has
+            # nothing to say, and they are not a machine's identity: every VM
+            # from one hypervisor would answer the same string and claim each
+            # other's images.
+            case "$BOOTTAG" in
+            NotSpecified|Default*|None|Unknown|ToBeFilledByO.E.M.|"") BOOTTAG="" ;;
+            esac
             [ -n "$BOOTTAG" ] && echo "Service tag from SMBIOS: $BOOTTAG"
         fi
+        # No serial? Use the SMBIOS UUID (stormcos#46).
+        #
+        # A Dell has a service tag and a VM has none — Proxmox sets `uuid=`
+        # and leaves `serial=` empty — so a machine that is not hardware could
+        # not be told which image was its own at all. It dropped to a shell
+        # saying SMBIOS had no tag, which is true and not useful.
+        #
+        # The UUID is the same *kind* of fact: one per machine rather than per
+        # interface, stable across a NIC being replaced, and already set by
+        # every hypervisor. A MAC was the other candidate and is worse on both
+        # counts — a machine with two NICs has two identities, and replacing a
+        # card changes who the machine is for no reason anyone would expect.
+        #
+        # Serial first, so a deliberately-assigned name wins over a generated
+        # hex string: `boothost/flow-1` is readable and `boothost/28bae105-…`
+        # is not, and on hardware the serial *is* the service tag, so nothing
+        # about the Dell path changes.
+        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_uuid ]; then
+            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_uuid)
+            [ -n "$BOOTTAG" ] && echo "Machine UUID from SMBIOS: $BOOTTAG"
+        fi
         if [ -z "$BOOTTAG" ]; then
-            echo "FATAL: rd.stormblock.boothost= and no service tag: not on the"
-            echo "  command line (rd.stormblock.tag=) and SMBIOS has none."
+            echo "FATAL: rd.stormblock.boothost= and nothing identifies this machine:"
+            echo "  not on the command line (rd.stormblock.tag=), no SMBIOS serial,"
+            echo "  and no SMBIOS UUID. On a VM, set one:"
+            echo "    qm set <id> --smbios1 serial=\$(printf %s <name> | base64),base64=1"
             echo "Dropping to shell..."
             exec /bin/sh
         fi
