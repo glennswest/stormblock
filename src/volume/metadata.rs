@@ -43,7 +43,7 @@ const MAGIC: [u8; 8] = *b"STRMVOL\0";
 /// says what a volume is and only moves one way in practice; access is a
 /// setting on a clone that moves both ways over its life. A V5 record loads
 /// read-write, which is what every volume that predates the question was.
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 /// Whether a volume takes writes.
 ///
@@ -316,6 +316,75 @@ fn convert_legacy_extents(m: BTreeMap<u64, LegacyLocation>) -> BTreeMap<u64, Ext
 /// default on read, it makes every record written before it undecodable.
 /// `#[serde(default)]` is no help. So a new field is a new version, always —
 /// which is what every module below is.
+/// V7 payload shapes — decode-only, converted on load.
+///
+/// The shape before `owner` (#115). Frozen here rather than read around,
+/// because bincode is not self-describing and `#[serde(default)]` does
+/// nothing for it — the comment on the V3 module says exactly this, and
+/// adding the field to the live struct without a new version is how a node
+/// came up with its network and no root: the decoder ran off the end of the
+/// first record and every volume after it was gone.
+mod v7 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: Option<RaidArrayId>,
+        pub extents: BTreeMap<u64, ExtentLocation>,
+        pub retention: Retention,
+        pub redundancy: RedundancyPolicy,
+        pub parity: BTreeMap<u64, ParityGroup>,
+        pub failed_slabs: Vec<SlabId>,
+        pub parent: Option<VolumeId>,
+        pub sealed: bool,
+        pub template: bool,
+        pub access: Access,
+        pub fs: Option<FsInfo>,
+    }
+}
+
+impl From<v7::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v7::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: v.array_id,
+                    extents: v.extents,
+                    retention: v.retention,
+                    redundancy: v.redundancy,
+                    parity: v.parity,
+                    failed_slabs: v.failed_slabs,
+                    parent: v.parent,
+                    sealed: v.sealed,
+                    template: v.template,
+                    access: v.access,
+                    fs: v.fs,
+                    // Nothing claimed these; they predate owners being
+                    // recorded at all, which is the truth about them.
+                    owner: None,
+                })
+                .collect(),
+        }
+    }
+}
+
 mod v6 {
     use super::*;
 
@@ -775,6 +844,12 @@ impl MetadataStore {
             let (old, _): (v4::VolumeMetadata, _) =
                 bincode::serde::decode_from_slice(payload, bincode::config::standard())
                     .map_err(|e| io::Error::other(format!("bincode decode (v4): {e}")))?;
+            return Ok(old.into());
+        }
+        if version == 7 {
+            let (old, _): (v7::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v7): {e}")))?;
             return Ok(old.into());
         }
         if version == 6 {
