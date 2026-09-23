@@ -118,25 +118,27 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Node disk layout: data last, and growable (2026-09-23) — IN PROGRESS
+### Node disk layout: data last, and growable (2026-09-23) — DONE (v16.1 pending)
 
 Asked for by the owner: the data half goes at the **end** of the drive so it can
 be expanded; the node is a test box, so reinstalling it is fine.
 
-- [ ] `lay_node_slabs`: system slab first at a fixed size (goldens only; every
+- [x] `lay_node_slabs`: system slab first at a fixed size (goldens only; every
       install replaces it), data slab last taking the rest of the drive.
-- [ ] Slab header bytes 120..124: `table_capacity` (slots the table has room
+- [x] Slab header bytes 120..124: `table_capacity` (slots the table has room
       for; 0 = legacy = `total_slots`). `SlabFormat::with_growth(bytes)`
       reserves table room; the data slab reserves 4× its size (0.024% of it).
-- [ ] `Slab::grow()`: extend `total_slots` into the reserved table, up to the
+- [x] `Slab::grow()`: extend `total_slots` into the reserved table, up to the
       device's length. No data moves.
-- [ ] `image::local::grow_data_half(disk)`: when the data partition is last and
+- [x] `image::local::grow_data_half(disk)`: when the data partition is last and
       the drive has room after it, extend its GPT entry to the end, rewrite both
       table copies, grow the slab. Run by `boot-local` on a local node disk
       before it opens the slabs, and by `stormblock slab grow <disk>`.
-- [ ] Tests: layout order, header round trip (with and without capacity), grow
+- [x] Tests: layout order, header round trip (with and without capacity), grow
       in place keeps data, grow at boot after the backing file is extended.
-- [ ] Reinstall the R230 onto the new layout; verify persistence again.
+- [x] Reinstall the R230 onto the new layout; verify persistence again.
+      Verified 11.34: system 0–116.4 GiB, data 116.4–1863 GiB with 4x table
+      room; a hard power cut kept a ConfigMap; booted local, no claim.
 
 ### Layered goldens — engine items (2026-08-19)
 
