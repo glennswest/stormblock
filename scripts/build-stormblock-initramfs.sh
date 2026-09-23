@@ -1890,18 +1890,21 @@ if [ "$BOOT_MODE" = "local" ]; then
     # which is otherwise refused by the survey and by boot-local both, on
     # every boot, with no way out — the guard cannot tell a dead identity from
     # a live one, so it protects both.
+    # --- BEGIN assimilate survey (covered by tests/initramfs-boot-hook.sh)
+    SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
+    SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
     LOCAL_DISK=""
     case "${ASSIMILATE:-any}" in
     off) echo "  rd.stormblock.assimilate=off: leaving every local drive alone" ;;
     blank|any|force)
-        for d in /sys/block/sd? /sys/block/nvme?n?; do
+        for d in "$SURVEY_SYS"/sd? "$SURVEY_SYS"/nvme?n?; do
             [ -e "$d" ] || continue
             dev="/dev/$(basename "$d")"
             [ "$(cat "$d/removable" 2>/dev/null)" = "1" ] && continue
             [ "$(cat "$d/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
             # Do not eat the disk this boot is running from.
             case "$SLAB" in *"$(basename "$d")"*) continue ;; esac
-            probe=$(/usr/sbin/stormblock slab list "$dev" 2>&1)
+            probe=$("$SURVEY_SB" slab list "$dev" 2>&1)
             case "$probe" in
                 *": slab "*|*"data slab"*)
                     # `force` is the one policy that answers "and take it
@@ -1928,9 +1931,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                     # ran from the appliance for the rest of its life.
                     #
                     # Both halves are required. A lone data slab is an
-                    # abandoned install and only `force` answers for it; a lone
-                    # system slab is somebody else's arrangement, and the
-                    # policy still says leave it.
+                    # abandoned install and only `force` answers for it.
                     if [ "$ASSIMILATE" != blank ] \
                        && printf '%s\n' "$probe" | grep -q "role=data" \
                        && printf '%s\n' "$probe" | grep -q "role=system"; then
@@ -1938,10 +1939,36 @@ if [ "$BOOT_MODE" = "local" ]; then
                         echo "  $dev is this node's own layout - taking it to replace the system half"
                         break
                     fi
+                    # **No data slab, no identity.** A drive whose slabs are
+                    # all system-role holds goldens at most. Those are what
+                    # every install replaces, and nothing on such a drive is
+                    # this node's CA key or its ServiceAccount signing key,
+                    # because those live only in a data slab. `boot-local`'s
+                    # own guard (`data_slab_on`) already takes this view and
+                    # lays fresh slabs over it. Only the survey refused.
+                    #
+                    # It refused on every boot. A 2 TB drive left by an older
+                    # flow-over, one system slab across the whole disk with
+                    # nothing in it, was "somebody else's arrangement". So the
+                    # node claimed a fresh clone from the appliance every boot
+                    # and nothing written to a -data volume survived a reboot
+                    # (stormblock#118):
+                    #
+                    #   /dev/sda is already a stormblock slab - leaving it
+                    #   no local drive to take; writes stay on the appliance
+                    #
+                    # `blank` still leaves it: that policy asks for a drive
+                    # that carries nothing at all.
+                    if [ "$ASSIMILATE" != blank ] \
+                       && ! printf '%s\n' "$probe" | grep -q "role=data"; then
+                        LOCAL_DISK="$dev"
+                        echo "  $dev carries system slabs only - no identity on it; this node will take it"
+                        break
+                    fi
                     echo "  $dev is already a stormblock slab - leaving it" ;;
                 *)
                     if [ "$ASSIMILATE" = blank ] && \
-                       /usr/sbin/stormblock slab list "$dev" 2>&1 | grep -q "partition"; then
+                       "$SURVEY_SB" slab list "$dev" 2>&1 | grep -q "partition"; then
                         echo "  $dev carries partitions and the policy is 'blank' - leaving it"
                     else
                         LOCAL_DISK="$dev"
@@ -1967,6 +1994,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         ;;
     *) echo "  unknown rd.stormblock.assimilate='$ASSIMILATE' (off|blank|any|force)" ;;
     esac
+    # --- END assimilate survey
 
     # --- BEGIN hook takeable (covered by tests/initramfs-boot-hook.sh)
     # A hook may name the drive instead (#109).

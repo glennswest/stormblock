@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-09-23
+- **fix(initramfs):** the assimilate survey takes a drive whose slabs are all
+  system-role. Identity (the CA key and the ServiceAccount signing key) lives
+  only in a data slab, and `boot-local`'s own guard already lays fresh slabs
+  over such a drive, so only the survey refused. It refused on every boot: the
+  R230's 2 TB disk carries one empty system slab across the whole disk, left
+  by an older flow-over. The node therefore claimed a fresh appliance clone at
+  every boot, and nothing written to a `-data` volume survived a reboot
+  (#118). The survey block is now covered by `tests/initramfs-boot-hook.sh`.
+
 ## [v16.0.0] — 2026-09-09
 
 ### 2026-09-08 (boot testing)

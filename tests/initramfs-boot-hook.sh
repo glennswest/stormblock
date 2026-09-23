@@ -27,6 +27,8 @@ sed -n '/# --- BEGIN local-slab probe/,/# --- END local-slab probe/p' "$GEN" > "
 [ -s "$WORK/probe.sh" ] || { echo "FAIL: could not extract the local-slab probe"; exit 1; }
 sed -n '/# --- BEGIN hook takeable/,/# --- END hook takeable/p' "$GEN" > "$WORK/takeable.sh"
 [ -s "$WORK/takeable.sh" ] || { echo "FAIL: could not extract the takeable block"; exit 1; }
+sed -n '/# --- BEGIN assimilate survey/,/# --- END assimilate survey/p' "$GEN" > "$WORK/survey.sh"
+[ -s "$WORK/survey.sh" ] || { echo "FAIL: could not extract the assimilate survey"; exit 1; }
 
 fail=0
 check() { # name expected actual
@@ -340,5 +342,51 @@ check "the boot drive is never taken as its own flow-over target" "" \
 # No offer at all is what every boot without a hook looks like.
 check "no offer changes nothing" "/dev/sdc" "$(takeable "" /dev/sdc any)"
 
-[ "$fail" -eq 0 ] && echo "all boot hook, probe and takeable checks passed"
+echo "assimilate survey:"
+
+# A fake /sys/block and a stub whose `slab list` prints a whole canned answer,
+# so a drive can report both halves on two lines the way the real one does.
+SVSTUB="$WORK/stormblock-survey"
+cat > "$SVSTUB" <<'STUBEOF'
+#!/bin/sh
+cat "$SURVEY_ANSWERS/$(basename "$3")" 2>/dev/null
+exit 0
+STUBEOF
+chmod +x "$SVSTUB"
+
+survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behind
+    (
+        set +e
+        sys="$WORK/sys"; rm -rf "$sys"; mkdir -p "$sys/sda" "$WORK/survey"
+        echo 0 > "$sys/sda/removable"; echo 3907029168 > "$sys/sda/size"
+        ASSIMILATE="$1"; shift
+        printf '%s\n' "$@" > "$WORK/survey/sda"
+        STORM_STORMBLOCK="$SVSTUB"; STORM_SYS_BLOCK="$sys"; SURVEY_ANSWERS="$WORK/survey"
+        export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS
+        SLAB="nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1"
+        . "$WORK/survey.sh" >/dev/null 2>&1
+        echo "$LOCAL_DISK"
+    )
+}
+
+SYS_ONLY="/dev/sda: slab 8dd28347-44b4-48e4-82d2-9624e8b5ac07 (role=system, tier=hot, 1841822 slots, 1841740 free, in stormblock)"
+DATA_ONLY="/dev/sda: slab 11111111-2222-3333-4444-555555555555 (role=data, tier=hot, 8189 slots, 8000 free, in stormblock-data)"
+SYS_HALF="/dev/sda: slab 66666666-7777-8888-9999-000000000000 (role=system, tier=hot, 16258 slots, 8000 free, in stormblock)"
+
+# The drive stormblock#118 was about: an older flow-over left one system slab
+# across the whole disk and the survey refused it on every boot.
+check "a lone system slab carries no identity and is taken" "/dev/sda" \
+    "$(survey any "$SYS_ONLY")"
+check "a blank drive is taken" "/dev/sda" \
+    "$(survey any "/dev/sda: not a slab (bad slab magic)")"
+check "this node's own layout is taken" "/dev/sda" \
+    "$(survey any "$DATA_ONLY" "$SYS_HALF")"
+check "a lone data slab is an identity and is left" "" \
+    "$(survey any "$DATA_ONLY")"
+check "'blank' leaves a drive that carries any slab" "" \
+    "$(survey blank "$SYS_ONLY")"
+check "'off' takes nothing" "" "$(survey off "$SYS_ONLY")"
+check "'force' takes a lone data slab" "/dev/sda" "$(survey force "$DATA_ONLY")"
+
+[ "$fail" -eq 0 ] && echo "all boot hook, probe, takeable and survey checks passed"
 exit "$fail"
