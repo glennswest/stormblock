@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-### 2026-09-23
+## [v16.0.1] — 2026-09-23
+
+### Fixed
+
 - **fix(initramfs):** the assimilate survey takes a drive whose slabs are all
   system-role. Identity (the CA key and the ServiceAccount signing key) lives
   only in a data slab, and `boot-local`'s own guard already lays fresh slabs
