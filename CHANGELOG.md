@@ -32,6 +32,12 @@
   alive and stuck. The 300 s deadline gave up on a first boot one minute
   before its seeding finished, and PID 1 sat in a shell while every device
   came up behind it.
+- **fix(ublk):** devices declare a volatile write cache
+  (`UBLK_ATTR_VOLATILE_CACHE`), so the kernel sends FLUSH and FUA becomes
+  write-plus-flush. They were declared write-through, so `fsync` in a guest
+  filesystem never reached the engine's `sync_all`, while slab writes sat in
+  the page cache and the drive's write-back cache. Once a node's data survived
+  a power cycle, fastetcd's redb came back "All roots are corrupted".
 - **fix(metadata):** `owner`, `Owner.namespace` and `Owner.uid` are always
   written. `skip_serializing_if` on a bincode-encoded field writes less than
   the decoder reads, so any volume without an owner made the whole

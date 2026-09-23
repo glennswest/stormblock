@@ -98,6 +98,10 @@ const UBLK_IO_OP_WRITE_ZEROES: u8 = 5;
 // ---------------------------------------------------------------------------
 const UBLK_PARAM_TYPE_BASIC: u32 = 1 << 0;
 const UBLK_PARAM_TYPE_DISCARD: u32 = 1 << 1;
+/// `UBLK_ATTR_VOLATILE_CACHE` (include/uapi/linux/ublk_cmd.h): this device
+/// has a write cache, so the block layer must send FLUSH, and turn FUA into
+/// write-plus-flush, for anything to be durable.
+const UBLK_ATTR_VOLATILE_CACHE: u32 = 1 << 2;
 
 // ---------------------------------------------------------------------------
 // ublk feature flags
@@ -718,7 +722,17 @@ impl UblkServer {
             len: std::mem::size_of::<UblkParams>() as u32,
             types: UBLK_PARAM_TYPE_BASIC | UBLK_PARAM_TYPE_DISCARD,
             basic: UblkParamBasic {
-                attrs: 0,
+                // **The cache is real, so say so.** Slab I/O goes through the
+                // page cache (`FileDevice` does not use O_DIRECT) onto drives
+                // whose own write cache is on. Declared write-through, the
+                // kernel never sent FLUSH: an `fsync` in a guest filesystem
+                // returned with nothing on the media, and `UBLK_IO_OP_FLUSH`
+                // (which does `sync_all` on every slab the volume touches) was
+                // never reached. The first node whose data survived a reboot
+                // came back with fastetcd's redb "DB corrupted ... All roots
+                // are corrupted" (#118). The flag is fixed at creation, so an
+                // adopted device keeps what its creator declared.
+                attrs: UBLK_ATTR_VOLATILE_CACHE,
                 logical_bs_shift: bs_shift,
                 physical_bs_shift: bs_shift,
                 io_opt_shift: 12, // 4096
