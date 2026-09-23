@@ -128,6 +128,22 @@ impl Drains {
     }
 }
 
+/// Make the map durable, then free the source slots it no longer names.
+///
+/// A migration's source slot is *owed*, not freed (b270bfd): freeing it before
+/// the map that stopped naming it reaches disk is how a crash leaves a volume
+/// pointing at a slot that has been reused. The drain persisted and never
+/// paid, so a drained slab kept every slot it had ever held and never emptied.
+async fn persist_then_release(
+    volumes: &Arc<tokio::sync::Mutex<VolumeManager>>,
+    registry: &Arc<RwLock<SlabRegistry>>,
+    engine: &PlacementEngine,
+) {
+    volumes.lock().await.persist().await;
+    let mut reg = registry.write().await;
+    engine.release_owed(&mut reg).await;
+}
+
 /// Legs of anything still on these slabs.
 fn remaining_on(gem: &GlobalExtentMap, slabs: &[SlabId]) -> u64 {
     slabs
@@ -159,6 +175,9 @@ async fn run(
     let mut since_persist = 0u32;
     loop {
         if *cancel.borrow() {
+            // What has moved is paid for before stopping: the map is made
+            // durable, then the source slots it no longer names are freed.
+            persist_then_release(&volumes, &registry, &engine).await;
             let mut st = status.write().await;
             st.state = DrainState::Cancelled;
             st.finished_at = Some(now());
@@ -213,9 +232,9 @@ async fn run(
                 st.remaining = remaining;
                 st.finished_at = Some(now());
                 st.state = if remaining == 0 { DrainState::Empty } else { DrainState::Stuck };
-                if remaining == 0 {
-                    volumes.lock().await.persist().await;
-                }
+                drop(st);
+                // Stuck or empty, everything that did move is paid for.
+                persist_then_release(&volumes, &registry, &engine).await;
                 // A stuck drive stays quarantined: it is still leaving.
                 if remaining == 0 {
                     let mut reg = registry.write().await;
@@ -258,7 +277,7 @@ async fn run(
         }
 
         if since_persist >= 64 {
-            volumes.lock().await.persist().await;
+            persist_then_release(&volumes, &registry, &engine).await;
             since_persist = 0;
         }
         tokio::task::yield_now().await;

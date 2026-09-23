@@ -26,6 +26,11 @@
   unnoticed because the test target had stopped compiling (#115's fixtures),
   and because a node that re-clones every boot never reads back what it
   wrote. The fixtures are fixed too.
+- **fix(drain):** a drain frees the slots it has moved off. Since a
+  migration's source slot became *owed* until the map is durable (b270bfd),
+  the drain persisted and never paid, so a drained slab kept every slot and
+  never emptied. It now releases after each persist, on cancel, and at the
+  end. The placement tests that asserted an immediate free now pay first.
 
 ## [v16.0.0] — 2026-09-09
 

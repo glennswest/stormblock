@@ -1409,7 +1409,10 @@ mod tests {
         dest_slab.read_slot(result.dest_slot, 0, &mut buf).await.unwrap();
         assert!(buf.iter().all(|&b| b == 0xDE));
 
-        // Source slab slot should be freed
+        // Source slab slot is owed until the map is durable (b270bfd), then
+        // freed.
+        assert_eq!(engine.owed_count(), 1);
+        engine.release_owed(&mut registry).await;
         let src_slab = registry.get(&slab_a_id).unwrap();
         assert_eq!(src_slab.find_slot(vol, 0), None);
 
@@ -1519,7 +1522,9 @@ mod tests {
             assert!(buf.iter().all(|&b| b == (i as u8 + 0x10)));
         }
 
-        // Source slab should have all slots free
+        // Source slab should have all slots free, once the owed frees are
+        // paid (b270bfd).
+        engine.release_owed(&mut registry).await;
         let src = registry.get(&slab_a_id).unwrap();
         assert_eq!(src.allocated_slots(), 0);
 
@@ -1568,7 +1573,9 @@ mod tests {
         let b_alloc = registry.get(&slab_b_id).unwrap().allocated_slots();
         assert!(b_alloc > 0, "slab B should have received extents");
 
-        // Slab A should have fewer than it started with
+        // Slab A should have fewer than it started with, once the owed
+        // frees are paid (b270bfd).
+        engine.release_owed(&mut registry).await;
         let a_alloc = registry.get(&slab_a_id).unwrap().allocated_slots();
         assert!(a_alloc < total_a, "slab A should have fewer extents after rebalance");
 
