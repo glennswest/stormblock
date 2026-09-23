@@ -4250,6 +4250,23 @@ async fn handle_adopt_ublk(
 
     let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
 
+    // The drive this boot laid keeps the records first, as it does in the
+    // engine that laid it (#118). The slabs open in handover order, appliance
+    // first, and a volume with no extents yet is recorded in the first
+    // metadata slab of its role. A PVC created and not yet written would
+    // otherwise exist only on a clone the next boot does not attach.
+    if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.as_ref()) {
+        let local: Vec<stormblock::drive::slab::SlabId> = [&flow.data_slab, &flow.system_slab]
+            .into_iter()
+            .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+            .map(stormblock::drive::slab::SlabId)
+            .filter(|id| mgr.is_metadata_slab(id))
+            .collect();
+        if !local.is_empty() {
+            mgr.keep_metadata_in_first(&local);
+        }
+    }
+
     // Resolve every volume before adopting anything. A name that does not
     // resolve should cost nothing — half-adopting a set of devices leaves the
     // node with some queues served and some not, which is worse than not

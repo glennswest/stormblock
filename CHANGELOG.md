@@ -19,6 +19,10 @@
   data slab *kept* from an earlier install is still `STORMBLOCK_SEED_DATA`
   only, because adopting its records over the fresh clone's volumes is the
   unbuilt upgrade path. `STORMBLOCK_NO_SEED_DATA` turns it off.
+- **fix(adopt-ublk):** the engine that adopts a flow-over boot puts the laid
+  drive's slabs first among its metadata slabs too, so a volume created at
+  runtime and not yet written is recorded on the local disk, not only on the
+  appliance clone.
 - **fix(metadata):** `owner`, `Owner.namespace` and `Owner.uid` are always
   written. `skip_serializing_if` on a bincode-encoded field writes less than
   the decoder reads, so any volume without an owner made the whole
