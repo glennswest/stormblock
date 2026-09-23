@@ -188,6 +188,12 @@ pub struct TemplateSpec {
     /// protected. A golden mirrored two ways hands out clones whose shared
     /// extents already have two legs and whose writes get two.
     pub redundancy: crate::volume::RedundancyPolicy,
+    /// Which half of the node's storage the template lives in. Its clones
+    /// stay in the same half, so a template for claims must be `Data`: a
+    /// claim shares its template's unwritten extents, and the system half is
+    /// replaced by every install. `None` asks the node, which is the system
+    /// half where there is one.
+    pub role: Option<crate::drive::slab::SlabRole>,
 }
 
 impl TemplateSpec {
@@ -203,6 +209,7 @@ impl TemplateSpec {
             format_in_core: true,
             parent: None,
             redundancy: Default::default(),
+            role: None,
         }
     }
 
@@ -654,7 +661,11 @@ pub async fn create(
             .create_volume_with(
                 &format!("fstemplate-{}-raw", spec.name),
                 spec.size_bytes,
-                crate::volume::CreateOptions::redundant(spec.redundancy.clone()),
+                match spec.role {
+                    Some(role) => crate::volume::CreateOptions::redundant(spec.redundancy.clone())
+                        .in_role(role),
+                    None => crate::volume::CreateOptions::redundant(spec.redundancy.clone()),
+                },
             )
             .await
             .map_err(|e| TemplateError::Internal(format!("creating template volume: {e}")))?,

@@ -134,6 +134,11 @@ pub struct CreateTemplateRequest {
     /// Incompatible with `format`, which would erase what the parent is for.
     #[serde(default)]
     pub parent: Option<String>,
+    /// `data` or `system`: the half of the node's storage the template lives
+    /// in, and therefore where its clones live. A template for
+    /// PersistentVolumeClaims is `data`, so its claims survive an install.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 fn yes() -> bool {
@@ -338,6 +343,13 @@ async fn create_template(
         },
         None => Default::default(),
     };
+    let role = match req.role.as_deref() {
+        None => None,
+        Some(r) => match crate::drive::slab::SlabRole::parse(r) {
+            Some(r) => Some(r),
+            None => return ApiError::bad_request(format!("invalid role '{r}' (use system or data)")),
+        },
+    };
     let spec = TemplateSpec {
         name: req.name,
         fs,
@@ -353,6 +365,7 @@ async fn create_template(
         format_in_core: req.format && req.parent.is_none(),
         parent: req.parent,
         redundancy,
+        role,
     };
 
     match template::create(&state.volume_manager, &state.fstemplates, &spec).await {

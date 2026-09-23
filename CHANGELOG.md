@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 2026-09-23 (PVC templates)
+- **feat(fstemplates):** `POST /api/v1/fstemplates` takes `role` (`data` or
+  `system`), and the template's volume, and so every clone of it, lives in that
+  half of the node's storage. A PVC blank minted on demand landed on the system
+  half, which every install replaces, and its claims share the blank's
+  unwritten extents.
+
 ## [v16.1.0] — 2026-09-23
 
 ### Changed
