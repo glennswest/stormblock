@@ -1014,7 +1014,6 @@ mod tests {
                     parent: Some(VolumeId(Uuid::from_u128(54))),
                     sealed: false,
                     fs: None,
-                    owner: None,
                     },
                 v5::VolumeRecord {
                     id: VolumeId(Uuid::from_u128(56)),
@@ -1029,7 +1028,6 @@ mod tests {
                     parent: None,
                     sealed: true,
                     fs: None,
-                    owner: None,
                 },
             ],
         };
@@ -1118,8 +1116,9 @@ mod tests {
                     label: "root".into(),
                     uuid: Some(Uuid::from_u128(9)),
                 }),
-                    template: false,
-                    }],
+                template: false,
+                owner: None,
+            }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
         let v = &back.volumes[0];
