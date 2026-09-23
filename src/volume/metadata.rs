@@ -201,7 +201,14 @@ pub struct VolumeRecord {
     ///
     /// `default` so a slab written before owners existed still loads: those
     /// volumes simply have no owner recorded, which is the truth about them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// **Never `skip_serializing_if` on anything bincode writes.** bincode is
+    /// not self-describing: a field left out on write is still read on
+    /// decode, from the next record's bytes or past the end. With it here,
+    /// one volume with no owner made the whole `volumes.dat` undecodable
+    /// (`UnexpectedEnd { additional: 1 }`), which is what every metadata
+    /// round-trip test was reporting.
+    #[serde(default)]
     pub owner: Option<Owner>,
 }
 
@@ -223,8 +230,9 @@ pub struct VolumeRecord {
 pub struct Owner {
     /// `PersistentVolumeClaim`, `VirtualMachineInstance`, `CloudImage`, …
     pub kind: String,
-    /// Empty for a cluster-scoped owner.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// Empty for a cluster-scoped owner. Written even when empty: see
+    /// `VolumeRecord::owner` on bincode and skipped fields.
+    #[serde(default)]
     pub namespace: String,
     pub name: String,
     /// The owner's uid, when the setter knows it.
@@ -233,7 +241,7 @@ pub struct Owner {
     /// name — which is exactly the case where a wrong answer deletes live
     /// data, so it is carried when it is known and absent rather than
     /// guessed when it is not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub uid: Option<String>,
 }
 
@@ -1210,6 +1218,31 @@ mod tests {
         assert_eq!(v.extents[&0].mirrors, vec![crate::volume::gem::Leg::new(b, 2)]);
         assert_eq!(v.parity[&0].legs, vec![crate::volume::gem::Leg::new(c, 5)]);
         assert_eq!(v.failed_slabs, vec![b]);
+    }
+
+    /// A record with no owner, beside one with a cluster-scoped owner whose
+    /// uid is unknown, must decode. With `skip_serializing_if` on those fields
+    /// bincode wrote less than it read and the whole file failed with
+    /// `UnexpectedEnd` (#118 found it; every round-trip test here was red).
+    #[test]
+    fn records_without_an_owner_round_trip() {
+        let mut meta = test_metadata();
+        let mut owned = meta.volumes[0].clone();
+        meta.volumes[0].owner = None;
+        owned.id = VolumeId(Uuid::from_u128(77));
+        owned.name = "owned".into();
+        owned.owner = Some(Owner {
+            kind: "CloudImage".into(),
+            namespace: String::new(),
+            name: "fedora-44".into(),
+            uid: None,
+        });
+        meta.volumes.push(owned);
+        let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap())
+            .expect("records without an owner must decode");
+        assert_eq!(back.volumes.len(), 2);
+        assert!(back.volumes[0].owner.is_none());
+        assert_eq!(back.volumes[1].owner.as_ref().unwrap().name, "fedora-44");
     }
 
     #[test]

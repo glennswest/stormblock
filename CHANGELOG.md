@@ -19,6 +19,13 @@
   data slab *kept* from an earlier install is still `STORMBLOCK_SEED_DATA`
   only, because adopting its records over the fresh clone's volumes is the
   unbuilt upgrade path. `STORMBLOCK_NO_SEED_DATA` turns it off.
+- **fix(metadata):** `owner`, `Owner.namespace` and `Owner.uid` are always
+  written. `skip_serializing_if` on a bincode-encoded field writes less than
+  the decoder reads, so any volume without an owner made the whole
+  `volumes.dat` undecodable (`UnexpectedEnd { additional: 1 }`). It went
+  unnoticed because the test target had stopped compiling (#115's fixtures),
+  and because a node that re-clones every boot never reads back what it
+  wrote. The fixtures are fixed too.
 
 ## [v16.0.0] — 2026-09-09
 
