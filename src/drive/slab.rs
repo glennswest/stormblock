@@ -2151,6 +2151,7 @@ mod tests {
             role: SlabRole::Data,
             meta_offset: HEADER_SIZE,
             meta_size: 128 * 1024,
+            table_capacity: 0,
             checksum: 0,
         };
         let bytes = header.to_bytes();
@@ -2185,6 +2186,7 @@ mod tests {
             role: SlabRole::System,
             meta_offset: 0,
             meta_size: 0,
+            table_capacity: 0,
             checksum: 0,
         };
         let bytes = header.to_bytes();
