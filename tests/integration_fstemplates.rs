@@ -682,9 +682,12 @@ async fn a_clone_costs_one_extent_not_a_filesystem() {
         .unwrap();
     let clone_cost = slots_in_use(&state).await - before_clone;
     assert_eq!(clone_cost, 1, "a clone should copy exactly the stamped extent");
-    // It still presents the whole filesystem, shared.
+    // It still presents the whole filesystem, shared. `allocated_bytes` is
+    // what the clone costs (5e4e5d3) and `shared_bytes` what it maps through
+    // its template, so the sharing shows in the second.
     assert_eq!(clone["virtual_size_bytes"], 512 * 1024 * 1024);
-    assert!(clone["allocated_bytes"].as_u64().unwrap() > clone_cost * DEFAULT_EXTENT_SIZE);
+    assert_eq!(clone["allocated_bytes"].as_u64().unwrap(), clone_cost * DEFAULT_EXTENT_SIZE);
+    assert!(clone["shared_bytes"].as_u64().unwrap() > 0, "the clone maps its template's extents");
 
     server.abort();
 }
