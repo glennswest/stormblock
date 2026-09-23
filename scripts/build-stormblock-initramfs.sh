@@ -1899,8 +1899,30 @@ if [ "$BOOT_MODE" = "local" ]; then
             dev="/dev/$(basename "$d")"
             [ "$(cat "$d/removable" 2>/dev/null)" = "1" ] && continue
             [ "$(cat "$d/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
-            # Do not eat the disk this boot is running from.
-            case "$SLAB" in *"$(basename "$d")"*) continue ;; esac
+            # Do not eat the disk this boot is running from — but a disk
+            # named by `rd.stormblock.slab=` is not that disk.
+            #
+            # This skipped any device whose name appeared in $SLAB, and
+            # stormcos sets `rd.stormblock.slab=/dev/sda` on every node so an
+            # installed one stops asking the appliance. The two settings then
+            # contradicted each other: the survey excluded the exact disk the
+            # node was told to use, `LOCAL_DISK` stayed empty, `--local-disk`
+            # was never passed, `boot-local` never laid a system and a data
+            # slab, and the node ran forever on volumes re-cloned from blank
+            # goldens at every boot. Nothing written to a `-data` volume
+            # survived a reboot, on a machine with a 2 TB drive sitting idle.
+            #
+            # The probe below already answers this correctly and was
+            # unreachable: somebody else's slab is refused, this node's own
+            # layout is taken to have its system half replaced, and a blank
+            # disk is claimed. The only case the old guard really protected —
+            # booting from a disk and then reformatting it — is the same case
+            # `boot-local` exists to perform, and it keeps the data half while
+            # doing it.
+            #
+            # What is still skipped is the appliance's own device, which is
+            # not in /sys/block as a local drive at all.
+            :
             probe=$(/usr/sbin/stormblock slab list "$dev" 2>&1)
             case "$probe" in
                 *": slab "*|*"data slab"*)
