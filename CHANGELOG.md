@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### 2026-09-23 (layout)
+- **BREAKING (node disk layout):** `lay_node_slabs` puts the system slab first,
+  at a fixed size (a sixteenth of the drive, 32 to 128 GiB), and the data slab
+  **last, taking the rest of the drive**. The data half is the one that fills
+  up (PVCs, VM disks, images), and the last partition is the only one that can
+  grow into space the drive gains. On the R230 that is 116 GiB for goldens and
+  about 1.7 TB for data, where it was 1.8 TB and 64 GB. Existing disks keep the
+  old layout until reinstalled; `node_layout` finds both halves by type,
+  whatever their order. `LocalLayout.data_bytes` is now `system_bytes`.
+- **feat(slab):** a slab can grow in place. Header bytes 120..124 record the
+  slot-table room (0 = exactly `total_slots`, so old slabs read unchanged), and
+  `SlabFormat::with_growth` reserves it. The data slab reserves 4x, which costs
+  0.024% of it. `Slab::grow` extends into the device's current length with a
+  header write; nothing moves.
+- **feat(boot-local, cli):** `image::local::grow_data_half` extends the last
+  partition to the end of the drive, rewrites both table copies, then grows
+  the slab (table first, so an interruption leaves a partition longer than its
+  slab, which the next call fixes). `boot-local` runs it on a local node disk
+  before opening it; `stormblock slab grow <disk>` runs it by hand.
+
 ## [v16.0.1] — 2026-09-23
 
 ### Fixed

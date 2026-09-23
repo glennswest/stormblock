@@ -273,6 +273,12 @@ struct SlabHeader {
     meta_offset: u64,
     /// Size of that region, both copies together.
     meta_size: u64,
+    /// Slots the slot table has room for, which may be more than
+    /// `total_slots`: the room a slab can grow into without moving its data
+    /// region. Written into what v1 left reserved (bytes 120..124), so a slab
+    /// formatted before this reads 0, meaning exactly `total_slots`, and
+    /// older code ignores it.
+    table_capacity: u64,
     #[allow(dead_code)]
     checksum: u32,
 }
@@ -297,7 +303,10 @@ impl SlabHeader {
         // byte 103 pad
         buf[104..112].copy_from_slice(&self.meta_offset.to_le_bytes());
         buf[112..120].copy_from_slice(&self.meta_size.to_le_bytes());
-        // bytes 120..124 reserved
+        // Zero when the table has no room beyond `total_slots`, which keeps a
+        // slab that cannot grow byte-identical to one written before this.
+        let cap = if self.table_capacity > self.total_slots { self.table_capacity } else { 0 };
+        buf[120..124].copy_from_slice(&(cap.min(u32::MAX as u64) as u32).to_le_bytes());
         let crc = crc32c::crc32c(&buf[..124]);
         buf[124..128].copy_from_slice(&crc.to_le_bytes());
         buf
@@ -351,6 +360,8 @@ impl SlabHeader {
         };
         let meta_offset = u64::from_le_bytes(data[104..112].try_into().unwrap());
         let meta_size = u64::from_le_bytes(data[112..120].try_into().unwrap());
+        let table_capacity =
+            (u32::from_le_bytes(data[120..124].try_into().unwrap()) as u64).max(total_slots);
 
         Ok(SlabHeader {
             slab_uuid,
@@ -367,6 +378,7 @@ impl SlabHeader {
             role,
             meta_offset,
             meta_size,
+            table_capacity,
             checksum: stored_crc,
         })
     }
@@ -385,11 +397,14 @@ pub struct SlabFormat {
     /// What the slab is for. [`SlabRole::System`] unless said otherwise —
     /// a data slab is the exception a caller has to ask for.
     pub role: SlabRole,
+    /// Bytes the slab should be able to grow to in place, or 0 for exactly
+    /// its device. The slot table is sized for this; see [`Slab::grow`].
+    pub grow_to: u64,
 }
 
 impl SlabFormat {
     pub fn new(slot_size: u64, tier: StorageTier) -> Self {
-        SlabFormat { slot_size, tier, metadata_bytes: 0, role: SlabRole::System }
+        SlabFormat { slot_size, tier, metadata_bytes: 0, role: SlabRole::System, grow_to: 0 }
     }
 
     /// Format this slab as identity storage: nothing on an install path may
@@ -397,6 +412,18 @@ impl SlabFormat {
     /// caller's memory of which path it handed over (#88).
     pub fn with_role(mut self, role: SlabRole) -> Self {
         self.role = role;
+        self
+    }
+
+    /// Leave room in the slot table for the slab to grow in place to
+    /// `bytes` — the size of its device after that device has grown.
+    ///
+    /// The table sits between the metadata region and the data, so it cannot
+    /// be extended later without moving every slot; reserving it now is what
+    /// makes a later grow a header write. It is cheap: an entry is 64 bytes
+    /// per slot, 1/16384 of what it describes.
+    pub fn with_growth(mut self, bytes: u64) -> Self {
+        self.grow_to = bytes;
         self
     }
 
@@ -425,6 +452,19 @@ pub fn auto_metadata_bytes(capacity: u64, slot_size: u64) -> u64 {
     // Never more than an eighth of the device, so a small slab stays a slab.
     let ceiling = (capacity / 8).clamp(2 * META_ALIGN, META_MAX);
     align_up(want.clamp(META_MIN.min(ceiling), ceiling), 2 * META_ALIGN)
+}
+
+/// Write `len` zero bytes at `offset`, a chunk at a time.
+async fn write_zeros(device: &Arc<dyn BlockDevice>, offset: u64, len: u64) -> DriveResult<()> {
+    const CHUNK: u64 = 8 * 1024 * 1024;
+    let zero = vec![0u8; CHUNK.min(len) as usize];
+    let mut done = 0u64;
+    while done < len {
+        let n = CHUNK.min(len - done);
+        device.write(offset + done, &zero[..n as usize]).await?;
+        done += n;
+    }
+    Ok(())
 }
 
 /// A slab manages a device as an extent store with fixed-size slots.
@@ -481,7 +521,10 @@ impl Slab {
             )));
         }
         let total_slots = usable / per_slot;
-        let table_size = total_slots * SLOT_ENTRY_SIZE;
+        // Room for growth: as many entries as a device of `grow_to` bytes
+        // would need, never fewer than fit now.
+        let table_capacity = total_slots.max(opts.grow_to / slot_size.max(1));
+        let table_size = table_capacity * SLOT_ENTRY_SIZE;
 
         // Align data offset to slot_size boundary
         let raw_data_offset = table_offset + table_size;
@@ -519,6 +562,7 @@ impl Slab {
             role: opts.role,
             meta_offset,
             meta_size,
+            table_capacity: table_capacity.max(total_slots),
             checksum: 0,
         };
 
@@ -534,16 +578,19 @@ impl Slab {
             device.write(meta_offset + meta_size / 2, &zero).await?;
         }
 
-        // Write zeroed slot table (padded to device block_size for alignment)
-        let table_bytes = total_slots as usize * SLOT_ENTRY_SIZE as usize;
+        // Write zeroed slot table (padded to device block_size for alignment).
+        // All of it, reserved room included: a grow takes those entries as
+        // free, so they must read as free.
+        let table_bytes = table_capacity as usize * SLOT_ENTRY_SIZE as usize;
         let bs = device.block_size() as usize;
         let padded_table = if bs > 1 && table_bytes % bs != 0 {
             table_bytes.div_ceil(bs) * bs
         } else {
             table_bytes
         };
-        let zero_table = vec![0u8; padded_table];
-        device.write(table_offset, &zero_table).await?;
+        // In chunks: a table with room for a 7 TB slab is ~460 MB, and this
+        // runs in an initramfs.
+        write_zeros(&device, table_offset, padded_table as u64).await?;
         device.flush().await?;
 
         let id = SlabId(slab_uuid);
@@ -1015,6 +1062,46 @@ impl Slab {
         self.header.total_slots
     }
 
+    /// Slots the table has room for: how far this slab can grow in place.
+    pub fn table_capacity(&self) -> u64 {
+        self.header.table_capacity
+    }
+
+    /// Take in whatever the device has gained, up to the table's room.
+    ///
+    /// The device is asked for its length now, so the caller grows the device
+    /// first — extends the partition, or the file — and then calls this. New
+    /// slots are free; nothing existing moves, because the data region starts
+    /// where it always did and the slot table already has their entries,
+    /// zeroed at format. The header is the only write.
+    ///
+    /// Returns how many slots were added: 0 when the device has not grown by a
+    /// whole slot, or the table has no room left.
+    pub async fn grow(&mut self) -> DriveResult<u64> {
+        let slot_size = self.header.slot_size;
+        let fits = self.device.capacity_bytes().saturating_sub(self.header.data_offset) / slot_size;
+        let new_total = fits.min(self.header.table_capacity);
+        let old_total = self.header.total_slots;
+        if new_total <= old_total {
+            return Ok(0);
+        }
+        let added = new_total - old_total;
+
+        self.header.total_slots = new_total;
+        self.header.free_slots = self.free_count + added;
+        self.header.update_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.device.write(0, &self.header.to_bytes()).await?;
+        self.device.flush().await?;
+
+        self.free_bitmap.resize(new_total as usize, true);
+        self.slots.resize(new_total as usize, Slot::free());
+        self.free_count += added;
+        Ok(added)
+    }
+
     /// Where the slots begin, in bytes from the start of the device. Slot
     /// `n` is at `data_offset + n * slot_size`.
     pub fn data_offset(&self) -> u64 {
@@ -1391,6 +1478,26 @@ mod slot_bounds_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// A slab written before `table_capacity` existed reads as having room
+    /// for exactly its slots, and one that cannot grow writes the same header
+    /// it always did.
+    #[test]
+    fn table_capacity_reads_legacy_headers_as_exact() {
+        let mut h = SlabHeader {
+            slab_uuid: Uuid::new_v4(), device_uuid: Uuid::new_v4(), slot_size: 1 << 20,
+            total_slots: 100, free_slots: 100, data_offset: 1 << 20, table_offset: 4096,
+            create_time: 1, update_time: 1, tier: StorageTier::Hot, flags: 0,
+            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, checksum: 0,
+        };
+        let b = h.to_bytes();
+        assert_eq!(&b[120..124], &[0, 0, 0, 0], "no room beyond total_slots writes zero");
+        assert_eq!(SlabHeader::from_bytes(&b).unwrap().table_capacity, 100);
+        h.table_capacity = 400;
+        let back = SlabHeader::from_bytes(&h.to_bytes()).unwrap();
+        assert_eq!(back.table_capacity, 400);
+        assert_eq!(back.total_slots, 100);
+    }
     use super::*;
     use crate::drive::filedev::FileDevice;
 

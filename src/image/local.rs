@@ -30,12 +30,15 @@ use super::{ImageError, Result};
 
 /// How the two slabs are sized on a drive.
 pub struct LocalLayout {
-    /// Bytes for the data slab. The system slab takes what is left.
+    /// Bytes for the system slab, at the front. The data slab takes the rest
+    /// of the drive, at the end.
     ///
-    /// Sized here rather than in an image, which is the point: 5G and 10G PVC
-    /// classes never fit an 8 GiB partition chosen by a build that had not
-    /// seen the drive (stormcos#36).
-    pub data_bytes: u64,
+    /// The system half is the one with a knowable size: the goldens of a
+    /// release, which every install replaces wholesale. The data half is the
+    /// one that grows — PVCs, VM disks, cloud images — so it gets the drive,
+    /// and it is last so that it can keep growing when the drive does
+    /// (stormcos#36, #48).
+    pub system_bytes: u64,
     pub slot_size: u64,
     pub tier: StorageTier,
     /// GPT block size. `None` follows the device, which is what firmware and
@@ -44,17 +47,19 @@ pub struct LocalLayout {
 }
 
 impl LocalLayout {
-    /// A tenth of the drive for data, floored at 8 GiB and capped at 64.
+    /// A sixteenth of the drive for the system half, floored at 32 GiB and
+    /// capped at 128; the data half gets everything else.
     ///
-    /// A guess, and a deliberately dull one: the data slab holds identity,
-    /// logs and claims, which grow with what the node is asked to run rather
-    /// than with how big its disk is. The floor is what the image ships today
-    /// and is known to hold the ladder; the cap stops a 20 TB drive donating
-    /// 2 TB to log files.
+    /// This was the other way round — a tenth for data, capped at 64 GiB, and
+    /// 1.8 TB of a 2 TB drive for goldens that used 8 GB, while VM images and
+    /// PVCs filled the data half. A release's goldens are ~11 GB today; the
+    /// floor holds a few of them, which is room for the previous release to
+    /// stay bootable beside the next, and the cap stops a 20 TB drive
+    /// donating a terabyte to goldens.
     pub fn for_drive(capacity: u64) -> Self {
         const GIB: u64 = 1024 * 1024 * 1024;
         LocalLayout {
-            data_bytes: (capacity / 10).clamp(8 * GIB, 64 * GIB).min(capacity / 2),
+            system_bytes: (capacity / 16).clamp(32 * GIB, 128 * GIB).min(capacity / 2),
             slot_size: DEFAULT_SLOT_SIZE,
             tier: StorageTier::Hot,
             lba: None,
@@ -72,6 +77,8 @@ pub struct LocalSlabs {
 }
 
 const ALIGN: u64 = 1024 * 1024;
+/// How far the data slab can grow in place, as a multiple of its laid size.
+const DATA_GROWTH: u64 = 4;
 const GPT_OVERHEAD: u64 = 2 * ALIGN;
 
 fn align_down(v: u64, a: u64) -> u64 {
@@ -267,10 +274,19 @@ pub async fn update_system_slab(
 /// partition holds the node's CA key and its ServiceAccount signing key, and
 /// nothing can mint those again.
 ///
-/// The data slab is allocated **first**, deliberately. It is the half an
-/// install keeps, and putting it before the half that grows means a system
-/// slab that gets larger across a release cannot move the partition holding
-/// the node's identity.
+/// **The system slab is first and the data slab is last.** The data half is
+/// the one that grows — it holds PVCs, VM disks and images — and the last
+/// partition on a drive is the only one that can grow into space the drive
+/// gains (a bigger virtual disk, a grown array), because that space always
+/// appears at the end. So the data slab is laid last, takes the rest of the
+/// drive, and is formatted with room in its slot table to grow in place; see
+/// [`grow_data_half`].
+///
+/// This was the other way round, data first "so a system slab that gets
+/// larger cannot move the partition holding the node's identity". That
+/// protected the half with a fixed size from the half that never moves, and
+/// left the one that fills up boxed in at the front. The system half does not
+/// grow in place at all: every install formats it afresh at its fixed size.
 pub async fn lay_node_slabs(
     device: Arc<dyn BlockDevice>,
     opts: &LocalLayout,
@@ -278,21 +294,22 @@ pub async fn lay_node_slabs(
     let capacity = device.capacity_bytes();
     let lba = opts.lba.unwrap_or_else(|| device.block_size());
 
-    let data_bytes = align_down(opts.data_bytes, ALIGN);
-    if data_bytes == 0 {
-        return Err(ImageError::Spec("the data slab would be empty".into()));
-    }
-    // What is left after the GPT at both ends and the data slab, rounded down
-    // so the last partition never runs past the tail the table needs.
-    let system_bytes = capacity
-        .saturating_sub(GPT_OVERHEAD)
-        .saturating_sub(data_bytes);
-    let system_bytes = align_down(system_bytes, ALIGN);
+    let system_bytes = align_down(opts.system_bytes, ALIGN);
     if system_bytes < 64 * ALIGN {
         return Err(ImageError::Spec(format!(
-            "a {} byte drive leaves {} for the system slab after a {} data slab, which is not \
-             enough to hold the goldens",
-            capacity, system_bytes, data_bytes
+            "a {system_bytes} byte system slab is not enough to hold the goldens"
+        )));
+    }
+    // What is left after the GPT at both ends and the system slab, rounded
+    // down so the last partition never runs past the tail the table needs.
+    let data_bytes = align_down(
+        capacity.saturating_sub(GPT_OVERHEAD).saturating_sub(system_bytes),
+        ALIGN,
+    );
+    if data_bytes < 64 * ALIGN {
+        return Err(ImageError::Spec(format!(
+            "a {capacity} byte drive leaves {data_bytes} for the data slab after a \
+             {system_bytes} system slab"
         )));
     }
 
@@ -344,8 +361,8 @@ pub async fn lay_node_slabs(
 
     let mut out = Vec::new();
     for (name, guid, size, role) in [
-        ("stormblock-data", type_guid::SLAB_DATA, data_bytes, SlabRole::Data),
         ("stormblock", type_guid::SLAB, system_bytes, SlabRole::System),
+        ("stormblock-data", type_guid::SLAB_DATA, data_bytes, SlabRole::Data),
     ] {
         let slot = gpt
             .allocate(name, guid, size, 0)
@@ -360,21 +377,83 @@ pub async fn lay_node_slabs(
         // The slab keeps its own record of what is in it. A node reads that
         // at boot; there is no filesystem underneath it to keep one in, and a
         // slab that cannot say what it holds boots to "no volume metadata".
-        let meta = auto_metadata_bytes(len, opts.slot_size);
+        // The data slab reserves room to grow in place to four times its
+        // size — its table and its record both — which costs 0.024% of it.
+        let grow_to = if role == SlabRole::Data { len.saturating_mul(DATA_GROWTH) } else { 0 };
+        let meta = auto_metadata_bytes(len.max(grow_to), opts.slot_size);
         let slab = Slab::format_with(
             part,
             SlabFormat::new(opts.slot_size, opts.tier)
                 .with_metadata(meta)
-                .with_role(role),
+                .with_role(role)
+                .with_growth(grow_to),
         )
         .await
         .map_err(|e| ImageError::Other(format!("format {name}: {e}")))?;
         out.push(slab);
     }
 
-    let system = out.pop().expect("two slabs");
     let data = out.pop().expect("two slabs");
+    let system = out.pop().expect("two slabs");
     Ok(LocalSlabs { data, system, data_bytes, system_bytes, lba })
+}
+
+/// Grow the data half into whatever the drive has after it.
+///
+/// The data slab is the last partition (see [`lay_node_slabs`]), so space the
+/// drive gains — a bigger virtual disk, a grown array — lands right behind it.
+/// This extends the partition to the end of the drive, rewrites both copies of
+/// the table, and grows the slab into the new length. Nothing moves: the slab
+/// was formatted with slot-table room to grow, and a grow is a header write.
+///
+/// The order is what makes an interruption harmless. The table is written
+/// first, so the worst a crash leaves is a partition longer than its slab,
+/// which the next call grows into. The other order would leave a slab claiming
+/// slots past the end of its partition.
+///
+/// Returns the slot count before and after, or `None` when there is nothing to
+/// do: no node layout, a data partition that is not last, or no space after it.
+pub async fn grow_data_half(device: Arc<dyn BlockDevice>) -> Result<Option<(u64, u64)>> {
+    let Some((data_i, _)) = node_layout(&device).await? else { return Ok(None) };
+    let mut gpt = Gpt::read(&device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let bs = gpt.block_size;
+    let data_last = gpt.entries[data_i].last_lba;
+    // Only the last partition can take space at the end of the drive.
+    if gpt.partitions().any(|(i, e)| i != data_i && e.last_lba > data_last) {
+        return Ok(None);
+    }
+
+    gpt.extend_to_device();
+    // Whole megabytes, like everything `lay_node_slabs` lays.
+    let per = (ALIGN / bs as u64).max(1);
+    let new_last = ((gpt.last_usable_lba + 1) / per * per).saturating_sub(1);
+    if new_last <= data_last {
+        return Ok(None);
+    }
+    gpt.entries[data_i].last_lba = new_last;
+    gpt.write(&device)
+        .await
+        .map_err(|e| ImageError::Other(format!("writing the extended table: {e}")))?;
+
+    let e = &gpt.entries[data_i];
+    let part = PartitionDevice::new(device.clone(), e.start_bytes(bs), e.size_bytes(bs))
+        .map_err(|err| ImageError::Other(format!("the extended data partition: {err}")))?;
+    let mut slab = Slab::open(Arc::new(part))
+        .await
+        .map_err(|err| ImageError::Other(format!("opening the data slab to grow it: {err}")))?;
+    if !slab.is_data() {
+        return Err(ImageError::Other(
+            "the partition typed as a data slab says it is a system slab; not growing it".into(),
+        ));
+    }
+    let before = slab.total_slots();
+    let added = slab
+        .grow()
+        .await
+        .map_err(|err| ImageError::Other(format!("growing the data slab: {err}")))?;
+    Ok(Some((before, before + added)))
 }
 
 #[cfg(test)]
@@ -583,5 +662,98 @@ mod tests {
         layout.slot_size = 1024 * 1024;
         let laid = lay_node_slabs(dev, &layout).await.unwrap();
         assert!(laid.data_bytes > 0 && laid.system_bytes > 0);
+    }
+
+    /// A 2 TB drive gets a fixed system half and the rest is data.
+    #[test]
+    fn a_big_drive_is_mostly_data() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let two_tb = 2_000_398_934_016u64;
+        let l = LocalLayout::for_drive(two_tb);
+        assert_eq!(l.system_bytes, two_tb / 16);
+        assert!(l.system_bytes <= 128 * GIB);
+        assert_eq!(LocalLayout::for_drive(100 * GIB).system_bytes, 32 * GIB);
+        assert_eq!(LocalLayout::for_drive(40 * 1024 * GIB).system_bytes, 128 * GIB);
+    }
+
+    /// The data partition is the last one on the drive, so it is the one that
+    /// can take space the drive gains.
+    #[tokio::test]
+    async fn the_data_half_is_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("order.disk").to_string_lossy().to_string();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, CAP).await.unwrap());
+        let mut layout = LocalLayout::for_drive(CAP);
+        layout.slot_size = 1024 * 1024;
+        lay_node_slabs(dev.clone(), &layout).await.unwrap();
+
+        let gpt = Gpt::read(&dev).await.unwrap();
+        let (d, s) = node_layout(&dev).await.unwrap().expect("a node layout");
+        assert!(
+            gpt.entries[d].first_lba > gpt.entries[s].last_lba,
+            "the data partition must come after the system partition"
+        );
+        assert!(
+            gpt.partitions().all(|(_, e)| e.last_lba <= gpt.entries[d].last_lba),
+            "nothing may sit after the data partition"
+        );
+    }
+
+    /// A drive that grows gives the data half its new space, in place: the
+    /// partition is extended, the slab takes the new slots, and what was
+    /// written stays where it was, owned by what owned it.
+    #[tokio::test]
+    async fn the_data_half_grows_into_a_grown_drive() {
+        use crate::volume::extent::VolumeId;
+        const MIB: u64 = 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grow.disk").to_string_lossy().to_string();
+
+        let (vol, slot, before_slots) = {
+            let dev: Arc<dyn BlockDevice> =
+                Arc::new(FileDevice::open_with_capacity(&path, CAP).await.unwrap());
+            let mut layout = LocalLayout::for_drive(CAP);
+            layout.slot_size = MIB;
+            let mut laid = lay_node_slabs(dev.clone(), &layout).await.unwrap();
+            assert!(laid.data.table_capacity() >= 4 * laid.data.total_slots() - 4);
+            let vol = VolumeId(uuid::Uuid::new_v4());
+            let slot = laid.data.allocate(vol, 7).await.unwrap();
+            laid.data.write_slot(slot, 0, &[0x5A; 4096]).await.unwrap();
+            dev.flush().await.unwrap();
+            (vol, slot, laid.data.total_slots())
+        };
+
+        // Nothing to do on a drive that has not grown.
+        {
+            let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&path).await.unwrap());
+            assert_eq!(grow_data_half(dev).await.unwrap(), None);
+        }
+
+        // The drive doubles, the way a virtual disk is grown: at the end.
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(2 * CAP).unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&path).await.unwrap());
+        let (was, now) = grow_data_half(dev.clone()).await.unwrap().expect("it grew");
+        assert_eq!(was, before_slots);
+        assert!(now >= was + (CAP / MIB) - 2, "grew by about the added space: {was} -> {now}");
+
+        // Reopened from scratch, it is the grown slab with the old data.
+        let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&path).await.unwrap());
+        let gpt = Gpt::read(&dev).await.unwrap();
+        assert!(!gpt.recovered_from_backup, "both copies of the table were rewritten");
+        let (d, _) = node_layout(&dev).await.unwrap().expect("still a node layout");
+        let e = &gpt.entries[d];
+        let part = PartitionDevice::new(dev.clone(), e.start_bytes(gpt.block_size), e.size_bytes(gpt.block_size)).unwrap();
+        let data = Slab::open(Arc::new(part)).await.unwrap();
+        assert_eq!(data.total_slots(), now);
+        assert!(data.is_data());
+        assert_eq!(data.find_slot(vol, 7), Some(slot), "ownership survived the grow");
+        let mut buf = vec![0u8; 4096];
+        data.read_slot(slot, 0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0x5A), "the data survived the grow");
+        assert_eq!(data.free_slots(), now - 1);
+
+        // And a second call finds nothing more to take.
+        assert_eq!(grow_data_half(dev).await.unwrap(), None);
     }
 }

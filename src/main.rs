@@ -438,6 +438,15 @@ enum SlabAction {
         #[arg(long)]
         metadata_bytes: Option<u64>,
     },
+    /// Grow a node disk's data half into the space after it.
+    ///
+    /// The data slab is the last partition; when the drive has grown, this
+    /// extends the partition to the end and the slab into it, in place. The
+    /// boot does the same on its own disk before opening it.
+    Grow {
+        /// The whole disk, e.g. /dev/sda
+        device: String,
+    },
     /// List slabs on specified devices
     List {
         /// Device paths to scan
@@ -1653,6 +1662,21 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             println!("  total slots: {}", slab.total_slots());
             println!("  capacity: {}", stormblock::mgmt::config::human_size(
                 slab.total_slots() * slab.slot_size()));
+        }
+        SlabAction::Grow { device } => {
+            // `open` creates a missing path; a typo must not become a file.
+            if !std::path::Path::new(device).exists() {
+                anyhow::bail!("{device} does not exist");
+            }
+            let dev: Arc<dyn BlockDevice> =
+                Arc::new(stormblock::drive::filedev::FileDevice::open(device).await?);
+            match stormblock::image::local::grow_data_half(dev).await? {
+                Some((was, now)) => println!(
+                    "{device}: data slab grew from {was} to {now} slots (+{})",
+                    stormblock::mgmt::config::human_size((now - was) * SLAB_SLOT_SIZE)
+                ),
+                None => println!("{device}: nothing to grow into"),
+            }
         }
         SlabAction::List { devices } => {
             for device in devices {
@@ -4698,6 +4722,26 @@ async fn handle_boot_local(
     local_disk_force: bool,
     check: bool,
 ) -> anyhow::Result<()> {
+    // A node disk's data half takes any space the drive has gained, before
+    // anything is open on it: nothing is mounted, nothing is exported, and a
+    // grow is a table rewrite and a header write. Its own failure costs
+    // nothing — the node boots on the data half it already had.
+    for path in slab_paths {
+        if is_fabric_uri(path) || !std::path::Path::new(path).exists() {
+            continue;
+        }
+        let Ok(dev) = stormblock::drive::filedev::FileDevice::open(path).await else {
+            continue;
+        };
+        match stormblock::image::local::grow_data_half(Arc::new(dev)).await {
+            Ok(Some((was, now))) => println!(
+                "{path}: the data half grew from {was} to {now} slots into the space after it"
+            ),
+            Ok(None) => {}
+            Err(e) => println!("{path}: not growing the data half — {e}"),
+        }
+    }
+
     let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
 
     // 3. Resolve the boot volume: --volume wins, else boot.toml.

@@ -350,6 +350,18 @@ impl Gpt {
     }
 
     /// Every non-empty entry, with its index.
+    /// Let the table use all of the device it was read from.
+    ///
+    /// [`Gpt::read`] puts the backup header at the device's last block, which
+    /// is where it belongs, but keeps the usable range the table was written
+    /// with. On a drive that has grown since, that leaves the new space
+    /// outside every partition's reach. This moves the end of the usable range
+    /// to just before the backup entries, so a partition can be extended into
+    /// it and [`Gpt::write`] records both.
+    pub fn extend_to_device(&mut self) {
+        self.last_usable_lba = self.alternate_lba - 1 - entries_lbas(self.block_size);
+    }
+
     pub fn partitions(&self) -> impl Iterator<Item = (usize, &GptEntry)> {
         self.entries.iter().enumerate().filter(|(_, e)| !e.is_empty())
     }
