@@ -3875,6 +3875,16 @@ async fn handle_attach(
     anyhow::bail!("attach exports volumes through ublk, which is Linux-only")
 }
 
+/// Whether [`seed_data_half`] runs without being asked.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SeedWhen {
+    /// The data slab was laid this boot and its records are routed to it.
+    Always,
+    /// Only with `STORMBLOCK_SEED_DATA` set.
+    Asked,
+}
+
 /// Put the writable half on the local disk, **now**, before anything is
 /// exported.
 ///
@@ -3911,33 +3921,39 @@ async fn seed_data_half(
     mgr: &stormblock::volume::VolumeManager,
     dest: stormblock::drive::slab::SlabId,
     disk: &str,
+    when: SeedWhen,
 ) -> anyhow::Result<()> {
     // Its own handle on the drive. The one the caller had was consumed laying
     // the slabs, and reading a partition table is cheap next to what follows.
     let dev: Arc<dyn BlockDevice> =
         Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
-    // **Off unless asked for.** `rd.stormblock.seed-data=1`, or the
-    // environment variable, and never by default.
+    // **On for a data half laid this boot, and asked-for otherwise.**
     //
-    // Moving the writable half onto the local disk is the right idea and this
-    // implementation is not finished. It moves the extents correctly — 3041 of
-    // them, verified — and then the *records* for those volumes do not survive
-    // to the next boot: the manager persists its map to the metadata slabs it
-    // chose when it opened, which are the appliance's, and the local slabs are
-    // registered afterwards. So the engine that adopts the boot opens the
-    // drive, restores 68 volumes, and every data volume is missing:
+    // It was off everywhere, because the records did not survive: the manager
+    // persisted its map only to the metadata slabs it chose when it opened,
+    // which are the appliance's, and the local slabs were registered
+    // afterwards. So the engine that adopted the boot opened the drive,
+    // restored 68 volumes, and every data volume was missing:
     //
     //   Error: volume 'stormcert-data' not found in slab metadata
     //     (have: ... every golden and every *-logs, and none of the rest)
     //
-    // and nothing on the node starts. A node that boots from the appliance is
-    // slower than one that does not; a node that does not boot is worse than
-    // both. The system half still flows over, which is the part that works and
-    // the part that carries the bytes.
-    if std::env::var("STORMBLOCK_SEED_DATA").is_err() {
+    // The fresh-lay path now names the local slabs as metadata slabs, first,
+    // before calling this, so the records land beside the extents (#118).
+    // Leaving the data half on the appliance is what made every write to a
+    // -data volume vanish at the next boot, because the appliance side is a
+    // clone that the next boot claims afresh.
+    //
+    // A data slab kept from an earlier install is different. It holds this
+    // node's records, and seeding into it before those are adopted over the
+    // fresh clone's volumes of the same names would move extents that nothing
+    // records. That is the upgrade path, and until it exists it is `Asked`.
+    let asked = std::env::var("STORMBLOCK_SEED_DATA").is_ok();
+    let refused = std::env::var("STORMBLOCK_NO_SEED_DATA").is_ok();
+    if refused || (when == SeedWhen::Asked && !asked) {
         println!(
-            "Flow-over: leaving the data half where it is — writes stay on the appliance \
-             (STORMBLOCK_SEED_DATA=1 to move them)"
+            "Flow-over: leaving the data half where it is — writes stay on the appliance{}",
+            if refused { " (STORMBLOCK_NO_SEED_DATA)" } else { "" }
         );
         return Ok(());
     }
@@ -4647,7 +4663,7 @@ async fn handle_boot_local(
     local_disk_force: bool,
     check: bool,
 ) -> anyhow::Result<()> {
-    let mgr = open_slabs_and_restore(slab_paths, meta).await?;
+    let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
 
     // 3. Resolve the boot volume: --volume wins, else boot.toml.
     let selector = match volume {
@@ -4846,7 +4862,12 @@ async fn handle_boot_local(
                     reg.add(laid.data);
                     reg.add(laid.system);
                 }
-                seed_data_half(&mgr, data_id, disk).await?;
+                // Not seeded by default. The data slab kept here holds this
+                // node's records, and adopting them over the fresh clone's
+                // volumes of the same names is the upgrade path, which is not
+                // built yet. Seeding without it would move extents onto the
+                // drive and record them nowhere.
+                seed_data_half(&mgr, data_id, disk, SeedWhen::Asked).await?;
                 println!(
                     "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
                 );
@@ -4950,7 +4971,21 @@ async fn handle_boot_local(
                 reg.add(laid.data);
                 reg.add(laid.system);
             }
-            seed_data_half(&mgr, data_id, disk).await?;
+            // **The records go where the extents go.** The slabs just laid
+            // keep metadata of their own, and this manager was only ever
+            // writing into the slabs it opened, which are the appliance
+            // clone's. So a seeded data half had its extents on the drive and
+            // its records on a clone the next boot never attaches, and the
+            // engine that adopted the boot died on
+            //
+            //   Error: volume 'stormcert-data' not found in slab metadata
+            //
+            // Safe here, and only here: both slabs were formatted a moment
+            // ago and hold nothing a persist could overwrite. The update path
+            // above keeps a data slab that holds this node's records, and
+            // writing this manager's view of it would replace them.
+            mgr.keep_metadata_in_first(&[data_id, system_id]);
+            seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
             println!(
                 "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
             );

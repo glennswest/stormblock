@@ -442,6 +442,19 @@ impl VolumeManager {
         self.metadata_slabs = slab_ids;
     }
 
+    /// Keep metadata in these slabs as well, ahead of the ones already named.
+    ///
+    /// First, because order is a decision: a volume with no extents yet is
+    /// recorded in the first metadata slab of its own role. On a node that has
+    /// just laid its own disk, that slab has to be the local one. Otherwise the
+    /// record lives only on an appliance clone that the next boot will not
+    /// attach.
+    pub fn keep_metadata_in_first(&mut self, slab_ids: &[SlabId]) {
+        let mut next: Vec<SlabId> = slab_ids.to_vec();
+        next.extend(self.metadata_slabs.iter().copied().filter(|s| !slab_ids.contains(s)));
+        self.metadata_slabs = next;
+    }
+
     /// Which slab, if any, this manager writes its metadata into. The first
     /// of them where there are several.
     pub fn metadata_slab(&self) -> Option<SlabId> {
@@ -1967,6 +1980,20 @@ mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
     use crate::raid::{RaidArray, RaidLevel};
+
+    /// A laid disk's slabs come first, and nothing is named twice (#118).
+    #[test]
+    fn local_metadata_slabs_go_first() {
+        let (appliance_data, appliance_sys) = (SlabId::new(), SlabId::new());
+        let (local_data, local_sys) = (SlabId::new(), SlabId::new());
+        let mut mgr = VolumeManager::new(4096);
+        mgr.persist_to_slabs(vec![appliance_data, appliance_sys]);
+        mgr.keep_metadata_in_first(&[local_data, local_sys, appliance_sys]);
+        assert_eq!(
+            mgr.metadata_slabs(),
+            &[local_data, local_sys, appliance_sys, appliance_data]
+        );
+    }
 
     async fn create_test_array() -> (RaidArrayId, Arc<dyn BlockDevice>, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();

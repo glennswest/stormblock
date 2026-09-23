@@ -11,6 +11,14 @@
   by an older flow-over. The node therefore claimed a fresh appliance clone at
   every boot, and nothing written to a `-data` volume survived a reboot
   (#118). The survey block is now covered by `tests/initramfs-boot-hook.sh`.
+- **fix(boot-local):** a data half laid this boot is seeded, and its records
+  land on it. The laid slabs become metadata slabs, first, so each volume's
+  record is written beside its extents instead of only onto the appliance
+  clone that the next boot claims afresh. That gap was why seeding was off
+  everywhere: the adopting engine found every data volume missing. Seeding a
+  data slab *kept* from an earlier install is still `STORMBLOCK_SEED_DATA`
+  only, because adopting its records over the fresh clone's volumes is the
+  unbuilt upgrade path. `STORMBLOCK_NO_SEED_DATA` turns it off.
 
 ## [v16.0.0] — 2026-09-09
 
