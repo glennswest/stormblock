@@ -23,6 +23,15 @@
   drive's slabs first among its metadata slabs too, so a volume created at
   runtime and not yet written is recorded on the local disk, not only on the
   appliance clone.
+- **fix(boot-local):** seeding persists every 64 extents, not after each one.
+  Per extent it was 3301 whole-map writes to four metadata slabs, two on a
+  spinning drive: 382.6 s on the R230. A source slot is still freed only after
+  the map that stopped naming it is durable.
+- **fix(initramfs):** the wait for the root device ends when the root appears
+  or the engine exits. The deadline (now 30 min) only bounds an engine that is
+  alive and stuck. The 300 s deadline gave up on a first boot one minute
+  before its seeding finished, and PID 1 sat in a shell while every device
+  came up behind it.
 - **fix(metadata):** `owner`, `Owner.namespace` and `Owner.uid` are always
   written. `skip_serializing_if` on a bincode-encoded field writes less than
   the decoder reads, so any volume without an owner made the whole

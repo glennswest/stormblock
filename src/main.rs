@@ -4038,6 +4038,9 @@ async fn seed_data_half(
     let engine = stormblock::placement::PlacementEngine::new();
     let started = std::time::Instant::now();
     let (mut moved, mut failed) = (0u64, 0u64);
+    // The drain's cadence, for the same reason (see `drain::run`).
+    const SEED_PERSIST_EVERY: u32 = 64;
+    let mut since_persist = 0u32;
     for (vol, vext) in todo {
         {
         let mut gem = mgr.gem().write().await;
@@ -4063,15 +4066,30 @@ async fn seed_data_half(
         // Durable map first, then the source slots it no longer names.
         //
         // The locks are dropped above so the persist can take what it needs.
-        // Doing this per extent rather than at the end is what makes an
-        // interruption harmless: the most a crash can cost is one extent's
+        // Doing this as it goes, rather than only at the end, is what makes an
+        // interruption harmless: the most a crash can cost is one batch's
         // worth of leaked slot, and never a volume that points at a slot the
-        // slab has already freed.
-        mgr.persist().await;
-        {
+        // slab has already freed — a source is freed only after the map that
+        // stopped naming it is durable, and until then the slot table's newer
+        // generation is what a restore takes.
+        //
+        // **In batches, not per extent.** Per extent was 3301 whole-map
+        // writes to four metadata slabs, two of them on a spinning drive,
+        // each flushed: 382.6 s on the R230, past the boot's 300 s wait for
+        // the root, so PID 1 gave up and dropped to a shell one minute before
+        // the seeding it was waiting for finished (#118).
+        since_persist += 1;
+        if since_persist >= SEED_PERSIST_EVERY {
+            since_persist = 0;
+            mgr.persist().await;
             let mut reg = mgr.registry().write().await;
             engine.release_owed(&mut reg).await;
         }
+    }
+    mgr.persist().await;
+    {
+        let mut reg = mgr.registry().write().await;
+        engine.release_owed(&mut reg).await;
     }
     println!(
         "Flow-over: data half seeded - {moved} extent(s) onto {disk} in {:.1}s{}",

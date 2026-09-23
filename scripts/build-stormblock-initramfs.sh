@@ -2088,17 +2088,30 @@ STORMBLOCK_PID=$!
 # engine that died, a slab that will not open — is not more likely at five
 # minutes than at thirty seconds, it just takes longer to say so, and it says
 # so on a machine that would otherwise sit at a prompt forever.
+#
+# **And a deadline is not the signal; the engine is.** 300 s gave up on a
+# boot whose engine was alive and one minute from done — seeding took 382.6 s
+# on the R230, PID 1 dropped to a shell, and every device then came up behind
+# it with nothing left to use them (#118). An engine that is still running is
+# working; one that has exited has failed, and that is known at once. So the
+# wait ends when the root appears or the engine dies, and the deadline only
+# bounds an engine that is alive and stuck — generously, since a first boot's
+# copy grows with what the node stores.
 echo "Waiting for root device $ROOTDEV..."
-TIMEOUT=${ROOT_TIMEOUT:-300}
+TIMEOUT=${ROOT_TIMEOUT:-1800}
 WAITED=0
 while [ ! -b "$ROOTDEV" ] && [ $TIMEOUT -gt 0 ]; do
+    if ! kill -0 "$STORMBLOCK_PID" 2>/dev/null; then
+        echo "  the storage engine (PID $STORMBLOCK_PID) exited before $ROOTDEV appeared"
+        break
+    fi
     sleep 1
     TIMEOUT=$((TIMEOUT - 1))
     WAITED=$((WAITED + 1))
     # Say something while a long first boot is working, so a wait that is
     # doing something is distinguishable from one that is not.
-    case $WAITED in 30|60|120|180|240)
-        echo "  still waiting for $ROOTDEV (${WAITED}s) - a first boot may be copying to local disk" ;;
+    case $WAITED in 30|60|120|180|240|300|600|900|1200|1500)
+        echo "  still waiting for $ROOTDEV (${WAITED}s) - the engine is alive; a first boot may be copying to local disk" ;;
     esac
 done
 
