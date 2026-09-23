@@ -2619,12 +2619,3 @@ our target.
   service tag. Placeholder serials (`Not Specified`, `Default string`, `To Be
   Filled By O.E.M.`) are rejected: every VM from one hypervisor would
   otherwise answer the same string and claim each other's images.
-- **fix(initramfs):** the assimilate survey no longer skips the disk named by
-  `rd.stormblock.slab=`. stormcos sets `rd.stormblock.slab=/dev/sda` on every
-  node so an installed one stops asking the appliance, and the survey's "do not
-  eat the disk this boot is running from" guard matched that name and skipped
-  it — so `LOCAL_DISK` stayed empty, `--local-disk` was never passed,
-  `boot-local` never laid a system and a data slab, and the node ran forever on
-  volumes re-cloned from blank goldens at every boot. Nothing written to a
-  `-data` volume survived a reboot, on a machine with an idle 2 TB drive. The
-  probe below already answers correctly for every case and was unreachable.
