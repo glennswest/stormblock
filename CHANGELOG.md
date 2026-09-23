@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-### 2026-09-23 (layout)
+## [v16.1.0] — 2026-09-23
+
+### Changed
+
 - **BREAKING (node disk layout):** `lay_node_slabs` puts the system slab first,
   at a fixed size (a sixteenth of the drive, 32 to 128 GiB), and the data slab
   **last, taking the rest of the drive**. The data half is the one that fills
