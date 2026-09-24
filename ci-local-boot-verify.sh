@@ -41,10 +41,15 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 # ------------------------------------------------------------------ stormuefi
 if [ -z "$STORMUEFI" ]; then
     say "stormuefi, built from its repo"
-    git clone -q --depth 1 https://github.com/glennswest/stormuefi "$WORK/stormuefi"
-    (cd "$WORK/stormuefi" && CARGO_TARGET_DIR="$WORK/uefi-target" \
+    # Outside this checkout: inside it, cargo takes stormuefi for a stray
+    # member of stormblock's workspace and refuses to build it.
+    UEFI_SRC=$(mktemp -d "$(dirname "$PWD")/stormuefi.XXXXXX")
+    trap 'rm -rf "$UEFI_SRC"' EXIT
+    git clone -q --depth 1 https://github.com/glennswest/stormuefi "$UEFI_SRC/src"
+    (cd "$UEFI_SRC/src" && CARGO_TARGET_DIR="$UEFI_SRC/target" \
         cargo build -q --release --target x86_64-unknown-uefi)
-    STORMUEFI="$WORK/uefi-target/x86_64-unknown-uefi/release/stormuefi.efi"
+    cp "$UEFI_SRC/target/x86_64-unknown-uefi/release/stormuefi.efi" "$WORK/stormuefi.efi"
+    STORMUEFI="$WORK/stormuefi.efi"
 fi
 [ -r "$STORMUEFI" ] || fail "no stormuefi at $STORMUEFI"
 echo "stormuefi: $(stat -c %s "$STORMUEFI") bytes; kernel: $KERNEL"
