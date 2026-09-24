@@ -119,6 +119,10 @@ cargo build --release --target aarch64-unknown-linux-musl --no-default-features 
 cargo test
 ```
 
+`Cargo.lock` is committed. Goldens are built from a commit with
+`cargo build --release --locked`, so what a commit compiles is exactly what its
+lockfile names; moving a dependency (`cargo update`) is a commit of its own.
+
 ## Configuration
 
 ```toml

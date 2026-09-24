@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-09-24
+- **build:** `Cargo.lock` is committed (#128). It was in `.gitignore`, so a
+  golden built `--locked` from a commit had no lockfile, and the builds that
+  worked were using an untracked one on dev. Generated on dev with cargo 1.95.0;
+  `cargo update` is now a deliberate commit.
 - **fix(volumes):** detaching a ublk device that has a filesystem mounted on it
   is refused (409, naming the mount point). The devices are recoverable, so a
   detach under a mount left the kernel queueing that filesystem's I/O for a
