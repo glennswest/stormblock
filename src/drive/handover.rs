@@ -83,6 +83,16 @@ pub struct Record {
     /// field existed — which is why it defaults rather than being required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_over: Option<FlowOver>,
+    /// A local disk carrying this node's layout, to be made bootable on its
+    /// own: the ESP and the boot pallets of the image this node booted, copied
+    /// into the disk's boot area (#123). Named whenever the node has such a
+    /// disk — freshly laid, updated, or already up to date — because a disk
+    /// installed before local boot existed holds every golden and still has
+    /// nothing firmware can start. The successor does it after the flow-over,
+    /// if any, has finished: a disk that boots before its slabs are complete
+    /// boots into a probe that rejects them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_boot: Option<String>,
 }
 
 impl Record {
@@ -128,6 +138,7 @@ mod tests {
             slabs: vec!["/dev/sda4".into()],
             meta: None,
             flow_over: None,
+            local_boot: None,
             devices: vec![
                 Device { dev_id: 0, volume: "stormpump".into() },
                 Device { dev_id: 2, volume: "sbregistry".into() },
@@ -167,7 +178,16 @@ mod tests {
         let json = br#"{"slabs":["/dev/sda4"],"devices":[{"dev_id":0,"volume":"stormpump"}]}"#;
         let rec: Record = serde_json::from_slice(json).expect("reads without flow_over");
         assert_eq!(rec.flow_over, None);
+        assert_eq!(rec.local_boot, None);
         assert_eq!(rec.volumes_in_device_order(), vec!["stormpump"]);
+    }
+
+    #[test]
+    fn a_local_boot_round_trips() {
+        let mut rec = a_record();
+        rec.local_boot = Some("/dev/sda".into());
+        let bytes = serde_json::to_vec(&rec).expect("encodes");
+        assert_eq!(serde_json::from_slice::<Record>(&bytes).expect("decodes"), rec);
     }
 
     #[test]

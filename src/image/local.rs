@@ -930,4 +930,78 @@ mod tests {
         // And a second call finds nothing more to take.
         assert_eq!(grow_data_half(dev).await.unwrap(), None);
     }
+    /// A table re-expressed in another LBA size describes the same bytes, and
+    /// is found at the new size — which is the size firmware looks at.
+    #[tokio::test]
+    async fn a_table_is_re_expressed_without_moving_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retable.disk").to_string_lossy().to_string();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, CAP).await.unwrap());
+        let mut layout = LocalLayout::for_drive(CAP);
+        layout.slot_size = 1024 * 1024;
+        layout.lba = Some(4096);
+        lay_node_slabs(dev.clone(), &layout).await.unwrap();
+        let ranges = |g: &Gpt| -> Vec<(u64, u64, String)> {
+            g.partitions()
+                .map(|(_, e)| (e.start_bytes(g.block_size), e.size_bytes(g.block_size), e.name.clone()))
+                .collect()
+        };
+        let before = Gpt::read(&dev).await.unwrap();
+        assert_eq!(before.block_size, 4096);
+
+        assert!(retable(&dev, 512).await.unwrap());
+        let after = Gpt::read(&dev).await.unwrap();
+        assert_eq!(after.block_size, 512);
+        assert!(!after.recovered_from_backup, "both copies were written");
+        assert_eq!(ranges(&after), ranges(&before));
+        assert_eq!(after.disk_guid, before.disk_guid);
+        // Nothing of the old table is left for a scanner to find: the 4096
+        // header was at byte 4096, inside the new entry array.
+        let old_hdr = window(&path, 4096, 8);
+        assert_ne!(&old_hdr[..], b"EFI PART");
+
+        assert!(!retable(&dev, 512).await.unwrap(), "already 512: nothing to do");
+        assert!(retable(&dev, 4096).await.unwrap());
+        assert_eq!(ranges(&Gpt::read(&dev).await.unwrap()), ranges(&before));
+    }
+
+    /// A disk laid before local boot existed — a 4096-byte table on a drive
+    /// firmware reads at 512, and the system slab at the first megabyte — gets
+    /// both put right by the next install, and the data half does not move.
+    #[tokio::test]
+    async fn an_old_layout_gains_a_boot_area_and_a_native_table() {
+        const MIB: u64 = 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.disk").to_string_lossy().to_string();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, CAP).await.unwrap());
+        let mut old = LocalLayout::for_drive(CAP);
+        old.slot_size = MIB;
+        old.boot_bytes = 0;
+        let laid = lay_node_slabs(dev.clone(), &old).await.unwrap();
+        let data_id = laid.data.slab_id();
+        let (d, _) = node_layout(&dev).await.unwrap().unwrap();
+        let g = Gpt::read(&dev).await.unwrap();
+        let data_range = (g.entries[d].start_bytes(g.block_size), g.entries[d].size_bytes(g.block_size));
+
+        let mut new = old;
+        new.lba = Some(512);
+        new.boot_bytes = 32 * MIB;
+        assert!(!boot_ready(&dev, &new).await, "a 4096 table and no boot area");
+
+        let updated = update_system_slab(dev.clone(), &new).await.unwrap();
+        assert_eq!(updated.data.slab_id(), data_id, "the data slab is the same slab");
+        assert!(boot_ready(&dev, &new).await);
+        let g = Gpt::read(&dev).await.unwrap();
+        assert_eq!(g.block_size, 512);
+        let (d, s) = node_layout(&dev).await.unwrap().unwrap();
+        assert_eq!(
+            (g.entries[d].start_bytes(512), g.entries[d].size_bytes(512)),
+            data_range,
+            "the data partition moved"
+        );
+        assert!(g.entries[s].start_bytes(512) >= new.boot_bytes);
+    }
 }
+

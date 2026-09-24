@@ -49,6 +49,7 @@ use crate::pallet::gpt::Gpt;
 use crate::pallet::manager::{PalletManager, DEFAULT_TRIES};
 use crate::pallet::{PalletKind, PalletLocation, PalletStore};
 
+
 use super::local::node_layout;
 use super::{fat, ImageError, Result};
 
@@ -240,9 +241,13 @@ async fn find_esp(
 ) -> Option<(Arc<dyn BlockDevice>, u64, u64)> {
     for (_, dev) in sources {
         let Ok(gpt) = Gpt::read(dev).await else { continue };
-        if let Some((_, e)) = gpt.partitions().find(|(_, e)| e.type_guid == type_guid::ESP) {
-            let bs = gpt.block_size;
-            return Some((dev.clone(), e.start_bytes(bs), e.size_bytes(bs)));
+        let bs = gpt.block_size;
+        let found = gpt
+            .partitions()
+            .find(|(_, e)| e.type_guid == type_guid::ESP)
+            .map(|(_, e)| (e.start_bytes(bs), e.size_bytes(bs)));
+        if let Some((start, len)) = found {
+            return Some((dev.clone(), start, len));
         }
     }
     None
@@ -393,4 +398,243 @@ fn same_tree(a: &fat::FatTree, b: &fat::FatTree) -> bool {
         (f, d)
     };
     norm(a) == norm(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::image::local::{has_boot_area, lay_node_slabs, LocalLayout};
+    use crate::pallet::manager::PublishSpec;
+    use crate::pallet::{BytesContent, MemberKind, MemberSpec, PalletManager, PalletStore};
+
+    const MIB: u64 = 1024 * 1024;
+    const DISK: u64 = 512 * MIB;
+
+    fn esp_files(tag: &str) -> Vec<(String, Vec<u8>)> {
+        vec![
+            (
+                "EFI/BOOT/BOOTX64.EFI".into(),
+                format!("stormuefi {tag} ").into_bytes().repeat(5000),
+            ),
+            ("loader/entries/stormcos-long-name.conf".into(), format!("title {tag}\n").into_bytes()),
+        ]
+    }
+
+    /// An image the way `image build` lays one for a node to attach: a GPT and
+    /// an ESP at 4096-byte sectors, which is what NVMe/TCP presents, and a
+    /// boot pallet at the top of the ladder.
+    async fn image(dir: &tempfile::TempDir, name: &str, tag: &str) -> (String, Arc<dyn BlockDevice>) {
+        let path = dir.path().join(name).to_string_lossy().to_string();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, 256 * MIB).await.unwrap());
+        let mut gpt = Gpt::create_with_lba(&dev, 4096);
+        let i = gpt.allocate("EFI", type_guid::ESP, 32 * MIB, 0).unwrap();
+        gpt.write(&dev).await.unwrap();
+        let e = gpt.entries[i].clone();
+        let part = Arc::new(
+            PartitionDevice::new(dev.clone(), e.start_bytes(4096), e.size_bytes(4096)).unwrap(),
+        );
+        fat::format_from_tree(part, &esp_files(tag), &[], "EFI").await.unwrap();
+
+        let mut store = PalletStore::new(Vec::new());
+        store.add_drive(path.clone(), dev.clone());
+        let mgr = PalletManager::new(store);
+        let mut spec = PublishSpec::new("kernel1", PalletKind::Boot)
+            .member(MemberSpec::new(
+                "kernel",
+                "kernel",
+                MemberKind::Kernel,
+                Arc::new(BytesContent(format!("vmlinuz {tag} ").into_bytes().repeat(20_000))),
+            ))
+            .member(MemberSpec::new(
+                "cmdline",
+                "cmdline",
+                MemberKind::BootConfig,
+                Arc::new(BytesContent(b"root=/dev/ublkb0 rd.stormblock.slab=/dev/sda".to_vec())),
+            ));
+        spec.version_label = tag.into();
+        spec.priority = Some(15);
+        mgr.publish(spec).await.unwrap();
+        (path, dev)
+    }
+
+    /// A node's disk as a flow-over lays it: at 512-byte LBAs, the way a real
+    /// drive is read by firmware, with a boot area in front.
+    async fn node_disk(dir: &tempfile::TempDir) -> (String, Arc<dyn BlockDevice>) {
+        let path = dir.path().join("node.disk").to_string_lossy().to_string();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, DISK).await.unwrap());
+        let mut layout = LocalLayout::for_drive(DISK);
+        layout.slot_size = MIB;
+        layout.lba = Some(512);
+        layout.boot_bytes = 128 * MIB;
+        lay_node_slabs(dev.clone(), &layout).await.unwrap();
+        assert!(has_boot_area(&dev, layout.boot_bytes).await);
+        (path, dev)
+    }
+
+    async fn esp_of(dev: &Arc<dyn BlockDevice>) -> Option<(fat::FatTree, u16)> {
+        let gpt = Gpt::read(dev).await.unwrap();
+        let bs = gpt.block_size;
+        let (s, l) = gpt
+            .partitions()
+            .find(|(_, e)| e.type_guid == type_guid::ESP)
+            .map(|(_, e)| (e.start_bytes(bs), e.size_bytes(bs)))?;
+        let part: Arc<dyn BlockDevice> =
+            Arc::new(PartitionDevice::with_block_size(dev.clone(), s, l, bs).unwrap());
+        let mut boot = vec![0u8; 512];
+        part.read(0, &mut boot).await.unwrap();
+        Some((fat::read_tree(part).await.unwrap(), u16::from_le_bytes([boot[11], boot[12]])))
+    }
+
+    /// The whole point: after this, the disk carries an ESP firmware can read
+    /// and a boot pallet stormuefi will select — and the slabs are where they
+    /// were.
+    #[tokio::test]
+    async fn a_laid_disk_boots_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ipath, idev) = image(&dir, "a.img", "A").await;
+        let (dpath, ddev) = node_disk(&dir).await;
+        let before = node_layout(&ddev).await.unwrap().unwrap();
+
+        let r = lay_local_boot(&dpath, ddev.clone(), vec![(ipath, idev)]).await.unwrap();
+        assert!(r.bootable(), "{r:?}");
+        assert_eq!(
+            r.esp,
+            EspOutcome::Rebuilt { from_sector: 4096, to_sector: 512, files: 2 },
+            "the image's ESP is at 4096 and the disk is read at 512"
+        );
+        assert_eq!(r.copied.len(), 1);
+        assert_eq!(r.ladder, vec![("kernel1".to_string(), 1, LOCAL_TOP)]);
+
+        // The ESP: typed, named, and declaring the disk's own sector size.
+        let (tree, sector) = esp_of(&ddev).await.expect("an ESP");
+        assert_eq!(sector, 512, "a FAT must declare its medium's sector size");
+        let mut want = esp_files("A");
+        want.sort();
+        let mut got = tree.files.clone();
+        got.sort();
+        assert_eq!(got, want);
+
+        // The pallet verifies where it landed, and it is in the boot area:
+        // in front of the system slab.
+        let mut store = PalletStore::new(Vec::new());
+        store.add_drive(dpath.clone(), ddev.clone());
+        let mgr = PalletManager::new(store);
+        let local = mgr.list().await;
+        assert_eq!(local.len(), 1);
+        assert!(mgr.verify(local[0].id).await.unwrap().ok);
+        let gpt = Gpt::read(&ddev).await.unwrap();
+        assert_eq!(gpt.block_size, 512);
+        let (d, s) = node_layout(&ddev).await.unwrap().unwrap();
+        assert_eq!((d, s), before, "the slabs' entries did not move");
+        assert!(local[0].start_bytes < gpt.entries[s].start_bytes(512));
+        assert!(
+            gpt.partitions().all(|(_, e)| e.last_lba <= gpt.entries[d].last_lba),
+            "the data half is still last, so it can still grow"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_run_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ipath, idev) = image(&dir, "a.img", "A").await;
+        let (dpath, ddev) = node_disk(&dir).await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(ipath.clone(), idev.clone())]).await.unwrap();
+        let r = lay_local_boot(&dpath, ddev.clone(), vec![(ipath, idev)]).await.unwrap();
+        assert_eq!(r.esp, EspOutcome::Unchanged);
+        assert!(r.copied.is_empty());
+        assert_eq!(r.already, 1);
+        assert!(r.removed.is_empty());
+        assert_eq!(r.ladder.len(), 1);
+    }
+
+    /// The next release goes on top, the previous one stays as its fallback,
+    /// and the one before that is dropped — the A/B ladder an upgrade writes.
+    #[tokio::test]
+    async fn a_new_release_goes_on_top_and_the_old_one_stays_as_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dpath, ddev) = node_disk(&dir).await;
+        for tag in ["A", "B", "C"] {
+            let (ipath, idev) = image(&dir, &format!("{tag}.img"), tag).await;
+            let r = lay_local_boot(&dpath, ddev.clone(), vec![(ipath, idev)]).await.unwrap();
+            assert_eq!(r.copied.len(), 1, "{tag}: {r:?}");
+            assert!(r.failed.is_empty(), "{tag}: {r:?}");
+            let (tree, _) = esp_of(&ddev).await.unwrap();
+            assert!(
+                tree.files.iter().any(|(_, d)| d.starts_with(format!("stormuefi {tag}").as_bytes())),
+                "{tag}: the ESP is the newest release's"
+            );
+        }
+        let mut store = PalletStore::new(Vec::new());
+        store.add_drive(dpath, ddev.clone());
+        let mgr = PalletManager::new(store);
+        let mut local = mgr.list().await;
+        local.sort_by_key(|p| std::cmp::Reverse(p.attributes.priority));
+        let labels: Vec<(String, u8)> =
+            local.iter().map(|p| (p.version_label.clone(), p.attributes.priority)).collect();
+        assert_eq!(labels, vec![("C".to_string(), LOCAL_TOP), ("B".to_string(), LOCAL_TOP - 1)]);
+    }
+
+    /// stormuefi scans every device. When a node netboots, the image it
+    /// attached has to win over whatever the disk carries — otherwise a
+    /// reinstall onto a new release could start the old kernel.
+    #[tokio::test]
+    async fn the_attached_image_outranks_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ipath, idev) = image(&dir, "a.img", "A").await;
+        let (dpath, ddev) = node_disk(&dir).await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(ipath.clone(), idev.clone())]).await.unwrap();
+
+        let mut store = PalletStore::new(Vec::new());
+        store.add_drive(dpath, ddev);
+        store.add_drive(ipath, idev);
+        let mut all = PalletManager::new(store).list().await;
+        all.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
+        assert_eq!(all[0].drive_index, 1, "the image's boot pallet is selected first");
+        assert_eq!(all[1].drive_index, 0);
+    }
+
+    /// A copy interrupted before its ESP was finished leaves a partition that
+    /// is not typed ESP — firmware passes over it — and the next run finishes
+    /// the job in the same place.
+    #[tokio::test]
+    async fn an_interrupted_esp_is_not_an_esp_and_is_finished_next_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ipath, idev) = image(&dir, "a.img", "A").await;
+        let (dpath, ddev) = node_disk(&dir).await;
+
+        let i = reserve_esp(&ddev, 32 * MIB).await.unwrap();
+        assert!(esp_of(&ddev).await.is_none(), "a pending ESP is not an ESP");
+
+        lay_local_boot(&dpath, ddev.clone(), vec![(ipath, idev)]).await.unwrap();
+        let gpt = Gpt::read(&ddev).await.unwrap();
+        assert_eq!(gpt.entries[i].type_guid, type_guid::ESP, "finished in the same entry");
+        assert_eq!(gpt.entries[i].name, ESP_NAME);
+        assert_eq!(
+            gpt.partitions().filter(|(_, e)| e.name == ESP_NAME || e.name == ESP_PENDING).count(),
+            1
+        );
+    }
+
+    /// Same sector size on both sides: the ESP is copied as it is.
+    #[tokio::test]
+    async fn a_matching_sector_size_is_a_byte_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ipath, idev) = image(&dir, "a.img", "A").await;
+        let path = dir.path().join("4kn.disk").to_string_lossy().to_string();
+        let ddev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, DISK).await.unwrap());
+        let mut layout = LocalLayout::for_drive(DISK);
+        layout.slot_size = MIB;
+        layout.lba = Some(4096);
+        layout.boot_bytes = 128 * MIB;
+        lay_node_slabs(ddev.clone(), &layout).await.unwrap();
+
+        let r = lay_local_boot(&path, ddev.clone(), vec![(ipath, idev)]).await.unwrap();
+        assert_eq!(r.esp, EspOutcome::Copied { bytes: 32 * MIB });
+        let (_, sector) = esp_of(&ddev).await.unwrap();
+        assert_eq!(sector, 4096);
+    }
 }

@@ -530,6 +530,18 @@ enum ImageAction {
     },
     /// List the formats this build can write
     Formats,
+    /// Make an installed disk boot on its own: copy the ESP (stormuefi) and
+    /// the boot pallets of the image a node booted into the disk's boot area
+    /// (#123). What the engine does after a flow-over, by hand.
+    LocalBoot {
+        /// The node's disk — a drive carrying the two slabs a flow-over lays
+        #[arg(long)]
+        disk: String,
+        /// The image to take them from: a disk, an image file, or an
+        /// `nvme-tcp://` URI (repeat for several)
+        #[arg(long = "from", required = true)]
+        from: Vec<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -1936,6 +1948,9 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
                 println!("{:<6} .{}", f.as_str(), f.extension());
             }
         }
+        ImageAction::LocalBoot { disk, from } => {
+            run_local_boot(disk, from).await?;
+        }
         ImageAction::Build { spec, out, format, keep_raw, engine } => {
             let format = resolve(out, format)?;
             let spec_dir = Path::new(spec).parent().map(PathBuf::from);
@@ -2619,6 +2634,60 @@ async fn data_slab_on(path: &str) -> anyhow::Result<Option<String>> {
 /// statting — so a remote root is an ordinary slab.
 fn is_fabric_uri(path: &str) -> bool {
     path.contains("://")
+}
+
+/// Make `disk` boot on its own from the image at `sources` (#123): the ESP
+/// and the boot pallets, into the boot area of the node layout. Read-only on
+/// every source.
+async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<()> {
+    use stormblock::image::local_boot::{lay_local_boot, EspOutcome};
+
+    let mut opened: Vec<(String, Arc<dyn BlockDevice>)> = Vec::new();
+    for path in sources.iter().filter(|p| p.as_str() != disk) {
+        let dev: Arc<dyn BlockDevice> = if is_fabric_uri(path) {
+            let spec = stormblock::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
+                .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
+            Arc::new(stormblock::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
+        } else {
+            Arc::new(stormblock::drive::filedev::FileDevice::open_read_only(path).await?)
+        };
+        opened.push((path.clone(), dev));
+    }
+    let dest: Arc<dyn BlockDevice> =
+        Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+    let r = lay_local_boot(disk, dest, opened)
+        .await
+        .map_err(|e| anyhow::anyhow!("local boot on {disk}: {e}"))?;
+
+    match &r.esp {
+        EspOutcome::NoSource => println!("Local boot: {disk}: no ESP on the image — nothing to start the kernel with"),
+        EspOutcome::Unchanged => println!("Local boot: {disk}: ESP already current"),
+        EspOutcome::Copied { bytes } => println!("Local boot: {disk}: ESP copied ({bytes} bytes)"),
+        EspOutcome::Rebuilt { from_sector, to_sector, files } => println!(
+            "Local boot: {disk}: ESP rebuilt at {to_sector}-byte sectors from {from_sector} ({files} file(s))"
+        ),
+    }
+    for c in &r.copied {
+        println!("Local boot: {disk}: boot pallet {c} copied and verified");
+    }
+    if r.already > 0 {
+        println!("Local boot: {disk}: {} boot pallet(s) already present", r.already);
+    }
+    for g in &r.removed {
+        println!("Local boot: {disk}: removed {g}");
+    }
+    for f in &r.failed {
+        println!("Local boot: {disk}: not copied — {f}");
+    }
+    for (name, version, pri) in &r.ladder {
+        println!("Local boot: {disk}: ladder {name} v{version} priority {pri}");
+    }
+    if r.bootable() {
+        println!("Local boot: {disk} boots on its own");
+    } else {
+        println!("Local boot: {disk} does not boot on its own yet");
+    }
+    Ok(())
 }
 
 async fn open_slabs_and_restore(
@@ -4134,7 +4203,11 @@ async fn seed_data_half(
 /// One extent per lock cycle, so root I/O interleaves with the copy instead of
 /// stalling behind the whole migration.
 #[cfg(target_os = "linux")]
-fn spawn_flow_over(state: &Arc<AppState>, flow: stormblock::drive::handover::FlowOver) {
+fn spawn_flow_over(
+    state: &Arc<AppState>,
+    flow: stormblock::drive::handover::FlowOver,
+    then_local_boot: Option<(String, Vec<String>)>,
+) {
     use stormblock::drive::slab::SlabId;
 
     let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(SlabId) else {
@@ -4163,8 +4236,18 @@ fn spawn_flow_over(state: &Arc<AppState>, flow: stormblock::drive::handover::Flo
                 .map(|(id, _)| *id)
                 .collect()
         };
+        // The disk boots on its own once it holds everything — and only then.
+        let local_boot = |job: Option<(String, Vec<String>)>| async move {
+            if let Some((disk, sources)) = job {
+                if let Err(e) = run_local_boot(&disk, &sources).await {
+                    println!("Local boot: {disk}: {e}");
+                    tracing::warn!("local boot on {disk}: {e}");
+                }
+            }
+        };
         if sources.is_empty() {
             tracing::info!("flow-over: nothing left to move onto {}", flow.disk);
+            local_boot(then_local_boot).await;
             return;
         }
         println!(
@@ -4220,6 +4303,15 @@ fn spawn_flow_over(state: &Arc<AppState>, flow: stormblock::drive::handover::Flo
         }
         tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
         println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
+        if failed == 0 {
+            local_boot(then_local_boot).await;
+        } else {
+            println!(
+                "Local boot: {} is left unbootable — {failed} extent(s) did not move, and a \
+                 disk that boots into incomplete slabs is worse than one that netboots",
+                flow.disk
+            );
+        }
     });
 }
 
@@ -4567,8 +4659,25 @@ async fn handle_adopt_ublk(
         // had seconds to live and the copy takes minutes; this process is the
         // one that is still here when the extents land. See
         // `drive::handover::FlowOver`.
+        //
+        // Then make the disk boot on its own (#123) — after the copy, never
+        // before it: a disk that boots before its slabs are complete boots
+        // into a probe that rejects them.
+        let local_boot = record.as_ref().and_then(|r| {
+            let disk = r.local_boot.clone()?;
+            let sources: Vec<String> =
+                r.slabs.iter().filter(|p| **p != disk).cloned().collect();
+            Some((disk, sources))
+        });
         if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.clone()) {
-            spawn_flow_over(&state, flow);
+            spawn_flow_over(&state, flow, local_boot);
+        } else if let Some((disk, sources)) = local_boot {
+            tokio::spawn(async move {
+                if let Err(e) = run_local_boot(&disk, &sources).await {
+                    println!("Local boot: {disk}: {e}");
+                    tracing::warn!("local boot on {disk}: {e}");
+                }
+            });
         }
 
         // Push the working directory down to the volume, on a timer.
@@ -4817,6 +4926,7 @@ async fn handle_boot_local(
     // refused — in both cases the successor has nothing to flow into and the
     // node runs from the appliance, which is what it did before any of this.
     let mut laid_flow_over: Option<stormblock::drive::handover::FlowOver> = None;
+    let mut local_boot_disk: Option<String> = None;
     if let Some(disk) = local_disk {
         // Flow-over is an optimisation, and an optimisation may not decide
         // whether a node boots.
@@ -4845,6 +4955,10 @@ async fn handle_boot_local(
                 stormblock::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
             layout.slot_size = mgr.slot_size();
             layout.tier = tier;
+            // The table in the drive's own sector size: firmware parses a GPT
+            // in the medium's block size, and `FileDevice` reports 4096 for
+            // every drive (#123). A file has none, and follows the device.
+            layout.lba = stormblock::drive::filedev::logical_sector_size(disk);
 
             // **A drive that is already this node's is updated, not replaced.**
             //
@@ -4894,7 +5008,18 @@ async fn handle_boot_local(
                 let have = stormblock::image::local::system_slab_volumes(&dest_dev)
                     .await
                     .unwrap_or(None);
-                if let Some(have) = have {
+                // And only a disk that can boot on its own counts: one laid
+                // before local boot existed holds every golden and has no
+                // boot area, and the shortcut would leave it that way (#123).
+                let boot_ready =
+                    stormblock::image::local::boot_ready(&dest_dev, &layout).await;
+                if !boot_ready {
+                    println!(
+                        "Flow-over: {disk} has no room to boot on its own (no boot area, or a \
+                         table firmware cannot read) — laying the system half again"
+                    );
+                }
+                if let Some(have) = have.filter(|_| boot_ready) {
                     if !want.is_empty() && want.iter().all(|id| have.contains(id)) {
                         println!(
                             "Flow-over: {disk} already holds all {} volume(s) this boot would \
@@ -5072,7 +5197,12 @@ async fn handle_boot_local(
         }
         .await;
         match flow_over {
-            Ok(f) => laid_flow_over = f,
+            Ok(f) => {
+                laid_flow_over = f;
+                // Laid, updated or already current: the disk carries this
+                // node's layout, and the successor makes it bootable.
+                local_boot_disk = Some(disk.to_string());
+            }
             // Said plainly, and on the console, because this is the one line
             // that explains why a node that was going to run locally is
             // running from the appliance instead.
@@ -5113,6 +5243,7 @@ async fn handle_boot_local(
                 })
                 .collect(),
             flow_over: laid_flow_over.clone(),
+            local_boot: local_boot_disk.clone(),
         };
         let path = std::path::Path::new(stormblock::drive::handover::DEFAULT_PATH);
         match record.write(path) {

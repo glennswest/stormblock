@@ -19,6 +19,11 @@
 //! overlap: without FAT16 there is no ESP size that satisfies both, and every
 //! ISO would ship a filesystem firmware could only half-see.
 //!
+//! There is a reader too ([`read_tree`]), for one job: an ESP served at one
+//! sector size has to be laid onto a drive of another, and a FAT declares its
+//! medium's sector size, so it is read out and written again rather than
+//! copied (#123).
+//!
 //! Timestamps are fixed rather than taken from the clock, so building the same
 //! tree twice produces the same bytes.
 
@@ -1285,5 +1290,64 @@ mod tests {
                 "{name} has no long-name entry — a guest would see only the 8.3 name"
             );
         }
+    }
+    /// What is read out of an ESP is what was put in — names long and short,
+    /// directories, empty files — and it lays down again at another sector
+    /// size, which is the whole reason the reader exists (#123).
+    #[tokio::test]
+    async fn a_tree_reads_back_and_moves_between_sector_sizes() {
+        use crate::drive::partition::PartitionDevice;
+        let dir = tempfile::TempDir::new().unwrap();
+        let files = vec![
+            ("EFI/BOOT/BOOTX64.EFI".to_string(), vec![0xE1; 300_000]),
+            ("EFI/stormcos/grub.cfg".to_string(), b"set timeout=0\n".to_vec()),
+            ("loader/entries/stormcos-6.12.0-200.fc41.conf".to_string(), b"title x\n".to_vec()),
+            ("empty".to_string(), Vec::new()),
+        ];
+        let dirs = vec!["EFI/Linux".to_string()];
+        // FAT is case-insensitive, and a name that fits 8.3 is stored in
+        // capitals with no long name; compare the way a reader resolves them.
+        let sorted = |t: &FatTree| {
+            let mut f: Vec<(String, Vec<u8>)> =
+                t.files.iter().map(|(p, b)| (p.to_ascii_uppercase(), b.clone())).collect();
+            f.sort();
+            let mut d: Vec<String> = t.dirs.iter().map(|p| p.to_ascii_uppercase()).collect();
+            d.sort();
+            (f, d)
+        };
+        let mut want_files: Vec<(String, Vec<u8>)> =
+            files.iter().map(|(p, b)| (p.to_ascii_uppercase(), b.clone())).collect();
+        want_files.sort();
+
+        // At 4096, the way an image served over NVMe/TCP carries it: FAT16.
+        let big = volume(&dir, "esp4k.img", 32 << 20).await;
+        format_from_tree(big.clone(), &files, &dirs, "EFI").await.unwrap();
+        let tree = read_tree(big).await.unwrap();
+        assert_eq!(tree.label, "EFI");
+        let (f, d) = sorted(&tree);
+        assert_eq!(f, want_files);
+        for want in ["EFI", "EFI/BOOT", "EFI/Linux", "EFI/stormcos", "loader", "loader/entries"] {
+            assert!(d.contains(&want.to_ascii_uppercase()), "{want} missing from {d:?}");
+        }
+
+        // At 512, the way a local drive is read: 64 MiB is FAT32 there.
+        let disk = volume(&dir, "disk.img", 64 << 20).await;
+        let small: Arc<dyn BlockDevice> =
+            Arc::new(PartitionDevice::with_block_size(disk, 0, 64 << 20, 512).unwrap());
+        format_from_tree(small.clone(), &tree.files, &tree.dirs, &tree.label).await.unwrap();
+        let mut boot = vec![0u8; 512];
+        small.read(0, &mut boot).await.unwrap();
+        assert_eq!(u16::from_le_bytes([boot[11], boot[12]]), 512);
+        assert_eq!(&boot[82..90], b"FAT32   ");
+        let again = read_tree(small).await.unwrap();
+        assert_eq!(sorted(&again), sorted(&tree));
+    }
+
+    /// Not a FAT: said so, not read as an empty one.
+    #[tokio::test]
+    async fn a_volume_that_is_not_fat_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dev = volume(&dir, "zero.img", 8 << 20).await;
+        assert!(read_tree(dev).await.is_err());
     }
 }
