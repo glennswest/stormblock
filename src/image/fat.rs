@@ -158,7 +158,7 @@ pub async fn format_from_tree(
         root.dir_at(parent)?.files.insert(name.to_string(), data.clone());
     }
     let mut fs = Fat32::new(device, label)?;
-    let entries = fs.write_mem_children(&root).await?;
+    let entries = fs.write_mem_children(&root, 0).await?;
     fs.write_root(entries).await?;
     fs.finish().await
 }
@@ -778,8 +778,11 @@ impl Fat32 {
 
     /// Returns the directory-entry bytes for everything inside `dir`, having
     /// already written the contents of each of them.
+    ///
+    /// `parent` is the cluster of the directory these are written into, or
+    /// `None` for the root — which a `..` entry names as cluster 0.
     async fn write_dir_children(&mut self, dir: &Path, parent: Option<u32>) -> Result<Vec<u8>> {
-        let _ = parent;
+        let parent = parent.unwrap_or(0);
         let mut names: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
         let mut rd = tokio::fs::read_dir(dir).await?;
         while let Some(e) = rd.next_entry().await? {
@@ -794,9 +797,12 @@ impl Fat32 {
         let mut out = Vec::new();
         for (name, path, is_dir) in names {
             let (first, size, attr) = if is_dir {
-                let child = Box::pin(self.write_dir_children(&path, None)).await?;
+                // The directory's own cluster first, so what is inside it can
+                // name it in `..` — pointing every `..` at the root is what
+                // fsck.fat reports as "Invalid '..' entry" (#123).
                 let cluster = self.allocate_chain(self.cluster_bytes())?;
-                let mut bytes = dot_entries(cluster, 0);
+                let child = Box::pin(self.write_dir_children(&path, Some(cluster))).await?;
+                let mut bytes = dot_entries(cluster, parent);
                 bytes.extend_from_slice(&child);
                 self.extend_chain(cluster, bytes.len() as u64)?;
                 self.write_chain(cluster, &bytes).await?;
@@ -814,7 +820,7 @@ impl Fat32 {
 
     /// [`Self::write_dir_children`] for a tree held in memory: the same
     /// order (names sorted, directories and files together), the same entries.
-    async fn write_mem_children(&mut self, dir: &MemDir) -> Result<Vec<u8>> {
+    async fn write_mem_children(&mut self, dir: &MemDir, parent: u32) -> Result<Vec<u8>> {
         let mut names: Vec<(&String, bool)> = dir
             .dirs
             .keys()
@@ -827,9 +833,9 @@ impl Fat32 {
         let mut out = Vec::new();
         for (name, is_dir) in names {
             let (first, size, attr) = if is_dir {
-                let child = Box::pin(self.write_mem_children(&dir.dirs[name])).await?;
                 let cluster = self.allocate_chain(self.cluster_bytes())?;
-                let mut bytes = dot_entries(cluster, 0);
+                let child = Box::pin(self.write_mem_children(&dir.dirs[name], cluster)).await?;
+                let mut bytes = dot_entries(cluster, parent);
                 bytes.extend_from_slice(&child);
                 self.extend_chain(cluster, bytes.len() as u64)?;
                 self.write_chain(cluster, &bytes).await?;
@@ -1401,5 +1407,28 @@ mod tests {
             }
         }
     }
+    /// A subdirectory's `..` names its parent, and the root as cluster 0 —
+    /// what fsck.fat checks and what a reader walking up relies on.
+    #[tokio::test]
+    async fn dot_dot_names_the_parent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dev = volume(&dir, "dots.img", 32 << 20).await;
+        let files = vec![("EFI/BOOT/BOOTX64.EFI".to_string(), vec![1u8; 10])];
+        format_from_tree(dev.clone(), &files, &[], "EFI").await.unwrap();
+        let r = FatReader::open(dev).await.unwrap();
+        let root = r.root_bytes().await.unwrap();
+        let cluster_of = |dir: &[u8], name: &[u8; 11]| -> u32 {
+            let e = dir.chunks_exact(32).find(|e| &e[0..11] == name).expect("entry");
+            (u16::from_le_bytes([e[20], e[21]]) as u32) << 16 | u16::from_le_bytes([e[26], e[27]]) as u32
+        };
+        let efi = cluster_of(&root, b"EFI        ");
+        let efi_dir = r.read_chain(efi, None).await.unwrap();
+        assert_eq!(cluster_of(&efi_dir, b"..         "), 0, "/EFI's parent is the root");
+        let boot = cluster_of(&efi_dir, b"BOOT       ");
+        let boot_dir = r.read_chain(boot, None).await.unwrap();
+        assert_eq!(cluster_of(&boot_dir, b".          "), boot);
+        assert_eq!(cluster_of(&boot_dir, b"..         "), efi, "/EFI/BOOT's parent is /EFI");
+    }
 }
+
 
