@@ -118,6 +118,42 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Local boot on an installed disk (2026-09-24, #123) — IN PROGRESS
+
+A flowed-over disk carries only the two slabs, so every cold boot still needs
+the network claim. The loader is **stormuefi** (already what the netbooted
+image runs): it scans every block device for `kind = boot` pallets and starts
+the best one. So the disk needs an **ESP with stormuefi** and the image's
+**boot pallet(s)**, beside the slabs. The owner scoped it (comments on #123):
+A/B is the running-upgrade path (#122), *not* this issue, but what is laid
+here must be the same pallet ladder that upgrade writes, not a second
+selection mechanism.
+
+- [ ] `LocalLayout.boot_bytes`: a boot area at the front (free GPT space the
+      ESP and pallets are allocated into), system slab after it, data last.
+      `update_system_slab` carves it out of the system partition when an older
+      layout has none (the system half is reformatted there anyway), and the
+      "already up to date" shortcut does not apply to a disk without one.
+- [ ] `image/fat.rs` reader, so the ESP can be **rebuilt** at the local disk's
+      sector size — the image is served at 4096, a local drive is usually 512,
+      and a FAT must declare its medium's sector size or firmware cannot read it.
+- [ ] `image/local_boot.rs`: copy the source's ESP (byte copy when sector
+      sizes match, rebuild otherwise; typed BASIC until complete, then ESP, so
+      a torn copy is "no ESP" and the node netboots) and every `kind = boot`
+      pallet not already present by manifest digest (`copy_pallet`, verified).
+      Local ladder: newest copy at priority 14, older renumbered below it,
+      prune to 2 — **capped below 15** so a netbooted image's own boot pallet
+      always outranks a local one (stormuefi scans every device).
+- [ ] handover `Record.local_boot`; the successor lays it after the flow-over
+      finishes (the initramfs engine does not live long enough for ~0.5–1 GB);
+      `stormblock image local-boot --disk --from` for doing it by hand.
+- [ ] tests; `ci-local-boot-verify.sh` on dev: 4Kn source image → 512 local
+      disk, `fdisk`, `fsck.fat`, `pallet verify`, OVMF finds the ESP
+- [ ] docs (images.md / pallets.md), CHANGELOG, close #123
+
+Not here: marking a boot successful once healthy, tries accounting, staging B
+on a running node (#122).
+
 ### Commit Cargo.lock (2026-09-24, #128) — DONE
 
 Goldens are built from a commit with `cargo build --release --locked`, so the
