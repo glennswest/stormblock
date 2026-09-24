@@ -125,8 +125,18 @@ lockfile is part of the source. Untracked in `.gitignore` until now; the only
 one that existed was hidden state in dev's old `/root/stormblock` checkout.
 
 - [x] `.gitignore`: stop ignoring `Cargo.lock` (fuzz's own stays ignored)
-- [ ] generate it on dev (`cargo generate-lockfile` via sc-build), commit it
+- [x] generate it on dev (`cargo generate-lockfile` via sc-build), commit it
+      (a899377: cargo 1.95.0, 352 packages, one `mkfs-ext4`)
 - [ ] verify: `sc-build 'cargo build --release --locked && cargo test --locked'`
+      Release build `--locked` passes (4m42s). `cargo test --locked` with
+      `TMPDIR` set to the scratch tree: 661 passed; the only failures are the
+      two in `integration_image` that #120 already tracks. cargo stopped at that
+      binary, so the integration binaries after it are **not yet run**, and a
+      `--no-fail-fast` run was cut off by memory pressure on the session host
+      (partial log showed `volume::pressure::tests::an_existing_slab_on_a_source_is_adopted_with_its_data`
+      failing, which passed in the run before; unconfirmed).
+      Without `TMPDIR`, 183 tests fail EACCES: dev's `/tmp/stormblock-*` test
+      dirs are owned by root from old root builds (a host fix, not ours).
 - [ ] `cargo update` from now on is a deliberate commit of its own
 
 ### Node disk layout: data last, and growable (2026-09-23) — DONE (v16.1 pending)
