@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 2026-09-24
+- **fix(volumes):** detaching a ublk device that has a filesystem mounted on it
+  is refused (409, naming the mount point). The devices are recoverable, so a
+  detach under a mount left the kernel queueing that filesystem's I/O for a
+  server that never returned; every `sync` on the R230 then hung in
+  `submit_bio_wait`, and the node could only be power-cycled.
+
 ### 2026-09-23 (PVC templates)
 - **feat(fstemplates):** `POST /api/v1/fstemplates` takes `role` (`data` or
   `system`), and the template's volume, and so every clone of it, lives in that

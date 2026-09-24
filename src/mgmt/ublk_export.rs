@@ -98,6 +98,42 @@ impl ShutdownWait {
 }
 
 /// Tracks the live per-volume ublk exports on this node.
+/// Where a block device is mounted, if anywhere.
+///
+/// By device number, against PID 1's mount table and this process's own: a
+/// claim's filesystem is mounted by stormpump in the node's namespace, and
+/// the engine runs in a container of its own, so either may hold it.
+///
+/// **Why it matters:** the devices this engine creates are recoverable
+/// (`UBLK_F_USER_RECOVERY`). Stopping a device's server while a filesystem is
+/// mounted on it does not fail the filesystem's I/O — the kernel queues it for
+/// a server that never comes back, and every `sync` on the node then sits in
+/// `submit_bio_wait` for ever. A detach under a mount wedged the R230 that way.
+pub fn mounted_at(device_path: &str) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let rdev = std::fs::metadata(device_path).ok()?.rdev();
+        let (maj, min) = (libc::major(rdev), libc::minor(rdev));
+        let want = format!("{maj}:{min}");
+        for table in ["/proc/1/mountinfo", "/proc/self/mountinfo"] {
+            let Ok(text) = std::fs::read_to_string(table) else { continue };
+            for line in text.lines() {
+                let f: Vec<&str> = line.split(' ').collect();
+                if f.len() > 4 && f[2] == want {
+                    return Some(f[4].to_string());
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device_path;
+        None
+    }
+}
+
 pub struct UblkExportManager {
     exports: HashMap<String, Export>,
     /// Next /dev/ublkbN id to hand out (Linux only consumes this).

@@ -1120,6 +1120,17 @@ async fn detach_volume(State(state): State<Arc<AppState>>, Path(id): Path<String
         Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
     };
     let key = uuid.to_string();
+    // Never stop a device under a mounted filesystem: the device is
+    // recoverable, so its I/O would wait for ever rather than fail, and the
+    // node's every `sync` with it (see `ublk_export::mounted_at`). The caller
+    // unmounts first; this says where.
+    if let Some(dev) = state.ublk_exports.lock().await.device_path(&key) {
+        if let Some(at) = crate::mgmt::ublk_export::mounted_at(&dev) {
+            return ApiError::conflict(format!(
+                "cannot detach volume {uuid}: {dev} is mounted at {at} — unmount it first"
+            ));
+        }
+    }
     state.ublk_exports.lock().await.remove(&key);
     #[cfg(feature = "nvmeof")]
     super::v1::release_nvme_namespace(&state, &key).await;
