@@ -26,6 +26,9 @@
   cluster count (64 MiB at 512-byte sectors: 129024 clusters, room for 129022
   entries), and every subdirectory's `..` named the root rather than its
   parent. Both were found by `fsck.fat`.
+- **fix(ci):** `ci-image-verify.sh` finds the GPT at the LBA size the builder
+  writes, rather than assuming 512. Since stormcos#31 an image is 4096, and the
+  script had stopped at its table check, before it ever reached mtools.
 - **build:** `Cargo.lock` is committed (#128). It was in `.gitignore`, so a
   golden built `--locked` from a commit had no lockfile, and the builds that
   worked were using an untracked one on dev. Generated on dev with cargo 1.95.0;
