@@ -530,6 +530,26 @@ enum ImageAction {
     },
     /// List the formats this build can write
     Formats,
+    /// Lay a node's layout on a drive: boot area, system slab, data slab last.
+    /// What `boot-local --local-disk` does to a drive it takes, by hand.
+    /// **Destroys what is on the drive**, and refuses one carrying a data
+    /// slab — that partition is a node's identity.
+    LayNode {
+        /// The drive (or an image file standing in for one)
+        #[arg(long)]
+        disk: String,
+        /// GPT block size. Defaults to the drive's logical sector size, which
+        /// is what firmware reads the table in; a file follows the device
+        #[arg(long)]
+        lba: Option<u32>,
+        /// Boot area in front of the system slab, e.g. 4G. Defaults by drive
+        /// size (4G on 64G and up, 1G on 16G and up, none below)
+        #[arg(long)]
+        boot_area: Option<String>,
+        /// System slab size, e.g. 32G. Defaults by drive size
+        #[arg(long)]
+        system: Option<String>,
+    },
     /// Make an installed disk boot on its own: copy the ESP (stormuefi) and
     /// the boot pallets of the image a node booted into the disk's boot area
     /// (#123). What the engine does after a flow-over, by hand.
@@ -1947,6 +1967,31 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
             for f in ImageFormat::ALL {
                 println!("{:<6} .{}", f.as_str(), f.extension());
             }
+        }
+        ImageAction::LayNode { disk, lba, boot_area, system } => {
+            if let Some(what) = data_slab_on(disk).await? {
+                anyhow::bail!("refusing to lay a node layout on {disk}: {what}");
+            }
+            let dev: Arc<dyn BlockDevice> =
+                Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+            let mut layout = stormblock::image::local::LocalLayout::for_drive(dev.capacity_bytes());
+            layout.lba = lba.or_else(|| stormblock::drive::filedev::logical_sector_size(disk));
+            if let Some(b) = boot_area {
+                layout.boot_bytes = stormblock::mgmt::config::parse_size(b).map_err(|e| anyhow::anyhow!(e))?;
+            }
+            if let Some(sz) = system {
+                layout.system_bytes = stormblock::mgmt::config::parse_size(sz).map_err(|e| anyhow::anyhow!(e))?;
+            }
+            let laid = stormblock::image::local::lay_node_slabs(dev, &layout).await.map_err(ie)?;
+            println!(
+                "{disk}: {}-byte table, boot area {}, system slab {} ({}), data slab {} ({})",
+                laid.lba,
+                stormblock::mgmt::config::human_size(layout.boot_bytes),
+                laid.system.slab_id(),
+                stormblock::mgmt::config::human_size(laid.system_bytes),
+                laid.data.slab_id(),
+                stormblock::mgmt::config::human_size(laid.data_bytes),
+            );
         }
         ImageAction::LocalBoot { disk, from } => {
             run_local_boot(disk, from).await?;
