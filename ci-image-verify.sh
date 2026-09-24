@@ -80,8 +80,16 @@ test "$("$ABS_BIN" image inspect disk.img | grep -c '^  system slab')" = 1
 python3 - <<'PY'
 import struct, uuid
 d = open('disk.img','rb').read()
-hdr = d[512:512+92]
-assert hdr[:8] == b'EFI PART', "no GPT header at LBA 1"
+# The builder writes the table in the device's block size (stormcos#31) —
+# 4096 for an image file — so LBA 1 is found by probing, as firmware on
+# either kind of medium would.
+for bs in (512, 4096):
+    hdr = d[bs:bs+92]
+    if hdr[:8] == b'EFI PART':
+        break
+else:
+    raise AssertionError("no GPT header at LBA 1 in 512 or 4096-byte blocks")
+print("  GPT in", bs, "byte LBAs")
 lba = struct.unpack('<Q', hdr[72:80])[0]
 count = struct.unpack('<I', hdr[80:84])[0]
 esz = struct.unpack('<I', hdr[84:88])[0]
@@ -89,7 +97,7 @@ SYSTEM = uuid.UUID('4C9A7B2E-1D63-4F8A-9E51-0B7C2A6D3F14')
 DATA   = uuid.UUID('7D3E5A91-6C24-4B8F-A05D-2E9147BC6F38')
 seen = []
 for i in range(count):
-    e = d[lba*512 + i*esz: lba*512 + (i+1)*esz]
+    e = d[lba*bs + i*esz: lba*bs + (i+1)*esz]
     t = uuid.UUID(bytes_le=e[:16])
     if t in (SYSTEM, DATA):
         seen.append('system' if t == SYSTEM else 'data')
