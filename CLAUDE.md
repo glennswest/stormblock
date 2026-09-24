@@ -118,6 +118,27 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Close the management API by default (2026-09-24, #107) — WAITING ON A DECISION
+
+The mechanism has been done since v14.0.0 (docs/auth.md): one check over the
+whole router, minted `<data_dir>/api_token`, `require_auth`, admin token for
+destructive verbs, a SECURITY warning on every open boot, `auth` on health.
+What is left is the **default**, and flipping it breaks callers that hold no
+credential today (checked 2026-09-24):
+
+- **stormbootx** (USB firmware) claims with `POST
+  /api/v1/synonyms/boothost/<tag>/claim` and sends no token — it has nowhere
+  to get one.
+- **stormcentral** `engine.rs` repoints `boothost/<tag>` and publishes
+  releases with no token.
+- the registry already reads the node's minted token (ready); the
+  initramfs `boot-claim` takes `--token`.
+
+Options put to the owner: (a) closed by default with the boot claim as the
+one public write (repoint, delete, publish stay guarded); (b) a fleet boot
+token carried by stormbootx; (c) keep open-with-warning and close per
+appliance by config. Nothing changed until answered.
+
 ### Local boot on an installed disk (2026-09-24, #123) — DONE (v16.2.0)
 
 A flowed-over disk carries only the two slabs, so every cold boot still needs
