@@ -684,6 +684,17 @@ down were not the same kind of thing, and the hand-formatted one could only be
 read by attaching it. `--metadata-bytes 0` (or `metadata_bytes: 0`) formats a
 slab that deliberately keeps no record of itself.
 
+### An installed disk boots on its own
+
+A flow-over lays more than the two slabs now. It also leaves a boot area at the
+front of the drive. Once the goldens have moved, the engine copies the image's
+ESP (stormuefi) and its boot pallets into that area, so a cold boot no longer
+needs the network. The table and the ESP are written in the drive's own sector
+size, which firmware requires. Release N sits at priority 14 with N-1 kept below
+it, so an attached image (priority 15) still wins. See
+[docs/images.md §2b](docs/images.md); `ci-local-boot-verify.sh` boots the
+result under OVMF.
+
 ### Booting: who decides where
 
 The initramfs decides where a node boots from, and `docs/boot-hooks.md`

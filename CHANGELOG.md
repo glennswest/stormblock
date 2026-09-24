@@ -3,6 +3,29 @@
 ## [Unreleased]
 
 ### 2026-09-24
+- **feat(image):** an installed disk boots on its own (#123). A flow-over
+  leaves a boot area in front of the system slab. Once the goldens have moved,
+  the adopting engine copies the attached image's ESP (stormuefi) and its
+  `kind = boot` pallets into it. Local boot pallets form the same A/B ladder an
+  upgrade uses: newest at priority 14, the previous one at 13, older ones
+  removed. The ladder stays one below an attached image's 15, so a netbooted
+  release still wins. Handover records carry `local_boot`. New
+  `stormblock image lay-node` and `stormblock image local-boot` do the same by
+  hand. Verified by `ci-local-boot-verify.sh`: OVMF boots the disk alone,
+  stormuefi selects the newest local release and the kernel starts.
+- **fix(image):** the node disk's GPT is written in the drive's own logical
+  sector size (`BLKSSZGET`), not `FileDevice`'s 4096. On a 512-byte drive a
+  4096-byte table is invisible to firmware. An installed disk laid the old way
+  has its table re-expressed at the native size on the next install, with every
+  partition at the same bytes; the system half gives up its front for the boot
+  area.
+- **feat(image):** `fat::read_tree` and `fat::format_from_tree`, so an ESP
+  served at one sector size can be laid onto a drive of another. `PartitionDevice::with_block_size` presents a
+  window at the medium's sector size.
+- **fix(image):** the FAT writer could size a FAT one sector short of its
+  cluster count (64 MiB at 512-byte sectors: 129024 clusters, room for 129022
+  entries), and every subdirectory's `..` named the root rather than its
+  parent. Both were found by `fsck.fat`.
 - **build:** `Cargo.lock` is committed (#128). It was in `.gitignore`, so a
   golden built `--locked` from a commit had no lockfile, and the builds that
   worked were using an untracked one on dev. Generated on dev with cargo 1.95.0;

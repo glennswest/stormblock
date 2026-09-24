@@ -20,6 +20,8 @@ stormblock image build --spec image.toml --out disk.qcow2
 stormblock image inspect disk.img
 stormblock image convert --in disk.img --out disk.iso --format iso
 stormblock image formats
+stormblock image lay-node   --disk /dev/sdb            # §2b
+stormblock image local-boot --disk /dev/sdb --from …   # §2b
 ```
 
 The CLI is glue: the builder is `crate::image`, a library, and **`/api/v1/images`
@@ -330,6 +332,89 @@ root=/dev/ublkb0 rd.stormblock.slab=/dev/sda4 stormblock.volume=stormpump
 ```
 
 `stormblock image inspect` prints what a slab says it holds.
+
+## 2b. An installed disk boots on its own (#123)
+
+A flow-over (`boot-local --local-disk`) lays the node's two slabs on its drive.
+On their own they are nothing firmware can start, so every cold boot of an
+installed node still needed the network claim, and with the appliance down it
+fell through to a disk with nothing on it. So the drive also carries what the
+image carries for booting:
+
+```
+GPT (in the drive's own sector size)
+├── EFI             ESP holding stormuefi              ┐ the boot area:
+├── kernel1         boot pallet — release N   pri 14   │ free space in front
+├── kernel1         boot pallet — release N-1 pri 13   ┘ of the system slab
+├── stormblock      system slab: the goldens, replaced by every install
+└── stormblock-data data slab: identity and state, last so it can grow
+```
+
+- **The loader is stormuefi**, the same one the netbooted image already runs.
+  It scans every block device for `kind = boot` pallets, verifies them and
+  starts the best one. The boot pallet's command line names the local disk
+  first (`rd.stormblock.slab=/dev/sda`), so a kernel started from the disk
+  finds its slabs there.
+- **What does it, and when.** `boot-local` records the disk in the handover
+  record (`local_boot`). The engine that adopts the boot copies the ESP and
+  every `kind = boot` pallet of the attached image into the boot area, **after**
+  the flow-over has moved the goldens. A disk that boots before its slabs are
+  complete would boot into a probe that rejects them. A flow-over with failed
+  extents leaves the disk unbootable on purpose.
+- **One ladder: the A/B an upgrade writes.** A new release's boot pallet goes
+  in at priority 14, the previous one drops to 13 as its fallback, and older
+  ones are removed. It is the same GPT-attribute ladder
+  (`priority`/`tries`/`successful`) that `pallet activate|successful|rollback`
+  drives. Staging B on a *running* node and marking a boot successful once it
+  is healthy belong to the upgrade work (#122), not here.
+- **The attached image outranks the disk.** stormuefi scans every device, so a
+  node that netboots a new release also sees its disk's copy of the old one.
+  The disk's ladder therefore starts at 14, one below the 15 an image publishes
+  at. When the image is attached its own boot pallet wins, and when it is not,
+  the newest local one does.
+- **The table and the ESP are in the drive's own sector size.** Firmware reads
+  a GPT and a FAT in the medium's block size. A `FileDevice` reports 4096 for
+  every drive, so the flow-over used to write a 4096-byte table onto 512-byte
+  drives. Our reader probes both sizes, so nothing noticed, but UEFI would never
+  have found a partition on those drives. The flow-over now asks the kernel
+  (`BLKSSZGET`). An installed disk laid the old way has its table re-expressed
+  at the native size, with every partition at the same bytes. The ESP, served
+  at 4096 over NVMe/TCP, is read out and laid down again at the disk's size
+  (`fat::read_tree` → `fat::format_from_tree`). When the two sizes match, it is
+  copied byte for byte.
+- **Nothing here can make a node unbootable.** A copied pallet stays invisible
+  to the ladder until it has verified at the destination. The ESP is typed as
+  a plain partition (`EFI-pending`) while it is written. It becomes an ESP only
+  once its files read back identical to the source's. An interrupted copy is
+  therefore a disk with no ESP: firmware passes over it on its way to the
+  network, and the next boot finishes the job.
+- **Older installs.** A disk laid before this had no boot area. The "already up
+  to date" shortcut does not apply to such a disk, so the next install lays the
+  system half again. The system half is always replaced, so moving it costs
+  nothing new. The boot area is carved from the system partition's front, and
+  the data half does not move.
+
+By hand:
+
+```
+stormblock image lay-node   --disk /dev/sdb [--lba 512] [--boot-area 4G] [--system 32G]
+stormblock image local-boot --disk /dev/sdb --from nvme-tcp://host:4420/nqn...
+```
+
+`lay-node` destroys the drive and refuses one that carries a data slab.
+`local-boot` is idempotent: it only reads its sources, and a disk that is
+already current is left alone.
+
+**`ci-local-boot-verify.sh` is the check that counts.** It builds stormuefi and
+two releases, each an image with a 4096-byte ESP and a boot pallet holding a
+real kernel. It lays a node disk at 512, runs `local-boot` from A and then B,
+and asks tools that are not ours about the result: `sfdisk` (the table at 512,
+one EFI System partition, data last), `fsck.fat` and `mtools` (stormuefi in the
+ESP, byte for byte), and `pallet verify`. Then **OVMF boots the disk with
+nothing else attached**: firmware starts stormuefi from the local ESP, which
+selects B over A and starts the kernel with B's command line. That script found
+two bugs in the FAT writer that every test of ours had passed: a FAT one sector
+short of its cluster count, and every `..` pointing at the root.
 
 ## 3. FAT16 or FAT32, and why both
 

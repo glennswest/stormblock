@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Local boot on an installed disk (2026-09-24, #123) — IN PROGRESS
+### Local boot on an installed disk (2026-09-24, #123) — DONE (v16.2.0)
 
 A flowed-over disk carries only the two slabs, so every cold boot still needs
 the network claim. The loader is **stormuefi** (already what the netbooted
@@ -129,30 +129,38 @@ A/B is the running-upgrade path (#122), *not* this issue, but what is laid
 here must be the same pallet ladder that upgrade writes, not a second
 selection mechanism.
 
-- [ ] `LocalLayout.boot_bytes`: a boot area at the front (free GPT space the
+- [x] `LocalLayout.boot_bytes`: a boot area at the front (free GPT space the
       ESP and pallets are allocated into), system slab after it, data last.
       `update_system_slab` carves it out of the system partition when an older
       layout has none (the system half is reformatted there anyway), and the
       "already up to date" shortcut does not apply to a disk without one.
-- [ ] `image/fat.rs` reader, so the ESP can be **rebuilt** at the local disk's
+- [x] `image/fat.rs` reader, so the ESP can be **rebuilt** at the local disk's
       sector size — the image is served at 4096, a local drive is usually 512,
       and a FAT must declare its medium's sector size or firmware cannot read it.
-- [ ] `image/local_boot.rs`: copy the source's ESP (byte copy when sector
+- [x] `image/local_boot.rs`: copy the source's ESP (byte copy when sector
       sizes match, rebuild otherwise; typed BASIC until complete, then ESP, so
       a torn copy is "no ESP" and the node netboots) and every `kind = boot`
       pallet not already present by manifest digest (`copy_pallet`, verified).
       Local ladder: newest copy at priority 14, older renumbered below it,
       prune to 2 — **capped below 15** so a netbooted image's own boot pallet
       always outranks a local one (stormuefi scans every device).
-- [ ] handover `Record.local_boot`; the successor lays it after the flow-over
+- [x] handover `Record.local_boot`; the successor lays it after the flow-over
       finishes (the initramfs engine does not live long enough for ~0.5–1 GB);
       `stormblock image local-boot --disk --from` for doing it by hand.
-- [ ] tests; `ci-local-boot-verify.sh` on dev: 4Kn source image → 512 local
+- [x] tests; `ci-local-boot-verify.sh` on dev: 4Kn source image → 512 local
       disk, `fdisk`, `fsck.fat`, `pallet verify`, OVMF finds the ESP
-- [ ] docs (images.md / pallets.md), CHANGELOG, close #123
+- [x] docs (images.md / pallets.md), CHANGELOG, close #123
+
+Also found and fixed on the way: the flow-over wrote its GPT at `FileDevice`'s
+4096 on every drive (invisible to firmware on a 512-byte drive; now
+`BLKSSZGET`, and an old table is re-expressed at the next install), and two FAT
+writer bugs only `fsck.fat` could see (a FAT one sector short; every `..` at the
+root). `ci-local-boot-verify.sh` passes on dev: OVMF with only the node disk
+attached → stormuefi → B selected over A → kernel with B's cmdline.
 
 Not here: marking a boot successful once healthy, tries accounting, staging B
-on a running node (#122).
+on a running node (#122). Not yet seen on metal: the R230 picks this up with
+the next release it installs.
 
 ### Commit Cargo.lock (2026-09-24, #128) — DONE
 
