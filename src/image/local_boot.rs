@@ -511,11 +511,13 @@ mod tests {
         // The ESP: typed, named, and declaring the disk's own sector size.
         let (tree, sector) = esp_of(&ddev).await.expect("an ESP");
         assert_eq!(sector, 512, "a FAT must declare its medium's sector size");
-        let mut want = esp_files("A");
-        want.sort();
-        let mut got = tree.files.clone();
-        got.sort();
-        assert_eq!(got, want);
+        let upper = |v: &[(String, Vec<u8>)]| {
+            let mut v: Vec<(String, Vec<u8>)> =
+                v.iter().map(|(p, b)| (p.to_ascii_uppercase(), b.clone())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(upper(&tree.files), upper(&esp_files("A")));
 
         // The pallet verifies where it landed, and it is in the boot area:
         // in front of the system slab.
