@@ -44,6 +44,16 @@ pub struct LocalLayout {
     /// GPT block size. `None` follows the device, which is what firmware and
     /// the kernel both read it in.
     pub lba: Option<u32>,
+    /// Bytes left free at the **front** of the drive for what makes it boot
+    /// on its own: an ESP holding stormuefi and the release's `boot` pallets
+    /// (#123). Free GPT space rather than a partition, because pallets are
+    /// partitions of their own, allocated first-fit — and the first free run
+    /// on this drive is this one. Zero lays no boot area; the drive then
+    /// only ever boots through the network claim.
+    ///
+    /// Sized for two generations of the boot pallet and the ESP: the one the
+    /// node runs, and the one it falls back to.
+    pub boot_bytes: u64,
 }
 
 impl LocalLayout {
@@ -63,8 +73,116 @@ impl LocalLayout {
             slot_size: DEFAULT_SLOT_SIZE,
             tier: StorageTier::Hot,
             lba: None,
+            boot_bytes: boot_area_for(capacity),
         }
     }
+}
+
+/// The boot area a drive of this size gets: 4 GiB on anything that is a real
+/// system drive, 1 GiB on a small one, none on a drive too small to spare it.
+///
+/// A release's boot pallet — kernel, initramfs, modules, firmware — is under
+/// a gigabyte, and the area holds two of them plus the ESP.
+pub fn boot_area_for(capacity: u64) -> u64 {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if capacity >= 64 * GIB {
+        4 * GIB
+    } else if capacity >= 16 * GIB {
+        GIB
+    } else {
+        0
+    }
+}
+
+/// Can firmware boot from this drive's layout, once the ESP and pallets are
+/// on it? A table in the medium's own LBA size, and a boot area.
+///
+/// This is what the "already up to date" shortcut must also ask: a drive
+/// laid before local boot existed holds every golden and still cannot boot,
+/// and taking the shortcut would leave it that way forever.
+pub async fn boot_ready(device: &Arc<dyn BlockDevice>, opts: &LocalLayout) -> bool {
+    if opts.boot_bytes == 0 {
+        return true;
+    }
+    let Ok(gpt) = Gpt::read(device).await else { return false };
+    if opts.lba.is_some_and(|l| l != gpt.block_size) {
+        return false;
+    }
+    has_boot_area(device, opts.boot_bytes).await
+}
+
+/// Re-express the table in `lba`-byte blocks, every partition at the same
+/// bytes. Returns whether anything changed.
+///
+/// `lay_node_slabs` used to write the table in `FileDevice`'s block size,
+/// which is 4096 whatever the drive is — and UEFI parses a GPT in the
+/// medium's own block size. On a 512-byte drive that is a disk with no
+/// partition table as far as firmware is concerned. Our reader probes both,
+/// so nothing noticed until the disk was asked to boot (#123).
+///
+/// Nothing moves: a partition is a byte range, and only the unit it is
+/// written in changes. Both directions are safe to interrupt, because the
+/// new table's head and tail each cover the old header at their end — and
+/// `Gpt::write` puts the tail down first, so at every point one complete
+/// table describes the same byte ranges.
+pub async fn retable(device: &Arc<dyn BlockDevice>, lba: u32) -> Result<bool> {
+    let old = Gpt::read(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    if old.block_size == lba {
+        return Ok(false);
+    }
+    let obs = old.block_size as u64;
+    let nbs = lba as u64;
+    let mut new = Gpt::create_with_lba(device, lba);
+    new.disk_guid = old.disk_guid;
+    for (i, e) in old.partitions() {
+        let start = e.first_lba * obs;
+        let end = (e.last_lba + 1) * obs;
+        if start % nbs != 0 || end % nbs != 0 {
+            return Err(ImageError::Other(format!(
+                "partition {} ({}) is not aligned to {lba}-byte blocks",
+                i + 1,
+                e.name
+            )));
+        }
+        let mut n = e.clone();
+        n.first_lba = start / nbs;
+        n.last_lba = end / nbs - 1;
+        if n.first_lba < new.first_usable_lba || n.last_lba > new.last_usable_lba {
+            return Err(ImageError::Other(format!(
+                "partition {} ({}) does not fit a {lba}-byte table",
+                i + 1,
+                e.name
+            )));
+        }
+        new.entries[i] = n;
+    }
+    new.write(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("writing the {lba}-byte table: {e}")))?;
+    Ok(true)
+}
+
+/// Does this drive have somewhere to put what boots it?
+///
+/// An ESP already on it says yes. Otherwise the free space in front of the
+/// system partition has to be at least `boot_bytes` — which it is not on a
+/// drive laid before the boot area existed, where the system slab starts at
+/// the first megabyte.
+pub async fn has_boot_area(device: &Arc<dyn BlockDevice>, boot_bytes: u64) -> bool {
+    if boot_bytes == 0 {
+        return true;
+    }
+    let Ok(gpt) = Gpt::read(device).await else { return false };
+    if gpt.partitions().any(|(_, e)| e.type_guid == type_guid::ESP) {
+        return true;
+    }
+    let Ok(Some((_, s))) = node_layout(device).await else { return false };
+    let bs = gpt.block_size as u64;
+    let front = gpt.entries[s].first_lba.saturating_sub(gpt.first_usable_lba) * bs;
+    // The first megabyte is alignment the table takes anyway.
+    front + ALIGN >= boot_bytes
 }
 
 /// What was laid down.
@@ -216,6 +334,9 @@ pub async fn update_system_slab(
     device: Arc<dyn BlockDevice>,
     opts: &LocalLayout,
 ) -> Result<LocalSlabs> {
+    if let Some(lba) = opts.lba {
+        retable(&device, lba).await?;
+    }
     let gpt = Gpt::read(&device)
         .await
         .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
@@ -223,6 +344,30 @@ pub async fn update_system_slab(
         .await?
         .ok_or_else(|| ImageError::Spec("this drive does not carry a node layout".into()))?;
     let lba = gpt.block_size;
+
+    // **Make room for the boot area** on a drive laid before it existed. The
+    // system half is about to be formatted afresh, so moving where it starts
+    // costs nothing that this call was not already going to destroy — and it
+    // is the only half that may move: the data half holds the node's identity
+    // and stays exactly where it is.
+    let mut gpt = gpt;
+    if !has_boot_area(&device, opts.boot_bytes).await {
+        let bs = lba as u64;
+        let e = &gpt.entries[system_i];
+        let want_first = (gpt.first_usable_lba * bs).div_ceil(ALIGN) * ALIGN + opts.boot_bytes;
+        let new_first = want_first / bs;
+        let size_after = (e.last_lba + 1).saturating_sub(new_first) * bs;
+        if size_after < 64 * ALIGN {
+            return Err(ImageError::Spec(format!(
+                "the system partition is too small to give up {} bytes for a boot area",
+                opts.boot_bytes
+            )));
+        }
+        gpt.entries[system_i].first_lba = new_first;
+        gpt.write(&device)
+            .await
+            .map_err(|e| ImageError::Other(format!("moving the system partition: {e}")))?;
+    }
 
     let part = |i: usize| -> Result<Arc<PartitionDevice>> {
         let e = &gpt.entries[i];
@@ -302,8 +447,12 @@ pub async fn lay_node_slabs(
     }
     // What is left after the GPT at both ends and the system slab, rounded
     // down so the last partition never runs past the tail the table needs.
+    let boot_bytes = align_down(opts.boot_bytes, ALIGN);
     let data_bytes = align_down(
-        capacity.saturating_sub(GPT_OVERHEAD).saturating_sub(system_bytes),
+        capacity
+            .saturating_sub(GPT_OVERHEAD)
+            .saturating_sub(boot_bytes)
+            .saturating_sub(system_bytes),
         ALIGN,
     );
     if data_bytes < 64 * ALIGN {
@@ -359,7 +508,24 @@ pub async fn lay_node_slabs(
     let mut gpt = Gpt::create_with_lba(&device, lba);
     gpt.write(&device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
 
-    let mut out = Vec::new();
+    // The boot area is the free space in front of the system partition, held
+    // by a placeholder while the two slabs are allocated first-fit behind it
+    // and dropped again before the table is final. Nothing is written into
+    // it here: the ESP and the boot pallets arrive later, from the engine
+    // that outlives this boot (see `image::local_boot`).
+    let hold = if boot_bytes > 0 {
+        Some(
+            gpt.allocate("boot-area", type_guid::BASIC, boot_bytes, 0)
+                .map_err(|e| ImageError::Other(format!("reserving the boot area: {e}")))?,
+        )
+    } else {
+        None
+    };
+
+    // Both allocated before the table is written, so the placeholder never
+    // reaches the disk: a table that still carried it would read as a drive
+    // whose boot area is taken.
+    let mut slots = Vec::new();
     for (name, guid, size, role) in [
         ("stormblock", type_guid::SLAB, system_bytes, SlabRole::System),
         ("stormblock-data", type_guid::SLAB_DATA, data_bytes, SlabRole::Data),
@@ -367,7 +533,15 @@ pub async fn lay_node_slabs(
         let slot = gpt
             .allocate(name, guid, size, 0)
             .map_err(|e| ImageError::Other(format!("allocating {name}: {e}")))?;
-        gpt.write(&device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
+        slots.push((name, slot, role));
+    }
+    if let Some(i) = hold {
+        gpt.remove(i).map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
+    }
+    gpt.write(&device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
+
+    let mut out = Vec::new();
+    for (name, slot, role) in slots {
         let start = gpt.entries[slot].start_bytes(lba);
         let len = gpt.entries[slot].size_bytes(lba);
         let part = Arc::new(

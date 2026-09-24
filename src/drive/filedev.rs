@@ -30,6 +30,33 @@ pub struct FileDevice {
     _tag_counter: AtomicU64,
 }
 
+/// The logical sector size of a block device node, from the kernel.
+///
+/// `FileDevice::block_size` is 4096 for everything — its preferred I/O size,
+/// not the medium's — and most drives are 512 underneath. Anything firmware
+/// reads has to be written in the medium's own size: a GPT at 4096 on a
+/// 512-byte drive is a disk with no partition table as far as UEFI is
+/// concerned (#123). `None` for a regular file, which has no sectors.
+#[cfg(target_os = "linux")]
+pub fn logical_sector_size(path: &str) -> Option<u32> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::io::AsRawFd;
+    let f = std::fs::File::open(path).ok()?;
+    if !f.metadata().ok()?.file_type().is_block_device() {
+        return None;
+    }
+    // BLKSSZGET
+    const BLKSSZGET: u32 = 0x1268;
+    let mut size: libc::c_int = 0;
+    let r = unsafe { libc::ioctl(f.as_raw_fd(), BLKSSZGET as _, &mut size) };
+    (r == 0 && size > 0).then_some(size as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn logical_sector_size(_path: &str) -> Option<u32> {
+    None
+}
+
 impl FileDevice {
     /// Open or create a file-backed block device.
     pub async fn open(path: &str) -> DriveResult<Self> {

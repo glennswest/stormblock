@@ -126,6 +126,325 @@ pub async fn format_from_dir(
     fs.finish().await
 }
 
+/// Format, then lay a tree of in-memory files into it.
+///
+/// `files` are paths from the root, `/`-separated (`EFI/BOOT/BOOTX64.EFI`);
+/// `dirs` are directories to create even when nothing is in them. This is
+/// how an ESP read off one medium is laid onto another whose sector size
+/// differs — see [`read_tree`].
+pub async fn format_from_tree(
+    device: Arc<dyn BlockDevice>,
+    files: &[(String, Vec<u8>)],
+    dirs: &[String],
+    label: &str,
+) -> Result<()> {
+    let mut root = MemDir::default();
+    for d in dirs {
+        root.dir_at(d)?;
+    }
+    for (path, data) in files {
+        let (parent, name) = match path.trim_matches('/').rsplit_once('/') {
+            Some((p, n)) => (p, n),
+            None => ("", path.trim_matches('/')),
+        };
+        if name.is_empty() {
+            return Err(ImageError::Spec(format!("'{path}' names no file")));
+        }
+        root.dir_at(parent)?.files.insert(name.to_string(), data.clone());
+    }
+    let mut fs = Fat32::new(device, label)?;
+    let entries = fs.write_mem_children(&root).await?;
+    fs.write_root(entries).await?;
+    fs.finish().await
+}
+
+/// What a FAT volume holds, read back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FatTree {
+    /// The volume label from the boot sector, trimmed.
+    pub label: String,
+    /// Every file, by path from the root, `/`-separated, in directory order.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// Every directory, by path from the root.
+    pub dirs: Vec<String>,
+}
+
+/// Read every file and directory out of a FAT16 or FAT32 volume.
+///
+/// The other half of [`format_from_tree`], and deliberately no more than an
+/// ESP needs: long names, subdirectories, both widths. An ESP is formatted in
+/// its medium's sector size, so one served at 4096 bytes cannot be copied
+/// byte for byte onto a 512-byte drive and still be read by firmware — it
+/// has to be read out and laid down again (#123).
+///
+/// Everything read is checked against the volume's own geometry: a chain
+/// that loops, leaves the volume, or ends before a file's size is an error,
+/// never a short file.
+pub async fn read_tree(device: Arc<dyn BlockDevice>) -> Result<FatTree> {
+    let r = FatReader::open(device).await?;
+    let mut tree = FatTree { label: r.label.clone(), ..Default::default() };
+    let root = r.root_bytes().await?;
+    r.walk(&root, "", 0, &mut tree).await?;
+    Ok(tree)
+}
+
+#[derive(Default)]
+struct MemDir {
+    dirs: std::collections::BTreeMap<String, MemDir>,
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+impl MemDir {
+    fn dir_at(&mut self, path: &str) -> Result<&mut MemDir> {
+        let mut at = self;
+        for part in path.split('/').filter(|p| !p.is_empty()) {
+            if at.files.contains_key(part) {
+                return Err(ImageError::Spec(format!("'{part}' is both a file and a directory")));
+            }
+            at = at.dirs.entry(part.to_string()).or_default();
+        }
+        Ok(at)
+    }
+}
+
+struct FatReader {
+    view: PartitionView,
+    kind: FatKind,
+    sector: u64,
+    sectors_per_cluster: u64,
+    root_dir_sector: u64,
+    root_entries: u64,
+    root_cluster: u32,
+    data_start: u64,
+    cluster_count: u32,
+    fat: Vec<u8>,
+    label: String,
+}
+
+impl FatReader {
+    async fn open(device: Arc<dyn BlockDevice>) -> Result<FatReader> {
+        let view = PartitionView::whole(device);
+        let mut b = vec![0u8; 512];
+        view.read_at(0, &mut b).await?;
+        let bad = |why: &str| ImageError::Other(format!("not a FAT volume: {why}"));
+        if b[510] != 0x55 || b[511] != 0xAA {
+            return Err(bad("no boot signature"));
+        }
+        let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as u64;
+        let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as u64;
+        let sector = u16_at(11);
+        if !matches!(sector, 512 | 1024 | 2048 | 4096) {
+            return Err(bad(&format!("{sector}-byte sectors")));
+        }
+        let spc = b[13] as u64;
+        if spc == 0 || !spc.is_power_of_two() {
+            return Err(bad(&format!("{spc} sectors per cluster")));
+        }
+        let reserved = u16_at(14);
+        let nfats = b[16] as u64;
+        let root_entries = u16_at(17);
+        let total = if u16_at(19) != 0 { u16_at(19) } else { u32_at(32) };
+        let fat_sectors = if u16_at(22) != 0 { u16_at(22) } else { u32_at(36) };
+        if reserved == 0 || nfats == 0 || fat_sectors == 0 {
+            return Err(bad("empty geometry"));
+        }
+        let root_dir_sectors = (root_entries * 32).div_ceil(sector);
+        let root_dir_sector = reserved + nfats * fat_sectors;
+        let data_start = root_dir_sector + root_dir_sectors;
+        if total <= data_start || total * sector > view.len() {
+            return Err(bad("geometry runs past the volume"));
+        }
+        let cluster_count = ((total - data_start) / spc) as u32;
+        let kind = if cluster_count < FAT16_MIN_CLUSTERS {
+            return Err(bad("FAT12 is not an ESP this reads"));
+        } else if cluster_count <= FAT16_MAX_CLUSTERS {
+            FatKind::Fat16
+        } else {
+            FatKind::Fat32
+        };
+        let label_at = if kind == FatKind::Fat32 { 71 } else { 43 };
+        let label = String::from_utf8_lossy(&b[label_at..label_at + 11]).trim_end().to_string();
+        let root_cluster = if kind == FatKind::Fat32 { u32_at(44) as u32 } else { 0 };
+
+        let mut fat = vec![0u8; (fat_sectors * sector) as usize];
+        view.read_at(reserved * sector, &mut fat).await?;
+        Ok(FatReader {
+            view,
+            kind,
+            sector,
+            sectors_per_cluster: spc,
+            root_dir_sector,
+            root_entries,
+            root_cluster,
+            data_start,
+            cluster_count,
+            fat,
+            label,
+        })
+    }
+
+    fn next(&self, c: u32) -> Option<u32> {
+        let v = match self.kind {
+            FatKind::Fat16 => {
+                let o = c as usize * 2;
+                let v = u16::from_le_bytes([*self.fat.get(o)?, *self.fat.get(o + 1)?]) as u32;
+                if v >= 0xFFF8 {
+                    return None;
+                }
+                v
+            }
+            FatKind::Fat32 => {
+                let o = c as usize * 4;
+                let v = u32::from_le_bytes(self.fat.get(o..o + 4)?.try_into().ok()?) & 0x0FFF_FFFF;
+                if v >= 0x0FFF_FFF8 {
+                    return None;
+                }
+                v
+            }
+        };
+        Some(v)
+    }
+
+    /// The clusters of a chain, checked: every one inside the volume, and no
+    /// more of them than the volume has — which is what makes a loop an error
+    /// rather than a hang.
+    fn chain(&self, first: u32) -> Result<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut c = first;
+        loop {
+            if c < 2 || c >= self.cluster_count + 2 || out.len() > self.cluster_count as usize {
+                return Err(ImageError::Other(format!("FAT chain from cluster {first} is broken")));
+            }
+            out.push(c);
+            match self.next(c) {
+                Some(n) => c = n,
+                None => return Ok(out),
+            }
+        }
+    }
+
+    async fn read_chain(&self, first: u32, len: Option<u64>) -> Result<Vec<u8>> {
+        let csize = self.sectors_per_cluster * self.sector;
+        let clusters = self.chain(first)?;
+        let want = len.unwrap_or(clusters.len() as u64 * csize);
+        if want > clusters.len() as u64 * csize {
+            return Err(ImageError::Other(format!(
+                "a file of {want} bytes has a chain of {} clusters",
+                clusters.len()
+            )));
+        }
+        let mut out = vec![0u8; (clusters.len() as u64 * csize) as usize];
+        for (i, c) in clusters.iter().enumerate() {
+            let at = (self.data_start + (*c as u64 - 2) * self.sectors_per_cluster) * self.sector;
+            let i = i * csize as usize;
+            self.view.read_at(at, &mut out[i..i + csize as usize]).await?;
+        }
+        out.truncate(want as usize);
+        Ok(out)
+    }
+
+    async fn root_bytes(&self) -> Result<Vec<u8>> {
+        match self.kind {
+            FatKind::Fat16 => {
+                let mut out = vec![0u8; (self.root_entries * 32) as usize];
+                self.view.read_at(self.root_dir_sector * self.sector, &mut out).await?;
+                Ok(out)
+            }
+            FatKind::Fat32 => self.read_chain(self.root_cluster, None).await,
+        }
+    }
+
+    async fn walk(&self, dir: &[u8], prefix: &str, depth: u32, tree: &mut FatTree) -> Result<()> {
+        if depth > 16 {
+            return Err(ImageError::Other("directories nested past 16 levels".into()));
+        }
+        // Long-name pieces seen since the last short entry, by sequence.
+        let mut lfn: Vec<(u8, u8, Vec<u16>)> = Vec::new();
+        for e in dir.chunks_exact(32) {
+            if e[0] == 0x00 {
+                break;
+            }
+            if e[0] == 0xE5 {
+                lfn.clear();
+                continue;
+            }
+            let attr = e[11];
+            if attr & 0x3F == ATTR_LFN {
+                const SPOTS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+                let units: Vec<u16> = SPOTS
+                    .iter()
+                    .map(|&o| u16::from_le_bytes([e[o], e[o + 1]]))
+                    .take_while(|&u| u != 0x0000 && u != 0xFFFF)
+                    .collect();
+                lfn.push((e[0] & 0x1F, e[13], units));
+                continue;
+            }
+            if attr & ATTR_VOLUME_ID != 0 {
+                lfn.clear();
+                continue;
+            }
+            let short: [u8; 11] = e[0..11].try_into().expect("11 bytes");
+            let name = long_name(&lfn, &short).unwrap_or_else(|| short_display(&short, e[12]));
+            lfn.clear();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let path = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+            let hi = if self.kind == FatKind::Fat32 {
+                (u16::from_le_bytes([e[20], e[21]]) as u32) << 16
+            } else {
+                0
+            };
+            let first = hi | u16::from_le_bytes([e[26], e[27]]) as u32;
+            let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]) as u64;
+            if attr & ATTR_DIRECTORY != 0 {
+                tree.dirs.push(path.clone());
+                if first != 0 {
+                    let bytes = self.read_chain(first, None).await?;
+                    Box::pin(self.walk(&bytes, &path, depth + 1, tree)).await?;
+                }
+            } else {
+                let data = if size == 0 { Vec::new() } else { self.read_chain(first, Some(size)).await? };
+                tree.files.push((path, data));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The long name a run of LFN entries spells, if they belong to this short
+/// entry — the checksum is what ties them to it, and a run whose checksum
+/// does not match is a stale one some other writer left behind.
+fn long_name(lfn: &[(u8, u8, Vec<u16>)], short: &[u8; 11]) -> Option<String> {
+    if lfn.is_empty() {
+        return None;
+    }
+    let sum = lfn_checksum(short);
+    if lfn.iter().any(|(_, c, _)| *c != sum) {
+        return None;
+    }
+    let mut parts: Vec<&(u8, u8, Vec<u16>)> = lfn.iter().collect();
+    parts.sort_by_key(|(seq, ..)| *seq);
+    let units: Vec<u16> = parts.iter().flat_map(|(_, _, u)| u.iter().copied()).collect();
+    String::from_utf16(&units).ok()
+}
+
+/// A short name as a reader shows it, honouring the NT lowercase bits.
+fn short_display(short: &[u8; 11], case: u8) -> String {
+    let mut stem = String::from_utf8_lossy(&short[0..8]).trim_end().to_string();
+    let mut ext = String::from_utf8_lossy(&short[8..11]).trim_end().to_string();
+    if stem.starts_with('\u{5}') {
+        stem.replace_range(0..1, "\u{e5}");
+    }
+    if case & 0x08 != 0 {
+        stem = stem.to_ascii_lowercase();
+    }
+    if case & 0x10 != 0 {
+        ext = ext.to_ascii_lowercase();
+    }
+    if ext.is_empty() { stem } else { format!("{stem}.{ext}") }
+}
+
 struct Fat32 {
     kind: FatKind,
     view: PartitionView,
@@ -467,6 +786,45 @@ impl Fat32 {
             };
             let short = short_name(&name, &mut used_short);
             out.extend_from_slice(&lfn_entries(&name, &short));
+            out.extend_from_slice(&dir_entry(&short, attr, first, size));
+        }
+        Ok(out)
+    }
+
+    /// [`Self::write_dir_children`] for a tree held in memory: the same
+    /// order (names sorted, directories and files together), the same entries.
+    async fn write_mem_children(&mut self, dir: &MemDir) -> Result<Vec<u8>> {
+        let mut names: Vec<(&String, bool)> = dir
+            .dirs
+            .keys()
+            .map(|n| (n, true))
+            .chain(dir.files.keys().map(|n| (n, false)))
+            .collect();
+        names.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut used_short = HashSet::new();
+        let mut out = Vec::new();
+        for (name, is_dir) in names {
+            let (first, size, attr) = if is_dir {
+                let child = Box::pin(self.write_mem_children(&dir.dirs[name])).await?;
+                let cluster = self.allocate_chain(self.cluster_bytes())?;
+                let mut bytes = dot_entries(cluster, 0);
+                bytes.extend_from_slice(&child);
+                self.extend_chain(cluster, bytes.len() as u64)?;
+                self.write_chain(cluster, &bytes).await?;
+                (cluster, 0u64, ATTR_DIRECTORY)
+            } else {
+                let data = &dir.files[name];
+                if data.is_empty() {
+                    (0, 0, ATTR_ARCHIVE)
+                } else {
+                    let first = self.allocate_chain(data.len() as u64)?;
+                    self.write_chain(first, data).await?;
+                    (first, data.len() as u64, ATTR_ARCHIVE)
+                }
+            };
+            let short = short_name(name, &mut used_short);
+            out.extend_from_slice(&lfn_entries(name, &short));
             out.extend_from_slice(&dir_entry(&short, attr, first, size));
         }
         Ok(out)

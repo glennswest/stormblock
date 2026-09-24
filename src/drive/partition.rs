@@ -17,6 +17,9 @@ pub struct PartitionDevice {
     id: DeviceId,
     start: u64,
     len: u64,
+    /// The block size this window presents, when it is not the inner
+    /// device's. See [`PartitionDevice::with_block_size`].
+    block_size: Option<u32>,
 }
 
 impl PartitionDevice {
@@ -38,6 +41,39 @@ impl PartitionDevice {
                 capacity: inner.capacity_bytes(),
             });
         }
+        Ok(PartitionDevice::new_unchecked(inner, start, len))
+    }
+
+    /// A window that presents `block_size` rather than the inner device's.
+    ///
+    /// For what formats a filesystem in the *medium's* sector size, when the
+    /// device underneath reports something else: a `FileDevice` on a
+    /// 512-byte drive says 4096 (its preferred I/O size), and a FAT laid at
+    /// 4096 on a drive firmware reads at 512 is one firmware cannot mount
+    /// (#123). Only for inner devices that take any offset — a file, not an
+    /// `O_DIRECT` path.
+    pub fn with_block_size(
+        inner: Arc<dyn BlockDevice>,
+        start: u64,
+        len: u64,
+        block_size: u32,
+    ) -> DriveResult<Self> {
+        let bs = block_size as u64;
+        if bs == 0 || start % bs != 0 {
+            return Err(DriveError::NotAligned { offset: start, block_size });
+        }
+        if len % bs != 0 {
+            return Err(DriveError::NotAligned { offset: len, block_size });
+        }
+        if start + len > inner.capacity_bytes() {
+            return Err(DriveError::OutOfRange { offset: start, len, capacity: inner.capacity_bytes() });
+        }
+        let mut p = PartitionDevice::new_unchecked(inner, start, len);
+        p.block_size = Some(block_size);
+        Ok(p)
+    }
+
+    fn new_unchecked(inner: Arc<dyn BlockDevice>, start: u64, len: u64) -> Self {
         let parent = inner.id().clone();
         let id = DeviceId {
             uuid: uuid::Uuid::new_v4(),
@@ -45,7 +81,7 @@ impl PartitionDevice {
             model: parent.model.clone(),
             path: format!("{}@{}", parent.path, start),
         };
-        Ok(PartitionDevice { inner, id, start, len })
+        PartitionDevice { inner, id, start, len, block_size: None }
     }
 
     pub fn start(&self) -> u64 {
@@ -71,7 +107,7 @@ impl BlockDevice for PartitionDevice {
     }
 
     fn block_size(&self) -> u32 {
-        self.inner.block_size()
+        self.block_size.unwrap_or_else(|| self.inner.block_size())
     }
 
     fn optimal_io_size(&self) -> u32 {
