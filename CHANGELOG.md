@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+<!-- New unreleased changes go here -->
+
+## [v16.2.0] — 2026-09-24
+
 
 ### 2026-09-24
 - **feat(image):** an installed disk boots on its own (#123). A flow-over
