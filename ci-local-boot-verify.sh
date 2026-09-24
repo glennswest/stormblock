@@ -116,7 +116,7 @@ for want in ("EFI", "kernel1", "stormblock", "stormblock-data"):
     assert want in names, want
 data = [p for p in t["partitions"] if p.get("name") == "stormblock-data"][0]
 assert all(p["start"] <= data["start"] for p in t["partitions"]), "the data half is not last"
-open(sys.argv[1] + ".esp", "w").write(f'{esp[0]["start"]} {esp[0]["size"]}')
+open(sys.argv[1] + ".esp", "w").write(f'{esp[0]["start"]} {esp[0]["size"]}\n')
 PY
 read -r ESP_START ESP_SIZE < "$WORK/table.json.esp"
 dd if="$WORK/node.disk" of="$WORK/esp.img" bs=512 skip="$ESP_START" count="$ESP_SIZE" status=none
