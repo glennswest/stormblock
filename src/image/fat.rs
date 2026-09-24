@@ -1418,7 +1418,11 @@ mod tests {
         let r = FatReader::open(dev).await.unwrap();
         let root = r.root_bytes().await.unwrap();
         let cluster_of = |dir: &[u8], name: &[u8; 11]| -> u32 {
-            let e = dir.chunks_exact(32).find(|e| &e[0..11] == name).expect("entry");
+            // By the directory bit too: the volume label is also `EFI`.
+            let e = dir
+                .chunks_exact(32)
+                .find(|e| &e[0..11] == name && e[11] & ATTR_DIRECTORY != 0)
+                .expect("entry");
             (u16::from_le_bytes([e[20], e[21]]) as u32) << 16 | u16::from_le_bytes([e[26], e[27]]) as u32
         };
         let efi = cluster_of(&root, b"EFI        ");
