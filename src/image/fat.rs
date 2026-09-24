@@ -553,6 +553,22 @@ impl Fat32 {
             }
             fat_sectors = needed;
         }
+        // The passes can oscillate by one sector instead of settling — at
+        // 64 MiB of 512-byte sectors they alternate 1008 / 1009 — and ending
+        // on the smaller leaves clusters with no FAT entry. fsck.fat says
+        // "129024 clusters but only space for 129022 FAT entries"; firmware
+        // is entitled to refuse the volume. Grow until every cluster has one.
+        loop {
+            let data_sectors = total_sectors
+                .saturating_sub(reserved)
+                .saturating_sub(NUM_FATS * fat_sectors)
+                .saturating_sub(root_dir_sectors);
+            let clusters = data_sectors / spc;
+            if (clusters + 2) * bytes_per_fat_entry <= fat_sectors * sector {
+                break;
+            }
+            fat_sectors += 1;
+        }
         let data_sectors =
             total_sectors - reserved - NUM_FATS * fat_sectors - root_dir_sectors;
         let cluster_count = data_sectors / spc;
@@ -1350,4 +1366,40 @@ mod tests {
         let dev = volume(&dir, "zero.img", 8 << 20).await;
         assert!(read_tree(dev).await.is_err());
     }
+    /// Every cluster has a FAT entry, at every size an ESP is made in — the
+    /// sizing passes used to settle one sector short at 64 MiB of 512-byte
+    /// sectors, which fsck.fat found and none of our tests did (#123).
+    #[tokio::test]
+    async fn every_cluster_has_a_fat_entry() {
+        use crate::drive::partition::PartitionDevice;
+        let dir = tempfile::TempDir::new().unwrap();
+        let disk = volume(&dir, "sizes.img", 600 << 20).await;
+        for mib in [24u64, 32, 48, 64, 100, 128, 260, 512] {
+            for sector in [512u32, 4096] {
+                let len = mib << 20;
+                let dev: Arc<dyn BlockDevice> =
+                    Arc::new(PartitionDevice::with_block_size(disk.clone(), 0, len, sector).unwrap());
+                if format(dev.clone(), "EFI").await.is_err() {
+                    continue; // too small for either width at this sector size
+                }
+                let mut b = vec![0u8; 512];
+                dev.read(0, &mut b).await.unwrap();
+                let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as u64;
+                let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as u64;
+                let bps = u16_at(11);
+                let spc = b[13] as u64;
+                let reserved = u16_at(14);
+                let root = (u16_at(17) * 32).div_ceil(bps);
+                let total = if u16_at(19) != 0 { u16_at(19) } else { u32_at(32) };
+                let (fat, width) = if u16_at(22) != 0 { (u16_at(22), 2) } else { (u32_at(36), 4) };
+                let clusters = (total - reserved - 2 * fat - root) / spc;
+                assert!(
+                    (clusters + 2) * width <= fat * bps,
+                    "{mib} MiB at {sector}: {clusters} clusters, FAT holds {}",
+                    fat * bps / width
+                );
+            }
+        }
+    }
 }
+
