@@ -118,6 +118,17 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Commit Cargo.lock (2026-09-24, #128) — IN PROGRESS
+
+Goldens are built from a commit with `cargo build --release --locked`, so the
+lockfile is part of the source. Untracked in `.gitignore` until now; the only
+one that existed was hidden state in dev's old `/root/stormblock` checkout.
+
+- [x] `.gitignore`: stop ignoring `Cargo.lock` (fuzz's own stays ignored)
+- [ ] generate it on dev (`cargo generate-lockfile` via sc-build), commit it
+- [ ] verify: `sc-build 'cargo build --release --locked && cargo test --locked'`
+- [ ] `cargo update` from now on is a deliberate commit of its own
+
 ### Node disk layout: data last, and growable (2026-09-23) — DONE (v16.1 pending)
 
 Asked for by the owner: the data half goes at the **end** of the drive so it can

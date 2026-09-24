@@ -1,6 +1,8 @@
 target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed (#128): goldens are built --locked from a commit.
+# The fuzz crate is its own workspace and ships nothing.
+/fuzz/Cargo.lock
 *.swp
 *.swo
 .idea/
