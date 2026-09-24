@@ -933,7 +933,6 @@ impl UblkServer {
 
         // --- Wait for shutdown signal ---
         let _ = shutdown.changed().await;
-        self.running.store(false, Ordering::SeqCst);
 
         // A recoverable device is **let go of**, not stopped.
         //
@@ -965,12 +964,24 @@ impl UblkServer {
             tracing::info!(
                 "ublk: releasing /dev/ublkb{assigned_id} for recovery (not stopping it)"
             );
+            self.running.store(false, Ordering::SeqCst);
         } else {
             tracing::info!("ublk server shutting down");
-            // --- STOP_DEV ---
+            // --- STOP_DEV, with the queues still being served ---
+            //
+            // STOP_DEV tears the disk down, and tearing it down writes back
+            // the device's dirty pages first — through this server. The
+            // workers used to be told to stop *before* this, so those writes
+            // were never answered: STOP_DEV never returned, the device stayed
+            // with writes in flight, and every `sync` on the node hung behind
+            // it (R230, 2026-09-24: `inflight 0 6`, an engine thread in
+            // `submit_bio_wait`). So the workers keep serving until the kernel
+            // has aborted their queues, which is what STOP_DEV returning
+            // means, and are only then told to go.
             let _ = submit_ctrl_cmd(
                 &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0, 0,
             );
+            self.running.store(false, Ordering::SeqCst);
         }
 
         // Wait for all workers to exit

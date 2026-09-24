@@ -7,6 +7,12 @@
   golden built `--locked` from a commit had no lockfile, and the builds that
   worked were using an untracked one on dev. Generated on dev with cargo 1.95.0;
   `cargo update` is now a deliberate commit.
+- **fix(ublk):** stopping a device keeps its queues served until STOP_DEV
+  returns. The workers were told to exit first, so the kernel's writeback of
+  the device during teardown was never answered: STOP_DEV never returned, the
+  device stayed with writes in flight, and every `sync` on the node hung
+  (reproduced on the R230 step by step: `inflight 0 6`, an engine thread in
+  `submit_bio_wait`, after a claim's detach).
 - **fix(volumes):** detaching a ublk device that has a filesystem mounted on it
   is refused (409, naming the mount point). The devices are recoverable, so a
   detach under a mount left the kernel queueing that filesystem's I/O for a
