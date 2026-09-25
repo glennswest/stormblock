@@ -1033,6 +1033,117 @@ async fn claim_over_http_mints_and_the_standby_surface_is_gone() {
     server.abort();
 }
 
+/// A caller that stops waiting does not abandon the format (#141): the
+/// create runs on its own task and finishes — ready, not stuck in
+/// `awaiting_format` — whoever is still listening.
+#[tokio::test]
+async fn a_create_whose_caller_gives_up_still_finishes() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let impatient = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(300))
+        .build()
+        .unwrap();
+    // Big enough that its format takes longer than the caller waits: a
+    // 100 GiB blank is over a second of metadata.
+    let r = impatient
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "pvc-big", "size": "100G" }))
+        .send()
+        .await;
+    if r.is_ok() {
+        eprintln!("the format beat the caller's timeout: this run proves less than it should");
+    }
+
+    let mut state_now = String::new();
+    for _ in 0..600 {
+        if let Some(t) = state.fstemplates.lock().await.find("pvc-big") {
+            state_now = t.state.as_str().to_string();
+            if t.state == stormblock::fs::TemplateState::Ready {
+                assert!(!t.formatting);
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(state_now, "ready", "the format finished without anyone waiting for it");
+    server.abort();
+}
+
+/// A template an engine left mid-format is finished at the next start
+/// (#141) — whatever the partial format wrote is discarded first — while a
+/// template waiting on an external formatter is left alone.
+#[tokio::test]
+async fn a_template_left_mid_format_is_finished_and_an_external_one_is_not() {
+    let dir = TempDir::new().unwrap();
+    let state = parts(&dir).await;
+    let external = |name: &'static str| {
+        let mut spec = TemplateSpec::new(name, 64 * 1024 * 1024);
+        spec.format_in_core = false;
+        spec
+    };
+
+    // Left by an engine that stopped: flagged, with junk where a partial
+    // format had got to.
+    let stopped = template::create(&state.volume_manager, &state.fstemplates, &external("pvc-stopped"))
+        .await
+        .unwrap();
+    {
+        let mut s = state.fstemplates.lock().await;
+        s.get_mut(&stopped.id).unwrap().formatting = true;
+    }
+    let raw = VolumeId(stopped.raw_volume_id.unwrap());
+    let dev = state.volume_manager.lock().await.get_volume(&raw).unwrap();
+    dev.write(0, &vec![0xAB; 1 << 20]).await.unwrap();
+    drop(dev);
+
+    // A store from before the flag: no filesystem, nothing serving it.
+    let legacy = template::create(&state.volume_manager, &state.fstemplates, &external("pvc-legacy"))
+        .await
+        .unwrap();
+
+    // Waiting on an external formatter that has done its job but not sealed:
+    // it carries a filesystem, so it is somebody's, and is left.
+    let formatted = template::create(&state.volume_manager, &state.fstemplates, &external("ext-formatted"))
+        .await
+        .unwrap();
+    let fdev = state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume(&VolumeId(formatted.raw_volume_id.unwrap()))
+        .unwrap();
+    ext4::format(&fdev, &ext4::Ext4Params { assume_blank: true, ..Default::default() }).await.unwrap();
+    drop(fdev);
+
+    // Being formatted over an export right now: served, so left.
+    let exported = template::create(&state.volume_manager, &state.fstemplates, &external("ext-exported"))
+        .await
+        .unwrap();
+    let in_use: std::collections::HashSet<Uuid> = [exported.raw_volume_id.unwrap()].into_iter().collect();
+
+    let done = template::resume_formats(&state.volume_manager, &state.fstemplates, &in_use).await;
+    let mut names: Vec<String> = done.iter().map(|(n, _)| n.clone()).collect();
+    names.sort();
+    assert_eq!(names, vec!["pvc-legacy", "pvc-stopped"]);
+    assert!(done.iter().all(|(_, r)| r.is_ok()), "{done:?}");
+
+    let s = state.fstemplates.lock().await;
+    for (name, want) in [
+        ("pvc-stopped", "ready"),
+        ("pvc-legacy", "ready"),
+        ("ext-formatted", "awaiting_format"),
+        ("ext-exported", "awaiting_format"),
+    ] {
+        assert_eq!(s.find(name).unwrap().state.as_str(), want, "{name}");
+    }
+    let sealed = VolumeId(s.find("pvc-stopped").unwrap().sealed_volume_id.unwrap());
+    drop(s);
+    let dev = state.volume_manager.lock().await.get_volume(&sealed).unwrap();
+    assert!(ext4::check(&dev).await.unwrap().is_clean(), "the partial format's junk did not survive");
+}
+
 /// #76: a template is a volume that has been sealed. The sealed volume shows
 /// as sealed with its filesystem on `GET /api/v1/volumes/{id}`, a clone taken
 /// through any door records its parent and carries its own identity, a

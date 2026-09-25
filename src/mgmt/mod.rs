@@ -456,6 +456,16 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             if !gone.is_empty() {
                 tracing::info!("retired {} standing clone(s) nobody had claimed", gone.len());
             }
+            // And finish the formats a previous run left in the middle (#141).
+            let in_use = api::volumes_in_use(&state).await;
+            for (name, r) in
+                crate::fs::template::resume_formats(&state.volume_manager, &state.fstemplates, &in_use).await
+            {
+                match r {
+                    Ok(()) => tracing::info!("fstemplate {name}: finished the format a previous run left"),
+                    Err(e) => tracing::warn!("fstemplate {name}: format not finished ({e}); rolled back — the next claim mints it afresh"),
+                }
+            }
         });
     }
 

@@ -293,6 +293,16 @@ pub struct FsTemplate {
     /// so [`retire_standing`] can delete it. Never written again.
     #[serde(default, skip_serializing)]
     pub standing: Option<StandingClone>,
+    /// The engine is laying this template's filesystem down itself (#141).
+    ///
+    /// Persisted, because the format outlives nothing it should not: an
+    /// engine that stops mid-format finds this at startup and finishes the
+    /// job ([`resume_formats`]) rather than leaving a template in
+    /// `awaiting_format` that no caller will ever format — which is what a
+    /// 1 TiB class blank did when the claim that minted it gave up waiting.
+    /// Unset for a template waiting on an external formatter.
+    #[serde(default)]
+    pub formatting: bool,
     /// The template this one was built `FROM`, if any.
     ///
     /// Recorded for lineage, not for reads: a snapshot owns a complete extent
@@ -339,6 +349,7 @@ impl FsTemplate {
             "label": self.label,
             "fs_uuid": self.fs_uuid,
             "state": self.state.as_str(),
+            "formatting": self.formatting,
             "raw_volume_id": self.raw_volume_id,
             "sealed_volume_id": self.sealed_volume_id,
             "clones": self.clones,
@@ -705,6 +716,7 @@ pub async fn create(
     // top of an ext4 parent describes a filesystem that does not exist.
     let mut template = FsTemplate {
         standing: None,
+        formatting: spec.format_in_core,
         id: Uuid::new_v4(),
         name: spec.name.clone(),
         fs: parent.as_ref().map(|p| p.fs).unwrap_or(spec.fs),
@@ -774,12 +786,6 @@ pub async fn create(
         return Ok(template);
     }
 
-    let dev = vm
-        .lock()
-        .await
-        .get_volume(&raw)
-        .ok_or_else(|| TemplateError::Internal("new template volume vanished".to_string()))?;
-
     let params = ext4::Ext4Params {
         profile: spec.fs.profile(),
         label: spec.label.clone(),
@@ -793,6 +799,27 @@ pub async fn create(
         assume_blank: true,
         ..Default::default()
     };
+    format_and_seal(vm, store, template.id, raw, params, &spec.seed).await
+}
+
+/// Lay the filesystem down on a template's raw volume, seed it, seal it — the
+/// long part of [`create`], and what [`resume_formats`] runs again for a
+/// template whose engine stopped part-way (#141). Anything that fails rolls
+/// the template back: nothing half-formatted survives as a template.
+async fn format_and_seal(
+    vm: &VmLock,
+    store: &StoreLock,
+    id: Uuid,
+    raw: VolumeId,
+    params: ext4::Ext4Params,
+    seed: &[files::SeedFile],
+) -> Result<FsTemplate> {
+    let name = store.lock().await.get(&id).map(|t| t.name.clone()).unwrap_or_default();
+    let dev = vm
+        .lock()
+        .await
+        .get_volume(&raw)
+        .ok_or_else(|| TemplateError::Internal("template volume vanished".to_string()))?;
 
     // **No lock is held across the format.** The formatter fans out across
     // block groups and thin volumes serialise only where a mapping changes, so
@@ -803,35 +830,30 @@ pub async fn create(
     drop(dev);
 
     if let Err(e) = format {
-        // Nothing half-formatted survives as a template.
-        rollback(vm, store, &template.id).await;
-        return Err(TemplateError::Internal(format!("formatting {}: {e}", spec.name)));
+        rollback(vm, store, &id).await;
+        return Err(TemplateError::Internal(format!("formatting {name}: {e}")));
     }
 
     // Contents go in before the seal, so a clone inherits them without ever
     // writing them again. Also unlocked: this is I/O against one volume.
-    if !spec.seed.is_empty() {
+    if !seed.is_empty() {
         let dev = vm
             .lock()
             .await
             .get_volume(&raw)
             .ok_or_else(|| TemplateError::Internal("template volume vanished".to_string()))?;
-        let seeded = files::write_files(&dev, &spec.seed).await;
+        let seeded = files::write_files(&dev, seed).await;
         drop(dev);
         if let Err(e) = seeded {
-            rollback(vm, store, &template.id).await;
-            return Err(TemplateError::Internal(format!(
-                "seeding {}: {e}",
-                spec.name
-            )));
+            rollback(vm, store, &id).await;
+            return Err(TemplateError::Internal(format!("seeding {name}: {e}")));
         }
     }
 
-    template.fs_uuid = Some(params.uuid);
     {
         let mut s = store.lock().await;
-        if let Some(t) = s.get_mut(&template.id) {
-            t.fs_uuid = template.fs_uuid;
+        if let Some(t) = s.get_mut(&id) {
+            t.fs_uuid = Some(params.uuid);
         }
         s.persist();
     }
@@ -840,13 +862,86 @@ pub async fn create(
     // seeded into it. A template that will not seal is not a template: roll it
     // back rather than leave a formatted volume and a store entry the caller
     // cannot use and will not name again (#47).
-    match seal(vm, store, &template.id, false).await {
+    match seal(vm, store, &id, false).await {
         Ok(t) => Ok(t),
         Err(e) => {
-            rollback(vm, store, &template.id).await;
+            rollback(vm, store, &id).await;
             Err(e)
         }
     }
+}
+
+/// Finish the formats an engine did not (#141).
+///
+/// A template is created in `awaiting_format` and persisted before its
+/// filesystem is laid down, so an engine that stops mid-format — or, before
+/// the create ran on its own task, a caller that gave up waiting — left one
+/// that nothing would ever format. Each such template is formatted now: its
+/// raw volume is discarded back to zeros first, so nothing a partial format
+/// wrote survives, then formatted and sealed; a failure rolls it back, so the
+/// next claim mints it afresh.
+///
+/// Which templates: those marked `formatting`, and — for a store written
+/// before that flag existed — any `awaiting_format` template with no parent
+/// whose raw volume carries no filesystem and is not being served (`in_use`).
+/// A template waiting on an external formatter is served (exported) while it
+/// is formatted, or already carries the filesystem it was given, and is left
+/// alone.
+pub async fn resume_formats(
+    vm: &VmLock,
+    store: &StoreLock,
+    in_use: &std::collections::HashSet<Uuid>,
+) -> Vec<(String, std::result::Result<(), String>)> {
+    let candidates: Vec<FsTemplate> = store
+        .lock()
+        .await
+        .templates
+        .iter()
+        .filter(|t| t.state == TemplateState::AwaitingFormat && t.parent_id.is_none())
+        .cloned()
+        .collect();
+    let mut out = Vec::new();
+    for t in candidates {
+        let Some(raw) = t.raw_volume_id.map(VolumeId) else { continue };
+        let Some(dev) = vm.lock().await.get_volume(&raw) else { continue };
+        let ours = t.formatting
+            || (!in_use.contains(&raw.0) && ext4::read_layout(&dev).await.is_err());
+        if !ours {
+            continue;
+        }
+        tracing::info!(template = %t.name, "finishing a format the engine did not complete (#141)");
+        // Back to zeros, so the format may assume a blank volume again.
+        if let Err(e) = dev.discard(0, dev.capacity_bytes()).await {
+            drop(dev);
+            rollback(vm, store, &t.id).await;
+            out.push((t.name.clone(), Err(format!("discarding the partial format: {e}"))));
+            continue;
+        }
+        drop(dev);
+        {
+            let mut s = store.lock().await;
+            if let Some(m) = s.get_mut(&t.id) {
+                m.formatting = true;
+            }
+            s.persist();
+        }
+        let params = ext4::Ext4Params {
+            profile: t.fs.profile(),
+            label: t.label.clone(),
+            uuid: Uuid::new_v4(),
+            journal: Some(t.journal),
+            features: t.features.clone(),
+            assume_blank: true,
+            ..Default::default()
+        };
+        let r = format_and_seal(vm, store, t.id, raw, params, &[]).await;
+        match &r {
+            Ok(_) => tracing::info!(template = %t.name, "formatted and sealed"),
+            Err(e) => tracing::warn!(template = %t.name, "could not finish its format, rolled back: {e}"),
+        }
+        out.push((t.name.clone(), r.map(|_| ()).map_err(|e| e.to_string())));
+    }
+    out
 }
 
 /// Seal a formatted template: verify the superblock, snapshot it, mark ready.
@@ -934,6 +1029,7 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
     t.sealed_volume_id = Some(raw.0);
     t.raw_volume_id = None;
     t.state = TemplateState::Ready;
+    t.formatting = false;
     if let Some(l) = &layout {
         t.fs_uuid = Some(l.uuid);
         t.journal = l.has_journal;

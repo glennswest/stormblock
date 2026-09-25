@@ -365,7 +365,17 @@ async fn create_template(
         role,
     };
 
-    match template::create(&state.volume_manager, &state.fstemplates, &spec).await {
+    // On a task of its own (#141): a caller that stops waiting — a client
+    // timeout on a 1 TiB class blank — drops this handler, and the format
+    // must not be dropped with it. The task finishes, or rolls back, whether
+    // anyone is still listening.
+    let created = {
+        let state = state.clone();
+        tokio::spawn(async move { template::create(&state.volume_manager, &state.fstemplates, &spec).await })
+            .await
+            .unwrap_or_else(|e| Err(template::TemplateError::Internal(format!("template create task: {e}"))))
+    };
+    match created {
         Ok(t) => {
             let body = if t.state == crate::fs::TemplateState::AwaitingFormat {
                 json!({
