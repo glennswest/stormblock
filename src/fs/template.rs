@@ -714,7 +714,7 @@ pub async fn create(
     // A template built on a parent *is* the parent's filesystem, so its shape
     // is inherited rather than restated: asking for ext2-with-no-journal on
     // top of an ext4 parent describes a filesystem that does not exist.
-    let mut template = FsTemplate {
+    let template = FsTemplate {
         standing: None,
         formatting: spec.format_in_core,
         id: Uuid::new_v4(),

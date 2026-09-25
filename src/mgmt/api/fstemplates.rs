@@ -283,6 +283,7 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
             clones: 0,
             seeded: Vec::new(),
             standing: None,
+            formatting: false,
         });
         adopted += 1;
     }
