@@ -389,6 +389,16 @@ impl VolumeManager {
     }
 
     pub async fn set_fs_info(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
+        self.set_fs_info_deferred(id, fs)?;
+        self.persist().await;
+        Ok(())
+    }
+
+    /// [`set_fs_info`](Self::set_fs_info) without the persist, for a caller
+    /// that persists once at the end of a larger step — a mint is a snapshot
+    /// and a record, and two metadata writes where one would do is most of
+    /// what it cost (#137).
+    pub fn set_fs_info_deferred(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
         if !self.volumes.contains_key(&id) {
             return Err(VolumeError::VolumeNotFound(id));
         }
@@ -400,7 +410,6 @@ impl VolumeManager {
                 self.fs_info.remove(&id);
             }
         }
-        self.persist().await;
         Ok(())
     }
 
@@ -1258,6 +1267,18 @@ impl VolumeManager {
         source_id: VolumeId,
         name: &str,
     ) -> Result<VolumeId, VolumeError> {
+        let id = self.create_snapshot_deferred(source_id, name).await?;
+        self.persist().await;
+        Ok(id)
+    }
+
+    /// [`create_snapshot`](Self::create_snapshot) without the persist — the
+    /// caller persists once it has finished with the new volume (#137).
+    pub async fn create_snapshot_deferred(
+        &mut self,
+        source_id: VolumeId,
+        name: &str,
+    ) -> Result<VolumeId, VolumeError> {
         let source_handle = self.volumes.get(&source_id)
             .ok_or(VolumeError::VolumeNotFound(source_id))?
             .clone();
@@ -1278,7 +1299,6 @@ impl VolumeManager {
         let snap_handle = Arc::new(self.inherit_handle(snap, &source_id));
         self.volumes.insert(snap_id, snap_handle);
         self.record_lineage(snap_id, source_id);
-        self.persist().await;
         Ok(snap_id)
     }
 

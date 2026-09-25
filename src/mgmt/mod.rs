@@ -189,8 +189,7 @@ impl Drop for VolumeSubsystem {
 pub struct AppState {
     pub drives: tokio::sync::RwLock<Vec<DriveInfo>>,
     pub arrays: tokio::sync::RwLock<HashMap<RaidArrayId, ArrayInfo>>,
-    /// Behind an `Arc` so work that outlives a request — replenishing a
-    /// template's standing clone after a claim — can hold it (#55).
+    /// Behind an `Arc` so work that outlives a request can hold it.
     pub volume_manager: Arc<tokio::sync::Mutex<VolumeManager>>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
     pub slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
@@ -447,21 +446,15 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConf
 
 /// Start the management REST API server.
 pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()> {
-    // Give every sealed template a clone standing by (#55). Spawned: a node
-    // that is starting should serve requests now and be fast shortly, not the
-    // other way round. Templates restored from disk arrive with their
-    // `standing` field, so this only mints what is actually missing — a claim
-    // that raced ahead of it, or a template sealed by an older build.
+    // Delete the clones #55 kept standing by (#137). A claim mints inline
+    // now, and a volume nobody asked for is a volume nobody can account for.
     {
         let state = state.clone();
         tokio::spawn(async move {
-            let n = crate::fs::template::ensure_standing_all(
-                &state.volume_manager,
-                &state.fstemplates,
-            )
-            .await;
-            if n > 0 {
-                tracing::info!("{n} template(s) now have a clone standing by");
+            let gone =
+                crate::fs::template::retire_standing(&state.volume_manager, &state.fstemplates).await;
+            if !gone.is_empty() {
+                tracing::info!("retired {} standing clone(s) nobody had claimed", gone.len());
             }
         });
     }

@@ -32,7 +32,6 @@ pub mod template;
 pub use ext4::{Ext4Layout, Ext4Params, Ext4Report, FsProfile, SealBlocker};
 pub use files::SeedFile;
 pub use template::{
-    claim, clone_template, ensure_standing, ensure_standing_all, ClaimSpec, CloneResult, CloneSpec,
-    standing_needed, standing_report, FsKind, FsTemplate, StandingClone, StandingStatus,
-    TemplateError, TemplateSpec, TemplateState, TemplateStore,
+    claim, clone_template, retire_standing, ClaimSpec, CloneResult, CloneSpec, FsKind, FsTemplate,
+    StandingClone, TemplateError, TemplateSpec, TemplateState, TemplateStore,
 };

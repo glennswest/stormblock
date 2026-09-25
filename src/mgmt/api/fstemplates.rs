@@ -40,13 +40,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/orphans", get(list_orphans).delete(reclaim_orphans))
         // Check, and enforce. Separate verbs on purpose: asking whether the
         // invariant holds must not be what makes it hold (#55).
-        .route("/standby", get(standby_report).post(standby_enforce))
         .route("/{id}", get(get_template).delete(delete_template))
         .route("/{id}/seal", post(seal_template))
         .route("/{id}/clone", post(clone_template))
-        // The fast path: take the clone that is already standing by (#55).
+        // A clone minted now, named for the caller (#137).
         .route("/{id}/claim", post(claim_clone))
-        .route("/{id}/standby", post(ensure_standby))
         .with_state(state)
 }
 
@@ -421,20 +419,6 @@ async fn seal_template(
     }
 
     let sealed = template::seal(&state.volume_manager, &state.fstemplates, &template_id, force).await;
-    if sealed.is_ok() {
-        // A sealed template is one clones can be taken from, so this is the
-        // moment its standing clone starts existing (#55). Spawned: sealing
-        // should not wait for it.
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                template::ensure_standing(&state.volume_manager, &state.fstemplates, &template_id.to_string())
-                    .await
-            {
-                tracing::warn!("fstemplate {template_id}: no standing clone after seal: {e}");
-            }
-        });
-    }
     match sealed {
         Ok(t) => Json(t.json()).into_response(),
         Err(e) => err(e),
@@ -460,8 +444,6 @@ async fn clone_template(
         stamp_backups: req.stamp_backups,
         label: req.label,
         verify: req.verify,
-        // Handed to whoever asked, so it counts against the template.
-        standby: false,
         // A template's clones stay in the template's half of the node's
         // storage. Crossing is `POST /api/v1/volumes/{id}/clone` with a
         // `role`, where the copy it costs is the caller's decision (#88).
@@ -534,41 +516,7 @@ async fn reclaim_orphans(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
-/// Which templates would make a start wait.
-///
-/// The check a supervisor runs — at its own startup, or on a timer — without
-/// causing work by asking. `POST` on the same path is the fix.
-async fn standby_report(State(state): State<Arc<AppState>>) -> Response {
-    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "standby_report")
-        .increment(1);
-    let all = template::standing_report(&*state.fstemplates.lock().await);
-    let needed: Vec<_> = all.iter().filter(|s| s.needs_clone).collect();
-    let ready = all.iter().filter(|s| s.standing.is_some()).count();
-    Json(json!({
-        "templates": all,
-        "ready": ready,
-        "needs_clone": needed.len(),
-        "healthy": needed.is_empty(),
-    }))
-    .into_response()
-}
 
-/// Mint whatever is missing. Idempotent, and safe to call on every supervisor
-/// start: a template that already has a clone waiting is left alone.
-async fn standby_enforce(State(state): State<Arc<AppState>>) -> Response {
-    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "standby_enforce")
-        .increment(1);
-    let before = template::standing_needed(&state.fstemplates).await;
-    let minted = template::ensure_standing_all(&state.volume_manager, &state.fstemplates).await;
-    let after = template::standing_needed(&state.fstemplates).await;
-    Json(json!({
-        "minted": minted,
-        "wanted": before.len(),
-        "still_needed": after.len(),
-        "templates": after,
-    }))
-    .into_response()
-}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ClaimRequest {
@@ -581,13 +529,8 @@ pub struct ClaimRequest {
     pub label: Option<String>,
 }
 
-/// Take the standing clone, and mint its replacement behind the caller.
-///
-/// This is what a consumer on a start path calls instead of `clone`: the
-/// expensive part — snapshot, fresh filesystem identity, check — was done when
-/// the previous claim replenished, so what is left here is a lookup. When
-/// nothing is standing, it mints inline rather than refusing, and says so in
-/// `from_standby`.
+/// `POST /api/v1/fstemplates/{id}/claim` — a fresh clone of the template,
+/// minted now (#137). What `clone` is, with a name chosen for the caller.
 async fn claim_clone(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -599,18 +542,13 @@ async fn claim_clone(
     let spec = template::ClaimSpec { size_bytes: req.size_bytes, label: req.label };
     match template::claim(&state.volume_manager, &state.fstemplates, &id, &spec).await {
         Ok(c) => {
-            metrics::counter!(
-                "stormblock_fstemplate_claims_total",
-                "source" => if c.from_standby { "standby" } else { "inline" }
-            )
-            .increment(1);
+            metrics::counter!("stormblock_fstemplate_claims_total").increment(1);
             Json(json!({
                 "volume_id": c.volume_id.0,
                 "template_id": c.template_id,
                 "fs_uuid": c.fs_uuid,
                 "size_bytes": c.size_bytes,
                 "verified": c.verified,
-                "from_standby": c.from_standby,
             }))
             .into_response()
         }
@@ -618,21 +556,6 @@ async fn claim_clone(
     }
 }
 
-/// Make sure a template has a clone standing by, and say which one it is.
-/// Idempotent — this is the call a consumer makes to pre-warm.
-async fn ensure_standby(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "standby")
-        .increment(1);
-    match template::ensure_standing(&state.volume_manager, &state.fstemplates, &id).await {
-        Ok(Some(c)) => Json(json!({
-            "standing": { "volume_id": c.volume_id, "fs_uuid": c.fs_uuid, "size_bytes": c.size_bytes, "verified": c.verified }
-        }))
-        .into_response(),
-        // Not sealed yet, or a mint is already in flight for it.
-        Ok(None) => Json(json!({ "standing": null })).into_response(),
-        Err(e) => err(e),
-    }
-}
 
 /// Clone a template on behalf of `POST /api/v1/volumes {from_template}`.
 ///
