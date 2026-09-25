@@ -184,8 +184,7 @@ pub async fn of_volume(state: &Arc<AppState>, vm: &VolumeManager, id: VolumeId) 
     let mut draining: HashMap<SlabId, DrainProgress> = HashMap::new();
     {
         let drains = state.drains.read().await;
-        for d in drains.all() {
-            let st = d.status.read().await;
+        for st in drains.all().await {
             if st.state != crate::drain::DrainState::Running {
                 continue;
             }

@@ -74,11 +74,6 @@ pub struct Drains {
 }
 
 impl Drains {
-    /// Every drain this node has run or is running.
-    pub fn all(&self) -> impl Iterator<Item = &Drain> {
-        self.by_drive.values()
-    }
-
     pub fn get(&self, drive: &str) -> Option<&Drain> {
         self.by_drive.get(drive)
     }
