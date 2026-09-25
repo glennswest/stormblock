@@ -285,7 +285,8 @@ async fn patch_volume(
             None => return status_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec.retention: {ret:?}")),
         }
     }
-    if spec.resync == Some(true) {
+    // A volume the rebuild queue holds is resynced by it.
+    if spec.resync == Some(true) && !state.rebuilds.holds(&id) {
         if let Err(e) = vm.resync_volume(id, false).await {
             return status_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", e.to_string());
         }

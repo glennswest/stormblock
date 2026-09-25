@@ -274,6 +274,8 @@ pub struct AppState {
     pub pallet_mirrors: tokio::sync::RwLock<HashMap<String, u8>>,
     /// Drives being emptied so they can be pulled (#70 item 3).
     pub drains: tokio::sync::RwLock<crate::drain::Drains>,
+    /// Per-volume rebuilds after a drive fails (#146).
+    pub rebuilds: Arc<crate::rebuild::Rebuilds>,
     /// Disk images being imported into goldens.
     pub imports: tokio::sync::RwLock<crate::image::import::Imports>,
     /// Latest pool-pressure sample, kept current by the watcher (#18).
@@ -348,10 +350,12 @@ impl AppState {
                 Err(_) => tracing::warn!("slab registry busy at startup; node topology labels not applied"),
             }
         }
+        let volume_manager = Arc::new(tokio::sync::Mutex::new(volume_manager));
+        let rebuilds = crate::rebuild::Rebuilds::new(volume_manager.clone(), &config.rebuild);
         AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),
             arrays: tokio::sync::RwLock::new(HashMap::new()),
-            volume_manager: Arc::new(tokio::sync::Mutex::new(volume_manager)),
+            volume_manager,
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,
             gem,
@@ -399,6 +403,7 @@ impl AppState {
                 None => HashMap::new(),
             }),
             drains: tokio::sync::RwLock::new(crate::drain::Drains::default()),
+            rebuilds,
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             serve: std::sync::OnceLock::new(),
             pool_pressure: None,

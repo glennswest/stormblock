@@ -480,6 +480,11 @@ async fn start_drain(State(state): State<Arc<AppState>>, Path(id): Path<String>)
     if state.drains.read().await.is_running(&path).await {
         return ApiError::conflict(format!("{path} is already being drained"));
     }
+    if let Some(job) = state.rebuilds.active_for_drive(&path) {
+        return ApiError::conflict(format!(
+            "{path}'s volumes are being rebuilt (rebuild {job}); the drain starts when that finishes"
+        ));
+    }
     let slabs = slabs_on_device(&state, &dev, &path).await;
     if slabs.is_empty() {
         return Json(serde_json::json!({
@@ -538,6 +543,21 @@ async fn cancel_drain(State(state): State<Arc<AppState>>, Path(id): Path<String>
     }
 }
 
+/// Start a drain unless one is already running. Returns whether it started.
+async fn start_drain_now(state: &Arc<AppState>, path: String, slabs: Vec<crate::drive::slab::SlabId>) -> bool {
+    if state.drains.read().await.is_running(&path).await {
+        return false;
+    }
+    state.drains.write().await.start(
+        path,
+        slabs,
+        state.gem.clone(),
+        state.slab_registry.clone(),
+        state.volume_manager.clone(),
+    );
+    true
+}
+
 /// What a drive watcher (stormdrive) tells us about a drive (#70 item 4).
 #[derive(Debug, Deserialize)]
 pub struct DriveHealthReport {
@@ -590,26 +610,46 @@ async fn drive_health(
             volumes_touched.extend(vm.distrust_slab(*s).await);
         }
     }
+    volumes_touched.sort_by_key(|v| v.0);
+    volumes_touched.dedup();
+    // Rebuild every redundant volume with a member here, most endangered
+    // first, onto drives of its own choosing (#146).
+    let rebuild_job = if distrust && state.rebuilds.automatic() && !volumes_touched.is_empty() {
+        Some(
+            state
+                .rebuilds
+                .start(format!("drive {path} {state_lc}"), Some(path.clone()), volumes_touched.clone())
+                .await,
+        )
+    } else {
+        None
+    };
     let mut drain_started = false;
+    let mut drain_after_rebuild = false;
     if distrust && (report.drain || matches!(state_lc.as_str(), "failed" | "missing")) && !slabs.is_empty() {
-        let running = state.drains.read().await.is_running(&path).await;
         let holds_meta = {
             let vm = state.volume_manager.lock().await;
             slabs.iter().any(|s| vm.is_metadata_slab(s))
         };
-        if !running && !holds_meta {
-            state.drains.write().await.start(
-                path.clone(),
-                slabs.clone(),
-                state.gem.clone(),
-                state.slab_registry.clone(),
-                state.volume_manager.clone(),
-            );
-            drain_started = true;
+        if !holds_meta {
+            match rebuild_job {
+                // The rebuild moves the redundant volumes off, from their
+                // surviving members; the drain then takes what has no
+                // redundancy, from the drive itself, if it still answers.
+                // Run together they would both move the same legs.
+                Some(job) => {
+                    let st = state.clone();
+                    let (p, sl) = (path.clone(), slabs.clone());
+                    tokio::spawn(async move {
+                        st.rebuilds.wait(job).await;
+                        start_drain_now(&st, p, sl).await;
+                    });
+                    drain_after_rebuild = true;
+                }
+                None => drain_started = start_drain_now(&state, path.clone(), slabs.clone()).await,
+            }
         }
     }
-    volumes_touched.sort_by_key(|v| v.0);
-    volumes_touched.dedup();
     Json(serde_json::json!({
         "drive": path,
         "state": state_lc,
@@ -617,6 +657,8 @@ async fn drive_health(
         "quarantined": distrust,
         "volumes_distrusting": volumes_touched.iter().map(|v| v.0.to_string()).collect::<Vec<_>>(),
         "drain_started": drain_started,
+        "drain_after_rebuild": drain_after_rebuild,
+        "rebuild": rebuild_job,
     }))
     .into_response()
 }

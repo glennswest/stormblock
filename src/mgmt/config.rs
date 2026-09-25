@@ -37,6 +37,9 @@ pub struct StormBlockConfig {
     /// Grow the pool when it comes under physical pressure (#18).
     #[serde(default)]
     pub pressure: crate::volume::pressure::PressureConfig,
+    /// Rebuilding volumes after a drive fails (#146).
+    #[serde(default)]
+    pub rebuild: crate::rebuild::RebuildConfig,
     /// The serving surface — `/serve/v1` (#60).
     #[serde(default)]
     pub serve: ServeSection,
@@ -261,6 +264,7 @@ impl Default for StormBlockConfig {
             stormfs: crate::stormfs::StormFsConfig::default(),
             gc: GcConfig::default(),
             pressure: crate::volume::pressure::PressureConfig::default(),
+            rebuild: crate::rebuild::RebuildConfig::default(),
             serve: ServeSection::default(),
         }
     }

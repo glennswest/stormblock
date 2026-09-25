@@ -1426,6 +1426,12 @@ async fn resync_volume(
         Ok(u) => u,
         Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
     };
+    // Two resyncs of one volume would each rebuild the same legs.
+    if state.rebuilds.holds(&VolumeId(uuid)) {
+        return ApiError::conflict(format!(
+            "volume {uuid} is being rebuilt (see /api/v1/rebuilds); it is resynced when that finishes"
+        ));
+    }
     let mut vm = state.volume_manager.lock().await;
     match vm.resync_volume(VolumeId(uuid), q.verify).await {
         Ok(report) => {
