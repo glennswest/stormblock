@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### CSI VolumeSnapshot = a golden (2026-09-25, #111) — DONE (v17.1.0)
+### CSI VolumeSnapshot = a golden (2026-09-25, #111) — DONE (v17.0.1)
 
 rustkube asked whether `CreateSnapshot` maps onto goldens and CoW clones or
 stays separate. **It maps, and already did:** stormblock-csi implements

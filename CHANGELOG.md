@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v17.0.1] — 2026-09-25
+
 ### 2026-09-25 (snapshots)
 - **fix(v1):** a `/v1` snapshot, which is what a Kubernetes `VolumeSnapshot`
   becomes through stormblock-csi, is **sealed** at creation, and so is every
