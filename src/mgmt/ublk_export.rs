@@ -136,6 +136,11 @@ pub fn mounted_at(device_path: &str) -> Option<String> {
 
 pub struct UblkExportManager {
     exports: HashMap<String, Export>,
+    /// Devices this engine serves but did not create here: the boot devices
+    /// an adopting engine took over from the initramfs, by volume id →
+    /// device path. Counted as in use, never stopped by a detach — their
+    /// lifetime is the handover's (#138).
+    adopted: HashMap<String, String>,
     /// Next /dev/ublkbN id to hand out (Linux only consumes this).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     next_id: u32,
@@ -150,7 +155,7 @@ impl Default for UblkExportManager {
 
 impl UblkExportManager {
     pub fn new() -> Self {
-        UblkExportManager { exports: HashMap::new(), next_id: 0, available: ublk_available() }
+        UblkExportManager { exports: HashMap::new(), adopted: HashMap::new(), next_id: 0, available: ublk_available() }
     }
 
     /// Whether ublk exports can actually be created on this host.
@@ -175,9 +180,25 @@ impl UblkExportManager {
         self.start(volume_id, device)
     }
 
-    /// Whether this node currently exports `volume_id` as a ublk device.
+    /// Record a boot device an adopting engine is serving (#138).
+    pub fn record_adopted(&mut self, volume_id: &str, device_path: String) {
+        self.adopted.insert(volume_id.to_string(), device_path);
+    }
+
+    /// Every ublk device this engine serves, created here or adopted: volume
+    /// id → device path.
+    pub fn devices(&self) -> Vec<(String, String)> {
+        self.exports
+            .iter()
+            .map(|(v, e)| (v.clone(), e.device_path.clone()))
+            .chain(self.adopted.iter().map(|(v, d)| (v.clone(), d.clone())))
+            .collect()
+    }
+
+    /// Whether this node currently exports `volume_id` as a ublk device —
+    /// including a boot device it adopted, which is as much in use.
     pub fn is_exported(&self, volume_id: &str) -> bool {
-        self.exports.contains_key(volume_id)
+        self.adopted.contains_key(volume_id) || self.exports.contains_key(volume_id)
     }
 
     /// Push a new size down to the kernel device backing `volume_id`.
@@ -548,7 +569,7 @@ mod tests {
 
     #[test]
     fn unavailable_host_declines_so_caller_uses_nvme_tcp() {
-        let mut mgr = UblkExportManager { exports: HashMap::new(), next_id: 0, available: false };
+        let mut mgr = UblkExportManager { exports: HashMap::new(), adopted: HashMap::new(), next_id: 0, available: false };
         // No panic, just None — nvme-tcp fallback. (device is never touched.)
         assert!(mgr.device_path("vol-x").is_none());
     }

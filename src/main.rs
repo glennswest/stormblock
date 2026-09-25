@@ -4458,8 +4458,11 @@ async fn handle_adopt_ublk(
     // node with some queues served and some not, which is worse than not
     // starting.
     let mut serving: Vec<(u32, String, Arc<dyn BlockDevice>)> = Vec::new();
+    // Which volume each adopted device is, for the API's "in use" (#138).
+    let mut adopted_ids: Vec<(u32, uuid::Uuid)> = Vec::new();
     for (i, selector) in volumes.iter().enumerate() {
         let id = resolve_boot_volume(&mgr, selector).await?;
+        adopted_ids.push((i as u32, id.0));
         let name = mgr
             .get_volume_handle(&id)
             .expect("resolved volume exists")
@@ -4687,6 +4690,14 @@ async fn handle_adopt_ublk(
         let slab_registry = mgr.registry().clone();
         let gem = mgr.gem().clone();
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
+        // The boot devices this process now serves are in use, and a volume
+        // listing must say so — they were recorded nowhere (#138).
+        {
+            let mut ublk = state.ublk_exports.lock().await;
+            for (dev_id, id) in &adopted_ids {
+                ublk.record_adopted(&id.to_string(), format!("/dev/ublkb{dev_id}"));
+            }
+        }
         // The serving surface too. An engine that took the devices over from
         // the initramfs *is* this node's engine, and layer 2 belongs to the
         // engine rather than to one of the two ways of becoming it.

@@ -89,6 +89,12 @@ pub struct VolumeResponse {
     /// `?placement=true`, since it walks the volume's extent map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<super::placement::Placement>,
+    /// `kind`, `in_use`, `attachments` and `consumer` (#138): what the
+    /// console's Volumes view needs to show only what running containers and
+    /// VMs use, and its Images view to show the rest. On the listing and the
+    /// single GET.
+    #[serde(flatten)]
+    pub usage: super::usage::Usage,
 }
 
 /// Everything about a volume the response carries beyond name and size.
@@ -230,6 +236,18 @@ pub struct ListVolumesQuery {
     /// The generation the caller last saw: 304 when nothing has changed.
     #[serde(default)]
     pub since: Option<u64>,
+    /// Only volumes of this kind (#138, #126): `volume`, `golden`, `blank`,
+    /// `media`, `snapshot`, `template` (comma-separated for several),
+    /// `image` for every kind that is not `volume`, `all` for everything.
+    /// Absent: everything, as before.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Only volumes something is (or is not) using right now.
+    #[serde(default)]
+    pub in_use: Option<bool>,
+    /// Only volumes nothing has claimed as its owner (#115).
+    #[serde(default)]
+    pub unowned: bool,
 }
 
 /// The listing, with the node's volume `generation` beside it (#136).
@@ -251,6 +269,8 @@ async fn list_volumes(
     headers: axum::http::HeaderMap,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "list").increment(1);
+    // What is served, gathered before the volume manager is held (#138).
+    let ctx = super::usage::Context::gather(&state).await;
     let vm = state.volume_manager.lock().await;
     let generation = vm.generation();
     let etag = format!("\"{generation}\"");
@@ -264,9 +284,14 @@ async fn list_volumes(
     let vols = vm.list_volumes().await;
     let mut items: Vec<VolumeResponse> = Vec::with_capacity(vols.len());
     for (id, name, vsize, allocated) in &vols {
+        let usage = ctx.usage(&vm, id);
+        if !super::usage::matches(&usage, vm.owner(id).is_some(), q.kind.as_deref(), q.in_use, q.unowned) {
+            continue;
+        }
         let d = describe(&vm, id).await;
         items.push(VolumeResponse {
             placement: None,
+            usage,
             id: id.0,
             name: name.clone(),
             virtual_size_bytes: *vsize,
@@ -322,6 +347,8 @@ async fn get_volume(
     };
 
     let vol_id = VolumeId(uuid);
+    // Gathered before the volume manager is held (#138).
+    let ctx = super::usage::Context::gather(&state).await;
     let vm = state.volume_manager.lock().await;
     match vm.get_volume_handle(&vol_id) {
         Some(handle) => {
@@ -330,9 +357,11 @@ async fn get_volume(
             let vsize = handle.capacity_bytes();
             let d = describe(&vm, &vol_id).await;
             let placement = super::placement::of_volume(&state, &vm, vol_id).await;
+            let usage = ctx.usage(&vm, &vol_id);
             let resp = VolumeResponse {
                 array_id: placement.as_ref().and_then(one_array),
                 placement,
+                usage,
                 id: uuid,
                 name,
                 virtual_size_bytes: vsize,
@@ -509,6 +538,7 @@ async fn compose_volume(
 
     let resp = VolumeResponse {
         placement: None,
+        usage: Default::default(),
         id: id.0,
         name: req.name,
         virtual_size_bytes: virtual_size,
@@ -589,6 +619,7 @@ async fn create_volume(
         let d = describe(&vm, &vol_id).await;
         let resp = VolumeResponse {
             placement: None,
+            usage: Default::default(),
             id: vol_id.0,
             name: req.name,
             virtual_size_bytes: size_bytes,
@@ -674,6 +705,7 @@ async fn create_volume(
             }
             let resp = VolumeResponse {
                 placement: None,
+                usage: Default::default(),
                 id: vol_id.0,
                 name: req.name,
                 virtual_size_bytes: size,
@@ -1009,6 +1041,7 @@ async fn clone_volume(
             };
             let resp = VolumeResponse {
                 placement: None,
+                usage: Default::default(),
                 id: c.volume_id.0,
                 name: req.name,
                 virtual_size_bytes: c.size_bytes,
@@ -1510,6 +1543,7 @@ async fn create_snapshot(
             let d = describe(&vm, &snap_id).await;
             let resp = VolumeResponse {
                 placement: None,
+                usage: Default::default(),
                 id: snap_id.0,
                 name: req.name,
                 virtual_size_bytes: vsize,
@@ -1587,6 +1621,7 @@ async fn resize_volume(
             let d = describe(&vm, &vol_id).await;
             let resp = VolumeResponse {
                 placement: None,
+                usage: Default::default(),
                 id: uuid,
                 name,
                 virtual_size_bytes: vsize,
@@ -2001,6 +2036,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
     let d = describe(vm, &id).await;
     Some(VolumeResponse {
         placement: None,
+        usage: Default::default(),
         id: id.0,
         name,
         virtual_size_bytes: vsize,
