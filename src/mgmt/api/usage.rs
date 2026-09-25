@@ -173,8 +173,38 @@ impl Context {
         {
             let v1 = state.v1.lock().await;
             ctx.snapshots.extend(v1.snapshots.values().filter_map(|s| s.local_id));
+            // Namespaces on the shared NVMe subsystem: what an attach through
+            // `/api/v1/volumes/{id}/attach` or `/v1` hot-adds. Keyed by the
+            // engine id for the first, by the `/v1` id for the second.
+            let nqn = state.config.nvmeof.as_ref().map(|n| n.nqn.clone());
+            let found: Vec<(Uuid, u32)> = v1
+                .nvme_nsids
+                .iter()
+                .filter_map(|(key, nsid)| {
+                    let engine = Uuid::parse_str(key)
+                        .ok()
+                        .or_else(|| v1.volumes.get(key).and_then(|r| r.local_id))?;
+                    Some((engine, *nsid))
+                })
+                .collect();
+            drop(v1);
+            for (engine, nsid) in found {
+                let mut a = Attachment::new("nvme-tcp");
+                a.target = nqn.clone();
+                a.nsid = Some(nsid);
+                let list = ctx.attachments.entry(engine).or_default();
+                if !list.contains(&a) {
+                    list.push(a);
+                }
+            }
         }
         ctx
+    }
+
+    /// Every volume something is attached to — the one answer the listing
+    /// and the delete guards share.
+    pub fn attached(&self) -> impl Iterator<Item = Uuid> + '_ {
+        self.attachments.keys().copied()
     }
 
     /// What a volume is. The rule, in one place:

@@ -235,6 +235,12 @@ pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<Str
     if state.ublk_exports.lock().await.is_exported(&volume_id.to_string()) {
         busy.push("a ublk device".to_string());
     }
+    // A namespace on the shared NVMe subsystem — what the volume attach hot-
+    // adds — was not checked here, so a volume attached that way could be
+    // deleted from under its host (#138).
+    if let Some(nsid) = state.v1.lock().await.nvme_nsids.get(&volume_id.to_string()) {
+        busy.push(format!("NVMe namespace {nsid}"));
+    }
     // A published release is a reference too, and the only one that survives
     // this process. Nothing was checking it, so eight releases ended up naming
     // volumes that had been reclaimed — manifests promising a download that
@@ -284,6 +290,10 @@ pub async fn volumes_in_use(state: &AppState) -> std::collections::HashSet<uuid:
         }
     }
     drop(ublk);
+    // And everything the Volumes view calls attached — shared-subsystem
+    // namespaces, per-volume subsystems, the serve wiring, adopted boot
+    // devices — so the listing and the guards cannot disagree (#138).
+    in_use.extend(usage::Context::gather(state).await.attached());
     // Anything a published release names, for the same reason (#106).
     in_use.extend(releases::published_volumes(state).await);
     in_use
