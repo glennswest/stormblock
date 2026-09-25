@@ -481,12 +481,31 @@ mod tests {
         assert!(r.auth.admin_token.is_none());
     }
 
+    /// An admin token with no ordinary one no longer leaves the node open:
+    /// the default mints the ordinary token beside it, and the admin token
+    /// then guards the destructive verbs as it would anywhere (#107).
     #[test]
-    fn an_admin_token_alone_guards_nothing_and_is_dropped() {
+    fn an_admin_token_alone_sits_beside_a_minted_one() {
         let mut m = cfg();
+        m.data_dir = None;
+        m.token_file = Some("/proc/stormblock/api_token".into());
         m.admin_token = Some("root".into());
         let r = resolve(&m).unwrap();
-        assert_eq!(r.source, Source::None);
+        assert_eq!(r.source, Source::Ephemeral);
+        assert!(r.auth.api_token.is_some());
+        assert_eq!(r.auth.admin_token.as_deref(), Some("root"));
+        assert!(r.admin);
+    }
+
+    /// Only an explicit `require_auth = false` drops an admin token, because
+    /// only then is nothing enforced for it to sit beside.
+    #[test]
+    fn an_admin_token_on_an_open_node_guards_nothing_and_is_dropped() {
+        let mut m = cfg();
+        m.require_auth = Some(false);
+        m.admin_token = Some("root".into());
+        let r = resolve(&m).unwrap();
+        assert_eq!(r.source, Source::Disabled);
         assert!(r.auth.admin_token.is_none());
         assert!(!r.admin);
     }
