@@ -133,11 +133,25 @@ impl FileDevice {
             metadata.len()
         };
 
-        let id = DeviceId {
-            uuid: Uuid::new_v4(),
-            serial: "file".to_string(),
-            model: "FileDevice".to_string(),
-            path: path.to_string(),
+        // A block device says who it is — serial, model, WWN — so a slab on
+        // it can be joined to the drive stormdrive reports (#136). A file is
+        // just a file.
+        let known = if is_block_device { super::identity::of(path) } else { None };
+        let id = match known {
+            Some(i) => DeviceId {
+                wwn: i.wwn,
+                uuid: Uuid::new_v4(),
+                serial: if i.serial.is_empty() { "file".to_string() } else { i.serial },
+                model: if i.model.is_empty() { "FileDevice".to_string() } else { i.model },
+                path: path.to_string(),
+            },
+            None => DeviceId {
+                wwn: String::new(),
+                uuid: Uuid::new_v4(),
+                serial: "file".to_string(),
+                model: "FileDevice".to_string(),
+                path: path.to_string(),
+            },
         };
 
         Ok(FileDevice {

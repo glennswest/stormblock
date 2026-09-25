@@ -66,8 +66,9 @@ impl SasDevice {
         .await
         .map_err(|e| DriveError::Other(e.into()))??;
 
-        // Read serial/model from sysfs if possible.
+        // Read serial/model/WWN from sysfs if possible.
         let (serial, model) = read_device_identity(&path);
+        let wwn = super::identity::of(&path).map(|i| i.wwn).unwrap_or_default();
 
         // Detect SSD vs HDD via rotational flag.
         let device_type = detect_drive_type(&path);
@@ -78,6 +79,7 @@ impl SasDevice {
             .map_err(DriveError::Io)?;
 
         let id = DeviceId {
+            wwn,
             uuid: Uuid::new_v4(),
             serial,
             model,

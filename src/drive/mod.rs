@@ -6,6 +6,7 @@ pub mod nvme;
 pub mod sas;
 pub mod dma;
 pub mod filedev;
+pub mod identity;
 pub mod handover;
 pub mod partition;
 pub mod discover;
@@ -39,6 +40,11 @@ pub struct DeviceId {
     pub serial: String,
     pub model: String,
     pub path: String,
+    /// World-wide name (SCSI NAA / NVMe EUI-64/NGUID) when the drive has
+    /// one — with `serial`, the identity stormdrive knows a drive by, and
+    /// the one that survives the drive moving to another bay or host (#136).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wwn: String,
 }
 
 impl fmt::Display for DeviceId {
@@ -192,6 +198,13 @@ pub struct IoCompletion {
 pub trait BlockDevice: Send + Sync {
     /// Device identity.
     fn id(&self) -> &DeviceId;
+
+    /// The identity of the **drive** this device is on — for a partition,
+    /// its disk's (#136). What a failure domain and a drive label key on:
+    /// two slabs on one spindle fail together whatever their offsets.
+    fn drive_id(&self) -> DeviceId {
+        self.id().clone()
+    }
 
     /// Total capacity in bytes.
     fn capacity_bytes(&self) -> u64;

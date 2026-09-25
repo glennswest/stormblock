@@ -182,6 +182,7 @@ impl NvmeDevice {
         Self::wait_csts_rdy(regs, true)?;
 
         let id = DeviceId {
+            wwn: String::new(),
             uuid: Uuid::new_v4(),
             serial: "vfio".to_string(),
             model: "NVMe-VFIO".to_string(),

@@ -162,6 +162,7 @@ pub async fn compose_volume(
         slot_size,
         purpose: VolumePurpose::Partition,
         device_id: DeviceId {
+            wwn: String::new(),
             uuid: dest_id.0,
             serial: format!("comp-{}", &dest_id.0.simple().to_string()[..8]),
             model: "ThinVolume".to_string(),

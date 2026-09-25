@@ -736,6 +736,7 @@ mod tests {
         fn id(&self) -> &crate::drive::DeviceId {
             static ID: std::sync::OnceLock<crate::drive::DeviceId> = std::sync::OnceLock::new();
             ID.get_or_init(|| crate::drive::DeviceId {
+                wwn: String::new(),
                 uuid: uuid::Uuid::nil(),
                 serial: "dummy".into(),
                 model: "dummy".into(),

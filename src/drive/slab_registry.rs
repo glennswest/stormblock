@@ -59,8 +59,15 @@ impl SlabRegistry {
     /// The chain a slab sits in: its device's identity, under the device's
     /// labels, under the node's.
     fn derive_domain(&self, slab: &Slab) -> FailureDomain {
-        let own = FailureDomain::from_device(slab.device().id());
-        let own = match self.device_labels.get(&slab.device().id().path) {
+        // The drive's identity, not the slab's device's: a slab in a
+        // partition is on the drive the partition is on (#136).
+        let drive = slab.device().drive_id();
+        let own = FailureDomain::from_device(&drive);
+        let own = match self
+            .device_labels
+            .get(&drive.path)
+            .or_else(|| self.device_labels.get(&slab.device().id().path))
+        {
             Some(outer) => own.merged_under(outer),
             None => own,
         };

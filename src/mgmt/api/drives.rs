@@ -39,6 +39,9 @@ pub struct DriveResponse {
     pub path: String,
     pub model: String,
     pub serial: String,
+    /// World-wide name, when the drive has one (#136).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub wwn: String,
     pub device_type: String,
     pub capacity_bytes: u64,
     pub capacity_human: String,
@@ -61,6 +64,7 @@ async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 path: d.path.clone(),
                 model: id.model.clone(),
                 serial: id.serial.clone(),
+                wwn: id.wwn.clone(),
                 device_type: d.device.device_type().to_string(),
                 capacity_bytes: d.device.capacity_bytes(),
                 capacity_human: human_size(d.device.capacity_bytes()),
@@ -90,6 +94,7 @@ async fn get_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
                 path: d.path.clone(),
                 model: id.model.clone(),
                 serial: id.serial.clone(),
+                wwn: id.wwn.clone(),
                 device_type: d.device.device_type().to_string(),
                 capacity_bytes: d.device.capacity_bytes(),
                 capacity_human: human_size(d.device.capacity_bytes()),
@@ -226,6 +231,7 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
             path: req.path,
             model: id.model.clone(),
             serial: id.serial.clone(),
+            wwn: id.wwn.clone(),
             device_type: dev.device_type().to_string(),
             capacity_bytes: dev.capacity_bytes(),
             capacity_human: human_size(dev.capacity_bytes()),

@@ -53,6 +53,7 @@ pub async fn create_snapshot(
         slot_size,
         purpose: crate::volume::thin::VolumePurpose::Partition,
         device_id: crate::drive::DeviceId {
+            wwn: String::new(),
             uuid: snap_id.0,
             serial: format!("snap-{}", &snap_id.0.simple().to_string()[..8]),
             model: "ThinVolume".to_string(),

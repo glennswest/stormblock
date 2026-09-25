@@ -76,6 +76,7 @@ impl PartitionDevice {
     fn new_unchecked(inner: Arc<dyn BlockDevice>, start: u64, len: u64) -> Self {
         let parent = inner.id().clone();
         let id = DeviceId {
+            wwn: String::new(),
             uuid: uuid::Uuid::new_v4(),
             serial: format!("{}+{}", parent.serial, start),
             model: parent.model.clone(),
@@ -100,6 +101,10 @@ impl PartitionDevice {
 impl BlockDevice for PartitionDevice {
     fn id(&self) -> &DeviceId {
         &self.id
+    }
+
+    fn drive_id(&self) -> DeviceId {
+        self.inner.drive_id()
     }
 
     fn capacity_bytes(&self) -> u64 {

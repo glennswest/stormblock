@@ -515,6 +515,7 @@ impl NvmeofDevice {
 
         let uri = spec.uri();
         let id = DeviceId {
+            wwn: String::new(),
             // Stable across reopens: derived from the attach URI, never
             // minted fresh (#65 is about exactly this mistake).
             uuid: Uuid::new_v5(&Uuid::NAMESPACE_URL, uri.as_bytes()),

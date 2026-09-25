@@ -646,6 +646,7 @@ impl IscsiDevice {
         };
 
         let id = DeviceId {
+            wwn: String::new(),
             uuid: Uuid::new_v4(),
             serial: format!("iscsi-{}", &Uuid::new_v4().simple().to_string()[..8]),
             model: format!("{} {}", vendor, product),

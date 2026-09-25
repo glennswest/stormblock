@@ -518,6 +518,7 @@ impl RaidArray {
         let journal = WriteIntentJournal::in_memory(stripe_count);
 
         let device_id = DeviceId {
+            wwn: String::new(),
             uuid: array_uuid,
             serial: format!("{level}"),
             model: "RaidArray".to_string(),

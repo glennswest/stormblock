@@ -34,6 +34,28 @@ pub struct SlabResponse {
     pub total_bytes_human: String,
     pub free_bytes: u64,
     pub free_bytes_human: String,
+    /// The drive the slab is on, by the identity stormdrive uses — serial,
+    /// WWN, model — so a slab can be joined to a drive and a drive's free
+    /// space read off its slabs (#136). For a slab in a partition, the disk.
+    pub drive: DriveRef,
+}
+
+/// A drive, named the way stormdrive names it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DriveRef {
+    pub serial: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub wwn: String,
+    pub model: String,
+    pub path: String,
+}
+
+impl DriveRef {
+    /// The drive under a device — a partition's disk, not the partition.
+    pub fn of(dev: &std::sync::Arc<dyn crate::drive::BlockDevice>) -> Self {
+        let id = dev.drive_id();
+        DriveRef { serial: id.serial, wwn: id.wwn, model: id.model, path: id.path }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +135,7 @@ async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 tier: format!("{}", slab.tier()),
                 role: slab.role().to_string(),
                 domain: reg.domain_of(id).to_string(),
+                drive: DriveRef::of(slab.device()),
                 slot_size,
                 total_slots: total,
                 free_slots: free,
@@ -151,6 +174,7 @@ async fn get_slab(
                 tier: format!("{}", slab.tier()),
                 role: slab.role().to_string(),
                 domain: reg.domain_of(&slab_id).to_string(),
+                drive: DriveRef::of(slab.device()),
                 slot_size,
                 total_slots: total,
                 free_slots: free,
@@ -254,8 +278,12 @@ async fn format_slab(
                     Some(d) => reg.add_in_domain(slab, d),
                     None => reg.add(slab),
                 }
-                reg.domain_of(&slab_id).to_string()
+                (
+                    reg.domain_of(&slab_id).to_string(),
+                    reg.get(&slab_id).map(|s| DriveRef::of(s.device())),
+                )
             };
+            let (slab_domain, drive) = slab_domain;
             if carries_metadata {
                 let mut vm = state.volume_manager.lock().await;
                 let mut slabs = vm.metadata_slabs().to_vec();
@@ -269,6 +297,12 @@ async fn format_slab(
                 tier: format!("{}", tier),
                 role: role.to_string(),
                 domain: slab_domain,
+                drive: drive.unwrap_or(DriveRef {
+                    serial: String::new(),
+                    wwn: String::new(),
+                    model: String::new(),
+                    path: String::new(),
+                }),
                 slot_size,
                 total_slots: total,
                 free_slots: free,

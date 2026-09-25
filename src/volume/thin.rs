@@ -184,6 +184,7 @@ impl ThinVolume {
     ) -> Self {
         let id = VolumeId::new();
         let device_id = DeviceId {
+            wwn: String::new(),
             uuid: id.0,
             serial: format!("vol-{}", &id.0.simple().to_string()[..8]),
             model: "ThinVolume".to_string(),
@@ -208,6 +209,7 @@ impl ThinVolume {
         slot_size: u64,
     ) -> Self {
         let device_id = DeviceId {
+            wwn: String::new(),
             uuid: id.0,
             serial: format!("vol-{}", &id.0.simple().to_string()[..8]),
             model: "ThinVolume".to_string(),

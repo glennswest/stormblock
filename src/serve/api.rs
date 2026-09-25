@@ -1126,6 +1126,7 @@ mod tests {
         fn new(capacity: u64) -> Arc<Self> {
             Arc::new(Recorder {
                 id: crate::drive::DeviceId {
+                    wwn: String::new(),
                     uuid: Uuid::new_v4(),
                     serial: "rec".into(),
                     model: "Recorder".into(),

@@ -54,12 +54,20 @@ impl FailureDomain {
     /// or its path when there is no serial worth the name (a file device says
     /// `file`; the path is what tells two of them apart, and it is stable
     /// across a restart where the uuid is not — #65).
+    ///
+    /// Given the **drive's** identity (`BlockDevice::drive_id`), the value is
+    /// its serial — what stormdrive calls the drive — else its WWN, else its
+    /// path. Never an offset: two slabs on one drive fail together (#136).
     pub fn from_device(id: &DeviceId) -> Self {
         let generic = id.serial.is_empty() || id.serial == "unknown" || id.serial == "file";
-        let value = if generic {
-            if id.path.is_empty() { id.uuid.to_string() } else { id.path.clone() }
-        } else {
+        let value = if !generic {
             id.serial.clone()
+        } else if !id.wwn.is_empty() {
+            id.wwn.clone()
+        } else if id.path.is_empty() {
+            id.uuid.to_string()
+        } else {
+            id.path.clone()
         };
         FailureDomain { chain: vec![Label { rung: "drive".into(), value }] }
     }
@@ -166,6 +174,7 @@ mod tests {
 
     fn dev(serial: &str) -> DeviceId {
         DeviceId {
+            wwn: String::new(),
             uuid: Uuid::new_v4(),
             serial: serial.into(),
             model: "m".into(),
