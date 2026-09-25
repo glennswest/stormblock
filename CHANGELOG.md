@@ -3,8 +3,10 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.2.0] — 2026-09-25
+
 ### 2026-09-25 (block devices)
-- **BREAKING (drive):** no file I/O for real storage (#140). The installed
+- **change(drive):** no file I/O for real storage (#140). The installed
   disk's slabs, the flow-over disk, local boot, the `slab`/`image lay-node`/
   `local-boot` CLIs, the slabs API, `image build` onto a device and its image
   sources all open a block device through `drive::open_path`: `O_DIRECT`, as the
