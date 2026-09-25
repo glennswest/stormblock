@@ -279,6 +279,12 @@ pub struct VolumeHealth {
     pub unreadable: usize,
     /// Slabs this volume has stopped trusting.
     pub failed_slabs: Vec<SlabId>,
+    /// How many more member losses the least protected extent (or stripe)
+    /// can take before data is lost: `copies - 1` (or the parity count) when
+    /// healthy, 0 when one more loss would make something unreadable. What a
+    /// rebuild queue orders by (#146). 0 as well for an unreplicated volume.
+    #[serde(default)]
+    pub margin: usize,
 }
 
 /// What a `resync` did.
@@ -297,6 +303,72 @@ pub struct ResyncReport {
     /// Slabs no longer in the failed set.
     pub slabs_cleared: Vec<SlabId>,
     pub errors: Vec<String>,
+    /// Extents (mirror) or stripes (parity) that needed looking at.
+    #[serde(default)]
+    pub units_considered: usize,
+    /// Bytes written to rebuilt legs.
+    #[serde(default)]
+    pub bytes_copied: u64,
+    /// Slots the rebuilt legs replaced, not yet freed: the map that stopped
+    /// naming them has to be durable first. [`ThinVolumeHandle::resync`]
+    /// frees them itself; [`ThinVolumeHandle::resync_with`] leaves them here.
+    #[serde(skip)]
+    pub owed: Vec<Leg>,
+}
+
+/// A checkpoint during a long resync: handed the slots rebuilt legs have
+/// replaced so far, it makes the map durable and then frees them.
+pub type ResyncCheckpoint =
+    Arc<dyn Fn(Vec<Leg>) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>;
+
+/// How a resync runs (#146).
+#[derive(Clone)]
+pub struct ResyncOptions {
+    /// Also recompute and rewrite every stripe's parity.
+    pub verify: bool,
+    /// Extents (or stripes) of this volume rebuilt at once.
+    pub in_flight: usize,
+    /// Byte budget shared with every other rebuild on the node.
+    pub throttle: Option<Arc<super::throttle::Throttle>>,
+    /// Set to stop between extents; what was rebuilt stays rebuilt.
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub checkpoint: Option<ResyncCheckpoint>,
+    /// Owed slots that trigger a checkpoint.
+    pub checkpoint_every: usize,
+}
+
+impl Default for ResyncOptions {
+    fn default() -> Self {
+        ResyncOptions { verify: false, in_flight: 1, throttle: None, cancel: None, checkpoint: None, checkpoint_every: 4096 }
+    }
+}
+
+/// A rebuilt leg of a shared extent (or parity group), written and waiting
+/// to be published in one sweep of every map that names the old slot.
+#[derive(Debug, Clone, Copy)]
+struct Deferred {
+    /// What to redo if it stopped being shared: the extent, or the stripe.
+    unit: u64,
+    /// The extent, or the stripe for a parity leg.
+    vext: u64,
+    parity: bool,
+    /// The leg replaced; `None` for a copy added beside `beside`.
+    old: Option<Leg>,
+    beside: Leg,
+    new: Leg,
+}
+
+/// What one extent or stripe of a resync did.
+#[derive(Debug, Default)]
+struct UnitOutcome {
+    rebuilt: usize,
+    added: usize,
+    verified: usize,
+    unrecoverable: usize,
+    bytes: u64,
+    errors: Vec<String>,
+    owed: Vec<Leg>,
+    deferred: Vec<Deferred>,
 }
 
 /// Number of lock shards for extents/stripes of one volume.
@@ -1672,11 +1744,13 @@ impl ThinVolumeHandle {
             legs_missing: 0,
             unreadable: 0,
             failed_slabs: self.failed_slabs(),
+            margin: 0,
         };
         let Some(map) = gem.get_volume_map(&self.id) else { return h };
         h.extents = map.extents.len();
         match policy.scheme {
             Redundancy::Parity { data, parity } => {
+                let mut margin = parity as usize;
                 let mut stripes: HashMap<u64, usize> = HashMap::new();
                 for (vext, loc) in &map.extents {
                     h.legs_expected += 1;
@@ -1693,6 +1767,7 @@ impl ThinVolumeHandle {
                     if missing_data > parity as usize - missing_parity {
                         h.unreadable += 1;
                     }
+                    margin = margin.min((parity as usize).saturating_sub(missing_parity + missing_data));
                 }
                 // Stripes with missing data and no group at all.
                 for (stripe, missing_data) in &stripes {
@@ -1700,17 +1775,25 @@ impl ThinVolumeHandle {
                         h.unreadable += 1;
                     }
                 }
+                // A stripe with no group has no parity to lose.
+                if map.extents.keys().any(|v| !map.parity.contains_key(&(v / data as u64))) {
+                    margin = 0;
+                }
+                h.margin = margin;
             }
             _ => {
                 let copies = policy.scheme.copies();
+                let mut margin = copies.saturating_sub(1);
                 for loc in map.extents.values() {
                     h.legs_expected += copies;
                     let ok = loc.legs().filter(|l| present(l)).count();
+                    margin = margin.min(ok.saturating_sub(1));
                     if ok == 0 {
                         h.unreadable += 1;
                     }
                     h.legs_missing += copies.saturating_sub(ok);
                 }
+                h.margin = margin;
             }
         }
         h.state = if h.unreadable > 0 {
@@ -1727,14 +1810,49 @@ impl ThinVolumeHandle {
     /// domain, bring the leg count to what the policy asks, and clear the
     /// failed set of slabs nothing references any more. `verify` also
     /// recomputes and rewrites every stripe's parity.
+    ///
+    /// The slots rebuilt legs replace are freed at the end: callers that
+    /// persist the map in between use [`Self::resync_with`] and free them
+    /// after the map is durable.
     pub async fn resync(&self, verify: bool) -> ResyncReport {
+        let mut report = self.resync_with(&ResyncOptions { verify, ..Default::default() }).await;
+        let owed = std::mem::take(&mut report.owed);
+        self.release_slots(&owed).await;
+        report
+    }
+
+    /// Free slots this volume no longer names — the owed half of a resync,
+    /// once the map that stopped naming them is durable.
+    pub async fn release_slots(&self, legs: &[Leg]) {
+        if legs.is_empty() {
+            return;
+        }
+        let mut reg = self.registry.write().await;
+        for l in legs {
+            if let Some(s) = reg.get_mut(&l.slab_id) {
+                let _ = s.free(l.slot_idx).await;
+            }
+        }
+    }
+
+    /// [`Self::resync`] with the knobs a background rebuild needs (#146):
+    /// several extents at once, a throttle shared with other rebuilds, a
+    /// cancel flag, and a checkpoint that is handed the replaced slots as
+    /// they pile up. What is left owed at the end is in `report.owed`.
+    ///
+    /// Every rebuilt leg of an extent nobody else shares is published under
+    /// that extent's lock, so a write can never land between the copy and
+    /// the publish and leave the new leg stale. A shared extent is never
+    /// written in place, so its legs are published together at the end, in
+    /// one sweep of every map that names them.
+    pub async fn resync_with(&self, opts: &ResyncOptions) -> ResyncReport {
         let policy = self.redundancy();
         let mut report = ResyncReport::default();
         match policy.scheme {
             Redundancy::Parity { data, parity } => {
-                self.resync_parity(&policy, data as usize, parity, verify, &mut report).await
+                self.resync_parity(&policy, data as usize, parity, opts, &mut report).await
             }
-            _ => self.resync_mirror(&policy, &mut report).await,
+            _ => self.resync_mirror(&policy, opts, &mut report).await,
         }
 
         // A failed slab that no longer carries anything of ours is forgiven.
@@ -1753,186 +1871,378 @@ impl ThinVolumeHandle {
         report
     }
 
-    async fn resync_mirror(&self, policy: &RedundancyPolicy, report: &mut ResyncReport) {
+    fn cancelled(opts: &ResyncOptions) -> bool {
+        opts.cancel.as_ref().map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+    }
+
+    /// Fold one unit's outcome into the report, handing owed slots to the
+    /// checkpoint once enough have piled up.
+    async fn absorb(&self, report: &mut ResyncReport, deferred: &mut Vec<Deferred>, out: UnitOutcome, opts: &ResyncOptions) {
+        report.legs_rebuilt += out.rebuilt;
+        report.legs_added += out.added;
+        report.parity_verified += out.verified;
+        report.unrecoverable += out.unrecoverable;
+        report.bytes_copied += out.bytes;
+        if report.errors.len() < 64 {
+            report.errors.extend(out.errors);
+        }
+        report.owed.extend(out.owed);
+        deferred.extend(out.deferred);
+        if let Some(cp) = &opts.checkpoint {
+            if report.owed.len() >= opts.checkpoint_every.max(1) {
+                cp(std::mem::take(&mut report.owed)).await;
+            }
+        }
+    }
+
+    /// Slabs attached right now, read once rather than per extent.
+    async fn attached_slabs(&self) -> HashSet<SlabId> {
+        self.registry.read().await.iter().map(|(id, _)| *id).collect()
+    }
+
+    async fn resync_mirror(&self, policy: &RedundancyPolicy, opts: &ResyncOptions, report: &mut ResyncReport) {
+        use futures_util::stream::StreamExt;
         let copies = policy.scheme.copies();
-        let extents: Vec<(u64, ExtentLocation)> = {
+        // Only the extents that need something: a leg off a trusted slab, or
+        // a leg count the policy disagrees with. Each is re-read under its
+        // lock, so an extent that changes after this pass is judged fresh.
+        let attached = self.attached_slabs().await;
+        let todo: Vec<u64> = {
             let gem = self.gem.read().await;
             gem.volume_extents(&self.id)
-                .map(|it| it.map(|(v, l)| (*v, l.clone())).collect())
+                .map(|it| {
+                    it.filter(|(_, l)| {
+                        l.leg_count() != copies
+                            || l.legs().any(|leg| !attached.contains(&leg.slab_id) || self.is_failed(leg.slab_id))
+                    })
+                    .map(|(v, _)| *v)
+                    .collect()
+                })
                 .unwrap_or_default()
         };
-        let mut moves: HashMap<Leg, Leg> = HashMap::new();
-        let mut adds: Vec<(Leg, Leg, u32)> = Vec::new();
+        report.units_considered += todo.len();
+        let mut deferred: Vec<Deferred> = Vec::new();
         let mut drops: Vec<Leg> = Vec::new();
-
-        for (vext, _) in extents {
-            let _e = self.shard(vext).lock().await;
-            // Re-read under the lock: a write may have moved it.
-            let Some(loc) = ({ let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() }) else { continue };
-            let (healthy, missing): (Vec<Leg>, Vec<Leg>) = {
-                let reg = self.registry.read().await;
-                loc.legs().partition(|l| reg.get(&l.slab_id).is_some() && !self.is_failed(l.slab_id))
-            };
-            if healthy.is_empty() {
-                report.unrecoverable += 1;
-                report.errors.push(format!("extent {vext}: no readable leg"));
-                continue;
-            }
-            let want_new = copies.saturating_sub(healthy.len());
-            if want_new == 0 {
-                // Surplus legs beyond the policy — drop from the tail.
-                let mut extra: Vec<Leg> = missing.clone();
-                let mut hs = healthy.clone();
-                while hs.len() > copies {
-                    extra.push(hs.pop().unwrap());
-                }
-                drops.extend(extra);
-                continue;
-            }
-            let mut data = vec![0u8; self.slot_size as usize];
-            let mut got = false;
-            for leg in &healthy {
-                if self.read_leg(*leg, 0, &mut data).await.is_ok() {
-                    got = true;
-                    break;
-                }
-            }
-            if !got {
-                report.unrecoverable += 1;
-                report.errors.push(format!("extent {vext}: every leg failed to read"));
-                continue;
-            }
-            let mut taken: Vec<FailureDomain> = {
-                let reg = self.registry.read().await;
-                let mut t = self.failed_domains(&reg);
-                t.extend(healthy.iter().map(|l| reg.domain_of(&l.slab_id)));
-                t
-            };
-            let mut old_iter = missing.into_iter();
-            for _ in 0..want_new {
-                let new = {
-                    let mut reg = self.registry.write().await;
-                    match self.allocate_apart(&mut reg, vext, &taken, &policy.spread, loc.generation).await {
-                        Ok(l) => {
-                            taken.push(reg.domain_of(&l.slab_id));
-                            l
-                        }
-                        Err(e) => {
-                            report.errors.push(format!("extent {vext}: {e}"));
-                            break;
-                        }
-                    }
-                };
-                if let Err(e) = self.write_leg(new, 0, &data).await {
-                    self.give_back(&[new]).await;
-                    report.errors.push(format!("extent {vext}: rebuilt leg failed to write: {e}"));
-                    self.mark_failed(new.slab_id, &e);
-                    continue;
-                }
-                // Carry the share count so the slot table agrees with the map.
-                if loc.ref_count > 1 {
-                    let mut reg = self.registry.write().await;
-                    if let Some(s) = reg.get_mut(&new.slab_id) {
-                        for _ in 1..loc.ref_count {
-                            let _ = s.inc_ref(new.slot_idx).await;
-                        }
-                    }
-                }
-                match old_iter.next() {
-                    Some(old) => {
-                        moves.insert(old, new);
-                        report.legs_rebuilt += 1;
-                    }
-                    None => {
-                        adds.push((healthy[0], new, loc.ref_count));
-                        report.legs_added += 1;
-                    }
-                }
-            }
-            // Extras still missing but not replaced (allocation failed) stay
-            // listed; the volume remains degraded and says so.
-        }
-
-        // Publish: one sweep for moves, then adds and drops.
         {
-            let mut gem = self.gem.write().await;
-            gem.rewrite_legs(&moves);
-            for (beside, new, _) in &adds {
-                gem.add_leg_beside(*beside, *new);
+            let mut outs = futures_util::stream::iter(todo)
+                .map(|vext| self.mirror_extent(vext, copies, policy, opts))
+                .buffer_unordered(opts.in_flight.max(1));
+            while let Some((out, d)) = outs.next().await {
+                drops.extend(d);
+                self.absorb(report, &mut deferred, out, opts).await;
             }
+        }
+
+        // Shared extents: one sweep over every map, then anything that
+        // stopped being shared meanwhile is done again, under its lock.
+        let redo = self.publish_deferred(deferred, report).await;
+        for vext in redo {
+            let (out, d) = self.mirror_extent(vext, copies, policy, opts).await;
+            drops.extend(d);
+            let mut none = Vec::new();
+            self.absorb(report, &mut none, out, opts).await;
+            // Shared again already — leave it for the next resync.
+            for d in none {
+                self.give_back(&[d.new]).await;
+            }
+        }
+
+        if !drops.is_empty() {
+            {
+                let mut gem = self.gem.write().await;
+                for leg in &drops {
+                    gem.drop_leg_everywhere(*leg);
+                }
+            }
+            let mut reg = self.registry.write().await;
             for leg in &drops {
-                gem.drop_leg_everywhere(*leg);
-            }
-        }
-        let mut reg = self.registry.write().await;
-        for (old, new) in &moves {
-            reg.commit(new.slab_id, new.slot_idx);
-            if let Some(s) = reg.get_mut(&old.slab_id) {
-                let _ = s.free(old.slot_idx).await;
-            }
-        }
-        for (_, new, _) in &adds {
-            reg.commit(new.slab_id, new.slot_idx);
-        }
-        for leg in &drops {
-            if let Some(s) = reg.get_mut(&leg.slab_id) {
-                if s.free(leg.slot_idx).await.is_ok() {
-                    report.legs_dropped += 1;
+                if let Some(s) = reg.get_mut(&leg.slab_id) {
+                    if s.free(leg.slot_idx).await.is_ok() {
+                        report.legs_dropped += 1;
+                    }
                 }
             }
         }
     }
 
-    async fn resync_parity(&self, policy: &RedundancyPolicy, width: usize, parity: u8, verify: bool, report: &mut ResyncReport) {
+    /// One extent of a mirrored (or unreplicated) volume, under its lock.
+    /// Returns what it did and any surplus legs to drop.
+    async fn mirror_extent(&self, vext: u64, copies: usize, policy: &RedundancyPolicy, opts: &ResyncOptions) -> (UnitOutcome, Vec<Leg>) {
+        let mut out = UnitOutcome::default();
+        if Self::cancelled(opts) {
+            return (out, Vec::new());
+        }
+        let _e = self.shard(vext).lock().await;
+        let Some(loc) = ({ let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() }) else {
+            return (out, Vec::new());
+        };
+        let (healthy, missing): (Vec<Leg>, Vec<Leg>) = {
+            let reg = self.registry.read().await;
+            loc.legs().partition(|l| reg.get(&l.slab_id).is_some() && !self.is_failed(l.slab_id))
+        };
+        if healthy.is_empty() {
+            out.unrecoverable += 1;
+            out.errors.push(format!("extent {vext}: no readable leg"));
+            return (out, Vec::new());
+        }
+        let want_new = copies.saturating_sub(healthy.len());
+        if want_new == 0 {
+            // Surplus legs beyond the policy — drop from the tail.
+            let mut extra: Vec<Leg> = missing.clone();
+            let mut hs = healthy.clone();
+            while hs.len() > copies {
+                extra.push(hs.pop().unwrap());
+            }
+            return (out, extra);
+        }
+        if let Some(t) = &opts.throttle {
+            t.take(self.slot_size).await;
+        }
+        let mut data = vec![0u8; self.slot_size as usize];
+        let mut got = false;
+        for leg in &healthy {
+            if self.read_leg(*leg, 0, &mut data).await.is_ok() {
+                got = true;
+                break;
+            }
+        }
+        if !got {
+            out.unrecoverable += 1;
+            out.errors.push(format!("extent {vext}: every leg failed to read"));
+            return (out, Vec::new());
+        }
+        let mut taken: Vec<FailureDomain> = {
+            let reg = self.registry.read().await;
+            let mut t = self.failed_domains(&reg);
+            t.extend(healthy.iter().map(|l| reg.domain_of(&l.slab_id)));
+            t
+        };
+        let exclusive = loc.ref_count <= 1;
+        let mut old_iter = missing.into_iter();
+        for _ in 0..want_new {
+            let new = {
+                let mut reg = self.registry.write().await;
+                match self.allocate_apart(&mut reg, vext, &taken, &policy.spread, loc.generation).await {
+                    Ok(l) => {
+                        taken.push(reg.domain_of(&l.slab_id));
+                        l
+                    }
+                    Err(e) => {
+                        out.errors.push(format!("extent {vext}: {e}"));
+                        break;
+                    }
+                }
+            };
+            if let Err(e) = self.write_leg(new, 0, &data).await {
+                self.give_back(&[new]).await;
+                out.errors.push(format!("extent {vext}: rebuilt leg failed to write: {e}"));
+                self.mark_failed(new.slab_id, &e);
+                continue;
+            }
+            out.bytes += self.slot_size;
+            // Carry the share count so the slot table agrees with the map.
+            if loc.ref_count > 1 {
+                let mut reg = self.registry.write().await;
+                if let Some(s) = reg.get_mut(&new.slab_id) {
+                    for _ in 1..loc.ref_count {
+                        let _ = s.inc_ref(new.slot_idx).await;
+                    }
+                }
+            }
+            let old = old_iter.next();
+            if !exclusive {
+                out.deferred.push(Deferred { unit: vext, vext, parity: false, old, beside: healthy[0], new });
+                continue;
+            }
+            // Ours alone: publish now, while the lock keeps writes out.
+            let published = {
+                let mut gem = self.gem.write().await;
+                match old {
+                    Some(o) => gem.replace_leg(self.id, vext, o, new),
+                    None => gem.add_leg(self.id, vext, new),
+                }
+            };
+            if !published {
+                self.give_back(&[new]).await;
+                continue;
+            }
+            self.commit_legs(&[new]).await;
+            match old {
+                Some(o) => {
+                    out.owed.push(o);
+                    out.rebuilt += 1;
+                }
+                None => out.added += 1,
+            }
+        }
+        // Extras still missing but not replaced (allocation failed) stay
+        // listed; the volume remains degraded and says so.
+        (out, Vec::new())
+    }
+
+    /// Publish rebuilt legs of shared extents in one sweep of every map.
+    /// Checked under the map lock: a location that is still shared cannot
+    /// have been written in place, so the copy is current. One that became
+    /// ours alone meanwhile may have been, so its new leg is given back and
+    /// its extent (or stripe) is returned to be done again.
+    async fn publish_deferred(&self, deferred: Vec<Deferred>, report: &mut ResyncReport) -> Vec<u64> {
+        if deferred.is_empty() {
+            return Vec::new();
+        }
+        let mut moves: HashMap<Leg, Leg> = HashMap::new();
+        let mut adds: Vec<(Leg, Leg)> = Vec::new();
+        let mut back: Vec<Leg> = Vec::new();
+        let mut redo: Vec<u64> = Vec::new();
+        {
+            let mut gem = self.gem.write().await;
+            for d in deferred {
+                let still_shared = if d.parity {
+                    gem.lookup_parity(self.id, d.vext)
+                        .map(|g| g.ref_count > 1 && d.old.map(|o| g.legs.contains(&o)).unwrap_or(false))
+                } else {
+                    gem.lookup(self.id, d.vext).map(|l| {
+                        l.ref_count > 1
+                            && match d.old {
+                                Some(o) => l.legs().any(|x| x == o),
+                                None => l.legs().any(|x| x == d.beside) && !l.legs().any(|x| x == d.new),
+                            }
+                    })
+                };
+                match still_shared {
+                    Some(true) => match d.old {
+                        Some(o) => {
+                            moves.insert(o, d.new);
+                        }
+                        None => adds.push((d.beside, d.new)),
+                    },
+                    Some(false) => {
+                        back.push(d.new);
+                        redo.push(d.unit);
+                    }
+                    // Gone (discarded, or moved by a write's copy-on-write):
+                    // whoever still names the old slot rebuilds it itself.
+                    None => back.push(d.new),
+                }
+            }
+            gem.rewrite_legs(&moves);
+            for (beside, new) in &adds {
+                gem.add_leg_beside(*beside, *new);
+            }
+        }
+        let published: Vec<Leg> = moves.values().copied().chain(adds.iter().map(|(_, n)| *n)).collect();
+        self.commit_legs(&published).await;
+        self.give_back(&back).await;
+        report.legs_rebuilt += moves.len();
+        report.legs_added += adds.len();
+        report.owed.extend(moves.keys().copied());
+        redo.sort_unstable();
+        redo.dedup();
+        redo
+    }
+
+    async fn resync_parity(&self, policy: &RedundancyPolicy, width: usize, parity: u8, opts: &ResyncOptions, report: &mut ResyncReport) {
+        use futures_util::stream::StreamExt;
+        let attached = self.attached_slabs().await;
         let stripes: Vec<u64> = {
             let gem = self.gem.read().await;
             let Some(map) = gem.get_volume_map(&self.id) else { return };
-            let mut s: HashSet<u64> = map.extents.keys().map(|v| v / width as u64).collect();
-            s.extend(map.parity.keys().copied());
+            let bad = |l: &Leg| !attached.contains(&l.slab_id) || self.is_failed(l.slab_id);
+            let mut s: HashSet<u64> = HashSet::new();
+            let mut all: HashSet<u64> = HashSet::new();
+            for (v, loc) in &map.extents {
+                all.insert(v / width as u64);
+                if loc.legs().any(|l| bad(&l)) {
+                    s.insert(v / width as u64);
+                }
+            }
+            for (st, g) in &map.parity {
+                if g.legs.iter().any(bad) || g.legs.len() < parity as usize || g.data_width == 0 || opts.verify {
+                    s.insert(*st);
+                }
+            }
+            // Members with no group at all.
+            for st in &all {
+                if !map.parity.contains_key(st) {
+                    s.insert(*st);
+                }
+            }
+            if opts.verify {
+                s.extend(all);
+            }
             let mut v: Vec<u64> = s.into_iter().collect();
             v.sort_unstable();
             v
         };
-        for stripe in stripes {
-            let _s = self.shard(stripe).lock().await;
-            let members = match self.assemble_stripe(stripe, width).await {
-                Ok(m) => m,
-                Err(e) => {
-                    report.unrecoverable += 1;
-                    report.errors.push(format!("stripe {stripe}: {e}"));
-                    continue;
+        report.units_considered += stripes.len();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        {
+            let mut outs = futures_util::stream::iter(stripes)
+                .map(|stripe| self.parity_stripe(stripe, width, parity, policy, opts))
+                .buffer_unordered(opts.in_flight.max(1));
+            while let Some(out) = outs.next().await {
+                self.absorb(report, &mut deferred, out, opts).await;
+            }
+        }
+        let redo = self.publish_deferred(deferred, report).await;
+        for stripe in redo {
+            let out = self.parity_stripe(stripe, width, parity, policy, opts).await;
+            let mut none = Vec::new();
+            self.absorb(report, &mut none, out, opts).await;
+            for d in none {
+                self.give_back(&[d.new]).await;
+            }
+        }
+    }
+
+    /// One stripe of a parity volume, under its lock.
+    async fn parity_stripe(&self, stripe: u64, width: usize, parity: u8, policy: &RedundancyPolicy, opts: &ResyncOptions) -> UnitOutcome {
+        let mut out = UnitOutcome::default();
+        if Self::cancelled(opts) {
+            return out;
+        }
+        let _s = self.shard(stripe).lock().await;
+        if let Some(t) = &opts.throttle {
+            t.take(self.slot_size * width as u64).await;
+        }
+        let members = match self.assemble_stripe(stripe, width).await {
+            Ok(m) => m,
+            Err(e) => {
+                out.unrecoverable += 1;
+                out.errors.push(format!("stripe {stripe}: {e}"));
+                return out;
+            }
+        };
+        // Data legs on missing/failed slabs: rewrite onto fresh ones.
+        for (i, member) in members.iter().enumerate() {
+            let vext = stripe * width as u64 + i as u64;
+            let loc = { let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() };
+            let Some(loc) = loc else { continue };
+            let usable = {
+                let reg = self.registry.read().await;
+                loc.legs().any(|l| reg.get(&l.slab_id).is_some() && !self.is_failed(l.slab_id))
+            };
+            if usable {
+                continue;
+            }
+            let taken = self.stripe_domains(stripe, width, Some(vext)).await;
+            let new = {
+                let mut reg = self.registry.write().await;
+                match self.allocate_apart(&mut reg, vext, &taken, &policy.spread, loc.generation).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        out.errors.push(format!("stripe {stripe} member {i}: {e}"));
+                        continue;
+                    }
                 }
             };
-            // Data legs on missing/failed slabs: rewrite onto fresh ones.
-            let mut moves: HashMap<Leg, Leg> = HashMap::new();
-            for (i, member) in members.iter().enumerate() {
-                let vext = stripe * width as u64 + i as u64;
-                let loc = { let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() };
-                let Some(loc) = loc else { continue };
-                let usable = {
-                    let reg = self.registry.read().await;
-                    loc.legs().any(|l| reg.get(&l.slab_id).is_some() && !self.is_failed(l.slab_id))
-                };
-                if usable {
-                    continue;
-                }
-                let taken = self.stripe_domains(stripe, width, Some(vext)).await;
-                let new = {
-                    let mut reg = self.registry.write().await;
-                    match self.allocate_apart(&mut reg, vext, &taken, &policy.spread, loc.generation).await {
-                        Ok(l) => l,
-                        Err(e) => {
-                            report.errors.push(format!("stripe {stripe} member {i}: {e}"));
-                            continue;
-                        }
-                    }
-                };
-                if let Err(e) = self.write_leg(new, 0, member).await {
-                    self.give_back(&[new]).await;
-                    report.errors.push(format!("stripe {stripe} member {i}: {e}"));
-                    continue;
-                }
-                if loc.ref_count > 1 {
+            if let Err(e) = self.write_leg(new, 0, member).await {
+                self.give_back(&[new]).await;
+                out.errors.push(format!("stripe {stripe} member {i}: {e}"));
+                continue;
+            }
+            out.bytes += self.slot_size;
+            if loc.ref_count > 1 {
+                {
                     let mut reg = self.registry.write().await;
                     if let Some(s) = reg.get_mut(&new.slab_id) {
                         for _ in 1..loc.ref_count {
@@ -1940,57 +2250,68 @@ impl ThinVolumeHandle {
                         }
                     }
                 }
-                moves.insert(loc.primary(), new);
-                report.legs_rebuilt += 1;
+                out.deferred.push(Deferred { unit: stripe, vext, parity: false, old: Some(loc.primary()), beside: loc.primary(), new });
+                continue;
             }
-            // Parity legs: rebuild the missing, verify the rest if asked.
-            let group = { let gem = self.gem.read().await; gem.lookup_parity(self.id, stripe).cloned() };
-            let refs: Vec<Option<&[u8]>> = members.iter().map(|m| Some(m.as_slice())).collect();
-            let want = stripe::compute_parity(&refs, self.slot_size as usize, parity);
-            match group {
-                None => {
-                    // Members exist with no group at all: make one.
-                    let any = { let gem = self.gem.read().await; (stripe * width as u64..(stripe + 1) * width as u64).any(|v| gem.lookup(self.id, v).is_some()) };
-                    if any {
-                        if let Err(e) = self.cow_parity_group(stripe, width, parity, policy, None, &members).await {
-                            report.errors.push(format!("stripe {stripe}: parity could not be created: {e}"));
-                        } else {
-                            report.legs_rebuilt += parity as usize;
-                        }
+            let ok = { self.gem.write().await.replace_leg(self.id, vext, loc.primary(), new) };
+            if ok {
+                self.commit_legs(&[new]).await;
+                out.owed.push(loc.primary());
+                out.rebuilt += 1;
+            } else {
+                self.give_back(&[new]).await;
+            }
+        }
+        // Parity legs: rebuild the missing, verify the rest if asked.
+        let group = { let gem = self.gem.read().await; gem.lookup_parity(self.id, stripe).cloned() };
+        let refs: Vec<Option<&[u8]>> = members.iter().map(|m| Some(m.as_slice())).collect();
+        let want = stripe::compute_parity(&refs, self.slot_size as usize, parity);
+        match group {
+            None => {
+                // Members exist with no group at all: make one.
+                let any = { let gem = self.gem.read().await; (stripe * width as u64..(stripe + 1) * width as u64).any(|v| gem.lookup(self.id, v).is_some()) };
+                if any {
+                    if let Err(e) = self.cow_parity_group(stripe, width, parity, policy, None, &members).await {
+                        out.errors.push(format!("stripe {stripe}: parity could not be created: {e}"));
+                    } else {
+                        out.rebuilt += parity as usize;
                     }
                 }
-                Some(g) => {
-                    for (i, leg) in g.legs.iter().enumerate() {
-                        let present = {
-                            let reg = self.registry.read().await;
-                            reg.get(&leg.slab_id).is_some() && !self.is_failed(leg.slab_id)
-                        };
-                        if present {
-                            if verify {
-                                match self.write_leg(*leg, 0, &want[i]).await {
-                                    Ok(()) => report.parity_verified += 1,
-                                    Err(e) => report.errors.push(format!("stripe {stripe} parity {i}: {e}")),
-                                }
+            }
+            Some(g) => {
+                for (i, leg) in g.legs.iter().enumerate() {
+                    let present = {
+                        let reg = self.registry.read().await;
+                        reg.get(&leg.slab_id).is_some() && !self.is_failed(leg.slab_id)
+                    };
+                    if present {
+                        if opts.verify {
+                            match self.write_leg(*leg, 0, &want[i]).await {
+                                Ok(()) => out.verified += 1,
+                                Err(e) => out.errors.push(format!("stripe {stripe} parity {i}: {e}")),
                             }
-                            continue;
                         }
-                        let taken = self.stripe_domains(stripe, width, None).await;
-                        let new = {
-                            let mut reg = self.registry.write().await;
-                            match self.allocate_apart(&mut reg, parity_vext(i as u8, stripe), &taken, &policy.spread, g.generation).await {
-                                Ok(l) => l,
-                                Err(e) => {
-                                    report.errors.push(format!("stripe {stripe} parity {i}: {e}"));
-                                    continue;
-                                }
+                        continue;
+                    }
+                    let taken = self.stripe_domains(stripe, width, None).await;
+                    let new = {
+                        let mut reg = self.registry.write().await;
+                        match self.allocate_apart(&mut reg, parity_vext(i as u8, stripe), &taken, &policy.spread, g.generation).await {
+                            Ok(l) => l,
+                            Err(e) => {
+                                out.errors.push(format!("stripe {stripe} parity {i}: {e}"));
+                                continue;
                             }
-                        };
-                        if let Err(e) = self.write_leg(new, 0, &want[i]).await {
-                            self.give_back(&[new]).await;
-                            report.errors.push(format!("stripe {stripe} parity {i}: {e}"));
-                            continue;
                         }
-                        if g.ref_count > 1 {
+                    };
+                    if let Err(e) = self.write_leg(new, 0, &want[i]).await {
+                        self.give_back(&[new]).await;
+                        out.errors.push(format!("stripe {stripe} parity {i}: {e}"));
+                        continue;
+                    }
+                    out.bytes += self.slot_size;
+                    if g.ref_count > 1 {
+                        {
                             let mut reg = self.registry.write().await;
                             if let Some(s) = reg.get_mut(&new.slab_id) {
                                 for _ in 1..g.ref_count {
@@ -1998,31 +2319,30 @@ impl ThinVolumeHandle {
                                 }
                             }
                         }
-                        moves.insert(*leg, new);
-                        report.legs_rebuilt += 1;
+                        out.deferred.push(Deferred { unit: stripe, vext: stripe, parity: true, old: Some(*leg), beside: *leg, new });
+                        continue;
                     }
-                    // A group rebuilt from slot tables carries no width;
-                    // it has one now.
-                    if g.data_width == 0 {
-                        let mut gem = self.gem.write().await;
-                        let mut ng = g.clone();
+                    let ok = { self.gem.write().await.replace_parity_leg(self.id, stripe, *leg, new) };
+                    if ok {
+                        self.commit_legs(&[new]).await;
+                        out.owed.push(*leg);
+                        out.rebuilt += 1;
+                    } else {
+                        self.give_back(&[new]).await;
+                    }
+                }
+                // A group rebuilt from slot tables carries no width;
+                // it has one now.
+                if g.data_width == 0 {
+                    let mut gem = self.gem.write().await;
+                    if let Some(mut ng) = gem.lookup_parity(self.id, stripe).cloned() {
                         ng.data_width = width as u8;
                         gem.restore_parity(self.id, stripe, ng);
                     }
                 }
             }
-            {
-                let mut gem = self.gem.write().await;
-                gem.rewrite_legs(&moves);
-            }
-            let mut reg = self.registry.write().await;
-            for (old, new) in &moves {
-                reg.commit(new.slab_id, new.slot_idx);
-                if let Some(s) = reg.get_mut(&old.slab_id) {
-                    let _ = s.free(old.slot_idx).await;
-                }
-            }
         }
+        out
     }
 
     /// Whole blocks only, which is what everything below this expects.
@@ -2913,6 +3233,73 @@ mod redundancy_tests {
                 assert_eq!(raw(&reg, leg, slot as usize).await, want, "leg content after resync");
             }
         }
+        cleanup(&paths);
+    }
+
+    /// A write that lands while a resync is rebuilding reaches the rebuilt
+    /// leg too (#146). The resync used to publish its new legs only at the
+    /// end, after each extent's lock was released: a write in between went
+    /// to the surviving leg alone, and the rebuilt one served the old data.
+    #[tokio::test]
+    async fn a_write_during_a_resync_reaches_the_rebuilt_leg() {
+        let slot = 4096u64;
+        let n = 32u64;
+        let (gem, reg, ids, paths) = setup_slabs(3, slot).await;
+        let v = volume(&gem, &reg, "mirror:2", slot);
+        for i in 0..n {
+            v.write(i * slot, &pattern(i as u8, slot as usize)).await.unwrap();
+        }
+        reg.write().await.remove(&ids[0]);
+
+        // Slow enough that writes interleave with it: 16 slots a second,
+        // two at a time.
+        let throttle = Arc::new(crate::volume::throttle::Throttle::new(16 * slot));
+        let opts = ResyncOptions { in_flight: 2, throttle: Some(throttle), ..Default::default() };
+        let rv = v.clone();
+        let resync = tokio::spawn(async move { rv.resync_with(&opts).await });
+        let mut round = 0u8;
+        while !resync.is_finished() {
+            round = round.wrapping_add(1);
+            for i in 0..n {
+                v.write(i * slot, &pattern(round.wrapping_mul(31).wrapping_add(i as u8), slot as usize)).await.unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let report = resync.await.unwrap();
+        assert!(round > 1, "writes ran while the resync did");
+        assert_eq!(report.unrecoverable, 0, "{report:?}");
+        v.release_slots(&report.owed).await;
+        assert_eq!(v.health().await.state, HealthState::Healthy);
+        for i in 0..n {
+            let want = pattern(round.wrapping_mul(31).wrapping_add(i as u8), slot as usize);
+            let l = loc(&gem, v.volume_id(), i).await;
+            assert_eq!(l.leg_count(), 2);
+            for leg in l.legs() {
+                assert_eq!(raw(&reg, leg, slot as usize).await, want, "extent {i}: every leg has the last write");
+            }
+        }
+        cleanup(&paths);
+    }
+
+    /// `margin` is how many more losses the least protected extent can take.
+    #[tokio::test]
+    async fn margin_counts_what_the_weakest_extent_can_still_lose() {
+        let slot = 4096u64;
+        let (gem, reg, ids, paths) = setup_slabs(3, slot).await;
+        let m3 = volume(&gem, &reg, "mirror:3", slot);
+        let p = volume(&gem, &reg, "raid5:2+1", slot);
+        let plain = volume(&gem, &reg, "none", slot);
+        for i in 0..4u64 {
+            m3.write(i * slot, &pattern(1, slot as usize)).await.unwrap();
+            p.write(i * slot, &pattern(2, slot as usize)).await.unwrap();
+            plain.write(i * slot, &pattern(3, slot as usize)).await.unwrap();
+        }
+        assert_eq!(m3.health().await.margin, 2);
+        assert_eq!(p.health().await.margin, 1);
+        assert_eq!(plain.health().await.margin, 0);
+        reg.write().await.remove(&ids[0]);
+        assert_eq!(m3.health().await.margin, 1);
+        assert_eq!(p.health().await.margin, 0, "one more loss and a stripe is gone");
         cleanup(&paths);
     }
 

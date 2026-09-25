@@ -22,6 +22,7 @@ pub mod gc;
 pub mod pressure;
 pub mod relocate;
 pub mod synonym;
+pub mod throttle;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ use crate::raid::RaidArrayId;
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
 pub use metadata::{Access, FsInfo, MetadataStore, Retention};
 pub use synonym::{Synonym, SynonymError, SynonymStore, Target as SynonymTarget};
-pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport};
+pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport, ResyncOptions, ResyncCheckpoint};
 pub use redundancy::{Redundancy, RedundancyPolicy};
 
 /// What a restripe did.
@@ -987,8 +988,12 @@ impl VolumeManager {
     /// trusting. See [`ThinVolumeHandle::resync`].
     pub async fn resync_volume(&mut self, id: VolumeId, verify: bool) -> Result<ResyncReport, VolumeError> {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
-        let report = handle.resync(verify).await;
+        let mut report = handle.resync_with(&ResyncOptions { verify, ..Default::default() }).await;
+        // The replaced slots are freed only once the map that stopped naming
+        // them is on disk.
         self.persist().await;
+        let owed = std::mem::take(&mut report.owed);
+        handle.release_slots(&owed).await;
         Ok(report)
     }
 
@@ -2586,6 +2591,71 @@ mod redundancy_tests {
         // Parity is a restripe, refused as a setting.
         let err = mgr.set_redundancy(id, RedundancyPolicy::parity(2, 1)).await.unwrap_err();
         assert!(matches!(err, VolumeError::RestripeRequired { .. }), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A leg a golden shares with its snapshot is rebuilt once and every map
+    /// that names it is pointed at the new slot (#146): the shared extents are
+    /// published together at the end, while an extent the source has since
+    /// written (its own now) is published under its lock.
+    #[tokio::test]
+    async fn a_shared_leg_is_rebuilt_once_for_every_map_that_names_it() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let mut sids = Vec::new();
+        for n in ["a", "b", "c"] {
+            let (s, _) = file_slab(&d, n, slot).await;
+            sids.push(s.slab_id());
+            mgr.add_slab(s).await;
+        }
+        let src = mgr.create_volume_with("m", 1 << 20, CreateOptions::redundant(RedundancyPolicy::mirror(2))).await.unwrap();
+        let v = mgr.get_volume(&src).unwrap();
+        for i in 0..6u64 {
+            v.write(i * slot, &vec![0x30 + i as u8; slot as usize]).await.unwrap();
+        }
+        let snap = mgr.create_snapshot(src, "snap").await.unwrap();
+        // The source moves on for one extent: that one is its own now.
+        v.write(0, &vec![0x77; slot as usize]).await.unwrap();
+
+        // The drive holding the most legs goes bad.
+        let lost = {
+            let gem = mgr.gem().read().await;
+            *sids.iter().max_by_key(|s| gem.slab_extents(**s).len()).unwrap()
+        };
+        let touched = mgr.distrust_slab(lost).await;
+        assert!(touched.contains(&src) && touched.contains(&snap), "{touched:?}");
+        let free_before = mgr.registry().read().await.total_free_slots();
+
+        let report = mgr.resync_volume(src, false).await.unwrap();
+        assert_eq!(report.unrecoverable, 0, "{report:?}");
+        assert_eq!(mgr.health(&src).await.unwrap().state, HealthState::Healthy);
+        // The snapshot's shared legs moved with the source's: nothing left on
+        // the lost slab for either, and its own resync has nothing to do.
+        {
+            let gem = mgr.gem().read().await;
+            for id in [src, snap] {
+                let map = gem.get_volume_map(&id).unwrap();
+                assert!(map.all_legs().all(|l| l.slab_id != lost), "{id:?} still names the lost slab");
+            }
+        }
+        let again = mgr.resync_volume(snap, false).await.unwrap();
+        assert_eq!(again.legs_rebuilt, 0, "{again:?}");
+        assert_eq!(mgr.health(&snap).await.unwrap().state, HealthState::Healthy);
+        // Rebuilt once, not once per map: the pool gave up one slot per leg
+        // that moved and got back the one it replaced.
+        let free_after = mgr.registry().read().await.total_free_slots();
+        assert_eq!(free_before, free_after, "every rebuilt slot freed the one it replaced");
+
+        let sv = mgr.get_volume(&snap).unwrap();
+        for i in 0..6u64 {
+            let mut back = vec![0u8; slot as usize];
+            sv.read(i * slot, &mut back).await.unwrap();
+            assert!(back.iter().all(|&b| b == 0x30 + i as u8), "snapshot extent {i}");
+            v.read(i * slot, &mut back).await.unwrap();
+            let want = if i == 0 { 0x77 } else { 0x30 + i as u8 };
+            assert!(back.iter().all(|&b| b == want), "source extent {i}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
