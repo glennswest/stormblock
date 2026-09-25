@@ -374,6 +374,11 @@ allocation while reads went on working (#92, #93).
 > The `/api/v1/fstemplates` surface below is the same model with a name and
 > a clone count kept beside it.
 >
+> **A template's format always finishes (#141, v18.3.0).** A create runs to
+> the end even if its caller stops waiting, and a format an engine was
+> stopped in the middle of is finished at the next start. `formatting: true`
+> on a template means the engine is laying it down.
+>
 > **Nothing is minted ahead of a claim (#137, v18.0.0).** A mint is a
 > sub-millisecond snapshot, one superblock write with its flush, and one
 > metadata persist. A clone of a sealed blank is verified by reading its stamp

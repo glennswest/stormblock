@@ -118,6 +118,31 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### A size-class blank that never formats (2026-09-25, #141) — DONE (v18.3.0)
+
+The 1 TiB class blank for a 600Gi claim sat in `awaiting_format` on C2NR0Q2.
+Not the size: a 1 TiB blank formats and seals in 5-7 s on dev (library: 14 s
+on a file slab). What was wrong is that nothing finished a format once its
+create stopped: the template is persisted `awaiting_format` before the
+format, a failure rolls back, but a caller that gave up (the handler future
+dropped) or an engine that stopped left it there for good.
+
+- [x] the API's create runs on a task of its own — finishes or rolls back
+      whoever is still waiting
+- [x] `FsTemplate.formatting` (persisted) + `resume_formats` at startup:
+      discard the raw volume to zeros, format, seal; a failure rolls back so
+      the next claim mints afresh. Pre-flag stores: any `awaiting_format`
+      template with no filesystem and nothing serving its raw volume.
+- [x] found by `ci-template-resume.sh` (kill -9 mid-format, restart): an
+      **empty volume came back as `System`** on a data-only node — both
+      `restore` (data dir) and `adopt_slabs` defaulted an extent-less volume's
+      role to System, so every write asked for a system slab. Now: the role of
+      the slab whose metadata records it, else a half the node has. On a node
+      with both halves the same bug put an unwritten data volume (a fresh PVC)
+      in the half an install replaces.
+- [x] rustkube-node#70: wait for `ready` when a found blank is still
+      formatting; an Event on the claim.
+
 ### No file I/O for real storage (2026-09-25, #140) — DONE (v18.2.0)
 
 The identity half of #140 landed with #136 (v17.1.0): slabs on the installed

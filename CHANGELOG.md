@@ -3,6 +3,27 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.3.0] — 2026-09-25
+
+### 2026-09-25 (blanks)
+- **fix(fstemplates):** a size-class blank can no longer be left in
+  `awaiting_format` (#141). `POST /api/v1/fstemplates` runs its format and seal
+  on a task of its own, so it finishes or rolls back even when the caller stops
+  waiting. The 1 TiB class minted for a 600Gi claim was abandoned that way. A
+  template records that the engine is formatting it (`formatting`, persisted
+  and reported), and at startup the engine finishes any format a previous run
+  left: it discards the raw volume to zeros, formats and seals, or rolls the
+  template back on failure. Measured on dev, a 1 TiB blank formats and seals
+  in 5–7 s on the served engine.
+- **fix(volume):** a volume with no extents yet keeps its half across a
+  restart. Both the data-directory restore and slab adoption made every such
+  volume `System`. On a data-only node that made it unwritable ("no system
+  slab"). On a node with both halves it placed an unwritten data volume, such
+  as a fresh PVC, in the half an install replaces. Its role now comes from the
+  slab whose metadata records it, else from a half the node actually has.
+- **test:** `ci-template-resume.sh`, a 1 TiB blank on the served engine: the
+  caller gives up, and the engine is killed mid-format and restarted.
+
 ## [v18.2.0] — 2026-09-25
 
 ### 2026-09-25 (block devices)
