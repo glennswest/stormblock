@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         println!("== {mib} MiB blank (built and sealed in {:.2} s)", built.as_secs_f64());
 
         let (mut snap, mut ident, mut check, mut mint_v, mut mint) = (vec![], vec![], vec![], vec![], vec![]);
+        let (mut cow, mut flush, mut open) = (vec![], vec![], vec![]);
         for i in 0..repeats {
             // The steps one at a time.
             let t = Instant::now();
@@ -83,6 +84,23 @@ async fn main() -> anyhow::Result<()> {
             let report = stormblock::fs::ext4::check(&dev).await?;
             check.push(t.elapsed());
             assert!(report.is_clean(), "a fresh clone must check clean");
+            drop(dev);
+            vm.lock().await.delete_volume(id).await?;
+
+            // What the identity step is made of: the first write to a clone's
+            // slot is a copy-on-write of the whole slot, then a flush.
+            let id = vm.lock().await.create_snapshot(source, &format!("w-{mib}-{i}")).await?;
+            let dev = vm.lock().await.get_volume(&id).expect("clone");
+            let t = Instant::now();
+            let mut sb = vec![0u8; 4096];
+            dev.read(0, &mut sb).await?;
+            open.push(t.elapsed());
+            let t = Instant::now();
+            dev.write(0, &sb).await?;
+            cow.push(t.elapsed());
+            let t = Instant::now();
+            dev.flush().await?;
+            flush.push(t.elapsed());
             drop(dev);
             vm.lock().await.delete_volume(id).await?;
 
@@ -100,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
         }
         println!("  snapshot            {}", stats(snap));
         println!("  identity (primary)  {}", stats(ident));
+        println!("    read block 0      {}", stats(open));
+        println!("    first write (CoW) {}", stats(cow));
+        println!("    flush             {}", stats(flush));
         println!("  check (fsck)        {}", stats(check));
         println!("  mint, with check    {}", stats(mint_v));
         println!("  mint, no check      {}", stats(mint));
