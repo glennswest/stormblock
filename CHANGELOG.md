@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-25 (snapshots)
+- **fix(v1):** a `/v1` snapshot, which is what a Kubernetes `VolumeSnapshot`
+  becomes through stormblock-csi, is **sealed** at creation, and so is every
+  member of a group snapshot (#111). It was an ordinary writable engine volume:
+  anything that attached it read-write could change what the snapshot held.
+  It is now a golden: immutable, carrying lineage to its source, and what a
+  restore clones from. This answers #111. CSI snapshots map onto goldens and
+  CoW clones and are not a separate story.
+
 ## [v17.0.0] — 2026-09-25
 
 ### 2026-09-25

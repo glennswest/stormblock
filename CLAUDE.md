@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### CSI VolumeSnapshot = a golden (2026-09-25, #111) — IN PROGRESS
+### CSI VolumeSnapshot = a golden (2026-09-25, #111) — DONE (v17.1.0)
 
 rustkube asked whether `CreateSnapshot` maps onto goldens and CoW clones or
 stays separate. **It maps, and already did:** stormblock-csi implements
@@ -130,10 +130,10 @@ it. The one gap: the snapshot volume was left **unsealed**, so it was a
 writable engine volume rather than a golden, and anything that attached it rw
 could change what the VolumeSnapshot holds.
 
-- [ ] seal the snapshot volume at creation (single and group)
-- [ ] tests: sealed, refuses writes, restore is a clone of it, a restored
+- [x] seal the snapshot volume at creation (single and group)
+- [x] tests: sealed, refuses writes, restore is a clone of it, a restored
       volume survives the snapshot's deletion
-- [ ] docs (spec §snapshots), CHANGELOG, answer on the issue
+- [x] docs (spec §snapshots), CHANGELOG, answer on the issue
 - Separate, and tracked: #130 (engine volumes made through `/api/v1` cannot
   be snapshotted through `/v1`; `ready: true` with no local backing).
 
