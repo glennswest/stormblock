@@ -9,8 +9,12 @@
 //! assumed.
 //!
 //! ```text
-//! cargo run --release --example rebuild_rate -- [DIR]
+//! cargo run --release --example rebuild_rate -- [DIR] [--buffered] [REPEATS]
 //! ```
+//!
+//! `--buffered` puts the slabs on the page cache instead (`FileDevice`), so
+//! the drive is out of the picture and what is left is the engine: whether
+//! rebuilding more at once goes faster, or queues on a lock.
 //!
 //! On a virtual disk this measures the engine's scheduling, not a drive:
 //! every "drive" here is a file on the same underlying device.
@@ -18,7 +22,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use stormblock::drive::filedev::FileDevice;
 use stormblock::drive::sas::SasDevice;
+use stormblock::drive::BlockDevice;
 use stormblock::drive::slab::Slab;
 use stormblock::placement::topology::StorageTier;
 use stormblock::rebuild::{RebuildConfig, Rebuilds};
@@ -29,7 +35,7 @@ const VOLUMES: usize = 16;
 const EXTENTS: u64 = 16;
 const SLOT: u64 = 1 << 20;
 
-async fn run(dir: &str, parallel: usize, in_flight: usize) -> anyhow::Result<(u64, f64)> {
+async fn run(dir: &str, buffered: bool, parallel: usize, in_flight: usize) -> anyhow::Result<(u64, f64)> {
     let mut vm = VolumeManager::new(SLOT);
     let mut paths = Vec::new();
     let mut sids = Vec::new();
@@ -39,8 +45,12 @@ async fn run(dir: &str, parallel: usize, in_flight: usize) -> anyhow::Result<(u6
         let f = std::fs::File::create(&path)?;
         f.set_len(160 << 20)?;
         drop(f);
-        let dev = SasDevice::open_file_direct(&path, 4096).await?;
-        let slab = Slab::format(Arc::new(dev), SLOT, StorageTier::Hot).await?;
+        let dev: Arc<dyn BlockDevice> = if buffered {
+            Arc::new(FileDevice::open(&path).await?)
+        } else {
+            Arc::new(SasDevice::open_file_direct(&path, 4096).await?)
+        };
+        let slab = Slab::format(dev, SLOT, StorageTier::Hot).await?;
         sids.push(slab.slab_id());
         vm.add_slab(slab).await;
         paths.push(path);
@@ -79,17 +89,33 @@ async fn run(dir: &str, parallel: usize, in_flight: usize) -> anyhow::Result<(u6
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let dir = std::env::args().nth(1).unwrap_or_else(|| std::env::temp_dir().join("rebuild-rate").to_string_lossy().to_string());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let buffered = args.iter().any(|a| a == "--buffered");
+    let rest: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let dir = rest.first().map(|s| s.to_string()).unwrap_or_else(|| std::env::temp_dir().join("rebuild-rate").to_string_lossy().to_string());
+    let repeats: usize = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
     std::fs::create_dir_all(&dir)?;
-    println!("{DRIVES} drives, {VOLUMES} mirror:2 volumes x {EXTENTS} MiB, one drive fails");
-    println!("{:>9} {:>10} {:>10} {:>8} {:>9}", "parallel", "in_flight", "copied", "secs", "MiB/s");
-    for (p, f) in [(1, 1), (4, 1), (1, 4), (4, 4), (8, 8)] {
-        let (bytes, secs) = run(&dir, p, f).await?;
-        println!(
-            "{p:>9} {f:>10} {:>9}M {secs:>8.2} {:>9.1}",
-            bytes >> 20,
-            (bytes as f64 / (1 << 20) as f64) / secs
-        );
+    println!(
+        "{DRIVES} drives ({}), {VOLUMES} mirror:2 volumes x {EXTENTS} MiB, one drive fails; median of {repeats}",
+        if buffered { "page cache" } else { "O_DIRECT" }
+    );
+    println!("{:>9} {:>10} {:>10} {:>8} {:>9}  {}", "parallel", "in_flight", "copied", "secs", "MiB/s", "each run, MiB/s");
+    let configs = [(1, 1), (4, 1), (1, 4), (4, 4), (8, 8)];
+    let mut rates: Vec<Vec<(u64, f64)>> = vec![Vec::new(); configs.len()];
+    // Interleaved, so drift on a shared host does not land on one setting.
+    for _ in 0..repeats {
+        for (i, (p, f)) in configs.iter().enumerate() {
+            rates[i].push(run(&dir, buffered, *p, *f).await?);
+        }
+    }
+    for (i, (p, f)) in configs.iter().enumerate() {
+        let mut r: Vec<f64> = rates[i].iter().map(|(b, s)| (*b as f64 / (1 << 20) as f64) / s).collect();
+        r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = r[r.len() / 2];
+        let (bytes, _) = rates[i][0];
+        let secs = (bytes as f64 / (1 << 20) as f64) / med;
+        let each: Vec<String> = rates[i].iter().map(|(b, s)| format!("{:.0}", (*b as f64 / (1 << 20) as f64) / s)).collect();
+        println!("{p:>9} {f:>10} {:>9}M {secs:>8.2} {med:>9.1}  {}", bytes >> 20, each.join(" "));
     }
     Ok(())
 }
