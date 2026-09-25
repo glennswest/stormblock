@@ -3,6 +3,32 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-25 (xfs)
+- **feat(fs):** XFS alongside ext4 (#147). `"fs": "xfs"` on a template,
+  blank or claim formats with `mkfs-xfs` v0.2.0, the filesystem `mkfs.xfs`
+  6.15 writes, from 300 MB. On a thin volume the log it zeroes becomes a
+  discard: a 2 GiB XFS blank allocates 6 MiB. A seal checks the superblock
+  (CRC, in-progress, needs-repair) and walks the whole tree with `fio-xfs`.
+  Every clone and claim is restamped as `xfs_admin -U` does it (new
+  `sb_uuid`, old UUID kept in `sb_meta_uuid`, `META_UUID` set, in every AG's
+  superblock) and read back. `features`, `journal: false` and `seed` are
+  refused for XFS. Volumes record `fs.kind: xfs`, and blanks adopted from a
+  slab keep their kind.
+- **feat(import):** an import finds the filesystems an image carries (XFS and
+  ext2/3/4, the whole volume or each GPT partition), names the OS from
+  `/etc/os-release` and walks each tree. `filesystems` appears on the import
+  status. A recognised filesystem that does not read fails the import unless
+  `"verify": false`.
+- **feat(api):** `POST /api/v1/volumes/{id}/fsck` on an XFS volume walks it and
+  reports; `repair=true` is refused for XFS.
+- **test:** `ci-xfs-verify.sh` runs on dev. An engine-made XFS blank and two
+  claims pass `xfs_repair -n`, `blkid` reports each UUID the engine recorded,
+  and `xfs_db` shows each claim's metadata UUID is still the blank's. A Rocky
+  9 cloud image imports through the served API and its XFS root passes
+  `xfs_repair -n`. `examples/xfs_verify.rs`.
+- **build:** `mkfs-xfs` and `fio-xfs` v0.2.0 (git tags); `Cargo.lock` gains
+  only those two.
+
 ## [v18.5.0] — 2026-09-25
 
 ### 2026-09-25 (rebuild)

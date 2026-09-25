@@ -395,6 +395,30 @@ the image carries are written, so a 2 GB cloud image with 600 MB used
 costs 600 MB once and each VM pays what it writes. `vhd`/`vhdx` are
 recognised and refused; convert with `qemu-img convert -O qcow2`.
 
+**What is inside is found and read** (#147). After the bytes are written and
+before the golden is sealed, the import finds every XFS and ext2/3/4
+filesystem the image carries: the volume itself, or each GPT partition. It
+opens each with the userspace reader for its kind (`fio-xfs`, `fio-ext4`),
+names the OS from `/etc/os-release`, and walks the whole tree (for XFS, every
+v5 checksum on the way). The status lists them:
+
+```json
+"filesystems": [
+  { "partition": 3, "kind": "xfs", "label": "BOOT", "walked": { "entries": 370, "directories": 8, "files": 360 } },
+  { "partition": 4, "kind": "xfs", "label": "rocky", "os": "Rocky Linux 9.8 (Blue Onyx)",
+    "walked": { "entries": 37473, "directories": 5101, "files": 28941 } }
+]
+```
+
+A filesystem that is recognised and does not read fails the import: an
+image nothing will boot should not become a golden every VM clones.
+`"verify": false` keeps it anyway, still listing what was found, without the
+walk. Measured on dev: the Rocky 9 GenericCloud image (646 MB qcow2, 1.2 GB
+written) imports, walks and seals in 19 s. `xfs_repair -n` passes on that root
+partition, and `xfs_db` counts 34,306 inodes in use against the walk's 37,473
+entries (hard links are entries of one inode). A whole volume that is itself
+XFS is recorded as `fs.kind: xfs`.
+
 What the engine stamps on a clone is the **disk** identity — GPT disk GUID
 (both headers, CRCs redone) or MBR signature — because that is what a
 host derives `PARTUUID` from, and two clones with one identity on one host

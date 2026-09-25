@@ -66,7 +66,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **Thin provisioning** — Extent-based allocator, volumes grow on write, and shrink again on discard: the targets advertise thin provisioning (SCSI VPD 0xB2, NVMe DSM) so initiators issue UNMAP/TRIM, which frees slab slots back to the pool.
 - **COW snapshots** — Instant snapshots via extent map cloning with reference counting; clone and delete persist refcounts a sector at a time, so latency tracks sectors touched rather than image size.
 - **Kubernetes `VolumeSnapshot` is a golden** (#111) — stormblock-csi's `CreateSnapshot` / `DeleteSnapshot` / `ListSnapshots` land on `/v1/snapshots`. The engine answers with a sealed CoW snapshot that has lineage; a group snapshot seals every member under one fence. A restore (`/v1/volumes` with `source: {kind: snapshot}`) is a CoW clone of it, the same thing provisioning from a template is. There is no separate backup machinery.
-- **Filesystem templates** — mkfs once, clone forever. The engine formats its own volumes through [`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs) (a from-scratch async mke2fs/e2fsck in pure Rust), seals a template as a snapshot, and every consumer gets a COW clone with a freshly stamped filesystem UUID instead of running mkfs. Formats run concurrently and every clone is fsck'd before hand-off.
+- **Filesystem templates** — mkfs once, clone forever. The engine formats its own volumes through [`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs) (a from-scratch async mke2fs/e2fsck in pure Rust) or, for XFS, [`mkfs-xfs`](https://github.com/glennswest/mkfs.xfs.rs), seals a template as a snapshot, and every consumer gets a COW clone with a freshly stamped filesystem UUID instead of running mkfs. Formats run concurrently and every clone is fsck'd before hand-off.
 - **Placement engine** — Snapshot-fenced cold copies, tiered data placement (Hot/Warm/Cool/Cold), extent-level replication.
 - **Shared ring IPC** — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd.
 - **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model, and hot-add: a host connects once and later attaches arrive as an async event plus a rescan, with no Connect per volume.
@@ -441,7 +441,13 @@ curl -X POST http://node:9090/api/v1/volumes \
   -H 'Content-Type: application/json' \
   -d '{"name":"pvc-1","from_template":"ext4-256m"}'
 
-# Check any volume's filesystem; ?repair=true corrects what it can
+# An XFS blank for the large claim classes
+curl -X POST http://node:9090/api/v1/fstemplates \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"pvc-xfs-1t","size":"1T","fs":"xfs"}'
+
+# Check any volume's filesystem; ?repair=true corrects what it can (ext only:
+# an XFS volume is walked and reported, never repaired)
 curl -X POST http://node:9090/api/v1/volumes/<uuid>/fsck
 ```
 
@@ -451,6 +457,23 @@ switch, and an `-O` list. For the journal:
 RouterOS cannot replay a journal, so one that ever goes dirty there leaves the
 filesystem read-only permanently, while a Linux host or VM wants the crash
 consistency.
+
+**XFS as well as ext4** (#147): `"fs": "xfs"` formats with
+[`mkfs-xfs`](https://github.com/glennswest/mkfs.xfs.rs), the same filesystem
+`mkfs.xfs` 6.15 writes (v5, CRCs, finobt, rmapbt, reflink, bigtime), from 300 MB
+up. The log it zeroes is a discard on a thin volume, so a 2 GiB XFS blank
+costs 6 MiB. Sealing checks what can be checked without `xfs_repair`: the
+superblock's CRC and flags, then the whole tree walked by
+[`fio-xfs`](https://github.com/glennswest/fio.xfs.rs) with every v5 checksum
+checked. The crate has no checker of its own yet. Not for XFS: `features`
+(an `mke2fs` list), `journal: false` (XFS always has a log), and `seed`
+(`fio-xfs` reads, it does not write yet). A claim or clone of an XFS blank
+gets a new UUID the way `xfs_admin -U` gives one: `sb_uuid` changes, the old
+UUID stays in `sb_meta_uuid` (the one the metadata blocks carry), and the
+`META_UUID` feature is set, one sector per allocation group. That matters more
+than for ext4, because the kernel refuses to mount two XFS filesystems with
+one UUID at all. `ci-xfs-verify.sh` checks blanks and claims with
+`xfs_repair -n`, `blkid` and `xfs_db` on dev.
 
 **Every clone is stamped with its own filesystem UUID.** Without that, two
 clones of one template collide on mount-by-UUID and in the blkid cache the
@@ -768,7 +791,7 @@ makes exactly that.
 src/drive/       BlockDevice trait, NVMe (VFIO), raw block devices (O_DIRECT, io_uring), FileDevice (tests/dev), Slab extent store, ublk, ring IPC
 src/raid/        RAID 1/5/6/10, SIMD parity, write journal, rebuild, scrub
 src/volume/      Thin provisioning, COW snapshots, GEM, extent allocator, metadata
-src/fs/          filesystem templates: format/check via mkfs-ext4, seal guard, UUID stamp
+src/fs/          filesystem templates: format/check via mkfs-ext4 and mkfs-xfs, seal guard, UUID stamp; survey of an image's filesystems (fio-ext4, fio-xfs)
 src/placement/   Cold copies, storage topology, tiered replication
 src/target/      NVMe-oF/TCP + iSCSI target protocols, per-core reactor
 src/mgmt/        REST API (axum), TOML config, Prometheus metrics, web UI
