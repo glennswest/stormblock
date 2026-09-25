@@ -118,26 +118,42 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Close the management API by default (2026-09-24, #107) — WAITING ON A DECISION
+### Close the management API by default (#107) — IN PROGRESS
 
-The mechanism has been done since v14.0.0 (docs/auth.md): one check over the
-whole router, minted `<data_dir>/api_token`, `require_auth`, admin token for
-destructive verbs, a SECURITY warning on every open boot, `auth` on health.
-What is left is the **default**, and flipping it breaks callers that hold no
-credential today (checked 2026-09-24):
+**Owner decision (2026-09-25, on the issue):** each host gets its own sealed
+golden from the default or assigned release; only that host can claim it;
+every boot is a fresh CoW clone of it with the previous one deleted; the claim
+is the only unauthenticated verb and can do nothing else; everything else
+requires the token. The mechanism (docs/auth.md, v14.0.0) is already there —
+what changes is the default and the claim.
 
-- **stormbootx** (USB firmware) claims with `POST
-  /api/v1/synonyms/boothost/<tag>/claim` and sends no token — it has nowhere
-  to get one.
-- **stormcentral** `engine.rs` repoints `boothost/<tag>` and publishes
-  releases with no token.
-- the registry already reads the node's minted token (ready); the
-  initramfs `boot-claim` takes `--token`.
+- [ ] **Host goldens.** `boothost/<tag>` stays the *assignment* (what
+      stormcentral PUTs and reads back). A claim resolves it — or, on a tag's
+      first appearance, `boothost/default`, pinning `boothost/<tag>` to that
+      target — and keeps `hostgolden/<tag>`: a sealed CoW clone of the
+      assignment owned by the tag. Reused while its parent is the assignment;
+      a repoint makes a new one; the old one is deleted once nothing
+      references it (no synonym, no clone).
+- [ ] **Fresh every boot.** The boot clone `boothost-<tag>` is a clone of the
+      host golden; the superseded one is released as today (grace for the
+      firmware→initramfs double claim, #97) — its lineage check now also
+      accepts the tag's previous host goldens.
+- [ ] **The claim is the one public write**, exactly `POST
+      /api/v1/synonyms/boothost/<tag>/claim`, and in that namespace it takes
+      no options (name, namespace, size, label, unsealed_ok ignored): it can
+      only hand tag X a clone of X's golden.
+- [ ] **Closed by default:** `require_auth` unset means required — mint into
+      the token file; with nowhere to write, an in-memory token (closed, and
+      said loudly) rather than open. `require_auth = false` stays the explicit
+      way to open a node.
+- [ ] Callers without a token: audit every component; file issues where they
+      must present the node token (stormcentral first — owner named it).
+- [ ] tests, docs/auth.md + docs for host goldens, CHANGELOG, major bump
+      (default behaviour change), close #107.
 
-Options put to the owner: (a) closed by default with the boot claim as the
-one public write (repoint, delete, publish stay guarded); (b) a fleet boot
-token carried by stormbootx; (c) keep open-with-warning and close per
-appliance by config. Nothing changed until answered.
+Later, per the decision, not in this cut: attaching the boot clone read-only
+with a writable overlay; binding a claim to the host (TOFU host key / TPM /
+mutual boot auth, stormcos#35) — until then the tag is the binding.
 
 ### Local boot on an installed disk (2026-09-24, #123) — DONE (v16.2.0)
 
