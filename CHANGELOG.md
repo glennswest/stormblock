@@ -3,6 +3,25 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.3.1] — 2026-09-25
+
+### 2026-09-25 (multi-drive)
+- **docs:** `docs/multi-drive.md`, the multi-drive design (#142). It covers
+  implicit pools per role and tier, placement per extent, the failure-domain
+  chain with stormdrive's shelf and bay, a drive's life (added, drained,
+  failed), overcommit, and what the console shows. Each part says what exists
+  and what is missing, and the work is split into #146, #151–#154,
+  rustkube-node#71, stormblock-csi#21 and stormconsole#29, with three
+  decisions for the owner.
+- **fix(drain):** a drained leg keeps the volume's own spread rung. The drain
+  kept legs apart only at `drive`, so a `mirror:2@shelf` leg moved off a failed
+  drive could land in its sibling's shelf, and the volume still read healthy.
+  A moved leg also no longer crosses the system/data boundary (#88): neither
+  destination picker checked the slab's role.
+- **test:** `tests/integration_multidrive.rs` runs four drives in two shelves
+  over the API: spread, `mirror:2@shelf`, a refused `mirror:3@shelf`, a failed
+  drive quarantined, drained and rebuilt around, and a drive added.
+
 ## [v18.3.0] — 2026-09-25
 
 ### 2026-09-25 (blanks)

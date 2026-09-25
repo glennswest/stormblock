@@ -214,10 +214,14 @@ above ran on files.
 | | where |
 |---|---|
 | per-volume background rebuild: automatic on failure, parallel, prioritised, throttled | stormblock #146 |
-| redundancy / spread / tier as StorageClass parameters, end to end | stormblock (`/v1` create), rustkube-node, stormblock-csi |
-| overcommit per drive → pool admission and headroom | stormdrive #13, stormblock, rustkube-node #62 |
-| drive affinity for non-redundant volumes *(decision 1)* | stormblock |
-| a new drive: slab by policy, then rebalance onto it *(decision 3)*; `POST /slabs/rebalance` | stormblock |
-| drain rate limiting against live I/O | stormblock |
-| Drives and Pools pages | stormconsole |
+| redundancy / spread / tier as StorageClass parameters, end to end | stormblock #151, rustkube-node #71, stormblock-csi #21 |
+| overcommit per drive → pool admission and headroom | stormblock #152, stormdrive #13, rustkube-node #62 |
+| drive affinity for non-redundant volumes *(decision 1)* | stormblock #153 |
+| a new drive: slab by policy, then rebalance onto it *(decision 3)*; `POST /slabs/rebalance`; drain rate limit | stormblock #154 |
+| Drives and Pools pages | stormconsole #29 (and #32 at 160 drives) |
 | drive-level RAID failure states — only for whole-device legs now | stormblock #69 |
+| replicas on other servers (a different axis: across nodes) | rustkube-node #68 |
+
+**Decisions for the owner:** (1) drive affinity for non-redundant volumes;
+(2) the default policy for a claim that names none; (3) whether a new drive
+joins the pool automatically.

@@ -118,22 +118,27 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Multi-drive: the design (2026-09-25, #142) — IN PROGRESS
+### Multi-drive: the design (2026-09-25, #142) — DONE (v18.3.1, docs/multi-drive.md)
 
 Owner: "we need to figure out multi-drive soon"; and (2026-09-25) redundancy
 is **per volume** — a volume's members on different drives, never a RAID
 across drives — placed by failure domain (drive < shelf of 160 < rack) and
 rebuilt per volume (#146). A design issue: write it down, then split it.
 
-- [ ] survey what the engine already does (slab choice per extent, domains,
+- [x] survey what the engine already does (slab choice per extent, domains,
       drive add/drain/health/resync/rebalance, capacity, StorageClass
       parameters on both drivers)
-- [ ] `docs/multi-drive.md`: pools, placement, failure domains, add /
+- [x] `docs/multi-drive.md`: pools, placement, failure domains, add /
       drain / fail a drive, overcommit, what the console shows — what exists,
       what is missing, and the proposals that need the owner's word
-- [ ] prove what exists on a multi-drive node in a test (file drives in
+- [x] prove what exists on a multi-drive node in a test (file drives in
       shelves), so the document describes behaviour rather than intent
-- [ ] split into issues (here and in the other repos), link them, close #142
+- [x] split into issues (here and in the other repos), link them, close #142
+
+Found by the test and fixed: a drain moved legs apart only at `drive` (broke
+`@shelf`), and no move checked the destination slab's role. Open for the
+owner: drive affinity for `none` volumes (#153), the default claim policy
+(#151), whether a new drive joins automatically (#154).
 
 ### A size-class blank that never formats (2026-09-25, #141) — DONE (v18.3.0)
 
