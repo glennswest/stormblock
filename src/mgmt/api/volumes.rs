@@ -1727,6 +1727,37 @@ async fn fsck_volume(
         }
     }
 
+    // XFS (#147): what can be checked without `xfs_repair` — the superblock,
+    // then the whole tree walked with every v5 CRC checked. There is no repair.
+    if crate::fs::xfs::looks_like_xfs(&dev).await {
+        if repair {
+            return ApiError::bad_request(format!(
+                "volume {uuid} is XFS: there is no XFS repair here yet; run xfs_repair against it"
+            ));
+        }
+        let mut problems = Vec::new();
+        if let Ok(b) = crate::fs::xfs::seal_blockers(&dev).await {
+            problems.extend(b);
+        }
+        let walked = match crate::fs::xfs::check(&dev).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                problems.push(e.to_string());
+                None
+            }
+        };
+        return Json(serde_json::json!({
+            "volume_id": uuid,
+            "fs": "xfs",
+            "checker": "walk",
+            "clean": problems.is_empty(),
+            "repaired": false,
+            "walked": walked,
+            "problems": problems.iter().map(|m| serde_json::json!({ "severity": "error", "message": m })).collect::<Vec<_>>(),
+        }))
+        .into_response();
+    }
+
     let result = if repair {
         crate::fs::ext4::repair(&dev).await
     } else {
