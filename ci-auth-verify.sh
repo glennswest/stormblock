@@ -41,8 +41,8 @@ trap stop EXIT
 
 [ -x "$BIN" ] || fail "no binary at $BIN"
 rm -rf "$W"; mkdir -p "$W/data"
-truncate -s 1G "$W/d1.img"
-truncate -s 1G "$W/d2.img"
+truncate -s 256M "$W/d1.img"
+truncate -s 256M "$W/d2.img"
 # Nothing about auth in here: the default is what is being checked.
 cat > "$W/stormblock.toml" <<EOF
 [management]
@@ -56,8 +56,10 @@ start() {
         --device "$W/d1.img" --device "$W/d2.img" --raid raid1 --volume seed:16M \
         --data-dir "$W/data" --no-nvmeof --no-iscsi >>"$W/engine.log" 2>&1 &
     ENGINE=$!
-    for _ in $(seq 1 100); do
+    # Array creation comes first and takes its time on a busy build box.
+    for _ in $(seq 1 600); do
         [ "$(code "$API/health")" = 200 ] && return 0
+        kill -0 "$ENGINE" 2>/dev/null || fail "engine exited"
         sleep 0.1
     done
     fail "engine did not come up"
