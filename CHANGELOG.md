@@ -3,6 +3,28 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-25 (block devices)
+- **BREAKING (drive):** no file I/O for real storage (#140). The installed
+  disk's slabs, the flow-over disk, local boot, the `slab`/`image lay-node`/
+  `local-boot` CLIs, the slabs API, `image build` onto a device and its image
+  sources all open a block device through `drive::open_path`: `O_DIRECT`, as the
+  drive it is, never `FileDevice`. `FileDevice` is for tests and development.
+  It warns when opened on a block device, and the node warns on every boot
+  when a slab sits in a regular file. Slabs laid through `FileDevice` reopen
+  O_DIRECT as they are, with nothing moved.
+- **perf(drive):** the raw block device (`SasDevice`) is asynchronous. Its I/O
+  runs on an io_uring on its own thread (eventfd-woken, many requests in
+  flight, every buffer owned by its operation), or on `pread`/`pwrite` in the
+  blocking pool where io_uring is unavailable (RouterOS). It used to hold a
+  lock across `submit_and_wait` on the executor thread: queue depth one per
+  drive, and a runtime worker blocked for every disk operation. Requests that
+  are not whole logical blocks are read-modify-written by the device instead
+  of refused.
+- **fix(drive):** `DmaBuf::alloc(0)` asked the allocator for a zero-size
+  layout, which is undefined behaviour.
+- The drive-identity half of #140 (`drive=<serial>`, one disk one domain)
+  shipped in v17.1.0 with #136.
+
 ## [v18.1.0] — 2026-09-25
 
 ### 2026-09-25 (volumes view)

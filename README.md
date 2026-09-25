@@ -102,7 +102,7 @@ The **Global Extent Map (GEM)** tracks all extent→slot mappings and is reconst
 | Tier 0 | NVMe E1.S / E3.S / U.2 | VFIO userspace | 200GbE |
 | Tier 1 | SAS SSD | io_uring (HBA330) | 25-100GbE |
 | Tier 2 | SAS HDD (JBOD) | io_uring (ARM64 head unit) | 25GbE |
-| MikroTik | USB/SATA (RouterOS) | tokio file I/O | 1-10GbE |
+| MikroTik | USB/SATA (RouterOS) | O_DIRECT block device (blocking pool where io_uring is unavailable) | 1-10GbE |
 
 ## Building
 
@@ -757,7 +757,7 @@ makes exactly that.
 ## Module Structure
 
 ```
-src/drive/       BlockDevice trait, NVMe/SAS/FileDevice, Slab extent store, ublk, ring IPC
+src/drive/       BlockDevice trait, NVMe (VFIO), raw block devices (O_DIRECT, io_uring), FileDevice (tests/dev), Slab extent store, ublk, ring IPC
 src/raid/        RAID 1/5/6/10, SIMD parity, write journal, rebuild, scrub
 src/volume/      Thin provisioning, COW snapshots, GEM, extent allocator, metadata
 src/fs/          filesystem templates: format/check via mkfs-ext4, seal guard, UUID stamp
