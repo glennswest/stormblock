@@ -118,6 +118,37 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### No file I/O for real storage (2026-09-25, #140) — IN PROGRESS
+
+The identity half of #140 landed with #136 (v17.1.0): slabs on the installed
+disk name `drive=<serial>`, one disk is one domain. The owner's direction on
+the issue goes further: "we will get rid of the file/block copies … I don't
+want any file IO." Every drive — the installed disk included — is opened as a
+**block device** (O_DIRECT, io_uring); `FileDevice` is for tests and
+development and says so loudly when it ends up under real storage.
+
+Found first: the block backend we had (`SasDevice`) is **queue depth one and
+blocks the async runtime** — a `std::Mutex` held across `submit_and_wait` on
+the executor thread for every request. Putting the node's root disk on it as
+it stood would have stalled the engine.
+
+- [ ] `drive/direct.rs`: asynchronous O_DIRECT I/O on an fd — an io_uring on
+      a thread of its own (eventfd-woken, many requests in flight, every
+      buffer owned by its operation so a dropped future cannot free what the
+      kernel is writing into), and `pread`/`pwrite` on the blocking pool where
+      io_uring is not available (RouterOS, a container with it disabled).
+- [ ] `SasDevice` on it, with read-modify-write for requests that are not
+      whole logical blocks (callers keep `FileDevice`'s permissive semantics),
+      a read-only open, and an O_DIRECT open of a regular file for tests.
+- [ ] `drive::open_path` — fabric URI, block device (never `FileDevice`),
+      else a file — and every place a slab, drive or disk is opened by path
+      uses it: slab paths at boot, the flow-over disk, local boot, `slab`/
+      `image lay-node`/`local-boot` CLIs, drives and slabs API, pool sources.
+- [ ] `FileDevice` on a block device warns; a slab on a regular file under a
+      serving engine warns ("tests and development only").
+- [ ] tests (O_DIRECT on files: aligned, unaligned, concurrency, both
+      engines), docs, CHANGELOG, close #140.
+
 ### Volumes view: in use, with a consumer; images marked (2026-09-25, #138, #126) — DONE (v18.1.0)
 
 Owner (comment on #138): the UI's point of view, **no storage change**.
