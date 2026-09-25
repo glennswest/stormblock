@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.5.0] — 2026-09-25
+
 ### 2026-09-25 (rebuild)
 - **feat(rebuild):** a failed drive's volumes are rebuilt without anyone
   asking (#146). A drive health report of `degraded`, `failing`, `failed` or
