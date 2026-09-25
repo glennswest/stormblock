@@ -3,6 +3,23 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.1.0] — 2026-09-25
+
+### 2026-09-25 (volumes view)
+- **feat(volumes):** every volume says what it is and whether something uses it
+  (#138, #126). New fields: `kind`
+  (`volume`/`golden`/`blank`/`media`/`snapshot`/`template`), `in_use` and
+  `attachments` (ublk with its mount point, adopted boot devices, NVMe
+  namespaces and per-volume subsystems, serve wiring, exports, iSCSI LUNs),
+  and `consumer` (the owner, else the mount). They appear on the listing and
+  on the single GET. The listing takes `?kind=` (with `image` and `all`),
+  `?in_use=` and `?unowned=true`, the last documented since #115 and never
+  implemented. With no filter the listing is unchanged.
+- **fix(volumes):** a volume attached on the shared NVMe subsystem, and a boot
+  device an adopting engine serves, now count as in use. Neither did before,
+  so the delete guards and the template sweep could act on a volume a host was
+  using.
+
 ## [v18.0.0] — 2026-09-25
 
 ### 2026-09-25 (claims)

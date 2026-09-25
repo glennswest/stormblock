@@ -381,6 +381,33 @@ allocation while reads went on working (#92, #93).
 > sealed. So `claim` mints on demand and no volume on a node is one nobody
 > asked for; `examples/claim_timing.rs` and `ci-claim-timing.sh` measure it.
 
+### Volumes and images (#138)
+
+Goldens stay volumes underneath; what a volume *is* and whether anything is
+using it is on every entry of `GET /api/v1/volumes`, so a console can show a
+Volumes view of what running containers and VMs use and an Images view of the
+rest without naming conventions:
+
+- **`kind`**: `volume` (anything unsealed), `golden`, `blank` (a template's
+  sealed volume, or a blank an image shipped), `media` (a whole-disk image or
+  ISO), `snapshot` (a `/v1` snapshot, i.e. a VolumeSnapshot) or `template` (a
+  template's scratch volume).
+- **`in_use`** and **`attachments`**: every way the engine is serving it right
+  now. That covers ublk devices with the mount point, boot devices the engine
+  adopted, NVMe namespaces on the shared subsystem, per-volume subsystems, the
+  serving layer's wiring, exports and iSCSI LUNs. The delete guards use the
+  same answer.
+- **`consumer`**: the volume's owner (`PUT …/owner`: a PVC, a VMI, …), else the
+  mount a ublk device carries.
+- Filters: `?kind=volume|golden|blank|media|snapshot|template` (comma-separated),
+  `?kind=image` for everything but `volume`, `?in_use=true|false`,
+  `?unowned=true`. With no filter the listing is what it always was.
+
+```
+GET /api/v1/volumes?kind=volume&in_use=true   # the Volumes view
+GET /api/v1/volumes?kind=image                # the Images view
+```
+
 Formatting a filesystem is the expensive part of provisioning a volume: a
 256 MiB ext4 laid down over the network takes ~20 s, while cloning a sealed
 template is effectively instant and starts at near-zero allocation. So format
