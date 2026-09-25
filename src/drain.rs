@@ -188,6 +188,20 @@ async fn run(
             break;
         }
 
+        // Which rung each volume keeps its legs apart at (#142): a leg moved
+        // off this drive must land where the volume's policy allows — a
+        // `mirror:2@shelf` leg in the *other* shelf, not merely on another
+        // drive. Read before the map and registry are locked: the volume
+        // manager is taken before them everywhere else, never after.
+        let spread: std::collections::HashMap<crate::volume::VolumeId, String> = {
+            let vm = volumes.lock().await;
+            let ids: Vec<crate::volume::VolumeId> =
+                vm.list_volumes().await.into_iter().map(|(id, ..)| id).collect();
+            ids.into_iter()
+                .filter_map(|id| vm.redundancy(&id).map(|p| (id, p.spread.clone())))
+                .collect()
+        };
+
         // One step under the locks: pick a leg, move it.
         let step = {
             let mut g = gem.write().await;
@@ -214,10 +228,11 @@ async fn run(
             match pick {
                 None => None,
                 Some((vol, idx, slab, is_parity)) => {
+                    let rung = spread.get(&vol).map(String::as_str).unwrap_or("drive");
                     let res = if is_parity {
-                        engine.migrate_parity_leg(&mut g, &mut r, vol, idx, slab, None).await
+                        engine.migrate_parity_leg_at(&mut g, &mut r, vol, idx, slab, rung).await
                     } else {
-                        engine.migrate_leg(&mut g, &mut r, vol, idx, slab, None).await
+                        engine.migrate_leg_at(&mut g, &mut r, vol, idx, slab, rung).await
                     };
                     let remaining = remaining_on(&g, &slabs);
                     Some((res, remaining, vol, idx, slab, is_parity))

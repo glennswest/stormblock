@@ -889,7 +889,7 @@ impl PlacementEngine {
     /// `migrate_leg` with the domain comparison at `rung` rather than the
     /// default, so a collision at `shelf` is resolved by a slab on another
     /// shelf.
-    async fn migrate_leg_at(
+    pub async fn migrate_leg_at(
         &self,
         gem: &mut GlobalExtentMap,
         registry: &mut SlabRegistry,
@@ -916,7 +916,7 @@ impl PlacementEngine {
         Ok(MigrateExtentResult { volume_id, vext_idx, source_slab: old.slab_id, dest_slab: new.slab_id, dest_slot: new.slot_idx })
     }
 
-    async fn migrate_parity_leg_at(
+    pub async fn migrate_parity_leg_at(
         &self,
         gem: &mut GlobalExtentMap,
         registry: &mut SlabRegistry,
@@ -952,9 +952,13 @@ impl PlacementEngine {
         keep_apart_from: &[FailureDomain],
         rung: &str,
     ) -> Result<SlabId, PlacementError> {
+        // A leg stays in its half (#88): a move never takes a system volume's
+        // extent into a data slab or the other way round.
+        let role = registry.role_of(&exclude);
         let pick = |ids: Vec<SlabId>| -> Option<SlabId> {
             ids.into_iter()
                 .filter(|id| *id != exclude && !registry.is_quarantined(id))
+                .filter(|id| registry.role_of(id) == role)
                 .filter(|id| !registry.collides(id, keep_apart_from, rung))
                 .filter_map(|id| registry.get(&id).map(|s| (id, s.free_slots())))
                 .filter(|(_, f)| *f > 0)
@@ -1116,10 +1120,13 @@ impl PlacementEngine {
         exclude: SlabId,
         keep_apart_from: &[FailureDomain],
     ) -> Result<SlabId, PlacementError> {
+        // A leg stays in its half (#88).
+        let role = registry.role_of(&exclude);
         // First try same tier
         let candidates: Vec<(SlabId, u64)> = registry.by_tier(tier)
             .iter()
             .filter(|&&id| id != exclude && !registry.is_quarantined(&id))
+            .filter(|&&id| registry.role_of(&id) == role)
             .filter(|&id| !registry.collides(id, keep_apart_from, DEFAULT_RUNG))
             .filter_map(|id| {
                 registry.get(id).and_then(|s| {
@@ -1136,6 +1143,7 @@ impl PlacementEngine {
         for (id, slab) in registry.iter() {
             if *id != exclude
                 && !registry.is_quarantined(id)
+                && registry.role_of(id) == role
                 && slab.free_slots() > 0
                 && !registry.collides(id, keep_apart_from, DEFAULT_RUNG)
             {
