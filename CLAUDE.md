@@ -118,6 +118,23 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Allocation metadata at 40 PB a node (2026-09-25, #145) — IN PROGRESS
+
+Owner's scale: 160 × 256 TB drives per 4U node (~41 PB), 1 PB drives
+coming. The issue counts the slab's `extent_index`; the resident cost is more
+than that — `Slab.slots: Vec<Slot>` holds an entry for **every** slot, free
+ones included, and the GEM holds a forward entry and a reverse entry per
+allocated slot. And allocation finds a free slot with `first_one()`, a scan
+from the start of the bitmap, every time.
+
+- [ ] measure: `examples/metadata_footprint.rs` — RSS per slot empty and
+      allocated (slab), per extent (GEM), allocation time as a slab fills;
+      extrapolate to a 256 TB drive and a 41 PB node
+- [ ] `docs/metadata-scale.md`: the budget, where the bytes go, the design
+      (extent size by class, what stays resident, paged index, free-extent
+      trees, 64-bit indexes and the format change), and the work split
+- [ ] what needs the owner's word, called out; issues filed; close #145
+
 ### Multi-drive: the design (2026-09-25, #142) — DONE (v18.3.1, docs/multi-drive.md)
 
 Owner: "we need to figure out multi-drive soon"; and (2026-09-25) redundancy
