@@ -118,6 +118,27 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Volumes view: in use, with a consumer; images marked (2026-09-25, #138, #126) — IN PROGRESS
+
+Owner (comment on #138): the UI's point of view, **no storage change**.
+Goldens stay volumes underneath; the console shows an Images view (goldens,
+blanks, media) and a Volumes view of only what running containers/VMs use.
+Here: what that view needs.
+
+- [ ] `kind` on every volume: `volume`, `golden`, `blank`, `media`,
+      `snapshot`, `template` (a template's scratch volume) — the rule in one
+      place instead of every tool's naming conventions (#126).
+- [ ] `in_use` + `attachments` from what the engine actually serves:
+      exports, iSCSI LUNs, ublk devices (with the mount point), per-volume
+      NVMe subsystems, the serve wiring table — and the boot devices an
+      adopting engine serves, which were recorded nowhere.
+- [ ] `consumer`: the volume's owner (#115) when one is set; else, for a
+      mounted ublk device, the mount (`{kind: "Mount", name: "/data/…"}`).
+- [ ] Filters: `?kind=` (one kind, `image` for all non-volumes, `all`),
+      `?in_use=true|false`, `?unowned=true` (documented since #115, never
+      implemented). No filter keeps today's listing (compatibility).
+- [ ] tests, docs, CHANGELOG, close #138 and #126.
+
 ### Retire standby clones: mint at claim time (2026-09-25, #137) — DONE (v18.0.0)
 
 Owner: "why do we have unclaimed clones? Does not make sense." #55 keeps one
