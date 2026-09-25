@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v17.0.0] — 2026-09-25
+
 ### 2026-09-25
 - **BREAKING (auth):** the management API is **closed by default** (#107).
   `management.require_auth` unset now means required. The node mints a token
@@ -27,7 +29,8 @@
   `/var/lib/stormblock/api_token`) for `image build --engine
   http://127.0.0.1:…`, and never presents it to another host.
 - **chore(ci):** the `ci-*.sh` scripts give their engines a token and present
-  it. The benchmarks take `$STORMBLOCK_API_TOKEN`.
+  it. The benchmarks take `$STORMBLOCK_API_TOKEN`. The new `ci-auth-verify.sh`
+  checks the served binary: closed by default, and the boot claim open.
 
 ## [v16.2.0] — 2026-09-24
 

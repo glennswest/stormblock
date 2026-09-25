@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Close the management API by default (#107) — IN PROGRESS
+### Close the management API by default (#107) — DONE (v17.0.0; golden held, see below)
 
 **Owner decision (2026-09-25, on the issue):** each host gets its own sealed
 golden from the default or assigned release; only that host can claim it;
@@ -127,29 +127,38 @@ is the only unauthenticated verb and can do nothing else; everything else
 requires the token. The mechanism (docs/auth.md, v14.0.0) is already there —
 what changes is the default and the claim.
 
-- [ ] **Host goldens.** `boothost/<tag>` stays the *assignment* (what
+- [x] **Host goldens.** `boothost/<tag>` stays the *assignment* (what
       stormcentral PUTs and reads back). A claim resolves it — or, on a tag's
       first appearance, `boothost/default`, pinning `boothost/<tag>` to that
       target — and keeps `hostgolden/<tag>`: a sealed CoW clone of the
       assignment owned by the tag. Reused while its parent is the assignment;
       a repoint makes a new one; the old one is deleted once nothing
       references it (no synonym, no clone).
-- [ ] **Fresh every boot.** The boot clone `boothost-<tag>` is a clone of the
+- [x] **Fresh every boot.** The boot clone `boothost-<tag>` is a clone of the
       host golden; the superseded one is released as today (grace for the
       firmware→initramfs double claim, #97) — its lineage check now also
       accepts the tag's previous host goldens.
-- [ ] **The claim is the one public write**, exactly `POST
+- [x] **The claim is the one public write**, exactly `POST
       /api/v1/synonyms/boothost/<tag>/claim`, and in that namespace it takes
       no options (name, namespace, size, label, unsealed_ok ignored): it can
       only hand tag X a clone of X's golden.
-- [ ] **Closed by default:** `require_auth` unset means required — mint into
+- [x] **Closed by default:** `require_auth` unset means required — mint into
       the token file; with nowhere to write, an in-memory token (closed, and
       said loudly) rather than open. `require_auth = false` stays the explicit
       way to open a node.
-- [ ] Callers without a token: audit every component; file issues where they
+- [x] Callers without a token: audit every component; file issues where they
       must present the node token (stormcentral first — owner named it).
-- [ ] tests, docs/auth.md + docs for host goldens, CHANGELOG, major bump
+- [x] tests, docs/auth.md + docs for host goldens, CHANGELOG, major bump
       (default behaviour change), close #107.
+
+**Golden held.** The audit (2026-09-25) found most outside callers sending no
+token; issues filed: stormcentral#30, stormcos#89 (and where a node keeps its
+token — the engine's data dir is `/run/stormblock/engine` there), stormconsole#30,
+stormdrive#14, stormvm#44, stormcos_qa#19, rustkube-node#66, stormblock-csi#20,
+stormblock-registry#40, stormstorage#12, vmcloud-image-operator#7. Shipping
+v17 before they present a token breaks them; the rollout order is the owner's
+call. Inside this repo: cluster heartbeat/join/Raft now present the shared
+token; the ci scripts present one; `ci-auth-verify.sh` passes on dev.
 
 Later, per the decision, not in this cut: attaching the boot clone read-only
 with a writable overlay; binding a claim to the host (TOFU host key / TPM /
