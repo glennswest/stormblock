@@ -764,6 +764,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fio-xfs"
+version = "0.2.0"
+source = "git+https://github.com/glennswest/fio.xfs.rs?tag=v0.2.0#12b4943389f9f4307938298401566681512e09f8"
+dependencies = [
+ "async-trait",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1551,6 +1561,19 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "mkfs-xfs"
+version = "0.2.0"
+source = "git+https://github.com/glennswest/mkfs.xfs.rs?tag=v0.2.0#4abddc05f94aa1de64e0d61c0329ba516db6d075"
+dependencies = [
+ "async-trait",
+ "futures",
+ "rustix",
+ "thiserror 2.0.21",
+ "tokio",
  "uuid",
 ]
 
@@ -2478,6 +2501,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "fio-ext4",
+ "fio-xfs",
  "flate2",
  "futures",
  "futures-util",
@@ -2492,6 +2516,7 @@ dependencies = [
  "metrics",
  "mime_guess",
  "mkfs-ext4",
+ "mkfs-xfs",
  "nix",
  "openraft",
  "pin-project-lite",
