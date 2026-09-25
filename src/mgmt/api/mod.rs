@@ -8,6 +8,7 @@ pub mod fstemplates;
 pub mod images;
 pub mod pallets;
 pub mod slabs;
+pub mod placement;
 #[cfg(feature = "stormfs-data")]
 pub mod stormfs;
 pub mod discovery;

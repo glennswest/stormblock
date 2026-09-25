@@ -588,6 +588,13 @@ impl RaidArray {
             .collect()
     }
 
+    /// Each member's index, state and the identity of the drive it is on —
+    /// a partner named the way stormdrive names drives (#136).
+    pub fn member_drives(&self) -> Vec<(usize, RaidMemberState, DeviceId)> {
+        let members = self.members.read().unwrap();
+        members.iter().enumerate().map(|(i, m)| (i, m.state, m.device.drive_id())).collect()
+    }
+
     /// Access the journal (for testing/recovery).
     pub async fn journal_mut(&self) -> tokio::sync::MutexGuard<'_, WriteIntentJournal> {
         self.journal.lock().await

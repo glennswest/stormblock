@@ -174,6 +174,10 @@ pub struct VolumeManager {
     /// only warning of it was a line in a log. Kept here so the condition is
     /// a thing the API can be asked about rather than something to notice.
     durability: Arc<std::sync::Mutex<Option<String>>>,
+    /// Bumped every time the volume metadata is persisted — which is every
+    /// time a volume, its lineage or its placement changes. A mirror asks
+    /// "has anything changed since N" instead of re-reading everything (#136).
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl VolumeManager {
@@ -196,6 +200,7 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
+            generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -216,6 +221,7 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
+            generation: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -1476,7 +1482,18 @@ impl VolumeManager {
     /// The extent maps are the piece slab slot tables cannot reconstruct: a
     /// COW snapshot's shared slots are recorded under the original writer,
     /// so without this file a snapshot reads as zeros after reattach (#13).
+    /// See the `generation` field: monotonic, never reused within a run.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The RAID array a slab sits on, when it was created on one.
+    pub fn array_of_slab(&self, slab: &SlabId) -> Option<RaidArrayId> {
+        self.array_slabs.iter().find(|(_, s)| *s == slab).map(|(a, _)| *a)
+    }
+
     pub async fn persist(&self) {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match self.persist_inner().await {
             Ok(()) => {
                 if let Some(prev) = self.durability.lock().unwrap().take() {

@@ -84,6 +84,11 @@ pub struct VolumeResponse {
     /// it is. `?unowned=true` on the listing asks the question directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<crate::volume::metadata::Owner>,
+    /// Where the volume lives — slabs, drives, RAID partners and the state of
+    /// each (#136). Always on the single-volume GET; on the listing only with
+    /// `?placement=true`, since it walks the volume's extent map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<super::placement::Placement>,
 }
 
 /// Everything about a volume the response carries beyond name and size.
@@ -217,14 +222,51 @@ pub struct ResizeVolumeRequest {
     pub new_size: String,
 }
 
-async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[derive(Debug, Deserialize, Default)]
+pub struct ListVolumesQuery {
+    /// Walk each volume's extent map and report where it lives (#136).
+    #[serde(default)]
+    pub placement: bool,
+    /// The generation the caller last saw: 304 when nothing has changed.
+    #[serde(default)]
+    pub since: Option<u64>,
+}
+
+/// The listing, with the node's volume `generation` beside it (#136).
+///
+/// A mirror remembers the generation and asks again with `?since=N` (or
+/// `If-None-Match: "N"`): a 304 means nothing about any volume — which exist,
+/// their lineage, their placement — has changed since, and it need not
+/// re-read 481 of them to find that out.
+#[derive(Debug, Serialize)]
+struct VolumeList {
+    items: Vec<VolumeResponse>,
+    count: usize,
+    generation: u64,
+}
+
+async fn list_volumes(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ListVolumesQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "list").increment(1);
     let vm = state.volume_manager.lock().await;
+    let generation = vm.generation();
+    let etag = format!("\"{generation}\"");
+    let known = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string());
+    if q.since == Some(generation) || known.as_deref() == Some(etag.as_str()) {
+        return (axum::http::StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
+    }
     let vols = vm.list_volumes().await;
     let mut items: Vec<VolumeResponse> = Vec::with_capacity(vols.len());
     for (id, name, vsize, allocated) in &vols {
         let d = describe(&vm, id).await;
         items.push(VolumeResponse {
+            placement: None,
             id: id.0,
             name: name.clone(),
             virtual_size_bytes: *vsize,
@@ -246,9 +288,27 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             fs: d.fs,
             owner: d.owner.clone(),
         });
+        if q.placement {
+            let p = super::placement::of_volume(&state, &vm, *id).await;
+            if let Some(last) = items.last_mut() {
+                last.array_id = p.as_ref().and_then(one_array);
+                last.placement = p;
+            }
+        }
     }
     let count = items.len();
-    Json(ListResponse { items, count })
+    (
+        [(axum::http::header::ETAG, etag)],
+        Json(VolumeList { items, count, generation }),
+    )
+        .into_response()
+}
+
+/// The array a volume is on, when all of it is on one.
+fn one_array(p: &super::placement::Placement) -> Option<Uuid> {
+    let mut ids = p.slabs.iter().filter_map(|s| s.array_id);
+    let first = ids.next()?;
+    ids.all(|a| a == first).then_some(first)
 }
 
 async fn get_volume(
@@ -269,7 +329,10 @@ async fn get_volume(
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
             let d = describe(&vm, &vol_id).await;
+            let placement = super::placement::of_volume(&state, &vm, vol_id).await;
             let resp = VolumeResponse {
+                array_id: placement.as_ref().and_then(one_array),
+                placement,
                 id: uuid,
                 name,
                 virtual_size_bytes: vsize,
@@ -278,7 +341,6 @@ async fn get_volume(
                 allocated_human: human_size(allocated),
                 shared_bytes: d.shared_bytes,
                 shared_human: human_size(d.shared_bytes),
-                array_id: None,
                 fs_uuid: d.fs_uuid,
                 redundancy: d.redundancy,
                 health: d.health,
@@ -446,6 +508,7 @@ async fn compose_volume(
         .unwrap_or((0, 0));
 
     let resp = VolumeResponse {
+        placement: None,
         id: id.0,
         name: req.name,
         virtual_size_bytes: virtual_size,
@@ -525,6 +588,7 @@ async fn create_volume(
         };
         let d = describe(&vm, &vol_id).await;
         let resp = VolumeResponse {
+            placement: None,
             id: vol_id.0,
             name: req.name,
             virtual_size_bytes: size_bytes,
@@ -609,6 +673,7 @@ async fn create_volume(
                 let _ = vm.set_owner(vol_id, req.owner.clone()).await;
             }
             let resp = VolumeResponse {
+                placement: None,
                 id: vol_id.0,
                 name: req.name,
                 virtual_size_bytes: size,
@@ -943,6 +1008,7 @@ async fn clone_volume(
                 None => 0,
             };
             let resp = VolumeResponse {
+                placement: None,
                 id: c.volume_id.0,
                 name: req.name,
                 virtual_size_bytes: c.size_bytes,
@@ -1443,6 +1509,7 @@ async fn create_snapshot(
             let vsize = handle.capacity_bytes();
             let d = describe(&vm, &snap_id).await;
             let resp = VolumeResponse {
+                placement: None,
                 id: snap_id.0,
                 name: req.name,
                 virtual_size_bytes: vsize,
@@ -1519,6 +1586,7 @@ async fn resize_volume(
             let vsize = handle.capacity_bytes();
             let d = describe(&vm, &vol_id).await;
             let resp = VolumeResponse {
+                placement: None,
                 id: uuid,
                 name,
                 virtual_size_bytes: vsize,
@@ -1932,6 +2000,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
     let vsize = handle.capacity_bytes();
     let d = describe(vm, &id).await;
     Some(VolumeResponse {
+        placement: None,
         id: id.0,
         name,
         virtual_size_bytes: vsize,
