@@ -754,7 +754,7 @@ async fn a_new_machine_is_pinned_to_the_default_image() {
     let pinned: serde_json::Value = client
         .get(format!("{base}/api/v1/synonyms/boothost/NEW1"))
         .send().await.unwrap().json().await.unwrap();
-    assert_eq!(pinned["target"]["id"].as_str().unwrap_or_else(|| pinned["target"].as_str().unwrap_or("")), v1.to_string());
+    assert_eq!(pinned["volume"]["id"], v1.to_string(), "the new machine is pinned to the default's image");
 
     // The default moves on; this machine does not.
     client
