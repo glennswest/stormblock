@@ -30,17 +30,22 @@ trap '[ -n "$ENGINE" ] && kill -9 "$ENGINE" 2>/dev/null; wait 2>/dev/null || tru
 
 [ -x "$BIN" ] || fail "no binary at $BIN"
 rm -rf "$W"; mkdir -p "$W/data"
-truncate -s 1100G "$W/d1.img"
-truncate -s 1100G "$W/d2.img"
+# One slab, formatted once and reopened by every start — a restart has to
+# find what the run before it wrote.
+truncate -s 2200G "$W/slab.img"
+"$BIN" slab format "$W/slab.img" --role data >/dev/null 2>&1 || "$BIN" slab format "$W/slab.img" >/dev/null
 cat > "$W/stormblock.toml" <<EOF
+[[drives]]
+path = "$W/slab.img"
+
 [management]
 listen_addr = "$MGMT"
 data_dir = "$W/data"
 node_name = "ci-resume"
 EOF
 start() {
-    RUST_LOG=stormblock=info "$BIN" --config "$W/stormblock.toml" --device "$W/d1.img" --device "$W/d2.img" \
-        --raid raid1 --volume seed:16M --data-dir "$W/data" --no-iscsi --no-nvmeof >>"$W/engine.log" 2>&1 &
+    RUST_LOG=stormblock=info "$BIN" --config "$W/stormblock.toml" --data-dir "$W/data" --no-iscsi \
+        >>"$W/engine.log" 2>&1 &
     ENGINE=$!
     for _ in $(seq 1 1200); do
         curl -s -o /dev/null "$API/health" && break
