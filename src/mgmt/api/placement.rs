@@ -12,7 +12,7 @@
 //! the volume's map, O(extents), so the listing only does it when asked
 //! (`?placement=true`); the single-volume GET always does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -158,7 +158,7 @@ pub async fn of_volume(state: &Arc<AppState>, vm: &VolumeManager, id: VolumeId) 
     let local = local_node(state);
 
     // Legs per slab, from the map.
-    let mut by_slab: BTreeMap<SlabId, Count> = BTreeMap::new();
+    let mut by_slab: HashMap<SlabId, Count> = HashMap::new();
     {
         let gem = vm.gem().read().await;
         if let Some(map) = gem.get_volume_map(&id) {
@@ -181,7 +181,7 @@ pub async fn of_volume(state: &Arc<AppState>, vm: &VolumeManager, id: VolumeId) 
     }
 
     // Drains in progress, by the slabs they are moving.
-    let mut draining: BTreeMap<SlabId, DrainProgress> = BTreeMap::new();
+    let mut draining: HashMap<SlabId, DrainProgress> = HashMap::new();
     {
         let drains = state.drains.read().await;
         for d in drains.all() {
@@ -204,6 +204,9 @@ pub async fn of_volume(state: &Arc<AppState>, vm: &VolumeManager, id: VolumeId) 
     }
 
     let failed: Vec<SlabId> = health.failed_slabs.clone();
+    // Stable output: slabs in id order.
+    let mut by_slab: Vec<(SlabId, Count)> = by_slab.into_iter().collect();
+    by_slab.sort_by_key(|(id, _)| id.0);
     let mut slabs = Vec::with_capacity(by_slab.len());
     let mut array_ids = Vec::new();
     {

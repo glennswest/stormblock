@@ -12,7 +12,7 @@ use axum::{
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
-use super::{ApiError, ListResponse};
+use super::ApiError;
 use crate::drive::BlockDevice;
 use crate::mgmt::AppState;
 use crate::mgmt::config::{human_size, parse_size};
