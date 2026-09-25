@@ -658,3 +658,230 @@ async fn a_freshly_claimed_clone_survives_the_next_claim() {
     assert!(present.contains(&ids[1].as_str()));
     server.abort();
 }
+
+// ------------------------------------------------------------------ #107
+//
+// Each machine boots from a sealed golden of its own, made from what it is
+// assigned; every boot is a fresh clone of that; and the claim is the one
+// verb that needs no credential, so it can do nothing else.
+
+async fn boot_claim(client: &reqwest::Client, base: &str, tag: &str) -> serde_json::Value {
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/{tag}/claim"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "claim for {tag}");
+    resp.json().await.unwrap()
+}
+
+async fn sealed(state: &Arc<AppState>, ids: &[uuid::Uuid]) {
+    let mut vm = state.volume_manager.lock().await;
+    for id in ids {
+        vm.seal_volume(stormblock::volume::VolumeId(*id), None).await.unwrap();
+    }
+}
+
+fn vid(v: &serde_json::Value) -> stormblock::volume::VolumeId {
+    stormblock::volume::VolumeId(uuid::Uuid::parse_str(v.as_str().unwrap()).unwrap())
+}
+
+/// A machine boots from its own sealed golden — a clone of what it is
+/// assigned, not the release itself — and every boot is a fresh clone of it.
+#[tokio::test]
+async fn a_machine_boots_a_fresh_clone_of_its_own_sealed_golden() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "HOST1", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    let first = boot_claim(&client, &base, "HOST1").await;
+    let second = boot_claim(&client, &base, "HOST1").await;
+
+    let golden = vid(&first["host_golden"]["volume"]);
+    assert_eq!(first["host_golden"]["minted"], true);
+    assert_eq!(second["host_golden"]["minted"], false, "the golden is kept across boots");
+    assert_eq!(vid(&second["host_golden"]["volume"]), golden);
+    assert_ne!(golden.0, v1, "a machine's golden is its own, not the release");
+    assert_ne!(first["volume"]["id"], second["volume"]["id"], "every boot is a fresh clone");
+
+    let vm = state.volume_manager.lock().await;
+    assert!(vm.is_sealed(&golden), "the host's golden is sealed");
+    assert_eq!(vm.parent(&golden), Some(stormblock::volume::VolumeId(v1)));
+    let boot = vid(&second["volume"]["id"]);
+    assert_eq!(vm.parent(&boot), Some(golden), "boot clones descend from the host's golden");
+    assert!(!vm.is_sealed(&boot));
+    assert!(
+        vm.get_volume_handle(&vid(&first["volume"]["id"])).is_none(),
+        "the previous boot's clone is released"
+    );
+    drop(vm);
+    server.abort();
+}
+
+/// A tag seen for the first time takes the default image, and keeps it: the
+/// default moving later does not move a machine that already has one.
+#[tokio::test]
+async fn a_new_machine_is_pinned_to_the_default_image() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1, v2]).await;
+
+    // Nothing assigned and no default: nothing to boot.
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/NEW1/claim"))
+        .json(&serde_json::json!({}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    let first = boot_claim(&client, &base, "NEW1").await;
+    assert_eq!(vid(&first["claimed_from"]["release"]).0, v1);
+
+    let pinned: serde_json::Value = client
+        .get(format!("{base}/api/v1/synonyms/boothost/NEW1"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(pinned["target"]["id"].as_str().unwrap_or_else(|| pinned["target"].as_str().unwrap_or("")), v1.to_string());
+
+    // The default moves on; this machine does not.
+    client
+        .put(format!("{base}/api/v1/synonyms/boothost/default"))
+        .json(&serde_json::json!({"volume": v2.to_string()}))
+        .send().await.unwrap();
+    let again = boot_claim(&client, &base, "NEW1").await;
+    assert_eq!(vid(&again["claimed_from"]["release"]).0, v1);
+    assert_eq!(again["host_golden"]["minted"], false);
+    server.abort();
+}
+
+/// Re-imaging a machine makes it a new golden, and the old one goes once the
+/// clone that descended from it has been released.
+#[tokio::test]
+async fn re_imaging_makes_a_new_golden_and_collects_the_old_one() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1, v2]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "HOST2", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    let before = boot_claim(&client, &base, "HOST2").await;
+    let old_golden = vid(&before["host_golden"]["volume"]);
+
+    client
+        .put(format!("{base}/api/v1/synonyms/boothost/HOST2"))
+        .json(&serde_json::json!({"volume": v2.to_string()}))
+        .send().await.unwrap();
+    let after = boot_claim(&client, &base, "HOST2").await;
+    let new_golden = vid(&after["host_golden"]["volume"]);
+
+    assert_eq!(after["host_golden"]["minted"], true);
+    assert_ne!(new_golden, old_golden);
+    let collected: Vec<&str> = after["host_golden"]["collected"]
+        .as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(collected, vec![old_golden.0.to_string().as_str()]);
+    let vm = state.volume_manager.lock().await;
+    assert!(vm.get_volume_handle(&old_golden).is_none(), "the old golden is gone");
+    assert_eq!(vm.parent(&new_golden), Some(stormblock::volume::VolumeId(v2)));
+    for release in [v1, v2] {
+        assert!(
+            vm.get_volume_handle(&stormblock::volume::VolumeId(release)).is_some(),
+            "a release is never touched by this path"
+        );
+    }
+    drop(vm);
+    server.abort();
+}
+
+/// The open claim takes no options: whatever the body says, it names nothing,
+/// clones nothing unsealed, and grows nothing.
+#[tokio::test]
+async fn a_boot_claim_ignores_what_the_body_asks_for() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "HOST3", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/HOST3/claim"))
+        .json(&serde_json::json!({
+            "namespace": "images", "name": "hijack", "size": "1G", "unsealed_ok": true
+        }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["volume"]["name"], "boothost-HOST3");
+    assert_eq!(body["volume"]["size_bytes"], 8 * 1024 * 1024, "not grown");
+    let named = client
+        .get(format!("{base}/api/v1/synonyms/images/hijack"))
+        .send().await.unwrap();
+    assert_eq!(named.status(), 404, "the open claim binds no names");
+
+    // An unsealed assignment is refused, whatever the body says.
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "HOST4", "volume": v2.to_string()}))
+        .send().await.unwrap();
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/HOST4/claim"))
+        .json(&serde_json::json!({"unsealed_ok": true}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    server.abort();
+}
+
+/// With a token in force, the boot claim is the only thing that answers
+/// without one — the re-point that decides what the machine boots does not.
+#[tokio::test]
+async fn with_a_token_only_the_boot_claim_is_open() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, v2) = setup(&dir).await;
+    sealed(&state, &[v1, v2]).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "HOST5", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    state.set_auth(stormblock::serve::api::AuthConfig { api_token: Some("tok".into()), admin_token: None });
+
+    boot_claim(&client, &base, "HOST5").await;
+    for req in [
+        client.get(format!("{base}/api/v1/volumes")),
+        client.get(format!("{base}/api/v1/synonyms/boothost/HOST5")),
+        client.put(format!("{base}/api/v1/synonyms/boothost/HOST5")).json(&serde_json::json!({"volume": v2.to_string()})),
+        client.post(format!("{base}/api/v1/synonyms/boothost/HOST5/rollback")),
+        client.post(format!("{base}/api/v1/synonyms/hostgolden/HOST5/claim")).json(&serde_json::json!({})),
+    ] {
+        let r = req.send().await.unwrap();
+        assert_eq!(r.status(), 401, "{}", r.url());
+    }
+    let ok = client
+        .put(format!("{base}/api/v1/synonyms/boothost/HOST5"))
+        .bearer_auth("tok")
+        .json(&serde_json::json!({"volume": v2.to_string()}))
+        .send().await.unwrap();
+    assert_eq!(ok.status(), 200, "the token can re-image a machine");
+    server.abort();
+}
