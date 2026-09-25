@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Per-volume rebuild at scale (2026-09-25, #146) — IN PROGRESS
+### Per-volume rebuild at scale (2026-09-25, #146) — DONE (v18.5.0)
 
 Owner: redundancy is per volume, members on different drives; a failed
 drive's volumes rebuild **in parallel across the pool, per volume**, most
@@ -138,22 +138,31 @@ Found in reading it, and has to be fixed first:
   durable (the owed-slot rule, b270bfd).
 
 Plan:
-- [ ] targeted publish under the extent lock for an unshared extent
+- [x] targeted publish under the extent lock for an unshared extent
       (`ref_count == 1`); shared extents (never written in place) batched
       into one sweep, rechecked under the map lock
-- [ ] `ResyncOptions`: concurrency within a volume, a shared throttle, a
+- [x] `ResyncOptions`: concurrency within a volume, a shared throttle, a
       cancel flag, a checkpoint that persists and then releases owed slots
-- [ ] `VolumeHealth.margin`: failures the least-protected extent can still
+- [x] `VolumeHealth.margin`: failures the least-protected extent can still
       take
-- [ ] `src/rebuild.rs`: one node-wide queue ordered by margin, N volumes at
+- [x] `src/rebuild.rs`: one node-wide queue ordered by margin, N volumes at
       once, jobs with progress; a volume hit again while running reruns
-- [ ] health report → rebuild automatically; `failed`/`missing` drain after
+- [x] health report → rebuild automatically; `failed`/`missing` drain after
       the rebuild (for what has no redundancy); manual resync and drain
       refuse while a rebuild holds the volume/drive
-- [ ] `GET/POST /api/v1/rebuilds`, `DELETE …/{id}`, `PUT …/throttle`;
-      `[rebuild] parallel`, `extents_in_flight`, `max_bytes_per_sec`
-- [ ] tests: stale-write race, parallel rebuild after a drive failure,
-      margin order, throttle; docs/redundancy.md + multi-drive.md; close
+- [x] `GET/POST /api/v1/rebuilds`, `DELETE …/{id}`, `PUT …/settings`;
+      `[rebuild] automatic`, `parallel`, `extents_in_flight`, `max_bytes_per_sec`
+- [x] tests: stale-write race, parallel rebuild after a drive failure,
+      margin order, throttle, partial; multidrive over HTTP; docs; close
+
+Found by the multidrive test once the rebuild ran before the drain: **a
+failed drive excluded its whole domain at the policy's rung**, so an `@shelf`
+volume had nowhere to rebuild (and could not place new extents while
+degraded). A failed slab now keeps out only its drive; a dead member holds no
+domain. Measured (`examples/rebuild_rate`, dev): page cache 1.8 → 3.1 GB/s
+from 1 to 8 volumes at once; O_DIRECT 126 → ~200 MiB/s, one virtual disk's
+ceiling. Follow-ups: #159 (EC k+m), #160 (scrub — owner decision:
+no checksums, so what repairs a mismatch).
 
 ### Allocation metadata at 40 PB a node (2026-09-25, #145) — DONE (v18.4.0, docs/metadata-scale.md)
 

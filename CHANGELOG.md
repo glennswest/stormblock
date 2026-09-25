@@ -3,6 +3,50 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-25 (rebuild)
+- **feat(rebuild):** a failed drive's volumes are rebuilt without anyone
+  asking (#146). A drive health report of `degraded`, `failing`, `failed` or
+  `missing` queues every redundant volume with a member on the drive. There is
+  one queue for the node, most endangered first (by the new `margin`).
+  `parallel` volumes rebuild at once and `extents_in_flight` extents of each at
+  once, under one node-wide `max_bytes_per_sec` budget. The map is made durable
+  every 4096 legs before the slots it replaced are freed. A volume hit again
+  mid-rebuild is rebuilt once more. `failed` and `missing` drain the drive
+  after the rebuild instead of alongside it.
+  `GET/POST /api/v1/rebuilds`, `GET/DELETE /api/v1/rebuilds/{id}` and
+  `PUT /api/v1/rebuilds/settings`; `[rebuild]` in the config.
+  `placement.rebuild` reads `queued` or `running`. A manual resync of a volume
+  the queue holds, or a drain of a drive whose rebuild is running, is refused
+  (409).
+- **feat(volume):** `margin` on a volume's health: how many more member
+  losses its least protected extent or stripe can take.
+- **fix(volume):** a resync published its rebuilt legs only at the end,
+  after each extent's lock was released. A write in between reached the
+  surviving legs and not the new one, which then served stale data. An
+  extent only this volume maps is now published under its lock. Shared
+  extents, which are never written in place, are published together at the
+  end and redone under the lock if they stopped being shared.
+- **fix(volume):** a failed drive ruled out its whole domain at the volume's
+  rung, so a `mirror:2@shelf` or `raid5@shelf` volume could not be rebuilt
+  after a drive failed: the other drives of that shelf were the only place
+  the leg could go. New extents of such a volume could not be placed either.
+  A failed slab now keeps out only its own drive, and a dead member holds no
+  domain in its stripe. The multi-drive test only passed because a drain
+  had moved the legs first.
+- **fix(volume):** a resync freed the slots it replaced before the map
+  naming their replacements was on disk. It now frees them after the map is
+  persisted.
+- **perf(volume):** a resync visits only the extents and stripes that need
+  work, publishes each rebuilt leg into its own map instead of sweeping
+  every map on the node (the sweep ran once per parity stripe), and can copy
+  several extents at once.
+- **feat(examples):** `rebuild_rate` measures rebuild throughput at several
+  `parallel` and `extents_in_flight` settings, on O_DIRECT or the page cache.
+- **docs:** `docs/redundancy.md` gains "Rebuilding after a failure"; the
+  failure-domain rule for failed drives; `docs/multi-drive.md`'s drive-life
+  table. Follow-ups filed: #159 (erasure coding k+m) and #160 (scrub, an
+  owner decision).
+
 ## [v18.4.0] — 2026-09-25
 
 ### 2026-09-25 (metadata at scale)

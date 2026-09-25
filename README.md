@@ -57,6 +57,7 @@ Initiator (StormFS, iSCSI, NVMe-oF client)
 - **SAS via io_uring** — Kernel SAS drivers (mpt3sas) with O_DIRECT and registered buffers.
 - **ublk server** — Exports volumes as `/dev/ublkbN` via io_uring URING_CMD (Linux 6.0+).
 - **Several drives** — implicit pools per role and tier, legs placed by failure domain (drive, shelf, rack), a failed drive quarantined, drained and rebuilt around; see [docs/multi-drive.md](docs/multi-drive.md).
+- **Rebuild after a drive fails** — automatic and per volume: every volume with a member on the drive, most endangered first, several at once, under one byte budget; see [docs/redundancy.md](docs/redundancy.md#rebuilding-after-a-failure-146).
 - **Metadata at scale** — what allocation metadata costs per slot and per PB, and the design for 40 PB a node; see [docs/metadata-scale.md](docs/metadata-scale.md).
 - **Redundancy per volume** — `mirror:N`, `raid5:D+1`, `raid6:D+2` are a property of each volume, realised by placing its extents across distinct failure domains (drive, shelf, rack, …); a node carries a mix on the same drives, clones inherit their golden's policy, `resync` rebuilds a lost leg, a drive can be reported failing and drained over HTTP, and a dirty-stripe log bounds the parity write hole. See [docs/redundancy.md](docs/redundancy.md).
 - **Software RAID** — drive-level RAID 1/5/6/10 with AVX2/AVX-512/NEON SIMD parity computation, kept as a leg transport and for whole-device use.

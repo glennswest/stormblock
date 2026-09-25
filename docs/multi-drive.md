@@ -144,7 +144,7 @@ today, or `mirror` on a node that can hold two drives' worth.)*
 |---|---|---|
 | **added** | `POST /api/v1/drives` opens and labels it; a slab is a second, manual call (`POST /api/v1/slabs`, or `…/adopt` for one that already carries one). Boot adopts the slabs it finds. | A new blank drive gets a data slab by policy (the same `assimilate` policy the boot uses: `off`, `blank`, `any`), and the pool grows by it. A drive carrying a slab is adopted with its data, never reformatted. Then the pool is **rebalanced** onto it (below). *(Owner decision 3: automatic, or on an operator's word.)* |
 | **drained** | `POST /api/v1/drives/{id}/drain`: quarantine, then move every leg off, one extent at a time, with I/O flowing. Ends `empty`, `stuck` or `cancelled`. Now respects each volume's rung and role. | Rate-limited against live I/O. A drive is **removed** only when it is `empty` (`DELETE /api/v1/drives/{id}`). |
-| **failing / failed** | `POST /api/v1/drives/{id}/health` (from stormdrive): quarantine, and every redundant volume with a leg there stops trusting it (degraded). `failed` also starts a drain. **Rebuild is manual:** `POST /api/v1/volumes/{id}/resync`, one volume per call, synchronous, holding the volume manager for the whole run. | **Automatic, background, per-volume rebuild (#146):** the volumes with a member on the drive, most-endangered first (least redundancy left), several at once onto different drives, throttled against live I/O. |
+| **failing / failed** | `POST /api/v1/drives/{id}/health` (from stormdrive): quarantine, and every redundant volume with a leg there stops trusting it (degraded). **Rebuilt automatically (#146):** the volumes with a member on the drive, most endangered first (`margin`), several at once and several extents of each at once, onto drives of their own choosing, under one node-wide byte budget; `/api/v1/rebuilds` shows and steers it. `failed` then drains what has no redundancy. | Scrub (#160); erasure coding wider than P+Q (#159). |
 | **gone** (pulled, not answering) | reported `missing`: as failed | as failed |
 
 The test drives all of the "today" column: four drives in two shelves; a
@@ -213,7 +213,7 @@ above ran on files.
 
 | | where |
 |---|---|
-| per-volume background rebuild: automatic on failure, parallel, prioritised, throttled | stormblock #146 |
+| per-volume background rebuild: automatic on failure, parallel, prioritised, throttled — **done** ([redundancy.md](redundancy.md#rebuilding-after-a-failure-146)) | stormblock #146 |
 | redundancy / spread / tier as StorageClass parameters, end to end | stormblock #151, rustkube-node #71, stormblock-csi #21 |
 | overcommit per drive → pool admission and headroom | stormblock #152, stormdrive #13, rustkube-node #62 |
 | drive affinity for non-redundant volumes *(decision 1)* | stormblock #153 |

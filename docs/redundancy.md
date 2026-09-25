@@ -78,6 +78,15 @@ asks for separate drives is never satisfied by two slabs nobody can tell
 apart. A slab that has been removed from the registry has no domain and
 constrains nothing — that is what lets a resync place onto the survivors.
 
+A slab a volume **has stopped trusting** keeps its drive out, and only its
+drive: it is compared at the `drive` rung, never at the policy's. One failed
+drive in a shelf of 160 does not rule out the other 159 for a
+`mirror:2@shelf` leg — for a two-shelf mirror, the rest of that shelf is the
+only place the replacement can go. Likewise the member being replaced holds
+no domain in its stripe. Until #146 both were counted at the policy's rung, so
+an `@shelf` volume could not be rebuilt at all after a failure (a drain moved
+its legs, which is why no test had noticed).
+
 ## What happens on I/O
 
 **Mirror.** A write goes to every trusted leg concurrently and is acknowledged
@@ -118,6 +127,10 @@ PUT  /api/v1/volumes/{id}/redundancy {"redundancy":"mirror:3"}
 `health` is `healthy` (every leg the policy asks for is on a trusted slab),
 `degraded` (something is missing but everything is readable) or `failed` (an
 extent has no readable leg, or a stripe has lost more than its parity covers).
+`margin` is how many more member losses the least protected extent (or
+stripe) can take: `1` for a healthy `mirror:2` or `raid5`, `0` once one of its
+members is gone — and for an unreplicated volume, always. The rebuild queue
+orders by it.
 
 `resync` is the one repair verb: a replaced drive, a slab that was marked
 failed, a policy raised from `mirror:2` to `mirror:3`, or a plain volume that
@@ -126,6 +139,15 @@ missing from what is left, add what the policy wants, drop what it no longer
 does, and forgive any failed slab nothing references any more. It works on
 shared slots too: a leg rebuilt for a golden is rebuilt for every clone that
 shares it, in one sweep.
+
+A resync runs while the volume serves I/O. An extent only this volume maps is
+copied and **published under that extent's lock**, so a write cannot land
+between the copy and the switch and leave the new leg stale — which it could
+until #146, when every new leg was published at the end. A shared extent is
+never written in place (a write copies it away first), so those are published
+together at the end, and any that stopped being shared in the meantime is done
+again under its lock. The slots rebuilt legs replace are freed only after the
+map that stopped naming them is on disk.
 
 Changing a policy is applied in place only between `none` and `mirror:N`.
 Converting to or from parity would re-stripe every extent — that is a move,
@@ -161,10 +183,10 @@ not a setting, and is refused with 400.
 - **`node`** is this node, or the host a fabric drive (`nvme-tcp://`,
   `iscsi://`) is served from. A leg on a RAID-1 member attached over NVMe/TCP
   names the node it lives on.
-- **`rebuild`** is `needed` while legs are missing. A `resync` is one
-  synchronous call, so there is no percentage to report while it runs, and a
-  drive-level RAID rebuild's progress is not kept either (#69). State is
-  reported, and progress is not claimed.
+- **`rebuild`** is `needed` while legs are missing, and `queued` or
+  `running` while the rebuild queue holds the volume; its progress is at
+  `/api/v1/rebuilds` (below). A drive-level RAID rebuild's progress is not
+  kept (#69).
 - `array_id` on the volume is set when all of it is on one drive-level array.
 
 The listing also carries `generation`, bumped whenever the node's volume
@@ -235,7 +257,12 @@ every redundant volume with a leg on it**, so those volumes stop reading and
 writing that leg immediately. An unreplicated volume's only copy is left
 alone: distrusting it would make the data unreadable, not safer. `healthy`
 lifts the quarantine; the volumes' failed sets clear on their next `resync`.
-`failed` and `missing` (or `"drain": true`) also start a drain.
+Every redundant volume it touched is then **rebuilt automatically** (next
+section). `failed` and `missing` (or `"drain": true`) also drain the drive —
+after that rebuild finishes, since both would otherwise move the same legs.
+The rebuild takes the redundant volumes off it from their surviving members;
+the drain then takes what has no redundancy, from the drive itself if it still
+answers. The response says `"rebuild": <job>` and `"drain_after_rebuild"`.
 
 **Drain** moves every leg off every slab on the drive — data and parity —
 one extent at a time, taking the map and registry locks per extent and
@@ -281,9 +308,67 @@ throughout and is refused while the volume is exported or attached — it is
 offline by design. `none`/`mirror` to `mirror` does not need it: set the
 policy and `resync`.
 
+## Rebuilding after a failure (#146)
+
+There is no drive-level array to rebuild. What a failed drive leaves behind is
+**a set of volumes each missing a member**, and each rebuilds onto drives of
+its own choosing. Their extents were spread over the pool when they were
+written, so the rebuilds read from and write to many drives at once: a
+drive's worth of data comes back from the whole pool, not from one spare.
+
+A health report of `degraded`, `failing`, `failed` or `missing` starts it; so
+can an operator:
+
+```
+GET    /api/v1/rebuilds              → settings, queued, running, bytes_copied, jobs (newest first)
+GET    /api/v1/rebuilds/{job}        → one job: every volume, its margin, state, legs, bytes, errors
+POST   /api/v1/rebuilds {"volumes":["pvc-a","…"]}   → these (by id or name); {} = every volume not healthy
+DELETE /api/v1/rebuilds/{job}        → stop it; what was rebuilt stays rebuilt
+PUT    /api/v1/rebuilds/settings {"parallel":8,"extents_in_flight":8,"max_bytes_per_sec":524288000}
+```
+
+- **One queue for the node, most endangered first.** Ordered by `margin`: a
+  `mirror:2` that lost a member (margin 0) goes before a `mirror:3` that lost
+  one (margin 1), whichever failure queued them.
+- **Parallel twice over.** `parallel` volumes at once (default 4), and
+  `extents_in_flight` extents of each at once (default 4), so one large volume
+  is not copied a slot at a time.
+- **Throttled as a whole.** `max_bytes_per_sec` is one budget shared by every
+  rebuild on the node (default 0, no limit): ten rebuilds take no more of the
+  drives than one would. A rebuild pays for an extent before it locks it, so
+  a rebuild waiting for its budget never holds a write up.
+- **Durable as it goes.** Every 4096 rebuilt legs the map is persisted and the
+  slots it stopped naming are freed; a crash loses at most that much progress.
+- **A second failure** that hits a volume mid-rebuild queues it again for
+  when the current pass ends — that pass may already be past what it took.
+- A job ends `done` when every volume is healthy, and `partial`, with the
+  reasons, when one is not (typically: too few domains left to hold its
+  policy). Unreplicated volumes are never queued: there is nothing to rebuild
+  them from.
+- A manual `resync`, or `spec.resync`, of a volume the queue holds is refused
+  (409) or left to the queue; a drain of a drive whose rebuild is running is
+  refused until it finishes.
+
+`[rebuild]` in `stormblock.toml` sets the starting values (`automatic`,
+`parallel`, `extents_in_flight`, `max_bytes_per_sec`); the settings endpoint
+changes them live and is not persisted.
+
+**Measured** on dev (`examples/rebuild_rate`, 8 slabs on files of one virtual
+disk, 16 `mirror:2` volumes, one slab failed, 64 MiB to rebuild, median of 3
+interleaved runs): on the page cache — the engine alone — 1.8 GB/s one volume
+at a time and 3.1 GB/s eight at once; with O_DIRECT, 126 MiB/s one at a time
+and ~200 MiB/s in parallel, which is that one virtual disk's ceiling rather
+than eight drives'. Run-to-run spread is wide (O_DIRECT 98–290 MiB/s) on a
+shared host, so read those as scaling, not as a drive's rate. What a 256 TB
+drive takes on real hardware is the test stormcos#92 (emulated drives) and a
+shelf are for.
+
 ## Not in this cut
 
 - StormFS chunk/versioned volumes stay `none` — StormFS replicates above.
+- Erasure coding wider than two parity members (`k+m` with m > 2), and a
+  periodic scrub that compares mirror legs and parity on a schedule (#159,
+  #160). `resync?verify=true` is the manual parity check.
 - A restripe of a volume with live writers (it is offline).
 - `[management].topology` still travels as a flat map to /v1 peers; only the
   local node reports `topology_chain`.
