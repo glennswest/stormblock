@@ -2630,17 +2630,22 @@ mod redundancy_tests {
         let report = mgr.resync_volume(src, false).await.unwrap();
         assert_eq!(report.unrecoverable, 0, "{report:?}");
         assert_eq!(mgr.health(&src).await.unwrap().state, HealthState::Healthy);
-        // The snapshot's shared legs moved with the source's: nothing left on
-        // the lost slab for either, and its own resync has nothing to do.
+        // The snapshot's shared legs moved with the source's. The one extent
+        // the source rewrote is the snapshot's alone now, so that one is left
+        // for the snapshot's own resync: at most one leg.
         {
             let gem = mgr.gem().read().await;
-            for id in [src, snap] {
-                let map = gem.get_volume_map(&id).unwrap();
-                assert!(map.all_legs().all(|l| l.slab_id != lost), "{id:?} still names the lost slab");
+            assert!(gem.get_volume_map(&src).unwrap().all_legs().all(|l| l.slab_id != lost));
+            let smap = gem.get_volume_map(&snap).unwrap();
+            for (vext, loc) in &smap.extents {
+                if *vext != 0 {
+                    assert!(loc.legs().all(|l| l.slab_id != lost), "snapshot extent {vext} still names the lost slab");
+                }
             }
         }
         let again = mgr.resync_volume(snap, false).await.unwrap();
-        assert_eq!(again.legs_rebuilt, 0, "{again:?}");
+        assert!(again.legs_rebuilt <= 1, "{again:?}");
+        assert!(mgr.gem().read().await.get_volume_map(&snap).unwrap().all_legs().all(|l| l.slab_id != lost));
         assert_eq!(mgr.health(&snap).await.unwrap().state, HealthState::Healthy);
         // Rebuilt once, not once per map: the pool gave up one slot per leg
         // that moved and got back the one it replaced.

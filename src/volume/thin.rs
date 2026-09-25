@@ -1972,6 +1972,11 @@ impl ThinVolumeHandle {
         if Self::cancelled(opts) {
             return (out, Vec::new());
         }
+        // Paid before the lock: a rebuild waiting for its budget must not
+        // hold the extent away from the writes it is yielding to.
+        if let Some(t) = &opts.throttle {
+            t.take(self.slot_size).await;
+        }
         let _e = self.shard(vext).lock().await;
         let Some(loc) = ({ let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() }) else {
             return (out, Vec::new());
@@ -1994,9 +1999,6 @@ impl ThinVolumeHandle {
                 extra.push(hs.pop().unwrap());
             }
             return (out, extra);
-        }
-        if let Some(t) = &opts.throttle {
-            t.take(self.slot_size).await;
         }
         let mut data = vec![0u8; self.slot_size as usize];
         let mut got = false;
@@ -2200,10 +2202,10 @@ impl ThinVolumeHandle {
         if Self::cancelled(opts) {
             return out;
         }
-        let _s = self.shard(stripe).lock().await;
         if let Some(t) = &opts.throttle {
             t.take(self.slot_size * width as u64).await;
         }
+        let _s = self.shard(stripe).lock().await;
         let members = match self.assemble_stripe(stripe, width).await {
             Ok(m) => m,
             Err(e) => {
