@@ -3,6 +3,27 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-25 (placement)
+- **feat(volumes):** `placement` on a volume (#136, #114). It lists each slab
+  holding a leg, with its role, tier, domain, drive (serial, WWN, model,
+  path), node, state (`ok`/`failed`/`quarantined`/`draining` with progress/
+  `missing`), legs and bytes. It also groups them per drive, gives the leg
+  totals and whether a rebuild is owed, and lists each drive-level RAID
+  array's members with their state. It is always on
+  `GET /api/v1/volumes/{id}`, and on the listing with `?placement=true`.
+  `array_id` is filled when a volume is on one array.
+- **feat(volumes):** the listing carries a `generation`, bumped on every
+  metadata persist. `?since=N` or `If-None-Match` answers 304 when nothing has
+  changed.
+- **feat(drives):** drives know who they are. `FileDevice` and the SAS backend
+  read serial, model and WWN from sysfs, and a partition resolves to its disk.
+  `DeviceId` gains `wwn`, and `/api/v1/drives` and every slab
+  (`/api/v1/slabs` → `drive`) report it.
+- **fix(placement):** two slabs on one drive are one failure domain. A slab in
+  a partition had the domain `drive=file+<offset>`, so two partitions of one
+  spindle counted as two drives and a mirror's legs could share it. Domains
+  and drive labels now key on the drive (`BlockDevice::drive_id`).
+
 ## [v17.0.1] — 2026-09-25
 
 ### 2026-09-25 (snapshots)

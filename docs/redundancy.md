@@ -54,8 +54,16 @@ site / building / room / row / rack / node / hba / shelf / bay / drive
 
 Two slabs are *the same domain at rung R* when their chains agree through R.
 A policy names the rung it spreads at (`mirror:2@shelf`); the default is
-`drive`. A slab's domain is its device's identity (`drive=<serial>`, or the
-path for a file) under whatever labels the drive was registered with:
+`drive`. A slab's domain is its **drive's** identity under whatever labels
+the drive was registered with: `drive=<serial>`, else its WWN, else its path.
+The drive is read from sysfs (serial, model, WWN; a partition resolves to its
+disk), so **two slabs on one drive are one domain whatever their offsets**.
+Before #136 a slab in a partition got `drive=file+<offset>`, which made two
+partitions of one spindle look like two drives to a mirror. The serial comes
+first because it names the physical device. NVMe namespaces share their
+controller's serial and fail with it (NVMe-oF namespaces from one StormBlock
+target all report `SB010A` on dev), and they are told apart by WWN in each
+slab's `drive`.
 
 ```bash
 # stormdrive (#70) resolves shelf/bay/hba from SES and sysfs and registers
@@ -122,6 +130,49 @@ shares it, in one sweep.
 Changing a policy is applied in place only between `none` and `mirror:N`.
 Converting to or from parity would re-stripe every extent — that is a move,
 not a setting, and is refused with 400.
+
+## Where a volume lives (#136)
+
+`GET /api/v1/volumes/{id}` carries `placement`; the listing carries it with
+`?placement=true` (it walks the volume's extent map, so it is opt-in there):
+
+```json
+"placement": {
+  "slabs": [
+    { "id": "9ea6…", "role": "system", "tier": "hot", "domain": "drive=WD-WX11D28JFS6T",
+      "drive": { "serial": "WD-WX11D28JFS6T", "wwn": "naa.50014ee2b5d3a1f0",
+                 "model": "WDC WD20EFRX-68E", "path": "/dev/sda" },
+      "node": "C2NR0Q2", "state": "ok", "legs": 740, "shared_legs": 12,
+      "parity_legs": 0, "bytes": 775946240 }
+  ],
+  "drives": [ { "drive": { … }, "node": "C2NR0Q2", "slabs": 2, "legs": 740, "bytes": 775946240 } ],
+  "legs": { "policy": "mirror:2", "health": "healthy", "extents": 370,
+            "expected": 740, "missing": 0, "unreadable": 0, "failed_slabs": [] },
+  "rebuild": "none",
+  "arrays": [ { "id": "…", "level": "raid1",
+                "members": [ { "index": 0, "state": "active", "drive": { … }, "node": "…" } ] } ]
+}
+```
+
+- **Slab `state`**: `ok`; `failed` means this volume stopped trusting it,
+  and a resync rebuilds its legs elsewhere; `quarantined` means a health report
+  took it out of placement; `draining` comes with `drain {moved, remaining,
+  failed}`; `missing` means a leg names a slab this node no longer has.
+- **`node`** is this node, or the host a fabric drive (`nvme-tcp://`,
+  `iscsi://`) is served from. A leg on a RAID-1 member attached over NVMe/TCP
+  names the node it lives on.
+- **`rebuild`** is `needed` while legs are missing. A `resync` is one
+  synchronous call, so there is no percentage to report while it runs, and a
+  drive-level RAID rebuild's progress is not kept either (#69). State is
+  reported, and progress is not claimed.
+- `array_id` on the volume is set when all of it is on one drive-level array.
+
+The listing also carries `generation`, bumped whenever the node's volume
+metadata is persisted: a volume created, deleted, cloned, re-placed or
+re-legged. A mirror remembers it and asks `?since=N`, or sends
+`If-None-Match: "N"`, and gets a `304` when nothing has changed. Slabs name
+their drive the same way (`GET /api/v1/slabs` → `drive`), which is how "look at
+a drive and know how much is left" joins to stormdrive.
 
 ## Creating volumes
 
