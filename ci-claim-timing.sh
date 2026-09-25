@@ -30,14 +30,15 @@ trap '[ -n "$ENGINE" ] && kill "$ENGINE" 2>/dev/null; wait 2>/dev/null || true' 
 
 [ -x "$BIN" ] || fail "no binary at $BIN"
 rm -rf "$W"; mkdir -p "$W/data"
-truncate -s 64G "$W/d1.img"
+truncate -s 32G "$W/d1.img"
+truncate -s 32G "$W/d2.img"
 cat > "$W/stormblock.toml" <<EOF
 [management]
 listen_addr = "$MGMT"
 data_dir = "$W/data"
 node_name = "ci-claim"
 EOF
-RUST_LOG=stormblock=warn "$BIN" --config "$W/stormblock.toml" --device "$W/d1.img" --volume seed:16M \
+RUST_LOG=stormblock=warn "$BIN" --config "$W/stormblock.toml" --device "$W/d1.img" --device "$W/d2.img" --raid raid1 --volume seed:16M \
     --data-dir "$W/data" --no-iscsi --nvmeof-addr "$NVME" --nvmeof-nqn nqn.2026-09.lo.test:claim \
     >"$W/engine.log" 2>&1 &
 ENGINE=$!
