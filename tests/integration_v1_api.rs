@@ -563,6 +563,21 @@ async fn v1_snapshot_clone_flow_with_cow_divergence() {
     assert_eq!(s, 200);
     assert_eq!(snap["id"], snap2["id"]);
 
+    // The snapshot is a golden (#111): sealed, so nothing can change what a
+    // VolumeSnapshot holds, and what a restore clones from.
+    let snap_backing = {
+        let v1 = state.v1.lock().await;
+        v1.snapshots[&snap_id].local_id.expect("a local volume's snapshot is engine-backed")
+    };
+    {
+        let vm = state.volume_manager.lock().await;
+        let sb = stormblock::volume::VolumeId(snap_backing);
+        assert!(vm.is_sealed(&sb), "a VolumeSnapshot is a sealed golden");
+        assert_eq!(vm.parent(&sb), Some(stormblock::volume::VolumeId(backing)));
+        let sv = vm.get_volume(&sb).unwrap();
+        assert!(sv.write(0, &vec![0xEE_u8; SLOT as usize]).await.is_err(), "a snapshot refuses writes");
+    }
+
     // Clone from the snapshot (the M2 clone-and-attach disk half).
     let mut clone_req = create_req("agent-fork-1", 1 << 20, 0);
     clone_req["source"] = json!({ "kind": "snapshot", "id": snap_id });
@@ -597,8 +612,21 @@ async fn v1_snapshot_clone_flow_with_cow_divergence() {
                 .as_u16()
         }
     };
+    {
+        let vm = state.volume_manager.lock().await;
+        assert_eq!(
+            vm.parent(&stormblock::volume::VolumeId(clone_backing)),
+            Some(stormblock::volume::VolumeId(snap_backing)),
+            "a restore is a CoW clone of the snapshot"
+        );
+    }
     assert_eq!(del(snap_id.clone()).await, 200);
     assert_eq!(del(snap_id).await, 200);
+
+    // Deleting the VolumeSnapshot leaves what was restored from it whole.
+    let mut buf = vec![0u8; SLOT as usize];
+    clone_vol.read(0, &mut buf).await.unwrap();
+    assert!(buf.iter().all(|&b| b == 0xAA), "a restored volume outlives its snapshot");
 
     server.abort();
 }
@@ -685,7 +713,7 @@ async fn v1_reset_discards_divergence_without_recreating_the_volume() {
 async fn v1_group_snapshot_is_atomic_and_idempotent() {
     let dir = TempDir::new().unwrap();
     let state = setup_state(&dir).await;
-    let (base, server) = start_server(state).await;
+    let (base, server) = start_server(state.clone()).await;
     let c = reqwest::Client::new();
 
     let (_, a) = post(&c, format!("{base}/v1/volumes"), create_req("data", 1 << 20, 0)).await;
@@ -703,6 +731,15 @@ async fn v1_group_snapshot_is_atomic_and_idempotent() {
     // Single consistency point.
     assert_eq!(snaps[0]["created_at_ms"], snaps[1]["created_at_ms"]);
     assert_eq!(snaps[0]["group_snapshot_id"], g1["id"]);
+    // Every member is a sealed golden (#111).
+    {
+        let v1 = state.v1.lock().await;
+        let vm = state.volume_manager.lock().await;
+        for m in snaps {
+            let local = v1.snapshots[m["id"].as_str().unwrap()].local_id.expect("engine-backed");
+            assert!(vm.is_sealed(&stormblock::volume::VolumeId(local)), "group member is sealed");
+        }
+    }
 
     // Idempotent by name.
     let (s, g2) = post(

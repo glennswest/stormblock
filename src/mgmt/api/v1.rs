@@ -1689,12 +1689,22 @@ async fn create_snapshot(
     let size = rec.vol.size_bytes;
     let source_local = rec.local_id;
 
-    // COW clone through GEM when the volume is backed on this node.
+    // COW clone through GEM when the volume is backed on this node — and
+    // sealed, because a snapshot *is* a golden (#111): the point-in-time copy
+    // a restore clones from, which nothing may write. Left unsealed it was an
+    // ordinary engine volume, and anything that attached it read-write could
+    // change what the VolumeSnapshot holds.
     let local_id = match source_local {
         Some(src) => {
             let mut vm = state.volume_manager.lock().await;
             match vm.create_snapshot(EngineVolumeId(src), &req.name).await {
-                Ok(id) => Some(id.0),
+                Ok(id) => {
+                    if let Err(e) = vm.seal_volume(id, None).await {
+                        let _ = vm.delete_volume(id).await;
+                        return Err(V1Error::Internal(format!("sealing snapshot: {e}")));
+                    }
+                    Some(id.0)
+                }
                 Err(e) => {
                     return Err(V1Error::Internal(format!("engine snapshot failed: {e}")))
                 }
@@ -1809,6 +1819,12 @@ async fn create_group_snapshot(
         match vm.create_snapshots_atomic(&locally_backed).await {
             Ok(ids) => {
                 for ((_, name), snap_id) in locally_backed.iter().zip(ids) {
+                    // Sealed after the fence, not inside it: the fence is
+                    // what makes the members one point in time, and sealing
+                    // changes no extent (#111).
+                    if let Err(e) = vm.seal_volume(snap_id, None).await {
+                        return Err(V1Error::Internal(format!("sealing group member: {e}")));
+                    }
                     local_snaps.insert(name.clone(), snap_id.0);
                 }
             }
