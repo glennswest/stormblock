@@ -16,7 +16,8 @@
 //! | writing a handful of known files into one | yes — [`files`], in userspace, no mount | |
 //! | writing image *content* into a filesystem | | the consumer that owns the content (tar, whiteouts, image config) |
 //!
-//! See [`ext4`] for the on-disk format and [`template`] for the lifecycle.
+//! See [`ext4`] and [`xfs`] for the on-disk formats and [`template`] for the
+//! lifecycle.
 
 pub mod disk;
 pub mod ext4;
@@ -28,6 +29,7 @@ pub mod ext4;
 pub mod ext4_free;
 pub mod files;
 pub mod template;
+pub mod xfs;
 
 pub use ext4::{Ext4Layout, Ext4Params, Ext4Report, FsProfile, SealBlocker};
 pub use files::SeedFile;

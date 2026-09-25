@@ -97,6 +97,12 @@ mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v3.0.0"
 # with no mount, no loop device and no attach.
 fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.7.0", default-features = false }
 
+# XFS beside ext4 (#147): a `mkfs.xfs`-identical formatter and a read-only
+# walker for XFS images (RHEL, Rocky, Alma roots). Separate crates with
+# separate device traits; `fs::xfs::XfsDevice` implements both.
+mkfs-xfs = { git = "https://github.com/glennswest/mkfs.xfs.rs", tag = "v0.2.0", default-features = false }
+fio-xfs = { git = "https://github.com/glennswest/fio.xfs.rs", tag = "v0.2.0", default-features = false }
+
 # Async utilities
 async-trait = "0.1"
 futures = "0.3"
