@@ -371,8 +371,15 @@ allocation while reads went on working (#92, #93).
 > second object; cloning is `POST /api/v1/volumes/{id}/clone` and always
 > stamps a fresh filesystem UUID; `GET /api/v1/volumes/{id}/lineage` walks
 > the ancestry; and `from_template` accepts any sealed volume by id or name.
-> The `/api/v1/fstemplates` surface below is the same model with a name, a
-> standing clone and a clone count kept beside it.
+> The `/api/v1/fstemplates` surface below is the same model with a name and
+> a clone count kept beside it.
+>
+> **Nothing is minted ahead of a claim (#137, v18.0.0).** A mint is a
+> sub-millisecond snapshot, one superblock write with its flush, and one
+> metadata persist. A clone of a sealed blank is verified by reading its stamp
+> back, not by an fsck of its own, because the blank was checked when it was
+> sealed. So `claim` mints on demand and no volume on a node is one nobody
+> asked for; `examples/claim_timing.rs` and `ci-claim-timing.sh` measure it.
 
 Formatting a filesystem is the expensive part of provisioning a volume: a
 256 MiB ext4 laid down over the network takes ~20 s, while cloning a sealed

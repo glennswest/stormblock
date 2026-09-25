@@ -3,6 +3,27 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.0.0] — 2026-09-25
+
+### 2026-09-25 (claims)
+- **BREAKING (fstemplates):** standby clones are retired (#137). A claim mints
+  its clone now. `GET/POST /api/v1/fstemplates/standby` and
+  `POST /api/v1/fstemplates/{id}/standby` are gone, a claim's response no
+  longer carries `from_standby`, and nothing is minted after a seal or a
+  clone. On startup a node deletes the clone each template recorded as
+  standing. Only that one is deleted, because a claimed clone kept its
+  `standby-…` name.
+- **perf(fstemplates):** a mint writes the volume metadata once instead of
+  twice (`create_snapshot_deferred`, `set_fs_info_deferred`). A clone of a
+  sealed source is verified by reading back the superblock just stamped
+  rather than by an fsck, since the sealed blank was checked at seal and
+  cannot change. A full check still runs for an unsealed source, and on
+  demand through `POST /api/v1/volumes/{id}/fsck`. Measured on dev over HTTP,
+  a claim went from 345–768 ms to 173–246 ms median with no standby
+  volumes, and in the library a mint is the snapshot (<1.3 ms) plus one flush.
+- **test:** `examples/claim_timing.rs` (per step) and `ci-claim-timing.sh`
+  (over HTTP: clone, claim, export) measure it.
+
 ## [v17.1.0] — 2026-09-25
 
 ### 2026-09-25 (placement)

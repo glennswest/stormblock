@@ -118,24 +118,34 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Retire standby clones: mint at claim time (2026-09-25, #137) — IN PROGRESS
+### Retire standby clones: mint at claim time (2026-09-25, #137) — DONE (v18.0.0)
 
 Owner: "why do we have unclaimed clones? Does not make sense." #55 keeps one
 pre-minted clone per sealed template because minting was "seconds"; that
 hides the cost and leaves volumes that are nobody's (rustkube-node#59: every
 volume is a PV + PVC).
 
-- [ ] **Measure** a claim with the standby out of the way, per step
+- [x] **Measure** a claim with the standby out of the way, per step
       (snapshot, identity, check, export) — `examples/claim_timing.rs`,
       numbers posted on the issue.
-- [ ] **Make it cheap:** identity is one superblock write on a
+- [x] **Make it cheap:** identity is one superblock write on a
       `metadata_csum_seed` blank (no backups, no group descriptors); the
       per-clone fsck goes — a sealed blank was checked when it was sealed and
       cannot change.
-- [ ] **Remove** `standing` / `ensure_standing*` / `standing_*` /
+- [x] **Remove** `standing` / `ensure_standing*` / `standing_*` /
       `/fstemplates/standby` / `/{id}/standby`; the boot-time top-up; delete
       the standing clones already on a node at startup.
-- [ ] Re-measure; tests, docs, CHANGELOG (breaking: endpoints removed).
+- [x] Re-measure; tests, docs, CHANGELOG (breaking: endpoints removed).
+
+Measured on dev (file-backed slab, virtual disk). **Before:** an inline mint
+over HTTP was 345 / 355 / 768 ms median (64M / 1G / 10G), because each paid
+two metadata persists, a template-store write and a background standby top-up
+competing with it; 30 standby volumes had piled up. **After:** claim 173 /
+186 / 246 ms and no standby volumes. In the library a mint is the snapshot
+(<1.3 ms) plus the stamp's flush (30-55 ms), and the fsck it no longer runs
+was 2-90 ms. What is left is fsync latency; the stamp's flush stays, because
+without it a crash before the consumer's first flush could leave a clone
+with its blank's UUID.
 
 ### Per-volume placement in the API (2026-09-25, #136, with #114) — DONE (v17.1.0)
 
@@ -1019,7 +1029,7 @@ scanning rather than configured.
       the source a fresh table. Refuses to wipe a source that is still the only
       copy of something that failed to convert.
 
-### Standing clones (2026-08-19, #55)
+### Standing clones (2026-08-19, #55) — RETIRED by #137 (v18.0.0)
 
 A sealed template holds one pre-minted clone; `claim` takes it and replenishes
 behind the caller. The engine owns it because the engine owns templates,
