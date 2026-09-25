@@ -3308,10 +3308,13 @@ mod redundancy_tests {
             p.write(i * slot, &pattern(100 + i as u8, slot as usize)).await.unwrap();
         }
         // Whichever drive in A holds more of them fails.
-        let on = |s: SlabId| async move { gem.read().await.slab_extents(s).len() + gem.read().await.slab_parity(s).len() };
+        async fn on_slab(gem: &Shared<GlobalExtentMap>, s: SlabId) -> usize {
+            let g = gem.read().await;
+            g.slab_extents(s).len() + g.slab_parity(s).len()
+        }
         let (a1, a2) = (ids[0], ids[1]);
-        let (bad, good) = if on(a1).await >= on(a2).await { (a1, a2) } else { (a2, a1) };
-        assert!(on(bad).await > 0);
+        let (bad, good) = if on_slab(&gem, a1).await >= on_slab(&gem, a2).await { (a1, a2) } else { (a2, a1) };
+        assert!(on_slab(&gem, bad).await > 0);
         m.set_failed_slabs([bad]);
         p.set_failed_slabs([bad]);
         assert_ne!(m.health().await.state, HealthState::Healthy);
@@ -3323,7 +3326,7 @@ mod redundancy_tests {
             let g = gem.read().await;
             assert!(g.get_volume_map(&v.volume_id()).unwrap().all_legs().all(|l| l.slab_id != bad));
         }
-        assert!(on(good).await > 0, "the rebuilt members went to the other drive in A");
+        assert!(on_slab(&gem, good).await > 0, "the rebuilt members went to the other drive in A");
         for i in 0..8u64 {
             let mut back = vec![0u8; slot as usize];
             m.read(i * slot, &mut back).await.unwrap();
