@@ -756,7 +756,10 @@ impl ThinVolumeHandle {
 
     // ── Allocation ─────────────────────────────────────────────────────
 
-    /// Domains this volume must stay off: the slabs it has stopped trusting.
+    /// The domains of the slabs this volume has stopped trusting. Kept off
+    /// at the `drive` rung — that drive, any partition of it — and never at
+    /// the policy's rung: one failed drive in a shelf does not make the other
+    /// 159 unusable for a `mirror@shelf` leg (#146).
     fn failed_domains(&self, registry: &SlabRegistry) -> Vec<FailureDomain> {
         self.failed.read().unwrap().iter().map(|s| registry.domain_of(s)).collect()
     }
@@ -774,21 +777,19 @@ impl ThinVolumeHandle {
     ) -> DriveResult<Leg> {
         let mut tiers = vec![self.placement.preferred_tier];
         tiers.extend(self.placement.tier_fallback.iter().copied());
+        let failed_drives = self.failed_domains(registry);
         for tier in tiers {
             // A slab that is full or collides is skipped by the registry; one
-            // that then fails to allocate (a race) is simply tried past.
+            // that then fails to allocate (a race), or that sits on a drive
+            // this volume has stopped trusting, is tried past — by id.
             let mut tried: Vec<SlabId> = Vec::new();
             loop {
-                let mut taken: Vec<FailureDomain> = apart_from.to_vec();
-                for t in &tried {
-                    taken.push(registry.domain_of(t));
-                }
-                let Some(slab_id) =
-                    registry.best_slab_for_tier_apart_from(tier, &taken, rung, self.placement.role)
-                else {
+                let Some(slab_id) = registry.best_slab_for_tier_apart_from_except(
+                    tier, apart_from, rung, self.placement.role, &tried,
+                ) else {
                     break;
                 };
-                if self.is_failed(slab_id) {
+                if self.is_failed(slab_id) || registry.collides(&slab_id, &failed_drives, "drive") {
                     tried.push(slab_id);
                     continue;
                 }
@@ -823,8 +824,7 @@ impl ThinVolumeHandle {
         vext_idx: u64,
         generation: u64,
     ) -> DriveResult<(SlabId, u32)> {
-        let failed = self.failed_domains(registry);
-        let leg = self.allocate_apart(registry, vext_idx, &failed, "drive", generation).await?;
+        let leg = self.allocate_apart(registry, vext_idx, &[], "drive", generation).await?;
         Ok((leg.slab_id, leg.slot_idx))
     }
 
@@ -837,7 +837,7 @@ impl ThinVolumeHandle {
         generation: u64,
     ) -> DriveResult<Vec<Leg>> {
         let copies = policy.scheme.copies();
-        let mut taken = self.failed_domains(registry);
+        let mut taken: Vec<FailureDomain> = Vec::new();
         let mut legs = Vec::with_capacity(copies);
         for _ in 0..copies {
             match self.allocate_apart(registry, vext_idx, &taken, &policy.spread, generation).await {
@@ -1339,19 +1339,23 @@ impl ThinVolumeHandle {
     async fn stripe_domains(&self, stripe: u64, width: usize, except: Option<u64>) -> Vec<FailureDomain> {
         let gem = self.gem.read().await;
         let reg = self.registry.read().await;
-        let mut taken = self.failed_domains(&reg);
+        // Only the members that are still there hold a domain: the one being
+        // replaced is where its replacement may well belong (in a stripe as
+        // wide as the domains, the only place it can go).
+        let live = |leg: &Leg| reg.get(&leg.slab_id).is_some() && !self.is_failed(leg.slab_id);
+        let mut taken = Vec::new();
         for vext in stripe * width as u64..(stripe + 1) * width as u64 {
             if Some(vext) == except {
                 continue;
             }
             if let Some(loc) = gem.lookup(self.id, vext) {
-                for leg in loc.legs() {
+                for leg in loc.legs().filter(|l| live(l)) {
                     taken.push(reg.domain_of(&leg.slab_id));
                 }
             }
         }
         if let Some(g) = gem.lookup_parity(self.id, stripe) {
-            for leg in &g.legs {
+            for leg in g.legs.iter().filter(|l| live(l)) {
                 taken.push(reg.domain_of(&leg.slab_id));
             }
         }
@@ -2015,9 +2019,7 @@ impl ThinVolumeHandle {
         }
         let mut taken: Vec<FailureDomain> = {
             let reg = self.registry.read().await;
-            let mut t = self.failed_domains(&reg);
-            t.extend(healthy.iter().map(|l| reg.domain_of(&l.slab_id)));
-            t
+            healthy.iter().map(|l| reg.domain_of(&l.slab_id)).collect()
         };
         let exclusive = loc.ref_count <= 1;
         let mut old_iter = missing.into_iter();
@@ -3279,6 +3281,55 @@ mod redundancy_tests {
             for leg in l.legs() {
                 assert_eq!(raw(&reg, leg, slot as usize).await, want, "extent {i}: every leg has the last write");
             }
+        }
+        cleanup(&paths);
+    }
+
+    /// A failed drive rules out that drive, not its shelf (#146). With two
+    /// drives in shelf A and one each in B and C, a `mirror:2@shelf` leg or a
+    /// `raid5:2+1@shelf` member on a failed drive in A is rebuilt onto the
+    /// other drive in A — the only place a shelf-apart policy allows it. The
+    /// failed drive's domain used to be compared at the policy's rung, which
+    /// ruled out all of shelf A and left nowhere to go.
+    #[tokio::test]
+    async fn a_failed_drive_is_rebuilt_around_within_its_own_shelf() {
+        let slot = 4096u64;
+        let (gem, reg, ids, paths) = setup_slabs(4, slot).await;
+        {
+            let mut r = reg.write().await;
+            for (id, d) in ids.iter().zip(["shelf=A/drive=a1", "shelf=A/drive=a2", "shelf=B/drive=b1", "shelf=C/drive=c1"]) {
+                r.set_domain(*id, FailureDomain::parse(d).unwrap());
+            }
+        }
+        let m = volume(&gem, &reg, "mirror:2@shelf", slot);
+        let p = volume(&gem, &reg, "raid5:2+1@shelf", slot);
+        for i in 0..8u64 {
+            m.write(i * slot, &pattern(i as u8, slot as usize)).await.unwrap();
+            p.write(i * slot, &pattern(100 + i as u8, slot as usize)).await.unwrap();
+        }
+        // Whichever drive in A holds more of them fails.
+        let on = |s: SlabId| async move { gem.read().await.slab_extents(s).len() + gem.read().await.slab_parity(s).len() };
+        let (a1, a2) = (ids[0], ids[1]);
+        let (bad, good) = if on(a1).await >= on(a2).await { (a1, a2) } else { (a2, a1) };
+        assert!(on(bad).await > 0);
+        m.set_failed_slabs([bad]);
+        p.set_failed_slabs([bad]);
+        assert_ne!(m.health().await.state, HealthState::Healthy);
+
+        for v in [&m, &p] {
+            let r = v.resync(false).await;
+            assert!(r.errors.is_empty(), "{r:?}");
+            assert_eq!(v.health().await.state, HealthState::Healthy, "{r:?}");
+            let g = gem.read().await;
+            assert!(g.get_volume_map(&v.volume_id()).unwrap().all_legs().all(|l| l.slab_id != bad));
+        }
+        assert!(on(good).await > 0, "the rebuilt members went to the other drive in A");
+        for i in 0..8u64 {
+            let mut back = vec![0u8; slot as usize];
+            m.read(i * slot, &mut back).await.unwrap();
+            assert_eq!(back, pattern(i as u8, slot as usize));
+            p.read(i * slot, &mut back).await.unwrap();
+            assert_eq!(back, pattern(100 + i as u8, slot as usize));
         }
         cleanup(&paths);
     }

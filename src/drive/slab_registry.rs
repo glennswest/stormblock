@@ -239,12 +239,26 @@ impl SlabRegistry {
         rung: &str,
         role: SlabRole,
     ) -> Option<SlabId> {
+        self.best_slab_for_tier_apart_from_except(tier, taken, rung, role, &[])
+    }
+
+    /// The same, never choosing a slab in `except` — one already tried, or
+    /// one the caller has stopped trusting. Excluded by id, not by domain: a
+    /// failed *drive* must not rule out the rest of its shelf.
+    pub fn best_slab_for_tier_apart_from_except(
+        &self,
+        tier: StorageTier,
+        taken: &[FailureDomain],
+        rung: &str,
+        role: SlabRole,
+        except: &[SlabId],
+    ) -> Option<SlabId> {
         self.tier_index
             .get(&tier)?
             .iter()
             .filter_map(|id| {
                 let free = self.allocatable(id)?;
-                if self.role_of(id) != role || self.collides(id, taken, rung) {
+                if self.role_of(id) != role || except.contains(id) || self.collides(id, taken, rung) {
                     None
                 } else {
                     Some((*id, free))
