@@ -1654,9 +1654,9 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                     );
                 }
             }
-            let dev = Arc::new(
-                stormblock::drive::filedev::FileDevice::open(device).await?
-            ) as Arc<dyn BlockDevice>;
+            let dev = (
+                open_storage(device).await?
+            );
             // Every slab carries its own volume records, whatever its role,
             // and how much room that takes scales with the slots it can hand
             // out — leave it at none and every write to it is acknowledged and
@@ -1708,7 +1708,7 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 anyhow::bail!("{device} does not exist");
             }
             let dev: Arc<dyn BlockDevice> =
-                Arc::new(stormblock::drive::filedev::FileDevice::open(device).await?);
+                open_storage(device).await?;
             match stormblock::image::local::grow_data_half(dev).await? {
                 Some((was, now)) => println!(
                     "{device}: data slab grew from {was} to {now} slots (+{})",
@@ -1719,9 +1719,8 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
         }
         SlabAction::List { devices } => {
             for device in devices {
-                match stormblock::drive::filedev::FileDevice::open(device).await {
+                match inspect_storage(device).await {
                     Ok(dev) => {
-                        let dev = Arc::new(dev) as Arc<dyn BlockDevice>;
                         match Slab::open(dev.clone()).await {
                             Ok(slab) => {
                                 println!("{}: slab {} (role={}, tier={}, {} slots, {} free)",
@@ -1767,9 +1766,9 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             }
         }
         SlabAction::Info { device } => {
-            let dev = Arc::new(
-                stormblock::drive::filedev::FileDevice::open(device).await?
-            ) as Arc<dyn BlockDevice>;
+            let dev = (
+                inspect_storage(device).await?
+            );
             let slab = Slab::open(dev).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Slab {}", slab.slab_id());
@@ -1792,8 +1791,8 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 // door creates what it cannot find, so `slab volumes /dev/sdz`
                 // made a zero-byte /dev/sdz and called it "not a slab" — true,
                 // and not what happened.
-                let dev = match stormblock::drive::filedev::FileDevice::open_read_only(device).await {
-                    Ok(d) => Arc::new(d) as Arc<dyn BlockDevice>,
+                let dev = match inspect_storage(device).await {
+                    Ok(d) => d,
                     Err(e) => {
                         println!("{device}: cannot open ({e})");
                         continue;
@@ -1980,7 +1979,7 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
                 anyhow::bail!("refusing to lay a node layout on {disk}: {what}");
             }
             let dev: Arc<dyn BlockDevice> =
-                Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+                open_storage(disk).await?;
             let mut layout = stormblock::image::local::LocalLayout::for_drive(dev.capacity_bytes());
             layout.lba = lba.or_else(|| stormblock::drive::filedev::logical_sector_size(disk));
             if let Some(b) = boot_area {
@@ -2636,8 +2635,8 @@ async fn data_slab_on(path: &str) -> anyhow::Result<Option<String>> {
         return Ok(None);
     }
     let dev: Arc<dyn BlockDevice> =
-        match stormblock::drive::filedev::FileDevice::open(path).await {
-            Ok(d) => Arc::new(d),
+        match inspect_storage(path).await {
+            Ok(d) => d,
             Err(_) => return Ok(None),
         };
 
@@ -2684,6 +2683,22 @@ async fn data_slab_on(path: &str) -> anyhow::Result<Option<String>> {
 /// A slab named as a fabric URI (`nvme-tcp://…`) rather than a local path.
 /// stormblock opens one wherever it opens a device path — attaching instead of
 /// statting — so a remote root is an ordinary slab.
+/// Real storage by path, for writing (#140): a block device is opened
+/// `O_DIRECT` as the drive it is and a fabric URI is attached — never a
+/// `FileDevice`. A regular file stays one, and may be created: that is an
+/// image being made, or a test's scratch disk.
+async fn open_storage(path: &str) -> anyhow::Result<Arc<dyn BlockDevice>> {
+    if is_fabric_uri(path) || stormblock::drive::is_block_device(path) {
+        return Ok(stormblock::drive::open_path(path, false).await?);
+    }
+    Ok(Arc::new(stormblock::drive::filedev::FileDevice::open(path).await?))
+}
+
+/// Storage by path, for looking at (#140): read-only, never created.
+async fn inspect_storage(path: &str) -> anyhow::Result<Arc<dyn BlockDevice>> {
+    Ok(stormblock::drive::open_path(path, true).await?)
+}
+
 fn is_fabric_uri(path: &str) -> bool {
     path.contains("://")
 }
@@ -2701,12 +2716,12 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
             Arc::new(stormblock::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
         } else {
-            Arc::new(stormblock::drive::filedev::FileDevice::open_read_only(path).await?)
+            inspect_storage(path).await?
         };
         opened.push((path.clone(), dev));
     }
     let dest: Arc<dyn BlockDevice> =
-        Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+        open_storage(disk).await?;
     let r = lay_local_boot(disk, dest, opened)
         .await
         .map_err(|e| anyhow::anyhow!("local boot on {disk}: {e}"))?;
@@ -2771,8 +2786,8 @@ async fn open_slabs_and_restore(
     // `slab_paths` is no longer 1:1 with `slabs`.
     let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
     for path in slab_paths {
-        // A slab is either a local device/image (FileDevice) or a namespace on
-        // the fabric (NvmeofDevice). The diskless boot hands boot-local an
+        // A slab is on a block device (O_DIRECT, #140), a namespace on the
+        // fabric (NvmeofDevice), or — tests and development — a file. The diskless boot hands boot-local an
         // `nvme-tcp://` URI from the appliance claim; attaching it here is what
         // makes a remote root an ordinary slab, exactly as a local one.
         let dev: Arc<dyn BlockDevice> = if is_fabric_uri(path) {
@@ -2780,7 +2795,18 @@ async fn open_slabs_and_restore(
                 .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
             Arc::new(stormblock::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
         } else {
-            Arc::new(stormblock::drive::filedev::FileDevice::open(path).await?)
+            let dev = open_storage(path).await?;
+            if !stormblock::drive::is_block_device(path) {
+                // Real storage is a block device, opened O_DIRECT (#140). A
+                // slab in a regular file goes through the page cache: fine
+                // for a test or a laptop, not for a node, and said so.
+                println!(
+                    "WARNING: {path} is a regular file, not a block device — a slab in a file is \
+                     for tests and development only"
+                );
+                tracing::warn!("slab {path} is on a regular file (tests and development only)");
+            }
+            dev
         };
         match Slab::open(dev.clone()).await {
             Ok(s) => {
@@ -3736,7 +3762,7 @@ async fn handle_golden(
         }
     };
     let dev: Arc<dyn BlockDevice> = if on_device {
-        let dev = stormblock::drive::filedev::FileDevice::open(out).await?;
+        let dev = open_storage(out).await?;
         let have = dev.capacity_bytes();
         if have < bytes {
             anyhow::bail!(
@@ -3749,7 +3775,7 @@ async fn handle_golden(
             // The filesystem is made at --size and the rest is left alone.
             println!("  {name}: {out} is {have} bytes, formatting {bytes}");
         }
-        Arc::new(dev)
+        dev
     } else {
         let _ = std::fs::remove_file(out);
         Arc::new(stormblock::drive::filedev::FileDevice::open_with_capacity(out, bytes).await?)
@@ -4071,7 +4097,7 @@ async fn seed_data_half(
     // Its own handle on the drive. The one the caller had was consumed laying
     // the slabs, and reading a partition table is cheap next to what follows.
     let dev: Arc<dyn BlockDevice> =
-        Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+        open_storage(disk).await?;
     // **On for a data half laid this boot, and asked-for otherwise.**
     //
     // It was off everywhere, because the records did not survive: the manager
@@ -4902,10 +4928,10 @@ async fn handle_boot_local(
         if is_fabric_uri(path) || !std::path::Path::new(path).exists() {
             continue;
         }
-        let Ok(dev) = stormblock::drive::filedev::FileDevice::open(path).await else {
+        let Ok(dev) = open_storage(path).await else {
             continue;
         };
-        match stormblock::image::local::grow_data_half(Arc::new(dev)).await {
+        match stormblock::image::local::grow_data_half(dev).await {
             Ok(Some((was, now))) => println!(
                 "{path}: the data half grew from {was} to {now} slots into the space after it"
             ),
@@ -5013,7 +5039,7 @@ async fn handle_boot_local(
         let flow_over: anyhow::Result<Option<stormblock::drive::handover::FlowOver>> = async {
             let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
             let dest_dev: Arc<dyn BlockDevice> =
-                Arc::new(stormblock::drive::filedev::FileDevice::open(disk).await?);
+                open_storage(disk).await?;
             let mut layout =
                 stormblock::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
             layout.slot_size = mgr.slot_size();
@@ -5456,9 +5482,9 @@ async fn handle_migrate_boot(
         source_slab.total_slots(), source_slab.allocated_slots());
 
     // 2. Open local target device
-    let local_dev = Arc::new(
-        stormblock::drive::filedev::FileDevice::open(target_device).await?
-    ) as Arc<dyn BlockDevice>;
+    let local_dev = (
+        open_storage(target_device).await?
+    );
 
     // 3. Build registry + GEM from source slab
     let mut registry = stormblock::drive::slab_registry::SlabRegistry::new();

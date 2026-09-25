@@ -1,174 +1,145 @@
-//! SAS/SATA block device access via io_uring with O_DIRECT.
+//! A raw block device: SAS, SATA or NVMe, opened `O_DIRECT` (#140).
 //!
-//! Opens /dev/sdX block devices with O_DIRECT for aligned DMA I/O.
-//! Uses io_uring for async submission/completion.
+//! **Every drive is opened this way — the installed disk included.** The
+//! owner's direction on #140: "we will get rid of the file/block copies …
+//! I don't want any file IO." `FileDevice` is for tests and development;
+//! a block device goes through here (see `drive::open_path`).
 //!
-//! `O_DIRECT` is a contract with the kernel: the file offset, the length
-//! **and the buffer address** must all be multiples of the device's logical
-//! block, or the request is refused with `EINVAL` before it reaches the
-//! drive. Offset and length are the caller's to get right and are checked
-//! here. The buffer address is not the caller's business — a `Vec<u8>` from
-//! malloc is 16-byte aligned, and every layer above this one (the thin
-//! volume, the slab, `mkfs-ext4`) hands down whatever it has — so a buffer
-//! that is not where `O_DIRECT` needs it is bounced through a page-aligned
-//! [`DmaBuf`]. That contract lives in this file because this is the file
-//! that opened the fd `O_DIRECT`; nothing above it can be expected to know.
+//! The I/O itself is [`DirectIo`](super::direct::DirectIo): an io_uring on a
+//! thread of its own with many requests in flight, or `pread`/`pwrite` on the
+//! blocking pool where io_uring is not available. What was here before held a
+//! lock across `submit_and_wait` on the async runtime's own thread — one
+//! request at a time per drive, and a worker blocked for each.
 //!
-//! Found the hard way: every ext4 template format on a 4 KiB-sector
-//! appliance failed at the first inode-table zeroing — the first write whose
-//! buffer was a plain `vec![0u8; 1 << 20]` — with an offset and a length that
-//! were both whole 4096-byte blocks (mkfs.ext4.rs#5). Reproduced on a
-//! `losetup -b 4096` loop device: a 4096-byte write from a `Vec` at offset 0
-//! is `EINVAL`, the same bytes from a `DmaBuf` are written.
+//! `O_DIRECT` is a contract with the kernel: the offset, the length **and the
+//! buffer address** must be multiples of the logical block, or the request is
+//! `EINVAL`. This device keeps the whole contract, so a caller does not have
+//! to: every request goes through a page-aligned [`DmaBuf`], and one that is
+//! not whole logical blocks is widened to them — a read reads the span and
+//! copies out; a write reads the edge blocks, patches them and writes the
+//! span back, under a lock so two such writes cannot interleave on a block.
+//! (The buffer half was found the hard way: every ext4 template format on a
+//! 4 KiB-sector appliance failed at the first inode-table zeroing, a
+//! `vec![0u8; 1 << 20]` at a whole-block offset — mkfs.ext4.rs#5.)
 
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use io_uring::{IoUring, opcode, types};
 use uuid::Uuid;
 
+use super::direct::DirectIo;
 use super::dma::DmaBuf;
 use super::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, SmartData};
 
-/// A SAS/SATA block device accessed via io_uring.
+/// A raw block device, `O_DIRECT`.
 pub struct SasDevice {
     fd: RawFd,
-    ring: std::sync::Mutex<IoUring>,
+    io: DirectIo,
     id: DeviceId,
     capacity: u64,
     block_size: u32,
     device_type: DriveType,
-    tag_counter: AtomicU64,
+    /// Held across a read-modify-write, so two partial-block writes to the
+    /// same block cannot each keep the other's bytes out.
+    rmw: tokio::sync::Mutex<()>,
 }
 
 impl SasDevice {
-    /// Open a block device at `path` with O_DIRECT.
+    /// Open a block device at `path` for reading and writing.
     pub async fn open(path: &str) -> DriveResult<Self> {
+        Self::open_with(path, false, None).await
+    }
+
+    /// Open a block device read-only — for anything that inspects. The
+    /// kernel refuses writes, so an inspection cannot change what it looks
+    /// at even by mistake.
+    pub async fn open_read_only(path: &str) -> DriveResult<Self> {
+        Self::open_with(path, true, None).await
+    }
+
+    /// Open a **regular file** `O_DIRECT` with an explicit logical block size
+    /// — the same engine and the same contract as a drive, for tests, where
+    /// a block device cannot be had without root.
+    pub async fn open_file_direct(path: &str, block_size: u32) -> DriveResult<Self> {
+        Self::open_with(path, false, Some(block_size)).await
+    }
+
+    async fn open_with(path: &str, read_only: bool, file_block: Option<u32>) -> DriveResult<Self> {
         let path = path.to_string();
-        // Open on a blocking thread since it may involve kernel work.
         let (fd, capacity, block_size) = tokio::task::spawn_blocking({
             let path = path.clone();
             move || -> DriveResult<(RawFd, u64, u32)> {
                 use nix::fcntl::{open, OFlag};
                 use nix::sys::stat::Mode;
 
-                let flags = OFlag::O_RDWR | OFlag::O_DIRECT;
-                let fd = open(path.as_str(), flags, Mode::empty())
+                let rw = if read_only { OFlag::O_RDONLY } else { OFlag::O_RDWR };
+                let fd = open(path.as_str(), rw | OFlag::O_DIRECT | OFlag::O_CLOEXEC, Mode::empty())
                     .map_err(|e| DriveError::Io(e.into()))?;
-
-                let capacity = ioctl_blkgetsize64(fd)?;
-                let block_size = ioctl_blksszget(fd)?;
-
-                Ok((fd, capacity, block_size))
+                let sizes = match file_block {
+                    Some(bs) => std::fs::metadata(&path)
+                        .map(|m| (m.len(), bs))
+                        .map_err(DriveError::Io),
+                    None => ioctl_blkgetsize64(fd).and_then(|c| Ok((c, ioctl_blksszget(fd)?))),
+                };
+                match sizes {
+                    Ok((capacity, block_size)) => Ok((fd, capacity, block_size)),
+                    Err(e) => {
+                        unsafe { libc::close(fd) };
+                        Err(e)
+                    }
+                }
             }
         })
         .await
         .map_err(|e| DriveError::Other(e.into()))??;
 
-        // Read serial/model/WWN from sysfs if possible.
+        // Who the drive is: serial, model, WWN; a partition is its disk (#136).
         let (serial, model) = read_device_identity(&path);
-        let wwn = super::identity::of(&path).map(|i| i.wwn).unwrap_or_default();
-
-        // Detect SSD vs HDD via rotational flag.
-        let device_type = detect_drive_type(&path);
-
-        // Create io_uring instance.
-        let ring = IoUring::builder()
-            .build(256)
-            .map_err(DriveError::Io)?;
-
+        let known = super::identity::of(&path);
         let id = DeviceId {
-            wwn,
+            wwn: known.as_ref().map(|i| i.wwn.clone()).unwrap_or_default(),
             uuid: Uuid::new_v4(),
-            serial,
-            model,
-            path,
+            serial: known
+                .as_ref()
+                .map(|i| i.serial.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(serial),
+            model: known.as_ref().map(|i| i.model.clone()).filter(|m| !m.is_empty()).unwrap_or(model),
+            path: path.clone(),
         };
+        let device_type = detect_drive_type(&path);
+        let io = DirectIo::new(fd);
+        tracing::debug!(%path, engine = io.engine_name(), block_size, "block device opened O_DIRECT");
 
         Ok(SasDevice {
             fd,
-            ring: std::sync::Mutex::new(ring),
+            io,
             id,
             capacity,
             block_size,
             device_type,
-            tag_counter: AtomicU64::new(0),
+            rmw: tokio::sync::Mutex::new(()),
         })
     }
 
-    fn next_tag(&self) -> u64 {
-        self.tag_counter.fetch_add(1, Ordering::Relaxed)
+    /// Which engine carries this device's I/O: `io_uring` or `blocking`.
+    pub fn engine(&self) -> &'static str {
+        self.io.engine_name()
     }
 
-    /// The caller's half of the `O_DIRECT` contract: offset and length are
-    /// whole logical blocks. Anything else is a request the drive cannot
-    /// perform, and it is named as such rather than surfacing as the
-    /// kernel's bare `EINVAL`.
-    fn check_request(&self, offset: u64, len: usize) -> DriveResult<()> {
-        let bs = u64::from(self.block_size);
-        if offset % bs != 0 {
-            return Err(DriveError::NotAligned { offset, block_size: self.block_size });
-        }
-        if len as u64 % bs != 0 {
-            return Err(DriveError::NotAligned { offset: len as u64, block_size: self.block_size });
+    /// The whole logical blocks covering `[offset, offset + len)`.
+    fn span(&self, offset: u64, len: usize) -> (u64, usize) {
+        let bs = u64::from(self.block_size.max(1));
+        let start = offset / bs * bs;
+        let end = (offset + len as u64).div_ceil(bs) * bs;
+        (start, (end - start) as usize)
+    }
+
+    fn check_range(&self, offset: u64, len: usize) -> DriveResult<()> {
+        if offset + len as u64 > self.capacity {
+            return Err(DriveError::OutOfRange { offset, len: len as u64, capacity: self.capacity });
         }
         Ok(())
-    }
-
-    /// Whether `O_DIRECT` will take a buffer at this address as it is.
-    fn buffer_is_direct(&self, ptr: *const u8) -> bool {
-        ptr as usize % self.block_size as usize == 0
-    }
-
-    /// Submit one write and wait for it. The buffer must satisfy `O_DIRECT`.
-    fn submit_write(&self, offset: u64, ptr: *const u8, len: usize) -> DriveResult<usize> {
-        let fd = self.fd;
-        let tag = self.next_tag();
-        let mut ring = self.ring.lock().unwrap();
-
-        let sqe = opcode::Write::new(types::Fd(fd), ptr, len as u32)
-            .offset(offset)
-            .build()
-            .user_data(tag);
-
-        // Safety: SQE references a valid fd and a buffer that outlives the
-        // wait below.
-        unsafe { ring.submission().push(&sqe).map_err(|_| DriveError::DeviceNotReady)?; }
-
-        ring.submit_and_wait(1).map_err(DriveError::Io)?;
-
-        let cqe = ring.completion().next().ok_or(DriveError::DeviceNotReady)?;
-        let result = cqe.result();
-        if result < 0 {
-            return Err(DriveError::Io(std::io::Error::from_raw_os_error(-result)));
-        }
-        Ok(result as usize)
-    }
-
-    /// Submit one read and wait for it. The buffer must satisfy `O_DIRECT`.
-    fn submit_read(&self, offset: u64, ptr: *mut u8, len: usize) -> DriveResult<usize> {
-        let fd = self.fd;
-        let tag = self.next_tag();
-        let mut ring = self.ring.lock().unwrap();
-
-        let sqe = opcode::Read::new(types::Fd(fd), ptr, len as u32)
-            .offset(offset)
-            .build()
-            .user_data(tag);
-
-        // Safety: SQE references a valid fd and a buffer that outlives the
-        // wait below.
-        unsafe { ring.submission().push(&sqe).map_err(|_| DriveError::DeviceNotReady)?; }
-
-        ring.submit_and_wait(1).map_err(DriveError::Io)?;
-
-        let cqe = ring.completion().next().ok_or(DriveError::DeviceNotReady)?;
-        let result = cqe.result();
-        if result < 0 {
-            return Err(DriveError::Io(std::io::Error::from_raw_os_error(-result)));
-        }
-        Ok(result as usize)
     }
 }
 
@@ -195,58 +166,41 @@ impl BlockDevice for SasDevice {
     }
 
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
-        self.check_request(offset, buf.len())?;
         if buf.is_empty() {
             return Ok(0);
         }
-        if self.buffer_is_direct(buf.as_ptr()) {
-            return self.submit_read(offset, buf.as_mut_ptr(), buf.len());
-        }
-        // Not where O_DIRECT needs it: read into a page-aligned buffer and
-        // copy out. The copy is the price of a caller that did not allocate
-        // for DMA, and it is paid here rather than as EINVAL at the caller.
-        let mut bounce = DmaBuf::alloc(buf.len());
-        let n = self.submit_read(offset, bounce.as_mut_ptr(), buf.len())?;
-        buf[..n].copy_from_slice(&bounce[..n]);
-        Ok(n)
+        self.check_range(offset, buf.len())?;
+        let (start, len) = self.span(offset, buf.len());
+        let got = self.io.read(start, len).await?;
+        let skew = (offset - start) as usize;
+        buf.copy_from_slice(&got[skew..skew + buf.len()]);
+        Ok(buf.len())
     }
 
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
-        self.check_request(offset, buf.len())?;
         if buf.is_empty() {
             return Ok(0);
         }
-        if self.buffer_is_direct(buf.as_ptr()) {
-            return self.submit_write(offset, buf.as_ptr(), buf.len());
+        self.check_range(offset, buf.len())?;
+        let (start, len) = self.span(offset, buf.len());
+        if start == offset && len == buf.len() {
+            let mut out = DmaBuf::alloc(len);
+            out[..len].copy_from_slice(buf);
+            self.io.write(start, out, len).await?;
+            return Ok(buf.len());
         }
-        let mut bounce = DmaBuf::alloc(buf.len());
-        bounce[..buf.len()].copy_from_slice(buf);
-        self.submit_write(offset, bounce.as_ptr(), buf.len())
+        // Not whole blocks: read the span, patch it, write it back — under
+        // the lock, so another partial write to these blocks waits its turn.
+        let _one = self.rmw.lock().await;
+        let mut span = self.io.read(start, len).await?;
+        let skew = (offset - start) as usize;
+        span[skew..skew + buf.len()].copy_from_slice(buf);
+        self.io.write(start, span, len).await?;
+        Ok(buf.len())
     }
 
     async fn flush(&self) -> DriveResult<()> {
-        let fd = self.fd;
-        let tag = self.next_tag();
-
-        let mut ring = self.ring.lock().unwrap();
-
-        let sqe = opcode::Fsync::new(types::Fd(fd))
-            .build()
-            .user_data(tag);
-
-        unsafe { ring.submission().push(&sqe).map_err(|_| DriveError::DeviceNotReady)?; }
-
-        ring.submit_and_wait(1)
-            .map_err(DriveError::Io)?;
-
-        let cqe = ring.completion().next()
-            .ok_or(DriveError::DeviceNotReady)?;
-
-        let result = cqe.result();
-        if result < 0 {
-            return Err(DriveError::Io(std::io::Error::from_raw_os_error(-result)));
-        }
-        Ok(())
+        self.io.sync().await
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
@@ -269,6 +223,8 @@ impl BlockDevice for SasDevice {
 
 impl Drop for SasDevice {
     fn drop(&mut self) {
+        // The engine works on a duplicate of this fd and finishes what it has
+        // in flight on it; this one is ours to close.
         unsafe { libc::close(self.fd); }
     }
 }
@@ -431,16 +387,12 @@ mod tests {
         assert_eq!(dev.read(4096, back).await.unwrap(), skewed.len());
         assert_eq!(back, skewed);
 
-        // The caller's half is still the caller's: a sub-block length is a
-        // request the drive cannot perform, and is named, not EINVAL.
-        assert!(matches!(
-            dev.write(4096, &pattern[..1024]).await,
-            Err(DriveError::NotAligned { .. })
-        ));
-        assert!(matches!(
-            dev.write(1024, &pattern[..4096]).await,
-            Err(DriveError::NotAligned { .. })
-        ));
+        // A request that is not whole blocks is widened by the device
+        // (#140): read the edges, patch, write back.
+        assert_eq!(dev.write(4096 + 100, &pattern[..1024]).await.unwrap(), 1024);
+        let mut round = vec![0u8; 1024];
+        dev.read(4096 + 100, &mut round).await.unwrap();
+        assert_eq!(round, &pattern[..1024]);
     }
 
     /// The whole provisioning path: a slab on the 4 KiB drive, a thin volume

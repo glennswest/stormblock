@@ -136,6 +136,14 @@ impl FileDevice {
         // A block device says who it is — serial, model, WWN — so a slab on
         // it can be joined to the drive stormdrive reports (#136). A file is
         // just a file.
+        if is_block_device {
+            // Real storage through the page cache: what #140 removed. Every
+            // path that opens a drive should come through `drive::open_path`.
+            tracing::warn!(
+                "{path} is a block device opened as a FileDevice — buffered file I/O on real \
+                 storage (tests and development only); open it with drive::open_path"
+            );
+        }
         let known = if is_block_device { super::identity::of(path) } else { None };
         let id = match known {
             Some(i) => DeviceId {

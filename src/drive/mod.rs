@@ -4,6 +4,8 @@
 pub mod nvme;
 #[cfg(target_os = "linux")]
 pub mod sas;
+#[cfg(target_os = "linux")]
+pub mod direct;
 pub mod dma;
 pub mod filedev;
 pub mod identity;
@@ -287,21 +289,70 @@ pub async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
         )));
     }
 
-    // Check if it's a block device on Linux
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.file_type().is_block_device() {
-                let dev = sas::SasDevice::open(path).await?;
-                return Ok(Box::new(dev));
-            }
-        }
+    // A block device is a block device (#140): O_DIRECT, never a file.
+    if is_block_device(path) {
+        #[cfg(target_os = "linux")]
+        return Ok(Box::new(sas::SasDevice::open(path).await?));
     }
 
-    // Fallback: open as file device (regular file or anything else)
+    // A regular file: tests and development only.
     let dev = filedev::FileDevice::open(path).await?;
     Ok(Box::new(dev))
+}
+
+/// Is `path` a block device node?
+pub fn is_block_device(path: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::metadata(path).map(|m| m.file_type().is_block_device()).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Open storage by path, the one way (#140): a fabric URI is attached, a
+/// block device is opened `O_DIRECT` as the drive it is ([`sas::SasDevice`]),
+/// and only a regular file — an image, a test's scratch disk — is a
+/// [`filedev::FileDevice`]. The owner's direction: "I don't want any file
+/// IO" for real storage; every slab on the installed disk goes through here.
+///
+/// `read_only` opens for inspection: the kernel refuses writes. A file that
+/// does not exist is an error, never created — use [`filedev::FileDevice`]
+/// directly to make an image.
+pub async fn open_path(path: &str, read_only: bool) -> DriveResult<std::sync::Arc<dyn BlockDevice>> {
+    if path.contains("://") {
+        if read_only {
+            tracing::debug!("{path}: a fabric device is opened as it is served");
+        }
+        return open_one_drive(path).await.map(std::sync::Arc::from);
+    }
+    if is_block_device(path) {
+        #[cfg(target_os = "linux")]
+        {
+            let dev = if read_only {
+                sas::SasDevice::open_read_only(path).await?
+            } else {
+                sas::SasDevice::open(path).await?
+            };
+            return Ok(std::sync::Arc::new(dev));
+        }
+    }
+    if !std::path::Path::new(path).exists() {
+        return Err(DriveError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{path} does not exist"),
+        )));
+    }
+    let dev = if read_only {
+        filedev::FileDevice::open_read_only(path).await?
+    } else {
+        filedev::FileDevice::open(path).await?
+    };
+    Ok(std::sync::Arc::new(dev))
 }
 
 fn supported_uri_schemes() -> &'static str {

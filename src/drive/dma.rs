@@ -37,7 +37,8 @@ impl DmaBuf {
     /// Allocate a page-aligned buffer of exactly `size` bytes.
     /// Size is rounded up to a multiple of `DMA_ALIGNMENT`.
     pub fn alloc(size: usize) -> Self {
-        let capacity = align_up(size, DMA_ALIGNMENT);
+        // Never zero: a zero-size layout is undefined behaviour to allocate.
+        let capacity = align_up(size.max(1), DMA_ALIGNMENT);
         let layout = Layout::from_size_align(capacity, DMA_ALIGNMENT)
             .expect("invalid DmaBuf layout");
         // Safety: layout has non-zero size (align_up guarantees >= DMA_ALIGNMENT).

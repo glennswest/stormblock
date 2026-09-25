@@ -265,12 +265,13 @@ impl ImageBuilder {
             // that life. Nothing reads outside the partitions the new GPT
             // declares, but a byte-for-byte reproducible image wants a device
             // nobody has written yet.
-            let dev = FileDevice::open(out_str).await?;
+            // O_DIRECT, as the drive it is (#140).
+            let dev = crate::drive::open_path(out_str, false).await?;
             let have = dev.capacity_bytes();
             if have < total {
                 return Err(ImageError::TooSmall { need: total, have });
             }
-            Arc::new(dev)
+            dev
         } else {
             // A sparse file: an image is mostly holes until something fills
             // them, and a 32 GiB image should not cost 32 GiB to build.
@@ -366,12 +367,13 @@ impl ImageBuilder {
                 }
             }
             for src in &sources {
-                let dev = FileDevice::open(
+                let dev = crate::drive::open_path(
                     src.to_str()
                         .ok_or_else(|| ImageError::Spec("source path is not UTF-8".into()))?,
+                    true,
                 )
                 .await?;
-                store.add_drive(src.display().to_string(), Arc::new(dev));
+                store.add_drive(src.display().to_string(), dev);
             }
             let mgr = PalletManager::new(store);
 

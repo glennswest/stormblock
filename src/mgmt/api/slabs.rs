@@ -214,8 +214,7 @@ async fn format_slab(
     // on the node nothing can mint again. Refuse unless the caller says, in
     // this request, that a data slab is what it means to write (#88).
     if role != crate::drive::slab::SlabRole::Data {
-        if let Ok(existing) = crate::drive::filedev::FileDevice::open(&req.device_path).await {
-            let dev = Arc::new(existing) as Arc<dyn crate::drive::BlockDevice>;
+        if let Ok(dev) = crate::drive::open_path(&req.device_path, true).await {
             if let Ok(slab) = crate::drive::slab::Slab::open(dev).await {
                 if slab.is_data() {
                     return ApiError::conflict(format!(
@@ -229,8 +228,17 @@ async fn format_slab(
     }
 
     // Open the device
-    let device = match crate::drive::filedev::FileDevice::open(&req.device_path).await {
-        Ok(d) => Arc::new(d) as Arc<dyn crate::drive::BlockDevice>,
+    // A block device is opened O_DIRECT as the drive it is (#140); only a
+    // path that is not one — a test's scratch file — is created as a file.
+    let opened = if crate::drive::is_block_device(&req.device_path) || req.device_path.contains("://") {
+        crate::drive::open_path(&req.device_path, false).await
+    } else {
+        crate::drive::filedev::FileDevice::open(&req.device_path)
+            .await
+            .map(|d| Arc::new(d) as Arc<dyn crate::drive::BlockDevice>)
+    };
+    let device = match opened {
+        Ok(d) => d,
         Err(e) => return ApiError::bad_request(format!("cannot open device '{}': {e}", req.device_path)),
     };
 
