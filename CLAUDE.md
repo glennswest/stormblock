@@ -118,6 +118,33 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Per-volume placement in the API (2026-09-25, #136, with #114) — IN PROGRESS
+
+Owner: attach stormvolume/drive/shelf and RAID-partner info to what
+rustkube-node mirrors; "look at a drive, and know how much storage is left".
+
+- [ ] **Drive identity.** `DeviceId.wwn`; `FileDevice`/SAS read serial, model
+      and WWN from sysfs for a block device (a partition resolves to its
+      disk). `BlockDevice::drive_id()` — a `PartitionDevice` answers with its
+      drive's. Slab domains and drive labels key on that, so **two slabs on
+      one drive are one failure domain** (today `drive=file+<offset>` makes
+      them two, and a mirror's legs can share a spindle). Slabs report
+      `drive {path, serial, wwn, model}`.
+- [ ] **`placement` on a volume** — always on `GET /api/v1/volumes/{id}`,
+      opt-in `?placement=true` on the list (O(extents)): per slab (role,
+      tier, domain, array, drive, node, state ok/failed/quarantined/draining
+      with drain progress, legs, bytes), per drive, leg totals from health,
+      and each RAID array's members with their state.
+- [ ] **`generation`** on the volume listing, bumped whenever the node's
+      volume metadata is persisted; `If-None-Match` / `?since=` answer 304,
+      so a mirror asks "changed?" instead of re-reading everything.
+- [ ] tests, docs, CHANGELOG, close #136 and #114.
+
+Not here: *progress* of a rebuild — a volume `resync` is one synchronous
+call, and a drive-level RAID rebuild's progress is returned and never kept
+(#69). State is reported (`degraded`, `failed`, member `rebuilding`), not a
+percentage.
+
 ### CSI VolumeSnapshot = a golden (2026-09-25, #111) — DONE (v17.0.1)
 
 rustkube asked whether `CreateSnapshot` maps onto goldens and CoW clones or
