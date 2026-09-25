@@ -133,7 +133,7 @@ struct Inner {
     jobs: BTreeMap<u64, RebuildJob>,
     done: HashMap<u64, tokio::sync::watch::Sender<bool>>,
     /// (margin, arrival, volume): the first is the most endangered.
-    queue: BTreeSet<(usize, u64, VolumeId)>,
+    queue: BTreeSet<(usize, u64, uuid::Uuid)>,
     queued: HashMap<VolumeId, (usize, u64)>,
     running: HashMap<VolumeId, Arc<AtomicBool>>,
     /// Hit again while running: run once more when this pass ends.
@@ -294,12 +294,12 @@ impl Rebuilds {
                     match g.queued.get(&vol).copied() {
                         Some((m, _)) if m <= margin => {}
                         Some((m, s)) => {
-                            g.queue.remove(&(m, s, vol));
-                            g.queue.insert((margin, seq, vol));
+                            g.queue.remove(&(m, s, vol.0));
+                            g.queue.insert((margin, seq, vol.0));
                             g.queued.insert(vol, (margin, seq));
                         }
                         None => {
-                            g.queue.insert((margin, seq, vol));
+                            g.queue.insert((margin, seq, vol.0));
                             g.queued.insert(vol, (margin, seq));
                         }
                     }
@@ -354,7 +354,7 @@ impl Rebuilds {
             });
             if !wanted_elsewhere {
                 if let Some((m, s)) = g.queued.remove(&vol) {
-                    g.queue.remove(&(m, s, vol));
+                    g.queue.remove(&(m, s, vol.0));
                 }
                 if let Some(flag) = g.running.get(&vol) {
                     flag.store(true, Ordering::Relaxed);
@@ -404,7 +404,7 @@ impl Rebuilds {
         while g.running.len() < parallel {
             let Some(first) = g.queue.iter().next().copied() else { break };
             g.queue.remove(&first);
-            let vol = first.2;
+            let vol = VolumeId(first.2);
             g.queued.remove(&vol);
             let cancel = Arc::new(AtomicBool::new(false));
             g.running.insert(vol, cancel.clone());
@@ -512,7 +512,7 @@ impl Rebuilds {
             let mut g = self.inner.lock().unwrap();
             let seq = g.seq;
             g.seq += 1;
-            g.queue.insert((margin, seq, vol));
+            g.queue.insert((margin, seq, vol.0));
             g.queued.insert(vol, (margin, seq));
             // Its job entries read `running` through the requeue; `pump`
             // only promotes `queued` ones, so mark them queued again.
@@ -639,7 +639,8 @@ mod tests {
         let lost = {
             let g = vm.gem().read().await;
             let two_legs: HashSet<_> = g.get_volume_map(&two).unwrap().all_legs().map(|l| l.slab_id).collect();
-            g.get_volume_map(&three).unwrap().all_legs().map(|l| l.slab_id).find(|s| two_legs.contains(s)).unwrap()
+            let s = g.get_volume_map(&three).unwrap().all_legs().map(|l| l.slab_id).find(|s| two_legs.contains(s)).unwrap();
+            s
         };
         vm.distrust_slab(lost).await;
         let volumes = Arc::new(tokio::sync::Mutex::new(vm));
