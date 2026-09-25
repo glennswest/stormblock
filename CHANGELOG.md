@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.6.0] — 2026-09-25
+
 ### 2026-09-25 (xfs)
 - **feat(fs):** XFS alongside ext4 (#147). `"fs": "xfs"` on a template,
   blank or claim formats with `mkfs-xfs` v0.2.0, the filesystem `mkfs.xfs`

@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### XFS alongside ext4 (2026-09-25, #147) — IN PROGRESS
+### XFS alongside ext4 (2026-09-25, #147) — DONE (v18.6.0)
 
 Owner: XFS in formatting and import as well as ext4, via the new crates
 `mkfs-xfs` (glennswest/mkfs.xfs.rs) and `fio-xfs` (glennswest/fio.xfs.rs).
@@ -127,26 +127,34 @@ Both first milestones closed; both at **v0.2.0**. What they give: a
 read-only walker/extractor with every v5 CRC checked (no writing yet). The
 two crates have **separate** `BlockDevice` traits; one adapter implements both.
 
-- [ ] `src/fs/xfs.rs`: the seam — adapter (discard for `write_zeroes` on a
+- [x] `src/fs/xfs.rs`: the seam — adapter (discard for `write_zeroes` on a
       thin volume), `format`, `read_layout` (primary superblock, CRC
       checked), `seal_blockers` (in-progress, needs-repair, bad CRC), `check`
       (open with fio-xfs and walk the whole tree), `stamp_uuid` the way
       `xfs_admin -U` does it (sb_uuid new, sb_meta_uuid keeps the old,
       `META_UUID` incompat, CRC — every AG's superblock, primary last),
       `stamp_label`
-- [ ] `FsKind::Xfs`: templates, blanks and claims format with `mkfs-xfs`;
+- [x] `FsKind::Xfs`: templates, blanks and claims format with `mkfs-xfs`;
       seal and resume dispatch on the kind; `seed` and ext `features` refused
       for XFS (fio-xfs cannot write yet)
-- [ ] clones of an XFS volume get a fresh UUID (the kernel refuses to mount
+- [x] clones of an XFS volume get a fresh UUID (the kernel refuses to mount
       two XFS filesystems with one UUID), read back
-- [ ] `probe`: `fs.kind: xfs` in volume metadata
-- [ ] import: find the filesystems inside a GPT image (XFS and ext4), open
+- [x] `probe`: `fs.kind: xfs` in volume metadata
+- [x] import: find the filesystems inside a GPT image (XFS and ext4), open
       each, walk it, read `/etc/os-release`; report them on the import;
       a recognised filesystem that does not read fails the import unless
       `verify: false`
-- [ ] tests (format → seal → clone → stamp read back; a GPT image with an
+- [x] tests (format → seal → clone → stamp read back; a GPT image with an
       XFS partition imports and reports its OS); `ci-xfs-verify.sh` on dev:
       `xfs_repair -n` and `blkid` on a blank and a clone; docs; close
+
+Verified by `ci-xfs-verify.sh` on dev (xfsprogs 6.15): engine-made blank and
+claims pass `xfs_repair -n`; `blkid` UUIDs match the engine's; claims keep the
+blank's `meta_uuid`. A Rocky 9 GenericCloud image imports in 19 s, root found
+(partition 4, "Rocky Linux 9.8"), walked 37,473 entries, `xfs_repair -n` clean.
+Not done here: a kernel mount (no root; mkfs-xfs's own `kernel-mount.sh` covers
+its output). `stamp_uuid` belongs in mkfs-xfs (mkfs.xfs.rs#6); seeding XFS
+waits for fio-xfs writes.
 
 ### Per-volume rebuild at scale (2026-09-25, #146) — DONE (v18.5.0)
 
