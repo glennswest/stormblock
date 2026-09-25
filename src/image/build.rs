@@ -957,7 +957,7 @@ impl Drop for VolumeExport {
         tokio::task::spawn(async move {
             let client = match crate::http::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
-                .bearer(crate::mgmt::auth::fleet_token())
+                .bearer(crate::mgmt::auth::token_for(&engine))
                 .build()
             {
                 Ok(c) => c,
@@ -979,11 +979,12 @@ impl GoldenSource {
     async fn open_volume(engine: &str, name: &str) -> Result<GoldenSource> {
         let base = engine.trim_end_matches('/');
         let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
-        // A build reads a golden off an appliance that may want a credential;
-        // `$STORMBLOCK_API_TOKEN` is where a build box keeps one (#107).
+        // A build reads a golden off an appliance, which wants a credential:
+        // `$STORMBLOCK_API_TOKEN` on a build box, or the appliance's own
+        // token file when the build runs on it (#107).
         let client = crate::http::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .bearer(crate::mgmt::auth::fleet_token())
+            .bearer(crate::mgmt::auth::token_for(&base))
             .build()
             .map_err(|e| ImageError::Spec(format!("{e}")))?;
 

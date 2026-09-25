@@ -49,6 +49,10 @@ pub enum Source {
     File(PathBuf),
     /// Minted at this boot and written to a token file.
     Minted(PathBuf),
+    /// Minted at this boot with nowhere to keep it: held in memory only. The
+    /// API is closed, and nothing else can present the token — the node says
+    /// so. Closed and unusable beats open (#107).
+    Ephemeral,
     /// No token: the API is open.
     None,
     /// No token, and the config says that is deliberate.
@@ -172,7 +176,23 @@ pub fn resolve(mgmt: &ManagementConfig) -> anyhow::Result<Resolved> {
             .map_err(|e| anyhow::anyhow!("cannot write token file {}: {e}", path.display()))?;
         (Some(token), Source::Minted(path))
     } else {
-        (None, Source::None)
+        // **Unset means required** (#107). The default used to be open, on
+        // the reasoning that a machine claims its boot image before it has a
+        // credential; that one verb is now open by itself
+        // (`serve::api::is_boot_claim`), so nothing is left that needs the
+        // rest open. Mint where the node can keep it; where it cannot, close
+        // anyway with a token only this process holds, and say so. Failing
+        // startup would stop a node booting over its own config, and falling
+        // back to open is the thing this default exists to end.
+        let token = mint();
+        match path.as_deref().map(|p| (p, write_token_file(p, &token))) {
+            Some((p, Ok(()))) => (Some(token), Source::Minted(p.to_path_buf())),
+            Some((p, Err(e))) => {
+                tracing::warn!("cannot write token file {}: {e}", p.display());
+                (Some(token), Source::Ephemeral)
+            }
+            None => (Some(token), Source::Ephemeral),
+        }
     };
 
     Ok(Resolved {
@@ -215,6 +235,38 @@ pub fn fleet_token() -> Option<String> {
         .or_else(|| non_empty(std::env::var("STORMBLOCK_API_TOKEN").ok()))
 }
 
+/// The credential for calling an engine at `url`: the shared token when
+/// there is one, else — when the engine is on this machine — the token this
+/// node minted, read from where it keeps it.
+///
+/// For the CLI and scripts running on the node itself (`image build
+/// --engine http://127.0.0.1:9090` on an appliance). A minted token means
+/// nothing to a peer, so it is never presented to anything that is not local.
+pub fn token_for(url: &str) -> Option<String> {
+    if let Some(t) = fleet_token() {
+        return Some(t);
+    }
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split(['/', '?'])
+        .next()
+        .unwrap_or("");
+    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host).trim_matches(['[', ']']);
+    let local = matches!(host, "localhost" | "127.0.0.1" | "::1" | "");
+    if !local {
+        return None;
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(p) = non_empty(std::env::var("STORMBLOCK_TOKEN_FILE").ok()) {
+        candidates.push(PathBuf::from(p));
+    }
+    candidates.push(PathBuf::from("/etc/stormblock/api_token"));
+    candidates.push(PathBuf::from("/var/lib/stormblock/api_token"));
+    candidates.iter().find_map(|p| read_token_file(p))
+}
+
 /// Say, on every boot, whether this node's API is open. See the module note:
 /// an insecure default survives because nothing fails while it is wrong.
 pub fn log_mode(r: &Resolved, listen_addr: &str, mgmt: &ManagementConfig) {
@@ -237,6 +289,20 @@ pub fn log_mode(r: &Resolved, listen_addr: &str, mgmt: &ManagementConfig) {
             p.display(),
             admin_note(r)
         ),
+        Source::Ephemeral => {
+            tracing::warn!(
+                "SECURITY: the management API on {listen_addr} is closed with a token minted this \
+                 boot and kept in memory only — there was nowhere to write it, so nothing else \
+                 on this node can call the API"
+            );
+            tracing::warn!(
+                "SECURITY: set management.data_dir or management.token_file so the token can be \
+                 kept and read ({}), or management.api_token to name one",
+                token_file(mgmt)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "no token file configured".to_string())
+            );
+        }
         Source::Disabled | Source::None => {
             let chosen = r.source == Source::Disabled;
             tracing::warn!(
@@ -250,8 +316,8 @@ pub fn log_mode(r: &Resolved, listen_addr: &str, mgmt: &ManagementConfig) {
             );
             if !chosen {
                 tracing::warn!(
-                    "SECURITY: set management.require_auth = true to require a bearer token; the \
-                     node will mint one into {} and keep it across restarts",
+                    "SECURITY: remove management.require_auth = false to require a bearer token; \
+                     the node will mint one into {} and keep it across restarts",
                     token_file(mgmt)
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "management.token_file (unset — set it, or management.data_dir)".to_string())
@@ -331,15 +397,32 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// Unset means required (#107): a node with somewhere to keep a token
+    /// mints one, and keeps it.
     #[test]
-    fn open_by_default() {
+    fn closed_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = cfg();
+        m.data_dir = Some(dir.path().to_string_lossy().to_string());
+        assert_eq!(m.require_auth, None);
+        let r = resolve(&m).unwrap();
+        assert_eq!(r.source, Source::Minted(dir.path().join("api_token")));
+        assert!(r.source.enforced());
+        assert!(r.auth.api_token.is_some());
+        assert_eq!(resolve(&m).unwrap().auth.api_token, r.auth.api_token, "kept, not re-minted");
+    }
+
+    /// With nowhere to keep a token, the default still closes — with one only
+    /// this process holds — rather than failing startup or falling open.
+    #[test]
+    fn closed_by_default_even_with_nowhere_to_keep_a_token() {
         let mut m = cfg();
         m.data_dir = None;
-        m.token_file = Some("/nonexistent/dir/that/should/not/be/read".into());
+        m.token_file = Some("/proc/stormblock/api_token".into());
         let r = resolve(&m).unwrap();
-        assert_eq!(r.source, Source::None);
-        assert!(r.auth.api_token.is_none());
-        assert!(!r.source.enforced());
+        assert_eq!(r.source, Source::Ephemeral);
+        assert!(r.source.enforced());
+        assert!(r.auth.api_token.is_some());
     }
 
     #[test]
@@ -424,4 +507,19 @@ mod tests {
         assert!(d(&del, Some("read")).is_err());
         assert!(d(&del, Some("root")).is_ok());
     }
+    #[test]
+    fn a_local_token_is_only_for_a_local_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("api_token");
+        std::fs::write(&f, "localsecret\n").unwrap();
+        std::env::set_var("STORMBLOCK_TOKEN_FILE", &f);
+        if fleet_token().is_none() {
+            assert_eq!(token_for("http://127.0.0.1:9090").as_deref(), Some("localsecret"));
+            assert_eq!(token_for("localhost:9090").as_deref(), Some("localsecret"));
+            assert_eq!(token_for("http://[::1]:9090/api").as_deref(), Some("localsecret"));
+            assert_eq!(token_for("http://forge.g8.lo:9090"), None, "never sent to a peer");
+        }
+        std::env::remove_var("STORMBLOCK_TOKEN_FILE");
+    }
 }
+

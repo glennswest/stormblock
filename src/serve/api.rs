@@ -129,6 +129,24 @@ fn is_public(path: &str) -> bool {
     )
 }
 
+/// The one write a caller with no credential may make: a machine claiming
+/// its own boot image, `POST /api/v1/synonyms/boothost/<tag>/claim` (#107).
+///
+/// Firmware has nowhere to keep a token, so this verb is open — and made safe
+/// by what it cannot do rather than by who calls it: it takes no options and
+/// only ever hands tag X a fresh clone of X's own sealed golden
+/// (`mgmt::api::synonyms::claim_boothost`). Matched exactly: one method, one
+/// namespace, one path segment for the tag, so `boothost/<tag>` itself — the
+/// re-point that decides what a machine boots — stays guarded.
+pub fn is_boot_claim(method: &Method, path: &str) -> bool {
+    if *method != Method::POST {
+        return false;
+    }
+    path.strip_prefix("/api/v1/synonyms/boothost/")
+        .and_then(|rest| rest.strip_suffix("/claim"))
+        .is_some_and(|tag| !tag.is_empty() && !tag.contains('/') && tag != "." && tag != "..")
+}
+
 /// Verbs that can destroy data. Everything that deletes, plus the ones that
 /// mutate irreversibly: applying a trim, sealing a template, collecting
 /// extents.
@@ -211,7 +229,7 @@ pub fn decide(
     let Some(expected) = auth.api_token.as_deref() else {
         return Ok(()); // explicit insecure mode
     };
-    if is_public(path) {
+    if is_public(path) || is_boot_claim(method, path) {
         return Ok(());
     }
 
@@ -1271,4 +1289,30 @@ mod tests {
         assert!(!is_public("/api/v1/volumes"));
         assert!(!is_public("/metrics"));
     }
+    /// The boot claim is the only write that needs no token, and only in its
+    /// exact shape: the re-point beside it, other namespaces and other verbs
+    /// on the same path all stay guarded (#107).
+    #[test]
+    fn only_the_boot_claim_is_an_open_write() {
+        let auth = AuthConfig { api_token: Some("t".into()), admin_token: None };
+        let open = |m: Method, p: &str| decide(&auth, &m, p, None, None).is_ok();
+        assert!(open(Method::POST, "/api/v1/synonyms/boothost/C2NR0Q2/claim"));
+        for (m, p) in [
+            (Method::GET, "/api/v1/synonyms/boothost/C2NR0Q2/claim"),
+            (Method::PUT, "/api/v1/synonyms/boothost/C2NR0Q2"),
+            (Method::DELETE, "/api/v1/synonyms/boothost/C2NR0Q2"),
+            (Method::POST, "/api/v1/synonyms/boothost/C2NR0Q2/rollback"),
+            (Method::POST, "/api/v1/synonyms/images/nginx/claim"),
+            (Method::POST, "/api/v1/synonyms/C2NR0Q2/claim"),
+            (Method::POST, "/api/v1/synonyms/hostgolden/C2NR0Q2/claim"),
+            (Method::POST, "/api/v1/synonyms/boothost/a/b/claim"),
+            (Method::POST, "/api/v1/synonyms/boothost//claim"),
+            (Method::POST, "/api/v1/synonyms/boothost/../claim"),
+            (Method::POST, "/api/v1/synonyms"),
+            (Method::GET, "/api/v1/volumes"),
+        ] {
+            assert!(!open(m.clone(), p), "{m} {p} must need the token");
+        }
+    }
 }
+

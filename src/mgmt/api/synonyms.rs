@@ -471,12 +471,15 @@ fn claimed_within_grace(
     m.get(&id).map(|t| t.elapsed()).filter(|e| *e < grace)
 }
 
-async fn release_superseded_clone(
-    state: &Arc<AppState>,
-    old: VolumeId,
-    syn: &synonym::Synonym,
-    source: VolumeId,
-) {
+/// Every volume a claim clone of `syn` may descend from: what it names now
+/// and everything it has named before.
+fn lineage_of(syn: &synonym::Synonym, source: VolumeId) -> Vec<VolumeId> {
+    std::iter::once(source)
+        .chain(syn.history.iter().filter_map(|h| h.target.volume_id()))
+        .collect()
+}
+
+async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents: &[VolumeId]) {
     // Still being booted from? A clone minted moments ago is the stage before
     // this one, not an abandoned predecessor.
     if let Some(age) = claimed_within_grace(old, state.claim_grace) {
@@ -507,12 +510,7 @@ async fn release_superseded_clone(
         // the old clone becomes garbage, and requiring the current golden
         // meant that case — the one that matters — was the one skipped.
         let parent = vm.parent(&old);
-        let ours = parent == Some(source)
-            || syn
-                .history
-                .iter()
-                .filter_map(|h| h.target.volume_id())
-                .any(|prev| parent == Some(prev));
+        let ours = parent.is_some_and(|p| parents.contains(&p));
         if !ours {
             tracing::debug!(
                 volume = %old,
@@ -620,6 +618,11 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Val
 }
 
 async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequest) -> Response {
+    // A machine claiming its boot image is the one caller that arrives with
+    // no credential, so its claim is a different, narrower verb (#107).
+    if namespace == BOOTHOST_NS {
+        return claim_boothost(state, name).await;
+    }
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(syn) = found else {
         return ApiError::not_found(format!("no synonym {}", synonym::key(namespace, name)));
@@ -724,7 +727,7 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // is what carried the clone name. They are the same volume whenever both
     // exist — the second is simply the one the boot path can see.
     if let Some(old) = superseded.or(predecessor).filter(|o| *o != c.volume_id) {
-        release_superseded_clone(&state, old, &syn, source).await;
+        release_superseded_clone(&state, old, &lineage_of(&syn, source)).await;
     }
 
     // Export the clone and hand back the tuple that reaches it.
@@ -762,6 +765,240 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
         out["synonym"] = body(&state, &b, None).await;
     }
     (StatusCode::CREATED, Json(out)).into_response()
+}
+
+/// The namespace a machine's boot image is assigned in, by service tag.
+pub const BOOTHOST_NS: &str = "boothost";
+/// Each host's own sealed golden, by service tag. Kept by the engine, never
+/// by a caller.
+pub const HOSTGOLDEN_NS: &str = "hostgolden";
+/// What a tag seen for the first time boots (stormbootx#15).
+pub const DEFAULT_HOST: &str = "default";
+
+/// One boothost claim at a time. Claims are rare — two per boot of one
+/// machine — and serialising them is what keeps two claims for one tag from
+/// each minting a host golden.
+static BOOT_CLAIMS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `POST /api/v1/synonyms/boothost/<tag>/claim` — what a machine boots, and
+/// the one thing on this API that needs no credential (#107).
+///
+/// Firmware has nowhere to keep a token, so this verb has to be safe to leave
+/// open, and it is made safe by what it *cannot* do. It takes no options —
+/// the body is ignored — and it can only ever hand tag X a fresh clone of X's
+/// own golden:
+///
+/// 1. **The assignment** is `boothost/<tag>`, which only an authenticated
+///    caller (stormcentral) can set. A tag seen for the first time takes what
+///    `boothost/default` names, and is pinned to it: moving the default later
+///    does not move a machine that already has an image.
+/// 2. **The host's golden** is `hostgolden/<tag>`: a sealed copy-on-write
+///    clone of the assignment, owned by the tag — metadata only, costing
+///    nothing until the assignment changes. It is reused for as long as the
+///    assignment stays put; a re-point makes a new one, and the old one goes
+///    once nothing is cloned from it.
+/// 3. **The boot clone** is a fresh clone of the host's golden, every time,
+///    and the previous boot's is released. Nothing written to the image
+///    survives a reboot; a machine's state lives in its data volumes.
+///
+/// So the worst a caller that is not machine X can do by claiming as X is get
+/// X's image — which is what "the tag is the binding" means until a claim is
+/// bound to the host itself (stormcos#35).
+async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
+    let _one_at_a_time = BOOT_CLAIMS.lock().await;
+
+    // 1. The assignment.
+    let assignment = {
+        let mut store = state.synonyms.write().await;
+        match store.get(BOOTHOST_NS, tag).cloned() {
+            Some(a) => a,
+            None => {
+                let Some(default) = store.get(BOOTHOST_NS, DEFAULT_HOST).cloned() else {
+                    return ApiError::not_found(format!(
+                        "no synonym {} and no {} to give a new machine",
+                        synonym::key(BOOTHOST_NS, tag),
+                        synonym::key(BOOTHOST_NS, DEFAULT_HOST)
+                    ));
+                };
+                let why = format!(
+                    "first claimed {}: pinned to {} v{}",
+                    chrono_now(),
+                    synonym::key(BOOTHOST_NS, DEFAULT_HOST),
+                    default.version
+                );
+                match store.create(BOOTHOST_NS, tag, default.target.clone(), default.label.clone(), Some(why)) {
+                    Ok(s) => {
+                        tracing::info!(tag, "new machine: {} pinned to the default image", s.name);
+                        s.clone()
+                    }
+                    Err(e) => return err(e),
+                }
+            }
+        }
+    };
+    let Some(release) = assignment.target.volume_id() else {
+        return ApiError::conflict(format!(
+            "{} names storage on another node ({}); a machine's golden is made here, so \
+             import it first",
+            synonym::key(BOOTHOST_NS, tag),
+            assignment.target.as_str()
+        ));
+    };
+    {
+        let vm = state.volume_manager.lock().await;
+        if vm.get_volume_handle(&release).is_none() {
+            return ApiError::conflict(format!(
+                "{} points at volume {release}, which is not on this node",
+                synonym::key(BOOTHOST_NS, tag)
+            ));
+        }
+        if !vm.is_sealed(&release) {
+            return ApiError::conflict(format!(
+                "{} points at volume {release}, which is not sealed: a machine's image is \
+                 made from a golden",
+                synonym::key(BOOTHOST_NS, tag)
+            ));
+        }
+    }
+
+    // 2. The host's golden: this one while it still descends from the
+    //    assignment, a new one when the assignment has moved.
+    let previous = state.synonyms.read().await.get(HOSTGOLDEN_NS, tag).cloned();
+    let current = {
+        let vm = state.volume_manager.lock().await;
+        previous
+            .as_ref()
+            .and_then(|p| p.target.volume_id())
+            .filter(|g| vm.get_volume_handle(g).is_some())
+            .filter(|g| vm.is_sealed(g) && vm.parent(g) == Some(release))
+    };
+    let (golden, minted) = match current {
+        Some(g) => (g, false),
+        None => {
+            let name = format!("{HOSTGOLDEN_NS}-{tag}-v{}", assignment.version);
+            let spec = crate::fs::template::CloneSpec::new(&name);
+            let c = match crate::fs::template::clone_volume(&state.volume_manager, release, &spec).await {
+                Ok(c) => c,
+                Err(e) => return super::fstemplates::err(e),
+            };
+            if let Err(e) = state.volume_manager.lock().await.seal_volume(c.volume_id, None).await {
+                return ApiError::internal(format!("sealing {name}: {e}"));
+            }
+            let target = Target::Volume { id: c.volume_id };
+            let mut store = state.synonyms.write().await;
+            let bound = if previous.is_some() {
+                store.repoint(HOSTGOLDEN_NS, tag, target, assignment.label.clone()).map(|_| ())
+            } else {
+                store
+                    .create(HOSTGOLDEN_NS, tag, target, assignment.label.clone(), Some(format!(
+                        "the sealed golden {} boots from; kept by the engine",
+                        synonym::key(BOOTHOST_NS, tag)
+                    )))
+                    .map(|_| ())
+            };
+            if let Err(e) = bound {
+                return err(e);
+            }
+            tracing::info!(tag, golden = %c.volume_id, "made this machine's own golden from {release}");
+            (c.volume_id, true)
+        }
+    };
+    let hostgolden = state.synonyms.read().await.get(HOSTGOLDEN_NS, tag).cloned();
+
+    // 3. A fresh boot clone, and the previous one released.
+    let clone_name = format!("{BOOTHOST_NS}-{tag}");
+    let predecessor = state.volume_manager.lock().await.find_volume(&clone_name).await;
+    let c = match crate::fs::template::clone_volume(
+        &state.volume_manager,
+        golden,
+        &crate::fs::template::CloneSpec::new(&clone_name),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => return super::fstemplates::err(e),
+    };
+    // What a boot clone of this machine may descend from: any golden it has
+    // had, and — for clones made before host goldens existed — any release it
+    // was assigned.
+    let mut parents = lineage_of(&assignment, release);
+    if let Some(h) = &hostgolden {
+        parents.extend(lineage_of(h, golden));
+    }
+    if let Some(old) = predecessor.filter(|o| *o != c.volume_id) {
+        release_superseded_clone(&state, old, &parents).await;
+    }
+    let collected = collect_host_goldens(&state, tag, golden).await;
+
+    note_claim(c.volume_id);
+    let attach = attach_info(&state, c.volume_id).await;
+    let out = json!({
+        "claimed_from": {
+            "synonym": synonym::key(BOOTHOST_NS, tag),
+            "version": assignment.version,
+            "volume": golden.0,
+            "release": release.0,
+        },
+        "host_golden": {
+            "synonym": synonym::key(HOSTGOLDEN_NS, tag),
+            "volume": golden.0,
+            "minted": minted,
+            "collected": collected.iter().map(|v| v.0).collect::<Vec<_>>(),
+        },
+        "volume": {
+            "id": c.volume_id.0,
+            "name": clone_name,
+            "size_bytes": c.size_bytes,
+            "fs_uuid": c.fs_uuid,
+            "sealed": false,
+            "access": "rw",
+        },
+        "attach": attach,
+    });
+    (StatusCode::CREATED, Json(out)).into_response()
+}
+
+/// Delete the host goldens a tag no longer uses: ones `hostgolden/<tag>` used
+/// to name, that nothing is cloned from any more and no name points at. A
+/// golden a boot clone still descends from stays until that clone is
+/// released — at the next boot.
+async fn collect_host_goldens(state: &Arc<AppState>, tag: &str, current: VolumeId) -> Vec<VolumeId> {
+    let Some(h) = state.synonyms.read().await.get(HOSTGOLDEN_NS, tag).cloned() else {
+        return Vec::new();
+    };
+    let prefix = format!("{HOSTGOLDEN_NS}-{tag}-");
+    let mut gone = Vec::new();
+    for old in h.history.iter().filter_map(|p| p.target.volume_id()) {
+        if old == current || gone.contains(&old) {
+            continue;
+        }
+        if !state.synonyms.read().await.pointing_at(&old).is_empty() {
+            continue;
+        }
+        let mut vm = state.volume_manager.lock().await;
+        let Some(handle) = vm.get_volume_handle(&old) else { continue };
+        // Only what this path made: sealed, named as a host golden of this
+        // tag, and with nothing cloned from it.
+        if !vm.is_sealed(&old) || !handle.name().await.starts_with(&prefix) || !vm.children(&old).is_empty() {
+            continue;
+        }
+        match vm.delete_volume(old).await {
+            Ok(()) => {
+                tracing::info!(tag, volume = %old, "collected a host golden nothing uses");
+                gone.push(old);
+            }
+            Err(e) => tracing::warn!(tag, volume = %old, "could not collect host golden: {e}"),
+        }
+    }
+    gone
+}
+
+fn chrono_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("at unix {secs}")
 }
 
 async fn claim_one(
