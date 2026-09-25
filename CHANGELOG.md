@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v17.1.0] — 2026-09-25
+
 ### 2026-09-25 (placement)
 - **feat(volumes):** `placement` on a volume (#136, #114). It lists each slab
   holding a leg, with its role, tier, domain, drive (serial, WWN, model,
