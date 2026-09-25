@@ -3,6 +3,24 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v18.4.0] — 2026-09-25
+
+### 2026-09-25 (metadata at scale)
+- **perf(slab):** a slab finds its first free slot through a per-chunk free
+  count (`drive/freemap.rs`) instead of scanning the bitmap from slot 0 on
+  every allocation. It is still first-fit with the same answer. On 4 M slots,
+  allocation now holds at ~27 µs a slot from empty to 90% full; before, it
+  climbed from 25 to 168 µs (#145).
+- **feat(examples):** `metadata_footprint` measures the resident bytes per
+  free slot, per allocated slot and per GEM extent, and the allocation cost as
+  a slab fills, then extrapolates to a 256 TB drive and a 41 PB node.
+- **docs:** `docs/metadata-scale.md` covers allocation metadata at 40 PB a
+  node (#145). Measured today: ~41 B a free slot and ~326 B a full one, which
+  is ~80 GB for a full 256 TB drive at 1 MiB and ~313 GB per PB. It proposes
+  a budget, per-class extent sizes, compact resident records, a paged and
+  incrementally persisted extent index, and 64-bit indexes in one format
+  change. The work is split into #155–#158 and stormcos#92.
+
 ## [v18.3.1] — 2026-09-25
 
 ### 2026-09-25 (multi-drive)

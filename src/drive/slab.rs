@@ -8,7 +8,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bitvec::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

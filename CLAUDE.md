@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Allocation metadata at 40 PB a node (2026-09-25, #145) — IN PROGRESS
+### Allocation metadata at 40 PB a node (2026-09-25, #145) — DONE (v18.4.0, docs/metadata-scale.md)
 
 Owner's scale: 160 × 256 TB drives per 4U node (~41 PB), 1 PB drives
 coming. The issue counts the slab's `extent_index`; the resident cost is more
@@ -127,13 +127,18 @@ ones included, and the GEM holds a forward entry and a reverse entry per
 allocated slot. And allocation finds a free slot with `first_one()`, a scan
 from the start of the bitmap, every time.
 
-- [ ] measure: `examples/metadata_footprint.rs` — RSS per slot empty and
+- [x] measure: `examples/metadata_footprint.rs` — RSS per slot empty and
       allocated (slab), per extent (GEM), allocation time as a slab fills;
       extrapolate to a 256 TB drive and a 41 PB node
-- [ ] `docs/metadata-scale.md`: the budget, where the bytes go, the design
+- [x] first-fit through a per-chunk free summary (`drive/freemap.rs`):
+      allocation flat at ~27 µs/slot from empty to 90% full (was 25→168 µs)
+- [x] `docs/metadata-scale.md`: the budget, where the bytes go, the design
       (extent size by class, what stays resident, paged index, free-extent
       trees, 64-bit indexes and the format change), and the work split
-- [ ] what needs the owner's word, called out; issues filed; close #145
+- [x] what needs the owner's word, called out; issues filed (#155–#158);
+      close #145. Measured: ~41 B per free slot, ~326 B per full slot,
+      ~313 GB/PB full. Decisions open: the budget (proposed ≤ 1 GiB/PiB),
+      extent classes (A, #156), 64-bit bundled with the paged format (B, #158)
 
 ### Multi-drive: the design (2026-09-25, #142) — DONE (v18.3.1, docs/multi-drive.md)
 
