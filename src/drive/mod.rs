@@ -8,6 +8,7 @@ pub mod sas;
 pub mod direct;
 pub mod dma;
 pub mod filedev;
+pub mod freemap;
 pub mod identity;
 pub mod handover;
 pub mod partition;

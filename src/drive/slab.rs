@@ -476,7 +476,9 @@ pub struct Slab {
     header: SlabHeader,
     device: Arc<dyn BlockDevice>,
     tier: StorageTier,
-    free_bitmap: BitVec<u8, Lsb0>,
+    /// Free slots, with a per-chunk summary so first-fit does not scan
+    /// every bit (#145).
+    free_bitmap: super::freemap::FreeMap,
     slots: Vec<Slot>,
     extent_index: HashMap<(VolumeId, u64), u32>,
     free_count: u64,
@@ -594,7 +596,7 @@ impl Slab {
         device.flush().await?;
 
         let id = SlabId(slab_uuid);
-        let free_bitmap = BitVec::repeat(true, total_slots as usize);
+        let free_bitmap = super::freemap::FreeMap::new(total_slots as usize, true);
         let slots = vec![Slot::free(); total_slots as usize];
 
         Ok(Slab {
@@ -629,7 +631,7 @@ impl Slab {
         let mut table_buf = vec![0u8; read_size];
         device.read(header.table_offset, &mut table_buf).await?;
 
-        let mut free_bitmap = BitVec::repeat(true, total_slots);
+        let mut free_bitmap = super::freemap::FreeMap::new(total_slots, true);
         let mut slots = Vec::with_capacity(total_slots);
         let mut extent_index = HashMap::new();
         let mut free_count = 0u64;
@@ -690,7 +692,7 @@ impl Slab {
         }
 
         // Find first free slot
-        let slot_idx = self.free_bitmap.first_one()
+        let slot_idx = self.free_bitmap.first_free()
             .ok_or_else(|| DriveError::Other(anyhow::anyhow!("bitmap inconsistency")))?;
 
         self.free_bitmap.set(slot_idx, false);
