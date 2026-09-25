@@ -29,6 +29,7 @@ pub mod ext4;
 pub mod ext4_free;
 pub mod files;
 pub mod template;
+pub mod survey;
 pub mod xfs;
 
 pub use ext4::{Ext4Layout, Ext4Params, Ext4Report, FsProfile, SealBlocker};

@@ -57,10 +57,39 @@ pub struct ImportSpec {
     /// Keep a downloaded file after the import.
     #[serde(default)]
     pub keep_download: bool,
+    /// Read every filesystem the image carries (the volume itself, or each
+    /// GPT partition — XFS and ext2/3/4) end to end before sealing, and fail
+    /// the import if one that was recognised does not read (#147). Default
+    /// true; `false` still finds and reports them, without walking.
+    #[serde(default = "yes")]
+    pub verify: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// A filesystem the image carries that was recognised and does not read is
+/// an image nothing will boot: fail rather than seal it, unless the caller
+/// asked not to verify.
+fn verdict(spec: &ImportSpec, found: &[crate::fs::survey::FoundFs]) -> Result<(), String> {
+    if !spec.verify {
+        return Ok(());
+    }
+    let bad: Vec<String> = found
+        .iter()
+        .filter_map(|f| {
+            f.error.as_ref().map(|e| match f.partition {
+                Some(p) => format!("partition {p} ({}): {e}", f.kind),
+                None => format!("{}: {e}", f.kind),
+            })
+        })
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("the image does not read cleanly ({}); import with \"verify\": false to keep it anyway", bad.join("; ")))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -91,6 +120,10 @@ pub struct ImportStatus {
     pub volume_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fs: Option<serde_json::Value>,
+    /// The filesystems found inside it — the root, `/boot`, and so on — with
+    /// what reading each found (#147).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub filesystems: Vec<crate::fs::survey::FoundFs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub started_at: u64,
@@ -162,6 +195,7 @@ impl Imports {
             downloaded_bytes: 0,
             volume_id: None,
             fs: None,
+            filesystems: Vec::new(),
             error: None,
             started_at: now(),
             finished_at: None,
@@ -474,8 +508,18 @@ async fn stream_raw(
     }
 
     let fs = crate::fs::disk::probe(&dev).await;
+    let found = crate::fs::survey::survey(&dev, spec.verify).await;
     drop(dev);
-    st.write().await.fs = fs.as_ref().map(|f| f.json());
+    {
+        let mut s = st.write().await;
+        s.fs = fs.as_ref().map(|f| f.json());
+        s.filesystems = found.clone();
+    }
+    if let Err(e) = verdict(spec, &found) {
+        let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
+        st.write().await.volume_id = None;
+        return Err(e);
+    }
     let mut vm = state.volume_manager.lock().await;
     if spec.seal {
         vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
@@ -562,8 +606,18 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
 
     // 4. Say what it is, and seal.
     let fs = crate::fs::disk::probe(&dev).await;
+    let found = crate::fs::survey::survey(&dev, spec.verify).await;
     drop(dev);
-    st.write().await.fs = fs.as_ref().map(|f| f.json());
+    {
+        let mut s = st.write().await;
+        s.fs = fs.as_ref().map(|f| f.json());
+        s.filesystems = found.clone();
+    }
+    if let Err(e) = verdict(spec, &found) {
+        let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
+        st.write().await.volume_id = None;
+        return Err(e);
+    }
     let mut vm = state.volume_manager.lock().await;
     if spec.seal {
         vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
