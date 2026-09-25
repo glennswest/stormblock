@@ -341,6 +341,152 @@ fn detect_drive_type(path: &str) -> DriveType {
 }
 
 #[cfg(test)]
+mod direct_tests {
+    //! The engine and the O_DIRECT contract, on regular files opened
+    //! O_DIRECT — a block device cannot be had without root on the build
+    //! box, and a file on a real filesystem keeps the same contract (#140).
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::drive::direct::DirectIo;
+
+    async fn file(dir: &tempfile::TempDir, len: u64) -> String {
+        let p = dir.path().join("direct.img").to_string_lossy().to_string();
+        let f = std::fs::File::create(&p).unwrap();
+        f.set_len(len).unwrap();
+        p
+    }
+
+    fn pattern(n: usize, seed: u8) -> Vec<u8> {
+        (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+    }
+
+    #[tokio::test]
+    async fn whole_blocks_round_trip_through_the_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = SasDevice::open_file_direct(&file(&dir, 8 << 20).await, 4096).await.unwrap();
+        println!("engine: {}", dev.engine());
+        let data = pattern(1 << 20, 7);
+        // A plain Vec: not page-aligned, which O_DIRECT refuses on its own.
+        assert_eq!(dev.write(4096, &data).await.unwrap(), data.len());
+        dev.flush().await.unwrap();
+        let mut back = vec![0u8; data.len()];
+        assert_eq!(dev.read(4096, &mut back).await.unwrap(), data.len());
+        assert_eq!(back, data);
+    }
+
+    /// A request that is not whole blocks is widened by the device; the
+    /// bytes around it are left exactly as they were.
+    #[tokio::test]
+    async fn partial_blocks_are_read_modify_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = SasDevice::open_file_direct(&file(&dir, 1 << 20).await, 4096).await.unwrap();
+        let base = pattern(3 * 4096, 1);
+        dev.write(0, &base).await.unwrap();
+        let patch = pattern(5000, 99);
+        assert_eq!(dev.write(1000, &patch).await.unwrap(), 5000, "spans a block boundary");
+        let mut all = vec![0u8; 3 * 4096];
+        dev.read(0, &mut all).await.unwrap();
+        let mut want = base.clone();
+        want[1000..6000].copy_from_slice(&patch);
+        assert_eq!(all, want);
+        let mut small = vec![0u8; 7];
+        dev.read(4093, &mut small).await.unwrap();
+        assert_eq!(small, want[4093..4100].to_vec(), "a read across a boundary");
+        assert!(dev.write((1 << 20) - 10, &[1u8; 20]).await.is_err(), "past the end is refused");
+    }
+
+    /// Many requests at once, both engines: whole blocks in parallel, and
+    /// partial writes into one block from many callers, none of which may
+    /// undo another's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn many_requests_in_flight_on_both_engines() {
+        for blocking in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = file(&dir, 4 << 20).await;
+            let mut dev = SasDevice::open_file_direct(&path, 4096).await.unwrap();
+            if blocking {
+                dev.io = DirectIo::blocking(dev.fd);
+            }
+            let dev = Arc::new(dev);
+            let mut tasks = Vec::new();
+            for i in 0..128u64 {
+                let d = dev.clone();
+                tasks.push(tokio::spawn(async move {
+                    d.write(i * 8192, &pattern(8192, i as u8)).await.unwrap();
+                }));
+            }
+            // Sixty-four callers, each patching its own 64 bytes of block 600.
+            for i in 0..64u64 {
+                let d = dev.clone();
+                tasks.push(tokio::spawn(async move {
+                    d.write(600 * 4096 + i * 64, &[i as u8 + 1; 64]).await.unwrap();
+                }));
+            }
+            for t in tasks {
+                t.await.unwrap();
+            }
+            for i in 0..128u64 {
+                let mut back = vec![0u8; 8192];
+                dev.read(i * 8192, &mut back).await.unwrap();
+                assert_eq!(back, pattern(8192, i as u8), "block {i} ({})", dev.engine());
+            }
+            let mut blk = vec![0u8; 4096];
+            dev.read(600 * 4096, &mut blk).await.unwrap();
+            for i in 0..64usize {
+                assert!(blk[i * 64..i * 64 + 64].iter().all(|b| *b == i as u8 + 1), "caller {i} lost ({})", dev.engine());
+            }
+        }
+    }
+
+    /// A caller that gives up mid-request must not take the device with it:
+    /// the buffer belongs to the operation, not to the future.
+    #[tokio::test]
+    async fn a_dropped_request_leaves_the_device_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = Arc::new(SasDevice::open_file_direct(&file(&dir, 64 << 20).await, 4096).await.unwrap());
+        for _ in 0..16 {
+            let d = dev.clone();
+            let t = tokio::spawn(async move {
+                let mut buf = vec![0u8; 32 << 20];
+                let _ = d.read(0, &mut buf).await;
+            });
+            tokio::task::yield_now().await;
+            t.abort();
+        }
+        dev.write(0, &[5u8; 4096]).await.unwrap();
+        let mut back = [0u8; 4096];
+        dev.read(0, &mut back).await.unwrap();
+        assert!(back.iter().all(|b| *b == 5));
+    }
+
+    /// A slab formats, takes data and reopens on a block device the way it
+    /// did on a FileDevice — so a slab laid through FileDevice is adopted as
+    /// it is, with nothing moved (#140).
+    #[tokio::test]
+    async fn a_slab_laid_through_a_file_reopens_o_direct_with_its_data() {
+        use crate::drive::slab::Slab;
+        use crate::placement::topology::StorageTier;
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir, 32 << 20).await;
+        let vol = crate::volume::extent::VolumeId(uuid::Uuid::new_v4());
+        let slot = {
+            let fdev = crate::drive::filedev::FileDevice::open(&path).await.unwrap();
+            let mut slab = Slab::format(Arc::new(fdev), 1 << 20, StorageTier::Hot).await.unwrap();
+            let slot = slab.allocate(vol, 3).await.unwrap();
+            slab.write_slot(slot, 0, &pattern(1 << 20, 42)).await.unwrap();
+            slot
+        };
+        let dev = SasDevice::open_file_direct(&path, 4096).await.unwrap();
+        let slab = Slab::open(Arc::new(dev)).await.unwrap();
+        assert_eq!(slab.find_slot(vol, 3), Some(slot));
+        let mut back = vec![0u8; 1 << 20];
+        slab.read_slot(slot, 0, &mut back).await.unwrap();
+        assert_eq!(back, pattern(1 << 20, 42));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
