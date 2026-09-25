@@ -17,6 +17,12 @@
 # nvme-cli, no nvme_tcp module, or not root. A skip is reported loudly so a
 # green run is never mistaken for "hot-add verified".
 
+# The engine requires a bearer token (#107). One for this run, presented by
+# every curl below through a curlrc, and named in the engine's config.
+CI_TOKEN=${STORMBLOCK_API_TOKEN:-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')}
+CURL_HOME=$(mktemp -d "${TMPDIR:-/tmp}/ci-curl.XXXXXX"); export CURL_HOME
+printf 'header = "Authorization: Bearer %s"\n' "$CI_TOKEN" > "$CURL_HOME/.curlrc"
+
 set -uo pipefail
 
 TOTAL_FAILURES=0
@@ -182,6 +188,7 @@ else
     truncate -s 256M "$WORKDIR/d2.img"
     cat > "$WORKDIR/stormblock.toml" <<EOF
 [management]
+api_token = "$CI_TOKEN"
 listen_addr = "127.0.0.1:$MGMT"
 data_dir = "$DATA_DIR"
 node_name = "$NODE"

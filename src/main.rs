@@ -1230,8 +1230,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Phase 6: Start cluster engine (if enabled)
+    //
+    // Peers are called with the cluster's shared token (#107), and the
+    // heartbeat and Raft clients are built here — before the management
+    // server resolves its own token — so name it now.
     #[cfg(feature = "cluster")]
     if config.cluster.enabled {
+        if let Some(t) = config.management.api_token.clone().filter(|t| !t.trim().is_empty()) {
+            stormblock::mgmt::auth::set_fleet_token(Some(t));
+        }
         match cluster::ClusterManager::new(config.cluster.clone(), &state).await {
             Ok(mut cluster_mgr) => {
                 if let Err(e) = cluster_mgr.start(&state).await {

@@ -99,8 +99,11 @@ impl ClusterConfig {
 
     /// Build an HTTP client configured for cluster TLS (if enabled).
     pub fn build_http_client(&self) -> anyhow::Result<crate::http::Client> {
+        // Peers are guarded like any caller (#107). Only a *shared* token
+        // means anything to another node, which is why a cluster shares one.
         let mut builder = crate::http::Client::builder()
-            .timeout(std::time::Duration::from_secs(10));
+            .timeout(std::time::Duration::from_secs(10))
+            .bearer(crate::mgmt::auth::fleet_token());
 
         if self.tls_enabled {
             if let Some(ca_path) = &self.tls_ca_cert {

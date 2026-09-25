@@ -12,6 +12,12 @@
 # discard_max_bytes on the block device: if that is 0, the VPD advertising is
 # still wrong and nothing downstream can possibly reclaim.
 
+# The engine requires a bearer token (#107). One for this run, presented by
+# every curl below through a curlrc, and named in the engine's config.
+CI_TOKEN=${STORMBLOCK_API_TOKEN:-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')}
+CURL_HOME=$(mktemp -d "${TMPDIR:-/tmp}/ci-curl.XXXXXX"); export CURL_HOME
+printf 'header = "Authorization: Bearer %s"\n' "$CI_TOKEN" > "$CURL_HOME/.curlrc"
+
 set -uo pipefail
 
 FAILURES=0
@@ -75,6 +81,7 @@ truncate -s 2G "$W/d1.img"
 truncate -s 2G "$W/d2.img"
 cat > "$W/stormblock.toml" <<EOF
 [management]
+api_token = "$CI_TOKEN"
 listen_addr = "127.0.0.1:$MGMT"
 data_dir = "$W/data"
 node_name = "ci-node"

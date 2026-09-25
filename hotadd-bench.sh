@@ -3,6 +3,13 @@
 #
 # This is the clone-per-container shape: the transport is established once,
 # and each container costs only whatever it takes to surface one more device.
+# The engine requires a bearer token (#107): give it as $STORMBLOCK_API_TOKEN
+# (on the engine's own host: `cat /etc/stormblock/api_token`).
+if [ -n "${STORMBLOCK_API_TOKEN:-}" ]; then
+    CURL_HOME=$(mktemp -d "${TMPDIR:-/tmp}/ci-curl.XXXXXX"); export CURL_HOME
+    printf 'header = "Authorization: Bearer %s"\n' "$STORMBLOCK_API_TOKEN" > "$CURL_HOME/.curlrc"
+fi
+
 set -u
 
 MGMT="${MGMT:-192.168.8.181:9090}"

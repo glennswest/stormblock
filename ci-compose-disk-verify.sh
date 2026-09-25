@@ -20,6 +20,12 @@
 #   STORMBLOCK_BIN=/build/cargo/stormblock/debug/stormblock ./ci-compose-disk-verify.sh
 set -euo pipefail
 
+# The engine requires a bearer token (#107). One for this run, presented by
+# every curl below through a curlrc, and named in the engine's config.
+CI_TOKEN=${STORMBLOCK_API_TOKEN:-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')}
+CURL_HOME=$(mktemp -d "${TMPDIR:-/tmp}/ci-curl.XXXXXX"); export CURL_HOME
+printf 'header = "Authorization: Bearer %s"\n' "$CI_TOKEN" > "$CURL_HOME/.curlrc"
+
 BIN=${STORMBLOCK_BIN:-/build/cargo/stormblock/debug/stormblock}
 WORK=${WORK:-/build/work/compose-verify}
 MGMT=${MGMT:-127.0.0.1:9199}
@@ -71,6 +77,7 @@ cat > "$WORK/stormblock.toml" <<EOF
 path = "$WORK/slab.img"
 
 [management]
+api_token = "$CI_TOKEN"
 listen_addr = "$MGMT"
 data_dir = "$WORK/data"
 node_name = "compose-verify"

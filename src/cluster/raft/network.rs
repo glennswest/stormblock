@@ -21,10 +21,13 @@ pub struct HttpNetworkFactory {
 
 impl Default for HttpNetworkFactory {
     fn default() -> Self {
-        HttpNetworkFactory {
-            client: crate::http::Client::new(),
-            scheme: "http".to_string(),
-        }
+        // Raft RPCs are guarded like any other call on a peer's API (#107):
+        // present the cluster's shared token.
+        let client = crate::http::Client::builder()
+            .bearer(crate::mgmt::auth::fleet_token())
+            .build()
+            .unwrap_or_else(|_| crate::http::Client::new());
+        HttpNetworkFactory { client, scheme: "http".to_string() }
     }
 }
 

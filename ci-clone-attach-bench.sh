@@ -14,6 +14,13 @@
 # Clone is measured at several golden-image sizes to show whether it is
 # actually O(1) or secretly O(extents).
 
+# The engine requires a bearer token (#107): give it as $STORMBLOCK_API_TOKEN
+# (on the engine's own host: `cat /etc/stormblock/api_token`).
+if [ -n "${STORMBLOCK_API_TOKEN:-}" ]; then
+    CURL_HOME=$(mktemp -d "${TMPDIR:-/tmp}/ci-curl.XXXXXX"); export CURL_HOME
+    printf 'header = "Authorization: Bearer %s"\n' "$STORMBLOCK_API_TOKEN" > "$CURL_HOME/.curlrc"
+fi
+
 set -uo pipefail
 
 MGMT="${MGMT:-127.0.0.1:9090}"
