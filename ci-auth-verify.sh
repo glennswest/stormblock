@@ -92,10 +92,7 @@ AUTH=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
 say "with the token: a sealed release, and boothost/default"
 curl -s -m 120 -X POST "$API/fstemplates" "${AUTH[@]}" -d '{"name":"release-a","size":"64M"}' > "$W/tpl.json"
 [ "$(j 'd["template"]["state"]' < "$W/tpl.json")" = ready ] || fail "template did not seal: $(cat "$W/tpl.json")"
-RELEASE=$(curl -s "$API/volumes" "${AUTH[@]}" | python3 -c "
-import json,sys
-v=[x for x in json.load(sys.stdin)['items'] if x['name']=='release-a' and x.get('sealed')]
-print(v[0]['id'])")
+RELEASE=$(j 'd["template"]["sealed_volume_id"]' < "$W/tpl.json")
 echo "release-a = $RELEASE"
 c=$(code -X POST "$API/synonyms" "${AUTH[@]}" -d "{\"namespace\":\"boothost\",\"name\":\"default\",\"volume\":\"$RELEASE\"}")
 [ "$c" = 201 ] || fail "creating boothost/default answered $c"
