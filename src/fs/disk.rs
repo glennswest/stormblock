@@ -106,8 +106,14 @@ pub async fn detect(dev: &Arc<dyn BlockDevice>) -> DriveResult<Option<FsInfo>> {
     Ok(None)
 }
 
-/// What the engine can read off a volume: ext4 first, then a disk shape.
+/// What the engine can read off a volume: ext4, then XFS (#147), then a disk
+/// shape.
 pub async fn probe(dev: &Arc<dyn BlockDevice>) -> Option<FsInfo> {
+    if crate::fs::xfs::looks_like_xfs(dev).await {
+        if let Ok(l) = crate::fs::xfs::read_layout(dev).await {
+            return Some(crate::fs::xfs::fs_info(&l));
+        }
+    }
     if let Ok(l) = crate::fs::ext4::read_layout(dev).await {
         return Some(FsInfo {
             kind: "ext4".into(),

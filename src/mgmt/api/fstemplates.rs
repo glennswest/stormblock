@@ -267,7 +267,9 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
         store.insert(crate::fs::template::FsTemplate {
             id: Uuid::new_v4(),
             name: tname,
-            fs: FsKind::Ext4,
+            // The kind the volume record names — a blank laid down as XFS
+            // stays XFS (#147) — else ext4, which is what blanks were before.
+            fs: fs.as_ref().and_then(|f| f.kind.parse().ok()).unwrap_or(FsKind::Ext4),
             size_bytes: size,
             journal: fs.as_ref().map(|f| f.journal).unwrap_or(true),
             label: fs.as_ref().map(|f| f.label.clone()).unwrap_or_default(),

@@ -51,6 +51,7 @@ use crate::drive::slab::SlabRole;
 use crate::volume::{VolumeId, VolumeManager};
 
 use super::ext4;
+use super::xfs;
 use super::files::{self, SeedFile};
 
 /// The volume manager, shared. Every entry point here locks it for as short a
@@ -64,9 +65,10 @@ pub const TEMPLATES_FILE: &str = "fstemplates.json";
 
 /// Filesystems this engine can lay down itself.
 ///
-/// One formatter writes all three; the kind only decides which features are
-/// turned on over the common base, exactly as `mke2fs -t` does. A local enum
-/// rather than the formatter's own so the persisted store owns its encoding.
+/// One formatter writes the three ext kinds; the kind only decides which
+/// features are turned on over the common base, exactly as `mke2fs -t` does.
+/// XFS is a formatter of its own (`mkfs-xfs`, #147). A local enum rather than
+/// the formatters' own so the persisted store owns its encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FsKind {
@@ -74,6 +76,7 @@ pub enum FsKind {
     Ext3,
     #[default]
     Ext4,
+    Xfs,
 }
 
 impl FsKind {
@@ -82,15 +85,22 @@ impl FsKind {
             FsKind::Ext2 => "ext2",
             FsKind::Ext3 => "ext3",
             FsKind::Ext4 => "ext4",
+            FsKind::Xfs => "xfs",
         }
     }
 
+    /// The ext formatter's profile. XFS has none; it is formatted by
+    /// [`xfs::format`] and never asks.
     pub fn profile(&self) -> ext4::FsProfile {
         match self {
             FsKind::Ext2 => ext4::FsProfile::Ext2,
             FsKind::Ext3 => ext4::FsProfile::Ext3,
-            FsKind::Ext4 => ext4::FsProfile::Ext4,
+            FsKind::Ext4 | FsKind::Xfs => ext4::FsProfile::Ext4,
         }
+    }
+
+    pub fn is_xfs(&self) -> bool {
+        matches!(self, FsKind::Xfs)
     }
 }
 
@@ -102,8 +112,9 @@ impl std::str::FromStr for FsKind {
             "ext2" => Ok(FsKind::Ext2),
             "ext3" => Ok(FsKind::Ext3),
             "ext4" => Ok(FsKind::Ext4),
+            "xfs" => Ok(FsKind::Xfs),
             other => Err(format!(
-                "unsupported filesystem '{other}' (this engine writes ext2, ext3 and ext4)"
+                "unsupported filesystem '{other}' (this engine writes ext2, ext3, ext4 and xfs)"
             )),
         }
     }
@@ -610,6 +621,9 @@ pub async fn create(
     if store.lock().await.by_name(&spec.name).is_some() {
         return Err(TemplateError::Exists(format!("fstemplate {} already exists", spec.name)));
     }
+    if spec.fs.is_xfs() && spec.parent.is_none() {
+        xfs_spec_ok(spec)?;
+    }
 
     // `FROM` a parent, or from nothing.
     //
@@ -698,7 +712,7 @@ pub async fn create(
                 .get_volume(&id)
                 .ok_or_else(|| TemplateError::Internal("cloned volume vanished".to_string()))?;
             let fresh = Uuid::new_v4();
-            if let Err(e) = ext4::stamp_uuid(&dev, fresh, true).await {
+            if let Err(e) = stamp_fs_uuid(p.fs.as_str(), &dev, fresh, true).await {
                 drop(dev);
                 let _ = discard(vm, id).await;
                 return Err(TemplateError::Internal(format!(
@@ -723,7 +737,8 @@ pub async fn create(
         size_bytes: spec.size_bytes,
         journal: match &parent {
             Some(p) => p.journal,
-            None => spec.journal.unwrap_or(spec.fs != FsKind::Ext2),
+            // XFS always has a log.
+            None => spec.fs.is_xfs() || spec.journal.unwrap_or(spec.fs != FsKind::Ext2),
         },
         label: match &parent {
             Some(p) if spec.label.is_empty() => p.label.clone(),
@@ -786,18 +801,22 @@ pub async fn create(
         return Ok(template);
     }
 
-    let params = ext4::Ext4Params {
-        profile: spec.fs.profile(),
-        label: spec.label.clone(),
-        uuid: Uuid::new_v4(),
-        journal: spec.journal,
-        features: spec.features.clone(),
-        // The volume was created moments ago and has never been written, so
-        // every unwritten block already reads back as zeros. This is what keeps
-        // a template's allocation in kilobytes rather than the tens of
-        // megabytes its inode tables describe.
-        assume_blank: true,
-        ..Default::default()
+    let params = if spec.fs.is_xfs() {
+        FormatParams::Xfs(xfs::XfsParams { label: spec.label.clone(), uuid: Uuid::new_v4(), block_size: None })
+    } else {
+        FormatParams::Ext4(ext4::Ext4Params {
+            profile: spec.fs.profile(),
+            label: spec.label.clone(),
+            uuid: Uuid::new_v4(),
+            journal: spec.journal,
+            features: spec.features.clone(),
+            // The volume was created moments ago and has never been written, so
+            // every unwritten block already reads back as zeros. This is what keeps
+            // a template's allocation in kilobytes rather than the tens of
+            // megabytes its inode tables describe.
+            assume_blank: true,
+            ..Default::default()
+        })
     };
     format_and_seal(vm, store, template.id, raw, params, &spec.seed).await
 }
@@ -811,7 +830,7 @@ async fn format_and_seal(
     store: &StoreLock,
     id: Uuid,
     raw: VolumeId,
-    params: ext4::Ext4Params,
+    params: FormatParams,
     seed: &[files::SeedFile],
 ) -> Result<FsTemplate> {
     let name = store.lock().await.get(&id).map(|t| t.name.clone()).unwrap_or_default();
@@ -826,7 +845,10 @@ async fn format_and_seal(
     // several templates format concurrently instead of queueing behind one
     // volume-manager mutex — which is the whole reason provisioning many at
     // once is not N times the cost of one.
-    let format = ext4::format(&dev, &params).await;
+    let format = match &params {
+        FormatParams::Ext4(p) => ext4::format(&dev, p).await.map(|_| ()),
+        FormatParams::Xfs(p) => xfs::format(&dev, p).await.map(|_| ()),
+    };
     drop(dev);
 
     if let Err(e) = format {
@@ -853,7 +875,7 @@ async fn format_and_seal(
     {
         let mut s = store.lock().await;
         if let Some(t) = s.get_mut(&id) {
-            t.fs_uuid = Some(params.uuid);
+            t.fs_uuid = Some(params.uuid());
         }
         s.persist();
     }
@@ -905,7 +927,7 @@ pub async fn resume_formats(
         let Some(raw) = t.raw_volume_id.map(VolumeId) else { continue };
         let Some(dev) = vm.lock().await.get_volume(&raw) else { continue };
         let ours = t.formatting
-            || (!in_use.contains(&raw.0) && ext4::read_layout(&dev).await.is_err());
+            || (!in_use.contains(&raw.0) && read_fs_uuid(t.fs.as_str(), &dev).await.is_err());
         if !ours {
             continue;
         }
@@ -925,14 +947,18 @@ pub async fn resume_formats(
             }
             s.persist();
         }
-        let params = ext4::Ext4Params {
-            profile: t.fs.profile(),
-            label: t.label.clone(),
-            uuid: Uuid::new_v4(),
-            journal: Some(t.journal),
-            features: t.features.clone(),
-            assume_blank: true,
-            ..Default::default()
+        let params = if t.fs.is_xfs() {
+            FormatParams::Xfs(xfs::XfsParams { label: t.label.clone(), uuid: Uuid::new_v4(), block_size: None })
+        } else {
+            FormatParams::Ext4(ext4::Ext4Params {
+                profile: t.fs.profile(),
+                label: t.label.clone(),
+                uuid: Uuid::new_v4(),
+                journal: Some(t.journal),
+                features: t.features.clone(),
+                assume_blank: true,
+                ..Default::default()
+            })
         };
         let r = format_and_seal(vm, store, t.id, raw, params, &[]).await;
         match &r {
@@ -982,6 +1008,38 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
 
     // Checking is I/O over the volume and nothing else, so it holds no lock:
     // an fsck of one template must not stall every other volume operation.
+    if template.fs.is_xfs() {
+        let checked = seal_check_xfs(&dev, &template.name, force).await?;
+        drop(dev);
+        let mut s = store.lock().await;
+        let t = s
+            .get_mut(id)
+            .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {id} not found")))?;
+        t.sealed_volume_id = Some(raw.0);
+        t.raw_volume_id = None;
+        t.state = TemplateState::Ready;
+        t.formatting = false;
+        t.journal = true;
+        if let Some(l) = &checked {
+            t.fs_uuid = Some(l.uuid);
+            t.metadata_csum = l.version == 5;
+            t.csum_seed = l.meta_uuid_feature;
+            t.sixty_four_bit = true;
+            if t.label.is_empty() {
+                t.label = l.label.clone();
+            }
+        }
+        let out = t.clone();
+        s.persist();
+        drop(s);
+        vm.lock()
+            .await
+            .seal_volume(raw, Some(out.fs_info()))
+            .await
+            .map_err(|e| TemplateError::Internal(format!("sealing volume {raw}: {e}")))?;
+        tracing::info!("fstemplate {} (xfs) sealed as volume {}", out.name, raw);
+        return Ok(out);
+    }
     let layout = match ext4::read_layout(&dev).await {
         Ok(l) => Some(l),
         Err(e) if force => {
@@ -1263,7 +1321,7 @@ async fn clone_volume_impl(
             .ok_or_else(|| TemplateError::Internal("clone volume vanished".to_string()))?;
         if spec.stamp_uuid {
             let fresh = Uuid::new_v4();
-            match ext4::stamp_uuid(&dev, fresh, spec.stamp_backups).await {
+            match stamp_fs_uuid(&fs.kind, &dev, fresh, spec.stamp_backups).await {
                 Ok(_) => fs_uuid = Some(fresh),
                 Err(e) => {
                     // Roll the clone back: handing out a volume that silently
@@ -1280,7 +1338,7 @@ async fn clone_volume_impl(
             }
         }
         if let Some(label) = &spec.label {
-            if let Err(e) = ext4::stamp_label(&dev, label).await {
+            if let Err(e) = stamp_fs_label(&fs.kind, &dev, label).await {
                 tracing::warn!("clone {}: could not set label: {e}", spec.name);
             }
         }
@@ -1306,17 +1364,17 @@ async fn clone_volume_impl(
             .await
             .get_volume(&id)
             .ok_or_else(|| TemplateError::Internal("clone volume vanished".to_string()))?;
-        let back = ext4::read_layout(&dev).await;
+        let back = read_fs_uuid(&fs.kind, &dev).await;
         drop(dev);
         match back {
-            Ok(l) if Some(l.uuid) == fs_uuid => verified = true,
-            Ok(l) => {
+            Ok(u) if Some(u) == fs_uuid => verified = true,
+            Ok(u) => {
                 return Err(discard_or_report(
                     vm,
                     id,
                     format!(
                         "clone {} reads back UUID {} after being stamped {:?}",
-                        spec.name, l.uuid, fs_uuid
+                        spec.name, u, fs_uuid
                     ),
                 )
                 .await)
@@ -1337,20 +1395,8 @@ async fn clone_volume_impl(
             .await
             .get_volume(&id)
             .ok_or_else(|| TemplateError::Internal("clone volume vanished".to_string()))?;
-        let verdict = ext4::check(&dev).await;
+        let problem = check_fs(&fs.kind, &dev).await;
         drop(dev);
-        let problem = match verdict {
-            Ok(report) if report.is_clean() => None,
-            Ok(report) => Some(
-                report
-                    .problems
-                    .iter()
-                    .map(|p| format!("{}: {}", p.code, p.message))
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            ),
-            Err(e) => Some(e.to_string()),
-        };
         if let Some(why) = problem {
             return Err(discard_or_report(
                 vm,
@@ -1383,6 +1429,135 @@ async fn clone_volume_impl(
         size_bytes: size,
         verified,
     })
+}
+
+// ── Filesystem kind dispatch ─────────────────────────────────────────
+//
+// Everything below the template lifecycle that touches the filesystem
+// itself, keyed on the kind the volume record names. `xfs` goes to
+// [`xfs`]; anything else is the ext family, as it always was.
+
+/// What to format a template with.
+#[derive(Debug, Clone)]
+enum FormatParams {
+    Ext4(ext4::Ext4Params),
+    Xfs(xfs::XfsParams),
+}
+
+impl FormatParams {
+    fn uuid(&self) -> Uuid {
+        match self {
+            FormatParams::Ext4(p) => p.uuid,
+            FormatParams::Xfs(p) => p.uuid,
+        }
+    }
+}
+
+/// What an XFS template may ask for (#147). `mkfs-xfs` refuses under 300 MB
+/// as `mkfs.xfs` does; `fio-xfs` cannot write yet, so nothing can be seeded
+/// into one; the ext feature list and a log-less filesystem mean nothing here.
+fn xfs_spec_ok(spec: &TemplateSpec) -> Result<()> {
+    if spec.size_bytes < xfs::MIN_BYTES {
+        return Err(TemplateError::Invalid(format!(
+            "an XFS template must be at least 300 MB (mkfs.xfs refuses anything smaller); asked for {} bytes",
+            spec.size_bytes
+        )));
+    }
+    if !spec.seed.is_empty() {
+        return Err(TemplateError::Invalid(
+            "seeding files into XFS is not supported yet: fio-xfs reads, it does not write".to_string(),
+        ));
+    }
+    if spec.features.is_some() {
+        return Err(TemplateError::Invalid(
+            "`features` is an mke2fs -O list; XFS templates take mkfs.xfs 6.15's defaults".to_string(),
+        ));
+    }
+    if spec.journal == Some(false) {
+        return Err(TemplateError::Invalid("XFS always has a log; journal=false does not apply".to_string()));
+    }
+    if spec.label.len() > 12 {
+        return Err(TemplateError::Invalid(format!("an XFS label is at most 12 bytes: {:?}", spec.label)));
+    }
+    Ok(())
+}
+
+/// Give the filesystem on `dev` a new UUID. `backups` is ext's choice to
+/// patch the backup superblocks too; XFS always writes every AG's.
+async fn stamp_fs_uuid(kind: &str, dev: &Arc<dyn crate::drive::BlockDevice>, uuid: Uuid, backups: bool) -> anyhow::Result<()> {
+    if kind == "xfs" {
+        xfs::stamp_uuid(dev, uuid).await
+    } else {
+        ext4::stamp_uuid(dev, uuid, backups).await.map(|_| ())
+    }
+}
+
+async fn stamp_fs_label(kind: &str, dev: &Arc<dyn crate::drive::BlockDevice>, label: &str) -> anyhow::Result<()> {
+    if kind == "xfs" {
+        xfs::stamp_label(dev, label).await
+    } else {
+        ext4::stamp_label(dev, label).await
+    }
+}
+
+/// The UUID the filesystem on `dev` answers to; an error when there is none.
+async fn read_fs_uuid(kind: &str, dev: &Arc<dyn crate::drive::BlockDevice>) -> anyhow::Result<Uuid> {
+    if kind == "xfs" {
+        Ok(xfs::read_layout(dev).await?.uuid)
+    } else {
+        Ok(ext4::read_layout(dev).await?.uuid)
+    }
+}
+
+/// Check the filesystem on `dev`: `None` when it is clean, else why not.
+async fn check_fs(kind: &str, dev: &Arc<dyn crate::drive::BlockDevice>) -> Option<String> {
+    if kind == "xfs" {
+        let blockers = match xfs::seal_blockers(dev).await {
+            Ok(b) => b,
+            Err(e) => return Some(e.to_string()),
+        };
+        if !blockers.is_empty() {
+            return Some(blockers.join("; "));
+        }
+        return xfs::check(dev).await.err().map(|e| e.to_string());
+    }
+    match ext4::check(dev).await {
+        Ok(report) if report.is_clean() => None,
+        Ok(report) => Some(
+            report
+                .problems
+                .iter()
+                .map(|p| format!("{}: {}", p.code, p.message))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
+/// The seal check for an XFS template: a readable superblock with a good
+/// CRC, nothing that says the format is unfinished or needs repair, and a
+/// tree `fio-xfs` walks end to end. `force` seals whatever is there.
+async fn seal_check_xfs(
+    dev: &Arc<dyn crate::drive::BlockDevice>,
+    name: &str,
+    force: bool,
+) -> Result<Option<xfs::XfsLayout>> {
+    let layout = match xfs::read_layout(dev).await {
+        Ok(l) => l,
+        Err(e) if force => {
+            tracing::warn!("sealing {name} with no readable XFS filesystem: {e}");
+            return Ok(None);
+        }
+        Err(e) => return Err(TemplateError::NotSealable(format!("no usable XFS filesystem on the template volume: {e}"))),
+    };
+    if let Some(why) = check_fs("xfs", dev).await {
+        if !force {
+            return Err(TemplateError::NotSealable(format!("refusing to seal {name}: {why}")));
+        }
+        tracing::warn!("sealing {name} despite: {why}");
+    }
+    Ok(Some(layout))
 }
 
 /// Mint a copy-on-write clone of a sealed template.
@@ -2202,6 +2377,81 @@ mod tests {
         let tdev = volume(&vm, t.clone_source().unwrap()).await;
         assert_eq!(ext4::read_layout(&tdev).await.unwrap().uuid, template_uuid);
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// An XFS blank (#147): formatted by `mkfs-xfs`, sealed after `fio-xfs`
+    /// walks it, and every clone — a claim is one — answers to its own UUID
+    /// while the metadata keeps the blank's, as `xfs_admin -U` leaves it.
+    #[tokio::test]
+    async fn an_xfs_template_formats_seals_and_clones_with_fresh_identity() {
+        let (vm, store, path) = node(4 * 1024 * 1024 * 1024).await;
+        let spec = TemplateSpec {
+            fs: FsKind::Xfs,
+            label: "data".to_string(),
+            ..TemplateSpec::new("xfs-1g", 1024 * 1024 * 1024)
+        };
+        let t = create(&vm, &store, &spec).await.unwrap();
+        assert_eq!((t.state, t.fs, t.journal), (TemplateState::Ready, FsKind::Xfs, true));
+        assert!(t.metadata_csum, "v5, CRCs");
+        let template_uuid = t.fs_uuid.unwrap();
+        let source = t.clone_source().unwrap();
+        {
+            let m = vm.lock().await;
+            let info = m.fs_info(&VolumeId(source)).cloned().unwrap();
+            assert_eq!((info.kind.as_str(), info.uuid), ("xfs", Some(template_uuid)));
+            assert!(m.is_sealed(&VolumeId(source)));
+        }
+        // The log mkfs.xfs zeroes is a discard on a thin volume: the blank
+        // costs its metadata, not the log.
+        let allocated = vm.lock().await.get_volume_handle(&VolumeId(source)).unwrap().allocated().await;
+        assert!(allocated < 32 * 1024 * 1024, "an XFS blank allocated {allocated} bytes");
+
+        let a = claim(&vm, &store, "xfs-1g", &ClaimSpec { size_bytes: None, label: Some("pvc-a".into()) })
+            .await
+            .unwrap();
+        let b = clone_template(&vm, &store, "xfs-1g", &CloneSpec::new("pvc-b")).await.unwrap();
+        assert!(a.verified && b.verified, "the stamp was read back");
+        assert_ne!(a.fs_uuid, b.fs_uuid);
+        for c in [&a, &b] {
+            assert_ne!(c.fs_uuid, Some(template_uuid));
+            let dev = volume(&vm, c.volume_id).await;
+            let l = xfs::read_layout(&dev).await.unwrap();
+            assert_eq!(Some(l.uuid), c.fs_uuid);
+            assert_eq!(l.meta_uuid, template_uuid, "metadata keeps the blank's UUID");
+            assert!(l.meta_uuid_feature);
+            xfs::check(&dev).await.unwrap();
+            assert_eq!(vm.lock().await.fs_info(&c.volume_id).unwrap().kind, "xfs");
+        }
+        assert_eq!(xfs::read_layout(&volume(&vm, a.volume_id).await).await.unwrap().label, "pvc-a");
+        // The blank itself is untouched.
+        assert_eq!(xfs::read_layout(&volume(&vm, VolumeId(source)).await).await.unwrap().uuid, template_uuid);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// What an XFS template cannot be, refused up front rather than failed
+    /// half-way.
+    #[tokio::test]
+    async fn xfs_templates_refuse_what_does_not_apply() {
+        let (vm, store, path) = node(1024 * 1024 * 1024).await;
+        let xfs_spec = |name: &str, size: u64| TemplateSpec { fs: FsKind::Xfs, ..TemplateSpec::new(name, size) };
+        for (spec, why) in [
+            (xfs_spec("small", 64 * 1024 * 1024), "300 MB"),
+            (TemplateSpec { features: Some("^64bit".into()), ..xfs_spec("f", 512 << 20) }, "mke2fs"),
+            (TemplateSpec { journal: Some(false), ..xfs_spec("j", 512 << 20) }, "log"),
+            (
+                TemplateSpec {
+                    seed: vec![SeedFile::new("/a", b"x".to_vec())],
+                    ..xfs_spec("s", 512 << 20)
+                },
+                "fio-xfs",
+            ),
+        ] {
+            let e = create(&vm, &store, &spec).await.unwrap_err().to_string();
+            assert!(e.contains(why), "{}: {e}", spec.name);
+        }
+        assert!(store.lock().await.templates.is_empty());
+        assert_eq!("xfs".parse::<FsKind>().unwrap(), FsKind::Xfs);
         let _ = std::fs::remove_file(path);
     }
 
