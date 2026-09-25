@@ -1855,7 +1855,39 @@ impl VolumeManager {
             _ => None,
         };
         let records: Vec<(metadata::VolumeRecord, SlabRole)> = match from_dir {
-            Some(m) => m.volumes.into_iter().map(|v| (v, SlabRole::System)).collect(),
+            // The data directory's record does not say which half a volume
+            // belongs to, and for a volume with no extents yet nothing else
+            // does either. Taking `System` for all of them put an unwritten
+            // data volume in the half an install replaces — and on a node
+            // with only a data slab, made it unwritable: a 1 TiB class blank
+            // resumed after a restart failed every write with "no system
+            // slab" (#141). So: the half the slabs' own records keep it in,
+            // else a half this node has, the way `create` chooses.
+            Some(m) => {
+                let from_slabs: HashMap<VolumeId, SlabRole> = self
+                    .load_slab_records()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|r| r.into_iter().map(|(v, role)| (v.id, role)).collect())
+                    .unwrap_or_default();
+                let fallback = {
+                    let reg = self.registry.read().await;
+                    let has = |r: SlabRole| reg.iter().any(|(_, s)| s.role() == r);
+                    if has(SlabRole::System) || !has(SlabRole::Data) {
+                        SlabRole::System
+                    } else {
+                        SlabRole::Data
+                    }
+                };
+                m.volumes
+                    .into_iter()
+                    .map(|v| {
+                        let role = from_slabs.get(&v.id).copied().unwrap_or(fallback);
+                        (v, role)
+                    })
+                    .collect()
+            }
             None => match self.load_slab_records().await? {
                 Some(r) => r,
                 None => {
@@ -2423,6 +2455,41 @@ mod redundancy_tests {
         assert!(matches!(err, VolumeError::InsufficientDomains { needed: 2, available: 1, .. }), "{err}");
         // Nothing was created.
         assert!(mgr.list_volumes().await.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An empty volume on a node with only a data slab comes back from the
+    /// data directory as a data volume that takes writes (#141). It came back
+    /// as `System`, with no system slab to write into.
+    #[tokio::test]
+    async fn an_empty_volume_on_a_data_only_node_is_still_writable_after_a_restart() {
+        use crate::drive::slab::{SlabFormat, SlabRole};
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let path = d.join("data.bin").to_str().unwrap().to_string();
+        let id = {
+            let dev = FileDevice::open_with_capacity(&path, 8 * 1024 * 1024).await.unwrap();
+            let slab = Slab::format_with(
+                Arc::new(dev),
+                SlabFormat::new(slot, StorageTier::Hot).with_role(SlabRole::Data),
+            )
+            .await
+            .unwrap();
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            mgr.add_slab(slab).await;
+            let id = mgr.create_volume_any("pvc-empty", 1 << 20).await.unwrap();
+            assert_eq!(mgr.volume_role(&id), Some(SlabRole::Data));
+            mgr.persist().await;
+            id
+        };
+        let mut mgr = VolumeManager::with_data_dir(slot, meta).unwrap();
+        let dev = FileDevice::open(&path).await.unwrap();
+        mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        mgr.restore().await.unwrap();
+        assert_eq!(mgr.volume_role(&id), Some(SlabRole::Data), "the half it can live in");
+        let v = mgr.get_volume(&id).unwrap();
+        v.write(0, &[7u8; 4096]).await.expect("an empty data volume takes writes after a restart");
         let _ = std::fs::remove_dir_all(&d);
     }
 
