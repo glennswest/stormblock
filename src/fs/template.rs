@@ -2398,13 +2398,13 @@ mod tests {
         let source = t.clone_source().unwrap();
         {
             let m = vm.lock().await;
-            let info = m.fs_info(&VolumeId(source)).cloned().unwrap();
+            let info = m.fs_info(&source).cloned().unwrap();
             assert_eq!((info.kind.as_str(), info.uuid), ("xfs", Some(template_uuid)));
-            assert!(m.is_sealed(&VolumeId(source)));
+            assert!(m.is_sealed(&source));
         }
         // The log mkfs.xfs zeroes is a discard on a thin volume: the blank
         // costs its metadata, not the log.
-        let allocated = vm.lock().await.get_volume_handle(&VolumeId(source)).unwrap().allocated().await;
+        let allocated = vm.lock().await.get_volume_handle(&source).unwrap().allocated().await;
         assert!(allocated < 32 * 1024 * 1024, "an XFS blank allocated {allocated} bytes");
 
         let a = claim(&vm, &store, "xfs-1g", &ClaimSpec { size_bytes: None, label: Some("pvc-a".into()) })
@@ -2425,7 +2425,7 @@ mod tests {
         }
         assert_eq!(xfs::read_layout(&volume(&vm, a.volume_id).await).await.unwrap().label, "pvc-a");
         // The blank itself is untouched.
-        assert_eq!(xfs::read_layout(&volume(&vm, VolumeId(source)).await).await.unwrap().uuid, template_uuid);
+        assert_eq!(xfs::read_layout(&volume(&vm, source).await).await.unwrap().uuid, template_uuid);
         let _ = std::fs::remove_file(path);
     }
 
