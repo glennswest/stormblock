@@ -87,3 +87,25 @@ curl -s "${H[@]}" "$API/volumes" | python3 -c '
 import json,sys
 v=[x["name"] for x in json.load(sys.stdin)["items"] if x["name"].startswith("standby-")]
 print(" ", len(v), v[:6])'
+
+# The Volumes and Images views (#138) on the same engine: every clone the
+# loop attached is in use over nvme-tcp; the templates' sealed volumes are
+# blanks; nothing the loop only cloned is in use.
+echo
+echo "volumes in use (?kind=volume&in_use=true), and images (?kind=image):"
+curl -s "${H[@]}" "$API/volumes?kind=volume&in_use=true" > "$W/in_use.json"
+curl -s "${H[@]}" "$API/volumes?kind=image" > "$W/images.json"
+python3 - "$W/in_use.json" "$W/images.json" "$N" "$(wc -w <<<"$SIZES")" <<'PY' || fail "the views do not match what was attached"
+import json, sys
+used = json.load(open(sys.argv[1]))["items"]
+images = json.load(open(sys.argv[2]))["items"]
+n, sizes = int(sys.argv[3]), int(sys.argv[4])
+claims = [v for v in used if v["name"].startswith("claim-")]
+assert len(claims) == n * sizes, f"{len(claims)} claims in use, expected {n * sizes}"
+assert all(a["transport"] == "nvme-tcp" for v in claims for a in v["attachments"]), claims[0]
+assert not any(v["name"].startswith("c-") for v in used), "a clone nothing attached is not in use"
+kinds = sorted({v["kind"] for v in images})
+assert "blank" in kinds and sum(v["kind"] == "blank" for v in images) >= sizes, kinds
+assert all(v["kind"] != "volume" for v in images)
+print(f"  {len(claims)} attached claims in use over nvme-tcp; images: {kinds}")
+PY
