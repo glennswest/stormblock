@@ -712,12 +712,16 @@ impl VolumeManager {
         // The records live in the slab, which is the only place they can live
         // for storage that arrived as a file: there is no data directory
         // belonging to an image.
-        let mut records: Vec<metadata::VolumeRecord> = Vec::new();
+        // Each record with the role of the slab it was read from: a volume
+        // with no extents yet is recorded in a metadata slab of its own role,
+        // and that is the only place its role is written down (#141).
+        let mut records: Vec<(metadata::VolumeRecord, SlabRole)> = Vec::new();
         {
             let reg = self.registry.read().await;
             let mut seen: HashSet<VolumeId> = HashSet::new();
             for slab_id in &metadata_slabs {
                 let Some(slab) = reg.get(slab_id) else { continue };
+                let home = slab.role();
                 let bytes = match slab.read_metadata().await {
                     Ok(Some(b)) => b,
                     Ok(None) => continue,
@@ -735,13 +739,13 @@ impl VolumeManager {
                 };
                 for v in doc.volumes {
                     if seen.insert(v.id) {
-                        records.push(v);
+                        records.push((v, home));
                     }
                 }
             }
         }
 
-        for vrec in records {
+        for (vrec, home) in records {
             if self.volumes.contains_key(&vrec.id) {
                 report.already_known += 1;
                 continue;
@@ -774,7 +778,7 @@ impl VolumeManager {
                     .values()
                     .next()
                     .map(|loc| reg.role_of(&loc.slab_id))
-                    .unwrap_or(SlabRole::System)
+                    .unwrap_or(home)
             };
             let vol = ThinVolume::restore(
                 vrec.id, vrec.name.clone(), vrec.virtual_size, self.slot_size,
