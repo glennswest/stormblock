@@ -2,8 +2,9 @@
 //! multi-drive design builds on, proved rather than described.
 //!
 //! Four drives in two shelves; volumes placed across them; a drive fails
-//! (health report → quarantine, drain, a degraded mirror), is emptied and
-//! rebuilt around; a drive is added and the pool grows.
+//! (health report → quarantine, an automatic rebuild of the mirror, then a
+//! drain of what has no redundancy), is emptied and rebuilt around; a drive
+//! is added and the pool grows.
 
 mod common;
 
@@ -134,24 +135,45 @@ async fn a_node_with_several_drives_places_fails_rebuilds_and_grows() {
     let (s, e) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "m3", "size": "16M", "redundancy": "mirror:3@shelf" }))).await;
     assert!(s >= 400, "{e}");
 
-    // Drive 0 fails: quarantined, the mirror is degraded, a drain empties it.
+    // Drive 0 fails. Nobody asks for a rebuild (#146): the report quarantines
+    // it, rebuilds the mirror from its surviving legs, and then drains what
+    // has no redundancy off the drive.
     let (s, h) = call(&c, reqwest::Method::POST, format!("{api}/drives/{d0}/health"), Some(json!({ "state": "failed", "reason": "test" }))).await;
     assert_eq!(s, 200, "{h}");
-    let p = placement(&c, &api, m).await;
-    assert_eq!(p["health"].as_str().or(p["legs"]["health"].as_str()), Some("degraded"), "{p:#}");
+    let job = h["rebuild"].as_u64().unwrap_or_else(|| panic!("a rebuild was started: {h}"));
+    assert_eq!(h["drain_after_rebuild"], true, "{h}");
+    let mut rebuilt = Value::Null;
+    for _ in 0..800 {
+        rebuilt = call(&c, reqwest::Method::GET, format!("{api}/rebuilds/{job}"), None).await.1;
+        if rebuilt["state"] != "running" && rebuilt["state"] != "queued" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(rebuilt["state"], "done", "{rebuilt:#}");
+    let vols = rebuilt["volumes"].as_array().unwrap();
+    assert_eq!(vols.len(), 1, "only the mirror: the plain volume has nothing to rebuild from: {rebuilt:#}");
+    assert_eq!(vols[0]["name"], "m");
+    assert!(vols[0]["legs_rebuilt"].as_u64().unwrap() > 0);
     let mut drained = Value::Null;
-    for _ in 0..400 {
-        drained = call(&c, reqwest::Method::GET, format!("{api}/drives/{d0}/drain"), None).await.1;
-        if drained["state"] != "running" {
+    for _ in 0..800 {
+        let (s, d) = call(&c, reqwest::Method::GET, format!("{api}/drives/{d0}/drain"), None).await;
+        drained = d;
+        if s == 200 && drained["state"] != "running" {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     assert_eq!(drained["state"], "empty", "{drained}");
+    let listing = call(&c, reqwest::Method::GET, format!("{api}/rebuilds"), None).await.1;
+    assert_eq!((listing["queued"].as_u64(), listing["running"].as_u64()), (Some(0), Some(0)), "{listing:#}");
+    let (s, set) = call(&c, reqwest::Method::PUT, format!("{api}/rebuilds/settings"), Some(json!({ "parallel": 2, "max_bytes_per_sec": 1048576 }))).await;
+    assert_eq!(s, 200, "{set}");
+    assert_eq!((set["parallel"].as_u64(), set["max_bytes_per_sec"].as_u64()), (Some(2), Some(1048576)));
+    let (s, set) = call(&c, reqwest::Method::PUT, format!("{api}/rebuilds/settings"), Some(json!({ "max_bytes_per_sec": 0 }))).await;
+    assert_eq!((s, set["max_bytes_per_sec"].as_u64()), (200, Some(0)));
 
     // The mirror is rebuilt around it; nothing of either volume is left on it.
-    let (s, r) = call(&c, reqwest::Method::POST, format!("{api}/volumes/{}/resync", m.0), None).await;
-    assert_eq!(s, 200, "{r}");
     let d0_path = dir.path().join("d0.img").to_string_lossy().to_string();
     for (id, name) in [(m, "m"), (plain, "plain")] {
         let p = placement(&c, &api, id).await;
