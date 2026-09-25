@@ -118,6 +118,43 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Per-volume rebuild at scale (2026-09-25, #146) — IN PROGRESS
+
+Owner: redundancy is per volume, members on different drives; a failed
+drive's volumes rebuild **in parallel across the pool, per volume**, most
+endangered first, throttled against live I/O — hours, not days.
+Already there: placement by failure domain at the volume's rung (v10,
+#142), spread per extent over every slab, distrust on a health report.
+Missing: anything that *runs* a rebuild. `resync` is one manual call per
+volume holding the volume manager throughout.
+
+Found in reading it, and has to be fixed first:
+- **A mirror resync publishes its new legs at the end**, after the extent
+  locks are released: a write between the copy and the publish reaches the
+  healthy legs and not the new one, which then serves stale data.
+- **Publishing is O(every extent on the node)** (`rewrite_legs`,
+  `add_leg_beside` scan every map), and a parity resync does it per stripe.
+- A resync frees the replaced slots before the map naming the new ones is
+  durable (the owed-slot rule, b270bfd).
+
+Plan:
+- [ ] targeted publish under the extent lock for an unshared extent
+      (`ref_count == 1`); shared extents (never written in place) batched
+      into one sweep, rechecked under the map lock
+- [ ] `ResyncOptions`: concurrency within a volume, a shared throttle, a
+      cancel flag, a checkpoint that persists and then releases owed slots
+- [ ] `VolumeHealth.margin`: failures the least-protected extent can still
+      take
+- [ ] `src/rebuild.rs`: one node-wide queue ordered by margin, N volumes at
+      once, jobs with progress; a volume hit again while running reruns
+- [ ] health report → rebuild automatically; `failed`/`missing` drain after
+      the rebuild (for what has no redundancy); manual resync and drain
+      refuse while a rebuild holds the volume/drive
+- [ ] `GET/POST /api/v1/rebuilds`, `DELETE …/{id}`, `PUT …/throttle`;
+      `[rebuild] parallel`, `extents_in_flight`, `max_bytes_per_sec`
+- [ ] tests: stale-write race, parallel rebuild after a drive failure,
+      margin order, throttle; docs/redundancy.md + multi-drive.md; close
+
 ### Allocation metadata at 40 PB a node (2026-09-25, #145) — DONE (v18.4.0, docs/metadata-scale.md)
 
 Owner's scale: 160 × 256 TB drives per 4U node (~41 PB), 1 PB drives
