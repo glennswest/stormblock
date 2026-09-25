@@ -152,4 +152,39 @@ mod tests {
         tree(dir.path());
         assert_eq!(of_in(dir.path(), "loop7"), None);
     }
+    /// Against the real `/sys` of whatever runs the tests: every disk the
+    /// kernel gives a serial or WWN is identified, and every partition on it
+    /// is the same drive. Nothing to check on a machine with no such disk.
+    #[test]
+    fn the_live_sysfs_resolves_partitions_to_their_disks() {
+        let sys = Path::new("/sys");
+        let Ok(entries) = std::fs::read_dir(sys.join("class/block")) else { return };
+        let mut checked = 0;
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let node = std::fs::canonicalize(e.path()).unwrap();
+            if node.join("partition").exists() {
+                continue;
+            }
+            let exposes = ["device/serial", "device/vpd_pg80", "device/wwid", "wwid"]
+                .iter()
+                .any(|f| std::fs::read(node.join(f)).map(|b| !b.iter().all(|c| c.is_ascii_whitespace() || *c == 0)).unwrap_or(false));
+            let id = of_in(sys, &name);
+            if !exposes {
+                continue;
+            }
+            let id = id.unwrap_or_else(|| panic!("{name} exposes an identity and none was read"));
+            println!("{name}: serial={:?} wwn={:?} model={:?}", id.serial, id.wwn, id.model);
+            for p in std::fs::read_dir(&node).unwrap().flatten() {
+                if p.path().join("partition").exists() {
+                    let pname = p.file_name().to_string_lossy().to_string();
+                    assert_eq!(of_in(sys, &pname).as_ref(), Some(&id), "{pname} is not {name}");
+                    println!("  {pname}: same drive");
+                }
+            }
+            checked += 1;
+        }
+        println!("{checked} disk(s) with an identity checked");
+    }
 }
+
