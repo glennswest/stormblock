@@ -3,6 +3,32 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-25
+- **BREAKING (auth):** the management API is **closed by default** (#107).
+  `management.require_auth` unset now means required. The node mints a token
+  into `management.token_file` (default `<data_dir>/api_token`), and with
+  nowhere to keep one it closes with an in-memory token rather than falling
+  open. `require_auth = false` is the one way to open a node. Every client that
+  calls a node's API must present the token. Most outside clients send none
+  today; issues are filed on each (see docs/auth.md).
+- **feat(synonyms):** the boot claim is the one open write, and each machine
+  boots from a sealed golden of its own (#107, owner decision 2026-09-25).
+  `POST /api/v1/synonyms/boothost/<tag>/claim` needs no token and takes no
+  options. It clones the tag's own `hostgolden/<tag>`, a sealed CoW clone of
+  its assignment. A tag seen for the first time is pinned to
+  `boothost/default`. Every boot is a fresh clone with the previous one
+  released. A re-point makes a new host golden and collects the old one once
+  nothing is cloned from it.
+- **fix(cluster):** heartbeat, join and Raft RPCs present the cluster's shared
+  token. They sent none, so a cluster whose nodes required a token could not
+  talk to itself.
+- **feat(auth):** the CLI reads a local engine's token
+  (`$STORMBLOCK_TOKEN_FILE`, `/etc/stormblock/api_token`,
+  `/var/lib/stormblock/api_token`) for `image build --engine
+  http://127.0.0.1:…`, and never presents it to another host.
+- **chore(ci):** the `ci-*.sh` scripts give their engines a token and present
+  it. The benchmarks take `$STORMBLOCK_API_TOKEN`.
+
 ## [v16.2.0] — 2026-09-24
 
 

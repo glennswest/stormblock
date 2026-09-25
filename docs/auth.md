@@ -10,22 +10,20 @@ This page is what guards it (issue #107).
 
 ## The short version
 
-```toml
-[management]
-require_auth = true
-data_dir = "/var/lib/stormblock"
-```
-
-The node mints a token at boot, writes it to `<data_dir>/api_token` mode
-`0600`, and requires it on every request:
+**Closed by default** (v17.0.0). A node mints a token at boot, writes it to
+`<data_dir>/api_token` (or `management.token_file`) mode `0600`, keeps it
+across restarts, and requires it on every request:
 
 ```bash
 curl -H "Authorization: Bearer $(cat /var/lib/stormblock/api_token)" \
      http://node:9090/api/v1/volumes
 ```
 
-Anything else gets a 401. Nothing else has to be configured, and the token
-survives restarts because the file does.
+Anything else gets a 401 — with two kinds of exception: the health and
+readiness probes, and **one write**, a machine claiming its own boot image
+(`POST /api/v1/synonyms/boothost/<tag>/claim`), which is safe to leave open
+because of what it cannot do (§ below). A node that must be open says
+`require_auth = false`, and says so on every boot.
 
 ## What the settings mean
 
@@ -34,14 +32,21 @@ survives restarts because the file does.
 | `management.api_token` | The token, named in the config. Accepted for everything. |
 | `management.admin_token` | When set, destructive verbs need **this** one and `api_token` is not enough. |
 | `management.token_file` | Where a minted token is kept. Defaults to `<data_dir>/api_token`, then `/etc/stormblock/api_token`. |
-| `management.require_auth` | `true` — required, minting one if there is none. `false` — deliberately open. Unset — enforced if a token is configured or a token file exists, open otherwise. |
+| `management.require_auth` | Unset or `true` — required, minting one if there is none. `false` — deliberately open. Unset with nowhere to keep a minted token: closed anyway, with a token held in memory only, and a warning; `true` in that case fails startup. |
 
 `$STORMBLOCK_API_TOKEN` and `$STORMBLOCK_ADMIN_TOKEN` are read when the config
 names neither.
 
 `require_auth = true` with nowhere to keep a token — no `token_file`, no
-`data_dir`, no `api_token` — **fails startup**. Falling back to open is the
-one thing it must not do.
+`data_dir`, no `api_token` — **fails startup**. Left unset, the same node
+closes with an in-memory token nothing else can present, rather than stop a
+node booting over its own config. Falling back to open is the one thing
+neither may do.
+
+`$STORMBLOCK_TOKEN_FILE` tells the CLI where a local token is; the CLI
+(`image build --engine http://127.0.0.1:…`) reads it, then
+`/etc/stormblock/api_token`, then `/var/lib/stormblock/api_token`, and only
+ever presents a minted token to an engine on its own machine.
 
 ### Destructive verbs
 
@@ -59,6 +64,10 @@ either token.
   an appliance" and drops a booting node to a shell. It answers a constant:
   name, version, and whether a token is required.
 * `/serve/v1/health`, `/serve/v1/ready` — supervisor probes.
+* `POST /api/v1/synonyms/boothost/<tag>/claim` — the boot claim, matched
+  exactly (one method, that namespace, one path segment). The re-point beside
+  it, `PUT /api/v1/synonyms/boothost/<tag>`, is what decides what a machine
+  boots, and it is guarded like everything else.
 
 Everything else needs the token, `/metrics` included: a scrape names this
 node's volumes and says how full it is, which is a read of its state rather
@@ -88,40 +97,49 @@ anyway, and only that shared token is presented outward — cluster replication
 and migration handoffs, `image build` reading a golden off an appliance, and
 `boot-claim`, which also takes `--token`.
 
-## Why the default is still open
+## The boot claim: the one open write (#107)
 
-Because a machine claims its boot image before it has any credential.
-`boot-claim` — and the firmware one stage earlier — asks an appliance for the
-volume this machine boots from, and closing the fleet from inside the engine
-would stop machines booting with no way to hand them the token first. That is a
-migration, and the order it runs in is: distribute the token, then set
-`require_auth = true` on the appliance.
+A machine claims its boot image before it has any credential — stormbootx is
+firmware on a USB stick, and the initramfs a stage later is no better placed —
+so that one verb has to be open. The owner's decision (2026-09-25) was to make
+it safe by what it **cannot** do rather than by who calls it:
 
-What is *not* deferred is the silence. A node with no token says so on every
-boot, naming what is exposed:
+1. **Each host has its own sealed golden.** `boothost/<tag>` is the host's
+   *assignment* — the release stormcentral points it at. The claim keeps
+   `hostgolden/<tag>`: a sealed copy-on-write clone of that release, owned by
+   the tag (metadata only; it costs nothing until the assignment changes).
+2. **A tag seen for the first time** takes whatever `boothost/default` names,
+   and is pinned to it: `boothost/<tag>` is created then, so moving the default
+   later does not move a machine that already has an image (stormbootx#15).
+3. **Every boot is a fresh clone** of the host's golden (`boothost-<tag>`), and
+   the previous boot's clone is released — after the grace that protects the
+   firmware → initramfs double claim (#97). Nothing written to the image
+   survives a reboot; a machine's state lives in its data volumes.
+4. **The claim takes no options.** Whatever the body says — a name to bind, a
+   namespace, a size, `unsealed_ok` — is ignored in the `boothost` namespace.
+   It can only hand tag X a fresh clone of X's own golden, and it refuses an
+   assignment that is not sealed.
+5. **Re-imaging X** is an authenticated re-point of `boothost/<tag>`. The next
+   claim makes X a new golden; the old one is deleted once nothing is cloned
+   from it (its last boot clone goes at the next boot).
 
-```
-WARN SECURITY: the management API on 0.0.0.0:9090 is UNAUTHENTICATED
-WARN SECURITY: anyone who can reach that address can create, clone, seal and
-     DELETE volumes, add and withdraw exports, re-point synonyms and publish
-     releases — which includes choosing what a machine boots at its next power
-     cycle
-WARN SECURITY: set management.require_auth = true to require a bearer token;
-     the node will mint one into /var/lib/stormblock/api_token and keep it
-     across restarts
-```
+So the worst a caller that is not machine X can do by claiming as X is get
+X's image. Until a claim is bound to the host itself — a host key recorded on
+first use, a TPM, or mutual boot auth (stormcos#35) — the tag is the binding.
+Also still to come: attaching the boot clone read-only with a writable
+overlay, so the image is not modified even within a boot.
 
-and `GET /api/v1/health` reports `"auth": "none"`, so a fleet can be asked
-which of its nodes are open without trying each one:
+The claim answers with `host_golden` (`volume`, `minted`, `collected`) and
+`claimed_from.release` beside the usual `volume` and `attach`.
 
-```bash
-for n in $(cat nodes); do
-  printf '%s %s\n' "$n" "$(curl -s "http://$n:9090/api/v1/health" | jq -r .auth)"
-done
-```
-
-An insecure default survives because nothing fails while it is wrong. These two
-are what make it fail loudly instead of silently.
+**Callers that must now present a token.** An audit on 2026-09-25 found most
+of the engine's outside clients sending none; each has an issue: stormcentral
+#30, stormcos #89 (also: where a node keeps its token), stormconsole #30,
+stormdrive #14, stormvm #44, stormcos_qa #19, rustkube-node #66,
+stormblock-csi #20 (manifests), stormblock-registry #40 and stormstorage #12
+(token paths), vmcloud-image-operator #7. Inside this repo, cluster heartbeat,
+join and Raft present the cluster's shared token, and the `ci-*.sh` scripts
+give their engines one.
 
 ## TLS
 

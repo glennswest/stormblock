@@ -147,11 +147,11 @@ uring_sqpoll = true
 
 [management]
 listen_addr = "0.0.0.0:9090"
-# Require a bearer token on every request. The node mints one at boot into
-# <data_dir>/api_token (mode 0600) and keeps it across restarts. Without
-# this a node is open to anything that can reach the port — see
-# docs/auth.md, which is also why an open node says so on every boot.
-require_auth = true
+# A bearer token is required on every request by default (v17.0.0): the
+# node mints one at boot into <data_dir>/api_token (mode 0600) and keeps it
+# across restarts. The one open write is a machine claiming its own boot
+# image, which boots from a sealed golden of its own — see docs/auth.md.
+# `require_auth = false` opens the node, and it says so on every boot.
 # Where API-created LUNs and volume metadata are persisted, so exports
 # come back after a restart.
 data_dir = "/var/lib/stormblock"
