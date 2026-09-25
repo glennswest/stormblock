@@ -32,7 +32,8 @@ pub struct Placement {
     /// The redundancy picture: legs the policy asks for, legs missing,
     /// extents that cannot be read from what remains.
     pub legs: LegTotals,
-    /// `none`, or `needed` while legs are missing — a `resync` rebuilds them.
+    /// `none`; `needed` while legs are missing; `queued` or `running` while
+    /// the rebuild queue holds the volume (#146).
     /// A resync is one synchronous call, so there is no progress to report
     /// while it runs; this says whether one is owed.
     pub rebuild: &'static str,
@@ -303,7 +304,11 @@ pub async fn of_volume(state: &Arc<AppState>, vm: &VolumeManager, id: VolumeId) 
     Some(Placement {
         slabs,
         drives: by_drive.into_values().collect(),
-        rebuild: if health.legs_missing > 0 { "needed" } else { "none" },
+        rebuild: match state.rebuilds.status_of(&id) {
+            Some(s) => s,
+            None if health.legs_missing > 0 => "needed",
+            None => "none",
+        },
         legs: LegTotals {
             policy: health.redundancy.clone(),
             health: health.state.to_string(),

@@ -224,6 +224,18 @@ impl Rebuilds {
         g.queued.contains_key(volume) || g.running.contains_key(volume)
     }
 
+    /// `queued` or `running` while the queue holds this volume.
+    pub fn status_of(&self, volume: &VolumeId) -> Option<&'static str> {
+        let g = self.inner.lock().unwrap();
+        if g.running.contains_key(volume) {
+            Some("running")
+        } else if g.queued.contains_key(volume) {
+            Some("queued")
+        } else {
+            None
+        }
+    }
+
     /// The unfinished job a drive's report started, if any.
     pub fn active_for_drive(&self, drive: &str) -> Option<u64> {
         let g = self.inner.lock().unwrap();
