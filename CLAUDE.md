@@ -118,6 +118,25 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Retire standby clones: mint at claim time (2026-09-25, #137) — IN PROGRESS
+
+Owner: "why do we have unclaimed clones? Does not make sense." #55 keeps one
+pre-minted clone per sealed template because minting was "seconds"; that
+hides the cost and leaves volumes that are nobody's (rustkube-node#59: every
+volume is a PV + PVC).
+
+- [ ] **Measure** a claim with the standby out of the way, per step
+      (snapshot, identity, check, export) — `examples/claim_timing.rs`,
+      numbers posted on the issue.
+- [ ] **Make it cheap:** identity is one superblock write on a
+      `metadata_csum_seed` blank (no backups, no group descriptors); the
+      per-clone fsck goes — a sealed blank was checked when it was sealed and
+      cannot change.
+- [ ] **Remove** `standing` / `ensure_standing*` / `standing_*` /
+      `/fstemplates/standby` / `/{id}/standby`; the boot-time top-up; delete
+      the standing clones already on a node at startup.
+- [ ] Re-measure; tests, docs, CHANGELOG (breaking: endpoints removed).
+
 ### Per-volume placement in the API (2026-09-25, #136, with #114) — DONE (v17.1.0)
 
 Owner: attach stormvolume/drive/shelf and RAID-partner info to what
