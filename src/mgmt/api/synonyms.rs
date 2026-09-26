@@ -767,10 +767,6 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
             "sealed": false,
             "access": "rw",
         },
-        // Earlier boot clones of this tag: released now, or kept because a
-        // guard held them (claimed within the grace, named, or not ours).
-        "released": released.iter().map(|v| v.0).collect::<Vec<_>>(),
-        "kept": kept.iter().map(|v| v.0).collect::<Vec<_>>(),
         "attach": attach,
     });
     if let Some(b) = bound {
@@ -987,6 +983,10 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
             "sealed": false,
             "access": "rw",
         },
+        // Earlier boot clones of this tag: released now, or kept because a
+        // guard held them (claimed within the grace, named, or not ours).
+        "released": released.iter().map(|v| v.0).collect::<Vec<_>>(),
+        "kept": kept.iter().map(|v| v.0).collect::<Vec<_>>(),
         "attach": attach,
     });
     (StatusCode::CREATED, Json(out)).into_response()
