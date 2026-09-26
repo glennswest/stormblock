@@ -38,6 +38,7 @@ pub struct DriveInfo {
 }
 
 /// Information about a RAID array, stored in AppState.
+#[derive(Clone)]
 pub struct ArrayInfo {
     pub array: Arc<RaidArray>,
     pub level: RaidLevel,

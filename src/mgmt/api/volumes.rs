@@ -687,9 +687,26 @@ async fn create_volume(
         None => None,
     };
 
+    // An array binding pins the volume: every extent on the array's slab
+    // (#150). The array is the redundancy, and its slab decides the role.
+    if array_id.is_some() && !redundancy.is_none() {
+        return ApiError::bad_request(format!(
+            "a volume on an array takes the array's redundancy; drop \"redundancy\": \"{}\"",
+            redundancy.spelling()
+        ));
+    }
     let mut vm = state.volume_manager.lock().await;
+    if let (Some(a), Some(r)) = (array_id, role) {
+        let slab_role = match vm.array_slab(&a) {
+            Some(s) => state.slab_registry.read().await.role_of(&s),
+            None => return ApiError::conflict(format!("array {} has no slab on this node", a.0)),
+        };
+        if slab_role != r {
+            return ApiError::bad_request(format!("array {} is {slab_role} storage, not {r}", a.0));
+        }
+    }
     let created = match array_id {
-        Some(a) if redundancy.is_none() && role.is_none() => vm.create_volume(&req.name, size, a).await,
+        Some(a) => vm.create_volume(&req.name, size, a).await,
         _ => vm
             .create_volume_with(
                 &req.name,

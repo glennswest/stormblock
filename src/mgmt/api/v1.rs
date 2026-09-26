@@ -142,6 +142,18 @@ pub struct CreateVolumeRequest {
     pub encrypted: bool,
     #[serde(default)]
     pub source: Option<VolumeSource>,
+    /// Where the backing volume lives on this node (#150).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<CreatePlacement>,
+}
+
+/// `placement` on a `/v1` create.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreatePlacement {
+    /// Carve the volume on this array: every extent on its slab. The array
+    /// is on this node, so the master is this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub array_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1015,11 +1027,40 @@ async fn create_volume(
         None => None,
     };
 
+    // Pinned to a local array (#150): the master is this node, and the volume
+    // is carved on the array rather than cloned or placed.
+    let pin_array: Option<crate::raid::RaidArrayId> = match req.placement.as_ref().and_then(|p| p.array_id.as_deref()) {
+        None => None,
+        Some(a) => {
+            let id = a
+                .parse::<Uuid>()
+                .map_err(|_| V1Error::BadRequest(format!("placement.array_id {a} is not a uuid")))?;
+            if req.source.is_some() {
+                return Err(V1Error::BadRequest(
+                    "placement.array_id carves a new volume on the array; it cannot also be a clone".into(),
+                ));
+            }
+            if req.master_node.as_deref().is_some_and(|m| m != v1.local_node) {
+                return Err(V1Error::BadRequest(format!(
+                    "array {a} is on {}, not {}", v1.local_node, req.master_node.as_deref().unwrap_or("")
+                )));
+            }
+            if state.volume_manager.lock().await.array_slab(&crate::raid::RaidArrayId(id)).is_none() {
+                return Err(V1Error::NotFound(format!("array {a}")));
+            }
+            Some(crate::raid::RaidArrayId(id))
+        }
+    };
+    let master_node = match pin_array {
+        Some(_) => Some(v1.local_node.clone()),
+        None => req.master_node.clone(),
+    };
+
     let nodes = nodes_view(&state, &v1).await;
     let (master, slaves) = pick_nodes(
         &nodes,
         req.size_bytes,
-        req.master_node.as_deref(),
+        master_node.as_deref(),
         &req.excluded_nodes,
         req.replica_tier.slaves,
     )?;
@@ -1043,7 +1084,10 @@ async fn create_volume(
                     .map_err(|e| crate::volume::VolumeError::AllocatorError(e.to_string()))
             }
             Some(src) => state.volume_manager.lock().await.create_snapshot(EngineVolumeId(src), &req.name).await,
-            None => state.volume_manager.lock().await.create_volume_any(&req.name, req.size_bytes).await,
+            None => match pin_array {
+                Some(a) => state.volume_manager.lock().await.create_volume(&req.name, req.size_bytes, a).await,
+                None => state.volume_manager.lock().await.create_volume_any(&req.name, req.size_bytes).await,
+            },
         };
         let mut vm = state.volume_manager.lock().await;
         match created {

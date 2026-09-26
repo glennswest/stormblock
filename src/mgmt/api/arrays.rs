@@ -29,6 +29,31 @@ pub struct ArrayResponse {
     pub stripe_size: u64,
     pub stripe_human: String,
     pub members: Vec<MemberResponse>,
+    /// The slab this array's storage is (#150).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slab: Option<ArraySlab>,
+    /// Volumes on it: pinned to it, or with a leg there.
+    pub volumes: Vec<ArrayVolume>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArraySlab {
+    pub id: Uuid,
+    /// Only volumes pinned to it allocate on it.
+    pub dedicated: bool,
+    pub role: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    /// Whether it carries the records of its own volumes, so a head that
+    /// reassembles the members can adopt it.
+    pub self_describing: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArrayVolume {
+    pub id: Uuid,
+    pub name: String,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,10 +72,52 @@ pub struct CreateArrayRequest {
     pub drive_uuids: Vec<Uuid>,
     #[serde(default = "default_stripe_kb")]
     pub stripe_kb: u64,
+    /// The array is one consumer's storage (#150): its slab takes only volumes
+    /// pinned to it (`array_id` on a volume create), carries their records,
+    /// and deleting the array cannot take anyone else's data. Default true;
+    /// `false` adds the array to the node's general pool as before.
+    #[serde(default = "yes")]
+    pub dedicated: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_stripe_kb() -> u64 {
     64
+}
+
+/// The array's slab and the volumes on it, as the volume manager knows them.
+async fn slab_view(state: &AppState, id: RaidArrayId) -> (Option<ArraySlab>, Vec<ArrayVolume>) {
+    let vm = state.volume_manager.lock().await;
+    let Some(slab_id) = vm.array_slab(&id) else { return (None, Vec::new()) };
+    let slab = {
+        let reg = state.slab_registry.read().await;
+        reg.get(&slab_id).map(|s| ArraySlab {
+            id: slab_id.0,
+            dedicated: s.is_dedicated(),
+            role: s.role().to_string(),
+            total_bytes: s.total_slots() * s.slot_size(),
+            free_bytes: s.free_slots() * s.slot_size(),
+            self_describing: s.has_metadata_region(),
+        })
+    };
+    let volumes = vm
+        .volumes_on_slab(slab_id)
+        .await
+        .into_iter()
+        .map(|(v, name, pinned)| ArrayVolume { id: v.0, name, pinned })
+        .collect();
+    (slab, volumes)
+}
+
+async fn full_response(state: &AppState, id: RaidArrayId, info: &ArrayInfo) -> ArrayResponse {
+    let mut r = array_to_response(id, info);
+    let (slab, volumes) = slab_view(state, id).await;
+    r.slab = slab;
+    r.volumes = volumes;
+    r
 }
 
 fn array_to_response(id: RaidArrayId, info: &ArrayInfo) -> ArrayResponse {
@@ -72,15 +139,19 @@ fn array_to_response(id: RaidArrayId, info: &ArrayInfo) -> ArrayResponse {
         stripe_size: info.stripe_size,
         stripe_human: human_size(info.stripe_size),
         members,
+        slab: None,
+        volumes: Vec::new(),
     }
 }
 
 async fn list_arrays(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "arrays", "method" => "list").increment(1);
-    let arrays = state.arrays.read().await;
-    let items: Vec<ArrayResponse> = arrays.iter()
-        .map(|(id, info)| array_to_response(*id, info))
-        .collect();
+    let snapshot: Vec<(RaidArrayId, ArrayInfo)> =
+        state.arrays.read().await.iter().map(|(id, i)| (*id, i.clone())).collect();
+    let mut items: Vec<ArrayResponse> = Vec::new();
+    for (id, info) in &snapshot {
+        items.push(full_response(&state, *id, info).await);
+    }
     let count = items.len();
     Json(ListResponse { items, count })
 }
@@ -95,10 +166,10 @@ async fn get_array(
         Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
     };
 
-    let arrays = state.arrays.read().await;
     let array_id = RaidArrayId(uuid);
-    match arrays.get(&array_id) {
-        Some(info) => Json(array_to_response(array_id, info)).into_response(),
+    let info = state.arrays.read().await.get(&array_id).cloned();
+    match info {
+        Some(info) => Json(full_response(&state, array_id, &info).await).into_response(),
         None => ApiError::not_found(format!("array {uuid} not found")),
     }
 }
@@ -136,10 +207,17 @@ async fn create_array(
     let stripe = array.stripe_size();
     let arc_array = Arc::new(array);
 
-    // Register in volume manager
+    // Register in volume manager: its own dedicated, self-describing slab
+    // (#150), or a slab in the general pool as before.
     {
         let mut vm = state.volume_manager.lock().await;
-        vm.add_backing_device(array_id, arc_array.clone() as Arc<dyn BlockDevice>).await;
+        if req.dedicated {
+            if let Err(e) = vm.add_dedicated_array(array_id, arc_array.clone() as Arc<dyn BlockDevice>).await {
+                return ApiError::internal(e.to_string());
+            }
+        } else {
+            vm.add_backing_device(array_id, arc_array.clone() as Arc<dyn BlockDevice>).await;
+        }
     }
 
     // Register in state
@@ -150,7 +228,7 @@ async fn create_array(
         capacity_bytes,
         stripe_size: stripe,
     };
-    let resp = array_to_response(array_id, &info);
+    let resp = full_response(&state, array_id, &info).await;
 
     {
         let mut arrays = state.arrays.write().await;
@@ -174,17 +252,16 @@ async fn delete_array(
 
     let array_id = RaidArrayId(uuid);
 
-    // Check if any volumes reference this array
-    {
-        let vm = state.volume_manager.lock().await;
-        let vols = vm.list_volumes().await;
-        // We can't easily check which array a volume belongs to from the public API,
-        // so just check if there are any volumes at all when deleting
-        if !vols.is_empty() {
-            // Check exports for volumes on this array
-            // For safety, refuse deletion if there are volumes
-            return ApiError::conflict("cannot delete array while volumes exist".to_string());
-        }
+    if !state.arrays.read().await.contains_key(&array_id) {
+        return ApiError::not_found(format!("array {uuid} not found"));
+    }
+    // Refused while any volume is on *this* array — pinned to it or with a
+    // leg on its slab — and only then (#150). Until now it refused while any
+    // volume existed anywhere on the node, and when it did go through it left
+    // the slab registered, so the pool kept allocating onto storage that was
+    // no longer an array.
+    if let Err(e) = state.volume_manager.lock().await.remove_array(&array_id).await {
+        return ApiError::conflict(format!("cannot delete array {uuid}: {e}"));
     }
 
     let mut arrays = state.arrays.write().await;
