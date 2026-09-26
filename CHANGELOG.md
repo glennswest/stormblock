@@ -3,6 +3,44 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (docs from the code)
+- **docs:** the README is rewritten from the code (#131). It covers:
+  - where the engine runs (a stormcos node runs `adopt-ublk` under stormpump;
+    the initramfs runs `boot-claim` / `boot-local`; appliances run the daemon);
+  - PVCs on stormcos as the built-in driver, with CSI only for third-party
+    drivers;
+  - every daemon flag, environment variable and config key with its default;
+  - ports, probes, metrics, the API surfaces and auth, the files it keeps,
+    how it ships as a stormcos component, and a list of what earlier docs
+    promised that the code does not do, with issues #159–#170.
+
+  CLAUDE.md's build, platform, architecture and state sections are current,
+  and building is `sc-build`, never root.
+- **docs:** every file in `docs/` was checked against the code and
+  corrected:
+  - `pallets.md`: `copy_pallet` keeps boot state; sealed-attach refusal done;
+    `/mirrors` and `/resync`.
+  - `images.md`: `input`.
+  - `composed-disks.md`: `allocated_bytes`; blank names.
+  - `auth.md`: `/seal`; `/mk/v1` probes.
+  - `boot-hooks.md`: `any` takes system-only drives.
+  - `redundancy.md`: port 9090; `items`; V8; `topology_chain`.
+  - `multi-drive.md`: the built-in PVC driver; design status.
+  - `m0-baseline.md` and its generator, `protocol-overhead.md`, `layering.md`
+    (what was built since), `contract/README.md`.
+- **docs:** superseded design moved to `docs/history/`, each file with a note
+  saying what is different now. That covers the v0.1 spec, the LinuxBoot
+  proposal, the placement note and the August deck. The spec's accurate
+  StormFS sections became `docs/stormfs-api.md`.
+- **docs:** `docs/stormblock-ipxe-boot.md` is removed. It documented a
+  `serve-boot` subcommand that never existed and a re-boot path that formats
+  the disk (#162), and it contained lab credentials.
+- **fix(cli):** `--help` for `must-gather` and `boot-claim` no longer shows
+  another subcommand's first line. `ublk` and `boot-local` have their own help.
+  The `migrate` stub names routes that exist.
+- **docs(code):** `require_auth`'s doc comment says what v17 does (unset means
+  required).
+
 ## [v19.1.1] — 2026-09-26
 
 ### Fixed

@@ -6,53 +6,47 @@ Pure Rust enterprise block storage engine. Turns raw NVMe/SAS drives into networ
 ## Design Principle: Single-node first, scale-out later
 StormBlock must be fully functional as a **standalone single-node** storage engine — no cluster requirement. A single node handles its own drives, RAID, volumes, and exports independently. Clustering (replication, Raft) is layered on top and strictly optional. New nodes can be added to an existing deployment at any time without disrupting running nodes.
 
-## Build on dev, never on this Mac
+## Build and test with sc-build, on dev
 
 **Every `cargo build`, `cargo test`, `cargo check` and every image build runs on
-`root@dev.g8.lo`.** Not on the workstation, not "just to check quickly".
+dev.g8.lo, through `sc-build` after `git push`** — never on the session host,
+never as root, never "just to check quickly". `sc-build` fetches the pushed
+commit onto dev as the unprivileged `stormbuild` user, builds it in a scratch
+directory and deletes it; there is no checkout on dev to use. `sc-build 'cmd'`
+runs any command; `SC_BUILD_NO_ISSUE=1` keeps an exploratory run from filing a
+`build-failure` issue. Builds queue for a slot, so give it a generous timeout.
 
-The workstation is macOS and the target is Linux, so the two builds do not
-compile the same code. `libc` is a Linux-only dependency here; `io_uring`,
-`ublk`, `/dev/kmsg`, `mlockall` and the whole storage path are behind
-`cfg(target_os = "linux")`. A macOS build therefore *skips* the code most
-likely to be wrong, and it passes while the node's build fails — and the
-reverse, where a change that only breaks macOS is pushed because the node built
-fine. Both have happened here in one session.
-
-The numbers say it plainly: `cargo test` runs **258** tests on the Mac and
-**303** on dev. The 45 that only exist on Linux are the ones covering the parts
-that touch hardware.
-
-The workflow is therefore:
+The storage path — `io_uring`, `ublk`, `O_DIRECT`, `/dev/kmsg`, `mlockall` — is
+`cfg(target_os = "linux")`, so another OS compiles a different, smaller
+program; on the old macOS workstation `cargo test` ran 258 tests against 303 on
+Linux. Build where the code runs.
 
 ```
-commit  →  push  →  pull on dev  →  build and test on dev
+commit  →  push  →  sc-build  →  read the result
 ```
 
-and never a build whose result was not produced on the machine the code runs
-on. Editing on the Mac is fine; believing it is not.
+Tests that create files need `mkdir -p tmp && export TMPDIR=$PWD/tmp` in the
+scratch tree: dev's `/tmp/stormblock-*` directories are root-owned from old
+builds. Known red: `integration_image` (#120), and `mgmt_luns_at_scale` (#134)
+on a busy box.
 
 ## Build
 ```bash
-# Full node (x86_64 — VFIO, io_uring, all features)
-cargo build --release --target x86_64-unknown-linux-musl
-
-# ARM64 JBOD head unit
-cargo build --release --target aarch64-unknown-linux-musl --features "arm64,iscsi,nvmeof"
-
-# MikroTik RouterOS appliance (NVMe-TCP only — no VFIO, no io_uring, no StormFS)
-cargo build --release --target aarch64-unknown-linux-musl --no-default-features --features "mikrotik,nvmeof"
-
-# The embedded management UI is off by default since v12.2.0 (#79):
-# stormview is the UI. Add --features ui for the old pages.
+sc-build 'cargo build --release --locked'                       # what goldens use
+sc-build 'cargo build --release --locked --target x86_64-unknown-linux-musl'
+sc-build 'cargo check --locked --no-default-features --features mikrotik,nvmeof'  # RouterOS
 ```
 
-**NVMe-TCP, not iSCSI.** What StormBlock serves on RouterOS is containers,
-PVCs and sbregistry, and those are 100% NVMe because **iSCSI is slow**.
-Sharing an iSCSI disk and PXE-booting a bare-metal host are **mkube's**,
-already working and unchanged by anything here — the engine does not need
-iSCSI to do its own job on this platform. Measured, aarch64 release, since
-"the binary must be small" is a real constraint:
+Features: `default = ["nvmeof", "iscsi", "cluster", "stormfs-data"]`; `ui` is
+the old web UI (off since v12.2.0, stormview is the UI); `arm64` and
+`mikrotik` are profile names that gate no code (#169). Without `nvmeof` the
+tree does not compile (#161).
+
+**NVMe-TCP, not iSCSI, on RouterOS.** What StormBlock serves there is
+containers, PVCs and sbregistry, and those are 100% NVMe because **iSCSI is
+slow**. Sharing an iSCSI disk and PXE-booting a bare-metal host are **mkube's**.
+Measured, aarch64 release, since "the binary must be small" is a real
+constraint:
 
 | profile | bytes |
 |---|---|
@@ -60,65 +54,67 @@ iSCSI to do its own job on this platform. Measured, aarch64 release, since
 | `mikrotik,iscsi` | 11,398,192 |
 | `mikrotik,iscsi,nvmeof` | 11,663,136 |
 
-NVMe alone is the smallest of the three — 629 KB below carrying both — so the
-fast transport is also the cheap one. Add `iscsi` only for a node that must
-serve an iSCSI LUN or run `boot-iscsi` itself.
-
 The profile leaves out `stormfs-data` too: a node with 256 MB is not a StormFS
 data node, and a mounted surface invites being called.
 
-**Musl static build** produces an 8.8 MB statically linked, stripped PIE binary (x86_64). Uses rustls-tls (no OpenSSL dependency). Requires `musl-tools` and `musl-dev` packages on the build host. Build and test on Linux: `root@dev.g8.lo:/root/stormblock` (or `gwest@dev.g8.lo` — shared dev host).
+`Cargo.lock` is committed; goldens build `--locked`; `cargo update` is a commit
+of its own. TLS is rustls (no OpenSSL), but not C-free: `aws-lc-sys` and `ring`
+come with it.
 
-## Target Platforms
+## Where it runs (see README "Where it runs")
 
-| Platform | Arch | Drive I/O | Targets | Notes |
-|----------|------|-----------|---------|-------|
-| Full node (Tier 0) | x86_64 | VFIO NVMe + io_uring SAS | NVMe-oF/TCP + iSCSI | Bare metal, buildroot image |
-| ARM64 JBOD (Tier 2) | aarch64 | io_uring SAS | NVMe-oF/TCP + iSCSI | SAS shelf head unit |
-| MikroTik RouterOS | arm64/x86 | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable (no VFIO) — never file I/O (#140) | NVMe-oF/TCP | Container on RouterOS 7+, USB/SATA attached storage, small footprint. iSCSI sharing and PXE boot are mkube's. |
+| where | started as | notes |
+|---|---|---|
+| stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260/:4420, no discovery, no cluster in this mode |
+| stormcos initramfs | `/init` → `boot-claim` + `boot-local` (`scripts/build-stormblock-initramfs.sh`) | boot hooks decide local vs appliance (`docs/boot-hooks.md`) |
+| appliance / forge | the daemon | serves goldens, host clones and boot claims |
+| RouterOS container | the daemon, `mikrotik,nvmeof` profile | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable; never file I/O (#140) |
 
-**MikroTik considerations:**
-- Runs as a container on RouterOS 7+ (or CHR VM)
-- No PCIe passthrough — no VFIO, drives are `/dev/sdX` block devices
-- No io_uring on RouterOS kernel — fall back to tokio `AsyncFd` / `spawn_blocking` with O_DIRECT
-- Memory constrained (256MB–1GB typical) — no hugepage DMA allocator
-- **NVMe-TCP is the transport.** RouterOS 7 speaks it (`/disk add
-  type=nvme-tcp ...`), and containers, PVCs and sbregistry all run on it
-  because iSCSI is slow. An earlier version of this table said "iSCSI target
-  only, NVMe-oF unlikely on these networks" — that was wrong, and a RouterOS
-  node was confirmed taking writes over NVMe-TCP on 2026-08-13 (#39).
-- **iSCSI sharing and PXE boot are mkube's, not the engine's.** They already
-  work and nothing here changes them, so the engine profile does not carry
-  iSCSI to support them. That division stands until NVMe boot over iPXE is
-  *demonstrated* rather than assumed — nobody has proved it yet, and the boot
-  path is not the place to find out by guessing.
-- RAID 1 (mirror) most relevant; RAID 5/6 may be too CPU-heavy on lower-end models
-- Binary must be small — strip, LTO, minimal features
+Drives are opened by the kernel and `O_DIRECT` everywhere; the VFIO NVMe
+driver is a stub (#167). **RouterOS specifics:** container on RouterOS 7+ (or
+CHR); no PCIe passthrough; 256 MB–1 GB of memory; NVMe-TCP is the transport
+(`/disk add type=nvme-tcp`, confirmed taking writes 2026-08-13, #39); RAID 1 is
+the relevant level; the binary must be small.
+
+**PVCs on stormcos** are the built-in driver (class `stormblock`): the kubelet
+clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
+`/api/v1/fstemplates/{id}/clone` and attaches it over ublk — no CSI. CSI
+(stormblock-csi, `/v1`) is for third-party drivers only.
 
 ## Architecture (bottom-up)
-- `src/drive/` — BlockDevice trait: NVMe via VFIO (`nvme.rs`), SAS via io_uring (`sas.rs`), iSCSI initiator (`iscsi_dev.rs`), DMA buffers (`dma.rs`), Slab extent store (`slab.rs`), Slab registry (`slab_registry.rs`), ublk server (`ublk.rs`, Linux-only), shared ring IPC (`uring_channel.rs`, `uring_server.rs`)
-- `src/raid/` — Software RAID 1/5/6/10: SIMD parity (`parity.rs`), write journal (`journal.rs`), rebuild (`rebuild.rs`), dynamic add/remove members (RAID 1)
-- `src/volume/` — Thin provisioning (`thin.rs`), extent allocator (`extent.rs`), COW snapshots (`snapshot.rs`), Global Extent Map (`gem.rs`)
-- `src/target/` — NVMe-oF/TCP :4420 (`nvmeof/`), iSCSI :3260 (`iscsi/`), per-core reactor (`reactor.rs`)
-- `src/mgmt/` — REST API via axum (`api/`), TOML config parsing (`config.rs`), Prometheus metrics, slab management (`api/slabs.rs`)
-- `src/cluster/` — Optional multi-node: Raft consensus (`raft/`), membership (`membership.rs`), heartbeat (`heartbeat.rs`), replication (`replication.rs`), migration (`migration.rs`)
-- `src/boot.rs` — Boot volume manager: templates, COW snapshots per machine, direct Linux boot (kernel cmdline + initramfs config)
-- `src/migrate.rs` — Live migration orchestrator: RAID 1 add/rebuild/remove + slab-based extent migration
-- `src/placement/` — Placement engine: cold copies, extent migration, slab evacuation, rebalancing (even distribution + tier affinity), storage topology
-- `src/stormfs.rs` — StormFS registration: periodic volume announcement to metadata cluster
-- `src/boot_iscsi.rs` — iSCSI boot disk orchestrator: multi-volume partitioned disk on iSCSI backing, layout parsing, provisioning
-- `src/main.rs` — CLI entry point, drive → RAID → volume → target startup with subcommands (slab, ublk, migrate, boot-iscsi, migrate-boot)
+- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slab_registry.rs`, `discover.rs`, `ublk.rs`, `handover.rs`, `identity.rs`, SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
+- `src/raid/` — drive-level RAID 1/5/6/10 for whole-device legs; parity, RAID 1 add/remove with resync. Journal on disk, scrub, rebuild and reassembly are not wired (#168)
+- `src/volume/` — thin volumes (`thin.rs`), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V8), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
+- `src/fs/` — templates (`template.rs`), ext4 (`ext4.rs`) and XFS (`xfs.rs`) seams, disk identity (`disk.rs`), files, image survey (`survey.rs`)
+- `src/image/` — image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import (`import.rs`, `decode/`), node layout (`local.rs`), local boot
+- `src/pallet/` — pallet writer, GPT, store, manager, selection; the reader is `crates/pallet-format`
+- `src/placement/` — failure domains (`domain.rs`), placement, drain moves, rebalance
+- `src/target/` — NVMe-oF/TCP (`nvmeof/`), iSCSI (`iscsi/`), per-core reactor
+- `src/serve/` — the serving layer mounted at `/serve/v1` (wiring, reconciler, readiness, reaper, tar, raw, trim)
+- `src/mgmt/` — the management API (`api/`: every `/api/v1` surface, `v1.rs`, `kube.rs`, `rebuilds.rs`, …), auth, config, metrics, discovery, ublk exports, `ui/` (feature `ui`)
+- `src/cluster/` — openraft membership, heartbeat, replication (feature `cluster`)
+- `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (formats every run, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
+- `src/main.rs` — CLI, the daemon, and every subcommand
 
 ## Current State
-All phases (0–7) and all roadmap items are implemented. 312 unit/integration tests pass on macOS; 3 external iSCSI tests pass against real LIO Target via mkube job runner. Musl static release build produces an 11 MB stripped PIE binary (x86_64). The drive layer has four backends: raw block devices (`SasDevice`: O_DIRECT, an io_uring on its own thread or the blocking pool; every drive and the installed disk, #140), NVMe (VFIO with hugepage DMA and full init), iSCSI (TCP initiator, any target), and FileDevice (tokio — tests and development only). SMART health monitoring via sysfs with REST endpoint. RAID 1/5/6/10 with SIMD parity, write-intent journal, background rebuild, and dynamic add_member/remove_member for RAID 1. Volume manager with thin provisioning, COW snapshots, extent allocator, and on-disk metadata persistence (`--data-dir` for restart recovery). Slab extent store (organic data placement with 1 MB slots per device, tier-indexed registry, GEM) and ublk server for kernel block device export (Linux 6.0+, io_uring URING_CMD). Boot volume manager with templates, COW clones, and direct Linux boot (kernel cmdline + initramfs config for ublk root). Live migration orchestrator for remote → local disk via RAID 1. Target protocols: iSCSI (RFC 7143, CHAP auth, full SCSI command set, multi-connection sessions, R2T/Data-Out, ALUA multipath) and NVMe-oF/TCP (fabric connect, admin + I/O commands, discovery, io_uring zero-copy send). Per-core reactor pool with CPU pinning on Linux. Management REST API with axum (drives, arrays, volumes, exports, slabs, metrics) with optional TLS via rustls. StormFS registration for volume announcement to metadata cluster. Cluster scaling via openraft 0.9 with HTTP/HTTPS Raft RPCs (TLS via rustls, shares management cert/key), node discovery, heartbeat health monitoring, sync/async volume replication, and volume migration — all behind `#[cfg(feature = "cluster")]`. Placement engine with snapshot-fenced cold copies, extent-level migration (migrate_extent, evacuate_slab, rebalance with EvenDistribution/TierAffinity strategies), storage topology classification (tier/locality), and slab-based migration orchestration. Slab extent store — organic data placement with fixed-size 1 MB slots per device, tier-indexed slab registry, and Global Extent Map (GEM) for cross-slab extent tracking with reverse index and COW snapshot cloning. Volume layer (Phase 2) rewritten: ThinVolume is config-only, ThinVolumeHandle routes I/O through GEM + SlabRegistry, allocate-on-write and COW via slab slot allocation. Shared ring IPC — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd. Boot-from-iSCSI: connect to remote iSCSI target as a BlockDevice, format as slab, create multi-volume partitioned disk layout (ESP/boot/root/swap/home), export each partition as ublk device, live-migrate to local disk. Integration tests exercise the full stack. Container images via Dockerfile for deployment under StormBase.
+**v19.1.1** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
+the full suite passes on dev apart from #120 (and #134 when the box is busy).
+The README is the reference for what the code does, rewritten from the code in
+#131; the docs in `docs/` were checked against it and the superseded ones moved
+to `docs/history/`. What earlier docs promised and the code does not do is
+listed in the README's "Not built, or not wired" with its issues (#159–#170).
+The golden has been held since v17 for the token rollout to the engine's
+clients (#107; stormcentral#30, stormcos#89 and the rest).
 
-Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compile/build/test. For special runtime testing that needs its own machine (not plain compiles), spin up a VM with terragrunt — see the sister projects for examples. DNS: 192.168.1.252, 192.168.1.154 (dns.gw.lo).
+For special runtime testing that needs its own machine, spin up a VM with
+terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
+(dns.gw.lo).
 
 ---
 
 ## TODO — Implementation Roadmap
 
-### Documentation from the code (2026-09-26, #131) — IN PROGRESS
+### Documentation from the code (2026-09-26, #131) — DONE (v19.1.2)
 
 Owner: every component rewrites its docs from the code as it is now
 (stormbootx b1347d9 / stormuefi b15dcba are the pattern); a stormcos
@@ -127,14 +123,23 @@ consistency pass follows. PVCs: stormcos has a **built-in** driver (class
 size class, attached over ublk by the kubelet; CSI is for third-party drivers
 only, and the built-in path is not described as an exception to it.
 
-- [ ] survey from source: CLI (every subcommand/flag/env, defaults), config
+- [x] survey from source: CLI (every subcommand/flag/env, defaults), config
       (every key, defaults), HTTP routes + auth + metrics, ports, how it ships
-- [ ] README.md rewritten from that survey
-- [ ] docs/: each file checked — design marked as design, stale corrected
+- [x] README.md rewritten from that survey
+- [x] docs/: each file checked — design marked as design, stale corrected
       or removed
-- [ ] cross-references checked against the other components' code
-- [ ] CLAUDE.md status current; module docs where behaviour changed
-- [ ] what the docs promise and the code does not do → issues; close
+- [x] cross-references checked against the other components' code
+- [x] CLAUDE.md status current; module docs where behaviour changed
+- [x] what the docs promise and the code does not do → issues; close
+
+Surveyed by read-only agents from the source, then written by hand. Found on
+the way and filed: #162 (`boot-iscsi` formats every run), #163 (`--data-dir`
+reaches only the volume manager), #164 (config-file CHAP ignored — an
+unauthenticated target), #165 (config sections never acted on), #166 (`ui`
+outside the token check), #167 (VFIO driver a stub), #168 (RAID extras not
+wired), #169 (dead code, empty features), #170 (StormFS registration target),
+rustkube#103. The removed iPXE runbook had lab credentials (IPMI `ADMIN/ADMIN`,
+`root/changeme`) that remain in git history — flagged to the owner.
 
 ### /v1 attach names its transport (2026-09-26, #149) — DONE (v19.1.1)
 
@@ -333,7 +338,7 @@ dropped) or an engine that stopped left it there for good.
       the slab whose metadata records it, else a half the node has. On a node
       with both halves the same bug put an unwritten data volume (a fresh PVC)
       in the half an install replaces.
-- [x] rustkube-node#70: wait for `ready` when a found blank is still
+- [ ] rustkube-node#70 (open, not implemented there yet): wait for `ready` when a found blank is still
       formatting; an Event on the claim.
 
 ### No file I/O for real storage (2026-09-25, #140) — DONE (v18.2.0)
@@ -1268,8 +1273,9 @@ metadata region the way `slab info` reads the header.
 
 A **pallet** is a GPT partition holding a named, versioned, self-contained set
 of sealed member images plus the manifest that describes them. On-disk format
-is specified in `stormuefi/docs/PALLET-SPEC.md` v1; the reader is built and
-OVMF-verified in `stormuefi-map`. stormblock owns the **producer** side.
+is specified in `docs/pallets.md` (it began as `stormuefi/docs/PALLET-SPEC.md`,
+now a pointer here); the reader is `crates/pallet-format`, which stormuefi
+links. stormblock owns the **producer** side.
 
 The engine had no notion of one: a drive carried a slab and nothing else, so
 there was effectively a single implicit grouping. What the model needs is
@@ -1277,7 +1283,7 @@ there was effectively a single implicit grouping. What the model needs is
 scanning rather than configured.
 
 - [x] `src/pallet/format.rs` — v1 writer + reader, byte-compatible with
-      `stormuefi-map`. Content first, header last, so a torn publish leaves a
+      `crates/pallet-format` (once `stormuefi-map`). Content first, header last, so a torn publish leaves a
       pallet that fails its own CRC rather than one that lies.
 - [x] `src/pallet/gpt.rs` — GPT read/write, protective MBR, primary + backup.
       Activation is an **attribute write** (bits 48–63), never a data write.
