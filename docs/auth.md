@@ -114,9 +114,13 @@ it safe by what it **cannot** do rather than by who calls it:
    and is pinned to it: `boothost/<tag>` is created then, so moving the default
    later does not move a machine that already has an image (stormbootx#15).
 3. **Every boot is a fresh clone** of the host's golden (`boothost-<tag>`), and
-   the previous boot's clone is released — after the grace that protects the
-   firmware → initramfs double claim (#97). Nothing written to the image
-   survives a reboot; a machine's state lives in its data volumes.
+   **every earlier clone of that tag is released** (#127) — each one that is
+   not inside the grace protecting the firmware → initramfs double claim (#97,
+   `STORMBLOCK_CLAIM_GRACE_SECS`, 600 s), not named by a synonym, not sealed,
+   and a clone of something the tag has booted. Its export goes first. So a tag
+   holds at most this boot's clones; the claim response lists what it
+   `released` and what a guard `kept`. Nothing written to the image survives a
+   reboot; a machine's state lives in its data volumes.
 4. **The claim takes no options.** Whatever the body says — a name to bind, a
    namespace, a size, `unsealed_ok` — is ignored in the `boothost` namespace.
    It can only hand tag X a fresh clone of X's own golden, and it refuses an

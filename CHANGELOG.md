@@ -3,6 +3,17 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (boot claim)
+- **fix(synonyms):** a boot claim (`POST /api/v1/synonyms/boothost/<tag>/claim`)
+  now releases **every** earlier clone named `boothost-<tag>`, not only the
+  first one `find_volume` met (#127). Forge had 60 of them. A claim used to
+  release at most one, so with several already there, or with the one it
+  found inside the double-claim grace, the rest stayed for good. Each earlier
+  clone still passes the same guards: not claimed within the grace (this
+  boot's), not named, not sealed, and a clone of something the tag has booted.
+  Its export is dropped first. The first claim after this upgrade collects an
+  existing pile. The response gains `released` and `kept`.
+
 ### 2026-09-26 (presentation)
 - **docs:** `docs/presentation.md` is an 11-slide Marp deck of stormblock's
   purpose and functionality (#132). It covers the problem it solves, where it
