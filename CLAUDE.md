@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### /v1 attach names its transport (2026-09-26, #149) — DONE (v19.1.0)
+### /v1 attach names its transport (2026-09-26, #149) — DONE (v19.1.1)
 
 stormstorage exports each leg with `/v1/volumes/{id}/attach {node: master}`;
 since 2337c8a made ublk the default for a local attach, the engine answers

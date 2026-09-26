@@ -3,6 +3,14 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.1.1] — 2026-09-26
+
+### Fixed
+- `POST /api/v1/volumes/{id}/attach` with an explicit `nvme-tcp` on a node
+  with no NVMe-oF target answers as it did before v19.1.0, instead of the 409
+  v19.1.0 introduced there (`integration_synonyms` relies on it). Only `/v1`
+  refuses an `nvme_tcp` it cannot give, which is what #149 asked for.
+
 ## [v19.1.0] — 2026-09-26
 
 ### 2026-09-26 (attach transport)
