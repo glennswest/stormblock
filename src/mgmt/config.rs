@@ -307,16 +307,15 @@ pub struct ManagementConfig {
     ///   cannot.
     /// * `Some(false)` — deliberately open. The node still says so on every
     ///   boot; what it stops saying is that nobody chose this.
-    /// * `None` (the default) — enforced when a token is configured or a
-    ///   token file exists, open otherwise, and **loud** about it on every
-    ///   boot.
+    /// * `None` (the default) — required, as with `Some(true)` (#107,
+    ///   v17.0.0), except that a node with nowhere to write the minted token
+    ///   keeps it in memory for this run (closed, and it says so) rather than
+    ///   failing to start.
     ///
-    /// The default is open because a node's engine is what a machine claims
-    /// its boot image from before it has any credential (`boot-claim`, and
-    /// the firmware one stage earlier): flipping the fleet to closed from
-    /// inside the engine would stop machines booting with no way to hand them
-    /// the token first. That is a migration, not a default. What is not
-    /// deferred is the silence — see `mgmt::auth::log_mode`.
+    /// A machine claiming its boot image has no credential yet, so that one
+    /// request — `POST /api/v1/synonyms/boothost/<tag>/claim` — stays open
+    /// whatever this says (`serve::api::is_boot_claim`); everything else needs
+    /// the token. See `mgmt::auth::resolve` and `docs/auth.md`.
     pub require_auth: Option<bool>,
     /// This node's name in the /v1 surface. Falls back to $STORMBLOCK_NODE,
     /// then $HOSTNAME, then "localhost".

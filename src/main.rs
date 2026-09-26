@@ -117,7 +117,6 @@ enum SubCommand {
         #[command(subcommand)]
         action: PalletAction,
     },
-    /// Export a volume via ublk to the local kernel (/dev/ublkbN)
     /// Collect everything needed to debug this node into one directory.
     ///
     /// The bundle someone can send you when the node is not the one in front
@@ -228,6 +227,9 @@ enum SubCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Export a volume via ublk to the local kernel (/dev/ublkbN). Not
+    /// implemented as a subcommand: it needs a running engine, so use
+    /// `POST /api/v1/volumes/{id}/attach` (or `attach --slab` offline).
     Ublk {
         /// Volume UUID to export
         #[arg(long)]
@@ -236,7 +238,10 @@ enum SubCommand {
         #[arg(long, default_value = "1")]
         queues: u16,
     },
-    /// Live migrate from iSCSI to local disk
+    /// Live migrate from iSCSI to local disk. Not implemented as a
+    /// subcommand: a boot volume flows over with `boot-local --local-disk`,
+    /// and a running engine moves volumes with `/api/v1/moves` or
+    /// `/api/v1/volumes/{id}/tier`.
     Migrate {
         /// Path to local disk for migration target
         #[arg(long)]
@@ -307,8 +312,6 @@ enum SubCommand {
         #[arg(long)]
         data_dir: Option<String>,
     },
-    /// Boot from a local slab — attach an existing slab + metadata
-    /// non-destructively and export the boot volume as /dev/ublkb0
     /// Ask the appliance which image this machine boots, and print somewhere
     /// to attach it from.
     ///
@@ -355,6 +358,8 @@ enum SubCommand {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Boot from a local slab — attach an existing slab + metadata
+    /// non-destructively and export the boot volume as /dev/ublkb0
     BootLocal {
         /// Slab device or file path(s) (e.g. root.slab). Paired with the
         /// array records in volumes.dat in order.
@@ -883,7 +888,7 @@ async fn main() -> anyhow::Result<()> {
             SubCommand::Migrate { local_disk, tier } => {
                 tracing::info!("Migration mode: target={}, tier={}", local_disk, tier);
                 tracing::info!("Migration requires a running StormBlock instance.");
-                tracing::info!("Use the REST API POST /api/v1/volumes/{{id}}/migrate to trigger migration.");
+                tracing::info!("A boot volume flows over with `boot-local --local-disk`; a running engine moves volumes with /api/v1/moves or /api/v1/volumes/{{id}}/tier.");
                 return Ok(());
             }
             #[cfg(feature = "iscsi")]
