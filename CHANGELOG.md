@@ -4,7 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-09-26 (presentation)
-- **docs:** `docs/presentation.md` is a 12-slide Marp deck of stormblock's
+- **docs:** `docs/presentation.md` is an 11-slide Marp deck of stormblock's
   purpose and functionality (#132). It covers the problem it solves, where it
   sits in stormcos (from stormcentral's relationships graph), how it works,
   what it does today, its interfaces, how it ships and runs, what is proven
