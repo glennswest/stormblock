@@ -1782,6 +1782,28 @@ async fn close_dual_attach(
 // Snapshots (#3) + group snapshots (#8)
 // ---------------------------------------------------------------------------
 
+/// What a snapshot names as its source: a `/v1` volume, or else an engine
+/// volume by id or name (#130). A VM's disks are engine volumes made through
+/// `/api/v1` — a clone of a golden, a cidata seed — and a VM snapshot has to
+/// be able to name them. The size and, when this node holds the data, the
+/// engine id to snapshot.
+async fn resolve_snapshot_source(
+    state: &AppState,
+    v1: &V1State,
+    id: &str,
+) -> Result<(Option<Uuid>, u64), V1Error> {
+    if let Some(rec) = v1.volumes.get(id) {
+        return Ok((rec.local_id, rec.vol.size_bytes));
+    }
+    let vm = state.volume_manager.lock().await;
+    let vid = vm
+        .find_volume(id)
+        .await
+        .ok_or_else(|| V1Error::NotFound(format!("volume {id}")))?;
+    let size = vm.get_volume(&vid).map(|h| h.capacity_bytes()).unwrap_or(0);
+    Ok((Some(vid.0), size))
+}
+
 #[derive(Deserialize)]
 struct CreateSnapshotRequest {
     name: String,
@@ -1802,12 +1824,7 @@ async fn create_snapshot(
             req.name, existing.snap.source_volume_id
         )));
     }
-    let rec = v1
-        .volumes
-        .get(&req.volume_id)
-        .ok_or_else(|| V1Error::NotFound(format!("volume {}", req.volume_id)))?;
-    let size = rec.vol.size_bytes;
-    let source_local = rec.local_id;
+    let (source_local, size) = resolve_snapshot_source(&state, &v1, &req.volume_id).await?;
 
     // COW clone through GEM when the volume is backed on this node — and
     // sealed, because a snapshot *is* a golden (#111): the point-in-time copy
@@ -1838,7 +1855,9 @@ async fn create_snapshot(
         name: req.name,
         source_volume_id: req.volume_id,
         size_bytes: size,
-        ready: true,
+        // Only what this node holds (#130): a volume mastered elsewhere has
+        // nothing here to copy, and `ready` must not say otherwise.
+        ready: local_id.is_some(),
         created_at_ms: now_ms(),
         group_snapshot_id: None,
     };
@@ -1916,22 +1935,22 @@ async fn create_group_snapshot(
     if let Some(existing) = v1.group_snapshots.values().find(|g| g.name == req.name) {
         return Ok(Json(existing.clone())); // idempotent by name
     }
+    // Every member resolved before anything is taken: a `/v1` volume, or an
+    // engine volume by id or name (#130).
+    let mut members: Vec<(Option<Uuid>, u64)> = Vec::with_capacity(req.volume_ids.len());
     for id in &req.volume_ids {
-        if !v1.volumes.contains_key(id) {
-            return Err(V1Error::NotFound(format!("volume {id}")));
-        }
+        members.push(resolve_snapshot_source(&state, &v1, id).await?);
     }
 
     // Engine fence: every locally-backed member is cloned under one held
-    // GEM+registry lock — a single consistency point across extent maps.
+    // GEM+registry lock — a single consistency point across extent maps. A
+    // snapshot, not a clone: no identity is restamped, so a VM's disks come
+    // back as exactly the disks the guest had.
     let locally_backed: Vec<(EngineVolumeId, String)> = req
         .volume_ids
         .iter()
-        .filter_map(|vid| {
-            v1.volumes[vid]
-                .local_id
-                .map(|l| (EngineVolumeId(l), format!("{}-{vid}", req.name)))
-        })
+        .zip(&members)
+        .filter_map(|(vid, (local, _))| local.map(|l| (EngineVolumeId(l), format!("{}-{vid}", req.name))))
         .collect();
     let mut local_snaps: HashMap<String, Uuid> = HashMap::new();
     if !locally_backed.is_empty() {
@@ -1957,14 +1976,14 @@ async fn create_group_snapshot(
     let group_id = gen_id("gsnap");
     let created = now_ms();
     let mut snapshots = Vec::with_capacity(req.volume_ids.len());
-    for vid in &req.volume_ids {
+    for (vid, (_, size)) in req.volume_ids.iter().zip(&members) {
         let name = format!("{}-{vid}", req.name);
         let snap = Snapshot {
             id: gen_id("snap"),
             name: name.clone(),
             source_volume_id: vid.clone(),
-            size_bytes: v1.volumes[vid].vol.size_bytes,
-            ready: true,
+            size_bytes: *size,
+            ready: local_snaps.contains_key(&name),
             created_at_ms: created,
             group_snapshot_id: Some(group_id.clone()),
         };
@@ -1974,11 +1993,12 @@ async fn create_group_snapshot(
         );
         snapshots.push(snap);
     }
+    let ready = snapshots.iter().all(|s| s.ready);
     let group = GroupSnapshot {
         id: group_id,
         name: req.name,
         snapshots,
-        ready: true,
+        ready,
         created_at_ms: created,
     };
     v1.group_snapshots.insert(group.id.clone(), group.clone());

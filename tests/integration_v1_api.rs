@@ -913,3 +913,149 @@ async fn v1_bearer_auth_enforced_when_configured() {
 
     server.abort();
 }
+
+/// A VM's disks are engine volumes made through `/api/v1`; a group snapshot of
+/// them through `/v1` is one point in time across both, keeps every identity
+/// (the GPT disk GUID included), and restores through `source: snapshot`
+/// (#130, stormvm#28).
+#[tokio::test]
+async fn v1_group_snapshot_of_engine_volumes_is_one_point_in_time() {
+    use stormblock::pallet::Gpt;
+    use stormblock::volume::VolumeId as Vid;
+    const MIB: u64 = 1 << 20;
+
+    let dir = TempDir::new().unwrap();
+    let state = setup_state(&dir).await;
+    let (root, seed) = {
+        let mut vm = state.volume_manager.lock().await;
+        let root = vm.create_volume_any("vm-1-root", 2 * MIB).await.unwrap();
+        let seed = vm.create_volume_any("vm-1-seed", MIB).await.unwrap();
+        (root, seed)
+    };
+    let (rv, sv) = {
+        let vm = state.volume_manager.lock().await;
+        (vm.get_volume(&root).unwrap(), vm.get_volume(&seed).unwrap())
+    };
+    // The root disk carries a GPT, the seed a pattern.
+    let gpt = Gpt::create_for(512, 2 * MIB);
+    let (head, tail) = gpt.render();
+    rv.write(0, &head).await.unwrap();
+    rv.write(gpt.tail_offset(), &tail).await.unwrap();
+    rv.write(MIB, &vec![0x11; 4096]).await.unwrap();
+    sv.write(0, &vec![0x5A; 4096]).await.unwrap();
+    let guid_at = |b: &[u8]| b[512 + 56..512 + 72].to_vec();
+    let guid = guid_at(&head);
+
+    let (base, server) = start_server(state.clone()).await;
+    let c = reqwest::Client::new();
+    // By engine id and by engine name.
+    let (s, g) = post(
+        &c,
+        format!("{base}/v1/group-snapshots"),
+        json!({ "name": "vm-1-snap", "volume_ids": [root.0.to_string(), "vm-1-seed"] }),
+    )
+    .await;
+    assert_eq!(s, 200, "{g}");
+    assert_eq!(g["ready"], true, "{g}");
+    let snaps = g["snapshots"].as_array().unwrap().clone();
+    assert_eq!(snaps.len(), 2);
+    assert!(snaps.iter().all(|m| m["ready"] == true));
+    assert_eq!(snaps[0]["source_volume_id"], root.0.to_string());
+    assert_eq!(snaps[1]["source_volume_id"], "vm-1-seed");
+    assert_eq!(snaps[0]["size_bytes"], 2 * MIB);
+
+    // The guest keeps writing; the snapshot does not move.
+    rv.write(MIB, &vec![0x22; 4096]).await.unwrap();
+    sv.write(0, &vec![0x6B; 4096]).await.unwrap();
+
+    let local = |i: usize| {
+        let st = state.clone();
+        let id = snaps[i]["id"].as_str().unwrap().to_string();
+        async move { st.v1.lock().await.snapshots[&id].local_id.expect("engine-backed") }
+    };
+    let (sroot, sseed) = (local(0).await, local(1).await);
+    let read = |id: uuid::Uuid, off: u64, len: usize| {
+        let st = state.clone();
+        async move {
+            let v = st.volume_manager.lock().await.get_volume(&Vid(id)).unwrap();
+            let mut b = vec![0u8; len];
+            v.read(off, &mut b).await.unwrap();
+            b
+        }
+    };
+    assert!(read(sroot, MIB, 4096).await.iter().all(|&x| x == 0x11), "root at the snapshot's point");
+    assert!(read(sseed, 0, 4096).await.iter().all(|&x| x == 0x5A), "seed at the same point");
+    assert_eq!(guid_at(&read(sroot, 0, 1024).await), guid, "the disk GUID is not restamped");
+    assert!(state.volume_manager.lock().await.is_sealed(&Vid(sroot)), "a snapshot is a golden");
+
+    // Restore: a new /v1 volume from the seed's snapshot holds its data.
+    let (s, v) = post(
+        &c,
+        format!("{base}/v1/volumes"),
+        json!({
+            "name": "vm-1-seed-restored",
+            "size_bytes": MIB,
+            "replica_tier": { "slaves": 0 },
+            "source": { "kind": "snapshot", "id": snaps[1]["id"] },
+        }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let restored = state.v1.lock().await.volumes[v["id"].as_str().unwrap()].local_id.unwrap();
+    assert!(read(restored, 0, 4096).await.iter().all(|&x| x == 0x5A));
+
+    // A single snapshot by engine name too.
+    let (s, one) = post(
+        &c,
+        format!("{base}/v1/snapshots"),
+        json!({ "name": "seed-now", "volume_id": "vm-1-seed" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{one}");
+    assert_eq!(one["ready"], true);
+
+    // Unknown is still a 404.
+    let (s, e) = post(
+        &c,
+        format!("{base}/v1/group-snapshots"),
+        json!({ "name": "nope", "volume_ids": ["no-such-volume"] }),
+    )
+    .await;
+    assert_eq!(s, 404, "{e}");
+
+    server.abort();
+}
+
+/// A volume mastered on another node has nothing here to copy: its snapshot
+/// is not ready, and neither is a group holding it (#130).
+#[tokio::test]
+async fn v1_snapshot_of_a_remote_master_is_not_ready() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state(&dir).await;
+    state.v1.lock().await.add_node("w2", 100 << 30, Default::default());
+    let (base, server) = start_server(state).await;
+    let c = reqwest::Client::new();
+
+    let mut req = create_req("remote", 1 << 20, 0);
+    req["master_node"] = json!("w2");
+    let (s, v) = post(&c, format!("{base}/v1/volumes"), req).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, here) = post(&c, format!("{base}/v1/volumes"), create_req("here", 1 << 20, 0)).await;
+
+    let (s, snap) = post(&c, format!("{base}/v1/snapshots"), json!({ "name": "r", "volume_id": v["id"] })).await;
+    assert_eq!(s, 200, "{snap}");
+    assert_eq!(snap["ready"], false);
+
+    let (s, g) = post(
+        &c,
+        format!("{base}/v1/group-snapshots"),
+        json!({ "name": "mixed", "volume_ids": [here["id"], v["id"]] }),
+    )
+    .await;
+    assert_eq!(s, 200, "{g}");
+    assert_eq!(g["ready"], false);
+    assert_eq!(g["snapshots"][0]["ready"], true);
+    assert_eq!(g["snapshots"][1]["ready"], false);
+
+    server.abort();
+}
