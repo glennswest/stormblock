@@ -258,25 +258,15 @@ async fn a_stale_record_and_several_cow_generations_recover() {
     vm2.persist_to_slab(sid);
     vm2.restore().await.unwrap();
 
-    let read = |vm: &VolumeManager, name: &'static str, idx: u64| {
-        let vm = vm;
-        async move {
-            let id = vm.find_volume(name).await.unwrap_or_else(|| panic!("{name} did not come back"));
-            let v = vm.get_volume(&id).unwrap();
-            let mut b = vec![0u8; BLOCK as usize];
-            v.read(idx * BLOCK, &mut b).await.unwrap();
-            value_of(idx, &b)
-        }
-    };
-    assert_eq!(read(&vm2, "clone", 0).await, Ok(3), "the clone's newest generation");
-    assert_eq!(read(&vm2, "snap", 0).await, Ok(2), "the snapshot's generation");
-    assert_eq!(read(&vm2, "blank", 0).await, Ok(blank_value(0)), "the blank's original");
+    assert_eq!(read_block(&vm2, "clone", 0).await, Ok(3), "the clone's newest generation");
+    assert_eq!(read_block(&vm2, "snap", 0).await, Ok(2), "the snapshot's generation");
+    assert_eq!(read_block(&vm2, "blank", 0).await, Ok(blank_value(0)), "the blank's original");
     // Discarded: anything but the other volume's bytes.
-    let r = read(&vm2, "clone", e1).await;
+    let r = read_block(&vm2, "clone", e1).await;
     assert!(r.is_ok(), "the clone's discarded extent reads another volume's data: {r:?}");
     // The rest of the clone is still the blank's.
     for i in 1..e1 {
-        assert_eq!(read(&vm2, "clone", i).await, Ok(blank_value(i)));
+        assert_eq!(read_block(&vm2, "clone", i).await, Ok(blank_value(i)));
     }
     let _ = (snap, other);
 
@@ -287,6 +277,14 @@ async fn a_stale_record_and_several_cow_generations_recover() {
     let v = vm2.get_volume(&id).unwrap();
     let e2 = 2 * SLOT / BLOCK;
     v.write(e2 * BLOCK, &block(e2, 99)).await.unwrap();
-    assert_eq!(read(&vm2, "blank", e2).await, Ok(blank_value(e2)));
-    assert_eq!(read(&vm2, "snap", e2).await, Ok(blank_value(e2)));
+    assert_eq!(read_block(&vm2, "blank", e2).await, Ok(blank_value(e2)));
+    assert_eq!(read_block(&vm2, "snap", e2).await, Ok(blank_value(e2)));
+}
+
+async fn read_block(vm: &VolumeManager, name: &str, idx: u64) -> Result<u64, String> {
+    let id = vm.find_volume(name).await.unwrap_or_else(|| panic!("{name} did not come back"));
+    let v = vm.get_volume(&id).unwrap();
+    let mut b = vec![0u8; BLOCK as usize];
+    v.read(idx * BLOCK, &mut b).await.unwrap();
+    value_of(idx, &b)
 }
