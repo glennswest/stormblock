@@ -87,7 +87,7 @@ async fn the_successor_maps_what_the_incumbent_allocated_in_the_window() {
     let dir = TempDir::new().unwrap();
     let (path, inc) = incumbent(&dir).await;
 
-    let vm = take_over(
+    let mut vm = take_over(
         || async {
             allocate_in_window(inc).await;
             Ok(())
