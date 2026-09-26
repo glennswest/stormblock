@@ -3,6 +3,22 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (attach transport)
+- **fix(v1):** `POST /v1/volumes/{id}/attach` takes an optional `transport`
+  (`nvme_tcp` or `ublk`; `nvme-tcp` and `nvmeof` are accepted too; absent
+  means the engine chooses) (#149). Since 2337c8a made ublk the default for a
+  local attach, an orchestrator attaching on the master's behalf for a remote
+  initiator got `ublk` for every request. That is how stormstorage exports
+  each leg of a distributed volume to the RAID head, so assembly failed. With
+  `nvme_tcp` the ublk offer is skipped and the NVMe-oF coordinates are
+  returned. When there are none (no NVMe-oF target, or the volume is not
+  backed here) the answer is a 409 that says which, and the refused
+  attachment is not recorded. `ublk` insists, or 409. Additive: callers that
+  send no transport are unchanged.
+- **refactor(api):** `POST /api/v1/volumes/{id}/attach` parses `transport`
+  with the same parser, and an explicit `nvme_tcp` there also refuses (409)
+  rather than returning coordinates with no namespace behind them.
+
 ## [v19.0.0] — 2026-09-26
 
 ### Breaking

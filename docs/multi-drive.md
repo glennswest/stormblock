@@ -62,6 +62,7 @@ legs, and its consumers attach a thin volume carved on that array.
 POST /api/v1/arrays   {"level":"Raid1","drive_uuids":[a,b]}            → dedicated by default
 POST /api/v1/volumes  {"name":"dist-vol","size":"1T","array_id":<array>}  → pinned to the array
 POST /v1/volumes      {"name":…,"size_bytes":…,"replica_tier":{"slaves":0},"placement":{"array_id":<array>}}
+POST /v1/volumes/{id}/attach {"node":<master>,"mode":"read_write","transport":"nvme_tcp"}  → nvme_tcp {nqn, addresses, nsid}
 GET  /api/v1/arrays/{id}   → "slab": {id, dedicated, role, total/free, self_describing}, "volumes": [{id, name, pinned}]
 DELETE /api/v1/arrays/{id} → 409 while any volume is on it; otherwise removes the array and its slab
 ```
@@ -82,6 +83,14 @@ DELETE /api/v1/arrays/{id} → 409 while any volume is on it; otherwise removes 
   carries the records of the volumes pinned to it, with the array it is. A
   head that reassembles the same members and adopts the slab gets the volumes
   back still pinned, and the slab still dedicated.
+- **Attach for a remote initiator** names its transport. A leg, or a
+  consumer volume, is attached with `node` set to the master (a read-write
+  attach is gated on it), and on a single-node engine the master is the
+  engine itself. From there the engine's own choice is a local ublk device,
+  which a RAID head on another machine cannot open. `"transport": "nvme_tcp"`
+  skips that offer and returns the NVMe-oF coordinates. When there are none,
+  because no NVMe-oF target is running or the volume is not backed here, the
+  answer is a 409 that says which, and nothing is recorded (#149).
 - **Delete** refuses while a volume is pinned to the array or has a leg on
   its slab, and only then. Before #150 it refused while any volume existed on
   the node, and when it did go through it left the slab registered.

@@ -357,6 +357,11 @@ pub struct ManagementConfig {
     /// which reads as a transport problem on a node already serving 39 ublk
     /// devices. Set it to `false` to force every attach through nvme-tcp.
     #[serde(default = "yes")]
+    ///
+    /// A caller that needs the network whatever node it asks from — a RAID
+    /// head assembling legs, a consumer on another machine — says so per
+    /// request with `"transport": "nvme_tcp"` on the attach (#149), so this
+    /// stays on for the node's own containers.
     pub ublk_transport: bool,
 }
 
