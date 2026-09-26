@@ -2282,3 +2282,128 @@ mod persistence_tests {
         assert!(!back.volumes.contains_key("b"));
     }
 }
+
+/// #149, as stormstorage meets it: an orchestrator on the master's own node
+/// attaches a leg for a RAID head somewhere else. With ublk working (faked
+/// here: dev has no ublk_drv) the engine answers `ublk` unless the request
+/// names `nvme_tcp` — and with it, the coordinates are real: the engine's own
+/// `nvme-tcp://` initiator connects to them and finds the volume.
+#[cfg(all(test, feature = "nvmeof"))]
+mod transport_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::mgmt::config::{NvmeofExportConfig, StormBlockConfig};
+    use crate::raid::RaidArrayId;
+    use crate::target::nvmeof::{NvmeofConfig, NvmeofTarget};
+    use crate::target::reactor::{ReactorConfig, ReactorPool};
+    use crate::volume::VolumeManager;
+
+    const NQN: &str = "nqn.2024.io.stormblock:leg-test";
+    const MIB: u64 = 1 << 20;
+
+    async fn node(dir: &std::path::Path) -> (Arc<AppState>, std::net::SocketAddr) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut config = StormBlockConfig::default();
+        config.management.data_dir = Some(dir.to_string_lossy().to_string());
+        config.management.node_name = Some("sno".into());
+        config.nvmeof = Some(NvmeofExportConfig {
+            listen_addr: addr.to_string(),
+            nqn: NQN.into(),
+            export_drives: false,
+        });
+        let mut vm = VolumeManager::new(MIB);
+        let dev = FileDevice::open_with_capacity(dir.join("pool.bin").to_str().unwrap(), 128 * MIB).await.unwrap();
+        vm.add_backing_device(RaidArrayId(Uuid::new_v4()), Arc::new(dev)).await;
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = Arc::new(AppState::new(config, vm, reg, gem));
+        let target = Arc::new(NvmeofTarget::new(NvmeofConfig { listen_addr: addr, nqn: NQN.into(), ..Default::default() }));
+        *state.nvmeof_target.write().await = Some(target.clone());
+        tokio::spawn(async move {
+            let reactor = ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false });
+            let _ = target.run_with_listener(listener, &reactor).await;
+        });
+        (state, addr)
+    }
+
+    async fn create(state: &Arc<AppState>, name: &str) -> Volume {
+        let req: CreateVolumeRequest = serde_json::from_value(serde_json::json!({
+            "name": name, "size_bytes": 16 * MIB, "replica_tier": { "slaves": 0 }
+        }))
+        .unwrap();
+        match create_volume(State(state.clone()), Json(req)).await {
+            Ok(Json(v)) => v,
+            Err(e) => panic!("create: {:?}", e.into_response().status()),
+        }
+    }
+
+    async fn attach(state: &Arc<AppState>, id: &str, transport: Option<&str>) -> Result<AttachInfo, u16> {
+        let node = state.v1.lock().await.local_node.clone();
+        let req = AttachRequest { node, mode: AttachMode::ReadWrite, transport: transport.map(String::from) };
+        match attach_volume(State(state.clone()), Path(id.to_string()), Json(req)).await {
+            Ok(Json(info)) => Ok(info),
+            Err(e) => Err(e.into_response().status().as_u16()),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nvme_tcp_is_given_even_where_ublk_would_be() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, addr) = node(dir.path()).await;
+        let leg = create(&state, "leg-0").await;
+        // Where ublk works, the engine's own choice for the master's node is
+        // a local device — what stormstorage got back and could not use.
+        state.ublk_exports.lock().await.insert_fake(&leg.id, "/dev/ublkb9");
+        assert_eq!(
+            attach(&state, &leg.id, None).await,
+            Ok(AttachInfo::Ublk { device_hint: "/dev/ublkb9".into() })
+        );
+
+        // Naming the network gets the network.
+        let info = attach(&state, &leg.id, Some("nvme_tcp")).await.unwrap();
+        let AttachInfo::NvmeTcp { nqn, addresses, nsid } = info else { panic!("{info:?}") };
+        assert_eq!(nqn, NQN);
+        assert_eq!((addresses[0].traddr.as_str(), addresses[0].trsvcid), ("127.0.0.1", addr.port()));
+        let nsid = nsid.expect("a namespace to connect to");
+        // The spellings an orchestrator might use all mean the same thing,
+        // and a repeat is the same namespace.
+        for t in ["nvme-tcp", "nvmeof"] {
+            let again = attach(&state, &leg.id, Some(t)).await.unwrap();
+            assert!(matches!(again, AttachInfo::NvmeTcp { nsid: Some(n), .. } if n == nsid), "{t}: {again:?}");
+        }
+
+        // And the coordinates are real: a RAID head opens them as a drive.
+        let uri = format!("nvme-tcp://{}:{}/{nqn}?nsid={nsid}", addresses[0].traddr, addresses[0].trsvcid);
+        let remote = crate::drive::open_one_drive(&uri).await.expect("the head connects");
+        let pattern: Vec<u8> = (0..MIB as usize).map(|i| (i % 253) as u8).collect();
+        remote.write(0, &pattern).await.unwrap();
+        remote.flush().await.unwrap();
+        let local = state.v1.lock().await.volumes.get(&leg.id).unwrap().local_id.unwrap();
+        let backing = state.volume_manager.lock().await.get_volume(&EngineVolumeId(local)).unwrap();
+        let mut back = vec![0u8; MIB as usize];
+        backing.read(0, &mut back).await.unwrap();
+        assert_eq!(back, pattern, "written over nvme_tcp, read from the engine volume");
+
+        // `ublk` insists, and an unknown transport is a bad request.
+        assert!(matches!(attach(&state, &leg.id, Some("ublk")).await, Ok(AttachInfo::Ublk { .. })));
+        assert_eq!(attach(&state, &leg.id, Some("iscsi")).await, Err(400));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nvme_tcp_with_no_target_says_so_and_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = node(dir.path()).await;
+        *state.nvmeof_target.write().await = None;
+        let v = create(&state, "no-target").await;
+        assert_eq!(attach(&state, &v.id, Some("nvme_tcp")).await, Err(409));
+        assert!(
+            state.v1.lock().await.attachments.get(&v.id).map(|n| n.is_empty()).unwrap_or(true),
+            "a refused attach leaves no attachment behind"
+        );
+        // `ublk` where there is none (dev has no ublk_drv): refused too.
+        if !state.ublk_exports.lock().await.available() {
+            assert_eq!(attach(&state, &v.id, Some("ublk")).await, Err(409));
+            assert!(state.v1.lock().await.attachments.get(&v.id).map(|n| n.is_empty()).unwrap_or(true));
+        }
+    }
+}

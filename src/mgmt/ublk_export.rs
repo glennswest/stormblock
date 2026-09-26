@@ -501,6 +501,27 @@ fn ublk_available() -> bool {
     false
 }
 
+// Registry bookkeeping is exercised without a kernel by injecting a fake
+// export; the real device-creation path is covered on-metal (dev.g8.lo).
+// Crate-visible so the attach handlers can be tested as they behave on a
+// node where ublk works (#149).
+#[cfg(test)]
+impl UblkExportManager {
+    pub(crate) fn insert_fake(&mut self, volume_id: &str, path: &str) {
+        self.exports.insert(
+            volume_id.to_string(),
+            Export {
+                device_path: path.to_string(),
+                #[cfg(target_os = "linux")]
+                shutdown: tokio::sync::watch::channel(false).0,
+                #[cfg(target_os = "linux")]
+                server: None,
+                done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,24 +542,6 @@ mod tests {
         assert!(!should_offer_ublk(true, "node-b", "node-a", true));
         // Not backed locally (this node holds no master replica).
         assert!(!should_offer_ublk(true, "node-a", "node-a", false));
-    }
-
-    // Registry bookkeeping is exercised without a kernel by injecting a fake
-    // export; the real device-creation path is covered on-metal (dev.g8.lo).
-    impl UblkExportManager {
-        fn insert_fake(&mut self, volume_id: &str, path: &str) {
-            self.exports.insert(
-                volume_id.to_string(),
-                Export {
-                    device_path: path.to_string(),
-                    #[cfg(target_os = "linux")]
-                    shutdown: tokio::sync::watch::channel(false).0,
-                    #[cfg(target_os = "linux")]
-                    server: None,
-                    done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                },
-            );
-        }
     }
 
     #[test]
