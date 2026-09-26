@@ -118,6 +118,24 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Documentation from the code (2026-09-26, #131) — IN PROGRESS
+
+Owner: every component rewrites its docs from the code as it is now
+(stormbootx b1347d9 / stormuefi b15dcba are the pattern); a stormcos
+consistency pass follows. PVCs: stormcos has a **built-in** driver (class
+`stormblock`) — a claim is a CoW clone of a sealed pre-formatted blank of its
+size class, attached over ublk by the kubelet; CSI is for third-party drivers
+only, and the built-in path is not described as an exception to it.
+
+- [ ] survey from source: CLI (every subcommand/flag/env, defaults), config
+      (every key, defaults), HTTP routes + auth + metrics, ports, how it ships
+- [ ] README.md rewritten from that survey
+- [ ] docs/: each file checked — design marked as design, stale corrected
+      or removed
+- [ ] cross-references checked against the other components' code
+- [ ] CLAUDE.md status current; module docs where behaviour changed
+- [ ] what the docs promise and the code does not do → issues; close
+
 ### /v1 attach names its transport (2026-09-26, #149) — DONE (v19.1.1)
 
 stormstorage exports each leg with `/v1/volumes/{id}/attach {node: master}`;
