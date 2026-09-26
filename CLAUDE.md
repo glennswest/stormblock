@@ -114,6 +114,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A presentation of purpose and functionality (2026-09-26, #132) — IN PROGRESS
+
+Owner: every component gets a short deck. `docs/presentation.md`, Marp
+Markdown, 8–15 slides, drawn from the #131 README and docs; only what works,
+planned work on its own slide; where it sits taken from stormcentral's
+relationships graph (stormblock depends on nothing; stormcos, stormpump,
+stormvm, sbregistry, stormdrive, stormstorage, stormblock-csi, stormuefi,
+stormbootx and buildbox2 depend on it).
+
+- [ ] write the deck
+- [ ] render it with marp-cli on dev (sc-build) and check the slide count
+- [ ] link from README; changelog; close
+
 ### Documentation from the code (2026-09-26, #131) — DONE (v19.1.2)
 
 Owner: every component rewrites its docs from the code as it is now
