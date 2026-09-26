@@ -1507,10 +1507,17 @@ fn queue_worker(
                     }
                 }
                 UBLK_IO_OP_WRITE_ZEROES => {
-                    // Write zeroes = zero-fill the region (treat as discard for thin volumes)
-                    match rt_handle.block_on(device.discard(offset, length as u64)) {
+                    // A promise, not a hint (#171): the range must read back
+                    // as zeros, and a failure is reported, never swallowed.
+                    // This used to be a discard, which reclaims whole slots
+                    // only and so left any partial range as it was, and
+                    // answered success even when it failed.
+                    match rt_handle.block_on(device.write_zeroes(offset, length as u64)) {
                         Ok(()) => 0,
-                        Err(_) => 0, // best-effort: report success even if unsupported
+                        Err(e) => {
+                            tracing::error!("ublk write-zeroes @{}+{}: {e}", offset, length);
+                            -(libc::EIO)
+                        }
                     }
                 }
                 _ => {

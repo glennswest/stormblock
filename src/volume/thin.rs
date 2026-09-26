@@ -798,7 +798,7 @@ impl ThinVolumeHandle {
                 )));
             }
             let slab = registry.get_mut(&pin).expect("checked above");
-            let slot_idx = slab.allocate_gen(self.id, vext_tag, generation).await?;
+            let slot_idx = slab.allocate_deferred(self.id, vext_tag, generation).await?;
             registry.reserve(pin, slot_idx);
             return Ok(Leg::new(pin, slot_idx));
         }
@@ -824,7 +824,7 @@ impl ThinVolumeHandle {
                     tried.push(slab_id);
                     continue;
                 };
-                match slab.allocate_gen(self.id, vext_tag, generation).await {
+                match slab.allocate_deferred(self.id, vext_tag, generation).await {
                     Ok(slot_idx) => {
                         registry.reserve(slab_id, slot_idx);
                         return Ok(Leg::new(slab_id, slot_idx));
@@ -943,6 +943,11 @@ impl ThinVolumeHandle {
                 buf.len(), leg.slab_id.0, leg.slot_idx
             )));
         }
+        // A newly allocated slot's entry may be published once its data is
+        // written (#171); a no-op for a slot already on the device.
+        if let Some(slab) = self.registry.read().await.get(&leg.slab_id) {
+            slab.confirm(leg.slot_idx);
+        }
         Ok(())
     }
 
@@ -1039,29 +1044,29 @@ impl ThinVolumeHandle {
         policy: &RedundancyPolicy,
     ) -> DriveResult<()> {
         if policy.is_none() {
-            // Allocate slot
             let (slab_id, slot_idx) = {
                 let mut reg = self.registry.write().await;
                 self.allocate_slot(&mut reg, vext_idx, 1).await?
             };
-
-            // Insert into GEM
+            let leg = Leg::new(slab_id, slot_idx);
+            // The whole slot, zero-filled around the write (#171): what this
+            // volume never wrote must read as zero, not as the slot's previous
+            // tenant — a freed slot is discarded, and discard does not zero
+            // on most SSDs and does nothing on an HDD.
+            let mut full = vec![0u8; self.slot_size as usize];
+            full[off_in_slot as usize..off_in_slot as usize + buf.len()].copy_from_slice(buf);
+            if let Err(e) = self.write_leg(leg, 0, &full).await {
+                self.give_back(&[leg]).await;
+                return Err(e);
+            }
+            // Mapped once the data is there, so no reader sees the slot before
+            // it holds this volume's bytes.
             {
                 let mut gem = self.gem.write().await;
                 gem.insert(self.id, vext_idx, ExtentLocation::new(slab_id, slot_idx));
             }
             // Mapped now, so the collector can see it is owned.
             self.registry.write().await.commit(slab_id, slot_idx);
-
-            // Write data
-            let (device, phys_offset) = {
-                let reg = self.registry.read().await;
-                let slab = reg.get(&slab_id).ok_or_else(|| {
-                    DriveError::Other(anyhow::anyhow!("slab {} not found", slab_id.0))
-                })?;
-                slab.slot_device_and_offset(slot_idx, off_in_slot)?
-            };
-            device.write(phys_offset, buf).await?;
             return Ok(());
         }
 
@@ -1169,7 +1174,7 @@ impl ThinVolumeHandle {
             let slab = reg.get_mut(&dest).ok_or_else(|| {
                 DriveError::Other(anyhow::anyhow!("destination slab {} is not attached", dest.0))
             })?;
-            let slot = slab.allocate_gen(self.id, vext_idx, generation).await?;
+            let slot = slab.allocate_deferred(self.id, vext_idx, generation).await?;
             reg.reserve(dest, slot);
             Leg::new(dest, slot)
         };
@@ -2656,7 +2661,9 @@ impl BlockDevice for ThinVolumeHandle {
                     continue;
                 }
                 if let Some(slab) = reg.get(&slab_id) {
-                    slab.device().flush().await?;
+                    // Data first, then the entries of slots allocated since
+                    // the last flush, then flushed again (#171).
+                    slab.sync().await?;
                 }
             }
         }
@@ -2683,8 +2690,17 @@ impl BlockDevice for ThinVolumeHandle {
             let vext_idx = pos / self.slot_size;
             let off_in_slot = pos % self.slot_size;
 
-            // Only discard full slots
-            if off_in_slot == 0 && (end - pos) >= self.slot_size {
+            // Only discard full slots, and only ones this volume holds alone.
+            // Unmapping a shared extent is not durable until the volume record
+            // is rewritten, so after a power cut the record would map it again
+            // and the discarded range would read the blank's data (#171). A
+            // discard is a hint; keeping a shared extent costs nothing, since
+            // the slot is held by the other sharer anyway.
+            let shared = {
+                let gem = self.gem.read().await;
+                gem.lookup(self.id, vext_idx).is_some_and(|l| l.ref_count > 1)
+            };
+            if off_in_slot == 0 && (end - pos) >= self.slot_size && !shared {
                 let _shard = if policy.is_none() || policy.scheme.is_parity() {
                     None
                 } else {
@@ -2698,6 +2714,32 @@ impl BlockDevice for ThinVolumeHandle {
             pos += remaining;
         }
 
+        Ok(())
+    }
+
+    /// Make a range read back as zeros (#171). An extent that is not mapped
+    /// already reads as zero and is left unmapped — a filesystem zeroing its
+    /// inode tables must not allocate them. A mapped one is written with
+    /// zeros through the ordinary path (copy-on-write if it is shared), so
+    /// the zeros are as durable as any other write once flushed.
+    async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.refuse_if_sealed()?;
+        let zeros = vec![0u8; self.slot_size as usize];
+        let mut pos = offset;
+        let end = offset + len;
+        while pos < end {
+            let vext_idx = pos / self.slot_size;
+            let off_in_slot = pos % self.slot_size;
+            let n = (self.slot_size - off_in_slot).min(end - pos);
+            let mapped = {
+                let gem = self.gem.read().await;
+                gem.lookup(self.id, vext_idx).is_some()
+            };
+            if mapped {
+                self.write(pos, &zeros[..n as usize]).await?;
+            }
+            pos += n;
+        }
         Ok(())
     }
 

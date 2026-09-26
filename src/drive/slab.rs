@@ -498,6 +498,38 @@ pub struct Slab {
     slots: Vec<Slot>,
     extent_index: HashMap<(VolumeId, u64), u32>,
     free_count: u64,
+    /// Slots allocated whose table entry is not on the device yet (#171).
+    pending: std::sync::Mutex<Pending>,
+}
+
+/// The write-ordering rule for a slot (#171): **its table entry reaches the
+/// device only after its data is durable.** A drive with a write-back cache
+/// may keep any subset of what it was sent when the power goes, so an entry
+/// written beside a slot's data can survive while the data does not — and
+/// recovery then maps the extent to a slot that never got it, losing what the
+/// consumer fsync'd in the rest of that extent.
+///
+/// So a slot taken with [`Slab::allocate_deferred`] is *unpublished*: it is
+/// allocated in memory, and every table sector written meanwhile shows it
+/// free, as the device does. Once its data is written the caller
+/// [`confirm`](Slab::confirm)s it; [`sync`](Slab::sync) then flushes the
+/// device (the data is durable), writes the entries, and flushes again.
+///
+/// The mirror of it for a free: **a slot is not reused until its free entry is
+/// durable.** Otherwise a power cut can keep the new tenant's data and the old
+/// owner's entry, and recovery maps the old owner's extent to someone else's
+/// bytes.
+#[derive(Default)]
+struct Pending {
+    /// Allocated in memory; the device still says free.
+    unpublished: HashSet<u32>,
+    /// Entries to write at the next sync: confirmed slots, and share counts
+    /// that moved.
+    ready: std::collections::BTreeSet<u32>,
+    /// Freed, the free entry written but not yet flushed: not reusable.
+    freeing: Vec<u32>,
+    /// Freed and flushed: reusable, not yet back in the bitmap.
+    released: Vec<u32>,
 }
 
 impl Slab {
@@ -624,6 +656,7 @@ impl Slab {
             slots,
             extent_index: HashMap::new(),
             free_count: total_slots,
+            pending: Default::default(),
         })
     }
 
@@ -681,6 +714,7 @@ impl Slab {
             slots,
             extent_index,
             free_count,
+            pending: Default::default(),
         })
     }
 
@@ -693,6 +727,125 @@ impl Slab {
         self.allocate_gen(volume_id, vext_idx, 1).await
     }
 
+    /// Allocate a slot whose table entry waits for its data (#171): nothing
+    /// is written now. The caller writes the slot, then
+    /// [`confirm`](Self::confirm)s it; the entry reaches the device at the next
+    /// [`sync`](Self::sync), after the data is durable. Until then the device
+    /// says the slot is free, so a power cut leaves the extent where it was.
+    pub async fn allocate_deferred(
+        &mut self,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        generation: u64,
+    ) -> DriveResult<u32> {
+        let idx = self.take_slot_or_flush(volume_id, vext_idx, generation).await?;
+        self.pending.lock().unwrap().unpublished.insert(idx);
+        Ok(idx)
+    }
+
+    /// The slot's data is written: its entry may be published at the next
+    /// [`sync`](Self::sync). A no-op for a slot already on the device.
+    pub fn confirm(&self, slot_idx: u32) {
+        let mut p = self.pending.lock().unwrap();
+        if p.unpublished.contains(&slot_idx) {
+            p.ready.insert(slot_idx);
+        }
+    }
+
+    /// Whether any confirmed slot is waiting for [`sync`](Self::sync).
+    pub fn has_ready(&self) -> bool {
+        !self.pending.lock().unwrap().ready.is_empty()
+    }
+
+    /// Make everything written to this slab so far durable, in the order a
+    /// power cut requires: flush the device (every confirmed slot's data is
+    /// on the media), write the confirmed slots' table entries, flush again.
+    /// With nothing waiting, one flush.
+    pub async fn sync(&self) -> DriveResult<()> {
+        // Free entries written before this flush are durable after it.
+        let freeing = std::mem::take(&mut self.pending.lock().unwrap().freeing);
+        if let Err(e) = self.device.flush().await {
+            self.pending.lock().unwrap().freeing.extend(freeing);
+            return Err(e);
+        }
+        let (ready, newly): (Vec<u32>, Vec<u32>) = {
+            let mut p = self.pending.lock().unwrap();
+            p.released.extend(freeing);
+            let ready: Vec<u32> = std::mem::take(&mut p.ready).into_iter().collect();
+            let newly = ready.iter().copied().filter(|r| p.unpublished.remove(r)).collect();
+            (ready, newly)
+        };
+        if ready.is_empty() {
+            return Ok(());
+        }
+        if let Err(e) = self.persist_slots(&ready).await {
+            // Not on the device: they wait for the next sync.
+            let mut p = self.pending.lock().unwrap();
+            p.unpublished.extend(newly);
+            p.ready.extend(ready);
+            return Err(e);
+        }
+        self.device.flush().await
+    }
+
+    /// Put slots whose free is durable back in the bitmap.
+    fn absorb_released(&mut self) {
+        let released = std::mem::take(&mut self.pending.lock().unwrap().released);
+        for idx in released {
+            if self.slots[idx as usize].state == SlotState::Free && !self.free_bitmap.is_free(idx as usize) {
+                self.free_bitmap.set(idx as usize, true);
+                self.free_count += 1;
+            }
+        }
+    }
+
+    /// [`take_slot`](Self::take_slot), and if the only free slots are ones
+    /// whose free is not yet durable, flush to make it so and take one.
+    async fn take_slot_or_flush(&mut self, volume_id: VolumeId, vext_idx: u64, generation: u64) -> DriveResult<u32> {
+        self.absorb_released();
+        if self.free_count == 0 {
+            let freeing = std::mem::take(&mut self.pending.lock().unwrap().freeing);
+            if !freeing.is_empty() {
+                if let Err(e) = self.device.flush().await {
+                    self.pending.lock().unwrap().freeing.extend(freeing);
+                    return Err(e);
+                }
+                self.pending.lock().unwrap().released.extend(freeing);
+                self.absorb_released();
+            }
+        }
+        self.take_slot(volume_id, vext_idx, generation)
+    }
+
+    /// Mark a slot free in memory. A slot never published goes straight back
+    /// to the bitmap (the device already says free); one that was is held
+    /// until its free entry is durable. Returns whether the entry must be
+    /// written.
+    fn retire(&mut self, idx: usize) -> bool {
+        self.slots[idx] = Slot::free();
+        let mut p = self.pending.lock().unwrap();
+        p.ready.remove(&(idx as u32));
+        if p.unpublished.remove(&(idx as u32)) {
+            drop(p);
+            self.free_bitmap.set(idx, true);
+            self.free_count += 1;
+            false
+        } else {
+            p.freeing.push(idx as u32);
+            true
+        }
+    }
+
+    /// The bytes the device should hold for a slot's entry: a slot not yet
+    /// published is free there, whatever memory says.
+    fn entry_bytes(&self, slot_idx: u32) -> [u8; SLOT_ENTRY_SIZE as usize] {
+        if self.pending.lock().unwrap().unpublished.contains(&slot_idx) {
+            Slot::free().to_bytes()
+        } else {
+            self.slots[slot_idx as usize].to_bytes()
+        }
+    }
+
     /// Allocate a slot recording `generation` — a copy-on-write allocates
     /// at the old extent's generation plus one, so the slot table can tell
     /// the current slot of an extent from the one a clone still shares, and
@@ -703,17 +856,24 @@ impl Slab {
         vext_idx: u64,
         generation: u64,
     ) -> DriveResult<u32> {
+        let slot_idx = self.take_slot_or_flush(volume_id, vext_idx, generation).await?;
+        // Only the slot entry is persisted here. The header's free_slots is
+        // derived — `open` recounts it from the slot table — so writing it on
+        // every allocation was a second disk round trip under the registry
+        // lock for a value that is never read back authoritatively.
+        self.persist_slot(slot_idx).await?;
+        Ok(slot_idx)
+    }
+
+    /// Take the first free slot in memory, for `(volume, vext)`.
+    fn take_slot(&mut self, volume_id: VolumeId, vext_idx: u64, generation: u64) -> DriveResult<u32> {
         if self.free_count == 0 {
             return Err(DriveError::Other(anyhow::anyhow!("slab full")));
         }
-
-        // Find first free slot
         let slot_idx = self.free_bitmap.first_free()
             .ok_or_else(|| DriveError::Other(anyhow::anyhow!("bitmap inconsistency")))?;
-
         self.free_bitmap.set(slot_idx, false);
         self.free_count -= 1;
-
         self.slots[slot_idx] = Slot {
             state: SlotState::Allocated,
             volume_id,
@@ -722,13 +882,6 @@ impl Slab {
             generation,
         };
         self.extent_index.insert((volume_id, vext_idx), slot_idx as u32);
-
-        // Only the slot entry is persisted here. The header's free_slots is
-        // derived — `open` recounts it from the slot table — so writing it on
-        // every allocation was a second disk round trip under the registry
-        // lock for a value that is never read back authoritatively.
-        self.persist_slot(slot_idx as u32).await?;
-
         Ok(slot_idx as u32)
     }
 
@@ -756,11 +909,9 @@ impl Slab {
             self.extent_index.remove(&key);
         }
 
-        self.slots[idx] = Slot::free();
-        self.free_bitmap.set(idx, true);
-        self.free_count += 1;
-
-        self.persist_slot(slot_idx).await?;
+        if self.retire(idx) {
+            self.persist_slot(slot_idx).await?;
+        }
         self.discard_slots(&[slot_idx]).await;
 
         Ok(())
@@ -936,9 +1087,10 @@ impl Slab {
             if self.extent_index.get(&key) == Some(&slot_idx) {
                 self.extent_index.remove(&key);
             }
-            self.slots[idx] = Slot::free();
-            self.free_bitmap.set(idx, true);
-            self.free_count += 1;
+            if !self.retire(idx) {
+                // Never published: nothing to write for it.
+                touched.retain(|&t| t != slot_idx);
+            }
             freed_slots.push(slot_idx);
             out.freed += 1;
         }
@@ -991,8 +1143,26 @@ impl Slab {
             self.free(slot_idx).await?;
             Ok(true)
         } else {
-            self.persist_slot(slot_idx).await?;
+            // Written at the next `sync`, after the entry of whatever took
+            // this share's place (#171): a count on disk that is too high
+            // leaks a share until restore recounts; one that is too low lets
+            // a write land in place in a slot another volume still reads.
+            self.pending.lock().unwrap().ready.insert(slot_idx);
             Ok(false)
+        }
+    }
+
+    /// Raise a slot's share count to at least `count`, in memory, written at
+    /// the next `sync`. Restore uses it to make the count agree with the
+    /// mappings it restored (#171); it never lowers one.
+    pub fn raise_ref(&mut self, slot_idx: u32, count: u32) -> bool {
+        match self.slots.get_mut(slot_idx as usize) {
+            Some(slot) if slot.state != SlotState::Free && slot.ref_count < count => {
+                slot.ref_count = count;
+                self.pending.lock().unwrap().ready.insert(slot_idx);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1133,12 +1303,15 @@ impl Slab {
 
     /// Number of free slots.
     pub fn free_slots(&self) -> u64 {
-        self.free_count
+        // Slots whose free is not yet durable count: the next allocation that
+        // needs one flushes and takes it.
+        let p = self.pending.lock().unwrap();
+        self.free_count + (p.freeing.len() + p.released.len()) as u64
     }
 
     /// Number of allocated slots.
     pub fn allocated_slots(&self) -> u64 {
-        self.header.total_slots - self.free_count
+        self.header.total_slots - self.free_slots()
     }
 
     /// Get a reference to the underlying device.
@@ -1237,7 +1410,7 @@ impl Slab {
                     self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
                 let off = (entry_offset - sector_start) as usize;
                 sector[off..off + SLOT_ENTRY_SIZE as usize]
-                    .copy_from_slice(&self.slots[slot_idx as usize].to_bytes());
+                    .copy_from_slice(&self.entry_bytes(slot_idx));
             }
 
             self.device.write(sector_start, &sector).await?;
@@ -1403,8 +1576,7 @@ impl Slab {
     }
 
     async fn persist_slot(&self, slot_idx: u32) -> DriveResult<()> {
-        let slot = &self.slots[slot_idx as usize];
-        let entry_bytes = slot.to_bytes();
+        let entry_bytes = self.entry_bytes(slot_idx);
         let entry_offset = self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
         let bs = self.device.block_size() as u64;
 
@@ -1427,7 +1599,7 @@ impl Slab {
             for i in 0..entries_per_sector {
                 let off = i * SLOT_ENTRY_SIZE as usize;
                 sector[off..off + SLOT_ENTRY_SIZE as usize]
-                    .copy_from_slice(&self.slots[first_entry + i].to_bytes());
+                    .copy_from_slice(&self.entry_bytes((first_entry + i) as u32));
             }
             self.device.write(sector_start, &sector).await?;
         } else {

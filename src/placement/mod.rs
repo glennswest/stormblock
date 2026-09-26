@@ -540,7 +540,7 @@ impl PlacementEngine {
         // the slot-table fallback agrees with the map.
         let dest_slot = registry.get_mut(&dest_id)
             .ok_or(PlacementError::SlabNotFound(dest_id))?
-            .allocate_gen(volume_id, vext_idx, generation)
+            .allocate_deferred(volume_id, vext_idx, generation)
             .await
             .map_err(|_| PlacementError::SlabFull)?;
 
@@ -554,6 +554,11 @@ impl PlacementEngine {
                 slot_idx: dest_slot,
                 error: e.to_string(),
             })?;
+        // Its entry is published at the destination's next flush, after the
+        // data it names (#171).
+        if let Some(slab) = registry.get(&dest_id) {
+            slab.confirm(dest_slot);
+        }
 
         // A shared slot stays shared: the new slot carries the same count.
         if ref_count > 1 {

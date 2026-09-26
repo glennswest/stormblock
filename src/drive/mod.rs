@@ -246,6 +246,21 @@ pub trait BlockDevice: Send + Sync {
     /// Discard (TRIM/UNMAP) a range. No-op on HDDs.
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()>;
 
+    /// Make `len` bytes at `offset` read back as zeros. The default writes
+    /// zeros; a device that can do better (a thin volume skipping what it
+    /// never mapped) overrides it. Unlike `discard`, this is a promise.
+    async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        const CHUNK: u64 = 1 << 20;
+        let zeros = vec![0u8; CHUNK.min(len).max(1) as usize];
+        let mut done = 0u64;
+        while done < len {
+            let n = (len - done).min(zeros.len() as u64) as usize;
+            self.write(offset + done, &zeros[..n]).await?;
+            done += n as u64;
+        }
+        Ok(())
+    }
+
     /// Query SMART health data. Returns None if not supported.
     fn smart_status(&self) -> DriveResult<SmartData> {
         Ok(SmartData { healthy: true, ..Default::default() })

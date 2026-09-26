@@ -1732,6 +1732,18 @@ impl VolumeManager {
             return Ok(());
         }
 
+        // Nothing durable may name a slot before its data is on the device
+        // (#171): flush every slab, publishing the entries of slots written
+        // since the last flush, before a record that maps them is written.
+        {
+            let reg = self.registry.read().await;
+            for (id, slab) in reg.iter() {
+                if let Err(e) = slab.sync().await {
+                    anyhow::bail!("slab {}: flush before writing volume records: {e}", id.0);
+                }
+            }
+        }
+
         if let Some(store) = &self.metadata_store {
             // Knowing about no volumes is not the same as there being none.
             // A manager whose slabs have not been attached yet holds nothing,
@@ -2040,6 +2052,23 @@ impl VolumeManager {
             GlobalExtentMap::rebuild_from_slabs(reg.iter())
         };
 
+        // Which volumes a record may legitimately share a slot with: its
+        // ancestors (#171). Every live volume, to tell a slot another volume
+        // has since taken from one whose owner is gone.
+        let parent_of: HashMap<VolumeId, VolumeId> =
+            records.iter().filter_map(|(v, _)| v.parent.map(|p| (v.id, p))).collect();
+        let live: HashSet<VolumeId> = records.iter().map(|(v, _)| v.id).collect();
+        let lineage = |mut id: VolumeId| -> HashSet<VolumeId> {
+            let mut set = HashSet::new();
+            while set.insert(id) && set.len() < 256 {
+                match parent_of.get(&id) {
+                    Some(p) => id = *p,
+                    None => break,
+                }
+            }
+            set
+        };
+
         let mut restored = 0u32;
         let mut dirty_to_verify: Vec<(VolumeId, Arc<ThinVolumeHandle>, Vec<u64>)> = Vec::new();
         for (vrec, home_role) in records {
@@ -2077,6 +2106,45 @@ impl VolumeManager {
                     match rebuilt.lookup(vrec.id, *vext).cloned() {
                         None => {
                             if reg.get(&loc.slab_id).is_some() {
+                                // No slot on disk names this extent of this
+                                // volume, so the record's slot is someone
+                                // else's: a share of an ancestor's (or of a
+                                // golden a composed disk maps), or a slot
+                                // this volume gave back since the record was
+                                // written and that may have been taken again.
+                                // Mapping the second is handing the consumer
+                                // another volume's bytes (#171).
+                                let slot = reg.get(&loc.slab_id).and_then(|s| s.get_slot(loc.slot_idx));
+                                let why = match slot {
+                                    None => Some("is out of range".to_string()),
+                                    Some(s) if s.state == crate::drive::slab::SlotState::Free => {
+                                        Some("has been freed".to_string())
+                                    }
+                                    Some(s) if s.volume_id == vrec.id => {
+                                        Some(format!("was taken again for extent {}", s.virtual_extent_idx))
+                                    }
+                                    Some(s) if lineage(vrec.id).contains(&s.volume_id) => {
+                                        (s.virtual_extent_idx != *vext).then(|| {
+                                            format!("is the ancestor's extent {}", s.virtual_extent_idx)
+                                        })
+                                    }
+                                    // A share of a volume outside the lineage
+                                    // (a composed disk's golden) has a count
+                                    // above one; a slot another live volume
+                                    // took fresh has one.
+                                    Some(s) if live.contains(&s.volume_id) && s.ref_count <= 1 => {
+                                        Some(format!("now belongs to volume {}", s.volume_id))
+                                    }
+                                    Some(_) => None,
+                                };
+                                if let Some(why) = why {
+                                    tracing::warn!(
+                                        "Volume '{}' extent {vext}: the record's slot {}:{} {why}; \
+                                         the record is older than the slot table, mapping dropped",
+                                        vrec.name, loc.slab_id.0, loc.slot_idx
+                                    );
+                                    continue;
+                                }
                                 rebuilt.restore_mapping(vrec.id, *vext, loc.clone());
                             } else {
                                 tracing::warn!(
@@ -2162,6 +2230,53 @@ impl VolumeManager {
             self.volumes.insert(vrec.id, handle);
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
+        }
+
+        // Share counts from the mappings restored (#171). A count on disk can
+        // be behind the map — a copy-on-write's decrement written, the entry
+        // of the slot that replaced it not — and a count too low lets a write
+        // land in place in a slot another volume still reads. Only ever
+        // raised: one too high costs a needless copy, never data.
+        {
+            let mut maps: HashMap<gem::Leg, u32> = HashMap::new();
+            for vol in rebuilt.volume_ids() {
+                if let Some(it) = rebuilt.volume_extents(&vol) {
+                    for (_, loc) in it {
+                        for leg in loc.legs() {
+                            *maps.entry(leg).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            let mut fix: Vec<(VolumeId, u64, u32)> = Vec::new();
+            for vol in rebuilt.volume_ids() {
+                if let Some(it) = rebuilt.volume_extents(&vol) {
+                    for (vext, loc) in it {
+                        let n = maps.get(&loc.primary()).copied().unwrap_or(1);
+                        if loc.ref_count < n {
+                            fix.push((vol, *vext, n));
+                        }
+                    }
+                }
+            }
+            for (vol, vext, n) in &fix {
+                rebuilt.set_extent_ref(*vol, *vext, *n);
+            }
+            let mut reg = self.registry.write().await;
+            let mut raised = 0usize;
+            for (leg, n) in maps {
+                if let Some(slab) = reg.get_mut(&leg.slab_id) {
+                    if slab.raise_ref(leg.slot_idx, n) {
+                        raised += 1;
+                    }
+                }
+            }
+            if raised > 0 || !fix.is_empty() {
+                tracing::info!(
+                    "restore: {raised} slot share count(s) and {} mapping(s) raised to the maps restored",
+                    fix.len()
+                );
+            }
         }
 
         *self.gem.write().await = rebuilt;
