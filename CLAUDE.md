@@ -114,6 +114,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A boot claim releases every old clone of its tag (2026-09-26, #127) — IN PROGRESS
+
+Forge had 60 unsealed `boothost-C2NR0Q2` volumes. Owner: a claim for a tag
+deletes that tag's old claims; at most the live one is kept until it is
+unexported; tags do not accumulate. Cause: `claim_boothost` released *one*
+predecessor, `find_volume("boothost-<tag>")` — whichever volume of that name
+it hit first — so with several same-named clones, or with the one it hit
+inside the double-claim grace (#97), the rest were never collected.
+
+- [ ] release **every** volume named `boothost-<tag>` but the new one, each
+      through the existing guards (not claimed within grace, not named by a
+      synonym, not sealed, a clone of something this tag has booted)
+- [ ] report what was released in the claim response (`released`)
+- [ ] tests: an accumulated pile is collected by one claim; clones inside
+      the grace window survive and the rest go
+- [ ] docs (auth.md host goldens), changelog, close
+
 ### A presentation of purpose and functionality (2026-09-26, #132) — DONE
 
 Owner: every component gets a short deck. `docs/presentation.md`, Marp
