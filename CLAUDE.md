@@ -118,6 +118,22 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### /v1 attach names its transport (2026-09-26, #149) — IN PROGRESS
+
+stormstorage exports each leg with `/v1/volumes/{id}/attach {node: master}`;
+since 2337c8a made ublk the default for a local attach, the engine answers
+`ublk` for exactly those requests and the RAID head cannot use it. The
+request says who asks, not where the I/O comes from.
+
+- [ ] one parser for the transport a caller wants (`ublk` | `nvme_tcp`,
+      `nvme-tcp`/`nvmeof` accepted | absent = engine's choice), used by both
+      `/v1` and `/api/v1` attach
+- [ ] `/v1` `AttachRequest.transport` (optional, additive): `nvme_tcp` skips
+      the ublk offer and returns NVMe-oF coordinates, or 409 saying why there
+      are none (no target, not backed here); `ublk` insists or 409
+- [ ] tests (HTTP, with an NVMe-oF target running), docs, CHANGELOG; file the
+      contract addition on stormblock-csi; close
+
 ### Pin a volume to an array; dedicated array slabs (2026-09-26, #150) — DONE (v19.0.0)
 
 stormstorage#2: a consumer volume carved on a RAID1-over-NVMe-TCP array must
