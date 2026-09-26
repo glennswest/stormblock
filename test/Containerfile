@@ -1,0 +1,18 @@
+# stormblock-test — stormblock's test image, per stormcentral
+# docs/test-standard.md (#139). One image for all three suites: the Job runs
+# `/test short|medium|long`.
+#
+# test/build.sh builds both binaries on the build box (static, musl) and
+# stages them; this packages them. The test runs /stormblock — the engine of
+# the commit under test — as its child on sparse files under /results, drives
+# it through its API, and reads and writes volumes over NVMe/TCP with the
+# engine's own userspace initiator: no privileges, no devices, no tools.
+#
+# The build context is the repo root (the standard's); the binaries are
+# taken from test/.stage/, where test/build.sh put them.
+FROM scratch
+ARG COMMIT=unknown
+LABEL storm.io/test-of="stormblock" storm.io/test-commit="${COMMIT}"
+COPY test/.stage/stormblock /stormblock
+COPY test/.stage/stormblock-test /test
+ENTRYPOINT ["/test"]

@@ -1,0 +1,4 @@
+# test/build.sh builds with the repo root as context and only needs the staged
+# binaries: keep the rest (sources, target/) out of the context.
+*
+!test/.stage

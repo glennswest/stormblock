@@ -1,0 +1,22 @@
+[package]
+name = "stormblock-test"
+version = "0.1.0"
+edition = "2021"
+license = "TBD"
+description = "stormblock's test container: short, medium and long suites, per stormcentral docs/test-standard.md (#139)."
+publish = false
+
+# A workspace member, so the one Cargo.lock pins it and `cargo test` builds it.
+# It drives the stormblock *binary* of the same commit through its API, the way
+# anything on a node does; the library is here only for its HTTP client and its
+# userspace NVMe/TCP initiator, which let a check read and write a volume
+# without privileges or a kernel driver.
+[dependencies]
+stormblock = { path = ".." }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+libc = "0.2"
+
+[[bin]]
+name = "stormblock-test"
+path = "src/main.rs"

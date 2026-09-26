@@ -1,0 +1,65 @@
+# stormblock-test — how stormcentral runs stormblock's tests on a test
+# machine, per stormcentral docs/test-standard.md (#139).
+#
+# Test metadata (what the runner matches against the machine):
+#   suites:   short (< 2 min), medium (< 30 min), long (the night window)
+#   requires: []            (no hardware: the engine under test runs inside the
+#                            pod on sparse files, NVMe/TCP on loopback, read
+#                            and written by the test's userspace initiator)
+#   api:      none          (no ServiceAccount token; nothing is created in the
+#                            cluster)
+#   node:     read-only GET /api/v1/health on STORM_NODE:9090, the node's own
+#             engine (public). Not answering is a skip. With
+#             STORM_STORMBLOCK_TOKEN set (a Secret, when the runner has the
+#             node's token — stormcos#89), also a read of its volumes and
+#             slabs; without it that check is a skip.
+#   external: none
+#   resources: medium needs ~1.5 GiB and long ~8 GiB of the results volume,
+#             sparse (what is written is far less). long sizes its waves from
+#             the pod's CPUs and memory limit: 4 volumes in flight per CPU, one
+#             per 64 MiB, 4 to 64.
+#
+# The runner creates the namespace test-stormblock-<suite>-<run id>, fills in
+# NAMESPACE / RUN_ID / NODE / SUITE / TIMEOUT / TIMEOUT_PLUS_MARGIN / COMMIT /
+# IMAGE, applies this, waits for the Job, collects /results with the logs, and
+# deletes the namespace.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stormblock-test
+  namespace: ${NAMESPACE}
+  labels: { storm.io/test-run: "${RUN_ID}" }
+spec:
+  backoffLimit: 0            # a retry would hide the finding
+  activeDeadlineSeconds: ${TIMEOUT_PLUS_MARGIN}
+  template:
+    metadata:
+      labels: { storm.io/test-run: "${RUN_ID}" }
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: stormblock-test
+          image: ${IMAGE}
+          command: ["/test", "${SUITE}"]
+          env:
+            - { name: STORM_NAMESPACE, value: "${NAMESPACE}" }
+            - { name: STORM_RUN_ID, value: "${RUN_ID}" }
+            - { name: STORM_NODE, value: "${NODE}" }
+            - { name: STORM_SUITE, value: "${SUITE}" }
+            - { name: STORM_TIMEOUT, value: "${TIMEOUT}" }
+            - { name: STORM_COMPONENT, value: stormblock }
+            - { name: STORM_COMMIT, value: "${COMMIT}" }
+          volumeMounts:
+            # The engine under test keeps its drives, data dir and log under
+            # /results/work, so a failure's engine.log comes back with the
+            # results.
+            - { name: results, mountPath: /results }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - { name: results, emptyDir: {} }

@@ -2,7 +2,7 @@
 # The pallet format's decode side is its own crate so firmware and the engine
 # can share one reader rather than maintaining two that must stay
 # bit-compatible forever (#53).
-members = ["crates/pallet-format"]
+members = ["crates/pallet-format", "test"]
 
 [package]
 name = "stormblock"

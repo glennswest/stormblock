@@ -10,3 +10,6 @@ target
 
 # terragrunt working caches
 .terragrunt-cache/
+
+# test/build.sh stages the image context here
+/test/.stage/
