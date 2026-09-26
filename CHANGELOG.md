@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.2.1] — 2026-09-26
+
 ### 2026-09-26 (handover order)
 - **fix(adopt-ublk):** the successor reads the slabs only after the incumbent
   is gone (#171). `adopt-ublk` used to restore from the slabs first and stand
