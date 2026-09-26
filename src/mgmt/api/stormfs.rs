@@ -11,9 +11,11 @@
 //! DELETE /api/v1/stormfs/pins/{id}         release one
 //! ```
 //!
-//! `docs/stormblock-spec.md` §9.1 has listed these routes since v0.1 and
-//! nothing implemented them; what `src/stormfs.rs` does is the opposite
-//! direction, announcing this node's volumes to a StormFS metadata server.
+//! The original spec listed these routes (its §9.1, now `docs/stormfs-api.md`)
+//! from v0.1, and nothing implemented them until #49/#50. What `src/stormfs.rs`
+//! does is the opposite direction: announcing this node's volumes to a
+//! registration endpoint (`POST <metadata_url>/api/v1/storage/register`, which
+//! stormstorage serves).
 //!
 //! **Lock order is stormfs → volume manager**, everywhere, including
 //! [`super::what_is_serving`]. Two of these handlers need both, and the pin

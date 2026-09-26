@@ -1,3 +1,8 @@
+> **History: superseded (moved here by #131, 2026-09-26).** A 2026-08-28 design
+> note. Its conclusions were built: per-volume redundancy across failure
+> domains (`docs/redundancy.md`), drain and automatic rebuild
+> (`docs/multi-drive.md`), and the blockers it lists (#69–#72) are closed.
+
 > **Superseded in part, 2026-08-28.** The mechanism described below was
 > drive-level: `RaidArray::add_member` / `remove_member` mirroring whole
 > devices. That is the wrong layer. The design of record is **volume-level

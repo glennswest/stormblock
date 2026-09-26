@@ -1,3 +1,10 @@
+> **History: not pursued (moved here by #131, 2026-09-26).** A 2026-03 proposal
+> for coreboot/LinuxBoot in SPI flash. None of the firmware, NVRAM or kexec
+> phases were built; the boot path became stormbootx and stormuefi (see
+> `docs/pallets.md` and `docs/images.md`). Note that `stormblock boot-iscsi`
+> formats its target on every run, so it provisions and cannot re-boot an
+> installed system.
+
 # LinuxBoot + StormBlock iSCSI — Firmware-Level Network Boot
 
 ## Overview

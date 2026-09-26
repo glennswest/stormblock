@@ -2,7 +2,7 @@
 //!
 //! This module defines the data structures for the NVMe userspace driver.
 //! The actual VFIO initialization requires bare-metal hardware with PCIe passthrough
-//! and is not yet implemented. See docs/stormblock-spec.md section 4.2.
+//! and is not yet implemented. The design is §4.2 of docs/history/stormblock-spec.md.
 
 #![allow(dead_code)]
 

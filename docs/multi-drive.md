@@ -3,7 +3,7 @@
 **Status:** design (#142, 2026-09-25). Written against what the engine does
 today — proved by `tests/integration_multidrive.rs` — and split into work.
 Companion to [redundancy.md](redundancy.md), which specifies per-volume
-redundancy, and [data-placement.md](data-placement.md).
+redundancy (the earlier placement note is [history](history/data-placement.md)).
 
 The owner's frame:
 

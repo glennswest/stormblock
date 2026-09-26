@@ -1,35 +1,21 @@
 # Layering — what belongs where, and why it matters for stormos
 
-**Status:** notes, 2026-08-19. Written before the refactor so the refactor is
-done with the destination in mind, not just the itch.
+**Status:** design rationale, 2026-08-19, updated 2026-09-26 (#131). Written
+before the serving layer moved into the engine; that move has happened, so the
+"today" parts below now say where things landed. The model — three layers, a
+runtime-neutral golden, flat maps that reference slabs by UUID — is current
+and is cited from the code (`src/serve/mod.rs`, `src/mgmt/api/mod.rs`,
+`src/mgmt/config.rs`).
 
-## The observation that started it
+## Where it started, and where it landed
 
-If you build a stormos base and want what stormblockmk does, you find almost
-all of it trapped in a crate named for the RouterOS profile. Measured:
-
-| module | lines | RouterOS-specific lines |
-|---|---:|---:|
-| `api.rs` | 1,185 | 0 |
-| `reconcile.rs` | 619 | 0 (one explanatory comment) |
-| `ext4.rs` | 486 | 0 |
-| `reap.rs` | 479 | 0 |
-| `wiring.rs` | 376 | 0 (one comment) |
-| `config.rs` | 308 | defaults only |
-| `ctx.rs` | 253 | a little |
-| `status.rs` | 251 | 0 |
-| `tarfs.rs` | 204 | 0 (one comment) |
-| `trim.rs` | 110 | 0 |
-| `netstat.rs` | 83 | 0 |
-| `main.rs` | 511 | composition |
-
-**4,865 lines, and the RouterOS-ness is 11 mentions in config defaults and
-startup.** Every mention in the substantial modules is a `//!` comment
-explaining *why* a decision was made — "RouterOS attaches one export", "an
-initiator that cannot select a LUN" — not RouterOS logic.
-
-So a second deployment wants ~3,700 of those lines and, today, can only fork
-them or depend on a crate whose name is a lie about its contents.
+The serving layer began in `stormblockmk`, a crate named for the RouterOS
+profile: 4,865 lines of which the RouterOS-specific part was 11 mentions in
+config defaults and startup. It now lives in the engine as `src/serve/` —
+`api.rs`, `reconcile.rs`, `reap.rs`, `wiring.rs`, `ctx.rs`, `status.rs`,
+`tarfs.rs`, `trim.rs`, `config.rs`, `netstat.rs` (≈3,900 lines) — mounted at
+`/serve/v1`, with `/mk/v1` kept as a deprecated alias of the same routes. The
+ext4 formatter is `src/fs/ext4.rs` over the `mkfs-ext4` crate.
 
 ## The three layers
 
@@ -46,17 +32,15 @@ them or depend on a crate whose name is a lie about its contents.
    This, and only this, is what makes a build "the RouterOS one" or "the
    stormos one".
 
-Today layer 2 sits inside layer 3. That is the whole of the problem.
+Layer 2 used to sit inside layer 3; it is now in the engine.
 
-## A gap this exposes, which is not a naming problem
+## The durability gap, closed
 
-`ctx.rs`: *"Persist the engine's export table. The engine keeps it in memory
-only; mk owns durability for it, atomically."*
-
-Durability of export state is not a policy anyone could reasonably choose
-differently — it is a correctness requirement, and it lives in the profile
-because the engine has a hole. Every new consumer inherits the hole and
-re-solves it. Move it down with the rest.
+`ctx.rs` once said *"the engine keeps [the export table] in memory only; mk owns
+durability for it"*. Durability of export state is a correctness requirement,
+not a policy, and it now lives in the engine: the wiring table is written
+atomically (`src/serve/wiring.rs`) and API exports are restored at start
+(`restore_exports`, `src/mgmt/api/exports.rs`).
 
 ## Why this matters more than tidiness: the runtimes above it
 
@@ -101,42 +85,37 @@ than polluting it. A separate `stormblock-serve` stays the alternative if the
 engine is to remain strictly mechanism-only as a rule; it costs one more crate
 and one more boundary.
 
-## Also on the wrong side today
+## Content in and out
 
-`/mk/v1/volumes/{id}/tar` and `/mk/v1/volumes/{id}/raw` are content-writing
-mechanisms sitting in the profile because the profile is their only caller.
-They are the two things a second deployment would copy first. They move with
-layer 2.
+`tar` and `raw` — the content-writing mechanisms a second deployment would
+have copied first — moved with layer 2: `/serve/v1/volumes/{id}/tar` and
+`/serve/v1/volumes/{id}/raw`. A whole image also imports through
+`POST /api/v1/volumes/import` (raw, qcow2, VMDK, OVA, ISO).
 
-## Bootable formats — where they fit (notes, 2026-08-19)
+## Bootable formats — where they fit (notes 2026-08-19; status 2026-09-26)
 
-A golden today is a bare filesystem: `mkfs-ext4` formats the whole device,
-there is no partition table and nothing boots it. That is the right shape for
-a container root and it is already the right shape for a micro-VM. It is not
-the shape a firmware boot wants.
+In August a golden was only a bare filesystem. Whole-disk goldens have been
+built since: `stormblock image build` lays GPT, ESP (FAT16/32 writer,
+`src/image/fat.rs`) and pallets (`docs/images.md`), a disk can be composed out
+of shared goldens with nothing written (`docs/composed-disks.md`), and images
+are written as raw, qcow2, VHD, VMDK or ISO (`src/image/formats.rs`).
 
-The ladder, cheapest first, with what exists:
+The ladder as it was reasoned, cheapest first:
 
 1. **Micro-VM, direct kernel boot — nothing new needed.** A
    firecracker/cloud-hypervisor guest is handed a kernel, an initrd and a raw
    block device for root. A clone *is* that block device. No partition table,
    no bootloader, no ESP. This is why micro-VMs are the easy case: the format
    we already build is the format they want.
-2. **Network boot — already specified.** `docs/stormblock-ipxe-boot.md` and
-   `docs/linuxboot-iscsi-spec.md`. The root lives on a stormblock volume and
-   firmware never reads a local disk, so again nothing on the image has to be
-   made bootable.
-3. **VM with firmware boot — this is the real gap.** Needs a whole-disk image:
-   protective MBR + GPT, an ESP (FAT32) holding a bootloader, and the rootfs
-   partition. **None of that code exists** in stormblock, mkfs-ext4 or
-   fio-ext4 — searched. It is a GPT writer, a small FAT32 writer, and
-   bootloader placement.
-4. **Hypervisor container formats — qcow2, VMDK, VHD.** A wrapper around a raw
-   image. `mkube/pkg/diskimg/` already has Go converters (`qcow2.go`,
-   `vhd.go`, `vmdk.go`), currently *to* raw; the build tool needs the other
-   direction, or to shell out.
-5. **ISO (El Torito)** — separate wrapping, mostly install media rather than a
-   runtime root.
+2. **Network boot.** Done by stormbootx (UEFI, NVMe/TCP attach of a claimed
+   clone) chain-loading stormuefi, which boots a pallet off it. The iPXE and
+   LinuxBoot designs of 2026-03 were not the path taken
+   (`docs/history/`).
+3. **VM with firmware boot.** Was the real gap; now `src/pallet/gpt.rs`,
+   `src/image/fat.rs` and `image build`.
+4. **Hypervisor container formats — qcow2, VMDK, VHD.** Written by
+   `src/image/formats.rs`, read by `src/image/decode/` (qcow2, VMDK).
+5. **ISO (El Torito)** — `src/image/iso.rs`.
 
 ### Two golden shapes, named
 
@@ -148,16 +127,16 @@ The distinction to keep straight, because it changes what a clone is:
   attaches as a *disk* that firmware can boot.
 
 Both are goldens, both clone by refcount, both import through
-`/mk/v1/volumes/{id}/raw`. The difference is only what the builder lays down,
+`/serve/v1/volumes/{id}/raw` or `POST /api/v1/volumes/import`. The difference is only what the builder lays down,
 which is another reason bootability belongs in the **builder**, decided once
 at build time, exactly like the golden itself.
 
 ### Consequence for the build tool
 
-This is an argument for a `stormblock-build` that owns "produce an artifact
-from an image", with the target as a parameter — filesystem golden, whole-disk
-golden, and a format wrapper — rather than bootability being bolted onto
-`sbregistry build-image`, which is named and shaped for OCI images.
+This was the argument for a build tool that owns "produce an artifact from an
+image", with the target as a parameter. It became `stormblock image
+build|convert|inspect|formats|lay-node|local-boot` and `/api/v1/images/*`;
+`sbregistry build-image` posts its specs to the engine.
 
 ### What this replaces (2026-08-19)
 
@@ -168,8 +147,7 @@ that builder shells out to almost nothing already (one `qemu-img`); the
 non-Rust part is the LXC compose step, not the tooling around it.
 
 So the target is: a stormcos image is a **whole-disk golden**, built by
-`mkfs-ext4` + `fio-ext4` plus the GPT/ESP/bootloader piece that does not exist
-yet — no LXC, no distro tooling, no host to be shared or to go stale. The same
+`mkfs-ext4` + `fio-ext4` plus the GPT/ESP/bootloader piece (now built) — no LXC, no distro tooling, no host to be shared or to go stale. The same
 artifact then imports through `/raw` and clones per node like any other golden,
 which also makes a node image rebuild a rebase rather than a re-compose.
 
@@ -189,8 +167,9 @@ than a Rust storage layer under borrowed pieces.
 
 A layered golden is not a stack that gets composed at read time. Each level
 owns a **complete extent map**, and every entry in it is an
-`ExtentLocation { slab_id: SlabId(Uuid), slot_idx: u32 }` — a slab named by
-UUID, and a slot within it. `base → l2 → l3` means `l3`'s map already names
+`ExtentLocation { slab_id: SlabId(Uuid), slot_idx: u32, ref_count, generation,
+mirrors }` — a slab named by UUID and a slot within it, plus the share count,
+the copy-on-write generation and any mirror legs. `base → l2 → l3` means `l3`'s map already names
 every slot it needs, whichever level first wrote it.
 
 Two things follow, and they pull in opposite directions.

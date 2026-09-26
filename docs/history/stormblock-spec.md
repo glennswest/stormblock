@@ -1,3 +1,17 @@
+> **History, not current (moved here by #131, 2026-09-26).** This is the
+> original design, v0.1, written 2026-02-17 before the slab/GEM model. Much of
+> it was built differently or not at all:
+> - the NVMe/VFIO userspace driver is a stub (`src/drive/nvme.rs`);
+> - there is no buildroot image, SQPOLL, zero-copy send on its own io_uring,
+>   management/I-O core split, AVX-512 or SIMD Q parity, on-disk RAID journal,
+>   scheduled scrub, VAAI, or error recovery level above 0;
+> - the volume model is slabs of 1 MiB slots and a global extent map, not
+>   `ExtentAllocator` over arrays;
+> - the REST routes and config sections below are not the real ones.
+>
+> Read the README and the current docs for what the code does. The two sections
+> that were accurate (§9.1.1–§9.1.2) moved to `docs/stormfs-api.md`.
+
 # StormBlock — Pure Rust Enterprise Block Storage Engine
 
 ## Specification Document v0.1
