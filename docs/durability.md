@@ -68,9 +68,10 @@ tests run on.
 * On metal: stormcentral's power-cut check (fastetcd, 300 objects, hard
   power-off, 5 runs).
 
-Known open (#171): `adopt-ublk` reads the slabs before it stands the
-incumbent down, so allocations the incumbent makes in between are not in the
-successor's map.
+8. **A handover reads the slabs after the incumbent is gone.** `adopt-ublk`
+   stands the incumbent down, waits for its process to exit, then restores
+   (`handover::take_over`). Reading first left the incumbent's last
+   allocations out of the successor's map, with their slots looking free.
 
 What the simulation cannot show: sectors torn inside one write, and drives
 that lie about FLUSH.

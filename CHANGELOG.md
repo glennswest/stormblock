@@ -3,6 +3,26 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (handover order)
+- **fix(adopt-ublk):** the successor reads the slabs only after the incumbent
+  is gone (#171). `adopt-ublk` used to restore from the slabs first and stand
+  the incumbent down after, so everything the incumbent allocated in between
+  was missing from the successor's map. Its slots looked free and could be
+  handed out again, and the incumbent's shutdown rewrote slot-table sectors
+  from its own older copy. Nothing showed until a restore after a power cut.
+  Now: SIGTERM, the devices quiesce, and the incumbent's process is waited
+  for (a zombie counts as exited; SIGKILL after 30 s), then restore. ublk
+  recovery holds the devices' I/O in the gap. `handover::take_over` pins the
+  order, and `ublk::stand_down` now returns the pids it signalled.
+  - Cost: a handover now waits for the incumbent to exit, which was measured
+    before at up to ~15 s of boot.
+  - If the successor then fails to restore, the devices stay held in recovery
+    with no server: loud, and retryable.
+- **test:** `tests/integration_handover_order.rs`. An incumbent allocates
+  inside the window, flushes and exits; the successor maps the allocation and
+  does not hand the slot out again. A second test shows the old order missing
+  it.
+
 ### 2026-09-26 (adopting slabs)
 - **fix(volume):** a daemon restart lost data that had been flushed (#171).
   `adopt_slabs`, which takes over the slabs on the drives at startup, mapped
