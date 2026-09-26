@@ -121,7 +121,9 @@ async fn a_volume_on_a_dedicated_array_is_that_array() {
         &c,
         reqwest::Method::POST,
         format!("{base}/v1/volumes"),
-        Some(json!({ "name": "dist-vol-2", "size_bytes": 8 * MIB, "placement": { "array_id": array } })),
+        // No replicas on other nodes: the array is this volume's redundancy,
+        // and whether to add a second node on top is another axis.
+        Some(json!({ "name": "dist-vol-2", "size_bytes": 8 * MIB, "replica_tier": { "slaves": 0 }, "placement": { "array_id": array } })),
     )
     .await;
     assert!(s == 200 || s == 201, "{v1}");
