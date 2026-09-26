@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (presentation)
+- **docs:** `docs/presentation.md` is a 12-slide Marp deck of stormblock's
+  purpose and functionality (#132). It covers the problem it solves, where it
+  sits in stormcos (from stormcentral's relationships graph), how it works,
+  what it does today, its interfaces, how it ships and runs, what is proven
+  and by which test, what is planned, and the issues that matter. It is drawn
+  from the README rewritten in #131. Render it with
+  `npx @marp-team/marp-cli@4 docs/presentation.md -o out/presentation.html`.
+
 ## [v19.1.2] — 2026-09-26
 
 ### 2026-09-26 (docs from the code)

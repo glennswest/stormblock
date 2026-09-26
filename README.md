@@ -1059,6 +1059,7 @@ What earlier docs described and the code does not do, each with its issue:
 | `docs/stormfs-api.md` | the StormFS data-path routes |
 | `docs/layering.md` | engine / serving / profile, and why maps reference slabs by UUID |
 | `docs/metadata-scale.md` | allocation metadata at 40 PB a node (measurements and design) |
+| `docs/presentation.md` | a 12-slide deck: purpose, where it sits, what works, interfaces, shipping, status (Marp) |
 | `docs/m0-baseline.md`, `docs/protocol-overhead.md` | dated measurements |
 | `contract/` | `/v1` wire fixtures shared with stormblock-csi |
 | `docs/history/` | superseded design: the v0.1 spec, the LinuxBoot proposal, the placement note, the August deck |
