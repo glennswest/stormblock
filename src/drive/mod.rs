@@ -5,6 +5,7 @@ pub mod nvme;
 #[cfg(target_os = "linux")]
 pub mod sas;
 #[cfg(target_os = "linux")]
+pub mod crashdev;
 pub mod direct;
 pub mod dma;
 pub mod filedev;
