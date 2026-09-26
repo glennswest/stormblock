@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.2.0] — 2026-09-26
+
 ### 2026-09-26 (VM snapshots)
 - **feat(v1):** `POST /v1/snapshots` and `POST /v1/group-snapshots` take engine
   volumes made through `/api/v1`, by id or name (#130, stormvm#28). Before,

@@ -97,7 +97,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/main.rs` — CLI, the daemon, and every subcommand
 
 ## Current State
-**v19.1.4** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
+**v19.2.0** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
 the full suite passes on dev apart from #120 (and #134 when the box is busy).
 The README is the reference for what the code does, rewritten from the code in
 #131; the docs in `docs/` were checked against it and the superseded ones moved
@@ -114,22 +114,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### /v1 snapshots of engine volumes (2026-09-26, #130, stormvm#28) — IN PROGRESS
+### /v1 snapshots of engine volumes (2026-09-26, #130, stormvm#28) — DONE (v19.2.0)
 
 A VM's disks are engine volumes made through `/api/v1` (clone of a golden,
 cidata seed), and `/v1/snapshots` and `/v1/group-snapshots` looked only in
 `v1.volumes` → 404. `/api/v1/volumes/snapshots` is no substitute: it restamps
 the GPT GUID and takes one volume per call. Taking the issue's proposal:
 
-- [ ] a member that is not a `/v1` volume resolves to an engine volume (id or
+- [x] a member that is not a `/v1` volume resolves to an engine volume (id or
       name) and is snapshotted through the same `create_snapshots_atomic`
       fence, sealed, no identity restamp; `source_volume_id` is what the
       caller passed
-- [ ] `ready` only when this node holds the data (`local_id` set); a group is
+- [x] `ready` only when this node holds the data (`local_id` set); a group is
       ready only when every member is
-- [ ] restore: `POST /v1/volumes {source: {kind: snapshot}}` of such a
+- [x] restore: `POST /v1/volumes {source: {kind: snapshot}}` of such a
       snapshot is a clone of it (already the path once `local_id` is set)
-- [ ] tests (group of two engine volumes: one point in time, GUIDs kept,
+- [x] tests (group of two engine volumes: one point in time, GUIDs kept,
       restore; a remote-master snapshot is not ready), docs, CHANGELOG, close
 
 ### P0: fsync'd writes lost on power cut (2026-09-26, #171) — DONE (v19.1.4)

@@ -7,7 +7,7 @@ with per-volume redundancy, and serves those volumes as local block devices
 stormcos nodes run from: sealed goldens, pallets, GPT disk images, and the
 claim a machine makes for its boot image.
 
-One binary, `stormblock` (v19.1.4). It is a daemon, an initramfs boot agent
+One binary, `stormblock` (v19.2.0). It is a daemon, an initramfs boot agent
 and a set of offline tools, chosen by subcommand.
 
 ```
