@@ -1,174 +1,410 @@
 # StormBlock
 
-**Pure Rust Enterprise Block Storage Engine**
+**The block storage engine of the Storm stack, in Rust.** It turns drives and
+files into slabs of 1 MiB slots, carves thin copy-on-write volumes out of them
+with per-volume redundancy, and serves those volumes as local block devices
+(ublk), over NVMe-oF/TCP and over iSCSI. It also builds and boots the disks
+stormcos nodes run from: sealed goldens, pallets, GPT disk images, and the
+claim a machine makes for its boot image.
 
-StormBlock turns raw physical drives — NVMe SSDs, SAS SSDs, SAS HDDs — into network-accessible logical volumes over NVMe-oF/TCP and iSCSI. It is the block-layer foundation of the Storm ecosystem.
-
-> **Build on `root@dev.g8.lo`, never on a Mac.** The workstation is macOS and
-> the target is Linux: `libc`, `io_uring`, `ublk`, `/dev/kmsg` and the whole
-> storage path are behind `cfg(target_os = "linux")`, so a macOS build skips
-> exactly the code most likely to be wrong. `cargo test` runs 258 tests there
-> and 303 on dev. Commit, push, pull on dev, build there.
-
-## Architecture
+One binary, `stormblock` (v19.1.1). It is a daemon, an initramfs boot agent
+and a set of offline tools, chosen by subcommand.
 
 ```
-Initiator (StormFS, iSCSI, NVMe-oF client)
-         │
-    NVMe-oF/TCP (:4420) or iSCSI (:3260)
-    Shared Ring IPC (Unix socket + memfd)
-         │
-         ▼
-┌──────────────────────────────────┐
-│          StormBlock              │
-│  ┌────────────────────────────┐  │
-│  │  Target Protocols          │  │
-│  │  NVMe-oF/TCP + iSCSI      │  │
-│  │  Shared Ring IPC           │  │
-│  ├────────────────────────────┤  │
-│  │  Volume Manager            │  │
-│  │  Thin + COW Snapshots      │  │
-│  │  Global Extent Map (GEM)   │  │
-│  ├────────────────────────────┤  │
-│  │  Placement Engine          │  │
-│  │  Cold copies + tiered data │  │
-│  ├────────────────────────────┤  │
-│  │  Slab Extent Store         │  │
-│  │  1 MB slots, multi-device  │  │
-│  ├────────────────────────────┤  │
-│  │  RAID Engine               │  │
-│  │  1/5/6/10 + SIMD           │  │
-│  ├────────────────────────────┤  │
-│  │  Drive Layer               │  │
-│  │  NVMe (VFIO) + SAS + ublk │  │
-│  └────────────────────────────┘  │
-└──────────────────────────────────┘
-         │
-    NVMe (VFIO userspace) + SAS (io_uring)
-    ublk (io_uring URING_CMD)
-         │
-    Physical Drives
+drives / files / nvme-tcp:// / iscsi://          (the drive layer)
+        │
+   slabs: 1 MiB slots, a role (system | data), a tier, a failure domain
+        │
+   global extent map: volume → extents → legs (mirror / parity per volume)
+        │
+   thin volumes: CoW clones, sealed goldens, filesystem templates (ext4, XFS)
+        │
+   ublk /dev/ublkbN · NVMe-oF/TCP (shared subsystem, per-volume subsystems)
+   · iSCSI (shared target, per-export portals)
+        │
+   management API :9090 — /api/v1, /v1 (CSI contract), /serve/v1,
+   /apis/storage.storm.io/v1, /metrics
 ```
 
-## Key Features
+## Where it runs
 
-- **Pure Rust** — No SPDK, no FFI to C libraries. Single static binary (~11 MB musl).
-- **NVMe userspace driver** — VFIO-based, per-core queue pairs, MMIO polling. No kernel block layer in the NVMe path.
-- **SAS via io_uring** — Kernel SAS drivers (mpt3sas) with O_DIRECT and registered buffers.
-- **ublk server** — Exports volumes as `/dev/ublkbN` via io_uring URING_CMD (Linux 6.0+).
-- **Several drives** — implicit pools per role and tier, legs placed by failure domain (drive, shelf, rack), a failed drive quarantined, drained and rebuilt around; see [docs/multi-drive.md](docs/multi-drive.md).
-- **A volume that is an array** — `POST /api/v1/arrays` makes a dedicated slab that only volumes pinned to it (`array_id` on a create, `placement.array_id` on `/v1`) allocate on; see [docs/multi-drive.md](docs/multi-drive.md#an-array-as-one-consumers-storage-150).
-- **Attach names its transport** — `POST /v1/volumes/{id}/attach` and `POST /api/v1/volumes/{id}/attach` take `"transport": "nvme_tcp" | "ublk"`. Without it the engine chooses, and a local attach gets a ublk device. An orchestrator attaching on the master's behalf for a remote initiator sends `nvme_tcp` and gets NVMe-oF/TCP coordinates, or a 409 saying why there are none (#149).
-- **Rebuild after a drive fails** — automatic and per volume: every volume with a member on the drive, most endangered first, several at once, under one byte budget; see [docs/redundancy.md](docs/redundancy.md#rebuilding-after-a-failure-146).
-- **Metadata at scale** — what allocation metadata costs per slot and per PB, and the design for 40 PB a node; see [docs/metadata-scale.md](docs/metadata-scale.md).
-- **Redundancy per volume** — `mirror:N`, `raid5:D+1`, `raid6:D+2` are a property of each volume, realised by placing its extents across distinct failure domains (drive, shelf, rack, …); a node carries a mix on the same drives, clones inherit their golden's policy, `resync` rebuilds a lost leg, a drive can be reported failing and drained over HTTP, and a dirty-stripe log bounds the parity write hole. See [docs/redundancy.md](docs/redundancy.md).
-- **Software RAID** — drive-level RAID 1/5/6/10 with AVX2/AVX-512/NEON SIMD parity computation, kept as a leg transport and for whole-device use.
-- **Slab extent store** — Organic data placement with fixed-size 1 MB slots per device. Volumes spread across any device on any tier.
-- **Global Extent Map (GEM)** — Cross-slab extent tracking with reverse index, COW snapshot cloning, and rebuild-from-slabs recovery.
-- **Thin provisioning** — Extent-based allocator, volumes grow on write, and shrink again on discard: the targets advertise thin provisioning (SCSI VPD 0xB2, NVMe DSM) so initiators issue UNMAP/TRIM, which frees slab slots back to the pool.
-- **COW snapshots** — Instant snapshots via extent map cloning with reference counting; clone and delete persist refcounts a sector at a time, so latency tracks sectors touched rather than image size.
-- **Kubernetes `VolumeSnapshot` is a golden** (#111) — stormblock-csi's `CreateSnapshot` / `DeleteSnapshot` / `ListSnapshots` land on `/v1/snapshots`. The engine answers with a sealed CoW snapshot that has lineage; a group snapshot seals every member under one fence. A restore (`/v1/volumes` with `source: {kind: snapshot}`) is a CoW clone of it, the same thing provisioning from a template is. There is no separate backup machinery.
-- **Filesystem templates** — mkfs once, clone forever. The engine formats its own volumes through [`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs) (a from-scratch async mke2fs/e2fsck in pure Rust) or, for XFS, [`mkfs-xfs`](https://github.com/glennswest/mkfs.xfs.rs), seals a template as a snapshot, and every consumer gets a COW clone with a freshly stamped filesystem UUID instead of running mkfs. Formats run concurrently and every clone is fsck'd before hand-off.
-- **Placement engine** — Snapshot-fenced cold copies, tiered data placement (Hot/Warm/Cool/Cold), extent-level replication.
-- **Shared ring IPC** — io_uring-style zero-copy shared-memory block I/O between StormFS and StormBlock via Unix socket + memfd + eventfd.
-- **NVMe-oF/TCP target** — io_uring zero-copy send, per-core reactor model, and hot-add: a host connects once and later attaches arrive as an async event plus a rescan, with no Connect per volume.
-- **iSCSI target** — RFC 7143, CHAP authentication, MPIO/ALUA. Thin volumes export directly as LUNs, added and removed at runtime, and scale to thousands per target.
-- **Cluster replication** — Raft consensus (openraft), synchronous or asynchronous, TLS-secured RPCs.
-- **REST API** — axum-based management (drives, arrays, volumes, exports, slabs, filesystem templates) with optional TLS.
-- **Kubernetes-shaped resources** — `/apis/storage.storm.io/v1/{volumes,slabs,drives,nodes}` with discovery, label selectors and `?watch=1`, served by the engine itself; stormdrive serves `drives`/`enclosures` in the same group. `kubectl`-shaped, no second store.
-- **Composed disks** — a per-node bootable disk that is a *chain of goldens*: a pallet is a sealed volume whose members are shared slab extents, the GPT is two goldens minted once per layout, and a disk is `compose(head, partitions…, tail)` — a map, with nothing written. Cutting a new version imports the changed component and composes; every unchanged golden stays shared. Verified by `fdisk`, `blkid`, a real mount and an OVMF boot. See [docs/composed-disks.md](docs/composed-disks.md).
-- **Direct Linux boot** — Kernel cmdline and initramfs config for ublk root volumes.
-- **312 tests** — Unit, integration, crash recovery, degraded RAID, volume lifecycle, thin reclaim, LUN scale, PDU fuzz testing.
+| where | how it is started | what it does there |
+|---|---|---|
+| **a stormcos node** | the stormpump boot unit `00-stormblock` runs `stormblock adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the ublk devices the initramfs engine created (root and the mounted volumes) without them disappearing, restores its state from the `stormblock-state` volume, serves the API and the per-export portals (`/serve/v1`). No shared :3260/:4420 target, no discovery beacon, no cluster in this mode. |
+| **the stormcos initramfs** | `/init` (built by `scripts/build-stormblock-initramfs.sh`) runs `boot-claim` then `boot-local`, or `boot-local` on a local slab | claims the machine's image from an appliance (`boothost/<tag>`), attaches it, exports root as `/dev/ublkb0`, and flows it over onto a local disk in the background (`--local-disk`). Boot hooks decide local vs appliance (`docs/boot-hooks.md`). |
+| **an appliance (forge)** | `stormblock --config …` (the daemon) | serves goldens and host clones over NVMe-oF/TCP, answers boot claims, builds images and pallets. |
+| **anywhere else** | the daemon, or a subcommand | a standalone storage node; `image`, `pallet`, `slab`, `golden`, `attach`, `must-gather` work offline on files and drives. |
 
-## Data Placement Model
+## PVCs on stormcos
 
-StormBlock uses an **organic, cellular storage model**. Each physical device is formatted as a Slab — a flat array of 1 MB slots. Any volume can allocate slots in any slab on any device. A volume's data starts as a single 1 MB chunk and grows/shrinks/spreads across devices as needed.
+stormcos has a **built-in PVC driver**: the StorageClass `stormblock`
+(provisioner `stormblock.storm.io`). A claim is rounded up to a size class, and
+the kubelet (rustkube-node) CoW-clones the sealed, pre-formatted **blank** of
+that class — `pvc-ext4j-<MiB>m`, a `/api/v1/fstemplates` template — through
+`POST /api/v1/fstemplates/{id}/clone`, attaches the clone over ublk
+(`POST /api/v1/volumes/{id}/attach`), and hands it to stormpump to mount. No
+mkfs, no copy, no CSI; a missing blank is minted and sealed on first use. The
+claim's volume is named `pvc-<namespace>-<claim>`.
 
-```
-Volume Z (virtual_size: 100 GB)
-  ├── extent 0  ──→  Slab A (local NVMe, Hot), slot 42
-  ├── extent 1  ──→  Slab A (local NVMe, Hot), slot 43
-  ├── extent 2  ──→  Slab B (remote SAS, Warm), slot 7
-  └── extent 3  ──→  Slab A (local NVMe, Hot), slot 100
+CSI exists only for **third-party drivers**: `/v1` is the contract
+stormblock-csi speaks (volumes, snapshots and group snapshots, attach, fence
+and promote, dual-attach), and orchestrators such as stormstorage use it too.
 
-Slab A (NVMe, tier=Hot, 10K slots)
-  ├── slot 42: Volume Z, extent 0
-  ├── slot 43: Volume Z, extent 1
-  ├── slot 100: Volume Z, extent 3
-  └── slot 200: Volume Y, extent 5
-```
+## What it does
 
-The **Global Extent Map (GEM)** tracks all extent→slot mappings and is reconstructable from slab slot tables on recovery.
+**Storage.**
+- **Drives** are raw block devices opened `O_DIRECT` — an io_uring on a thread
+  of its own, or `pread`/`pwrite` on the blocking pool where io_uring is
+  unavailable (RouterOS) — plus `nvme-tcp://` and `iscsi://` initiators, and
+  files (tests and development only). Drives open and close at runtime
+  (`POST /api/v1/drives`), carry their identity (serial, WWN) and labels
+  (`shelf`, `bay`, `hba` from stormdrive), and can be drained and reported
+  failing over HTTP.
+- **Slabs** are the unit of storage: 1 MiB slots, a slot table, and optionally
+  the volume records themselves, so a slab is self-describing and can be
+  adopted by another engine. Each has a **role** — `system` (goldens, replaced
+  by an install) or `data` (identity and state, never formatted by an install)
+  — a tier, and a failure domain (`site/…/rack/node/hba/shelf/bay/drive`).
+- **Thin volumes** allocate on write and give space back on discard (iSCSI
+  UNMAP / WRITE SAME, NVMe DSM). **Copy-on-write clones** share extents by
+  refcount; a **sealed** volume takes no writes and is what clones come from.
+- **Redundancy is per volume** — `none`, `mirror:N`, `raid5:D+1`, `raid6:D+2`,
+  each with the failure-domain rung its legs are kept apart at
+  (`mirror:2@shelf`). A failed drive's volumes are **rebuilt automatically**,
+  most endangered first, several at once, under one byte budget
+  (`/api/v1/rebuilds`). See `docs/redundancy.md`, `docs/multi-drive.md`.
+- **Drive-level RAID 1/5/6/10** (`/api/v1/arrays`) exists for whole-device
+  legs — a RAID 1 across NVMe/TCP legs is how stormstorage builds a
+  distributed volume. An API-created array is *dedicated* by default, and a
+  volume created with its `array_id` lives only on it.
 
-## Hardware Targets
+**Filesystems.** Templates formatted in-process — ext2/3/4 with
+[`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs), XFS with
+[`mkfs-xfs`](https://github.com/glennswest/mkfs.xfs.rs) — sealed after a check,
+and cloned with a fresh filesystem UUID each time. Files are written into ext4
+volumes and read out of ext4 and XFS ones in userspace (`fio-ext4`,
+`fio-xfs`), with no mount.
 
-| Tier | Media | Interface | Network |
-|------|-------|-----------|---------|
-| Tier 0 | NVMe E1.S / E3.S / U.2 | VFIO userspace | 200GbE |
-| Tier 1 | SAS SSD | io_uring (HBA330) | 25-100GbE |
-| Tier 2 | SAS HDD (JBOD) | io_uring (ARM64 head unit) | 25GbE |
-| MikroTik | USB/SATA (RouterOS) | O_DIRECT block device (blocking pool where io_uring is unavailable) | 1-10GbE |
+**Images and boot.** `import` turns a raw, qcow2, VMDK or OVA image (or an
+ISO) into a sealed golden and reads the filesystems inside it. `image build`
+lays GPT disks and ISOs out of **pallets** — sealed, versioned sets of boot
+members that stormuefi selects at boot (`docs/pallets.md`, `docs/images.md`).
+`compose` builds a bootable disk as a map over shared goldens with nothing
+written (`docs/composed-disks.md`). **Synonyms** name volumes and re-point the
+name at a new version; `boothost/<tag>` is how a machine claims its own boot
+image, the one request that needs no token (`docs/auth.md`).
+
+**Serving.** ublk devices for the local node; a shared NVMe-oF/TCP subsystem
+with namespace hot-add, and per-volume subsystems; a shared iSCSI target
+(CHAP, MC/S, ALUA, thousands of LUNs) and per-export portals. `/serve/v1`
+(the serving layer: exports, readiness, tar in/out, raw import, trim) is
+mounted by the engine whenever it has a data directory.
+
+**Cluster (optional).** UDP-multicast node discovery, openraft membership,
+heartbeats and volume replication behind the `cluster` feature; off unless
+`[cluster] enabled = true`. Single-node is the design point: nothing needs a
+cluster.
 
 ## Building
 
+Build and test **on dev.g8.lo, never on a workstation**: the storage path
+(`io_uring`, `ublk`, `O_DIRECT`, `/dev/kmsg`) is `cfg(target_os = "linux")`,
+so another OS compiles a different, smaller program. From this repo's
+sessions that means `sc-build` after `git push` — it fetches the pushed commit
+onto dev as an unprivileged user, builds in a scratch directory and deletes it.
+Nothing here needs root.
+
 ```bash
-# Full node (x86_64 — VFIO, io_uring, all features)
-cargo build --release --target x86_64-unknown-linux-musl
-
-# ARM64 (JBOD head units)
-cargo build --release --target aarch64-unknown-linux-musl --features "arm64,iscsi,nvmeof"
-
-# MikroTik RouterOS (lightweight — no VFIO, no io_uring, iSCSI only)
-cargo build --release --target aarch64-unknown-linux-musl --no-default-features --features "mikrotik,iscsi"
-
-# Run tests
-cargo test
+sc-build                                           # cargo build && cargo test
+sc-build 'cargo build --release --locked'          # what a golden is built with
+sc-build 'cargo test --locked --test integration_multidrive'
 ```
 
-`Cargo.lock` is committed. Goldens are built from a commit with
-`cargo build --release --locked`, so what a commit compiles is exactly what its
-lockfile names; moving a dependency (`cargo update`) is a commit of its own.
+Tests that write files need `TMPDIR` inside the scratch tree
+(`mkdir -p tmp && export TMPDIR=$PWD/tmp`). `Cargo.lock` is committed and every
+golden is built `--locked`; `cargo update` is a commit of its own.
+
+**Features** (`Cargo.toml`): `default = ["nvmeof", "iscsi", "cluster",
+"stormfs-data"]`.
+
+| feature | adds |
+|---|---|
+| `nvmeof` | the NVMe-oF/TCP target, `--nvmeof-*` flags, `[nvmeof]` |
+| `iscsi` | the iSCSI target, `--iscsi-*`/`--chap-*` flags, `boot-iscsi`, `migrate-boot`, `[iscsi]`, `/api/v1/luns`, `/api/v1/sessions` |
+| `cluster` | openraft membership, heartbeats, replication, `[cluster]`, `/api/v1/cluster`, `/raft/*` |
+| `stormfs-data` | the StormFS data path, `/api/v1/stormfs` (`docs/stormfs-api.md`) |
+| `ui` | the old embedded web UI at `/ui` (off since v12.2.0; stormview is the UI) |
+| `arm64`, `mikrotik` | profile names only — no code is gated on them |
+
+Profiles:
+
+```bash
+cargo build --release --locked --target x86_64-unknown-linux-musl                 # a full node
+cargo build --release --locked --target aarch64-unknown-linux-musl \
+    --no-default-features --features "mikrotik,nvmeof"                            # RouterOS (NVMe-TCP only)
+```
+
+The RouterOS profile serves containers, PVCs and sbregistry over NVMe-TCP;
+iSCSI sharing and PXE boot on RouterOS are mkube's. `--no-default-features`
+without `nvmeof` does not currently compile (#161).
+
+## Running
+
+With no subcommand, `stormblock` is the storage daemon. It loads
+`/etc/stormblock/stormblock.toml` (defaults if the file is missing, an error if
+it does not parse), then, in order:
+
+1. starts the volume manager (with `--data-dir` or `[management] data_dir`,
+   metadata survives a restart);
+2. starts node discovery (unless `discovery_disabled`), the extent GC (`[gc]`)
+   and the pool-pressure watcher (`[pressure]`, off by default);
+3. opens the drives (`-d` or `[[drives]]`) and **adopts the slabs already on
+   them**, their volumes included; with `--raid`, builds an array from them,
+   and with `--volume` too, creates volumes on it; with neither, every drive
+   becomes a raw NVMe namespace;
+4. starts the cluster engine (`[cluster] enabled`) and StormFS registration
+   (`[stormfs] enabled`);
+5. starts the **iSCSI target** (unless `--no-iscsi`) and the **NVMe-oF/TCP
+   target** — the latter only when there is something to export at startup
+   (a drive, an array or a volume); with no drives there is no :4420 listener;
+6. mounts `/serve/v1` if there is a data directory (`[serve] data_dir`, or
+   `<management.data_dir>/serve`) and starts its reconciler;
+7. starts the management API on `[management] listen_addr` (HTTPS with
+   `tls_cert` + `tls_key`), resolving or minting its token first.
+
+SIGINT or SIGTERM stops it: ublk exports are told to stop first, then the
+metadata flush and the ublk teardown run together, bounded at about 13 s so a
+unit's `TimeoutStopSec` (30 s in `systemd/stormblock-target.service`) is never
+reached mid-teardown. `RUST_LOG` sets the log filter (default `info`); logs go
+to stderr.
+
+### Subcommands
+
+| subcommand | what it does |
+|---|---|
+| `slab format\|grow\|list\|info\|volumes` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it |
+| `image build\|convert\|inspect\|formats\|lay-node\|local-boot` | build disk images and ISOs out of pallets from a TOML spec (`docs/images.md`); `lay-node` lays a node's disk layout (destroys the drive); `local-boot` copies an ESP and boot pallets onto an installed disk |
+| `pallet …` (24 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, members, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
+| `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--read-only] [--whiteouts] [--fsck]`) — how stormcentral builds service goldens |
+| `attach` | attach a slab offline and export (and optionally mount) volumes in it; with no `--volume`, list them |
+| `boot-claim` | ask an appliance which image this machine boots (`--boothost URL --tag <service tag>`), print the attach URI |
+| `boot-local` | attach local slabs non-destructively, export the boot volume as `/dev/ublkb0` (plus `--image-store`, `--writable`), optionally flow over to `--local-disk`; `--check` validates and exits |
+| `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs |
+| `must-gather` | collect what is needed to debug a node into one directory, read-only |
+| `boot-iscsi` | provision a partitioned disk on a remote iSCSI target and export it over ublk. **It formats the target every run** (#162): a first-install tool, not a boot path |
+| `migrate-boot` | copy boot volumes from an iSCSI slab onto a local disk |
+| `ublk`, `migrate` | stubs that print how to do it with a running engine |
+
+`stormblock <subcommand> --help` lists each one's flags.
 
 ## Configuration
 
-```toml
-# stormblock.toml
-[system]
-hostname = "stormblock-nvme-1"
-management_port = 8443
+### Command line (daemon)
 
-[topology]
-site = "nashville"
-rack = "rack-a"
-tier = "tier0"
+| flag | default | |
+|---|---|---|
+| `-c, --config` | `/etc/stormblock/stormblock.toml` | config file; parsed even when a subcommand runs |
+| `-d, --device` | — | drives to open (repeatable); replaces `[[drives]]` |
+| `--raid` | — | build an array from the drives: `1`/`raid1`/`mirror`, `5`, `6`, `10` |
+| `--stripe-kb` | `64` | stripe size for RAID 5/6/10 |
+| `--volume` | — | `name:size[:redundancy]` to create on the array (repeatable) |
+| `--data-dir` | — | volume metadata directory. **Only the volume manager sees it**: `/serve/v1`, the token file, templates, synonyms and `/v1` state read `[management] data_dir` (#163) |
+| `--iscsi-addr` | `0.0.0.0:3260` | iSCSI listen address (`iscsi`) |
+| `--iscsi-target-name` | `iqn.2024.io.stormblock:default` | iSCSI target IQN (`iscsi`) |
+| `--chap-user`, `--chap-secret` | — | CHAP for the iSCSI target; both or neither (`iscsi`) |
+| `--no-iscsi` | off | do not start the iSCSI target (`iscsi`) |
+| `--nvmeof-addr` | `0.0.0.0:4420` | NVMe-oF/TCP listen address (`nvmeof`) |
+| `--nvmeof-nqn` | `nqn.2024.io.stormblock:default` | NVMe-oF subsystem NQN (`nvmeof`) |
+| `--no-nvmeof` | off | do not start the NVMe-oF target (`nvmeof`) |
+| `--reactor-cores` | `0` | per-core reactor threads for the targets; 0 = one per core |
 
-[network]
-nvmeof_bind = "0.0.0.0:4420"
-iscsi_bind = "0.0.0.0:3260"
+**The target listen addresses, IQN, NQN and CHAP come from these flags only.**
+`[iscsi] listen_addr/target_name/chap_*` and `[nvmeof] listen_addr/nqn` in the
+file are overwritten by the flags' defaults (#75, #164) — in particular CHAP set
+only in the file is **not applied**.
 
-[io]
-io_cores = "2-15"
-nvme_queue_depth = 256
-uring_sqpoll = true
+### Environment
 
-[management]
-listen_addr = "0.0.0.0:9090"
-# A bearer token is required on every request by default (v17.0.0): the
-# node mints one at boot into <data_dir>/api_token (mode 0600) and keeps it
-# across restarts. The one open write is a machine claiming its own boot
-# image, which boots from a sealed golden of its own — see docs/auth.md.
-# `require_auth = false` opens the node, and it says so on every boot.
-# Where API-created LUNs and volume metadata are persisted, so exports
-# come back after a restart.
-data_dir = "/var/lib/stormblock"
-# Address remote consumers should dial for this node's targets. Target
-# listen addresses are usually wildcards, which tell a caller nothing;
-# without this, attach info and NVMe-oF discovery fall back to loopback.
-advertised_addr = "192.168.200.21"
+| variable | used for | when unset |
+|---|---|---|
+| `RUST_LOG` | log filter | `info` |
+| `STORMBLOCK_API_TOKEN` | the API token, after `[management] api_token`; also `boot-claim --token` | token file, else minted |
+| `STORMBLOCK_ADMIN_TOKEN` | the admin token, after `[management] admin_token` | no admin tier |
+| `STORMBLOCK_TOKEN_FILE` | where CLI tools look for a local engine's token, before `/etc/stormblock/api_token` and `/var/lib/stormblock/api_token` | those two |
+| `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
+| `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
+| `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
+| `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator` |
+| `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
+| `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds the data half | policy decides |
+
+### The config file
+
+Every section is optional; unknown keys are ignored silently. Sizes take
+`K`/`M`/`G`/`T` (base 1024). `stormblock.example.toml` is a commented example.
+
+**`[management]`**
+
+| key | default | |
+|---|---|---|
+| `listen_addr` | `0.0.0.0:9090` | API address (an IP, not a hostname) |
+| `tls_cert`, `tls_key` | — | HTTPS; both or neither |
+| `data_dir` | — | durable state (see *Files* below); also the default serve directory and token-file location |
+| `api_token` | — | bearer token for every request but the probes and the boot claim |
+| `admin_token` | — | if set, destructive verbs need this one instead |
+| `token_file` | `<data_dir>/api_token`, else `/etc/stormblock/api_token` | where a minted token is kept (mode 0600) |
+| `require_auth` | unset = required | `false` opens the API deliberately (and says so every boot) |
+| `node_name` | env, then hostname | this node's name in `/v1` |
+| `topology` | `{}` | rungs above the node: `[management.topology] site = …, rack = …` |
+| `advertised_addr` | derived | host (or host:port) consumers should dial |
+| `discovery_disabled` | `false` | no UDP multicast beacon (239.255.42.99:7447) |
+| `beacon_secs`, `peer_stale_secs` | `5`, `30` | discovery timing |
+| `ublk_transport` | `true` | offer ublk for a local attach; per request, `"transport": "nvme_tcp"` asks for the network instead |
+
+**`[[drives]]`** `path` — a device, partition, file or `nvme-tcp://`/`iscsi://` URI.
+
+**`[iscsi]`** (`iscsi`) — `max_connections` (`4`, MC/S per session) is used;
+`listen_addr`, `target_name`, `chap_user`, `chap_secret` are not (see above).
+
+**`[nvmeof]`** (`nvmeof`) — `export_drives` (`true`: publish each drive as a raw
+namespace; set `false` where the drives are the engine's pool) is used;
+`listen_addr` and `nqn` are not (see above).
+
+**`[[luns]]`** (`iscsi`) — `id`, `path`, `size` (creates or extends a file),
+`readonly` (`false`): LUNs on the shared target at startup.
+
+**`[serve]`** — the serving layer (`/serve/v1`)
+
+| key | default | |
+|---|---|---|
+| `enabled` | `true` | mount `/serve/v1` |
+| `data_dir` | `<management.data_dir>/serve` | wiring and export tables; with neither set, serving is skipped |
+| `advertise_addr` | the management advertised address | what consumers attach to |
+| `iscsi_enabled` | `false` | serve the legacy shared iSCSI target |
+| `portal_base`, `portal_span` | `3261`, `128` | per-export portal ports (3261–3388) |
+| `iqn`, `iqn_prefix` | `iqn.2026-08.lo.storm:shared`, `iqn.2026-08.lo.storm` | |
+| `nqn`, `nqn_prefix` | `nqn.2026-08.lo.storm:shared`, `nqn.2026-08.lo.storm` | per-volume subsystems are `<nqn_prefix>:vol-<uuid>` |
+| `drain_grace_secs` | `120` | a withdrawn export drains this long before its LUN is pulled |
+| `reconcile_secs` | `2` | reconciler tick |
+| `orphan_export_grace_secs` | `300` | an export naming a missing volume is withdrawn after this; 0 = never |
+| `reap_secs`, `reap_apply`, `reap_min_age_secs`, `reap_max_per_pass` | `600`, `true`, `900`, `64` | template debris reaper |
+
+**`[rebuild]`** — `automatic` (`true`), `parallel` (`4`), `extents_in_flight`
+(`4`), `max_bytes_per_sec` (`0` = unlimited). Live-adjustable at
+`PUT /api/v1/rebuilds/settings`.
+
+**`[gc]`** — `enabled` (`true`), `interval_secs` (`600`), `confirm_passes`
+(`true`), `max_reclaim_per_pass` (`4096`), `dry_run` (`false`): the collector
+for slab slots no volume maps.
+
+**`[pressure]`** — `enabled` (`false`), `high_water_pct` (`80.0`),
+`check_interval_secs` (`60`), `min_slab_bytes` (1 GiB), `max_slabs` (`64`), and
+`[[pressure.sources]]` of `kind = "device"` (`path`; adopted if it holds a
+slab, **formatted** if not) or `kind = "directory"` (`path`, `slab_bytes`).
+
+**`[cluster]`** (`cluster`) — `enabled` (`false`), `data_dir`
+(`/var/lib/stormblock/raft`), `seed_nodes`, `heartbeat_interval_ms` (`1000`),
+`heartbeat_timeout_ms` (`5000`), `tls_enabled` (`false`, needs management TLS),
+`tls_ca_cert`. `replication_mode` and `replication_factor` are parsed and not
+used.
+
+**`[stormfs]`** — `enabled` (`false`), `metadata_url`, `heartbeat_secs`
+(`30`), `advertise_addr`: announce this node's volumes to
+`<metadata_url>/api/v1/storage/register` (served by stormstorage).
+
+**Parsed and not acted on:** `[[arrays]]` and `[[volumes]]` (validated, so a
+bad value still stops startup — use `--raid`/`--volume`, or the API),
+`[reactor]` (use `--reactor-cores`) and `[boot]` (#165).
+
+## Ports
+
+| port | what | when |
+|---|---|---|
+| TCP 9090 | management API, `/metrics`, cluster and Raft RPCs | always (daemon, and `adopt-ublk --api`) |
+| TCP 4420 | NVMe-oF/TCP shared subsystem and discovery | daemon, with something to export at startup |
+| TCP 3260 | iSCSI shared target | daemon, unless `--no-iscsi` |
+| TCP 3261–3388 | per-export portals and per-volume NVMe subsystems (`[serve] portal_base/span`) | when `/serve/v1` is mounted |
+| UDP 7447, group 239.255.42.99 | node discovery beacon | daemon, unless `discovery_disabled` |
+
+## Health, readiness and metrics
+
+- `GET /api/v1/health` — public, no locks, no I/O:
+  `{"status":"ok","service":"stormblock","version":…,"auth":"required"|"none"}`.
+  A booting node asks this of every candidate address before it has a token.
+- `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
+  when an attach would work now (slab open, metadata restored, targets
+  listening, exports wired), else 503 with the blockers.
+- `GET /metrics` — Prometheus text, **needs the token**. Slab and drive gauges
+  are refreshed at scrape time: `stormblock_slab_{capacity,allocated,free}_bytes{slab,tier}`
+  and their `_total`s, `stormblock_drive_{capacity_bytes,healthy,media_errors,temperature_celsius,available_spare_pct,power_on_hours}{drive,serial}`;
+  plus `stormblock_api_requests_total{endpoint,method}`, `stormblock_volumes_total`,
+  `stormblock_pool_*`, `stormblock_iscsi_sessions_*`, `stormblock_cluster_*`,
+  `stormblock_replication_*`, and the serving layer's `stormblockmk_*` gauges.
+
+## The API
+
+Everything is on the management port, behind one bearer-token check
+(`docs/auth.md`). The token is required by default: the engine takes
+`api_token`, `$STORMBLOCK_API_TOKEN` or the token file, and mints one into the
+token file if there is none. Open without a token: `/api/v1/health`, the
+`/serve/v1` (and legacy `/mk/v1`) `health` and `ready` probes, and
+`POST /api/v1/synonyms/boothost/<tag>/claim`. With an `admin_token`, destructive
+requests (any `DELETE`, `…/seal`, writing files or a tar into a volume, a
+non-dry-run GC, `trim?apply`, `fsck?repair`) need it.
+
+| surface | for |
+|---|---|
+| `/api/v1/drives`, `/arrays`, `/slabs`, `/rebuilds` | drives (open, label, drain, health), RAID arrays, slabs and the pool, GC, rebuild queue |
+| `/api/v1/volumes` | volumes: create, clone, seal, access, redundancy, tier, restripe, attach, fsck, files, cidata, import, compose, placement |
+| `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks, offline moves, names and boot claims, published releases |
+| `/api/v1/pallets`, `/images` | pallets on drives, image build/convert/inspect |
+| `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery, cluster |
+| `/api/v1/stormfs` | the StormFS data path (`docs/stormfs-api.md`) |
+| `/v1` | the CSI / orchestrator contract (`contract/`) |
+| `/serve/v1` (and `/mk/v1`) | the serving layer: exports, readiness, tar, raw, trim |
+| `/apis/storage.storm.io/v1` | Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` |
+
+## Files
+
+In the data directory (`[management] data_dir`; `adopt-ublk --data-dir`):
+`volumes.dat` (+ `.bak`), `luns.json`, `exports.json`, `v1_state.json` (+
+journal), `fstemplates.json`, `synonyms.json`, `releases.json`, `moves.json`,
+`pallet_mirrors.json`, `stormfs.json`, `cluster_identity.json`, `api_token`
+(0600) and `serve/wiring.json`. Each slab with a metadata region also carries
+its own volumes' records. On stormcos, `adopt-ublk` restores these from, and
+captures them back into, the `stormblock-state` volume.
+
+Elsewhere: `/etc/stormblock/stormblock.toml`, `/etc/stormblock/boot.toml`
+(`boot-local`), `/run/stormblock/handover.json` (the initramfs engine's record
+for `adopt-ublk`), `/var/lib/stormblock/raft` (`[cluster] data_dir`).
+
+## How it ships
+
+stormblock is a **`special`** component in stormcentral (`components/stormcos.toml`):
+a bare binary plus `/etc/stormblock/stormblock.toml`, not a stormd service. It
+is staged with `stormcentral component stage`, which runs stormcos's
+`deploy/build-goldens.sh`. That builds `cargo build --release --locked
+--target x86_64-unknown-linux-musl` and lays three goldens:
+
+- **`stormblock`** — read-only ext4, the binary at `/usr/bin/stormblock` and a
+  config with `listen_addr = "0.0.0.0:9090"`; placed in `system1`;
+- **`stormblock-data`** and **`stormblock-state`** — blanks in `data1`, the
+  engine's `/data` and its persisted state.
+
+The same build puts the binary in the initramfs (`/usr/sbin/stormblock`) and
+the fedora golden, and every service golden is written by `stormblock golden`.
+The container images (`Dockerfile`, `Dockerfile.aarch64`) and
+`systemd/stormblock-target.service` are for running it outside stormcos.
+
+## Using it
+
+The examples below leave the token out for brevity. Every request except the
+health probes and the boot claim needs it:
+
+```bash
+TOKEN=$(cat /var/lib/stormblock/api_token)      # <data_dir>/api_token
+curl -H "Authorization: Bearer $TOKEN" http://node:9090/api/v1/volumes
 ```
-
-See [stormblock-spec.md](docs/stormblock-spec.md) for the full specification,
-and [auth.md](docs/auth.md) for who may call a node's API.
 
 ### Exporting a volume
 
@@ -443,7 +679,8 @@ curl -X POST http://node:9090/api/v1/volumes \
   -H 'Content-Type: application/json' \
   -d '{"name":"pvc-1","from_template":"ext4-256m"}'
 
-# An XFS blank for the large claim classes
+# An XFS blank (the built-in PVC driver's blanks are ext4, pvc-ext4j-<MiB>m;
+# XFS is for whoever asks for it)
 curl -X POST http://node:9090/api/v1/fstemplates \
   -H 'Content-Type: application/json' \
   -d '{"name":"pvc-xfs-1t","size":"1T","fs":"xfs"}'
@@ -787,30 +1024,87 @@ restart ends in `failed` mode. So a unit's `TimeoutStopSec` must stay above the
 engine's own budget (~13 s), or SIGKILL lands in the middle of a teardown and
 makes exactly that.
 
-## Module Structure
+## Not built, or not wired
+
+What earlier docs described and the code does not do, each with its issue:
+
+- **NVMe userspace (VFIO) driver** — a stub; NVMe drives are served through
+  the kernel, opened `O_DIRECT` (#167).
+- **Drive-level RAID extras** — the write-intent journal is in memory only,
+  and journal recovery, scrub, array rebuild (other than RAID 1 resync on
+  `add_member`) and reassembly from superblocks are not wired; RAID 6 Q parity
+  is scalar (#168). Per-volume redundancy is the rebuild path in use.
+- **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with
+  nothing starting it; `arm64`/`mikrotik` gate nothing (#169).
+- **Config the daemon ignores** — see *The config file* (#163, #164, #165).
+- **`boot-iscsi` as a boot path** — it formats every run (#162).
+- **The `ui` feature's pages are outside the token check** (#166).
+- **Scrub** of mirror legs and parity on a schedule (#160), **erasure coding
+  beyond P+Q** (#159), metadata at 40 PB a node (#155–#158), drive affinity,
+  overcommit and StorageClass policy for claims (#151–#154).
+- **"No C dependencies"** was never true: TLS brings in `aws-lc-sys` and
+  `ring`.
+
+## Docs
+
+| | |
+|---|---|
+| `docs/auth.md` | who may call a node's API; the boot claim; host goldens |
+| `docs/redundancy.md` | per-volume redundancy, failure domains, health, resync, automatic rebuild, drain, whole-disk goldens and import |
+| `docs/multi-drive.md` | pools, placement, a drive's life, dedicated arrays, what a claim should ask for (part design) |
+| `docs/pallets.md` | the pallet format and lifecycle (§2.6–§2.8 are design) |
+| `docs/images.md` | building disk images and ISOs, local boot |
+| `docs/composed-disks.md` | per-node disks composed from shared goldens |
+| `docs/boot-hooks.md` | how the initramfs decides local disk vs appliance |
+| `docs/stormfs-api.md` | the StormFS data-path routes |
+| `docs/layering.md` | engine / serving / profile, and why maps reference slabs by UUID |
+| `docs/metadata-scale.md` | allocation metadata at 40 PB a node (measurements and design) |
+| `docs/m0-baseline.md`, `docs/protocol-overhead.md` | dated measurements |
+| `contract/` | `/v1` wire fixtures shared with stormblock-csi |
+| `docs/history/` | superseded design: the v0.1 spec, the LinuxBoot proposal, the placement note, the August deck |
+| `CHANGELOG.md`, `CLAUDE.md` | what changed, and the work plan |
+
+## Source layout
+
+92k lines of Rust in `src/`, 13.7k in `tests/`, about 870 tests.
 
 ```
-src/drive/       BlockDevice trait, NVMe (VFIO), raw block devices (O_DIRECT, io_uring), FileDevice (tests/dev), Slab extent store, ublk, ring IPC
-src/raid/        RAID 1/5/6/10, SIMD parity, write journal, rebuild, scrub
-src/volume/      Thin provisioning, COW snapshots, GEM, extent allocator, metadata
-src/fs/          filesystem templates: format/check via mkfs-ext4 and mkfs-xfs, seal guard, UUID stamp; survey of an image's filesystems (fio-ext4, fio-xfs)
-src/placement/   Cold copies, storage topology, tiered replication
-src/target/      NVMe-oF/TCP + iSCSI target protocols, per-core reactor
-src/mgmt/        REST API (axum), TOML config, Prometheus metrics, web UI
-src/cluster/     Raft consensus, replication, migration (optional feature)
-src/boot.rs      Boot volume manager: templates, COW clones, direct Linux boot
-src/migrate.rs   Live migration: remote → local via RAID 1
-src/stormfs.rs   StormFS registration: volume announcement to metadata cluster
+src/mgmt/       19.7k  management API (axum): every /api/v1 surface, /v1, kube resources,
+                       auth, config, metrics, discovery, ublk exports, web UI (feature ui)
+src/volume/     17.7k  thin volumes, GEM, redundancy (mirror/parity legs), snapshots and
+                       clones, metadata, synonyms, chunks/versions (StormFS), GC, pressure,
+                       relocation, composition
+src/drive/      10.4k  BlockDevice; O_DIRECT block devices (io_uring or blocking pool),
+                       nvme-tcp:// and iscsi:// initiators, files; slabs and the registry;
+                       ublk; handover; SMART; identity
+src/image/       7.5k  image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import decoders,
+                       node layout, local boot
+src/target/      6.7k  NVMe-oF/TCP and iSCSI targets, per-core reactor
+src/fs/          5.6k  templates, ext4 and XFS seams, disk identity, files, image survey
+src/serve/       4.0k  the serving layer (/serve/v1): wiring, reconciler, readiness, reaper
+src/pallet/      3.9k  pallet format writer, GPT, store, manager, selection
+src/placement/   2.9k  failure domains, placement, drain moves, rebalance
+src/raid/        2.7k  drive-level RAID 1/5/6/10, parity
+src/cluster/     2.6k  openraft membership, heartbeat, replication (feature cluster)
+src/*.rs         8.8k  main.rs (CLI, daemon, subcommands), rebuild, drain, state, boot,
+                       boot_iscsi, migrate, stormfs registration, http client
+crates/pallet-format   the no_std pallet reader stormuefi links
 ```
 
-## Storm Ecosystem
+## Storm components it talks to
 
-| Component | Role | Language |
-|-----------|------|----------|
-| **StormBlock** | Block storage engine | Rust |
-| [StormFS](https://github.com/glennswest/stormfs) | Distributed filesystem | Rust |
-| [StormForce](https://github.com/glennswest/stormforce) | Event streaming (Kafka replacement) | Rust |
-| [StormOS](https://github.com/glennswest/stormos) | Infrastructure OS | Go |
+| component | how |
+|---|---|
+| [stormcos](https://github.com/glennswest/stormcos) | ships the engine (`adopt-ublk` under stormpump), its goldens, and the initramfs that runs `boot-claim`/`boot-local` |
+| [rustkube](https://github.com/glennswest/rustkube), rustkube-node | the built-in PVC driver: clones blanks and attaches them over ublk through `/api/v1` |
+| [stormblock-csi](https://github.com/glennswest/stormblock-csi) | the CSI driver for third-party use, over `/v1` |
+| [stormblock-registry](https://github.com/glennswest/stormblock-registry) (sbregistry) | builds blanks and goldens, posts image specs to `/api/v1/images/build` |
+| [stormbootx](https://github.com/glennswest/stormbootx), [stormuefi](https://github.com/glennswest/stormuefi) | UEFI: claim `boothost/<tag>` and attach it over NVMe/TCP; boot a pallet (the reader is `crates/pallet-format`) |
+| [stormdrive](https://github.com/glennswest/stormdrive) | registers and labels drives (`shelf`, `bay`, `hba`), reports their health |
+| [stormstorage](https://github.com/glennswest/stormstorage) | distributed volumes: RAID 1 over NVMe/TCP legs through `/v1` and `/api/v1/arrays` |
+| [stormcentral](https://github.com/glennswest/stormcentral) | stages the component and its goldens |
+| [zeroboot](https://github.com/glennswest/zeroboot) | a boot hook the initramfs asks first |
+| [StormFS](https://github.com/glennswest/stormfs) | the data path (`docs/stormfs-api.md`) and the ring-IPC client |
 
 ## License
 
