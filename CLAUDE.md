@@ -114,6 +114,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### /v1 snapshots of engine volumes (2026-09-26, #130, stormvm#28) — IN PROGRESS
+
+A VM's disks are engine volumes made through `/api/v1` (clone of a golden,
+cidata seed), and `/v1/snapshots` and `/v1/group-snapshots` looked only in
+`v1.volumes` → 404. `/api/v1/volumes/snapshots` is no substitute: it restamps
+the GPT GUID and takes one volume per call. Taking the issue's proposal:
+
+- [ ] a member that is not a `/v1` volume resolves to an engine volume (id or
+      name) and is snapshotted through the same `create_snapshots_atomic`
+      fence, sealed, no identity restamp; `source_volume_id` is what the
+      caller passed
+- [ ] `ready` only when this node holds the data (`local_id` set); a group is
+      ready only when every member is
+- [ ] restore: `POST /v1/volumes {source: {kind: snapshot}}` of such a
+      snapshot is a clone of it (already the path once `local_id` is set)
+- [ ] tests (group of two engine volumes: one point in time, GUIDs kept,
+      restore; a remote-master snapshot is not ready), docs, CHANGELOG, close
+
 ### P0: fsync'd writes lost on power cut (2026-09-26, #171) — DONE (v19.1.4)
 
 fastetcd's redb reports "All roots are corrupted" after every hard power-off
