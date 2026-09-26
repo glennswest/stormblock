@@ -36,20 +36,23 @@ fn median(v: &[u64]) -> u64 {
     s.get(s.len() / 2).copied().unwrap_or(0)
 }
 
-/// One volume's life in a wave. Answers its duration.
+/// One volume's life in a wave. Answers its duration. Whatever fails on the
+/// way, the volume is detached and deleted: a failure must not be counted a
+/// second time as residue.
 async fn one(e: Arc<Engine>, blank: String, seed: u64) -> Result<u64, String> {
     let t = Instant::now();
     let id = claim(&e, &blank).await?;
-    let dev = e.attach(&id).await?;
-    let r = async {
+    let used = async {
+        let dev = e.attach(&id).await?;
         write_check(&dev, 8 * MIB, seed, MIB as usize).await?;
         read_check(&dev, 8 * MIB, seed, MIB as usize).await
     }
     .await;
-    drop(dev);
-    let d = e.detach(&id).await;
-    let del = delete_volume(&e, &id).await;
-    r.and(d).and(del)?;
+    let detached = e.detach(&id).await;
+    let deleted = delete_volume(&e, &id).await;
+    used?;
+    detached?;
+    deleted?;
     Ok(t.elapsed().as_millis() as u64)
 }
 
@@ -62,7 +65,11 @@ pub async fn run(env: &Env, r: &mut Report) -> Result<(), String> {
     let cpus = std::thread::available_parallelism().map(|n| n.get() as u64).unwrap_or(2);
     let mem = memory_mib();
     // Four volumes in flight per CPU, a volume per 64 MiB of memory, 4..=64.
-    let wave = (cpus * 4).min(mem / 64).clamp(4, 64);
+    let mut wave = (cpus * 4).min(mem / 64).clamp(4, 64);
+    // A runner (or a shared box) can cap it.
+    if let Some(cap) = std::env::var("STORM_WAVE_MAX").ok().and_then(|v| v.parse::<u64>().ok()) {
+        wave = wave.min(cap.max(1));
+    }
     // The window, less a margin to clean up and report.
     let window = env.timeout.saturating_sub(Duration::from_secs(600)).max(Duration::from_secs(60));
 

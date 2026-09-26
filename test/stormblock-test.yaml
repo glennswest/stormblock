@@ -17,7 +17,8 @@
 #   resources: medium needs ~1.5 GiB and long ~8 GiB of the results volume,
 #             sparse (what is written is far less). long sizes its waves from
 #             the pod's CPUs and memory limit: 4 volumes in flight per CPU, one
-#             per 64 MiB, 4 to 64.
+#             per 64 MiB, 4 to 64;
+#             STORM_WAVE_MAX caps it.
 #
 # The runner creates the namespace test-stormblock-<suite>-<run id>, fills in
 # NAMESPACE / RUN_ID / NODE / SUITE / TIMEOUT / TIMEOUT_PLUS_MARGIN / COMMIT /
