@@ -2579,6 +2579,153 @@ mod redundancy_tests {
         d
     }
 
+    /// A general slab and an array's dedicated slab (#150): the pool never
+    /// allocates on the array, a volume pinned to it never allocates
+    /// anywhere else — nor does its clone — and the array cannot be removed
+    /// out from under its volumes.
+    #[tokio::test]
+    async fn a_pinned_volume_lives_on_its_array_and_nothing_else_does() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let (general, _) = file_slab(&d, "general", slot).await;
+        let gid = general.slab_id();
+        mgr.add_slab(general).await;
+        let array = RaidArrayId(uuid::Uuid::new_v4());
+        let adev = FileDevice::open_with_capacity(d.join("array.bin").to_str().unwrap(), 4 * 1024 * 1024).await.unwrap();
+        let aslab = mgr.add_dedicated_array(array, Arc::new(adev)).await.unwrap();
+        {
+            let reg = mgr.registry().read().await;
+            assert!(reg.is_dedicated(&aslab) && !reg.is_dedicated(&gid));
+            assert_eq!(reg.role_of(&aslab), SlabRole::Data);
+            assert!(reg.get(&aslab).unwrap().has_metadata_region());
+        }
+
+        // Unpinned volumes fill the general slab and never touch the array,
+        // though the array is the emptier of the two once the general slab
+        // is filling up.
+        let plain = mgr.create_volume_any("plain", 1 << 20).await.unwrap();
+        let data_plain = mgr.create_volume_with("data-plain", 1 << 20, CreateOptions::default().in_role(SlabRole::Data)).await.unwrap();
+        let pv = mgr.get_volume(&plain).unwrap();
+        for i in 0..64u64 {
+            pv.write(i * slot, &[1u8; 4096]).await.unwrap();
+        }
+        // A data volume with no general data slab has nowhere to go: the
+        // dedicated slab is not one.
+        assert!(mgr.get_volume(&data_plain).unwrap().write(0, &[2u8; 4096]).await.is_err());
+
+        let pinned = mgr.create_volume("mirror-vol", 1 << 20, array).await.unwrap();
+        assert_eq!(mgr.get_volume_handle(&pinned).unwrap().pinned_slab(), Some(aslab));
+        assert_eq!(mgr.volume_role(&pinned), Some(SlabRole::Data));
+        let v = mgr.get_volume(&pinned).unwrap();
+        for i in 0..16u64 {
+            v.write(i * slot, &vec![0x40 + i as u8; 4096]).await.unwrap();
+        }
+        let clone = mgr.create_snapshot(pinned, "clone").await.unwrap();
+        let cv = mgr.get_volume(&clone).unwrap();
+        for i in 0..4u64 {
+            cv.write(i * slot, &[0x99; 4096]).await.unwrap();
+        }
+        {
+            let gem = mgr.gem().read().await;
+            for id in [pinned, clone] {
+                assert!(gem.get_volume_map(&id).unwrap().all_legs().all(|l| l.slab_id == aslab), "{id:?} left its array");
+            }
+            assert!(gem.get_volume_map(&plain).unwrap().all_legs().all(|l| l.slab_id == gid), "the pool used the array");
+        }
+        let mut buf = vec![0u8; 4096];
+        v.read(5 * slot, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0x45));
+
+        // A pin carries the array's redundancy and nothing else.
+        assert!(mgr
+            .create_volume_with("m2", 1 << 20, CreateOptions { redundancy: RedundancyPolicy::mirror(2), ..CreateOptions::pinned_to(aslab) })
+            .await
+            .is_err());
+
+        // Full is full: the pinned volume is refused, never spilled.
+        let big = mgr.create_volume("big", 64 << 20, array).await.unwrap();
+        let bv = mgr.get_volume(&big).unwrap();
+        let mut refused = false;
+        for i in 0..2048u64 {
+            if bv.write(i * slot, &[3u8; 4096]).await.is_err() {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "the array never filled");
+        assert!(mgr.gem().read().await.get_volume_map(&big).unwrap().all_legs().all(|l| l.slab_id == aslab));
+
+        // The array's own record carries its volumes and nobody else's.
+        mgr.persist().await;
+        {
+            let reg = mgr.registry().read().await;
+            let bytes = reg.get(&aslab).unwrap().read_metadata().await.unwrap().unwrap();
+            let doc = MetadataStore::decode(&bytes).unwrap();
+            let mut names: Vec<String> = doc.volumes.iter().map(|v| v.name.clone()).collect();
+            names.sort();
+            assert_eq!(names, vec!["big", "clone", "mirror-vol"]);
+            assert!(doc.volumes.iter().all(|v| v.array_id == Some(array)));
+            assert_eq!(doc.arrays.len(), 1);
+            assert_eq!(doc.arrays[0].array_id, array);
+        }
+
+        // Removal waits for every volume on it.
+        assert!(mgr.remove_array(&array).await.is_err());
+        let names: Vec<String> = mgr.volumes_on_slab(aslab).await.into_iter().map(|(_, n, _)| n).collect();
+        assert_eq!(names, vec!["big", "clone", "mirror-vol"]);
+        for id in [clone, pinned, big] {
+            mgr.delete_volume(id).await.unwrap();
+        }
+        mgr.remove_array(&array).await.unwrap();
+        assert!(mgr.registry().read().await.get(&aslab).is_none(), "the slab went with the array");
+        assert!(!mgr.is_metadata_slab(&aslab));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A new head that reassembles the members adopts the array's slab: it is
+    /// still dedicated (the flag is on disk), the volume comes back, and it is
+    /// still pinned (the array is named in the slab's own record).
+    #[tokio::test]
+    async fn an_adopted_array_slab_keeps_its_pins_and_its_dedication() {
+        let d = dir();
+        let slot = 4096u64;
+        let path = d.join("array.bin");
+        let array = RaidArrayId(uuid::Uuid::new_v4());
+        let (aslab, pinned) = {
+            let mut mgr = VolumeManager::new(slot);
+            let dev = FileDevice::open_with_capacity(path.to_str().unwrap(), 4 * 1024 * 1024).await.unwrap();
+            let aslab = mgr.add_dedicated_array(array, Arc::new(dev)).await.unwrap();
+            let pinned = mgr.create_volume("pv", 1 << 20, array).await.unwrap();
+            mgr.get_volume(&pinned).unwrap().write(0, &[7u8; 4096]).await.unwrap();
+            mgr.persist().await;
+            (aslab, pinned)
+        };
+
+        let mut head = VolumeManager::new(slot);
+        let (general, _) = file_slab(&d, "general", slot).await;
+        head.add_slab(general).await;
+        let dev = FileDevice::open(path.to_str().unwrap()).await.unwrap();
+        let slab = Slab::open(Arc::new(dev)).await.unwrap();
+        assert!(slab.is_dedicated());
+        let report = head
+            .adopt_slabs(vec![crate::drive::discover::FoundSlab { label: "array".into(), slab }])
+            .await
+            .unwrap();
+        assert_eq!(report.volumes.len(), 1);
+        assert!(head.registry().read().await.is_dedicated(&aslab));
+        assert_eq!(head.array_slab(&array), Some(aslab));
+        let h = head.get_volume_handle(&pinned).unwrap();
+        assert_eq!(h.pinned_slab(), Some(aslab), "still pinned after adoption");
+        let mut buf = vec![0u8; 4096];
+        h.read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 7));
+        // New writes stay on the array; the general slab is not a fallback.
+        h.write(8 * slot, &[8u8; 4096]).await.unwrap();
+        assert!(head.gem().read().await.get_volume_map(&pinned).unwrap().all_legs().all(|l| l.slab_id == aslab));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[tokio::test]
     async fn create_refuses_a_policy_the_node_cannot_place() {
         let d = dir();
