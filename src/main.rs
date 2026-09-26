@@ -4467,51 +4467,6 @@ async fn handle_adopt_ublk(
     };
     let meta = meta.or(record.as_ref().and_then(|r| r.meta.as_deref()));
 
-    let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
-
-    // The drive this boot laid keeps the records first, as it does in the
-    // engine that laid it (#118). The slabs open in handover order, appliance
-    // first, and a volume with no extents yet is recorded in the first
-    // metadata slab of its role. A PVC created and not yet written would
-    // otherwise exist only on a clone the next boot does not attach.
-    if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.as_ref()) {
-        let local: Vec<stormblock::drive::slab::SlabId> = [&flow.data_slab, &flow.system_slab]
-            .into_iter()
-            .filter_map(|s| uuid::Uuid::parse_str(s).ok())
-            .map(stormblock::drive::slab::SlabId)
-            .filter(|id| mgr.is_metadata_slab(id))
-            .collect();
-        if !local.is_empty() {
-            mgr.keep_metadata_in_first(&local);
-        }
-    }
-
-    // Resolve every volume before adopting anything. A name that does not
-    // resolve should cost nothing — half-adopting a set of devices leaves the
-    // node with some queues served and some not, which is worse than not
-    // starting.
-    let mut serving: Vec<(u32, String, Arc<dyn BlockDevice>)> = Vec::new();
-    // Which volume each adopted device is, for the API's "in use" (#138).
-    let mut adopted_ids: Vec<(u32, uuid::Uuid)> = Vec::new();
-    for (i, selector) in volumes.iter().enumerate() {
-        let id = resolve_boot_volume(&mgr, selector).await?;
-        adopted_ids.push((i as u32, id.0));
-        let name = mgr
-            .get_volume_handle(&id)
-            .expect("resolved volume exists")
-            .name()
-            .await;
-        let dev = mgr.get_volume(&id).expect("resolved volume exists");
-        serving.push((i as u32, name, dev));
-    }
-
-    for (dev_id, name, dev) in &serving {
-        println!(
-            "  adopting /dev/ublkb{dev_id} ← {name} ({})",
-            stormblock::mgmt::config::human_size(dev.capacity_bytes())
-        );
-    }
-
     // Lock this process into RAM before anything else.
     //
     // The engine is about to stop the server that is exporting **its own
@@ -4539,7 +4494,9 @@ async fn handle_adopt_ublk(
     // one server per device, so this is the handover's first step rather than
     // an afterthought — and the kernel is asked who the incumbent is, because
     // it is the only party that actually knows.
-    let dev_ids: Vec<u32> = serving.iter().map(|(id, ..)| *id).collect();
+    // Device n serves the nth volume of the record: the ids are known
+    // without reading anything from the slabs.
+    let dev_ids: Vec<u32> = (0..volumes.len() as u32).collect();
 
     // Refuse a handover that would abandon devices.
     //
@@ -4565,7 +4522,69 @@ async fn handle_adopt_ublk(
         );
     }
 
-    stormblock::drive::ublk::stand_down(&dev_ids, std::time::Duration::from_secs(15))?;
+    // Stand the incumbent down and wait for it to be gone, THEN read the
+    // slabs (#171). ublk recovery holds every device's I/O in the gap.
+    let (mgr, serving, adopted_ids) = stormblock::drive::handover::take_over(
+        || async {
+            let ids = dev_ids.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let pids = stormblock::drive::ublk::stand_down(&ids, std::time::Duration::from_secs(15))?;
+                stormblock::drive::ublk::wait_exited(&pids, std::time::Duration::from_secs(30));
+                Ok(())
+            })
+            .await??;
+            Ok(())
+        },
+        || async {
+            let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
+
+            // The drive this boot laid keeps the records first, as it does in the
+            // engine that laid it (#118). The slabs open in handover order, appliance
+            // first, and a volume with no extents yet is recorded in the first
+            // metadata slab of its role. A PVC created and not yet written would
+            // otherwise exist only on a clone the next boot does not attach.
+            if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.as_ref()) {
+                let local: Vec<stormblock::drive::slab::SlabId> = [&flow.data_slab, &flow.system_slab]
+                    .into_iter()
+                    .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                    .map(stormblock::drive::slab::SlabId)
+                    .filter(|id| mgr.is_metadata_slab(id))
+                    .collect();
+                if !local.is_empty() {
+                    mgr.keep_metadata_in_first(&local);
+                }
+            }
+
+            // Resolve every volume before serving any. The incumbent is gone by
+            // now, so a name that does not resolve leaves the devices held in
+            // recovery with no server — loud, and retryable by running this
+            // again — where half-adopting a set would serve some queues and
+            // not others.
+            let mut serving: Vec<(u32, String, Arc<dyn BlockDevice>)> = Vec::new();
+            // Which volume each adopted device is, for the API's "in use" (#138).
+            let mut adopted_ids: Vec<(u32, uuid::Uuid)> = Vec::new();
+            for (i, selector) in volumes.iter().enumerate() {
+                let id = resolve_boot_volume(&mgr, selector).await?;
+                adopted_ids.push((i as u32, id.0));
+                let name = mgr
+                    .get_volume_handle(&id)
+                    .expect("resolved volume exists")
+                    .name()
+                    .await;
+                let dev = mgr.get_volume(&id).expect("resolved volume exists");
+                serving.push((i as u32, name, dev));
+            }
+
+            for (dev_id, name, dev) in &serving {
+                println!(
+                    "  adopting /dev/ublkb{dev_id} ← {name} ({})",
+                    stormblock::mgmt::config::human_size(dev.capacity_bytes())
+                );
+            }
+            Ok((mgr, serving, adopted_ids))
+        },
+    )
+    .await?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut threads = Vec::new();

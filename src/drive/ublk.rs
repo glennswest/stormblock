@@ -1188,7 +1188,7 @@ pub fn also_served_by(dev_ids: &[u32]) -> DriveResult<Vec<u32>> {
     Ok(orphans)
 }
 
-pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()> {
+pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<Vec<i32>> {
     let mut pids: Vec<i32> = Vec::new();
     for &id in dev_ids {
         if let Some(pid) = server_pid(id)? {
@@ -1216,7 +1216,7 @@ pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()
         }
     }
     if pids.is_empty() {
-        return Ok(());
+        return Ok(pids);
     }
 
     for &pid in &pids {
@@ -1246,7 +1246,7 @@ pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()
             .collect();
         if pending.is_empty() {
             tracing::info!("ublk: {} device(s) quiesced and ready to adopt", dev_ids.len());
-            return Ok(());
+            return Ok(pids);
         }
 
         if std::time::Instant::now() >= deadline {
@@ -1279,7 +1279,56 @@ pub fn stand_down(dev_ids: &[u32], grace: std::time::Duration) -> DriveResult<()
                 pending.len(),
                 pending.iter().map(|d| format!("/dev/ublkb{d}")).collect::<Vec<_>>().join(", ")
             );
-            return Ok(());
+            return Ok(pids);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Wait for the servers `stand_down` signalled to be gone (#171).
+///
+/// A handover reads the slabs only after this: the incumbent flushes and
+/// writes its records and slot-table entries on its way out, and anything it
+/// allocated after a successor had read the slabs would be missing from the
+/// successor's map — its slots looking free, to be handed out again. ublk
+/// recovery holds the devices' I/O meanwhile, so waiting costs latency, never
+/// data. A zombie has exited (its parent reaps it on its own time). After
+/// `grace` a server still running is killed: everything it acknowledged is
+/// already on the media, and the successor reconciles the rest.
+pub fn wait_exited(pids: &[i32], grace: std::time::Duration) {
+    let gone = |pid: i32| -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            // `pid (comm) S ...` — the state follows the last ')'.
+            Ok(stat) => stat.rsplit_once(')').and_then(|(_, r)| r.trim_start().chars().next()) == Some('Z'),
+        }
+    };
+    let started = std::time::Instant::now();
+    let mut killed = false;
+    loop {
+        let alive: Vec<i32> = pids.iter().copied().filter(|&p| !gone(p)).collect();
+        if alive.is_empty() {
+            if !pids.is_empty() {
+                tracing::info!(
+                    "ublk: the previous server has exited ({:.1}s); reading the slabs",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            return;
+        }
+        if started.elapsed() >= grace {
+            if killed {
+                tracing::warn!("ublk: server(s) {alive:?} still present after SIGKILL; reading the slabs anyway");
+                return;
+            }
+            for pid in &alive {
+                tracing::warn!("ublk: server {pid} has not exited after {}s; killing it", grace.as_secs());
+                // SAFETY: a pid the kernel named as a device's server.
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
+            killed = true;
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            continue;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

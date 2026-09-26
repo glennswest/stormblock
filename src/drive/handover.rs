@@ -129,6 +129,27 @@ impl Record {
     }
 }
 
+/// The order of a handover (#171): the incumbent is stood down and gone
+/// **before** the successor reads anything from the slabs.
+///
+/// The other order — restore, then stand down — left a window in which the
+/// incumbent kept serving: every slot it allocated there was missing from the
+/// successor's map, looked free to it, and could be handed out again, and the
+/// incumbent's shutdown rewrote slot-table sectors from its own, older copy.
+/// Nothing showed until a restore after a power cut. The cost of this order
+/// is that a successor that then fails to restore leaves the devices held in
+/// recovery with no server, which is loud, rather than silently wrong.
+pub async fn take_over<T, SD, SDF, R, RF>(stand_down: SD, restore: R) -> anyhow::Result<T>
+where
+    SD: FnOnce() -> SDF,
+    SDF: std::future::Future<Output = anyhow::Result<()>>,
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = anyhow::Result<T>>,
+{
+    stand_down().await?;
+    restore().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
