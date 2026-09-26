@@ -1204,13 +1204,6 @@ async fn attach_volume(
     let nsid = super::v1::ensure_nvme_namespace(&state, &key, Some(uuid)).await;
     #[cfg(not(feature = "nvmeof"))]
     let nsid = None;
-    // Asked for the network, and there is no namespace to connect to: say so
-    // rather than hand back coordinates with nothing behind them (#149).
-    if want == WantTransport::NvmeTcp && nsid.is_none() {
-        return ApiError::conflict(format!(
-            "volume {uuid} cannot be served over nvme_tcp: this node runs no NVMe-oF target"
-        ));
-    }
     Json(super::v1::attach_info_for(&state, nsid)).into_response()
 }
 

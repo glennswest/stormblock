@@ -18,8 +18,8 @@
   attachment is not recorded. `ublk` insists, or 409. Additive: callers that
   send no transport are unchanged.
 - **refactor(api):** `POST /api/v1/volumes/{id}/attach` parses `transport`
-  with the same parser, and an explicit `nvme_tcp` there also refuses (409)
-  rather than returning coordinates with no namespace behind them.
+  with the same parser, and now also accepts the spelling `nvme_tcp`. Its
+  answers are unchanged.
 
 ## [v19.0.0] — 2026-09-26
 
