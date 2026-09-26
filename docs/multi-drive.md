@@ -106,7 +106,8 @@ DELETE /api/v1/arrays/{id} → 409 while any volume is on it; otherwise removes 
 | `raid5:D+1`, `raid6:D+2` | data legs and P/Q legs likewise, every member of a stripe on its own domain |
 
 A volume's placement is visible per slab and per drive (`placement` on
-`GET /api/v1/volumes/{id}`, #136). The console's Volumes view reads it.
+`GET /api/v1/volumes/{id}`, #136), for the console's Volumes view to read
+(stormconsole#29; the console does not read it yet).
 
 ### Failure domains
 
@@ -156,16 +157,24 @@ built.)*
 ## 3. Policy: what a claim asks for
 
 A claim's placement is the volume's policy, and it should come from the
-StorageClass. **Nothing carries it today:**
+StorageClass. On stormcos a claim of class `stormblock` is served by the
+**built-in PVC driver**: the kubelet (rustkube-node) rounds it up to a size
+class, CoW-clones the sealed blank of that class (`pvc-ext4j-<MiB>m`) through
+`/api/v1/fstemplates/{id}/clone`, and attaches it over ublk — no mkfs, no copy,
+no CSI. CSI (stormblock-csi, `/v1`) exists only for third-party drivers.
+**Nothing carries a policy today:**
 
-* stormblock-csi reads `qosClass`, `bandwidthClass`, `encrypted` and
-  `replicaSlaves`, and `/v1` volume create has no redundancy field.
 * rustkube-node reads no StorageClass parameters for the built-in driver. It
   mints size-class blanks with no redundancy, so every PVC is `none`.
+* stormblock-csi, for third-party use, reads `stormblock.io/qosClass`,
+  `stormblock.io/bandwidthClass`, `stormblock.io/encrypted` and
+  `stormblock.io/replicaSlaves`, and `/v1` volume create has no redundancy
+  field.
 * The engine already accepts `redundancy` on `POST /api/v1/volumes` and
   `POST /api/v1/fstemplates`, and **a clone inherits its golden's policy**.
 
-**Proposed parameters** (the same names on both drivers):
+**Proposed parameters** (the built-in driver's, with the same names offered
+to stormblock-csi):
 
 | parameter | values | default |
 |---|---|---|
@@ -206,6 +215,8 @@ automatic pass after a drive is added.
 
 ## 5. Capacity and overcommit
 
+**Status: design (#152), not implemented.**
+
 Thin volumes promise more than the pool holds. That is their purpose, and
 nothing bounds it today. The only check is `/v1` create's `free_bytes >=
 size` against free space at that moment. A write that finds no slot fails
@@ -226,6 +237,8 @@ back to the host (NVMe `CAPACITY_EXCEEDED`, SCSI `SPACE ALLOCATION FAILED`).
   `/metrics`: committed, written and free.
 
 ## 6. What the console shows
+
+**Status: design (stormconsole#29).**
 
 * **Drives:** identity (serial, WWN, model), where it is (shelf, bay, hba),
   health, its slabs and how full each is, overcommit setting, and a drain in
@@ -261,7 +274,7 @@ above ran on files.
 | overcommit per drive → pool admission and headroom | stormblock #152, stormdrive #13, rustkube-node #62 |
 | drive affinity for non-redundant volumes *(decision 1)* | stormblock #153 |
 | a new drive: slab by policy, then rebalance onto it *(decision 3)*; `POST /slabs/rebalance`; drain rate limit | stormblock #154 |
-| Drives and Pools pages | stormconsole #29 (and #32 at 160 drives) |
+| Drives and Pools pages | stormconsole #29 (#32, 160 drives, is closed) |
 | drive-level RAID failure states — only for whole-device legs now | stormblock #69 |
 | replicas on other servers (a different axis: across nodes) | rustkube-node #68 |
 

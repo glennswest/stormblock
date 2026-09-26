@@ -23,7 +23,12 @@ drives on VM disks, no tuning, iodepth=16, 20s per job.
 
 Data-path verify: 8 MB random pattern written with O_DIRECT, read back, byte-compared — per node.
 
-**Production note:** clients never drive `nvme connect` by hand — attach goes
-through stormblock-csi against the `/v1` API (`POST /v1/volumes/{id}/attach` →
-`AttachInfo{nqn, addresses}`). This harness validates the data path underneath
-that flow; wiring `/v1` attach to real per-volume namespaces is the #5–#7 track.
+**Production note (updated 2026-09-26, #131):** nothing drives `nvme connect` by
+hand. On stormcos a `stormblock` claim is the built-in PVC driver: the kubelet
+CoW-clones a sealed blank of the claim's size class and attaches it over ublk
+through `POST /api/v1/volumes/{id}/attach` — no CSI. `/v1` (`POST
+/v1/volumes/{id}/attach` → `AttachInfo`, tagged `transport`: `nvme_tcp` with
+`nqn`, `addresses`, `nsid`, or `ublk`) serves third-party CSI drivers and
+orchestrators such as stormstorage. This harness measured the data path
+underneath either, on file-backed drives before block devices went O_DIRECT
+(#140), at roughly v6.

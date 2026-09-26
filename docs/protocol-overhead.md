@@ -1,7 +1,10 @@
 # Connection and protocol overhead: iSCSI vs NVMe-oF/TCP
 
 Measured 2026-08-11 against stormblock 7.1.0 serving both targets from one
-node, with real kernel initiators (`iscsi_tcp`, `nvme_tcp`).
+node, with real kernel initiators (`iscsi_tcp`, `nvme_tcp`). A dated
+measurement: since v17 the management API also needs a bearer token
+(`docs/auth.md`), which the reproduction below predates; the targets
+themselves are unaffected.
 
 **Topology.** Target `sb-node1` (192.168.8.181), initiator `sb-node2`
 (192.168.8.182), both Proxmox VMs on pve.g8.lo, 2 vCPU / 2 GB, over the
@@ -110,7 +113,8 @@ Connection cost is the smaller half of the argument. The I/O path is the rest:
 - **Queueing.** A SCSI/iSCSI session carries a single command window: every
   command takes a CmdSN, and the target advertises `MaxCmdSN`/`ExpCmdSN` as one
   sliding window shared by the whole session. Parallelism has to come from
-  MC/S (rarely deployed well — stormblock's own gap is #31) or from multiple
+  MC/S (rarely deployed well; stormblock's target has negotiated it since #31,
+`[iscsi] max_connections`, default 4) or from multiple
   sessions plus dm-multipath. NVMe defines up to 64K queues of up to 64K
   entries, conventionally one queue pair per CPU core, with no cross-queue
   ordering and no shared sequence number. This node negotiated 2 I/O queues for
@@ -124,7 +128,9 @@ Connection cost is the smaller half of the argument. The I/O path is the rest:
   even issue UNMAP — the omission of which was the root cause of #25's
   monotonic growth.
 - **Multipath.** ANA is part of the protocol; iSCSI needs dm-multipath and
-  ALUA glued on top, with its own settle time.
+  ALUA glued on top, with its own settle time. (A statement about the
+  protocols: stormblock's NVMe-oF target implements no ANA; its iSCSI target
+  does implement ALUA.)
 - **Hot-add.** Namespaces can appear and disappear on a live controller via
   AEN + Changed Namespace List. iSCSI's equivalent is a LUN rescan.
 
@@ -147,8 +153,10 @@ state does not exercise. The realistic candidates:
   adds its own settle before a usable path exists.
 - **Discovery against a portal advertising many targets.** SendTargets returns
   every target; a login per returned target multiplies the 91 ms figure.
-- **Layers above the transport** — CSI, kubelet volume manager, and their own
-  retry backoffs, which are typically measured in seconds by design.
+- **Layers above the transport** — for a third-party CSI driver, CSI and the
+  kubelet volume manager, with their own retry backoffs, typically measured in
+  seconds by design. (stormcos's own `stormblock` claims have no CSI stage:
+  the kubelet attaches the clone over ublk.)
 
 Distinguishing these needs a trace of the slow case rather than a
 steady-state benchmark: `iscsiadm -m session -P 3`, `journalctl -u iscsid`, and

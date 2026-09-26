@@ -51,7 +51,8 @@ ever presents a minted token to an engine on its own machine.
 ### Destructive verbs
 
 `admin_token` splits the surface in two. What counts as destructive is decided
-in `serve::api::is_destructive`: every `DELETE`, sealing a template, writing
+in `serve::api::is_destructive`: every `DELETE`, any path ending in `/seal`
+(a volume's or a template's, whatever the method), writing
 files or a tar into a volume's filesystem, `?repair=true` on an fsck,
 `?apply` on a trim, and a slab GC that is not a dry run. Everything else takes
 either token.
@@ -63,7 +64,8 @@ either token.
   it, before it has any credential; a 401 there is indistinguishable from "not
   an appliance" and drops a booting node to a shell. It answers a constant:
   name, version, and whether a token is required.
-* `/serve/v1/health`, `/serve/v1/ready` — supervisor probes.
+* `/serve/v1/health`, `/serve/v1/ready` — supervisor probes, and the same two
+  under the deprecated `/mk/v1` prefix.
 * `POST /api/v1/synonyms/boothost/<tag>/claim` — the boot claim, matched
   exactly (one method, that namespace, one path segment). The re-point beside
   it, `PUT /api/v1/synonyms/boothost/<tag>`, is what decides what a machine

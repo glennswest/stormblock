@@ -54,7 +54,7 @@ background, after root is up. `/init` picks that drive today from
 
 | policy | takes |
 |---|---|
-| `any` (default) | any drive that is not already a stormblock slab |
+| `any` (default) | any drive that is not already a stormblock slab; also this node's own layout (updated in place, below) and a drive carrying only system slabs, which holds no identity (#118) |
 | `blank` | a drive with no slab and no partition table |
 | `off` | nothing |
 | `force` | a drive even when it is one of ours, destroying the identity on it |
@@ -82,9 +82,9 @@ on it is not garbage. Three cases, and they get three answers:
 | the drive | what happens |
 |---|---|
 | this node's own layout — a data half and a system half | **updated**: the system half is formatted afresh for the new goldens, the data half is opened and kept, and the node boots normally with the identity it already had. This is what an install *is*, and it needs no `force`. |
-| the same, already holding what this boot carries | **nothing at all.** The system half's own record is read offline and compared by volume id; if it already holds everything this boot would copy, it is left exactly as it is and the node boots from it. An update that has nothing to update must not reformat a working half and re-copy the same bytes. |
+| the same, already holding what this boot carries, and able to boot on its own | **nothing at all.** The system half's own record is read offline and compared by volume id; if it already holds everything this boot would copy, it is left exactly as it is and the node boots from it. An update that has nothing to update must not reformat a working half and re-copy the same bytes. |
 | a lone data slab | refused. That is an install abandoned part-way, and it is indistinguishable from a live node's identity — `--local-disk-force` is the deliberate act for a drive whose identity is spent. |
-| a lone system slab | left alone; the policy is about drives that are nobody's. |
+| a lone system slab | **taken** under `any` and `force` (no identity lives on it; fresh slabs are laid over it), left alone under `blank`. |
 
 The data half holds this node's CA key and its ServiceAccount signing key, and
 nothing can mint those again — which is why it is opened rather than assumed:
@@ -125,9 +125,11 @@ by definition not the blank one a hook offered.
 `/init` refuses a decision it cannot act on, logs why, and moves to the next
 hook — and with no hook left, the ordinary probe decides:
 
-- exit 0 with no `ZB_SLAB`, or a `ZB_SLAB` that is not on this machine;
-- exit 0 with an `ZB_ACTION` that says something other than `boot-local`;
-- any other exit status.
+- exit 0 with no `ZB_SLAB`, or a local `ZB_SLAB` that is not on this machine
+  (a URI, `*://*`, is not checked for existence);
+- exit 0 with a `ZB_ACTION` other than `boot-local` or empty;
+- any other exit status. Exit 2 means ask-appliance whatever `ZB_ACTION`
+  says.
 
 The failure this avoids is trading the appliance fallback — which works — for
 a boot that commits and then drops to an initramfs shell.

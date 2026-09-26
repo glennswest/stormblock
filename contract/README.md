@@ -1,6 +1,8 @@
 # Engine `/v1` wire-contract fixtures
 
-**Vendored from [stormblock-csi](https://github.com/glennswest/stormblock-csi/tree/main/contract)** — these files are one pin held on two sides (#34, stormblock-csi#8). `tests/contract_v1_wire.rs` round-trips every one of them through the serde types in `src/mgmt/api/v1.rs`, so a field rename, a tag change or a dropped `skip_serializing_if` fails `cargo test` here. Changing the wire means changing the fixture in **both** repos; a change landed in only one fails that repo's build, which is the point.
+**Vendored from [stormblock-csi](https://github.com/glennswest/stormblock-csi/tree/main/contract)** — these files are one pin held on two sides (#34, stormblock-csi#8). `tests/contract_v1_wire.rs` round-trips every wire type through the serde types in `src/mgmt/api/v1.rs`, and checks the two error envelopes by shape (key set, `code`, `current_epoch`) against what `V1Error` produces, so a field rename, a tag change or a dropped `skip_serializing_if` fails `cargo test` here. Changing the wire means changing the fixture in **both** repos; a change landed in only one fails that repo's build, which is the point.
+
+**Engine-only extensions** the shared fixtures do not pin, because the CSI driver does not send or read them: `CreateVolumeRequest.placement` (#150), `AttachRequest.transport` (#149; stormblock-csi#22 asks to add it upstream) and `NodeCapacity.topology_chain` (#72). All are optional and skipped when empty, so the fixtures still round-trip — but "every field set" below is no longer true on this side. `docs/stormblock-api.md` lives in stormblock-csi, not here.
 
 The rest of this file is the upstream README, kept as copied.
 

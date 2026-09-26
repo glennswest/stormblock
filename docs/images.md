@@ -599,7 +599,7 @@ profile inherits it rather than forking it.
 | Method | Path | |
 |---|---|---|
 | POST | `/api/v1/images/build` | the spec plus `out`, `format`, `keep_raw`, `include_slab` |
-| POST | `/api/v1/images/convert` | `{in, out, format, include_slab}` |
+| POST | `/api/v1/images/convert` | `{input, out, format, include_slab}` |
 | POST | `/api/v1/images/inspect` | `{path}` → the GPT and the pallets in it |
 | GET | `/api/v1/images/formats` | what can be written |
 

@@ -158,10 +158,10 @@ superblock's own flags already agree.
 ```
 
 `written_bytes` is zero. The second node of the same layout reports
-`gpt_minted: false` and the same `partuuid`s. Note that `allocated_bytes` on
-a composed volume counts what it *maps*, shared or not; the slab's free-slot
-count is the number that says whether anything was written, and it does not
-move. The result
+`gpt_minted: false` and the same `partuuid`s. On the volume itself,
+`allocated_bytes` counts only the extents this volume holds alone and
+`shared_bytes` what it shares (since 5e4e5d3), so a composed disk that wrote
+nothing reports `allocated_bytes` near zero. The result
 is read back through the map — `Gpt::read` finds both headers, each pallet
 partition's manifest checks — before it is returned; the disk is recorded as
 `fs.kind = gpt` with its GUID, and is left *unsealed*: it is a node's disk and
@@ -200,7 +200,7 @@ POST /api/v1/volumes/compose/slab
   "goldens": [
     {"name": "stormpump", "volume": "blob-4aee70b9abacec1e"},
     {"name": "fedora",    "volume": "blob-97dce83fad0cf113"},
-    {"name": "pvc-1G",    "volume": "blob-f5752972260b0bea", "template": true}
+    {"name": "pvc-ext4j-1024m", "volume": "blob-f5752972260b0bea", "template": true}
   ]
 }
 ```

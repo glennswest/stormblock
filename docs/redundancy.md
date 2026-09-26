@@ -66,11 +66,13 @@ target all report `SB010A` on dev), and they are told apart by WWN in each
 slab's `drive`.
 
 ```bash
+# Every call but the boot claim carries the node's token (docs/auth.md):
+# -H "Authorization: Bearer $(cat /var/lib/stormblock/api_token)"
 # stormdrive (#70) resolves shelf/bay/hba from SES and sysfs and registers
 # the drive with them; every slab on it inherits the chain.
-curl -X POST :8080/api/v1/drives -d '{"path":"/dev/sdb","labels":{"shelf":"NA1234","bay":"7","hba":"host3"}}'
-curl -X PUT  :8080/api/v1/drives/<id>/labels -d '{"labels":{"rack":"r2"}}'
-curl        :8080/api/v1/drives/<id>/slabs
+curl -X POST :9090/api/v1/drives -d '{"path":"/dev/sdb","labels":{"shelf":"NA1234","bay":"7","hba":"host3"}}'
+curl -X PUT  :9090/api/v1/drives/<id>/labels -d '{"labels":{"rack":"r2"}}'
+curl        :9090/api/v1/drives/<id>/slabs
 ```
 
 Empty chains are *unknown*, and unknown is treated as shared: a policy that
@@ -199,9 +201,9 @@ a drive and know how much is left" joins to stormdrive.
 ## Creating volumes
 
 ```bash
-curl -X POST :8080/api/v1/volumes -d '{"name":"app-data-1","size":"100G","redundancy":"mirror:2"}'
-curl -X POST :8080/api/v1/volumes -d '{"name":"db","size":"2T","redundancy":"raid5:4+1@shelf"}'
-curl -X POST :8080/api/v1/fstemplates -d '{"name":"golden","size":"4G","redundancy":"mirror:2", ...}'
+curl -X POST :9090/api/v1/volumes -d '{"name":"app-data-1","size":"100G","redundancy":"mirror:2"}'
+curl -X POST :9090/api/v1/volumes -d '{"name":"db","size":"2T","redundancy":"raid5:4+1@shelf"}'
+curl -X POST :9090/api/v1/fstemplates -d '{"name":"golden","size":"4G","redundancy":"mirror:2", ...}'
 ```
 
 With a policy `array_id` is not needed — the volume's extents pick their own
@@ -320,7 +322,7 @@ A health report of `degraded`, `failing`, `failed` or `missing` starts it; so
 can an operator:
 
 ```
-GET    /api/v1/rebuilds              → settings, queued, running, bytes_copied, jobs (newest first)
+GET    /api/v1/rebuilds              → settings, queued, running, bytes_copied, items (the jobs, newest first), count
 GET    /api/v1/rebuilds/{job}        → one job: every volume, its margin, state, legs, bytes, errors
 POST   /api/v1/rebuilds {"volumes":["pvc-a","…"]}   → these (by id or name); {} = every volume not healthy
 DELETE /api/v1/rebuilds/{job}        → stop it; what was rebuilt stays rebuilt
@@ -370,8 +372,6 @@ shelf are for.
   periodic scrub that compares mirror legs and parity on a schedule (#159,
   #160). `resync?verify=true` is the manual parity check.
 - A restripe of a volume with live writers (it is offline).
-- `[management].topology` still travels as a flat map to /v1 peers; only the
-  local node reports `topology_chain`.
 
 ## Whole-disk goldens: VM images, cloud images, ISOs
 

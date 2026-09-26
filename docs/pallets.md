@@ -263,6 +263,12 @@ partition = one pallet
 
 ### 2.7 The map: two levels, and the drive lives at the top
 
+**Status: design (#62), not implemented.** Nothing in `src/` builds an L1/L2
+map or a container descriptor. Read-through goldens were delivered a different
+way, by volumes that share slab extents (`docs/composed-disks.md`); this
+section and §2.8 are kept as the design for writable containers inside a
+pallet.
+
 A container can be 100 TiB. A flat map at 1 MiB units would be 104,857,600
 entries — 800 MB per container whether or not anything was written — so the map
 is two-level, and the level boundary is also where a pallet spans drives.
@@ -309,6 +315,8 @@ adding them changes no format.
 
 ### 2.8 A/B, per kind
 
+**Status: design (#62), not implemented.** See §2.7.
+
 The unit of replacement differs by what is being replaced, because a pallet is
 the thing you copy whole:
 
@@ -331,10 +339,10 @@ its GPT attributes, then pick the container by its descriptor — highest
 priority with tries left. The chosen container is what gets published, and what
 the kernel and command line are read out of.
 
-**Boot state is per node, not per copy.** `copy_pallet` resets it: a pallet
-arriving on another drive or another node starts with full tries and nothing
-marked successful, rather than inheriting a counter that meant something
-somewhere else.
+**Boot state travels with the copy today.** `copy_pallet` lands the copy at
+priority 0 and, once it verifies, applies the source's attributes unchanged
+(`src/pallet/manager.rs`, `copy_pallet`): tries and successful come across as
+they were. Resetting them per node is part of this design, not of the code.
 
 ### 2.9 Trust chain
 
@@ -394,8 +402,9 @@ Nothing is configured. Drives are opened and closed at runtime through
 turns up after the process did must not cost a restart, because restarting
 takes down every volume the node is serving. A drive carrying a slab is refused
 for closing, by asking the slab registry whether any slab's device *is* that
-device.
- `PalletStore` is handed drives and finds what is on them
+device, unless `?force=true` is passed.
+
+`PalletStore` is handed drives and finds what is on them
 by reading each GPT and each superblock. That is the only arrangement that
 survives the cases that matter — a disk moved between nodes, a pallet copied
 onto a spare, an image assembled elsewhere and written whole. A configured list
@@ -410,6 +419,7 @@ would have to be right about all of them.
 - **Selection spans drives.** The ladder is per kind across every drive, not per
   disk.
 - **A pallet can be on several drives at once** (#56): `copies` on publish
+  (`POST /api/v1/pallets`; the CLI's `pallet publish` has no such flag)
   puts the same name and version on N drives, each leg a complete candidate.
   The ladder sees N candidates with the same attributes and firmware's own
   boot order is the failover; `status` groups them, `resync` refills a lost
@@ -624,7 +634,9 @@ every request rather than cached, so nothing here can disagree with the disk.
 | GET | `/{id}` | one pallet and its members |
 | POST | `/` | publish (members from a volume, a file, or inline base64) |
 | POST | `/{id}/verify` | full check, per-member verdicts |
-| POST | `/{id}/activate` · `/{id}/successful` · `/rollback` | selection |
+| POST | `/{id}/activate` · `/{id}/successful` · `/rollback` `?kind=` | selection |
+| GET · PUT | `/mirrors` | the mirror policy: pallet name → copies |
+| POST | `/resync` | put every mirrored pallet on the drives it should be on |
 | POST | `/{id}/read-only` · `/{id}/sealed` | `{"value":bool,"force":bool}` |
 | POST | `/{id}/copy` · `/{id}/move` | `{"drive":"<path or index>"}` |
 | POST | `/{id}/recompose` | add/remove members as a new version |
@@ -715,9 +727,6 @@ Guaranteed, and asserted by tests:
 Not done here:
 
 - **Signing.** The format reserves the signed quantity; key handling is undecided.
-- **Volume-level sealed / read-only attach refusal** (#51 item 2) — a pallet
-  member is read-only by attribute, but the engine's volume attach path does not
-  yet refuse a writable attach of a sealed volume.
 - **Per-leg physical offsets** (#51 item 3) — moot for a *pallet* mirror,
   where each leg is a complete partition (see `docs/redundancy.md`, "Pallet-
   level mirror"); still open for a read-only consumer of a parity *volume*.
