@@ -537,6 +537,108 @@ async fn an_unnamed_claim_still_releases_the_clone_it_replaces() {
     server.abort();
 }
 
+/// A pile of old boot clones is collected by one claim (#127).
+///
+/// Forge had 60 `boothost-C2NR0Q2` volumes: a claim released only the one
+/// predecessor `find_volume` happened to meet, so once there were several —
+/// or that one was inside the double-claim grace — the rest stayed for good.
+#[tokio::test]
+async fn one_claim_collects_every_old_boot_clone_of_its_tag() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    std::sync::Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "PILE", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    // What forge had: clones of the release, all under the one name, from
+    // before claims made a host golden.
+    let mut pile = Vec::new();
+    for _ in 0..12 {
+        let id = state
+            .volume_manager
+            .lock().await
+            .create_snapshot(stormblock::volume::VolumeId(v1), "boothost-PILE")
+            .await
+            .unwrap();
+        pile.push(id);
+    }
+    // And one that merely shares the name: not a clone of anything this tag
+    // has booted, so it is not ours to delete.
+    let stranger = state.volume_manager.lock().await.create_volume_any("boothost-PILE", 1 << 20).await.unwrap();
+
+    let body = boot_claim(&client, &base, "PILE").await;
+    let released: Vec<String> = body["released"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    assert_eq!(released.len(), 12, "{body:#}");
+    for id in &pile {
+        assert!(released.contains(&id.0.to_string()));
+    }
+    assert_eq!(body["kept"], serde_json::json!([stranger.0.to_string()]));
+
+    let volumes: serde_json::Value = client.get(format!("{base}/api/v1/volumes")).send().await.unwrap().json().await.unwrap();
+    let left: Vec<&str> = volumes["items"]
+        .as_array().unwrap()
+        .iter()
+        .filter(|v| v["name"] == "boothost-PILE")
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+    let mut want = vec![body["volume"]["id"].as_str().unwrap(), stranger.0.to_string().leak() as &str];
+    want.sort();
+    let mut left = left;
+    left.sort();
+    assert_eq!(left, want, "the new boot clone, and the stranger");
+    server.abort();
+}
+
+/// With the real grace, the clones of this boot cycle stay and older ones go
+/// (#127, #97): firmware then initramfs claim seconds apart, and the next boot
+/// collects both.
+#[tokio::test]
+async fn a_claim_keeps_this_boots_clones_and_releases_the_rest() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    assert!(state.claim_grace >= std::time::Duration::from_secs(60));
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "GRACE", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    // Left from earlier boots: never claimed in this process, so not in grace.
+    let mut stale = Vec::new();
+    for _ in 0..3 {
+        stale.push(
+            state.volume_manager.lock().await
+                .create_snapshot(stormblock::volume::VolumeId(v1), "boothost-GRACE")
+                .await
+                .unwrap(),
+        );
+    }
+
+    let firmware = boot_claim(&client, &base, "GRACE").await;
+    let initramfs = boot_claim(&client, &base, "GRACE").await;
+
+    assert_eq!(firmware["released"].as_array().unwrap().len(), 3, "{firmware:#}");
+    assert_eq!(
+        initramfs["kept"],
+        serde_json::json!([firmware["volume"]["id"]]),
+        "the firmware's clone of this boot is within the grace: {initramfs:#}"
+    );
+    let vm = state.volume_manager.lock().await;
+    for s in &stale {
+        assert!(vm.get_volume_handle(s).is_none(), "an earlier boot's clone is gone");
+    }
+    assert!(vm.get_volume_handle(&vid(&firmware["volume"]["id"])).is_some());
+    assert!(vm.get_volume_handle(&vid(&initramfs["volume"]["id"])).is_some());
+    drop(vm);
+    server.abort();
+}
+
 /// Moving a machine to a new image releases the clone of the old one.
 ///
 /// The guard used to require the superseded clone's parent to be the golden

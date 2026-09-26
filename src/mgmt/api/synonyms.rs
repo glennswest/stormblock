@@ -479,7 +479,9 @@ fn lineage_of(syn: &synonym::Synonym, source: VolumeId) -> Vec<VolumeId> {
         .collect()
 }
 
-async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents: &[VolumeId]) {
+/// Release a clone a newer claim superseded, if every guard allows it.
+/// Returns whether it was released.
+async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents: &[VolumeId]) -> bool {
     // Still being booted from? A clone minted moments ago is the stage before
     // this one, not an abandoned predecessor.
     if let Some(age) = claimed_within_grace(old, state.claim_grace) {
@@ -489,21 +491,21 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
              probably still attached (#97)",
             age.as_secs()
         );
-        return;
+        return false;
     }
     {
         let store = state.synonyms.read().await;
         let named_by = store.pointing_at(&old);
         if !named_by.is_empty() {
             tracing::debug!(volume = %old, "superseded clone is still named; leaving it");
-            return;
+            return false;
         }
     }
     {
         let vm = state.volume_manager.lock().await;
         if vm.is_sealed(&old) {
             tracing::warn!(volume = %old, "refusing to release a sealed volume");
-            return;
+            return false;
         }
         // A clone of *anything this name has ever pointed at*, not only what
         // it points at now. Moving a machine to a new image is exactly when
@@ -516,7 +518,7 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
                 volume = %old,
                 "superseded volume is not a clone of anything this name has named; leaving it"
             );
-            return;
+            return false;
         }
     }
 
@@ -539,8 +541,14 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
 
     let mut vm = state.volume_manager.lock().await;
     match vm.delete_volume(old).await {
-        Ok(()) => tracing::info!(volume = %old, "released the clone this claim superseded"),
-        Err(e) => tracing::warn!(volume = %old, "could not release superseded clone: {e}"),
+        Ok(()) => {
+            tracing::info!(volume = %old, "released the clone this claim superseded");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(volume = %old, "could not release superseded clone: {e}");
+            false
+        }
     }
 }
 
@@ -727,7 +735,7 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // is what carried the clone name. They are the same volume whenever both
     // exist — the second is simply the one the boot path can see.
     if let Some(old) = superseded.or(predecessor).filter(|o| *o != c.volume_id) {
-        release_superseded_clone(&state, old, &lineage_of(&syn, source)).await;
+        let _ = release_superseded_clone(&state, old, &lineage_of(&syn, source)).await;
     }
 
     // Export the clone and hand back the tuple that reaches it.
@@ -759,6 +767,10 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
             "sealed": false,
             "access": "rw",
         },
+        // Earlier boot clones of this tag: released now, or kept because a
+        // guard held them (claimed within the grace, named, or not ours).
+        "released": released.iter().map(|v| v.0).collect::<Vec<_>>(),
+        "kept": kept.iter().map(|v| v.0).collect::<Vec<_>>(),
         "attach": attach,
     });
     if let Some(b) = bound {
@@ -905,9 +917,25 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
     };
     let hostgolden = state.synonyms.read().await.get(HOSTGOLDEN_NS, tag).cloned();
 
-    // 3. A fresh boot clone, and the previous one released.
+    // 3. A fresh boot clone, and every earlier one released (#127).
+    //
+    // Every volume of this name, not the first `find_volume` meets: releasing
+    // one per claim let clones pile up whenever there were already several,
+    // or the one it happened to find was inside the grace window — 60 of them
+    // on forge. Each still goes through the guards: not claimed within the
+    // grace (the live one of this boot), not named, not sealed, and a clone of
+    // something this tag has booted.
     let clone_name = format!("{BOOTHOST_NS}-{tag}");
-    let predecessor = state.volume_manager.lock().await.find_volume(&clone_name).await;
+    let predecessors: Vec<VolumeId> = state
+        .volume_manager
+        .lock()
+        .await
+        .list_volumes()
+        .await
+        .into_iter()
+        .filter(|(_, name, _, _)| *name == clone_name)
+        .map(|(id, ..)| id)
+        .collect();
     let c = match crate::fs::template::clone_volume(
         &state.volume_manager,
         golden,
@@ -925,8 +953,14 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
     if let Some(h) = &hostgolden {
         parents.extend(lineage_of(h, golden));
     }
-    if let Some(old) = predecessor.filter(|o| *o != c.volume_id) {
-        release_superseded_clone(&state, old, &parents).await;
+    let mut released = Vec::new();
+    let mut kept = Vec::new();
+    for old in predecessors.into_iter().filter(|o| *o != c.volume_id) {
+        if release_superseded_clone(&state, old, &parents).await {
+            released.push(old);
+        } else {
+            kept.push(old);
+        }
     }
     let collected = collect_host_goldens(&state, tag, golden).await;
 
