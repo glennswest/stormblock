@@ -204,6 +204,16 @@ Rule for the fix: nothing durable references a slot before its data is.
 - [x] docs/durability.md, changelog
 - [x] full suite on dev (849 passed; the 3 failures are #120 and #134 —
       `mgmt_luns_at_scale` took 46 s to 570 s on identical code); release
+- [x] (31bf732) `adopt_slabs` reconciles records with slot tables; the
+      daemon adopts every drive at once — a daemon restart lost flushed data
+- [ ] **handover order** (owner, 2026-09-26): `adopt-ublk` read the slabs and
+      restored *before* standing the incumbent down, so allocations the
+      incumbent made in between were missing from the successor's map (and
+      their slots looked free). Now: stand down, wait for the incumbent's
+      process to exit (zombie = exited; SIGKILL after the grace), THEN
+      restore; ublk recovery holds I/O in the gap. `handover::take_over` pins
+      the order; a test allocates in the incumbent inside the window and checks
+      the successor maps it. Release v19.1.5, tell the owner the commit.
 - [ ] close after the on-metal power-cut check (300/300 × 5). Owner
       (2026-09-26) is building the v19.1.4 golden himself, ahead of the #107
       token rollout, and will report the result on #171; do not stage or
