@@ -114,6 +114,44 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### P0: fsync'd writes lost on power cut (2026-09-26, #171) — IN PROGRESS
+
+fastetcd's redb reports "All roots are corrupted" after every hard power-off
+of C2NR0Q2 (stormcos#105, 11.44 marked broken). Found by reading the write
+path with a volatile drive cache in mind:
+
+1. **A slot's table entry can become durable before its data.**
+   `Slab::allocate_gen` persists the entry immediately; the copy-on-write copy
+   (1 MiB) and the new data are written after, with no flush between. A power
+   cut can keep the small entry and lose the copy: recovery maps the extent to
+   a slot that never got its data, losing what the consumer fsync'd long
+   before in the rest of that extent. A clone of an ext4 blank CoWs every
+   metadata extent on first touch.
+2. **An unreplicated first write does not zero-fill its slot** (the mirrored
+   path does); the rest of the slot is a previous tenant's data. Discard on
+   free does not zero on an SSD and is a no-op on an HDD.
+3. **Restore maps a recorded slot without checking it** — freed and reused by
+   another volume, it is mapped anyway.
+4. **Refcounts**: a CoW's decrement of the old slot is persisted at once and
+   can land before the new slot's entry.
+5. **`UBLK_IO_OP_WRITE_ZEROES`** (advertised) discards whole slots only,
+   ignores partial ranges and reports success on error.
+
+Rule for the fix: nothing durable references a slot before its data is.
+
+- [ ] a crash-simulating `BlockDevice` for tests: writes held until flush; a
+      crash keeps a random subset of unflushed writes. A randomized test: a
+      clone of a blank, random writes, flushes, crash, `restore()`, verify
+      every block acknowledged before the last flush. Run it on the current
+      code first
+- [ ] slots allocated in memory only; entries written after the data, between
+      two device flushes (`ThinVolumeHandle::flush`, `VolumeManager::persist`)
+- [ ] zero-fill on first write; write-zeroes that writes zeros
+- [ ] restore: drop a recorded slot that is free or owned elsewhere; recount
+      refcounts from the maps
+- [ ] docs, changelog, release; close (the on-metal power-cut check is
+      stormcentral's)
+
 ### A boot claim releases every old clone of its tag (2026-09-26, #127) — DONE (v19.1.3)
 
 Forge had 60 unsealed `boothost-C2NR0Q2` volumes. Owner: a claim for a tag
