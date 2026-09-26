@@ -139,17 +139,21 @@ path with a volatile drive cache in mind:
 
 Rule for the fix: nothing durable references a slot before its data is.
 
-- [ ] a crash-simulating `BlockDevice` for tests: writes held until flush; a
-      crash keeps a random subset of unflushed writes. A randomized test: a
-      clone of a blank, random writes, flushes, crash, `restore()`, verify
-      every block acknowledged before the last flush. Run it on the current
-      code first
-- [ ] slots allocated in memory only; entries written after the data, between
-      two device flushes (`ThinVolumeHandle::flush`, `VolumeManager::persist`)
-- [ ] zero-fill on first write; write-zeroes that writes zeros
-- [ ] restore: drop a recorded slot that is free or owned elsewhere; recount
-      refcounts from the maps
-- [ ] docs, changelog, release; close (the on-metal power-cut check is
+- [x] a crash-simulating `BlockDevice` (`drive/crashdev.rs`) and a
+      randomized test (`tests/integration_power_cut.rs`): on the old code 182
+      of 300 cuts lost acknowledged data
+- [x] slots allocated in memory only (`allocate_deferred`), confirmed after
+      their data is written, entries written by `Slab::sync` between two
+      device flushes (`ThinVolumeHandle::flush`, `VolumeManager::persist`);
+      a freed slot is not reused until its free is durable; CoW decrements
+      wait for the sync
+- [x] zero-fill on first write; write-zeroes that writes zeros (ublk EIO on
+      failure); discard leaves shared extents
+- [x] restore: drop a recorded slot that is free or taken elsewhere; raise
+      share counts to the maps restored
+- [x] test: stale record + several CoW generations of one extent
+- [x] docs/durability.md, changelog
+- [ ] full suite on dev; release; close (the on-metal power-cut check is
       stormcentral's)
 
 ### A boot claim releases every old clone of its tag (2026-09-26, #127) — DONE (v19.1.3)
