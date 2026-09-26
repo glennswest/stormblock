@@ -97,7 +97,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/main.rs` — CLI, the daemon, and every subcommand
 
 ## Current State
-**v19.1.1** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
+**v19.1.2** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
 the full suite passes on dev apart from #120 (and #134 when the box is busy).
 The README is the reference for what the code does, rewritten from the code in
 #131; the docs in `docs/` were checked against it and the superseded ones moved
