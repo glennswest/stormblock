@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Pin a volume to an array; dedicated array slabs (2026-09-26, #150) — IN PROGRESS
+### Pin a volume to an array; dedicated array slabs (2026-09-26, #150) — DONE (v18.7.0)
 
 stormstorage#2: a consumer volume carved on a RAID1-over-NVMe-TCP array must
 *be* the mirror. Today `array_id` on create is only checked (every extent
@@ -126,21 +126,28 @@ goes anywhere of its role), the array's slab is general-purpose (anything on
 the head can land on it), and `DELETE /arrays/{id}` refuses while any volume
 exists on the node yet leaves the slab registered when it succeeds.
 
-- [ ] slab header `flags` bit 0 = DEDICATED (byte 101, always 0 until now; an
+- [x] slab header `flags` bit 0 = DEDICATED (byte 101, always 0 until now; an
       older engine ignores it); `SlabFormat::dedicated`
-- [ ] registry: dedicated slabs are not `allocatable` — every general picker,
+- [x] registry: dedicated slabs are not `allocatable` — every general picker,
       the pool counts and placement's own pickers skip them; rebalance too
-- [ ] `PlacementPolicy.pinned: Option<SlabId>`: a pinned volume allocates only
+- [x] `PlacementPolicy.pinned: Option<SlabId>`: a pinned volume allocates only
       there (redundancy must be `none` — the array is the redundancy); clones
       inherit the pin; persisted as the record's existing `array_id`
       (restore, and adopt via the slab's own `arrays` records)
-- [ ] `POST /api/v1/arrays {"dedicated": true}` (default true): slab in the
+- [x] `POST /api/v1/arrays {"dedicated": true}` (default true): slab in the
       data role, with its own metadata region, registered as a metadata slab
       that carries only the volumes pinned to it
-- [ ] `array_id` on `POST /api/v1/volumes` pins; `placement.array_id` on
+- [x] `array_id` on `POST /api/v1/volumes` pins; `placement.array_id` on
       `POST /v1/volumes`; `GET /api/v1/arrays/{id}` names its slab and volumes;
       delete refuses only for *its* volumes and takes the slab out
-- [ ] tests, docs, CHANGELOG, close
+- [x] tests, docs, CHANGELOG, close
+
+Decided per the issue's proposal: API-created arrays are dedicated by
+default (`"dedicated": false` opts out); config/CLI arrays (`--raid`, the
+node's own disks) keep the general pool. Not here: API-created arrays are
+still not reassembled at restart by the engine itself — the slab is adopted
+by whoever reassembles the members (stormstorage), which is what the
+self-describing slab is for.
 
 ### XFS alongside ext4 (2026-09-25, #147) — DONE (v18.6.0)
 

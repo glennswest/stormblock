@@ -3,6 +3,30 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (arrays)
+- **feat(arrays):** an array created with `POST /api/v1/arrays` is *dedicated*
+  by default (#150). Its slab is in the data role, carries its own metadata
+  region, and takes allocations only for volumes pinned to it. No general
+  placement, drain destination, rebalance, retier or chunk allocation lands
+  there. The flag is bit 0 of the slab header's `flags` byte, so it survives
+  restarts and adoption. `"dedicated": false` keeps the old general-pool
+  behaviour.
+- **feat(volumes):** `array_id` on `POST /api/v1/volumes` now pins the volume,
+  so every extent is on the array's slab. Before this it was only checked,
+  and the extents went anywhere of the volume's role. `placement.array_id` on
+  `POST /v1/volumes` does the same and gives the volume a `/v1` identity for
+  attach and fence. A pinned volume refuses a full array rather than
+  spilling, takes no redundancy policy of its own, and passes its pin to its
+  clones. Pins persist as the record's `array_id` and survive restore and
+  adoption.
+- **feat(arrays):** `GET /api/v1/arrays` and `GET /api/v1/arrays/{id}` name
+  the array's slab (dedicated, role, total/free, self-describing) and the
+  volumes on it.
+- **fix(arrays):** `DELETE /api/v1/arrays/{id}` refused while *any* volume
+  existed on the node, and when it did succeed it left the array's slab in
+  the registry for the pool to keep using. It now refuses only for volumes
+  on that array, and removes the slab with it.
+
 ## [v18.6.0] — 2026-09-25
 
 ### 2026-09-25 (xfs)

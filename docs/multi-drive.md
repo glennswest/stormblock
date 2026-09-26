@@ -52,6 +52,40 @@ volume = extents; each extent has N legs (mirror) or a stripe (parity);
   A pool is never an array. A volume is protected by where its own members
   are.
 
+### An array as one consumer's storage (#150)
+
+The one place a drive-level array *is* how a volume is protected: a
+distributed volume (stormstorage) builds a RAID1 on a head across NVMe-TCP
+legs, and its consumers attach a thin volume carved on that array.
+
+```
+POST /api/v1/arrays   {"level":"Raid1","drive_uuids":[a,b]}            → dedicated by default
+POST /api/v1/volumes  {"name":"dist-vol","size":"1T","array_id":<array>}  → pinned to the array
+POST /v1/volumes      {"name":…,"size_bytes":…,"replica_tier":{"slaves":0},"placement":{"array_id":<array>}}
+GET  /api/v1/arrays/{id}   → "slab": {id, dedicated, role, total/free, self_describing}, "volumes": [{id, name, pinned}]
+DELETE /api/v1/arrays/{id} → 409 while any volume is on it; otherwise removes the array and its slab
+```
+
+- **Dedicated** (the default; `"dedicated": false` joins the general pool
+  as before): the array's slab is in the data role, it takes allocations only
+  for volumes pinned to it, and nothing else on the head lands there. That is
+  every general placement, a drain's destination, rebalance, retier and chunk
+  allocation. The flag is bit 0 of the slab header's `flags` byte, so it
+  survives a restart and a new head adopting the slab. An older engine reads
+  the byte as zero and treats the slab as ordinary.
+- **Pinned**: every extent of the volume on the array's slab, and nowhere
+  else. A full array refuses the write rather than spilling onto the pool.
+  A clone of a pinned volume is pinned too, so its copy-on-writes stay with
+  the slots it shares. The array is the redundancy, so `redundancy` must be
+  `none`. The pin is persisted as the volume record's `array_id`.
+- **Self-describing**: a dedicated slab has its own metadata region and
+  carries the records of the volumes pinned to it, with the array it is. A
+  head that reassembles the same members and adopts the slab gets the volumes
+  back still pinned, and the slab still dedicated.
+- **Delete** refuses while a volume is pinned to the array or has a leg on
+  its slab, and only then. Before #150 it refused while any volume existed on
+  the node, and when it did go through it left the slab registered.
+
 ## 2. Placement
 
 ### What happens today (proved)
