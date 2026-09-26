@@ -118,6 +118,30 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
+### Pin a volume to an array; dedicated array slabs (2026-09-26, #150) — IN PROGRESS
+
+stormstorage#2: a consumer volume carved on a RAID1-over-NVMe-TCP array must
+*be* the mirror. Today `array_id` on create is only checked (every extent
+goes anywhere of its role), the array's slab is general-purpose (anything on
+the head can land on it), and `DELETE /arrays/{id}` refuses while any volume
+exists on the node yet leaves the slab registered when it succeeds.
+
+- [ ] slab header `flags` bit 0 = DEDICATED (byte 101, always 0 until now; an
+      older engine ignores it); `SlabFormat::dedicated`
+- [ ] registry: dedicated slabs are not `allocatable` — every general picker,
+      the pool counts and placement's own pickers skip them; rebalance too
+- [ ] `PlacementPolicy.pinned: Option<SlabId>`: a pinned volume allocates only
+      there (redundancy must be `none` — the array is the redundancy); clones
+      inherit the pin; persisted as the record's existing `array_id`
+      (restore, and adopt via the slab's own `arrays` records)
+- [ ] `POST /api/v1/arrays {"dedicated": true}` (default true): slab in the
+      data role, with its own metadata region, registered as a metadata slab
+      that carries only the volumes pinned to it
+- [ ] `array_id` on `POST /api/v1/volumes` pins; `placement.array_id` on
+      `POST /v1/volumes`; `GET /api/v1/arrays/{id}` names its slab and volumes;
+      delete refuses only for *its* volumes and takes the slab out
+- [ ] tests, docs, CHANGELOG, close
+
 ### XFS alongside ext4 (2026-09-25, #147) — DONE (v18.6.0)
 
 Owner: XFS in formatting and import as well as ext4, via the new crates
