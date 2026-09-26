@@ -97,7 +97,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/main.rs` — CLI, the daemon, and every subcommand
 
 ## Current State
-**v19.1.2** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
+**v19.1.3** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
 the full suite passes on dev apart from #120 (and #134 when the box is busy).
 The README is the reference for what the code does, rewritten from the code in
 #131; the docs in `docs/` were checked against it and the superseded ones moved
@@ -114,7 +114,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A boot claim releases every old clone of its tag (2026-09-26, #127) — IN PROGRESS
+### A boot claim releases every old clone of its tag (2026-09-26, #127) — DONE (v19.1.3)
 
 Forge had 60 unsealed `boothost-C2NR0Q2` volumes. Owner: a claim for a tag
 deletes that tag's old claims; at most the live one is kept until it is
@@ -123,13 +123,13 @@ predecessor, `find_volume("boothost-<tag>")` — whichever volume of that name
 it hit first — so with several same-named clones, or with the one it hit
 inside the double-claim grace (#97), the rest were never collected.
 
-- [ ] release **every** volume named `boothost-<tag>` but the new one, each
+- [x] release **every** volume named `boothost-<tag>` but the new one, each
       through the existing guards (not claimed within grace, not named by a
       synonym, not sealed, a clone of something this tag has booted)
-- [ ] report what was released in the claim response (`released`)
-- [ ] tests: an accumulated pile is collected by one claim; clones inside
+- [x] report what was released in the claim response (`released`)
+- [x] tests: an accumulated pile is collected by one claim; clones inside
       the grace window survive and the rest go
-- [ ] docs (auth.md host goldens), changelog, close
+- [x] docs (auth.md host goldens), changelog, close
 
 ### A presentation of purpose and functionality (2026-09-26, #132) — DONE
 

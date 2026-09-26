@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.1.3] — 2026-09-26
+
 ### 2026-09-26 (boot claim)
 - **fix(synonyms):** a boot claim (`POST /api/v1/synonyms/boothost/<tag>/claim`)
   now releases **every** earlier clone named `boothost-<tag>`, not only the
