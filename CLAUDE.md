@@ -97,7 +97,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/main.rs` — CLI, the daemon, and every subcommand
 
 ## Current State
-**v19.1.3** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
+**v19.1.4** (2026-09-26). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
 the full suite passes on dev apart from #120 (and #134 when the box is busy).
 The README is the reference for what the code does, rewritten from the code in
 #131; the docs in `docs/` were checked against it and the superseded ones moved
@@ -114,7 +114,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### P0: fsync'd writes lost on power cut (2026-09-26, #171) — IN PROGRESS
+### P0: fsync'd writes lost on power cut (2026-09-26, #171) — DONE (v19.1.4)
 
 fastetcd's redb reports "All roots are corrupted" after every hard power-off
 of C2NR0Q2 (stormcos#105, 11.44 marked broken). Found by reading the write
@@ -153,8 +153,9 @@ Rule for the fix: nothing durable references a slot before its data is.
       share counts to the maps restored
 - [x] test: stale record + several CoW generations of one extent
 - [x] docs/durability.md, changelog
-- [ ] full suite on dev; release; close (the on-metal power-cut check is
-      stormcentral's)
+- [x] full suite on dev (849 passed; the 3 failures are #120 and #134 —
+      `mgmt_luns_at_scale` took 46 s to 570 s on identical code); release;
+      close. The on-metal power-cut check is stormcentral's.
 
 ### A boot claim releases every old clone of its tag (2026-09-26, #127) — DONE (v19.1.3)
 

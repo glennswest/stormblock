@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.1.4] — 2026-09-26
+
 ### 2026-09-26 (power cut)
 - **fix(durability):** writes a consumer fsync'd could be lost on a hard power
   cut (#171; fastetcd's redb: "All roots are corrupted" after every power-off).
