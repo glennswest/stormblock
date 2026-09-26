@@ -195,3 +195,98 @@ async fn fsynced_writes_survive_a_power_cut_at_any_point() {
         failures.first().unwrap()
     );
 }
+
+/// Recovery from a record that is behind the slot tables, with several
+/// copy-on-write generations of one extent (#171's acceptance).
+///
+/// The record is written once, early; afterwards the clone copies extent 0
+/// twice (once from the blank, once more after a snapshot of the clone
+/// shares it again), writes extent 1 into a slot of its own, gives that slot
+/// back, and a second volume takes it. Everything is flushed, the power goes
+/// with nothing unflushed kept, and a fresh engine restores from the slabs.
+/// Extent 0 must read the newest generation in the clone, the middle one in
+/// the snapshot and the original in the blank; extent 1 of the clone, whose
+/// recorded slot now belongs to the other volume, must not read that
+/// volume's bytes.
+#[tokio::test]
+async fn a_stale_record_and_several_cow_generations_recover() {
+    let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024));
+    let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
+        .with_role(SlabRole::Data)
+        .with_auto_metadata(dev.capacity_bytes());
+    let slab = Slab::format_with(dev.clone() as Arc<dyn BlockDevice>, fmt).await.unwrap();
+    let sid = slab.slab_id();
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_slab(slab).await;
+    vm.persist_to_slab(sid);
+
+    let blank = vm.create_volume_any("blank", VOL).await.unwrap();
+    let bv = vm.get_volume(&blank).unwrap();
+    for i in 0..BLOCKS {
+        bv.write(i * BLOCK, &block(i, blank_value(i))).await.unwrap();
+    }
+    bv.flush().await.unwrap();
+    let clone = vm.create_snapshot(blank, "clone").await.unwrap();
+    let cv = vm.get_volume(&clone).unwrap();
+    // Extent 1 into a slot of the clone's own, then recorded.
+    let e1 = SLOT / BLOCK;
+    cv.write(e1 * BLOCK, &block(e1, 7)).await.unwrap();
+    cv.flush().await.unwrap();
+    vm.persist().await;
+
+    // Generation 2 of extent 0.
+    cv.write(0, &block(0, 2)).await.unwrap();
+    cv.flush().await.unwrap();
+    let snap = vm.create_snapshot(clone, "snap").await.unwrap();
+    // Generation 3: the snapshot shares generation 2, so this copies again.
+    cv.write(0, &block(0, 3)).await.unwrap();
+    // Extent 1 given back, and taken by another volume.
+    cv.discard(SLOT, SLOT).await.unwrap();
+    cv.flush().await.unwrap();
+    let other = vm.create_volume_any("other", VOL).await.unwrap();
+    let ov = vm.get_volume(&other).unwrap();
+    for e in 0..(VOL / SLOT) {
+        ov.write(e * SLOT, &vec![0xEE; SLOT as usize]).await.unwrap();
+    }
+    ov.flush().await.unwrap();
+
+    // Power cut, nothing unflushed kept.
+    let after = Arc::new(dev.crash(1, 0.0));
+    let slab = Slab::open(after.clone() as Arc<dyn BlockDevice>).await.unwrap();
+    let mut vm2 = VolumeManager::new(SLOT);
+    vm2.add_slab(slab).await;
+    vm2.persist_to_slab(sid);
+    vm2.restore().await.unwrap();
+
+    let read = |vm: &VolumeManager, name: &'static str, idx: u64| {
+        let vm = vm;
+        async move {
+            let id = vm.find_volume(name).await.unwrap_or_else(|| panic!("{name} did not come back"));
+            let v = vm.get_volume(&id).unwrap();
+            let mut b = vec![0u8; BLOCK as usize];
+            v.read(idx * BLOCK, &mut b).await.unwrap();
+            value_of(idx, &b)
+        }
+    };
+    assert_eq!(read(&vm2, "clone", 0).await, Ok(3), "the clone's newest generation");
+    assert_eq!(read(&vm2, "snap", 0).await, Ok(2), "the snapshot's generation");
+    assert_eq!(read(&vm2, "blank", 0).await, Ok(blank_value(0)), "the blank's original");
+    // Discarded: anything but the other volume's bytes.
+    let r = read(&vm2, "clone", e1).await;
+    assert!(r.is_ok(), "the clone's discarded extent reads another volume's data: {r:?}");
+    // The rest of the clone is still the blank's.
+    for i in 1..e1 {
+        assert_eq!(read(&vm2, "clone", i).await, Ok(blank_value(i)));
+    }
+    let _ = (snap, other);
+
+    // And the share counts let a write copy rather than land in place: a
+    // write to the clone's extent 2 (shared with the blank and the snapshot)
+    // must not change the blank.
+    let id = vm2.find_volume("clone").await.unwrap();
+    let v = vm2.get_volume(&id).unwrap();
+    let e2 = 2 * SLOT / BLOCK;
+    v.write(e2 * BLOCK, &block(e2, 99)).await.unwrap();
+    assert_eq!(read(&vm2, "blank", e2).await, Ok(blank_value(e2)));
+    assert_eq!(read(&vm2, "snap", e2).await, Ok(blank_value(e2)));
+}
