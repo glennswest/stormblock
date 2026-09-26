@@ -260,7 +260,10 @@ impl Engine {
     /// only its results.
     pub async fn remove(mut self) {
         self.stop().await;
-        let _ = std::fs::remove_dir_all(&self.dir);
+        // STORM_KEEP_WORK=1 keeps the engine's files (log, drives) for a look.
+        if std::env::var("STORM_KEEP_WORK").ok().as_deref() != Some("1") {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 

@@ -88,6 +88,13 @@ impl Report {
     where
         F: std::future::Future<Output = Outcome>,
     {
+        // STORM_ONLY=<substring> runs only the matching tests (and the
+        // engine they need) — for chasing one failure.
+        if let Ok(only) = std::env::var("STORM_ONLY") {
+            if !only.is_empty() && !test.contains(&only) && test != "engine-up" {
+                return true;
+            }
+        }
         let t = Instant::now();
         let outcome = f.await;
         let ok = outcome.is_ok();

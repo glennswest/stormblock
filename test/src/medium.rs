@@ -37,9 +37,16 @@ pub async fn run(env: &Env, r: &mut Report) -> Result<(), String> {
     r.run("restart-keeps-flushed-data", async {
         let id = create_volume(&e, "t-restart", "64M", None).await?;
         attach_write(&e, &id, 8 * MIB, 4, 11).await?;
+        let before = e.ok("GET", &format!("/volumes/{id}"), None).await?;
         e.restart().await?;
+        let after = e.ok("GET", &format!("/volumes/{id}"), None).await?;
         let dev = e.attach(&id).await?;
-        read_check(&dev, 8 * MIB, 11, (4 * MIB) as usize).await?;
+        read_check(&dev, 8 * MIB, 11, (4 * MIB) as usize).await.map_err(|err| {
+            format!(
+                "{err}; allocated {} → {} bytes across the restart",
+                before["allocated_bytes"], after["allocated_bytes"]
+            )
+        })?;
         drop(dev);
         e.detach(&id).await?;
         delete_volume(&e, &id).await?;
