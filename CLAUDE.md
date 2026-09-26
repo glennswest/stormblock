@@ -114,6 +114,37 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Test containers: short, medium, long (2026-09-26, #139, P1) — IN PROGRESS
+
+Per stormcentral `docs/test-standard.md`: `test/Containerfile` (context =
+repo root), `/test <suite>`, optional `test/build.sh`, JSON lines + summary,
+exit 0/1/2, results under `/results`, no machine assumptions, Job in the
+run's own namespace. Pattern: stormd's `test/` (runs its binary in the pod).
+
+Design: the node's engine is closed (v17) and a Job has no token for it
+(stormcos#89), so:
+- **node**: `GET /api/v1/health` on `STORM_NODE:9090` (public) — up, version,
+  auth; unreachable = skip. The authenticated node checks run only with
+  `STORM_STORMBLOCK_TOKEN`, else skip (not pass).
+- **the engine under test runs in the pod**: `/stormblock` of the same
+  commit on sparse file slabs under `/results/work`, NVMe-oF on 127.0.0.1,
+  driven through its API with its own minted token; data checked through the
+  engine's userspace NVMe/TCP initiator. Unprivileged, no ublk, no devices.
+
+- [ ] `test/` crate `stormblock-test` (workspace member, depends on the lib
+      for `http` and `nvmeof_dev`): harness (engine child, API, report)
+- [ ] short (< 2 min): node health; engine up; create, clone (ext4 blank →
+      claim), attach over NVMe/TCP, write/read, detach, delete; nothing left
+- [ ] medium (< 30 min): auth closed; restart and kill -9 keep flushed data;
+      snapshot/group snapshot + restore; mirror:2 across two domains, drive
+      failed → rebuild → data intact; sealed refuses rw attach; discard
+      reclaims
+- [ ] long: waves (claim, attach, write, verify, delete) sized from the
+      pod's CPU/memory and the pool, until `STORM_TIMEOUT`; per-wave latency,
+      residue (volumes, allocated slots, engine RSS and fds); regression fails
+- [ ] `test/build.sh`, `test/Containerfile`, `test/stormblock-test.yaml`;
+      run all three suites on dev (sc-build); docs, changelog, close
+
 ### /v1 snapshots of engine volumes (2026-09-26, #130, stormvm#28) — DONE (v19.2.0)
 
 A VM's disks are engine volumes made through `/api/v1` (clone of a golden,
