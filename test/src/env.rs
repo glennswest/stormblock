@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub struct Env {
-    pub suite: String,
     /// The node's address, for the checks of the node's own engine.
     pub node: Option<String>,
     pub run_id: String,
@@ -39,7 +38,6 @@ impl Env {
             }
         });
         Env {
-            suite,
             node: var("STORM_NODE"),
             run_id: var("STORM_RUN_ID").unwrap_or_else(|| format!("local-{}", std::process::id())),
             timeout: Duration::from_secs(var("STORM_TIMEOUT").and_then(|t| t.parse().ok()).unwrap_or(default_timeout)),

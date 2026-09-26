@@ -2551,6 +2551,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "stormblock-test"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "stormblock",
+ "tokio",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
