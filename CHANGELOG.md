@@ -3,6 +3,18 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (VM snapshots)
+- **feat(v1):** `POST /v1/snapshots` and `POST /v1/group-snapshots` take engine
+  volumes made through `/api/v1`, by id or name (#130, stormvm#28). Before,
+  only `/v1` volumes were accepted, and every disk stormvm gives a VM got
+  a 404. A group is one consistency point across its members, through the
+  same fence as before: each member is a copy-on-write snapshot, sealed, and
+  no GPT or filesystem identity is restamped. A restore is `POST /v1/volumes`
+  with `source: {kind: snapshot}`.
+- **fix(v1):** a snapshot is `ready` only where this node holds the data. A
+  snapshot of a volume mastered on another node used to say `ready: true`
+  with nothing copied. A group is ready only when every member is.
+
 ## [v19.1.4] — 2026-09-26
 
 ### 2026-09-26 (power cut)

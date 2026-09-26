@@ -49,6 +49,11 @@ claim's volume is named `pvc-<namespace>-<claim>`.
 CSI exists only for **third-party drivers**: `/v1` is the contract
 stormblock-csi speaks (volumes, snapshots and group snapshots, attach, fence
 and promote, dual-attach), and orchestrators such as stormstorage use it too.
+`/v1/snapshots` and `/v1/group-snapshots` also take **engine volumes** (by id
+or name), such as a VM's root disk cloned through `/api/v1`. A group is one
+consistency point across its members: a copy-on-write snapshot, sealed, with
+no identity restamped. A snapshot is `ready` only where this node holds the
+data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
 
 ## What it does
 
