@@ -1168,16 +1168,16 @@ async fn attach_volume(
     }
     let local_node = state.v1.lock().await.local_node.clone();
     let node = req.node.clone().unwrap_or_else(|| local_node.clone());
-    let want = req.transport.as_deref().map(|t| t.to_ascii_lowercase());
-    match want.as_deref() {
-        None | Some("ublk") | Some("nvme-tcp") | Some("nvme_tcp") | Some("nvmeof") => {}
-        Some(other) => return ApiError::bad_request(format!("transport {other:?}: use ublk or nvme-tcp")),
-    }
+    use crate::mgmt::ublk_export::WantTransport;
+    let want = match WantTransport::parse(req.transport.as_deref()) {
+        Ok(w) => w,
+        Err(e) => return ApiError::bad_request(e),
+    };
     let key = uuid.to_string();
 
     // Local fast path, on the same terms as /v1: enabled, this node, and
     // backed here — which every engine volume is.
-    if want.as_deref() != Some("nvme-tcp") && want.as_deref() != Some("nvme_tcp") && want.as_deref() != Some("nvmeof")
+    if want != WantTransport::NvmeTcp
         && crate::mgmt::ublk_export::should_offer_ublk(
             state.config.management.ublk_transport,
             &node,
@@ -1188,12 +1188,12 @@ async fn attach_volume(
         if let Some(path) = state.ublk_exports.lock().await.ensure(&key, device.clone()) {
             return Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response();
         }
-        if want.as_deref() == Some("ublk") {
+        if want == WantTransport::Ublk {
             return ApiError::conflict(
                 "ublk was asked for but is not available on this node (kernel ublk_drv, or ublk_transport is off)",
             );
         }
-    } else if want.as_deref() == Some("ublk") {
+    } else if want == WantTransport::Ublk {
         return ApiError::conflict(format!(
             "ublk is a local device: this node is {local_node:?}, the attach is for {node:?}, \
              or ublk_transport is off"
@@ -1204,6 +1204,13 @@ async fn attach_volume(
     let nsid = super::v1::ensure_nvme_namespace(&state, &key, Some(uuid)).await;
     #[cfg(not(feature = "nvmeof"))]
     let nsid = None;
+    // Asked for the network, and there is no namespace to connect to: say so
+    // rather than hand back coordinates with nothing behind them (#149).
+    if want == WantTransport::NvmeTcp && nsid.is_none() {
+        return ApiError::conflict(format!(
+            "volume {uuid} cannot be served over nvme_tcp: this node runs no NVMe-oF target"
+        ));
+    }
     Json(super::v1::attach_info_for(&state, nsid)).into_response()
 }
 

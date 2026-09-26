@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::drive::BlockDevice;
-use crate::mgmt::ublk_export::should_offer_ublk;
+use crate::mgmt::ublk_export::{should_offer_ublk, WantTransport};
 use crate::mgmt::AppState;
 use crate::volume::VolumeId as EngineVolumeId;
 
@@ -1320,6 +1320,13 @@ async fn expand_volume(
 struct AttachRequest {
     node: String,
     mode: AttachMode,
+    /// `nvme_tcp` or `ublk`; absent is the engine's choice (#149). A caller
+    /// attaching on the master's behalf for a remote initiator — a RAID head
+    /// assembling legs, a consumer on another machine — sends `nvme_tcp`,
+    /// since from the master's own node the engine would otherwise offer a
+    /// local ublk device.
+    #[serde(default)]
+    transport: Option<String>,
 }
 
 async fn attach_volume(
@@ -1327,6 +1334,7 @@ async fn attach_volume(
     Path(id): Path<String>,
     Json(req): Json<AttachRequest>,
 ) -> V1Result<AttachInfo> {
+    let want = WantTransport::parse(req.transport.as_deref()).map_err(V1Error::BadRequest)?;
     let mut v1 = state.v1.lock().await;
     v1.expire_windows(now_ms());
     let rec = v1
@@ -1361,6 +1369,30 @@ async fn attach_volume(
     let local_id = rec.local_id;
     let local_node = v1.local_node.clone();
 
+    // A transport that was asked for and cannot be given is refused *before*
+    // the attachment is recorded, so a refusal leaves nothing behind.
+    let ublk_possible = should_offer_ublk(
+        state.config.management.ublk_transport,
+        &req.node,
+        &local_node,
+        local_id.is_some(),
+    );
+    match want {
+        WantTransport::Ublk if !ublk_possible => {
+            return Err(V1Error::Conflict(format!(
+                "ublk is a local device: this node is {local_node:?}, the attach is for {:?}, \
+                 the volume is not backed here, or ublk_transport is off",
+                req.node
+            )));
+        }
+        WantTransport::NvmeTcp => {
+            if let Some(why) = nvme_unavailable(&state, &id, local_id, &local_node).await {
+                return Err(V1Error::Conflict(why));
+            }
+        }
+        _ => {}
+    }
+
     let entry = v1.attachments.entry(id.clone()).or_default();
     if !entry.contains(&req.node) {
         entry.push(req.node.clone());
@@ -1372,12 +1404,9 @@ async fn attach_volume(
     // the backing device as a local /dev/ublkbN instead of NVMe-oF/TCP. Any
     // miss (disabled, remote node, ublk unavailable) falls through to
     // nvme-tcp, which always works — so this is a pure optimization.
-    if should_offer_ublk(
-        state.config.management.ublk_transport,
-        &req.node,
-        &local_node,
-        local_id.is_some(),
-    ) {
+    // `nvme_tcp` skips it: the caller has said the I/O comes over the
+    // network (#149).
+    if want != WantTransport::NvmeTcp && ublk_possible {
         if let Some(local) = local_id {
             let device = state.volume_manager.lock().await.get_volume(&EngineVolumeId(local));
             if let Some(device) = device {
@@ -1385,6 +1414,12 @@ async fn attach_volume(
                     return Ok(Json(AttachInfo::Ublk { device_hint: path }));
                 }
             }
+        }
+        if want == WantTransport::Ublk {
+            forget_attachment(&state, &id, &req.node).await;
+            return Err(V1Error::Conflict(
+                "ublk was asked for but is not available on this node (kernel ublk_drv not loaded)".into(),
+            ));
         }
     }
     // NVMe-oF path: hot-add the volume as a namespace on the shared
@@ -1394,8 +1429,49 @@ async fn attach_volume(
     let nsid = ensure_nvme_namespace(&state, &id, local_id).await;
     #[cfg(not(feature = "nvmeof"))]
     let nsid = None;
+    if want == WantTransport::NvmeTcp && nsid.is_none() {
+        forget_attachment(&state, &id, &req.node).await;
+        return Err(V1Error::Conflict(format!("volume {id} could not be added as an NVMe-oF namespace")));
+    }
 
     Ok(Json(attach_info_for(&state, nsid)))
+}
+
+/// Why a volume cannot be served over NVMe-oF/TCP from here, if it cannot:
+/// the coordinates an `nvme_tcp` attach returns must be ones an initiator
+/// can connect to and find the volume behind (#149).
+async fn nvme_unavailable(state: &AppState, id: &str, local_id: Option<Uuid>, local_node: &str) -> Option<String> {
+    #[cfg(not(feature = "nvmeof"))]
+    {
+        let _ = (state, id, local_id, local_node);
+        return Some("this engine was built without NVMe-oF".into());
+    }
+    #[cfg(feature = "nvmeof")]
+    {
+        if state.nvmeof_target.read().await.is_none() {
+            return Some(format!(
+                "{local_node} serves no NVMe-oF target, so there are no nvme_tcp coordinates to give"
+            ));
+        }
+        match local_id {
+            None => Some(format!(
+                "volume {id} is not backed on {local_node}: attach it on the node that holds it"
+            )),
+            Some(l) if state.volume_manager.lock().await.get_volume(&EngineVolumeId(l)).is_none() => {
+                Some(format!("volume {id}'s backing volume {l} is gone from {local_node}"))
+            }
+            Some(_) => None,
+        }
+    }
+}
+
+/// Undo the attachment record of an attach that was refused after it.
+async fn forget_attachment(state: &AppState, id: &str, node: &str) {
+    let mut v1 = state.v1.lock().await;
+    if let Some(nodes) = v1.attachments.get_mut(id) {
+        nodes.retain(|n| n != node);
+        v1.save();
+    }
 }
 
 #[derive(Deserialize)]

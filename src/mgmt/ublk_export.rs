@@ -32,6 +32,39 @@ pub fn should_offer_ublk(
     enabled && locally_backed && request_node == local_node
 }
 
+/// Which transport an attach asks for (#149).
+///
+/// An attach request names who is asking, not where the I/O will come from.
+/// An orchestrator attaching on the master's behalf for a remote initiator —
+/// a RAID head, a consumer on another machine — is *on* the master, so the
+/// engine would offer it a local ublk device it cannot use. Naming the
+/// transport is how such a caller says "network".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WantTransport {
+    /// The engine's choice: ublk when it can, nvme-tcp otherwise.
+    Any,
+    /// Only a local ublk device; refused where there cannot be one.
+    Ublk,
+    /// Only NVMe-oF/TCP coordinates, even on the master.
+    NvmeTcp,
+}
+
+impl WantTransport {
+    /// `ublk`, `nvme_tcp` (the tag `AttachInfo` answers with), `nvme-tcp` or
+    /// `nvmeof`; absent is [`WantTransport::Any`].
+    pub fn parse(s: Option<&str>) -> Result<Self, String> {
+        match s.map(|t| t.trim().to_ascii_lowercase()) {
+            None => Ok(WantTransport::Any),
+            Some(t) => match t.as_str() {
+                "" | "any" => Ok(WantTransport::Any),
+                "ublk" => Ok(WantTransport::Ublk),
+                "nvme_tcp" | "nvme-tcp" | "nvmeof" | "nvme" => Ok(WantTransport::NvmeTcp),
+                other => Err(format!("transport {other:?}: use nvme_tcp or ublk")),
+            },
+        }
+    }
+}
+
 struct Export {
     device_path: String,
     /// Fires the ublk server's shutdown watch on teardown (DEL_DEV).
@@ -475,6 +508,12 @@ mod tests {
     #[test]
     fn offer_policy_requires_enabled_local_and_backed() {
         // Happy path: enabled, same node, locally backed.
+        assert_eq!(WantTransport::parse(None), Ok(WantTransport::Any));
+        for t in ["nvme_tcp", "nvme-tcp", "NVMeoF"] {
+            assert_eq!(WantTransport::parse(Some(t)), Ok(WantTransport::NvmeTcp), "{t}");
+        }
+        assert_eq!(WantTransport::parse(Some("ublk")), Ok(WantTransport::Ublk));
+        assert!(WantTransport::parse(Some("iscsi")).is_err());
         assert!(should_offer_ublk(true, "node-a", "node-a", true));
         // Disabled by config.
         assert!(!should_offer_ublk(false, "node-a", "node-a", true));
