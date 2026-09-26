@@ -3,6 +3,27 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (power cut)
+- **fix(durability):** writes a consumer fsync'd could be lost on a hard power
+  cut (#171; fastetcd's redb: "All roots are corrupted" after every power-off).
+  - A slot's table entry was written before its data was durable. It is now
+    published at the next flush, after the data.
+  - A freed slot could be reused before its free was durable. It now waits.
+  - A first write left the rest of its slot holding the previous tenant's
+    bytes. It now fills the slot with zeros.
+  - `restore` mapped a stale record's slot even after the slot was freed or
+    reused. It now drops those mappings, and it raises share counts to the
+    mappings it restored.
+  - Persist now flushes the slabs before writing records.
+  - Discard now leaves shared extents alone.
+  - ublk WRITE_ZEROES was a discard that swallowed errors. It now writes zeros
+    and reports EIO.
+  - See `docs/durability.md`.
+- **test:** `drive::crashdev::CrashDevice`, a device with a volatile write
+  cache. `tests/integration_power_cut.rs` runs 300 randomized cuts, plus a
+  stale record with several copy-on-write generations. Before the fix, 182 of
+  the 300 lost acknowledged data.
+
 ## [v19.1.3] — 2026-09-26
 
 ### 2026-09-26 (boot claim)
