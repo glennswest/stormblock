@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.1.0] — 2026-09-26
+
 ### 2026-09-26 (attach transport)
 - **fix(v1):** `POST /v1/volumes/{id}/attach` takes an optional `transport`
   (`nvme_tcp` or `ublk`; `nvme-tcp` and `nvmeof` are accepted too; absent
