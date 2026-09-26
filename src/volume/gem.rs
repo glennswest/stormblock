@@ -277,6 +277,22 @@ impl GlobalExtentMap {
     }
 
     /// Record a stripe's parity legs.
+    /// Take the maps of `ids` out of `other` — a map rebuilt from slabs just
+    /// adopted — with the reverse entries those volumes own. Anything already
+    /// here for those volumes is replaced.
+    pub fn absorb(&mut self, mut other: GlobalExtentMap, ids: &std::collections::HashSet<VolumeId>) {
+        for id in ids {
+            if let Some(m) = other.volumes.remove(id) {
+                self.volumes.insert(*id, m);
+            }
+        }
+        for (key, owner) in other.reverse {
+            if ids.contains(&owner.0) {
+                self.reverse.insert(key, owner);
+            }
+        }
+    }
+
     pub fn insert_parity(&mut self, volume_id: VolumeId, stripe: u64, group: ParityGroup) {
         if let Some(vmap) = self.volumes.get(&volume_id) {
             if let Some(old) = vmap.parity.get(&stripe) {

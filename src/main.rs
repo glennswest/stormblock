@@ -1065,20 +1065,22 @@ async fn main() -> anyhow::Result<()> {
         {
             let mut adopted_slabs = 0usize;
             let mut adopted_volumes = 0usize;
+            // Every drive's slabs in one call: a volume's legs can be on
+            // several drives, and adopting one drive at a time restored the
+            // volume from the first and dropped its legs on the rest — half of
+            // a two-drive volume came back after a restart.
+            let mut found = Vec::new();
             for dev in &drives {
-                let found = stormblock::drive::discover::slabs_in_partitions(dev).await;
-                if found.is_empty() {
-                    continue;
-                }
+                found.extend(stormblock::drive::discover::slabs_in_partitions(dev).await);
+            }
+            if !found.is_empty() {
                 let mut vm = state.volume_manager.lock().await;
                 match vm.adopt_slabs(found).await {
                     Ok(r) => {
                         adopted_slabs += r.slabs.len();
                         adopted_volumes += r.volumes.len();
                     }
-                    Err(e) => tracing::warn!(
-                        "drive {}: {e}", dev.id().path
-                    ),
+                    Err(e) => tracing::warn!("adopting the drives' slabs: {e}"),
                 }
             }
             if adopted_slabs > 0 {
