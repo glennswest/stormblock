@@ -50,6 +50,8 @@ tests run on.
    unmapped and writes zeros into mapped ones. A failure is reported as EIO.
    Before, it was a discard: that ignored partial ranges and answered success
    when it failed.
+   `adopt_slabs` (a daemon taking over the slabs on its drives) uses the
+   same reconciliation, over every drive's slabs at once.
 7. **Discard leaves a shared extent alone.** Unmapping it is not durable until
    the record is rewritten, so after a cut it would be mapped again.
 
@@ -65,6 +67,10 @@ tests run on.
   * `a_stale_record_and_several_cow_generations_recover`.
 * On metal: stormcentral's power-cut check (fastetcd, 300 objects, hard
   power-off, 5 runs).
+
+Known open (#171): `adopt-ublk` reads the slabs before it stands the
+incumbent down, so allocations the incumbent makes in between are not in the
+successor's map.
 
 What the simulation cannot show: sectors torn inside one write, and drives
 that lie about FLUSH.

@@ -3,6 +3,18 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-26 (adopting slabs)
+- **fix(volume):** a daemon restart lost data that had been flushed (#171).
+  `adopt_slabs`, which takes over the slabs on the drives at startup, mapped
+  extents from the slabs' records alone. The records are rewritten only on
+  persist, so everything allocated since the last one came back missing. It
+  also adopted one drive at a time, which dropped a volume's legs on every
+  drive after the first. It now reconciles the records with the slot tables
+  the way `restore` does (same helper), and the daemon adopts every drive's
+  slabs in one call. Found by the new medium test suite (#139): 4 MiB written
+  and flushed, 2 MiB back after a restart. `boot-local` and `adopt-ublk` use
+  `restore` and were not affected.
+
 ## [v19.2.0] — 2026-09-26
 
 ### 2026-09-26 (VM snapshots)
