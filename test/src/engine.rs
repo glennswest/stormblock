@@ -39,7 +39,10 @@ pub struct Engine {
 
 impl Engine {
     /// Lay out a fresh engine under `<results>/work/<run>/<name>` with two
-    /// drives of `drive_bytes` (sparse) in a RAID-1, and start it.
+    /// drives of `drive_bytes` (sparse), start it, and give each drive a data
+    /// slab. A restart adopts those slabs with their volumes — the way a node
+    /// comes back — where `--raid` would build a new array and format a new
+    /// slab on every start.
     pub async fn start(env: &Env, name: &str, drive_bytes: u64) -> Result<Engine, String> {
         let dir = env.results.join("work").join(&env.run_id).join(name);
         let _ = std::fs::remove_dir_all(&dir);
@@ -51,7 +54,8 @@ impl Engine {
         let nqn = format!("nqn.2026-09.io.storm:test-{}", name);
         let config = format!(
             "[management]\nlisten_addr = \"127.0.0.1:{api_port}\"\ndata_dir = \"{data}\"\nnode_name = \"test-{name}\"\n\
-             ublk_transport = false\n\n[nvmeof]\nlisten_addr = \"127.0.0.1:{nvme_port}\"\nnqn = \"{nqn}\"\n",
+             ublk_transport = false\n\n[nvmeof]\nlisten_addr = \"127.0.0.1:{nvme_port}\"\nnqn = \"{nqn}\"\n\
+             export_drives = false\n",
             data = dir.join("data").display()
         );
         std::fs::write(dir.join("stormblock.toml"), config).map_err(|e| e.to_string())?;
@@ -68,6 +72,10 @@ impl Engine {
             http: Client::new(),
         };
         e.spawn().await?;
+        for d in ["d1.img", "d2.img"] {
+            let path = e.dir.join(d).display().to_string();
+            e.ok("POST", "/slabs", Some(json!({ "device_path": path, "role": "data" }))).await?;
+        }
         Ok(e)
     }
 
@@ -80,8 +88,8 @@ impl Engine {
         let d = |f: &str| self.dir.join(f).display().to_string();
         let child = Command::new(&self.bin)
             .args(["--config", &d("stormblock.toml")])
-            .args(["--device", &d("d1.img"), "--device", &d("d2.img"), "--raid", "raid1"])
-            .args(["--volume", "seed:16M", "--data-dir", &d("data"), "--no-iscsi"])
+            .args(["--device", &d("d1.img"), "--device", &d("d2.img")])
+            .args(["--data-dir", &d("data"), "--no-iscsi"])
             .args(["--nvmeof-addr", &format!("127.0.0.1:{}", self.nvme_port), "--nvmeof-nqn", &self.nqn])
             .env("RUST_LOG", "stormblock=info")
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
@@ -207,7 +215,7 @@ impl Engine {
     /// A `/v1` volume, attached for this node over NVMe/TCP.
     pub async fn attach_v1(&self, id: &str) -> Result<Arc<dyn BlockDevice>, String> {
         let me = self.node.clone();
-        self.attach_at(&format!("{}/volumes/{id}/attach", self.v1()), json!({ "node": me, "transport": "nvme_tcp" }))
+        self.attach_at(&format!("{}/volumes/{id}/attach", self.v1()), json!({ "node": me, "mode": "read_write", "transport": "nvme_tcp" }))
             .await
     }
 
