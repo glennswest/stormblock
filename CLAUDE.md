@@ -155,8 +155,10 @@ Rule for the fix: nothing durable references a slot before its data is.
 - [x] docs/durability.md, changelog
 - [x] full suite on dev (849 passed; the 3 failures are #120 and #134 —
       `mgmt_luns_at_scale` took 46 s to 570 s on identical code); release
-- [ ] close after stormcentral's on-metal power-cut check (300/300 × 5) —
-      needs a golden with v19.1.4, and the golden is held for #107
+- [ ] close after the on-metal power-cut check (300/300 × 5). Owner
+      (2026-09-26) is building the v19.1.4 golden himself, ahead of the #107
+      token rollout, and will report the result on #171; do not stage or
+      close it from here
 
 ### A boot claim releases every old clone of its tag (2026-09-26, #127) — DONE (v19.1.3)
 
