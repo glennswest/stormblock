@@ -74,6 +74,14 @@ impl CreateOptions {
         self
     }
 
+    /// Every extent on this slab (#150). The role is the slab's.
+    pub fn pinned_to(slab: SlabId) -> Self {
+        CreateOptions {
+            placement: PlacementPolicy { pinned: Some(slab), ..Default::default() },
+            ..Default::default()
+        }
+    }
+
     /// Place in `role` when one was named, and let the node decide otherwise.
     pub fn in_role_opt(mut self, role: Option<SlabRole>) -> Self {
         self.role = role;
@@ -575,12 +583,88 @@ impl VolumeManager {
         virtual_size: u64,
         array_id: RaidArrayId,
     ) -> Result<VolumeId, VolumeError> {
-        if !self.array_slabs.contains_key(&array_id) {
+        let Some(slab) = self.array_slabs.get(&array_id).copied() else {
             return Err(VolumeError::AllocatorError(
                 format!("no backing device for array {array_id}")
             ));
+        };
+        self.create_volume_with(name, virtual_size, CreateOptions::pinned_to(slab)).await
+    }
+
+    /// The slab an array's storage is, when the array has one here.
+    pub fn array_slab(&self, array_id: &RaidArrayId) -> Option<SlabId> {
+        self.array_slabs.get(array_id).copied()
+    }
+
+    /// The volumes on an array's slab: pinned to it, or with any leg there.
+    pub async fn volumes_on_slab(&self, slab: SlabId) -> Vec<(VolumeId, String, bool)> {
+        let on: HashSet<VolumeId> = {
+            let gem = self.gem.read().await;
+            gem.volume_ids()
+                .into_iter()
+                .filter(|v| gem.get_volume_map(v).map(|m| m.all_legs().any(|l| l.slab_id == slab)).unwrap_or(false))
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (id, h) in &self.volumes {
+            let pinned = h.pinned_slab() == Some(slab);
+            if pinned || on.contains(id) {
+                out.push((*id, h.name().await, pinned));
+            }
         }
-        self.create_volume_with(name, virtual_size, CreateOptions::default()).await
+        out.sort_by(|a, b| a.1.cmp(&b.1));
+        out
+    }
+
+    /// An array that is one consumer's storage (#150): its slab is formatted
+    /// in the data role, *dedicated* (nothing unpinned allocates on it), and
+    /// with a metadata region of its own that carries the records of the
+    /// volumes pinned to it — so a head that reassembles the same members can
+    /// adopt the slab and find its volumes. Returns the slab.
+    pub async fn add_dedicated_array(
+        &mut self,
+        array_id: RaidArrayId,
+        device: Arc<dyn BlockDevice>,
+    ) -> Result<SlabId, VolumeError> {
+        let cap = device.capacity_bytes();
+        let fmt = crate::drive::slab::SlabFormat::new(self.slot_size, StorageTier::Hot)
+            .with_role(SlabRole::Data)
+            .with_auto_metadata(cap)
+            .dedicated();
+        let slab = Slab::format_with(device, fmt)
+            .await
+            .map_err(|e| VolumeError::AllocatorError(format!("formatting the slab on array {array_id}: {e}")))?;
+        let slab_id = slab.slab_id();
+        self.registry.write().await.add(slab);
+        self.array_slabs.insert(array_id, slab_id);
+        if !self.metadata_slabs.contains(&slab_id) {
+            self.metadata_slabs.push(slab_id);
+        }
+        tracing::info!("array {array_id} is dedicated slab {}", slab_id.0);
+        self.persist().await;
+        Ok(slab_id)
+    }
+
+    /// Forget an array's slab: refused while any volume is pinned to it or
+    /// has a leg there, since removing it would take their data (#150).
+    pub async fn remove_array(&mut self, array_id: &RaidArrayId) -> Result<(), VolumeError> {
+        let Some(slab) = self.array_slabs.get(array_id).copied() else {
+            return Ok(());
+        };
+        let on = self.volumes_on_slab(slab).await;
+        if !on.is_empty() {
+            let names: Vec<String> = on.iter().map(|(_, n, _)| n.clone()).collect();
+            return Err(VolumeError::AllocatorError(format!(
+                "array {array_id} holds {} volume(s): {}",
+                on.len(),
+                names.join(", ")
+            )));
+        }
+        self.registry.write().await.remove(&slab);
+        self.array_slabs.remove(array_id);
+        self.metadata_slabs.retain(|s| *s != slab);
+        self.persist().await;
+        Ok(())
     }
 
     /// Create a new thin volume without binding it to a specific array.
@@ -613,9 +697,22 @@ impl VolumeManager {
         // unspecified role means "wherever this node keeps volumes", which is
         // the system slabs on a node that has them and the data slabs on a
         // node that does not (#93).
-        let role = match opts.role {
-            Some(r) => r,
-            None => self.registry.read().await.default_role(),
+        if let Some(pin) = opts.placement.pinned {
+            if !opts.redundancy.is_none() {
+                return Err(VolumeError::AllocatorError(format!(
+                    "a volume pinned to one slab cannot be {}: its redundancy is the array's",
+                    opts.redundancy.spelling()
+                )));
+            }
+            if self.registry.read().await.get(&pin).is_none() {
+                return Err(VolumeError::AllocatorError(format!("slab {} is not attached", pin.0)));
+            }
+        }
+        let role = match (opts.placement.pinned, opts.role) {
+            // A pinned volume is in its slab's half, whatever else was said.
+            (Some(pin), _) => self.registry.read().await.role_of(&pin),
+            (None, Some(r)) => r,
+            (None, None) => self.registry.read().await.default_role(),
         };
         let needed = opts.redundancy.scheme.width();
         if needed > 1 {
@@ -717,6 +814,7 @@ impl VolumeManager {
         // with no extents yet is recorded in a metadata slab of its own role,
         // and that is the only place its role is written down (#141).
         let mut records: Vec<(metadata::VolumeRecord, SlabRole)> = Vec::new();
+        let mut arrays_found: Vec<(RaidArrayId, SlabId)> = Vec::new();
         {
             let reg = self.registry.read().await;
             let mut seen: HashSet<VolumeId> = HashSet::new();
@@ -738,12 +836,20 @@ impl VolumeManager {
                         continue;
                     }
                 };
+                // The arrays a slab says it is (#150): what lets a volume
+                // pinned to an array find that array's slab on a new head.
+                for a in &doc.arrays {
+                    arrays_found.push((a.array_id, *slab_id));
+                }
                 for v in doc.volumes {
                     if seen.insert(v.id) {
                         records.push((v, home));
                     }
                 }
             }
+        }
+        for (array, slab) in arrays_found {
+            self.array_slabs.entry(array).or_insert(slab);
         }
 
         for (vrec, home) in records {
@@ -788,7 +894,11 @@ impl VolumeManager {
                 vol,
                 self.gem.clone(),
                 self.registry.clone(),
-                PlacementPolicy { role, ..Default::default() },
+                PlacementPolicy {
+                    role,
+                    pinned: vrec.array_id.and_then(|a| self.array_slabs.get(&a).copied()),
+                    ..Default::default()
+                },
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
@@ -1415,15 +1525,17 @@ impl VolumeManager {
     /// data volume that copied-on-write into a *system* slab would put half
     /// of the node's identity in the half an install replaces (#88).
     fn inherit_handle(&self, vol: ThinVolume, source_id: &VolumeId) -> ThinVolumeHandle {
-        let (policy, failed, role) = match self.volumes.get(source_id) {
-            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role()),
-            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System),
+        let (policy, failed, role, pinned) = match self.volumes.get(source_id) {
+            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab()),
+            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None),
         };
+        // A clone of a pinned volume shares its slots on that slab, and its
+        // copy-on-writes stay there with them (#150).
         let handle = ThinVolumeHandle::with_redundancy(
             vol,
             self.gem.clone(),
             self.registry.clone(),
-            PlacementPolicy { role, ..Default::default() },
+            PlacementPolicy { role, pinned, ..Default::default() },
             policy,
         );
         handle.set_failed_slabs(failed);
@@ -1684,9 +1796,16 @@ impl VolumeManager {
             return Vec::new();
         }
         let full = self.snapshot_metadata().await;
-        if self.metadata_slabs.len() == 1 {
+        // One metadata slab carries everything — unless it is dedicated, which
+        // carries only what is pinned to it (#150).
+        if self.metadata_slabs.len() == 1 && !self.registry.read().await.is_dedicated(&self.metadata_slabs[0]) {
             return vec![(self.metadata_slabs[0], full)];
         }
+        let pins: HashMap<VolumeId, SlabId> = self
+            .volumes
+            .iter()
+            .filter_map(|(id, h)| h.pinned_slab().map(|p| (*id, p)))
+            .collect();
 
         let mut roles: HashMap<VolumeId, SlabRole> = HashMap::new();
         for (id, handle) in &self.volumes {
@@ -1709,8 +1828,11 @@ impl VolumeManager {
         // Where a volume with no extents is recorded: the first metadata
         // slab whose role matches it.
         let home = |vid: &VolumeId| -> Option<SlabId> {
+            if let Some(p) = pins.get(vid) {
+                return self.metadata_slabs.contains(p).then_some(*p);
+            }
             let want = roles.get(vid).copied().unwrap_or_default();
-            self.metadata_slabs.iter().copied().find(|s| reg.role_of(s) == want)
+            self.metadata_slabs.iter().copied().find(|s| reg.role_of(s) == want && !reg.is_dedicated(s))
         };
         let array_of: HashMap<SlabId, RaidArrayId> = self
             .array_slabs
@@ -1796,6 +1918,7 @@ impl VolumeManager {
                 handle.failed_slabs(),
                 handle.is_sealed(),
                 handle.access(),
+                handle.pinned_slab(),
             ));
         }
 
@@ -1814,11 +1937,12 @@ impl VolumeManager {
             .collect();
         let volumes = vol_info
             .into_iter()
-            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed, access)| metadata::VolumeRecord {
+            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed, access, pinned)| metadata::VolumeRecord {
                 id,
                 name,
                 virtual_size,
-                array_id: None,
+                // A pin travels as the array the slab is (#150).
+                array_id: pinned.and_then(|p| self.array_of_slab(&p)),
                 retention: self.retentions.get(&id).copied().unwrap_or_default(),
                 parent: self.parents.get(&id).copied(),
                 sealed,
@@ -2010,7 +2134,11 @@ impl VolumeManager {
                 vol,
                 self.gem.clone(),
                 self.registry.clone(),
-                PlacementPolicy { role, ..Default::default() },
+                PlacementPolicy {
+                    role,
+                    pinned: vrec.array_id.and_then(|a| self.array_slabs.get(&a).copied()),
+                    ..Default::default()
+                },
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());

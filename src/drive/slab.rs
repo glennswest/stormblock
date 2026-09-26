@@ -260,6 +260,9 @@ struct SlabHeader {
     create_time: u64,
     update_time: u64,
     tier: StorageTier,
+    /// Bit 0: [`FLAG_DEDICATED`]. The byte was written as 0 by every earlier
+    /// version and never read, so an older engine opens a dedicated slab as
+    /// an ordinary one.
     flags: u8,
     /// What the slab is for. Written into a v1 pad byte, so a slab formatted
     /// before this reads as `System` rather than as garbage.
@@ -383,6 +386,12 @@ impl SlabHeader {
     }
 }
 
+/// Header `flags` bit: the slab takes allocations only for volumes pinned
+/// to it (#150). An array built for one consumer's volume is dedicated, so
+/// nothing else on the node lands on it, and deleting the array cannot take
+/// anyone else's data with it.
+pub const FLAG_DEDICATED: u8 = 0x01;
+
 /// What to reserve when formatting a slab.
 #[derive(Debug, Clone, Copy)]
 pub struct SlabFormat {
@@ -399,11 +408,19 @@ pub struct SlabFormat {
     /// Bytes the slab should be able to grow to in place, or 0 for exactly
     /// its device. The slot table is sized for this; see [`Slab::grow`].
     pub grow_to: u64,
+    /// Only volumes pinned to this slab allocate on it (#150).
+    pub dedicated: bool,
 }
 
 impl SlabFormat {
     pub fn new(slot_size: u64, tier: StorageTier) -> Self {
-        SlabFormat { slot_size, tier, metadata_bytes: 0, role: SlabRole::System, grow_to: 0 }
+        SlabFormat { slot_size, tier, metadata_bytes: 0, role: SlabRole::System, grow_to: 0, dedicated: false }
+    }
+
+    /// Take allocations only for volumes pinned to this slab (#150).
+    pub fn dedicated(mut self) -> Self {
+        self.dedicated = true;
+        self
     }
 
     /// Format this slab as identity storage: nothing on an install path may
@@ -559,7 +576,7 @@ impl Slab {
             create_time: now,
             update_time: now,
             tier,
-            flags: 0,
+            flags: if opts.dedicated { FLAG_DEDICATED } else { 0 },
             role: opts.role,
             meta_offset,
             meta_size,
@@ -1045,6 +1062,11 @@ impl Slab {
     /// What the slab is for — see [`SlabRole`].
     pub fn role(&self) -> SlabRole {
         self.header.role
+    }
+
+    /// Whether only volumes pinned to this slab may allocate on it (#150).
+    pub fn is_dedicated(&self) -> bool {
+        self.header.flags & FLAG_DEDICATED != 0
     }
 
     /// Whether this slab holds identity and state rather than goldens, and so

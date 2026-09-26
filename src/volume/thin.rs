@@ -77,6 +77,11 @@ pub struct PlacementPolicy {
     /// take a copy-on-write extent of the node's identity with it (#88).
     /// Tier is a preference with a fallback chain; this is not.
     pub role: SlabRole,
+    /// Every extent on this one slab, and nowhere else (#150): a volume
+    /// carved on an array *is* that array's storage. Tier, role and the
+    /// dedicated flag do not apply to a pinned volume's own slab; it is
+    /// refused rather than spilled when the slab is full.
+    pub pinned: Option<SlabId>,
 }
 
 impl Default for PlacementPolicy {
@@ -85,6 +90,7 @@ impl Default for PlacementPolicy {
             preferred_tier: StorageTier::Hot,
             tier_fallback: vec![StorageTier::Warm, StorageTier::Cool, StorageTier::Cold],
             role: SlabRole::System,
+            pinned: None,
         }
     }
 }
@@ -461,6 +467,11 @@ impl ThinVolumeHandle {
         self.placement.role
     }
 
+    /// The slab every extent of this volume lives on, when it is pinned (#150).
+    pub fn pinned_slab(&self) -> Option<SlabId> {
+        self.placement.pinned
+    }
+
     pub fn is_sealed(&self) -> bool {
         self.sealed.load(Ordering::Relaxed)
     }
@@ -775,6 +786,22 @@ impl ThinVolumeHandle {
         rung: &str,
         generation: u64,
     ) -> DriveResult<Leg> {
+        if let Some(pin) = self.placement.pinned {
+            if self.is_failed(pin) {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "volume {} is pinned to slab {}, which it has stopped trusting", self.id, pin.0
+                )));
+            }
+            if registry.allocatable_pinned(&pin).is_none() {
+                return Err(DriveError::NoSpace(format!(
+                    "slab {} this volume is pinned to is full, quarantined or not attached", pin.0
+                )));
+            }
+            let slab = registry.get_mut(&pin).expect("checked above");
+            let slot_idx = slab.allocate_gen(self.id, vext_tag, generation).await?;
+            registry.reserve(pin, slot_idx);
+            return Ok(Leg::new(pin, slot_idx));
+        }
         let mut tiers = vec![self.placement.preferred_tier];
         tiers.extend(self.placement.tier_fallback.iter().copied());
         let failed_drives = self.failed_domains(registry);

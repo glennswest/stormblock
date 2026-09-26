@@ -114,12 +114,28 @@ impl SlabRegistry {
     }
 
     /// Whether a slab can take a new slot: has room and is not quarantined.
+    /// Free slots on a slab that takes general allocations: not quarantined,
+    /// and not dedicated to the volumes pinned to it (#150).
     fn allocatable(&self, id: &SlabId) -> Option<u64> {
+        if self.is_dedicated(id) {
+            return None;
+        }
+        self.allocatable_pinned(id)
+    }
+
+    /// Free slots on a slab for a volume pinned to it: quarantine still
+    /// applies, dedication does not.
+    pub fn allocatable_pinned(&self, id: &SlabId) -> Option<u64> {
         if self.quarantined.contains(id) {
             return None;
         }
         let free = self.slabs.get(id)?.free_slots();
         if free > 0 { Some(free) } else { None }
+    }
+
+    /// Whether a slab takes allocations only for volumes pinned to it.
+    pub fn is_dedicated(&self, id: &SlabId) -> bool {
+        self.slabs.get(id).map(|s| s.is_dedicated()).unwrap_or(false)
     }
 
     /// Say where a device is — `shelf=…/bay=…` from stormdrive, `rack=…`

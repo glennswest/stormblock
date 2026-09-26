@@ -808,7 +808,9 @@ impl PlacementEngine {
             let mut domains: Vec<(FailureDomain, u64, u64, Vec<SlabId>)> = Vec::new();
             for (&id, slab) in registry.iter() {
                 let d = registry.domain_of(&id);
-                if d.is_empty() {
+                // A dedicated slab is not part of the pool being evened out:
+                // nothing may move onto it, and what is on it is pinned (#150).
+                if d.is_empty() || registry.is_dedicated(&id) {
                     continue;
                 }
                 match domains.iter_mut().find(|(k, _, _, _)| k.same_at(&d, rung)) {
@@ -958,6 +960,8 @@ impl PlacementEngine {
         let pick = |ids: Vec<SlabId>| -> Option<SlabId> {
             ids.into_iter()
                 .filter(|id| *id != exclude && !registry.is_quarantined(id))
+                // A dedicated slab holds only what is pinned to it (#150).
+                .filter(|id| !registry.is_dedicated(id))
                 .filter(|id| registry.role_of(id) == role)
                 .filter(|id| !registry.collides(id, keep_apart_from, rung))
                 .filter_map(|id| registry.get(&id).map(|s| (id, s.free_slots())))
@@ -989,6 +993,7 @@ impl PlacementEngine {
 
             // Calculate average usage fraction across all slabs
             let slab_stats: Vec<(SlabId, u64, u64)> = registry.iter()
+                .filter(|(id, _)| !registry.is_dedicated(id))
                 .map(|(&id, slab)| (id, slab.allocated_slots(), slab.total_slots()))
                 .collect();
 
@@ -1077,6 +1082,10 @@ impl PlacementEngine {
             for (&vol_id, policy) in volume_policies {
                 if let Some(iter) = gem.volume_extents(&vol_id) {
                     for (&vext_idx, loc) in iter {
+                        // Pinned where it is (#150).
+                        if registry.is_dedicated(&loc.slab_id) {
+                            continue;
+                        }
                         let current_tier = registry.get(&loc.slab_id)
                             .map(|s| s.tier());
                         if let Some(tier) = current_tier {
@@ -1126,6 +1135,7 @@ impl PlacementEngine {
         let candidates: Vec<(SlabId, u64)> = registry.by_tier(tier)
             .iter()
             .filter(|&&id| id != exclude && !registry.is_quarantined(&id))
+            .filter(|&&id| !registry.is_dedicated(&id))
             .filter(|&&id| registry.role_of(&id) == role)
             .filter(|&id| !registry.collides(id, keep_apart_from, DEFAULT_RUNG))
             .filter_map(|id| {
@@ -1143,6 +1153,7 @@ impl PlacementEngine {
         for (id, slab) in registry.iter() {
             if *id != exclude
                 && !registry.is_quarantined(id)
+                && !registry.is_dedicated(id)
                 && registry.role_of(id) == role
                 && slab.free_slots() > 0
                 && !registry.collides(id, keep_apart_from, DEFAULT_RUNG)
