@@ -118,7 +118,7 @@ Build host: dev.g8.lo (login `root` or `gwest`) — the shared dev box for compi
 
 ## TODO — Implementation Roadmap
 
-### Pin a volume to an array; dedicated array slabs (2026-09-26, #150) — DONE (v18.7.0)
+### Pin a volume to an array; dedicated array slabs (2026-09-26, #150) — DONE (v19.0.0)
 
 stormstorage#2: a consumer volume carved on a RAID1-over-NVMe-TCP array must
 *be* the mirror. Today `array_id` on create is only checked (every extent

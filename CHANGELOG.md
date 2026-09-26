@@ -3,6 +3,14 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.0.0] — 2026-09-26
+
+### Breaking
+- `POST /api/v1/arrays` makes a **dedicated** array by default: volumes that
+  are not pinned to it no longer allocate on its slab. Send
+  `"dedicated": false` for the previous behaviour. `array_id` on a volume
+  create now *pins* the volume to the array; before, it was only checked.
+
 ### 2026-09-26 (arrays)
 - **feat(arrays):** an array created with `POST /api/v1/arrays` is *dedicated*
   by default (#150). Its slab is in the data role, carries its own metadata
