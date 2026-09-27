@@ -109,7 +109,7 @@ pub struct RepointRequest {
 /// The synonym as it goes on the wire, plus what is known about the target
 /// right now — a caller resolving a name almost always then asks the volume
 /// what it is, and the round trip is free here.
-async fn body(state: &AppState, s: &Synonym, changed: Option<bool>) -> serde_json::Value {
+pub(super) async fn body(state: &AppState, s: &Synonym, changed: Option<bool>) -> serde_json::Value {
     let mut v = json!({
         "namespace": s.namespace,
         "name": s.name,
@@ -148,10 +148,10 @@ async fn body(state: &AppState, s: &Synonym, changed: Option<bool>) -> serde_jso
     v
 }
 
-fn err(e: SynonymError) -> Response {
+pub(super) fn err(e: SynonymError) -> Response {
     match e {
         SynonymError::NotFound(_) => ApiError::not_found(e.to_string()),
-        SynonymError::Exists(_) => ApiError::conflict(e.to_string()),
+        SynonymError::Exists(_) | SynonymError::Conflict(_) => ApiError::conflict(e.to_string()),
         SynonymError::InvalidName(_) | SynonymError::NoHistory(_) => {
             ApiError::bad_request(e.to_string())
         }
@@ -234,6 +234,7 @@ async fn resolve(
     since: Option<u64>,
     headers: &HeaderMap,
 ) -> Response {
+    let name = &canonical(&state, namespace, name).await;
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(s) = found else {
         return ApiError::not_found(format!("no synonym {}", synonym::key(namespace, name)));
@@ -284,6 +285,7 @@ async fn do_repoint(
     name: &str,
     req: RepointRequest,
 ) -> Response {
+    let name = &canonical(&state, namespace, name).await;
     let target = match target_of(&state, req.volume.as_deref(), req.uri.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -315,6 +317,7 @@ async fn repoint_two(
 }
 
 async fn do_rollback(state: Arc<AppState>, namespace: &str, name: &str) -> Response {
+    let name = &canonical(&state, namespace, name).await;
     let back = {
         let mut store = state.synonyms.write().await;
         match store.rollback(namespace, name) {
@@ -629,7 +632,8 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // A machine claiming its boot image is the one caller that arrives with
     // no credential, so its claim is a different, narrower verb (#107).
     if namespace == BOOTHOST_NS {
-        return claim_boothost(state, name).await;
+        let host = canonical(&state, namespace, name).await;
+        return claim_boothost(state, &host, name).await;
     }
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(syn) = found else {
@@ -775,13 +779,17 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     (StatusCode::CREATED, Json(out)).into_response()
 }
 
-/// The namespace a machine's boot image is assigned in, by service tag.
-pub const BOOTHOST_NS: &str = "boothost";
-/// Each host's own sealed golden, by service tag. Kept by the engine, never
-/// by a caller.
-pub const HOSTGOLDEN_NS: &str = "hostgolden";
-/// What a tag seen for the first time boots (stormbootx#15).
-pub const DEFAULT_HOST: &str = "default";
+pub use crate::volume::synonym::{BOOTHOST_NS, DEFAULT_HOST, HOSTGOLDEN_NS};
+
+/// In the `boothost` and `hostgolden` namespaces a name may be a host's
+/// alias — its serial, a MAC, a former name — and means that host (#199).
+/// Everywhere else a name is itself.
+async fn canonical(state: &AppState, namespace: &str, name: &str) -> String {
+    if namespace != BOOTHOST_NS && namespace != HOSTGOLDEN_NS {
+        return name.to_string();
+    }
+    state.synonyms.read().await.host_of(name).unwrap_or_else(|| name.to_string())
+}
 
 /// One boothost claim at a time. Claims are rare — two per boot of one
 /// machine — and serialising them is what keeps two claims for one tag from
@@ -812,8 +820,14 @@ static BOOT_CLAIMS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// So the worst a caller that is not machine X can do by claiming as X is get
 /// X's image — which is what "the tag is the binding" means until a claim is
 /// bound to the host itself (stormcos#35).
-async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
+async fn claim_boothost(state: Arc<AppState>, tag: &str, claimed_as: &str) -> Response {
     let _one_at_a_time = BOOT_CLAIMS.lock().await;
+    // Every name this host has had: its clones and goldens carry the name
+    // they were made under, and a rename must not strand them (#199).
+    let host = state.synonyms.read().await.host(tag);
+    let names: Vec<String> = std::iter::once(tag.to_string())
+        .chain(host.iter().flat_map(|h| h.former_names.iter().cloned()))
+        .collect();
 
     // 1. The assignment.
     let assignment = {
@@ -922,6 +936,7 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
     // grace (the live one of this boot), not named, not sealed, and a clone of
     // something this tag has booted.
     let clone_name = format!("{BOOTHOST_NS}-{tag}");
+    let clone_names: Vec<String> = names.iter().map(|n| format!("{BOOTHOST_NS}-{n}")).collect();
     let predecessors: Vec<VolumeId> = state
         .volume_manager
         .lock()
@@ -929,7 +944,7 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
         .list_volumes()
         .await
         .into_iter()
-        .filter(|(_, name, _, _)| *name == clone_name)
+        .filter(|(_, name, _, _)| clone_names.contains(name))
         .map(|(id, ..)| id)
         .collect();
     let c = match crate::fs::template::clone_volume(
@@ -958,11 +973,18 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
             kept.push(old);
         }
     }
-    let collected = collect_host_goldens(&state, tag, golden).await;
+    let collected = collect_host_goldens(&state, tag, &names, golden).await;
 
     note_claim(c.volume_id);
     let attach = attach_info(&state, c.volume_id).await;
     let out = json!({
+        // Who this is, and what the machine called itself: a serial or a MAC
+        // resolves to the host it is an alias of (#199).
+        "host": {
+            "name": tag,
+            "claimed_as": claimed_as,
+            "aliases": host.as_ref().map(|h| h.aliases.clone()).unwrap_or_default(),
+        },
         "claimed_from": {
             "synonym": synonym::key(BOOTHOST_NS, tag),
             "version": assignment.version,
@@ -996,11 +1018,16 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str) -> Response {
 /// to name, that nothing is cloned from any more and no name points at. A
 /// golden a boot clone still descends from stays until that clone is
 /// released — at the next boot.
-async fn collect_host_goldens(state: &Arc<AppState>, tag: &str, current: VolumeId) -> Vec<VolumeId> {
+async fn collect_host_goldens(
+    state: &Arc<AppState>,
+    tag: &str,
+    names: &[String],
+    current: VolumeId,
+) -> Vec<VolumeId> {
     let Some(h) = state.synonyms.read().await.get(HOSTGOLDEN_NS, tag).cloned() else {
         return Vec::new();
     };
-    let prefix = format!("{HOSTGOLDEN_NS}-{tag}-");
+    let prefixes: Vec<String> = names.iter().map(|n| format!("{HOSTGOLDEN_NS}-{n}-")).collect();
     let mut gone = Vec::new();
     for old in h.history.iter().filter_map(|p| p.target.volume_id()) {
         if old == current || gone.contains(&old) {
@@ -1013,7 +1040,8 @@ async fn collect_host_goldens(state: &Arc<AppState>, tag: &str, current: VolumeI
         let Some(handle) = vm.get_volume_handle(&old) else { continue };
         // Only what this path made: sealed, named as a host golden of this
         // tag, and with nothing cloned from it.
-        if !vm.is_sealed(&old) || !handle.name().await.starts_with(&prefix) || !vm.children(&old).is_empty() {
+        let named = handle.name().await;
+        if !vm.is_sealed(&old) || !prefixes.iter().any(|p| named.starts_with(p)) || !vm.children(&old).is_empty() {
             continue;
         }
         match vm.delete_volume(old).await {

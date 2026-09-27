@@ -39,6 +39,14 @@ const SYNONYMS_FILE: &str = "synonyms.json";
 /// The default namespace, for callers that do not care about them.
 pub const DEFAULT_NAMESPACE: &str = "default";
 
+/// The namespace a machine's boot image is assigned in, by host name.
+pub const BOOTHOST_NS: &str = "boothost";
+/// Each host's own sealed golden, by host name. Kept by the engine, never
+/// by a caller.
+pub const HOSTGOLDEN_NS: &str = "hostgolden";
+/// What a host seen for the first time boots (stormbootx#15).
+pub const DEFAULT_HOST: &str = "default";
+
 /// What a synonym points at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -122,6 +130,9 @@ pub enum SynonymError {
     InvalidName(String),
     /// A rollback with nothing to roll back to.
     NoHistory(String),
+    /// Two hosts would share a name or an alias (#199). The message names
+    /// both.
+    Conflict(String),
 }
 
 impl std::fmt::Display for SynonymError {
@@ -133,6 +144,7 @@ impl std::fmt::Display for SynonymError {
             SynonymError::NoHistory(k) => {
                 write!(f, "synonym {k} has no earlier target to roll back to")
             }
+            SynonymError::Conflict(why) => write!(f, "{why}"),
         }
     }
 }
@@ -179,19 +191,91 @@ fn check_name(namespace: &str, name: &str) -> Result<(), SynonymError> {
     Ok(())
 }
 
+/// A machine, by the name it is known by (#199).
+///
+/// The name is the host's DNS name, and is the key of its `boothost/<name>`
+/// assignment and `hostgolden/<name>` golden. Aliases are the other things a
+/// machine may claim as — its SMBIOS serial, its MACs — and resolve to the
+/// same host. Nothing becomes an alias by itself: MicroCloud nodes share a
+/// chassis serial, so the serial a claim arrives with says nothing on its own
+/// about which machine it is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Host {
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Names the host had before a rename. Its boot clones and host goldens
+    /// carry the name they were made under, so collecting them has to know
+    /// every name the host has had.
+    #[serde(default)]
+    pub former_names: Vec<String>,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+/// What two host identifiers are compared by: case-insensitive, and a MAC in
+/// any common spelling (`AA:BB:…`, `aa-bb-…`, `aabb.ccdd.eeff`, bare hex) as
+/// its 12 hex digits.
+pub fn host_match_key(s: &str) -> String {
+    let t = s.trim();
+    let hex: String = t.chars().filter(|c| !matches!(c, ':' | '-' | '.')).collect();
+    let mac_shaped = hex.len() == 12
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+        && t.chars().all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '-' | '.'));
+    if mac_shaped {
+        hex.to_ascii_lowercase()
+    } else {
+        t.to_ascii_lowercase()
+    }
+}
+
+/// How an alias is stored: a MAC written with separators becomes
+/// `aa:bb:cc:dd:ee:ff`; anything else is kept as given.
+pub fn normalize_alias(s: &str) -> String {
+    let t = s.trim();
+    let key = host_match_key(t);
+    let separated = t.contains(':') || t.contains('-') || t.contains('.');
+    if separated && key.len() == 12 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+        key.as_bytes()
+            .chunks(2)
+            .map(|c| std::str::from_utf8(c).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(":")
+    } else {
+        t.to_string()
+    }
+}
+
+/// A host name or alias is a synonym name, and never `default`.
+fn check_host_name(name: &str) -> Result<(), SynonymError> {
+    check_name(BOOTHOST_NS, name)?;
+    if name.eq_ignore_ascii_case(DEFAULT_HOST) {
+        return Err(SynonymError::InvalidName(format!(
+            "{DEFAULT_HOST} is what a new machine boots, not a host"
+        )));
+    }
+    Ok(())
+}
+
 /// The node's synonyms, persisted as `<data_dir>/synonyms.json`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SynonymStore {
     pub version: u32,
     /// Keyed `namespace/name`, ordered so the file reads the same twice.
     pub synonyms: BTreeMap<String, Synonym>,
+    /// Boot hosts with aliases or a rename behind them, keyed by name (#199).
+    /// A host with neither is just its `boothost/<name>` synonym.
+    #[serde(default)]
+    pub hosts: BTreeMap<String, Host>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
 
 impl Default for SynonymStore {
     fn default() -> Self {
-        SynonymStore { version: 1, synonyms: BTreeMap::new(), path: None }
+        SynonymStore { version: 1, synonyms: BTreeMap::new(), hosts: BTreeMap::new(), path: None }
     }
 }
 
@@ -222,10 +306,10 @@ impl SynonymStore {
                         bak.display()
                     );
                     let _ = std::fs::rename(&path, &bak);
-                    SynonymStore { version: 1, synonyms: BTreeMap::new(), path: Some(path) }
+                    SynonymStore { path: Some(path), ..SynonymStore::default() }
                 }
             },
-            Err(_) => SynonymStore { version: 1, synonyms: BTreeMap::new(), path: Some(path) },
+            Err(_) => SynonymStore { path: Some(path), ..SynonymStore::default() },
         }
     }
 
@@ -272,6 +356,16 @@ impl SynonymStore {
         let k = key(namespace, name);
         if self.synonyms.contains_key(&k) {
             return Err(SynonymError::Exists(k));
+        }
+        // A new host may not be named what another host answers to.
+        if namespace == BOOTHOST_NS {
+            if let Some(other) = self.host_of(name) {
+                if host_match_key(&other) != host_match_key(name) {
+                    return Err(SynonymError::Conflict(format!(
+                        "{name} is an alias of host {other}; claim or assign it as {other}"
+                    )));
+                }
+            }
         }
         let t = now();
         let syn = Synonym {
@@ -339,6 +433,165 @@ impl SynonymStore {
         Ok(gone)
     }
 
+    /// The host a name or alias belongs to: a host record's name or one of
+    /// its aliases, or a `boothost/<name>` assignment's name. `None` for a
+    /// machine nobody has heard of.
+    pub fn host_of(&self, k: &str) -> Option<String> {
+        let want = host_match_key(k);
+        if want.is_empty() {
+            return None;
+        }
+        for h in self.hosts.values() {
+            if host_match_key(&h.name) == want || h.aliases.iter().any(|a| host_match_key(a) == want) {
+                return Some(h.name.clone());
+            }
+        }
+        self.synonyms
+            .values()
+            .filter(|s| s.namespace == BOOTHOST_NS && s.name != DEFAULT_HOST)
+            .find(|s| host_match_key(&s.name) == want)
+            .map(|s| s.name.clone())
+    }
+
+    /// A host's record, or the bare record a host with only an assignment
+    /// has.
+    pub fn host(&self, name: &str) -> Option<Host> {
+        if let Some(h) = self.hosts.get(name) {
+            return Some(h.clone());
+        }
+        self.get(BOOTHOST_NS, name).map(|s| Host {
+            name: s.name.clone(),
+            aliases: Vec::new(),
+            former_names: Vec::new(),
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+        })
+    }
+
+    /// Every boot host: the ones with a record and the ones that are only an
+    /// assignment, by name.
+    pub fn hosts(&self) -> Vec<Host> {
+        let mut names: std::collections::BTreeSet<String> = self.hosts.keys().cloned().collect();
+        for s in self.list(Some(BOOTHOST_NS)) {
+            if s.name != DEFAULT_HOST {
+                names.insert(s.name.clone());
+            }
+        }
+        names.iter().filter_map(|n| self.host(n)).collect()
+    }
+
+    /// Set a host's aliases, replacing the ones it had. Refused, naming both
+    /// hosts, when an alias is another host's name or alias (#199).
+    pub fn set_aliases(&mut self, name: &str, aliases: &[String]) -> Result<Host, SynonymError> {
+        check_host_name(name)?;
+        let name = match self.host_of(name) {
+            Some(h) if host_match_key(&h) == host_match_key(name) => h,
+            Some(h) => {
+                return Err(SynonymError::Conflict(format!(
+                    "{name} is an alias of host {h}; set aliases on {h}"
+                )))
+            }
+            None => name.to_string(),
+        };
+        let mut wanted: Vec<String> = Vec::new();
+        for a in aliases {
+            let a = normalize_alias(a);
+            check_host_name(&a).map_err(|e| match e {
+                SynonymError::InvalidName(why) => SynonymError::InvalidName(format!("alias {a}: {why}")),
+                other => other,
+            })?;
+            if host_match_key(&a) == host_match_key(&name)
+                || wanted.iter().any(|w| host_match_key(w) == host_match_key(&a))
+            {
+                continue;
+            }
+            wanted.push(a);
+        }
+        let clashes: Vec<String> = wanted
+            .iter()
+            .filter_map(|a| {
+                self.host_of(a)
+                    .filter(|o| *o != name)
+                    .map(|o| format!("{a} already names host {o}"))
+            })
+            .collect();
+        if !clashes.is_empty() {
+            return Err(SynonymError::Conflict(format!(
+                "two hosts may not share an alias: {} (for host {name})",
+                clashes.join("; ")
+            )));
+        }
+        let t = now();
+        let h = self.hosts.entry(name.clone()).or_insert_with(|| Host {
+            name: name.clone(),
+            aliases: Vec::new(),
+            former_names: Vec::new(),
+            created_at: t,
+            updated_at: t,
+        });
+        h.aliases = wanted;
+        h.updated_at = t;
+        let out = h.clone();
+        self.persist();
+        Ok(out)
+    }
+
+    /// Rename a host, keeping everything it has: its assignment and host
+    /// golden move to the new name with their versions and history, its
+    /// aliases stay, and the old name is remembered so its clones are still
+    /// collected. The old name stays an alias unless `keep_alias` is false,
+    /// so a machine still claiming by it boots as before.
+    pub fn rename_host(&mut self, from: &str, to: &str, keep_alias: bool) -> Result<Host, SynonymError> {
+        let old = self
+            .host_of(from)
+            .ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, from)))?;
+        if old == DEFAULT_HOST {
+            return Err(SynonymError::InvalidName(format!("{DEFAULT_HOST} is not a host")));
+        }
+        check_host_name(to)?;
+        if old == to {
+            return self.host(&old).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, from)));
+        }
+        if let Some(other) = self.host_of(to).filter(|o| *o != old) {
+            return Err(SynonymError::Conflict(format!(
+                "cannot rename {old} to {to}: {to} already names host {other}"
+            )));
+        }
+        for ns in [BOOTHOST_NS, HOSTGOLDEN_NS] {
+            let k = key(ns, to);
+            if self.synonyms.contains_key(&k) && host_match_key(to) != host_match_key(&old) {
+                return Err(SynonymError::Exists(k));
+            }
+        }
+        let t = now();
+        for ns in [BOOTHOST_NS, HOSTGOLDEN_NS] {
+            if let Some(mut s) = self.synonyms.remove(&key(ns, &old)) {
+                s.name = to.to_string();
+                s.updated_at = t;
+                self.synonyms.insert(key(ns, to), s);
+            }
+        }
+        let mut h = self.hosts.remove(&old).unwrap_or(Host {
+            name: old.clone(),
+            aliases: Vec::new(),
+            former_names: Vec::new(),
+            created_at: t,
+            updated_at: t,
+        });
+        h.name = to.to_string();
+        h.aliases.retain(|a| host_match_key(a) != host_match_key(to));
+        if keep_alias && host_match_key(&old) != host_match_key(to) {
+            h.aliases.push(old.clone());
+        }
+        if !h.former_names.contains(&old) {
+            h.former_names.push(old);
+        }
+        h.updated_at = t;
+        self.hosts.insert(to.to_string(), h.clone());
+        self.persist();
+        Ok(h)
+    }
+
     pub fn persist(&self) {
         let Some(path) = &self.path else { return };
         let bytes = match serde_json::to_vec_pretty(self) {
@@ -364,6 +617,97 @@ mod tests {
 
     fn vol() -> VolumeId {
         VolumeId(uuid::Uuid::new_v4())
+    }
+
+    #[test]
+    fn a_host_answers_to_its_name_and_its_aliases() {
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "stormblock1", Target::Volume { id: vol() }, None, None).unwrap();
+        let h = s
+            .set_aliases("stormblock1", &["C2NR0Q2".into(), "AA-BB-CC-DD-EE-FF".into()])
+            .unwrap();
+        assert_eq!(h.aliases, vec!["C2NR0Q2".to_string(), "aa:bb:cc:dd:ee:ff".to_string()]);
+        for k in ["stormblock1", "STORMBLOCK1", "C2NR0Q2", "c2nr0q2", "aa:bb:cc:dd:ee:ff", "AABBCCDDEEFF", "aabb.ccdd.eeff"] {
+            assert_eq!(s.host_of(k).as_deref(), Some("stormblock1"), "{k}");
+        }
+        assert_eq!(s.host_of("someone-else"), None);
+        assert_eq!(s.host_of(DEFAULT_HOST), None, "default is not a host");
+    }
+
+    #[test]
+    fn two_hosts_never_share_an_alias() {
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "mc1", Target::Volume { id: vol() }, None, None).unwrap();
+        s.create(BOOTHOST_NS, "mc2", Target::Volume { id: vol() }, None, None).unwrap();
+        s.set_aliases("mc1", &["CHASSIS9".into()]).unwrap();
+        let e = s.set_aliases("mc2", &["chassis9".into()]).unwrap_err().to_string();
+        assert!(e.contains("mc1") && e.contains("mc2") && e.contains("chassis9"), "{e}");
+        // Nor may an alias be another host's name, or a new host be named
+        // what another host answers to.
+        let e = s.set_aliases("mc2", &["MC1".into()]).unwrap_err().to_string();
+        assert!(e.contains("mc1") && e.contains("mc2"), "{e}");
+        let e = s
+            .create(BOOTHOST_NS, "CHASSIS9", Target::Volume { id: vol() }, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("mc1"), "{e}");
+        assert!(s.host("mc2").unwrap().aliases.is_empty(), "a refused set changes nothing");
+    }
+
+    #[test]
+    fn a_rename_keeps_the_assignment_golden_and_history() {
+        let mut s = SynonymStore::in_memory();
+        let (a, b, g) = (vol(), vol(), vol());
+        s.create(BOOTHOST_NS, "C2NR0Q2", Target::Volume { id: a }, None, None).unwrap();
+        s.repoint(BOOTHOST_NS, "C2NR0Q2", Target::Volume { id: b }, None).unwrap();
+        s.create(HOSTGOLDEN_NS, "C2NR0Q2", Target::Volume { id: g }, None, None).unwrap();
+        s.set_aliases("C2NR0Q2", &["aa:bb:cc:dd:ee:01".into()]).unwrap();
+
+        let h = s.rename_host("C2NR0Q2", "stormblock1", true).unwrap();
+        assert_eq!(h.name, "stormblock1");
+        assert_eq!(h.former_names, vec!["C2NR0Q2".to_string()]);
+        assert!(h.aliases.contains(&"C2NR0Q2".to_string()), "the old name stays an alias");
+        assert!(h.aliases.contains(&"aa:bb:cc:dd:ee:01".to_string()));
+
+        let moved = s.get(BOOTHOST_NS, "stormblock1").unwrap();
+        assert_eq!((moved.version, moved.target.volume_id()), (2, Some(b)));
+        assert_eq!(moved.history[0].target.volume_id(), Some(a));
+        assert_eq!(s.get(HOSTGOLDEN_NS, "stormblock1").unwrap().target.volume_id(), Some(g));
+        assert!(s.get(BOOTHOST_NS, "C2NR0Q2").is_none());
+        assert_eq!(s.host_of("C2NR0Q2").as_deref(), Some("stormblock1"));
+        assert_eq!(s.hosts().len(), 1);
+    }
+
+    #[test]
+    fn a_rename_onto_another_host_is_refused() {
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "a1", Target::Volume { id: vol() }, None, None).unwrap();
+        s.create(BOOTHOST_NS, "b1", Target::Volume { id: vol() }, None, None).unwrap();
+        s.set_aliases("b1", &["SER-B".into()]).unwrap();
+        for to in ["b1", "ser-b"] {
+            let e = s.rename_host("a1", to, true).unwrap_err().to_string();
+            assert!(e.contains("a1") && e.contains("b1"), "{e}");
+        }
+        // Without the alias, the old name no longer answers.
+        s.rename_host("a1", "a2", false).unwrap();
+        assert_eq!(s.host_of("a1"), None);
+        assert_eq!(s.host("a2").unwrap().former_names, vec!["a1".to_string()]);
+    }
+
+    #[test]
+    fn hosts_survive_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut s = SynonymStore::load(dir.path());
+            s.create(BOOTHOST_NS, "n1", Target::Volume { id: vol() }, None, None).unwrap();
+            s.set_aliases("n1", &["S1".into()]).unwrap();
+        }
+        let s = SynonymStore::load(dir.path());
+        assert_eq!(s.host_of("s1").as_deref(), Some("n1"));
+        // A file written before hosts existed still loads.
+        let old = r#"{"version":1,"synonyms":{}}"#;
+        std::fs::write(dir.path().join(SYNONYMS_FILE), old).unwrap();
+        assert!(SynonymStore::load(dir.path()).hosts.is_empty());
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod v1;
 pub mod kube;
 pub mod moves;
 pub mod synonyms;
+pub mod boothost;
 pub mod releases;
 #[cfg(feature = "iscsi")]
 pub mod luns;
@@ -92,6 +93,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/moves", moves::router(state.clone()))
         .nest("/api/v1/rebuilds", rebuilds::router(state.clone()))
         .nest("/api/v1/synonyms", synonyms::router(state.clone()))
+        .nest("/api/v1/boothost", boothost::router(state.clone()))
         .nest("/api/v1/releases", releases::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
