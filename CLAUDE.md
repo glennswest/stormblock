@@ -126,6 +126,31 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Universal boot: a default claim carries a MAC (2026-09-27, #200, P0)
+
+Owner: one ISO for every machine; "I don't want copies, I want cows". Today a
+claim of `boothost/default` itself is tag `default`: one `hostgolden/default`
+and one `boothost-default` boot clone for *every* machine, each claim
+releasing the clone another machine runs on. Built on #199 (hosts, aliases,
+rename).
+
+Design: `POST /api/v1/synonyms/boothost/default/claim` must carry the
+machine's first NIC MAC (`?mac=` or body `{"mac": …}`; the only option a boot
+claim reads); without one → 400. The MAC resolves to a host by alias (a named
+machine boots as itself); else the provisional host `mac-<12 hex>` is created
+with the MAC as its alias and claimed through the ordinary path (pinned to
+the default release, its own sealed `hostgolden/mac-<hex>` CoW clone, fresh
+boot clone per boot per #107). Naming = the #199 rename; the golden is kept.
+`GET /api/v1/boothost?unnamed=1` lists hosts still under a `mac-` name.
+- [ ] store: `provisional_host_name(mac)`, `is_provisional`, record on claim
+- [ ] claim: default + MAC → host; refuse default without MAC; response
+      `host.provisional`, `host.mac`
+- [ ] `GET /boothost?unnamed=1`
+- [ ] tests: two machines, one serial, one ISO → two goldens of one base;
+      same MAC → same golden; rename → claim by name and by default+MAC gets
+      the same golden; no MAC → 400; unnamed listing
+- [ ] docs (auth.md, README), CHANGELOG; sc-build; close #200
+
 ### boothost names are DNS names; serials and MACs are aliases (2026-09-27, #199)
 
 Owner: a machine is known by its DNS name (`stormblock1` is the Dell, today
