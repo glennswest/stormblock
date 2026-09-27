@@ -77,7 +77,7 @@ async fn cut_short(dir: &TempDir) -> (String, String) {
 
 fn boot_local(local: &str, resume_from: Option<&str>) -> (bool, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_stormblock"));
-    cmd.args(["boot-local", "--slab", local, "--volume", "root", "--validate"])
+    cmd.args(["boot-local", "--slab", local, "--volume", "root", "--check"])
         .env_remove("STORMBLOCK_BOOTHOST")
         .env("RUST_LOG", "stormblock=info");
     match resume_from {
