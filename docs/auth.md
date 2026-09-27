@@ -70,6 +70,13 @@ either token.
   exactly (one method, that namespace, one path segment). The re-point beside
   it, `PUT /api/v1/synonyms/boothost/<tag>`, is what decides what a machine
   boots, and it is guarded like everything else.
+* `GET /api/v1/synonyms/boothost/<tag>/intent` and
+  `POST /api/v1/synonyms/boothost/<tag>/installed` — the boot intent's read
+  and the install report (#148), matched the same way. The read answers one
+  word about the tag asked; the report can only lower `install` to `local`,
+  and only for the clone a claim handed out under that `install`. Setting the
+  intent, `PUT …/intent`, needs the token — the admin token when one is
+  configured, since `install` takes the machine's disk whatever it carries.
 
 Everything else needs the token, `/metrics` included: a scrape names this
 node's volumes and says how full it is, which is a read of its state rather
@@ -149,6 +156,45 @@ overlay, so the image is not modified even within a boot.
 The claim answers with `host` (`name`, `claimed_as`, `aliases`),
 `host_golden` (`volume`, `minted`, `collected`) and `claimed_from.release`
 beside the usual `volume` and `attach`.
+
+The claim also answers `intent` (below).
+
+## Boot intent (#148, stormbootx#11)
+
+Beside `boothost/<name>`, each host carries an intent that its boot agent
+reads *before* it claims:
+
+| intent | stormbootx does | then |
+|---|---|---|
+| `auto` (never set) | claims and boots the image | |
+| `install` | claims and boots; the initramfs takes the local disk with force (`--local-disk-force`) | once the flow-over is done and the disk boots on its own, the node reports it and the intent becomes `local` |
+| `local` | boots the local disk at once: no claim, no clone | |
+
+```
+GET  /api/v1/synonyms/boothost/<name>/intent      → {host, intent, updated_at}   open
+PUT  /api/v1/synonyms/boothost/<name>/intent      {"intent": "install"|"local"|"auto"}  admin token
+POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>}  open
+```
+
+`<name>` resolves like a claim: the host's name or any alias — a machine that
+booted the default reads under its MAC's 12 hex digits, which still reaches it
+after a rename. A machine nobody has heard of is a 404; stormbootx reads any
+doubt (404, error, unknown word) as `auto`, so the intent can never keep a
+machine from booting. The intent lives on the host record in `synonyms.json`
+and moves with a rename.
+
+**One request, one install.** A claim served while the intent is `install`
+records its boot clone (the later of firmware's and the initramfs's claims
+wins) and answers `intent: install`. `boot-claim` then writes
+`/run/stormblock/install.json`; the initramfs survey takes the local disk with
+force (an explicit `rd.stormblock.assimilate=off` still says no); `boot-local`
+carries the ticket in the handover record; and the adopting engine, once the
+flow-over has moved every extent and the disk boots on its own, posts
+`…/installed` with that clone's id, retrying for an hour. Only that clone's
+report resets the intent — any other is a 409 and changes nothing — and setting
+the intent clears it, so an install that began before a request never answers
+for it. Until the report lands the intent stays `install`, and the next power
+cycle installs again.
 
 **Aliases do not widen the claim.** An alias only lets a machine reach the host
 it has been *told* it is; nothing becomes an alias by itself, two hosts never

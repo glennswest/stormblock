@@ -3,6 +3,21 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27 (#148)
+- **feat:** boot intent beside `boothost/<name>` (stormbootx#11):
+  `GET /api/v1/synonyms/boothost/<name>/intent` (open, like the claim; name or
+  alias, a MAC's 12 hex digits included; 404 for a machine nobody knows) and
+  `PUT …/intent {"intent": "install"|"local"|"auto"}` (admin token when one is
+  configured). Kept on the host record, so a rename carries it; shown in
+  `/api/v1/boothost`.
+- **feat:** `install` is one-shot. A claim under it answers `intent: install`
+  and records its boot clone; `boot-claim` writes `/run/stormblock/install.json`,
+  the initramfs survey then takes the local disk with force (unless
+  `rd.stormblock.assimilate=off`), `boot-local` carries it in the handover
+  record, and the adopting engine, after the flow-over and local boot succeed,
+  posts `POST …/boothost/<name>/installed {"volume"}` (open) — which sets the
+  intent to `local` only for the clone claimed under the install.
+
 ## [v19.4.0] — 2026-09-27
 
 ### 2026-09-27 (#200)

@@ -395,9 +395,11 @@ Everything is on the management port, behind one bearer-token check
 `api_token`, `$STORMBLOCK_API_TOKEN` or the token file, and mints one into the
 token file if there is none. Open without a token: `/api/v1/health`, the
 `/serve/v1` (and legacy `/mk/v1`) `health` and `ready` probes, and
-`POST /api/v1/synonyms/boothost/<tag>/claim`. With an `admin_token`, destructive
-requests (any `DELETE`, `…/seal`, writing files or a tar into a volume, a
-non-dry-run GC, `trim?apply`, `fsck?repair`) need it.
+`POST /api/v1/synonyms/boothost/<tag>/claim`, and beside it the boot intent's
+`GET …/<tag>/intent` and `POST …/<tag>/installed` (#148). With an
+`admin_token`, destructive requests (any `DELETE`, `…/seal`, writing files or a
+tar into a volume, a non-dry-run GC, `trim?apply`, `fsck?repair`, setting a boot
+intent) need it.
 
 | surface | for |
 |---|---|
@@ -678,6 +680,20 @@ itself: MicroCloud nodes share a chassis serial, so which machine a serial means
 is said explicitly. In the `boothost` and `hostgolden` namespaces, resolve,
 re-point, rollback and claim accept an alias; `DELETE` takes the exact name.
 Hosts are kept in `synonyms.json` (`hosts`) beside the synonyms they name.
+
+**Boot intent (#148).** Each host carries an intent its boot agent reads before
+it claims: `auto` (never set; claim and boot), `local` (boot the local disk, no
+claim), or `install` (claim, and the initramfs takes the local disk with
+force). `install` is one-shot: once the flow-over is done and the disk boots on
+its own, the node reports it and the intent becomes `local`.
+
+```bash
+curl http://forge:9090/api/v1/synonyms/boothost/ac1f6b8aa79c/intent   # open; name or alias
+curl -X PUT http://forge:9090/api/v1/synonyms/boothost/server1/intent \
+     -H "Authorization: Bearer $ADMIN" -d '{"intent":"install"}'
+```
+
+See `docs/auth.md` "Boot intent" for the whole path.
 
 **Why not DHCP.** DHCP can carry a pointer — a `root_path`, a boot file — and
 it is the wrong home for one. A lease is not a source of truth; the mapping
