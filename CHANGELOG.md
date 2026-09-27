@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.2.2] — 2026-09-27
+
 ### 2026-09-27 (flow-over cut short)
 - **fix(boot-local):** a power cut in the middle of a flow-over no longer
   bricks the node (#171). The local records still named extents on the old
