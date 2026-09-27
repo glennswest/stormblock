@@ -146,11 +146,17 @@ flow-over and local boot succeed, reports `POST …/boothost/<tag>/installed
 {volume}` (open; resets only when `volume` is the clone claimed under the
 install). The intended golden's key in the reply (stormbootx#19) is left
 out: that is the owner's call.
-- [ ] store: `BootIntent`, `Host.intent`/`install_claim`, set/note/done
-- [ ] routes GET/PUT intent, POST installed; open GET/POST in auth
-- [ ] claim: `intent` in reply, `install_claim` recorded; boothost view
-- [ ] node: boot-claim ticket, initramfs force, record, successor report
-- [ ] tests, docs (auth.md, README), CHANGELOG; sc-build; close
+- [x] store: `BootIntent`, `Host.intent`/`install_claim`, set/note/done (0e3c47b)
+- [x] routes GET/PUT intent, POST installed; open GET/POST in auth (0e3c47b)
+- [x] claim: `intent` in reply, `install_claim` recorded; boothost view
+- [x] node: boot-claim ticket, initramfs force, record, successor report
+      (8a076f8; the report only after the flow-over moved everything and
+      `run_local_boot` says the disk is bootable; retried for an hour)
+- [x] tests, docs (auth.md, README, boot-hooks.md), CHANGELOG; on dev at
+      the fix commit: lib 33/33 (store, auth, handover), integration_synonyms
+      24/24, integration_auth 5/5, tests/initramfs-boot-hook.sh all ok
+- [ ] full suite on dev; close. Not verified: a real machine through
+      stormbootx (local skips the claim; install → flow-over → local)
 
 ### Universal boot: a default claim carries a MAC (2026-09-27, #200, P0) — DONE (v19.4.0)
 
