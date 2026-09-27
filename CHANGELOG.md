@@ -3,6 +3,27 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27 (#199)
+- **feat:** boot hosts are known by their DNS name, with their SMBIOS serial
+  and MACs as aliases. A claim of `boothost/<alias>` is a claim of the host it
+  belongs to, so agents claiming by serial keep booting the same image; the
+  response carries `host {name, claimed_as, aliases}`. Resolve, re-point and
+  rollback in the `boothost`/`hostgolden` namespaces accept an alias too.
+  - `/api/v1/boothost`: `GET` (every host: name, aliases, former names,
+    assignment, host golden), `GET /{name|alias}`, `PUT /{name} {aliases}`,
+    `POST /{name}/rename {to, keep_alias?}`. Token required, like everything
+    but the claim.
+  - A rename moves `boothost/<old>` and `hostgolden/<old>` with their versions
+    and history, keeps the old name as an alias (unless `keep_alias: false`),
+    and remembers it, so boot clones and host goldens made under it are still
+    released and collected (#127).
+  - Two hosts never share an alias or a name: setting one, renaming onto one,
+    or creating `boothost/<x>` where `x` is another host's alias is a 409 naming
+    both. Nothing becomes an alias by itself (MicroCloud nodes share a chassis
+    serial). Matching is case-insensitive, and a MAC matches in any spelling.
+  - Hosts are stored in `synonyms.json` (`hosts`); a file without it still
+    loads.
+
 ### 2026-09-27 (docs checked against the code)
 - **docs:** README, `docs/` and CLAUDE.md checked against the code for
   everything since 2026-09-18 (config, CLI, env, routes, auth, ports,

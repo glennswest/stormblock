@@ -106,10 +106,13 @@ firmware on a USB stick, and the initramfs a stage later is no better placed —
 so that one verb has to be open. The owner's decision (2026-09-25) was to make
 it safe by what it **cannot** do rather than by who calls it:
 
-1. **Each host has its own sealed golden.** `boothost/<tag>` is the host's
+1. **Each host has its own sealed golden.** A host is known by its DNS name;
+   its SMBIOS serial and MACs are aliases, and a claim by an alias is a claim
+   of that host (#199, `/api/v1/boothost`). `boothost/<name>` is the host's
    *assignment* — the release stormcentral points it at. The claim keeps
-   `hostgolden/<tag>`: a sealed copy-on-write clone of that release, owned by
-   the tag (metadata only; it costs nothing until the assignment changes).
+   `hostgolden/<name>`: a sealed copy-on-write clone of that release, owned by
+   the host (metadata only; it costs nothing until the assignment changes).
+   Below, *tag* is the host's name, whichever alias it claimed as.
 2. **A tag seen for the first time** takes whatever `boothost/default` names,
    and is pinned to it: `boothost/<tag>` is created then, so moving the default
    later does not move a machine that already has an image (stormbootx#15).
@@ -135,8 +138,16 @@ first use, a TPM, or mutual boot auth (stormcos#35) — the tag is the binding.
 Also still to come: attaching the boot clone read-only with a writable
 overlay, so the image is not modified even within a boot.
 
-The claim answers with `host_golden` (`volume`, `minted`, `collected`) and
-`claimed_from.release` beside the usual `volume` and `attach`.
+The claim answers with `host` (`name`, `claimed_as`, `aliases`),
+`host_golden` (`volume`, `minted`, `collected`) and `claimed_from.release`
+beside the usual `volume` and `attach`.
+
+**Aliases do not widen the claim.** An alias only lets a machine reach the host
+it has been *told* it is; nothing becomes an alias by itself, two hosts never
+share one (a conflict is refused, naming both), and setting aliases or renaming
+a host needs the token. A rename keeps the host's assignment, golden, history
+and clones — the old name stays an alias unless `keep_alias: false`, and
+clones and goldens made under it are still collected.
 
 **Callers that must now present a token.** An audit on 2026-09-25 found most
 of the engine's outside clients sending none; each has an issue: stormcentral

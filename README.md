@@ -229,7 +229,7 @@ to stderr.
 | `pallet …` (22 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, `add-member`/`remove-member`/`copy-member`/`move-member`, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
 | `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--label] [--read-only]`; `--whiteouts` and `--fsck` are on by default and take a value, e.g. `--fsck false`) — how stormcentral builds service goldens |
 | `attach` | attach a slab offline and export (and optionally mount) volumes in it; with no `--volume`, list them |
-| `boot-claim` | ask an appliance which image this machine boots (`--boothost URL --tag <service tag>`), print the attach URI |
+| `boot-claim` | ask an appliance which image this machine boots (`--boothost URL --tag <host name or alias>`; the SMBIOS serial by default), print the attach URI |
 | `boot-local` | attach local slabs non-destructively, export the boot volume as `/dev/ublkb0` (plus `--image-store`, `--writable`), optionally flow over to `--local-disk`; `--check` validates and exits |
 | `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs |
 | `must-gather` | collect what is needed to debug a node into one directory, read-only |
@@ -403,6 +403,7 @@ non-dry-run GC, `trim?apply`, `fsck?repair`) need it.
 |---|---|
 | `/api/v1/drives`, `/arrays`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID arrays, slabs and the pool (`durability`, `{id}/slots`), GC, rebuild queue |
 | `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
+| `/api/v1/boothost` | boot hosts by DNS name: list, find by name or alias, `PUT {aliases}`, `POST …/rename` (#199) |
 | `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks (`{id}/clone`, `{id}/claim`), offline moves, names and boot claims, published releases (`index.html`, `manifest`, `notes`, `changes`) |
 | `/api/v1/pallets`, `/images` | pallets on drives, image build/convert/inspect |
 | `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery (`/discovery/cluster`, `…/join`, `…/leave`), cluster (`nodes`, `nodes/{id}`, `status`, `heartbeat`) |
@@ -600,8 +601,9 @@ carries the tuple:
 
 ```json
 {
-  "claimed_from": {"synonym": "boothost/C2NR0Q2", "version": 1},
-  "volume": {"id": "42e3fbba-…", "name": "boothost-C2NR0Q2"},
+  "host": {"name": "stormblock1", "claimed_as": "C2NR0Q2", "aliases": ["C2NR0Q2"]},
+  "claimed_from": {"synonym": "boothost/stormblock1", "version": 1},
+  "volume": {"id": "42e3fbba-…", "name": "boothost-stormblock1"},
   "attach": {
     "protocol": "nvme-tcp",
     "address": "192.168.31.202", "port": 4420,
@@ -617,26 +619,46 @@ has an address changes it under whoever is holding the old one. The address
 reported is the advertised one — a wildcard listen address tells a caller
 nothing, and loopback is worse than nothing.
 
-### Naming a machine's image by its service tag
+### Naming a machine's image by its host name
 
 Which image a machine boots is a fleet decision, and it belongs next to the
 images rather than in the network. A synonym in a `boothost` namespace, keyed on
-the machine's service tag, is that decision written down:
+the machine's **DNS name**, is that decision written down. Its SMBIOS serial and
+its MACs are **aliases** of the same host (#199): a claim by any of them is a
+claim of that host, so an agent that still claims by serial boots the same
+image.
 
 ```bash
 # This machine runs 10.22.
 curl -X POST http://forge:9090/api/v1/synonyms \
-  -d '{"namespace":"boothost","name":"C2NR0Q2","volume":"stormcos-sno-10.22","label":"10.22"}'
+  -d '{"namespace":"boothost","name":"stormblock1","volume":"stormcos-sno-10.22","label":"10.22"}'
+# …and also answers to its serial and its MACs.
+curl -X PUT http://forge:9090/api/v1/boothost/stormblock1 \
+  -d '{"aliases":["C2NR0Q2","aa:bb:cc:dd:ee:ff"]}'
 
-# At boot: one request, and the answer is bootable.
+# At boot: one request, by name or any alias, and the answer is bootable.
 curl -X POST http://forge:9090/api/v1/synonyms/boothost/C2NR0Q2/claim
-#   → a copy-on-write clone of the sealed golden, costing nothing until written
+#   → "host": {"name": "stormblock1", "claimed_as": "C2NR0Q2", …}
+#   → a copy-on-write clone of the host's sealed golden, costing nothing until written
 #   → and the nvme-tcp:// URI that reaches it
 
 # Move that machine to a new image, or put it back.
-curl -X PUT  http://forge:9090/api/v1/synonyms/boothost/C2NR0Q2 -d '{"volume":"stormcos-sno-10.23"}'
-curl -X POST http://forge:9090/api/v1/synonyms/boothost/C2NR0Q2/rollback
+curl -X PUT  http://forge:9090/api/v1/synonyms/boothost/stormblock1 -d '{"volume":"stormcos-sno-10.23"}'
+curl -X POST http://forge:9090/api/v1/synonyms/boothost/stormblock1/rollback
+
+# A machine known by its serial gets its DNS name: assignment, golden, history
+# and clones come with it, and the serial stays an alias.
+curl -X POST http://forge:9090/api/v1/boothost/C2NR0Q2/rename -d '{"to":"stormblock1"}'
 ```
+
+`GET /api/v1/boothost` lists every host with its aliases, former names,
+assignment and golden; `GET /api/v1/boothost/{name|alias}` finds one. Two hosts
+never share an alias — setting one that another host already answers to, or
+renaming onto it, is a 409 naming both — and nothing becomes an alias by
+itself: MicroCloud nodes share a chassis serial, so which machine a serial means
+is said explicitly. In the `boothost` and `hostgolden` namespaces, resolve,
+re-point, rollback and claim accept an alias; `DELETE` takes the exact name.
+Hosts are kept in `synonyms.json` (`hosts`) beside the synonyms they name.
 
 **Why not DHCP.** DHCP can carry a pointer — a `root_path`, a boot file — and
 it is the wrong home for one. A lease is not a source of truth; the mapping
