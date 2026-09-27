@@ -142,14 +142,19 @@ with the MAC as its alias and claimed through the ordinary path (pinned to
 the default release, its own sealed `hostgolden/mac-<hex>` CoW clone, fresh
 boot clone per boot per #107). Naming = the #199 rename; the golden is kept.
 `GET /api/v1/boothost?unnamed=1` lists hosts still under a `mac-` name.
-- [ ] store: `provisional_host_name(mac)`, `is_provisional`, record on claim
-- [ ] claim: default + MAC → host; refuse default without MAC; response
+- [x] store: `provisional_host_name(mac)`, `is_provisional`, record on claim
+- [x] claim: default + MAC → host; refuse default without MAC; response
       `host.provisional`, `host.mac`
-- [ ] `GET /boothost?unnamed=1`
-- [ ] tests: two machines, one serial, one ISO → two goldens of one base;
+- [x] `GET /boothost?unnamed=1`
+- [x] tests: two machines, one serial, one ISO → two goldens of one base;
       same MAC → same golden; rename → claim by name and by default+MAC gets
       the same golden; no MAC → 400; unnamed listing
-- [ ] docs (auth.md, README), CHANGELOG; sc-build; close #200
+- [x] docs (auth.md, README), CHANGELOG (fab5769, b39b9ac); targeted
+      tests on dev at b39b9ac: lib 12/12, synonyms 23/23, auth 5/5
+- [ ] full suite + release build on dev; release v19.4.0; close #200/#199;
+      tell the owner the version (they build the golden, test server1-4).
+      Owner confirmed (2026-09-27): the per-machine golden is what stays with
+      the machine through renames; each boot is a fresh CoW clone of it
 
 ### boothost names are DNS names; serials and MACs are aliases (2026-09-27, #199)
 
@@ -170,14 +175,11 @@ Design: host records live in the synonym store (`synonyms.json`, `hosts`,
 - [x] `/api/v1/boothost` router (`src/mgmt/api/boothost.rs`) (7d788c0)
 - [x] tests: 5 store units in `src/volume/synonym.rs`, 3 HTTP tests at the end
       of `tests/integration_synonyms.rs` (2dbf0ad); docs + CHANGELOG (053bc5d)
-- [ ] **NOT YET BUILT OR RUN** (session restarted 2026-09-27 while sc-build
-      was queued). Next: `sc-build 'mkdir -p tmp && export TMPDIR=$PWD/tmp &&
-      cargo test --locked --lib synonym && cargo test --locked --test
-      integration_synonyms && cargo test --locked --test integration_auth'`,
-      fix what fails, then the full suite, then close #199 with the evidence.
-      Choices made (tell the owner): rename keeps the old name as an alias by
-      default; DELETE of a boothost synonym takes the exact name only;
-      `boot-claim --tag` still defaults to the SMBIOS serial (resolves by alias)
+- [x] built and run on dev at 9bb3463: `--lib synonym` 11/11,
+      `integration_synonyms` 21/21, `integration_auth` 5/5. Choices made:
+      rename keeps the old name as an alias by default; DELETE of a boothost
+      synonym takes the exact name only; `boot-claim --tag` still defaults to
+      the SMBIOS serial (resolves by alias)
 
 ### Docs checked against the code (2026-09-27) — DONE
 
