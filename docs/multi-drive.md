@@ -24,7 +24,7 @@ or two drives.
 
 ```
 node
- ├─ drive  (identity: serial / WWN — #140; where: shelf, bay, hba — stormdrive)
+ ├─ drive  (identity: serial / WWN — #136; where: shelf, bay, hba — stormdrive)
  │   └─ slab   one per role the drive serves (data; + system on the system drive)
  ├─ drive
  │   └─ slab
@@ -35,7 +35,7 @@ volume = extents; each extent has N legs (mirror) or a stripe (parity);
 ```
 
 * **A drive is the unit of hardware.** It is known by the identity stormdrive
-  uses: serial, then WWN (#136/#140), never its device name or an offset.
+  uses: serial, then WWN (#136), never its device name or an offset.
   Every slab on it takes that identity as its `drive=` rung, so **one disk is
   one failure domain** however it is partitioned.
 * **A slab is the unit of storage.** A drive carries one slab per role (the
@@ -117,7 +117,7 @@ A slab's domain is a chain, widest first:
 site / building / room / row / rack / node / hba / shelf / bay / drive
 ```
 
-* `drive=` comes from the drive's own identity (#140). Two slabs on one drive
+* `drive=` comes from the drive's own identity (#136). Two slabs on one drive
   share it.
 * `shelf`, `bay` and `hba` come from **stormdrive**, which registers each drive
   as `POST /api/v1/drives {path, labels}` and relabels it as it learns more

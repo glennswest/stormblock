@@ -437,7 +437,10 @@ bytes. When the local records name a slab that is not on the machine,
 4. It writes a handover record naming the clone and a flow-over into the local
    slabs, so the successor finishes the move.
 
-Without an appliance it warns and drops the extents, as before.
+`STORMBLOCK_RESUME_SOURCE` (a device path or `nvme-tcp://` URI) names the
+source directly and takes precedence over the claim; tests use it, and it is
+the way to recover by hand. Without either, it warns and drops the extents,
+as before.
 `tests/integration_flowover_resume.rs` covers both.
 
 ## 3. FAT16 or FAT32, and why both

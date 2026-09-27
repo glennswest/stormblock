@@ -15,6 +15,7 @@ after each step. On dev, with 1 M and 4 M slots, the two runs agree:
 |---|---|---|
 | a slab, **every slot free** | **~41 B** a slot | `Slab.slots: Vec<Slot>`, 40 B for every slot whether used or not, and the free bitmap |
 | the slot allocated, slab side | **~70 B** more | `extent_index: HashMap<(VolumeId, u64), u32>`, a second copy of what the slot says |
+| slots not yet published | small, transient | `Slab.pending`: slots allocated but not yet in the slot table, and freed slots waiting for their free to be durable (#171); emptied by every `Slab::sync` |
 | the extent, volume side | **~215 B** | GEM forward `BTreeMap<u64, ExtentLocation>` (56 B plus node overhead) and reverse `HashMap<(SlabId, u32), (VolumeId, u64)>` |
 
 Extrapolated at 1 MiB slots:
@@ -39,7 +40,8 @@ is written**.
 2. **Metadata is persisted as one document.** `VolumeManager::persist` encodes
    every volume and every extent and writes the whole record, to the data
    directory and to each metadata slab, on every persist. That happens on every
-   mint, every drain step and every metadata change. Its size grows with
+   mint, every drain step and every metadata change, and since #171 each persist
+first syncs (flushes) every slab. Its size grows with
    everything allocated: at ~40 B an extent it is ~38 GB per PB at 1 MiB,
    rewritten whole each time. At PB scale this is the first wall to be hit, and
    it is independent of RAM.
@@ -89,8 +91,10 @@ Today every allocated slot is described three times in memory: `Slab.slots`,
 on-disk change:**
 * the slab keeps **only its free map** resident (1 bit a slot, with the
   per-chunk summary). The per-slot owner record lives in the on-disk slot
-  table, which is already authoritative and already written on every
-  allocation. Nothing needs 40 B per free slot in memory;
+  table, which is already authoritative. Since #171 a volume write's slot is
+  taken in memory (`allocate_deferred`) and its entry is written at the next
+  `Slab::sync`, so the pending set is the only resident per-slot state this
+  needs. Nothing needs 40 B per free slot in memory;
 * the GEM keeps **one compact forward entry** per extent:
   * a slab *ordinal* (u16, into a table of slab ids) instead of a 16-byte uuid;
   * a u64 slot;

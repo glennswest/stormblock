@@ -46,15 +46,19 @@ tests run on.
      slot shared by more than one volume (a composed disk's golden);
    * raises share counts to the mappings it restored. It never lowers them:
      a count that is too high costs one needless copy, never data.
+
+   `adopt_slabs` (a daemon taking over the slabs on its drives) uses the
+   same reconciliation, over every drive's slabs at once.
 6. **WRITE_ZEROES is a promise.** On a thin volume it leaves unmapped extents
    unmapped and writes zeros into mapped ones. A failure is reported as EIO.
    Before, it was a discard: that ignored partial ranges and answered success
    when it failed.
-   `adopt_slabs` (a daemon taking over the slabs on its drives) uses the
-   same reconciliation, over every drive's slabs at once.
 7. **Discard leaves a shared extent alone.** Unmapping it is not durable until
    the record is rewritten, so after a cut it would be mapped again.
-
+8. **A handover reads the slabs after the incumbent is gone.** `adopt-ublk`
+   stands the incumbent down, waits for its process to exit, then restores
+   (`handover::take_over`). Reading first left the incumbent's last
+   allocations out of the successor's map, with their slots looking free.
 9. **A flow-over cut short is finished, not lost.** When the local records
    name a slab that is not on the machine (the appliance clone a flow-over
    was moving from), `boot-local` claims a fresh clone of the same image,
@@ -71,13 +75,17 @@ tests run on.
     read what it held then, or something written since. Before the fix, 182
     of the 300 lost data.
   * `a_stale_record_and_several_cow_generations_recover`.
+* `tests/integration_handover_order.rs` (rule 8):
+  `the_successor_maps_what_the_incumbent_allocated_in_the_window`, and
+  `restoring_before_the_incumbent_is_gone_misses_the_window` showing the old
+  order's loss.
+* `tests/integration_flowover_resume.rs` (rule 9):
+  `a_cut_short_flow_over_resumes_from_a_fresh_clone`, and
+  `without_a_source_the_unmoved_extents_are_missing_and_said_so`.
 * On metal: stormcentral's power-cut check (fastetcd, 300 objects, hard
-  power-off, 5 runs).
-
-8. **A handover reads the slabs after the incumbent is gone.** `adopt-ublk`
-   stands the incumbent down, waits for its process to exit, then restores
-   (`handover::take_over`). Reading first left the incumbent's last
-   allocations out of the successor's map, with their slots looking free.
+  power-off, 5 runs). Passed 2026-09-27 on C2NR0Q2 with v19.2.1 in the engine
+  and the initramfs: 1500 of 1500 objects (#171). Rule 9 has not yet met
+  metal; that check is #172.
 
 What the simulation cannot show: sectors torn inside one write, and drives
-that lie about FLUSH.
+that lie about FLUSH. Torn sectors can be simulated; that is #191.

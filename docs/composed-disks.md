@@ -271,7 +271,9 @@ a ublk block device, and hands it to tools that are not ours:
 
 ## 6. Not done
 
-- **No CLI subcommand.** Both operations are REST and library only.
+- **No CLI subcommand.** Composing is REST and library only:
+  `POST /api/v1/volumes/compose`, `…/compose/pallet`, `…/compose/disk` and
+  `…/compose/slab`.
 - **`image build` still lays pallets and slabs as bytes.** It is the file
   path; a release is composed instead (stormpump's `deploy/compose-release.py`
   runs `compose/pallet`, `compose/slab` and `compose/disk` from the same

@@ -178,8 +178,9 @@ Two things follow, and they pull in opposite directions.
 twelve-level stack reads exactly as fast as a one-level one. A runtime clone
 of the deepest level is one map copy plus a refcount bump — measured at one
 slot for a 9 MiB stack, the cost of the clone stamping its own filesystem
-identity. Because that is so cheap, a clone can be made before it is wanted
-and parked; a cold start becomes a map lookup rather than a build. Writes go
+identity. Because that is so cheap, a clone is minted when it is claimed
+(~200 ms over HTTP, most of it the stamp's flush), and nothing is parked in
+advance: the standby clones were retired in #137. Writes go
 copy-on-write into fresh slab space and rewrite only that clone's map, so the
 levels underneath are never written — the clone is disposable by
 construction. All of this is asserted in

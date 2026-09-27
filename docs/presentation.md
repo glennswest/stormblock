@@ -191,10 +191,11 @@ two timing tests on a loaded box (#134, #173).
 
 - **Power cuts (#171, P0)**: fsync'd writes were lost on a hard power-off.
   Fixed in v19.1.4–v19.2.2: slot entries after their data, the handover
-  order, a flow-over cut short. The on-metal check is still running.
+  order, a flow-over cut short. On metal: 5 hard power cuts, 1500 of 1500
+  objects kept (v19.2.1, 2026-09-27). The flow-over cut on metal is #172.
 - **The golden is held.** Since v17 the API is closed by default, and the
   engine's clients have to present a token first (#107; stormcentral#30,
-  stormcos#89, and one issue per client).
+  stormcos#89, and one issue per client). When to release it: #194.
 - **Security**: CHAP in the config file is ignored, so a CHAP-configured
   iSCSI target runs open (#164); the optional `ui` pages bypass the token
   (#166).

@@ -2073,9 +2073,8 @@ mod tests {
     ///    construction, so a twelve-level stack reads exactly as fast as a
     ///    one-level one. The reason to squash is space — each level carries
     ///    its own filesystem metadata and rounds its writes up to a slot —
-    ///    and never latency. A clone can also be made *before* it is needed
-    ///    and parked, since it costs a slot and no copying, which makes a
-    ///    cold start a map lookup rather than any kind of build.
+    ///    and never latency. A clone costs a slot and no copying, so it is
+    ///    minted when claimed; nothing is parked in advance (#137).
     /// 2. **A write never reaches the levels underneath.** Copy-on-write
     ///    takes fresh slab space and rewrites only this volume's map; the
     ///    goldens keep their refcounts and their bytes. Asserted below by
