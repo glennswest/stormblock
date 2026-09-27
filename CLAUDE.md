@@ -131,19 +131,26 @@ Design: the node's engine is closed (v17) and a Job has no token for it
   driven through its API with its own minted token; data checked through the
   engine's userspace NVMe/TCP initiator. Unprivileged, no ublk, no devices.
 
-- [ ] `test/` crate `stormblock-test` (workspace member, depends on the lib
-      for `http` and `nvmeof_dev`): harness (engine child, API, report)
-- [ ] short (< 2 min): node health; engine up; create, clone (ext4 blank →
+- [x] `test/` crate `stormblock-test` (workspace member, depends on the lib
+      for `http` and `nvmeof_dev`): harness (engine child, API, report).
+      The in-pod engine uses two plain drive files whose data slabs are
+      adopted on restart (`--raid` formats a new slab every start)
+- [x] short (< 2 min): node health; engine up; create, clone (ext4 blank →
       claim), attach over NVMe/TCP, write/read, detach, delete; nothing left
-- [ ] medium (< 30 min): auth closed; restart and kill -9 keep flushed data;
+- [x] medium (< 30 min): auth closed; restart and kill -9 keep flushed data;
       snapshot/group snapshot + restore; mirror:2 across two domains, drive
       failed → rebuild → data intact; sealed refuses rw attach; discard
       reclaims
-- [ ] long: waves (claim, attach, write, verify, delete) sized from the
+- [x] long: waves (claim, attach, write, verify, delete) sized from the
       pod's CPU/memory and the pool, until `STORM_TIMEOUT`; per-wave latency,
       residue (volumes, allocated slots, engine RSS and fds); regression fails
-- [ ] `test/build.sh`, `test/Containerfile`, `test/stormblock-test.yaml`;
-      run all three suites on dev (sc-build); docs, changelog, close
+- [x] `test/build.sh`, `test/Containerfile`, `test/stormblock-test.yaml`;
+      all three suites run on dev in podman as uid 65532 (image 30 MB)
+- [ ] docs, changelog, close
+
+Found by the suites and fixed: `adopt_slabs` lost flushed data across a
+daemon restart (medium; 31bf732, #171), and concurrent NVMe/TCP attaches
+shared a namespace, so siblings read each other's writes (long; a3c6a96).
 
 ### /v1 snapshots of engine volumes (2026-09-26, #130, stormvm#28) — DONE (v19.2.0)
 

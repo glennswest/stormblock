@@ -12,6 +12,16 @@
     checks data over NVMe/TCP with the engine's own initiator.
   - It found the `adopt_slabs` restart loss fixed in 31bf732 (#171).
   - See README, "The test container".
+- **fix(nvmeof):** concurrent attaches could share one namespace. Attaching
+  a volume over NVMe/TCP picked the lowest free NSID and added the namespace
+  in two steps, with nothing held between them. Two attaches at once got the
+  same NSID; the second replaced the first, so both volumes' attach URIs named
+  one namespace and each read the other's writes. The long suite found it: 29
+  of ~50,000 volume cycles read a sibling's data, and one write failed with
+  NVMe status 0x16. `NvmeofTarget::add_namespace_next` now picks and inserts
+  under one lock (the export path too), and `ensure_nvme_namespace` holds the
+  `/v1` state lock from check to record. NSID *reuse* after a detach is still
+  #96.
 
 ## [v19.2.2] — 2026-09-27
 
