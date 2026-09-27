@@ -138,22 +138,21 @@ automatically (MicroCloud nodes share a chassis serial).
 
 Design: host records live in the synonym store (`synonyms.json`, `hosts`,
 `serde(default)`), so a rename and the synonyms it moves persist together.
-- [ ] store: `Host {name, aliases, former_names}`; `host_of(key)` (name or
-      alias, ASCII case-insensitive; MACs normalised to `aa:bb:…`);
-      `set_aliases` and `rename_host` refuse conflicts naming both hosts;
-      `create` in `boothost` refuses a name that is another host's alias
-- [ ] claim, resolve, re-point and rollback in `boothost`/`hostgolden` go
-      through `host_of`; the claim keys everything by the canonical name and
-      reports `host {name, claimed_as}`; clone collection and host-golden
-      collection also match the host's former names
-- [ ] rename: moves `boothost/<old>` and `hostgolden/<old>` (version and
-      history kept), old name kept as an alias unless `keep_alias: false`
-- [ ] `/api/v1/boothost`: `GET` (every host: name, aliases, former names,
-      assignment, host golden), `GET /{name|alias}`, `PUT /{name}
-      {aliases}`, `POST /{name}/rename {to, keep_alias?}` — token required
-- [ ] tests (store units; HTTP: claim by alias, rename keeps history and
-      collects the old-named clone, shared alias refused naming both),
-      docs (auth.md host goldens, README), CHANGELOG; close #199
+- [x] store: `Host {name, aliases, former_names}` in `SynonymStore.hosts`;
+      `host_of`, `set_aliases`, `rename_host`, conflicts name both (7d788c0)
+- [x] claim/resolve/re-point/rollback resolve aliases; claim reports `host`;
+      clone + host-golden collection by former names (7d788c0)
+- [x] `/api/v1/boothost` router (`src/mgmt/api/boothost.rs`) (7d788c0)
+- [x] tests: 5 store units in `src/volume/synonym.rs`, 3 HTTP tests at the end
+      of `tests/integration_synonyms.rs` (2dbf0ad); docs + CHANGELOG (053bc5d)
+- [ ] **NOT YET BUILT OR RUN** (session restarted 2026-09-27 while sc-build
+      was queued). Next: `sc-build 'mkdir -p tmp && export TMPDIR=$PWD/tmp &&
+      cargo test --locked --lib synonym && cargo test --locked --test
+      integration_synonyms && cargo test --locked --test integration_auth'`,
+      fix what fails, then the full suite, then close #199 with the evidence.
+      Choices made (tell the owner): rename keeps the old name as an alias by
+      default; DELETE of a boothost synonym takes the exact name only;
+      `boot-claim --tag` still defaults to the SMBIOS serial (resolves by alias)
 
 ### Docs checked against the code (2026-09-27) — DONE
 
