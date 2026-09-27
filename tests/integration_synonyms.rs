@@ -987,3 +987,164 @@ async fn with_a_token_only_the_boot_claim_is_open() {
     assert_eq!(ok.status(), 200, "the token can re-image a machine");
     server.abort();
 }
+
+// A machine is known by its DNS name; its serial and MACs are aliases of the
+// same host, and a rename keeps everything it had (#199).
+
+/// A claim by an alias is a claim of the host it belongs to.
+#[tokio::test]
+async fn a_host_boots_by_its_name_or_any_alias() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "stormblock1", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    let set = client
+        .put(format!("{base}/api/v1/boothost/stormblock1"))
+        .json(&serde_json::json!({"aliases": ["C2NR0Q2", "AA-BB-CC-DD-EE-FF"]}))
+        .send().await.unwrap();
+    assert_eq!(set.status(), 200);
+    let set: serde_json::Value = set.json().await.unwrap();
+    assert_eq!(set["aliases"], serde_json::json!(["C2NR0Q2", "aa:bb:cc:dd:ee:ff"]));
+
+    let by_serial = boot_claim(&client, &base, "C2NR0Q2").await;
+    assert_eq!(by_serial["host"]["name"], "stormblock1");
+    assert_eq!(by_serial["host"]["claimed_as"], "C2NR0Q2");
+    assert_eq!(by_serial["volume"]["name"], "boothost-stormblock1");
+    assert_eq!(by_serial["claimed_from"]["synonym"], "boothost/stormblock1");
+
+    let by_mac = boot_claim(&client, &base, "aa:bb:cc:dd:ee:ff").await;
+    let by_name = boot_claim(&client, &base, "stormblock1").await;
+    for c in [&by_mac, &by_name] {
+        assert_eq!(c["host"]["name"], "stormblock1");
+        assert_eq!(c["host_golden"]["minted"], false, "one host, one golden");
+        assert_eq!(c["host_golden"]["volume"], by_serial["host_golden"]["volume"]);
+    }
+
+    // No second host appeared, and the assignment answers to the alias too.
+    let hosts: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(hosts["count"], 1);
+    assert_eq!(hosts["items"][0]["name"], "stormblock1");
+    assert_eq!(hosts["items"][0]["assignment"]["volume"]["id"], v1.to_string());
+    let one: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost/c2nr0q2"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!((one["name"].as_str(), one["resolved_from"].as_str()), (Some("stormblock1"), Some("c2nr0q2")));
+    let resolved: serde_json::Value = client
+        .get(format!("{base}/api/v1/synonyms/boothost/C2NR0Q2"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(resolved["name"], "stormblock1");
+    let unknown = client.get(format!("{base}/api/v1/boothost/nobody")).send().await.unwrap();
+    assert_eq!(unknown.status(), 404);
+    server.abort();
+}
+
+/// Renaming a machine from its serial to its DNS name keeps its assignment
+/// history and its golden, and its old-named clones and goldens are still
+/// collected.
+#[tokio::test]
+async fn a_rename_keeps_the_boot_history_and_the_clones() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1, v2]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "C2NR0Q2", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    let before = boot_claim(&client, &base, "C2NR0Q2").await;
+    assert_eq!(before["volume"]["name"], "boothost-C2NR0Q2");
+    let old_clone = before["volume"]["id"].as_str().unwrap().to_string();
+    let old_golden = vid(&before["host_golden"]["volume"]);
+
+    let renamed = client
+        .post(format!("{base}/api/v1/boothost/C2NR0Q2/rename"))
+        .json(&serde_json::json!({"to": "stormblock1"}))
+        .send().await.unwrap();
+    assert_eq!(renamed.status(), 200);
+    let renamed: serde_json::Value = renamed.json().await.unwrap();
+    assert_eq!(renamed["name"], "stormblock1");
+    assert_eq!(renamed["aliases"], serde_json::json!(["C2NR0Q2"]));
+    assert_eq!(renamed["former_names"], serde_json::json!(["C2NR0Q2"]));
+    assert_eq!(renamed["assignment"]["version"], 1);
+    assert_eq!(vid(&renamed["host_golden"]["volume"]["id"]), old_golden);
+
+    // An agent still claiming by serial boots the same host, keeps its golden,
+    // and the clone made under the old name is released.
+    let after = boot_claim(&client, &base, "C2NR0Q2").await;
+    assert_eq!(after["host"]["name"], "stormblock1");
+    assert_eq!(after["volume"]["name"], "boothost-stormblock1");
+    assert_eq!(after["host_golden"]["minted"], false);
+    assert_eq!(vid(&after["host_golden"]["volume"]), old_golden);
+    assert_eq!(after["released"], serde_json::json!([old_clone]));
+
+    // Re-imaged under its new name: a new golden, and the one made under the
+    // old name is collected.
+    client
+        .put(format!("{base}/api/v1/synonyms/boothost/stormblock1"))
+        .json(&serde_json::json!({"volume": v2.to_string()}))
+        .send().await.unwrap();
+    let reimaged = boot_claim(&client, &base, "stormblock1").await;
+    assert_eq!(reimaged["host_golden"]["minted"], true);
+    assert_eq!(reimaged["host_golden"]["collected"], serde_json::json!([old_golden.0.to_string()]));
+    let history: serde_json::Value = client
+        .get(format!("{base}/api/v1/synonyms/boothost/stormblock1"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(history["version"], 2, "the assignment's history came with the rename");
+    assert_eq!(history["history"][0]["target"]["id"], v1.to_string());
+    server.abort();
+}
+
+/// Two machines never share an alias, and the refusal names both.
+#[tokio::test]
+async fn two_hosts_may_not_share_an_alias() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    for name in ["mc1", "mc2"] {
+        client
+            .post(format!("{base}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": name, "volume": v1.to_string()}))
+            .send().await.unwrap();
+    }
+    let ok = client
+        .put(format!("{base}/api/v1/boothost/mc1"))
+        .json(&serde_json::json!({"aliases": ["CHASSIS9"]}))
+        .send().await.unwrap();
+    assert_eq!(ok.status(), 200);
+
+    let clash = client
+        .put(format!("{base}/api/v1/boothost/mc2"))
+        .json(&serde_json::json!({"aliases": ["chassis9"]}))
+        .send().await.unwrap();
+    assert_eq!(clash.status(), 409);
+    let why = clash.text().await.unwrap();
+    assert!(why.contains("mc1") && why.contains("mc2"), "{why}");
+
+    let onto = client
+        .post(format!("{base}/api/v1/boothost/mc2/rename"))
+        .json(&serde_json::json!({"to": "CHASSIS9"}))
+        .send().await.unwrap();
+    assert_eq!(onto.status(), 409);
+    let why = onto.text().await.unwrap();
+    assert!(why.contains("mc1") && why.contains("mc2"), "{why}");
+
+    // A claim by the shared serial boots the one host it names, not a new one.
+    let claim: serde_json::Value = client
+        .post(format!("{base}/api/v1/synonyms/boothost/CHASSIS9/claim"))
+        .json(&serde_json::json!({}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(claim["host"]["name"], "mc1");
+    server.abort();
+}
