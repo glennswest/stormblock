@@ -55,6 +55,12 @@ tests run on.
 7. **Discard leaves a shared extent alone.** Unmapping it is not durable until
    the record is rewritten, so after a cut it would be mapped again.
 
+9. **A flow-over cut short is finished, not lost.** When the local records
+   name a slab that is not on the machine (the appliance clone a flow-over
+   was moving from), `boot-local` claims a fresh clone of the same image,
+   which carries the same slabs with the same bytes. It maps the unmoved
+   extents onto the clone and hands the rest of the move to the successor.
+
 ## How it is checked
 
 * `tests/integration_power_cut.rs`:

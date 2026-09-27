@@ -3,6 +3,31 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27 (flow-over cut short)
+- **fix(boot-local):** a power cut in the middle of a flow-over no longer
+  bricks the node (#171). The local records still named extents on the old
+  appliance clone's slab. The next boot claimed a new clone, so that slab was
+  "not attached": every unmoved extent was dropped (9087 on C2NR0Q2), the
+  erofs root came up with holes, and the boot stopped at "Failed to mount
+  root".
+  - A fresh clone of the same sealed image carries the same slabs, by id,
+    with the same bytes: a clone restamps the GPT, never the slabs.
+  - `boot-local` now claims a clone when the local records name a slab that
+    is not here. It attaches the missing slab for its data only; the clone's
+    records are the image's and are never read. It then restores onto it.
+  - The handover record names the clone and a flow-over into the local
+    slabs, so the successor finishes the move.
+  - The initramfs exports the appliance it found (`STORMBLOCK_BOOTHOST`), and
+    the engine reads the machine's tag from SMBIOS (`STORMBLOCK_BOOT_TAG`
+    overrides it).
+  - Only `boot-local` does this: `must-gather` never claims, because a claim
+    releases the machine's earlier clones.
+- **test:** `tests/integration_flowover_resume.rs`: an image, a byte copy
+  standing in for the next boot's clone, and a local slab half flowed over.
+  `boot-local --check` drops nothing when given the clone
+  (`STORMBLOCK_RESUME_SOURCE`), and without one it says the extents are
+  missing.
+
 ## [v19.2.1] — 2026-09-26
 
 ### 2026-09-26 (handover order)
