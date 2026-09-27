@@ -3,6 +3,16 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27 (test container)
+- **feat(test):** stormblock's test container under stormcentral's test
+  standard (#139): `test/` (crate `stormblock-test`, a workspace member),
+  `test/build.sh`, `test/Containerfile` (`FROM scratch`, 30 MB) and
+  `test/stormblock-test.yaml`, with `short`, `medium` and `long` suites.
+  - It runs the engine of the same commit in the pod, unprivileged, and
+    checks data over NVMe/TCP with the engine's own initiator.
+  - It found the `adopt_slabs` restart loss fixed in 31bf732 (#171).
+  - See README, "The test container".
+
 ## [v19.2.2] — 2026-09-27
 
 ### 2026-09-27 (flow-over cut short)

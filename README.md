@@ -129,6 +129,41 @@ Tests that write files need `TMPDIR` inside the scratch tree
 (`mkdir -p tmp && export TMPDIR=$PWD/tmp`). `Cargo.lock` is committed and every
 golden is built `--locked`; `cargo update` is a commit of its own.
 
+### The test container (short, medium, long)
+
+`test/` is stormblock's test image under stormcentral's `docs/test-standard.md`
+(#139). There is one image for all three suites, run as a Job with
+`/test short|medium|long`. `test/build.sh` builds `stormblock` and
+`stormblock-test` static (musl) on the build box, and `test/Containerfile`
+packages them `FROM scratch` (context: the repo root). `test/stormblock-test.yaml`
+is the Job, with the test's metadata.
+
+The test runs the `stormblock` of the same commit **inside the pod**, as its
+child: two sparse files under `/results/work` with a data slab each, NVMe/TCP
+on loopback. It drives it through its API with the token it mints, and reads
+and writes volumes with the engine's own userspace NVMe/TCP initiator. No
+privileges, devices or tools are needed, so it runs the same on every machine
+(`requires: []`). The node's own engine gets the public health probe on
+`STORM_NODE:9090`. Its authenticated checks need `STORM_STORMBLOCK_TOKEN`
+(stormcos#89) and are a *skip* without it.
+
+| suite | budget | what |
+|---|---|---|
+| `short` | < 2 min | the node's engine is up; create, attach, write and read back, claim a clone of an ext4 blank, delete; nothing left behind |
+| `medium` | < 30 min | the API is closed without the token; flushed data survives SIGTERM and SIGKILL restarts; a group snapshot restores its point in time; a `mirror:2@shelf` volume survives a failed drive and its rebuild; a golden refuses a read-write attach; discard gives space back |
+| `long` | the night | waves of claim, attach, write, verify, detach and delete, sized from the pod's CPUs and memory (`STORM_WAVE_MAX` caps them). Per wave it reports time, what is left, and the engine's memory and fds; it fails on residue, slowdown or growth |
+
+Output is one JSON object per test on stdout and in `/results/results.jsonl`,
+then a summary. The exit is 0 when all passed, 1 when one failed, and 2 when
+the run could not happen. By hand:
+
+```bash
+sc-build 'sh test/build.sh && podman run --rm --user 65532 --tmpfs /results:rw,mode=1777 stormblock-test short'
+```
+
+`STORM_ONLY=<name>` runs the matching tests; `STORM_KEEP_WORK=1` keeps the
+engine's files and log.
+
 **Features** (`Cargo.toml`): `default = ["nvmeof", "iscsi", "cluster",
 "stormfs-data"]`.
 
