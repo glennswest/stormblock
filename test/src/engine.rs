@@ -277,7 +277,7 @@ pub fn sparse(path: &std::path::Path, bytes: u64) -> Result<(), String> {
 pub fn pattern(seed: u64, len: usize) -> Vec<u8> {
     let mut b = vec![0u8; len];
     for (i, c) in b.chunks_mut(8).enumerate() {
-        let v = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ i as u64;
+        let v = seed.wrapping_mul(K) ^ i as u64;
         c.copy_from_slice(&v.to_le_bytes()[..c.len()]);
     }
     b
@@ -293,8 +293,42 @@ pub async fn write_check(dev: &Arc<dyn BlockDevice>, off: u64, seed: u64, len: u
 pub async fn read_check(dev: &Arc<dyn BlockDevice>, off: u64, seed: u64, len: usize) -> Result<(), String> {
     let mut got = vec![0u8; len];
     dev.read(off, &mut got).await.map_err(|e| format!("read @{off}: {e}"))?;
-    if got != pattern(seed, len) {
-        return Err(format!("read @{off} does not hold what was written (seed {seed})"));
+    let want = pattern(seed, len);
+    if got != want {
+        let first = got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(0);
+        let block = first / 4096 * 4096;
+        let what = describe(&got[block..(block + 4096).min(len)], block);
+        return Err(format!(
+            "read @{off} does not hold what was written (seed {seed}): first difference at +{first}, \
+             that block holds {what}"
+        ));
     }
     Ok(())
+}
+
+const K: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// K's inverse mod 2^64 (K is odd), so a block of `pattern` names its seed.
+fn k_inverse() -> u64 {
+    let mut x: u64 = 1;
+    for _ in 0..6 {
+        x = x.wrapping_mul(2u64.wrapping_sub(K.wrapping_mul(x)));
+    }
+    x
+}
+
+/// Whose data a block of a pattern buffer is: zeros, a seed's (and whether at
+/// the right place), or neither.
+fn describe(block: &[u8], at: usize) -> String {
+    if block.iter().all(|&b| b == 0) {
+        return "zeros".into();
+    }
+    let v0 = u64::from_le_bytes(block[..8].try_into().unwrap());
+    let chunk = (at / 8) as u64;
+    let seed = (v0 ^ chunk).wrapping_mul(k_inverse());
+    let full = pattern(seed, at + block.len());
+    if full[at..] == *block {
+        return format!("seed {seed}'s data");
+    }
+    format!("other bytes ({})", block[..16].iter().map(|b| format!("{b:02x}")).collect::<String>())
 }

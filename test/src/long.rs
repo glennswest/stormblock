@@ -43,9 +43,10 @@ async fn one(e: Arc<Engine>, blank: String, seed: u64) -> Result<u64, String> {
     let t = Instant::now();
     let id = claim(&e, &blank).await?;
     let used = async {
-        let dev = e.attach(&id).await?;
-        write_check(&dev, 8 * MIB, seed, MIB as usize).await?;
-        read_check(&dev, 8 * MIB, seed, MIB as usize).await
+        let tag = |err: String| format!("{id}: {err}");
+        let dev = e.attach(&id).await.map_err(tag)?;
+        write_check(&dev, 8 * MIB, seed, MIB as usize).await.map_err(tag)?;
+        read_check(&dev, 8 * MIB, seed, MIB as usize).await.map_err(tag)
     }
     .await;
     let detached = e.detach(&id).await;
@@ -134,12 +135,17 @@ pub async fn run(env: &Env, r: &mut Report) -> Result<(), String> {
 
     r.run("waves-complete", async {
         ensure(n >= 2, format!("only {n} wave(s) fit in the window"))?;
-        ensure(failures.is_empty(), format!("{} failure(s); first: {}", failures.len(), failures.first().cloned().unwrap_or_default()))?;
+        ensure(
+            failures.is_empty(),
+            format!("{} failure(s); first: {}", failures.len(), failures.iter().take(3).cloned().collect::<Vec<_>>().join(" | ")),
+        )?;
         Ok(format!("{n} wave(s) of up to {wave} volume(s)"))
     })
     .await;
     r.run("no-residue", async {
-        ensure(residue.is_empty(), format!("{} wave(s) left something; first: {}", residue.len(), residue[0]))?;
+        if let Some(first) = residue.first() {
+            return Err(Why::Fail(format!("{} wave(s) left something; first: {first}", residue.len())));
+        }
         Ok("every wave cleaned up after itself".to_string())
     })
     .await;
