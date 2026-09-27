@@ -206,7 +206,7 @@ Rule for the fix: nothing durable references a slot before its data is.
       `mgmt_luns_at_scale` took 46 s to 570 s on identical code); release
 - [x] (31bf732) `adopt_slabs` reconciles records with slot tables; the
       daemon adopts every drive at once — a daemon restart lost flushed data
-- [ ] **handover order** (owner, 2026-09-26): `adopt-ublk` read the slabs and
+- [x] **handover order** (owner, 2026-09-26; v19.2.1 c585c0b): `adopt-ublk` read the slabs and
       restored *before* standing the incumbent down, so allocations the
       incumbent made in between were missing from the successor's map (and
       their slots looked free). Now: stand down, wait for the incumbent's
@@ -214,6 +214,13 @@ Rule for the fix: nothing durable references a slot before its data is.
       restore; ublk recovery holds I/O in the gap. `handover::take_over` pins
       the order; a test allocates in the incumbent inside the window and checks
       the successor maps it. Release v19.1.5, tell the owner the commit.
+- [x] **flow-over cut short** (owner's second finding, 2026-09-27): a cut
+      mid flow-over bricked the node (the next boot claimed a new clone, the
+      old clone's slab was not attached, 9087 mappings dropped, erofs root with
+      holes). boot-local now claims a fresh clone (same sealed image = same
+      slabs by id, same bytes), attaches the missing slab data-only, restores
+      onto it, and hands the flow-over to the successor.
+      `tests/integration_flowover_resume.rs`. Release v19.2.2.
 - [ ] close after the on-metal power-cut check (300/300 × 5). Owner
       (2026-09-26) is building the v19.1.4 golden himself, ahead of the #107
       token rollout, and will report the result on #171; do not stage or
