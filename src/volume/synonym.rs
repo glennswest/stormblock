@@ -248,6 +248,25 @@ pub fn normalize_alias(s: &str) -> String {
     }
 }
 
+/// What a machine is called before it has a name: `mac-<12 hex digits>` of
+/// the first NIC's MAC it claimed `boothost/default` with (#200). `None` when
+/// `mac` is not a MAC, or is all zeros or all ones.
+pub fn provisional_host_name(mac: &str) -> Option<String> {
+    let hex = host_match_key(mac);
+    let is_mac = hex.len() == 12 && hex.chars().all(|c| c.is_ascii_hexdigit());
+    if !is_mac || hex == "000000000000" || hex == "ffffffffffff" {
+        return None;
+    }
+    Some(format!("mac-{hex}"))
+}
+
+/// Whether a host still has the provisional name it booted the default
+/// under — a machine nobody has named yet (#200).
+pub fn is_provisional(name: &str) -> bool {
+    name.strip_prefix("mac-")
+        .is_some_and(|m| m.len() == 12 && m.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// A host name or alias is a synonym name, and never `default`.
 fn check_host_name(name: &str) -> Result<(), SynonymError> {
     check_name(BOOTHOST_NS, name)?;
@@ -536,6 +555,32 @@ impl SynonymStore {
         Ok(out)
     }
 
+    /// The host a machine claiming `boothost/default` with this MAC is (#200):
+    /// the host the MAC is an alias of, or the one still (or once) called
+    /// `mac-<hex>`, or else a new provisional host of that name with the MAC
+    /// as its alias. Returns the host's name and whether it was made now.
+    pub fn provisional_host(&mut self, mac: &str) -> Result<(String, bool), SynonymError> {
+        let name = provisional_host_name(mac)
+            .ok_or_else(|| SynonymError::InvalidName(format!("{mac:?} is not a NIC's MAC address")))?;
+        if let Some(h) = self.host_of(mac).or_else(|| self.host_of(&name)) {
+            return Ok((h, false));
+        }
+        let hex = &name["mac-".len()..];
+        let alias = hex
+            .as_bytes()
+            .chunks(2)
+            .map(|c| std::str::from_utf8(c).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(":");
+        let t = now();
+        self.hosts.insert(
+            name.clone(),
+            Host { name: name.clone(), aliases: vec![alias], former_names: Vec::new(), created_at: t, updated_at: t },
+        );
+        self.persist();
+        Ok((name, true))
+    }
+
     /// Rename a host, keeping everything it has: its assignment and host
     /// golden move to the new name with their versions and history, its
     /// aliases stay, and the old name is remembered so its clones are still
@@ -692,6 +737,32 @@ mod tests {
         s.rename_host("a1", "a2", false).unwrap();
         assert_eq!(s.host_of("a1"), None);
         assert_eq!(s.host("a2").unwrap().former_names, vec!["a1".to_string()]);
+    }
+
+    #[test]
+    fn a_default_claims_mac_is_a_host_of_its_own_until_named() {
+        let mut s = SynonymStore::in_memory();
+        assert_eq!(provisional_host_name("AA-BB-CC-DD-EE-01").as_deref(), Some("mac-aabbccddee01"));
+        for bad in ["", "C2NR0Q2", "00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "aa:bb:cc:dd:ee"] {
+            assert!(s.provisional_host(bad).is_err(), "{bad:?}");
+        }
+        assert!(s.hosts().is_empty(), "a refused MAC makes no host");
+
+        let (a, made) = s.provisional_host("aa:bb:cc:dd:ee:01").unwrap();
+        assert_eq!((a.as_str(), made), ("mac-aabbccddee01", true));
+        assert!(is_provisional(&a));
+        assert_eq!(s.host(&a).unwrap().aliases, vec!["aa:bb:cc:dd:ee:01".to_string()]);
+        let (b, _) = s.provisional_host("aa:bb:cc:dd:ee:02").unwrap();
+        assert_ne!(a, b, "two MACs, two machines");
+        assert_eq!(s.provisional_host("AABBCCDDEE01").unwrap(), (a.clone(), false), "the same MAC, the same host");
+
+        // Named: the MAC and the provisional name both still mean it.
+        s.create(BOOTHOST_NS, &a, Target::Volume { id: vol() }, None, None).unwrap();
+        s.rename_host(&a, "server3", true).unwrap();
+        assert!(!is_provisional("server3"));
+        assert_eq!(s.provisional_host("aa:bb:cc:dd:ee:01").unwrap(), ("server3".to_string(), false));
+        assert_eq!(s.host_of("mac-aabbccddee01").as_deref(), Some("server3"));
+        assert_eq!(s.hosts().len(), 2);
     }
 
     #[test]

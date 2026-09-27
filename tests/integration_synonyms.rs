@@ -1148,3 +1148,142 @@ async fn two_hosts_may_not_share_an_alias() {
     assert_eq!(claim["host"]["name"], "mc1");
     server.abort();
 }
+
+// ------------------------------------------------------------------ #200
+//
+// Universal boot: one ISO, no tag. A machine claims `boothost/default` with
+// its first NIC's MAC and gets a copy-on-write clone of the default release
+// of its own, keyed by that MAC until it is named.
+
+async fn default_claim(client: &reqwest::Client, base: &str, mac: &str) -> serde_json::Value {
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/default/claim"))
+        // What stormbootx knows and sends; the serial is ignored — seven
+        // MicroCloud blades share one.
+        .json(&serde_json::json!({"mac": mac, "serial": "S11075924402016"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "default claim for {mac}");
+    resp.json().await.unwrap()
+}
+
+/// Two machines with one SMBIOS serial and no tag boot the one ISO: each gets
+/// its own golden (different volumes, one base), and after naming each claims
+/// by its name — or still by the default and its MAC — and gets that same
+/// golden back.
+#[tokio::test]
+async fn two_untagged_machines_booting_the_default_each_get_their_own_clone() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    let a = default_claim(&client, &base, "0C:C4:7A:00:00:01").await;
+    let b = default_claim(&client, &base, "0c-c4-7a-00-00-02").await;
+    assert_eq!(a["host"]["name"], "mac-0cc47a000001");
+    assert_eq!(b["host"]["name"], "mac-0cc47a000002");
+    for (c, mac) in [(&a, "0c:c4:7a:00:00:01"), (&b, "0c:c4:7a:00:00:02")] {
+        assert_eq!(c["host"]["provisional"], true);
+        assert_eq!(c["host"]["new"], true);
+        assert_eq!(c["host"]["mac"], mac);
+        assert_eq!(c["host"]["aliases"], serde_json::json!([mac]));
+        assert_eq!(c["host_golden"]["minted"], true);
+        assert_eq!(vid(&c["claimed_from"]["release"]).0, v1);
+    }
+    let (ga, gb) = (vid(&a["host_golden"]["volume"]), vid(&b["host_golden"]["volume"]));
+    assert_ne!(ga, gb, "two machines, two clones");
+    assert_ne!(a["volume"]["id"], b["volume"]["id"]);
+    assert_ne!(a["volume"]["name"], b["volume"]["name"]);
+    {
+        let vm = state.volume_manager.lock().await;
+        for g in [ga, gb] {
+            assert_eq!(vm.parent(&g), Some(stormblock::volume::VolumeId(v1)), "a CoW clone of the default");
+            assert!(vm.is_sealed(&g));
+        }
+        // Machine B's claim did not take machine A's boot clone away.
+        assert!(vm.get_volume_handle(&vid(&a["volume"]["id"])).is_some());
+        assert_eq!(vm.parent(&vid(&a["volume"]["id"])), Some(ga));
+    }
+
+    // The same MAC again: the same machine, the same golden.
+    let a2 = default_claim(&client, &base, "0c:c4:7a:00:00:01").await;
+    assert_eq!((a2["host"]["name"].as_str(), a2["host"]["new"].as_bool()), (Some("mac-0cc47a000001"), Some(false)));
+    assert_eq!(a2["host_golden"]["minted"], false);
+    assert_eq!(vid(&a2["host_golden"]["volume"]), ga);
+
+    // Both are waiting for a name.
+    let unnamed: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost?unnamed=1"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(unnamed["count"], 2);
+
+    // Named. The golden is neither copied nor made again.
+    for (from, to) in [("mac-0cc47a000001", "server1"), ("mac-0cc47a000002", "server2")] {
+        let r = client
+            .post(format!("{base}/api/v1/boothost/{from}/rename"))
+            .json(&serde_json::json!({"to": to}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    let s1 = boot_claim(&client, &base, "server1").await;
+    let s2 = boot_claim(&client, &base, "server2").await;
+    let again = default_claim(&client, &base, "0c:c4:7a:00:00:02").await;
+    assert_eq!((s1["host"]["provisional"].as_bool(), s1["host_golden"]["minted"].as_bool()), (Some(false), Some(false)));
+    assert_eq!(vid(&s1["host_golden"]["volume"]), ga);
+    assert_eq!(vid(&s2["host_golden"]["volume"]), gb);
+    assert_eq!(again["host"]["name"], "server2", "the MAC is an alias of the named machine");
+    assert_eq!(vid(&again["host_golden"]["volume"]), gb);
+    assert_eq!(again["host_golden"]["minted"], false);
+
+    let unnamed: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost?unnamed=true"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(unnamed["count"], 0);
+    let all: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(all["count"], 2, "no third host appeared");
+    server.abort();
+}
+
+/// Tag `default` is one boot clone for every machine: a claim of it without a
+/// MAC, or with something that is not one, is refused and makes nothing.
+#[tokio::test]
+async fn a_default_claim_without_a_mac_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let (state, v1, _v2) = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    let before = state.volume_manager.lock().await.list_volumes().await.len();
+
+    for body in [serde_json::json!({}), serde_json::json!({"mac": "C2NR0Q2"}), serde_json::json!({"mac": "00:00:00:00:00:00"})] {
+        let r = client
+            .post(format!("{base}/api/v1/synonyms/boothost/default/claim"))
+            .json(&body)
+            .send().await.unwrap();
+        assert_eq!(r.status(), 400, "{body}");
+    }
+    assert_eq!(state.volume_manager.lock().await.list_volumes().await.len(), before, "nothing was cloned");
+    assert!(state.synonyms.read().await.get("hostgolden", "default").is_none());
+
+    // The MAC may come as a query parameter instead.
+    let r = client
+        .post(format!("{base}/api/v1/synonyms/boothost/default/claim?mac=0cc47a0000aa"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let r: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(r["host"]["name"], "mac-0cc47a0000aa");
+    server.abort();
+}

@@ -394,6 +394,18 @@ pub struct ClaimRequest {
     /// consistency question, and one they should have to ask out loud.
     #[serde(default)]
     pub unsealed_ok: bool,
+    /// For a claim of `boothost/default` only: the claiming machine's first
+    /// NIC MAC, its identity until it is named (#200). The one thing a boot
+    /// claim reads from its body; `?mac=` works too.
+    #[serde(default)]
+    pub mac: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ClaimQuery {
+    /// Same as the body's `mac`, for a client that would rather not send one.
+    #[serde(default)]
+    pub mac: Option<String>,
 }
 
 fn yes() -> bool {
@@ -632,8 +644,7 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // A machine claiming its boot image is the one caller that arrives with
     // no credential, so its claim is a different, narrower verb (#107).
     if namespace == BOOTHOST_NS {
-        let host = canonical(&state, namespace, name).await;
-        return claim_boothost(state, &host, name).await;
+        return claim_boothost(state, name, req.mac.as_deref()).await;
     }
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(syn) = found else {
@@ -820,8 +831,42 @@ static BOOT_CLAIMS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// So the worst a caller that is not machine X can do by claiming as X is get
 /// X's image — which is what "the tag is the binding" means until a claim is
 /// bound to the host itself (stormcos#35).
-async fn claim_boothost(state: Arc<AppState>, tag: &str, claimed_as: &str) -> Response {
+///
+/// **Universal boot (#200).** A machine with no name of its own claims
+/// `boothost/default` and says which machine it is with its first NIC's MAC
+/// (`?mac=` or `{"mac": …}` — the one thing a boot claim reads). The MAC is
+/// the host it is an alias of, once the machine has been named; until then it
+/// is the provisional host `mac-<hex>`, made on the first claim with the MAC
+/// as its alias. Either way it is then an ordinary host: its own sealed
+/// golden, a copy-on-write clone of the default release it was pinned to,
+/// never another machine's. A claim of `boothost/default` with no MAC is
+/// refused — tag `default` would be one boot clone for every machine, each
+/// claim releasing the clone the last machine is running on.
+async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str>) -> Response {
     let _one_at_a_time = BOOT_CLAIMS.lock().await;
+    let by_default = claimed_as.eq_ignore_ascii_case(DEFAULT_HOST);
+    let (tag, mac, new_machine) = if by_default {
+        let Some(mac) = mac.filter(|m| !m.trim().is_empty()) else {
+            return ApiError::bad_request(format!(
+                "a claim of {} must carry the machine's MAC (?mac= or {{\"mac\": …}}): \
+                 every machine booting the default gets a clone of its own",
+                synonym::key(BOOTHOST_NS, DEFAULT_HOST)
+            ));
+        };
+        let made = state.synonyms.write().await.provisional_host(mac);
+        match made {
+            Ok((host, made)) => {
+                if made {
+                    tracing::info!(mac, host, "a machine nobody has named booted the default");
+                }
+                (host, Some(synonym::normalize_alias(mac)), made)
+            }
+            Err(e) => return err(e),
+        }
+    } else {
+        (canonical(&state, BOOTHOST_NS, claimed_as).await, None, false)
+    };
+    let tag = tag.as_str();
     // Every name this host has had: its clones and goldens carry the name
     // they were made under, and a rename must not strand them (#199).
     let host = state.synonyms.read().await.host(tag);
@@ -984,6 +1029,10 @@ async fn claim_boothost(state: Arc<AppState>, tag: &str, claimed_as: &str) -> Re
             "name": tag,
             "claimed_as": claimed_as,
             "aliases": host.as_ref().map(|h| h.aliases.clone()).unwrap_or_default(),
+            // Booted the default under its MAC and not named yet (#200).
+            "provisional": synonym::is_provisional(tag),
+            "mac": mac,
+            "new": new_machine,
         },
         "claimed_from": {
             "synonym": synonym::key(BOOTHOST_NS, tag),
@@ -1066,18 +1115,22 @@ fn chrono_now() -> String {
 async fn claim_one(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(q): Query<ClaimQuery>,
     body: Option<Json<ClaimRequest>>,
 ) -> Response {
-    let req = body.map(|b| b.0).unwrap_or_default();
+    let mut req = body.map(|b| b.0).unwrap_or_default();
+    req.mac = req.mac.or(q.mac);
     claim(state, DEFAULT_NAMESPACE, &name, req).await
 }
 
 async fn claim_two(
     State(state): State<Arc<AppState>>,
     Path((namespace, name)): Path<(String, String)>,
+    Query(q): Query<ClaimQuery>,
     body: Option<Json<ClaimRequest>>,
 ) -> Response {
-    let req = body.map(|b| b.0).unwrap_or_default();
+    let mut req = body.map(|b| b.0).unwrap_or_default();
+    req.mac = req.mac.or(q.mac);
     claim(state, &namespace, &name, req).await
 }
 

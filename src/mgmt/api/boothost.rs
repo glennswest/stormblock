@@ -3,6 +3,8 @@
 //! ```text
 //! GET  /api/v1/boothost                   every host: name, aliases, former names,
 //!                                         assignment, host golden
+//! GET  /api/v1/boothost?unnamed=1         only machines that booted the default
+//!                                         and are still called mac-<hex> (#200)
 //! GET  /api/v1/boothost/{name|alias}      one host, found by its name or an alias
 //! PUT  /api/v1/boothost/{name}            {aliases: [...]} — replace its aliases
 //! POST /api/v1/boothost/{name}/rename     {to, keep_alias?} — rename it, keeping
@@ -20,7 +22,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -40,6 +42,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{name}", get(get_one).put(set_aliases))
         .route("/{name}/rename", post(rename))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListQuery {
+    /// `1`/`true`: only the machines nobody has named yet — booted the
+    /// default under their MAC and still called `mac-<hex>` (#200).
+    #[serde(default)]
+    pub unnamed: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +89,7 @@ async fn view(state: &AppState, h: &Host) -> serde_json::Value {
         "name": h.name,
         "aliases": h.aliases,
         "former_names": h.former_names,
+        "provisional": synonym::is_provisional(&h.name),
         "assignment": assignment,
         "host_golden": golden,
         "created_at": h.created_at,
@@ -86,10 +97,15 @@ async fn view(state: &AppState, h: &Host) -> serde_json::Value {
     })
 }
 
-async fn list(State(state): State<Arc<AppState>>) -> Response {
+async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>) -> Response {
+    let unnamed = match q.unnamed.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("0") | Some("false") => false,
+        Some("" | "1" | "true") => true,
+        Some(other) => return ApiError::bad_request(format!("unnamed={other}: expected 1 or 0")),
+    };
     let hosts = state.synonyms.read().await.hosts();
     let mut items = Vec::with_capacity(hosts.len());
-    for h in &hosts {
+    for h in hosts.iter().filter(|h| !unnamed || synonym::is_provisional(&h.name)) {
         items.push(view(&state, h).await);
     }
     let count = items.len();
