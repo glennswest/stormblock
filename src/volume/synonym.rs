@@ -199,7 +199,7 @@ fn check_name(namespace: &str, name: &str) -> Result<(), SynonymError> {
 /// same host. Nothing becomes an alias by itself: MicroCloud nodes share a
 /// chassis serial, so the serial a claim arrives with says nothing on its own
 /// about which machine it is.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Host {
     pub name: String,
     #[serde(default)]
@@ -209,10 +209,73 @@ pub struct Host {
     /// every name the host has had.
     #[serde(default)]
     pub former_names: Vec<String>,
+    /// What the machine's boot agent does before it claims (#148).
+    #[serde(default, skip_serializing_if = "BootIntent::is_auto")]
+    pub intent: BootIntent,
+    /// The boot clone a claim handed out while the intent was `install`: the
+    /// one install whose completion may set the intent back to `local`.
+    /// Cleared whenever the intent is set, so a report from an install that
+    /// began before the request never answers for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_claim: Option<VolumeId>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+/// What a machine's boot agent does before it claims (#148, stormbootx#11).
+///
+/// Read by firmware from `GET /api/v1/synonyms/boothost/<name>/intent`, which
+/// treats any doubt — a 404, an error, a word it does not know — as `auto`,
+/// so nothing here can keep a machine from booting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootIntent {
+    /// Claim and boot the image, as a machine always has.
+    #[default]
+    Auto,
+    /// Claim, boot and take the local disk whatever it carries (the
+    /// initramfs's `--local-disk-force`). One-shot: set back to `local` once
+    /// the node reports the flow-over done.
+    Install,
+    /// Boot the local disk at once: no claim, no clone.
+    Local,
+}
+
+impl BootIntent {
+    pub fn is_auto(&self) -> bool {
+        *self == BootIntent::Auto
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BootIntent::Auto => "auto",
+            BootIntent::Install => "install",
+            BootIntent::Local => "local",
+        }
+    }
+}
+
+impl std::str::FromStr for BootIntent {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(BootIntent::Auto),
+            "install" => Ok(BootIntent::Install),
+            "local" => Ok(BootIntent::Local),
+            other => Err(format!("intent {other:?}: expected install, local or auto")),
+        }
+    }
+}
+
+/// What reporting an install done did (#148).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallDone {
+    /// The intent was `install` for this clone, and is now `local`.
+    Reset,
+    /// The intent was not `install`: nothing to do (a repeated report).
+    NotRequested,
 }
 
 /// What two host identifiers are compared by: case-insensitive, and a MAC in
@@ -480,10 +543,9 @@ impl SynonymStore {
         }
         self.get(BOOTHOST_NS, name).map(|s| Host {
             name: s.name.clone(),
-            aliases: Vec::new(),
-            former_names: Vec::new(),
             created_at: s.created_at,
             updated_at: s.updated_at,
+            ..Host::default()
         })
     }
 
@@ -543,10 +605,9 @@ impl SynonymStore {
         let t = now();
         let h = self.hosts.entry(name.clone()).or_insert_with(|| Host {
             name: name.clone(),
-            aliases: Vec::new(),
-            former_names: Vec::new(),
             created_at: t,
             updated_at: t,
+            ..Host::default()
         });
         h.aliases = wanted;
         h.updated_at = t;
@@ -575,7 +636,7 @@ impl SynonymStore {
         let t = now();
         self.hosts.insert(
             name.clone(),
-            Host { name: name.clone(), aliases: vec![alias], former_names: Vec::new(), created_at: t, updated_at: t },
+            Host { name: name.clone(), aliases: vec![alias], created_at: t, updated_at: t, ..Host::default() },
         );
         self.persist();
         Ok((name, true))
@@ -618,10 +679,9 @@ impl SynonymStore {
         }
         let mut h = self.hosts.remove(&old).unwrap_or(Host {
             name: old.clone(),
-            aliases: Vec::new(),
-            former_names: Vec::new(),
             created_at: t,
             updated_at: t,
+            ..Host::default()
         });
         h.name = to.to_string();
         h.aliases.retain(|a| host_match_key(a) != host_match_key(to));
@@ -635,6 +695,56 @@ impl SynonymStore {
         self.hosts.insert(to.to_string(), h.clone());
         self.persist();
         Ok(h)
+    }
+
+    /// Set a host's boot intent (#148). `name` is the host's name or an
+    /// alias; a host nobody has heard of is not found. Returns the host.
+    pub fn set_intent(&mut self, name: &str, intent: BootIntent) -> Result<Host, SynonymError> {
+        let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
+        let t = now();
+        let base = self.host(&host).unwrap_or_default();
+        let h = self.hosts.entry(host.clone()).or_insert(base);
+        h.intent = intent;
+        h.install_claim = None;
+        h.updated_at = t;
+        let out = h.clone();
+        self.persist();
+        Ok(out)
+    }
+
+    /// A claim of `host` handed out `clone`: when the intent is `install`,
+    /// that clone is the install whose completion resets it. The later of
+    /// the firmware's and the initramfs's claims is the one that installs.
+    pub fn note_install_claim(&mut self, host: &str, clone: VolumeId) {
+        if let Some(h) = self.hosts.get_mut(host).filter(|h| h.intent == BootIntent::Install) {
+            h.install_claim = Some(clone);
+            self.persist();
+        }
+    }
+
+    /// The node installed from `clone` has finished its flow-over: an
+    /// `install` intent that clone was claimed under goes back to `local`.
+    /// Refused when the intent is `install` for another clone — a report of
+    /// an install that began before the request, or one made up.
+    pub fn install_done(&mut self, name: &str, clone: VolumeId) -> Result<(Host, InstallDone), SynonymError> {
+        let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
+        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent == BootIntent::Install) else {
+            let h = self.host(&host).unwrap_or_default();
+            return Ok((h, InstallDone::NotRequested));
+        };
+        if h.install_claim != Some(clone) {
+            let why = match h.install_claim {
+                Some(c) => format!("the install requested for {host} is the one booted from {}, not {}", c.0, clone.0),
+                None => format!("no claim of {host} has been made since its install was requested"),
+            };
+            return Err(SynonymError::Conflict(why));
+        }
+        h.intent = BootIntent::Local;
+        h.install_claim = None;
+        h.updated_at = now();
+        let out = h.clone();
+        self.persist();
+        Ok((out, InstallDone::Reset))
     }
 
     pub fn persist(&self) {
@@ -863,5 +973,67 @@ mod tests {
         let s = SynonymStore::load(dir.path());
         assert_eq!(s.find("node-root").unwrap().target.volume_id(), Some(a));
         assert_eq!(s.find("node-root").unwrap().version, 1);
+    }
+
+    #[test]
+    fn an_intent_is_the_hosts_and_answers_to_its_aliases() {
+        let mut s = SynonymStore::in_memory();
+        assert!(matches!(s.set_intent("nobody", BootIntent::Local), Err(SynonymError::NotFound(_))));
+        // A machine that booted the default: its MAC, bare, reaches it.
+        let (host, _) = s.provisional_host("AC:1F:6B:8A:A7:9C").unwrap();
+        assert_eq!(s.host(&host).unwrap().intent, BootIntent::Auto, "never set is auto");
+        let h = s.set_intent("ac1f6b8aa79c", BootIntent::Local).unwrap();
+        assert_eq!((h.name.as_str(), h.intent), ("mac-ac1f6b8aa79c", BootIntent::Local));
+        // A rename carries it, and the MAC still reaches it.
+        s.rename_host(&host, "server1", true).unwrap();
+        assert_eq!(s.host(&s.host_of("ac1f6b8aa79c").unwrap()).unwrap().intent, BootIntent::Local);
+        // A host that is only an assignment gets a record.
+        s.create(BOOTHOST_NS, "server2", Target::Volume { id: vol() }, None, None).unwrap();
+        assert_eq!(s.set_intent("SERVER2", BootIntent::Install).unwrap().intent, BootIntent::Install);
+        assert_eq!(s.host("server2").unwrap().intent, BootIntent::Install);
+        for (w, want) in [("Install", BootIntent::Install), (" local ", BootIntent::Local), ("AUTO", BootIntent::Auto)] {
+            assert_eq!(w.parse::<BootIntent>().unwrap(), want);
+        }
+        assert!("reinstall".parse::<BootIntent>().is_err());
+    }
+
+    #[test]
+    fn install_is_one_shot_and_only_for_the_clone_claimed_under_it() {
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "server1", Target::Volume { id: vol() }, None, None).unwrap();
+        let (before, firmware, initramfs) = (vol(), vol(), vol());
+        // A claim before the request is not the install.
+        s.note_install_claim("server1", before);
+        assert_eq!(s.install_done("server1", before).unwrap().1, InstallDone::NotRequested);
+        s.set_intent("server1", BootIntent::Install).unwrap();
+        assert!(matches!(s.install_done("server1", before), Err(SynonymError::Conflict(_))));
+        // Firmware claims, then the initramfs: the later clone installs.
+        s.note_install_claim("server1", firmware);
+        s.note_install_claim("server1", initramfs);
+        assert!(matches!(s.install_done("server1", firmware), Err(SynonymError::Conflict(_))));
+        assert_eq!(s.host("server1").unwrap().intent, BootIntent::Install);
+        let (h, done) = s.install_done("server1", initramfs).unwrap();
+        assert_eq!((h.intent, done, h.install_claim), (BootIntent::Local, InstallDone::Reset, None));
+        // Reported twice: nothing more to do.
+        assert_eq!(s.install_done("server1", initramfs).unwrap().1, InstallDone::NotRequested);
+        // Asked again: the old report does not answer for the new request.
+        s.set_intent("server1", BootIntent::Install).unwrap();
+        assert!(s.install_done("server1", initramfs).is_err());
+    }
+
+    #[test]
+    fn an_intent_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let clone = vol();
+        {
+            let mut s = SynonymStore::load(dir.path());
+            s.create(BOOTHOST_NS, "server1", Target::Volume { id: vol() }, None, None).unwrap();
+            s.set_intent("server1", BootIntent::Install).unwrap();
+            s.note_install_claim("server1", clone);
+        }
+        let mut s = SynonymStore::load(dir.path());
+        let h = s.host("server1").unwrap();
+        assert_eq!((h.intent, h.install_claim), (BootIntent::Install, Some(clone)));
+        assert_eq!(s.install_done("server1", clone).unwrap().1, InstallDone::Reset);
     }
 }

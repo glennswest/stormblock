@@ -7,6 +7,9 @@
 //! PUT    /api/v1/synonyms/{ns}/{name}     re-point at a new version
 //! POST   /api/v1/synonyms/{ns}/{name}/rollback   put it back to the previous target
 //! DELETE /api/v1/synonyms/{ns}/{name}     drop the name (never the volume)
+//! GET    /api/v1/synonyms/boothost/{name}/intent      a machine's boot intent (open)
+//! PUT    /api/v1/synonyms/boothost/{name}/intent      {intent: install|local|auto}
+//! POST   /api/v1/synonyms/boothost/{name}/installed   {volume} — an install finished (open)
 //! ```
 //!
 //! Both path shapes work: `/api/v1/synonyms/fedora-43` is
@@ -44,7 +47,7 @@ use serde_json::json;
 use super::ApiError;
 use crate::drive::BlockDevice;
 use crate::mgmt::AppState;
-use crate::volume::synonym::{self, Synonym, SynonymError, Target, DEFAULT_NAMESPACE};
+use crate::volume::synonym::{self, BootIntent, Host, InstallDone, Synonym, SynonymError, Target, DEFAULT_NAMESPACE};
 use crate::volume::VolumeId;
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -56,6 +59,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{namespace}/{name}/rollback", post(rollback_two))
         .route("/{name}/claim", post(claim_one))
         .route("/{namespace}/{name}/claim", post(claim_two))
+        .route("/{namespace}/{name}/intent", get(get_intent).put(put_intent))
+        .route("/{namespace}/{name}/installed", post(installed))
         .with_state(state)
 }
 
@@ -1021,8 +1026,16 @@ async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str
     let collected = collect_host_goldens(&state, tag, &names, golden).await;
 
     note_claim(c.volume_id);
+    // Under `install`, this clone is the install (#148); the reply tells the
+    // initramfs, which takes the disk with force.
+    let intent = {
+        let mut store = state.synonyms.write().await;
+        store.note_install_claim(tag, c.volume_id);
+        store.host(tag).map(|h| h.intent).unwrap_or_default()
+    };
     let attach = attach_info(&state, c.volume_id).await;
     let out = json!({
+        "intent": intent.as_str(),
         // Who this is, and what the machine called itself: a serial or a MAC
         // resolves to the host it is an alias of (#199).
         "host": {
@@ -1132,6 +1145,132 @@ async fn claim_two(
     let mut req = body.map(|b| b.0).unwrap_or_default();
     req.mac = req.mac.or(q.mac);
     claim(state, &namespace, &name, req).await
+}
+
+/// The intent routes live in the `boothost` namespace only.
+fn boothost_only(namespace: &str) -> Result<(), Response> {
+    if namespace == BOOTHOST_NS {
+        Ok(())
+    } else {
+        Err(ApiError::not_found(format!(
+            "a boot intent belongs to a machine: /api/v1/synonyms/{BOOTHOST_NS}/<name>/intent"
+        )))
+    }
+}
+
+/// A host's intent as it goes on the wire. The GET is open, so this says no
+/// more than the claim beside it already does: the host's name and one word.
+fn intent_body(h: &Host, asked_as: &str) -> serde_json::Value {
+    let mut v = json!({
+        "host": h.name,
+        "intent": h.intent.as_str(),
+        "updated_at": h.updated_at,
+    });
+    if !synonym::host_match_key(asked_as).eq(&synonym::host_match_key(&h.name)) {
+        v["resolved_from"] = json!(asked_as);
+    }
+    v
+}
+
+/// `GET /api/v1/synonyms/boothost/<name>/intent` — what the machine's boot
+/// agent does before it claims (#148, stormbootx#11): `install`, `local` or
+/// `auto` (never set).
+///
+/// Open, like the claim: firmware reads it before it has any credential. The
+/// name resolves the way a claim's does — a host's name, or an alias (its
+/// serial, or a MAC in any spelling: a machine that booted the default reads
+/// under its MAC's 12 hex digits). A machine nobody has heard of is a 404,
+/// which stormbootx reads as `auto`.
+async fn get_intent(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(r) = boothost_only(&namespace) {
+        return r;
+    }
+    let found = {
+        let store = state.synonyms.read().await;
+        store.host_of(&name).and_then(|h| store.host(&h))
+    };
+    match found {
+        Some(h) => Json(intent_body(&h, &name)).into_response(),
+        None => err(SynonymError::NotFound(synonym::key(BOOTHOST_NS, &name))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IntentRequest {
+    pub intent: String,
+}
+
+/// `PUT /api/v1/synonyms/boothost/<name>/intent {"intent": …}` — set it.
+///
+/// Needs the admin token when one is configured (`serve::api`): `install`
+/// takes the machine's disk whatever it carries, its identity included. It
+/// is one-shot — the node reports the install done and the engine sets
+/// `local`.
+async fn put_intent(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+    Json(req): Json<IntentRequest>,
+) -> Response {
+    if let Err(r) = boothost_only(&namespace) {
+        return r;
+    }
+    let intent: BootIntent = match req.intent.parse() {
+        Ok(i) => i,
+        Err(e) => return ApiError::bad_request(e),
+    };
+    let set = state.synonyms.write().await.set_intent(&name, intent);
+    match set {
+        Ok(h) => {
+            tracing::info!(host = %h.name, intent = intent.as_str(), "boot intent set");
+            Json(intent_body(&h, &name)).into_response()
+        }
+        Err(e) => err(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstalledRequest {
+    /// The boot clone the node installed from — the `volume.id` of its claim.
+    pub volume: String,
+}
+
+/// `POST /api/v1/synonyms/boothost/<name>/installed {"volume": <clone id>}` —
+/// the node booted under `install` has finished its flow-over and its disk
+/// boots on its own, so the intent goes back to `local`: one request, one
+/// install.
+///
+/// Open, like the claim: the node's engine has no token for this appliance
+/// (stormcos#89). It can only ever lower `install` to `local`, and only for
+/// the clone a claim handed out under that `install` — a report of any other
+/// is a 409 and changes nothing. When the intent is not `install` it is a
+/// no-op, so a report repeated after a restart is harmless.
+async fn installed(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+    Json(req): Json<InstalledRequest>,
+) -> Response {
+    if let Err(r) = boothost_only(&namespace) {
+        return r;
+    }
+    let Ok(clone) = uuid::Uuid::parse_str(req.volume.trim()).map(VolumeId) else {
+        return ApiError::bad_request(format!("volume {:?} is not a volume id", req.volume));
+    };
+    let done = state.synonyms.write().await.install_done(&name, clone);
+    match done {
+        Ok((h, outcome)) => {
+            let reset = outcome == InstallDone::Reset;
+            if reset {
+                tracing::info!(host = %h.name, volume = %clone.0, "install finished: boot intent is local again");
+            }
+            let mut v = intent_body(&h, &name);
+            v["reset"] = json!(reset);
+            Json(v).into_response()
+        }
+        Err(e) => err(e),
+    }
 }
 
 /// Resolve a synonym to a volume id, for the surfaces that take "an id or a

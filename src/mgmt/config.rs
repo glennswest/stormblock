@@ -312,8 +312,9 @@ pub struct ManagementConfig {
     ///   keeps it in memory for this run (closed, and it says so) rather than
     ///   failing to start.
     ///
-    /// A machine claiming its boot image has no credential yet, so that one
-    /// request — `POST /api/v1/synonyms/boothost/<tag>/claim` — stays open
+    /// A machine claiming its boot image has no credential yet, so its boot
+    /// requests — `POST /api/v1/synonyms/boothost/<tag>/claim`, `GET
+    /// …/<tag>/intent` and `POST …/<tag>/installed` (#148) — stay open
     /// whatever this says (`serve::api::is_boot_claim`); everything else needs
     /// the token. See `mgmt::auth::resolve` and `docs/auth.md`.
     pub require_auth: Option<bool>,

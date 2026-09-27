@@ -90,6 +90,9 @@ async fn view(state: &AppState, h: &Host) -> serde_json::Value {
         "aliases": h.aliases,
         "former_names": h.former_names,
         "provisional": synonym::is_provisional(&h.name),
+        // What its boot agent does before it claims (#148).
+        "intent": h.intent.as_str(),
+        "install_claim": h.install_claim.map(|v| v.0),
         "assignment": assignment,
         "host_golden": golden,
         "created_at": h.created_at,

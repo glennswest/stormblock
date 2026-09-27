@@ -129,22 +129,33 @@ fn is_public(path: &str) -> bool {
     )
 }
 
-/// The one write a caller with no credential may make: a machine claiming
-/// its own boot image, `POST /api/v1/synonyms/boothost/<tag>/claim` (#107).
+/// What a machine may ask of this API with no credential: claim its own boot
+/// image, `POST /api/v1/synonyms/boothost/<tag>/claim` (#107); read its boot
+/// intent, `GET …/boothost/<tag>/intent`; and report an install finished,
+/// `POST …/boothost/<tag>/installed` (#148).
 ///
-/// Firmware has nowhere to keep a token, so this verb is open — and made safe
-/// by what it cannot do rather than by who calls it: it takes no options and
-/// only ever hands tag X a fresh clone of X's own sealed golden
-/// (`mgmt::api::synonyms::claim_boothost`). Matched exactly: one method, one
-/// namespace, one path segment for the tag, so `boothost/<tag>` itself — the
-/// re-point that decides what a machine boots — stays guarded.
+/// Firmware has nowhere to keep a token, and neither has a node's engine for
+/// the appliance it booted from, so these are open — and made safe by what
+/// they cannot do rather than by who calls them. The claim takes no options
+/// and only ever hands tag X a fresh clone of X's own sealed golden
+/// (`mgmt::api::synonyms::claim_boothost`); the intent read answers one word
+/// about the tag asked; the install report can only lower `install` to
+/// `local`, and only for the clone a claim handed out under it. Matched
+/// exactly: one method each, one namespace, one path segment for the tag, so
+/// `boothost/<tag>` itself — the re-point that decides what a machine boots —
+/// and the intent's `PUT` stay guarded.
 pub fn is_boot_claim(method: &Method, path: &str) -> bool {
-    if *method != Method::POST {
+    let verb = match *method {
+        Method::POST => ["/claim", "/installed"].as_slice(),
+        Method::GET => ["/intent"].as_slice(),
+        _ => return false,
+    };
+    let Some(rest) = path.strip_prefix("/api/v1/synonyms/boothost/") else {
         return false;
-    }
-    path.strip_prefix("/api/v1/synonyms/boothost/")
-        .and_then(|rest| rest.strip_suffix("/claim"))
-        .is_some_and(|tag| !tag.is_empty() && !tag.contains('/') && tag != "." && tag != "..")
+    };
+    verb.iter()
+        .filter_map(|v| rest.strip_suffix(v))
+        .any(|tag| !tag.is_empty() && !tag.contains('/') && tag != "." && tag != "..")
 }
 
 /// Verbs that can destroy data. Everything that deletes, plus the ones that
@@ -160,6 +171,11 @@ fn is_destructive(method: &Method, path: &str, query: Option<&str>) -> bool {
         return true;
     }
     if path.ends_with("/seal") {
+        return true;
+    }
+    if *method == Method::PUT && path.starts_with("/api/v1/synonyms/boothost/") && path.ends_with("/intent") {
+        // `install` takes the machine's disk whatever it carries — the
+        // node's identity included (#148).
         return true;
     }
     if *method == Method::POST && path.ends_with("/tar") {
@@ -1315,5 +1331,29 @@ mod tests {
             assert!(!open(m.clone(), p), "{m} {p} must need the token");
         }
     }
-}
 
+    /// A machine reads its boot intent and reports an install done with no
+    /// token; setting the intent needs the admin token when one is configured
+    /// (#148).
+    #[test]
+    fn the_intent_is_read_open_and_set_by_the_admin() {
+        let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()) };
+        let as_ = |m: Method, p: &str, tok: Option<&str>| decide(&auth, &m, p, None, tok).is_ok();
+        assert!(as_(Method::GET, "/api/v1/synonyms/boothost/ac1f6b8aa79c/intent", None));
+        assert!(as_(Method::POST, "/api/v1/synonyms/boothost/C2NR0Q2/installed", None));
+        let put = "/api/v1/synonyms/boothost/C2NR0Q2/intent";
+        assert!(!as_(Method::PUT, put, None));
+        assert!(!as_(Method::PUT, put, Some("t")), "the api token is not enough");
+        assert!(as_(Method::PUT, put, Some("a")));
+        for (m, p) in [
+            (Method::POST, "/api/v1/synonyms/boothost/C2NR0Q2/intent"),
+            (Method::GET, "/api/v1/synonyms/boothost/C2NR0Q2/installed"),
+            (Method::GET, "/api/v1/synonyms/images/nginx/intent"),
+            (Method::GET, "/api/v1/synonyms/boothost/a/b/intent"),
+            (Method::GET, "/api/v1/synonyms/boothost//intent"),
+            (Method::POST, "/api/v1/synonyms/boothost/../installed"),
+        ] {
+            assert!(!as_(m.clone(), p, None), "{m} {p} must need the token");
+        }
+    }
+}
