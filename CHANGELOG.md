@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.3.0] — 2026-09-27
+
 ### 2026-09-27 (test container)
 - **feat(test):** stormblock's test container under stormcentral's test
   standard (#139): `test/` (crate `stormblock-test`, a workspace member),

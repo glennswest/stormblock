@@ -97,7 +97,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/main.rs` — CLI, the daemon, and every subcommand
 
 ## Current State
-**v19.2.2** (2026-09-27). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
+**v19.3.0** (2026-09-27). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
 the full suite passes on dev apart from #120 (and #134 when the box is busy).
 The README is the reference for what the code does, rewritten from the code in
 #131; the docs in `docs/` were checked against it and the superseded ones moved
@@ -114,7 +114,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Test containers: short, medium, long (2026-09-26, #139, P1) — IN PROGRESS
+### Test containers: short, medium, long (2026-09-26, #139, P1) — DONE (v19.3.0)
 
 Per stormcentral `docs/test-standard.md`: `test/Containerfile` (context =
 repo root), `/test <suite>`, optional `test/build.sh`, JSON lines + summary,
@@ -146,7 +146,7 @@ Design: the node's engine is closed (v17) and a Job has no token for it
       residue (volumes, allocated slots, engine RSS and fds); regression fails
 - [x] `test/build.sh`, `test/Containerfile`, `test/stormblock-test.yaml`;
       all three suites run on dev in podman as uid 65532 (image 30 MB)
-- [ ] docs, changelog, close
+- [x] docs, changelog, close
 
 Found by the suites and fixed: `adopt_slabs` lost flushed data across a
 daemon restart (medium; 31bf732, #171), and concurrent NVMe/TCP attaches
