@@ -126,6 +126,32 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Boot intent beside boothost/<tag> (2026-09-27, #148, stormbootx#11) — IN PROGRESS
+
+stormbootx v0.4.0 reads `GET /api/v1/synonyms/boothost/<tag>/intent` before
+it claims (`install` | `local` | `auto`; any doubt = `auto`); a machine with
+no stated tag reads under its MAC (12 hex). Owner: `install` is one-shot —
+back to `local` once the flow-over completes; the claim reply tells the
+initramfs (it is `--local-disk-force`, "this drive is spent").
+
+Design: the intent lives on the `Host` record (`intent`, `install_claim`),
+so a rename carries it. The name resolves through `host_of` (alias, MAC);
+unknown → 404. GET is open (firmware has no token), PUT needs the admin
+token when one is configured (install destroys the disk's identity). A
+claim served under `install` records its boot clone as `install_claim` and
+answers `intent`. `boot-claim` writes `/run/stormblock/install.json` when
+told `install`; the initramfs then assimilates with force; `boot-local`
+carries the ticket in the handover record; the successor, once the
+flow-over and local boot succeed, reports `POST …/boothost/<tag>/installed
+{volume}` (open; resets only when `volume` is the clone claimed under the
+install). The intended golden's key in the reply (stormbootx#19) is left
+out: that is the owner's call.
+- [ ] store: `BootIntent`, `Host.intent`/`install_claim`, set/note/done
+- [ ] routes GET/PUT intent, POST installed; open GET/POST in auth
+- [ ] claim: `intent` in reply, `install_claim` recorded; boothost view
+- [ ] node: boot-claim ticket, initramfs force, record, successor report
+- [ ] tests, docs (auth.md, README), CHANGELOG; sc-build; close
+
 ### Universal boot: a default claim carries a MAC (2026-09-27, #200, P0) — DONE (v19.4.0)
 
 Owner: one ISO for every machine; "I don't want copies, I want cows". Today a
