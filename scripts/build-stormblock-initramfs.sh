@@ -1894,6 +1894,18 @@ if [ "$BOOT_MODE" = "local" ]; then
     # every boot, with no way out — the guard cannot tell a dead identity from
     # a live one, so it protects both.
     # --- BEGIN assimilate survey (covered by tests/initramfs-boot-hook.sh)
+    # An install the appliance asked for (#148): `boot-claim` leaves a ticket
+    # when the claim answered `intent: install`. That is the operator saying
+    # "this drive is spent", so it is `force` - except that an explicit
+    # `rd.stormblock.assimilate=off` on this machine still means no.
+    if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
+        if [ "${ASSIMILATE:-}" = off ]; then
+            echo "  an install was requested, and rd.stormblock.assimilate=off says no"
+        else
+            ASSIMILATE=force
+            echo "  an install was requested: the local disk is taken whatever it carries"
+        fi
+    fi
     SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
     SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
     LOCAL_DISK=""

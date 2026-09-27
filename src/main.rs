@@ -2713,7 +2713,8 @@ fn is_fabric_uri(path: &str) -> bool {
 /// Make `disk` boot on its own from the image at `sources` (#123): the ESP
 /// and the boot pallets, into the boot area of the node layout. Read-only on
 /// every source.
-async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<()> {
+/// Answers whether the disk now boots on its own.
+async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> {
     use stormblock::image::local_boot::{lay_local_boot, EspOutcome};
 
     let mut opened: Vec<(String, Arc<dyn BlockDevice>)> = Vec::new();
@@ -2761,7 +2762,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<()> {
     } else {
         println!("Local boot: {disk} does not boot on its own yet");
     }
-    Ok(())
+    Ok(r.bootable())
 }
 
 async fn open_slabs_and_restore(
@@ -4452,6 +4453,7 @@ fn spawn_flow_over(
     state: &Arc<AppState>,
     flow: stormblock::drive::handover::FlowOver,
     then_local_boot: Option<(String, Vec<String>)>,
+    install: Option<stormblock::drive::handover::InstallTicket>,
 ) {
     use stormblock::drive::slab::SlabId;
 
@@ -4482,12 +4484,29 @@ fn spawn_flow_over(
                 .collect()
         };
         // The disk boots on its own once it holds everything — and only then.
+        // An install the appliance asked for is done at that point, and only
+        // at that point (#148): `local` on a disk that cannot boot would
+        // leave the machine nothing to boot.
         let local_boot = |job: Option<(String, Vec<String>)>| async move {
-            if let Some((disk, sources)) = job {
-                if let Err(e) = run_local_boot(&disk, &sources).await {
-                    println!("Local boot: {disk}: {e}");
-                    tracing::warn!("local boot on {disk}: {e}");
-                }
+            let booted = match job {
+                Some((disk, sources)) => match run_local_boot(&disk, &sources).await {
+                    Ok(bootable) => bootable,
+                    Err(e) => {
+                        println!("Local boot: {disk}: {e}");
+                        tracing::warn!("local boot on {disk}: {e}");
+                        false
+                    }
+                },
+                None => false,
+            };
+            match install {
+                Some(t) if booted => report_installed(t).await,
+                Some(t) => println!(
+                    "Install: not reported done to {} - the disk does not boot on its own; \
+                     the intent stays install",
+                    t.boothost
+                ),
+                None => {}
             }
         };
         if sources.is_empty() {
@@ -4944,8 +4963,9 @@ async fn handle_adopt_ublk(
                 r.slabs.iter().filter(|p| **p != disk).cloned().collect();
             Some((disk, sources))
         });
+        let install = record.as_ref().and_then(|r| r.install.clone());
         if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.clone()) {
-            spawn_flow_over(&state, flow, local_boot);
+            spawn_flow_over(&state, flow, local_boot, install);
         } else if let Some((disk, sources)) = local_boot {
             tokio::spawn(async move {
                 if let Err(e) = run_local_boot(&disk, &sources).await {
@@ -5083,6 +5103,7 @@ async fn claim_boot_uri(
                     if let Some(name) = v.get("volume").and_then(|x| x.get("name")).and_then(|x| x.as_str()) {
                         eprintln!("boot-claim: {tag} -> {name}");
                     }
+                    note_install_ticket(&base, &v);
                     return Ok(uri.to_string());
                 }
                 // A tag nobody has decided for is a fleet decision that has
@@ -5103,6 +5124,87 @@ async fn claim_boot_uri(
         }
         eprintln!("boot-claim: {last} - retrying");
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+/// Leave the install the claim asked for where the initramfs and
+/// `boot-local` look (#148): `intent: install` in the reply writes the
+/// ticket, anything else removes a stale one. Never fails the claim — a
+/// ticket that cannot be written is an install that does not happen, which
+/// is the boot this machine would have had before intents existed.
+fn note_install_ticket(base: &str, reply: &serde_json::Value) {
+    use stormblock::drive::handover::{InstallTicket, INSTALL_TICKET_PATH};
+    let path = std::path::Path::new(INSTALL_TICKET_PATH);
+    let intent = reply.get("intent").and_then(|i| i.as_str()).unwrap_or("auto");
+    eprintln!("boot-claim: intent {intent}");
+    let ticket = (intent == "install")
+        .then(|| {
+            let host = reply.get("host")?.get("name")?.as_str()?;
+            let volume = reply.get("volume")?.get("id")?.as_str()?;
+            Some(InstallTicket { boothost: base.to_string(), host: host.to_string(), volume: volume.to_string() })
+        })
+        .flatten();
+    match ticket {
+        Some(t) => match t.write(path) {
+            Ok(()) => eprintln!("boot-claim: install requested for {} - {} written", t.host, path.display()),
+            Err(e) => eprintln!("boot-claim: install requested, but {}: {e} - booting as auto", path.display()),
+        },
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Tell the appliance an install it asked for is done (#148): the flow-over
+/// finished and the disk boots on its own, so the machine's intent goes back
+/// to `local`. Retried for an hour — until it lands, the next power cycle
+/// installs again — and never fatal.
+async fn report_installed(ticket: stormblock::drive::handover::InstallTicket) {
+    let url = format!(
+        "{}/api/v1/synonyms/boothost/{}/installed",
+        ticket.boothost.trim_end_matches('/'),
+        ticket.host
+    );
+    let client = match stormblock::http::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("install report to {url}: {e}");
+            return;
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    loop {
+        let last = match client.post(&url).json(&serde_json::json!({ "volume": ticket.volume })).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                println!("Install: reported done to {url}; this machine's boot intent is local again");
+                tracing::info!("install reported done to {url}");
+                return;
+            }
+            // Refused — not the clone the install is for, or no such host.
+            // Asking again will not change the answer.
+            Ok(resp) if resp.status().is_client_error() => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                println!("Install: {url} refused the report ({status}: {body})");
+                tracing::warn!("install report refused by {url}: {status}: {body}");
+                return;
+            }
+            Ok(resp) => format!("{}", resp.status()),
+            Err(e) => e.to_string(),
+        };
+        if std::time::Instant::now() >= deadline {
+            println!(
+                "Install: could not report done to {url} ({last}); the intent stays install, \
+                 so the next power cycle installs again"
+            );
+            tracing::error!("install report to {url} gave up: {last}");
+            return;
+        }
+        tracing::warn!("install report to {url}: {last} - retrying");
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
 }
 
@@ -5546,6 +5648,25 @@ async fn handle_boot_local(
                 .collect(),
             flow_over: laid_flow_over.clone(),
             local_boot: local_boot_disk.clone(),
+            // An install the appliance asked for is done when this disk is
+            // (#148) — only when there is a flow-over to finish. With none,
+            // the intent stays `install` and the next boot tries again.
+            install: {
+                let t = stormblock::drive::handover::InstallTicket::read(std::path::Path::new(
+                    stormblock::drive::handover::INSTALL_TICKET_PATH,
+                ));
+                match (&t, &laid_flow_over) {
+                    (Some(t), None) => {
+                        println!(
+                            "Install: {} asked for an install and no local disk was laid; \
+                             its intent stays install",
+                            t.boothost
+                        );
+                        None
+                    }
+                    _ => t,
+                }
+            },
         };
         let path = std::path::Path::new(stormblock::drive::handover::DEFAULT_PATH);
         match record.write(path) {

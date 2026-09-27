@@ -357,6 +357,7 @@ chmod +x "$SVSTUB"
 survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behind
     (
         set +e
+        STORM_INSTALL_TICKET="${TICKET:-$WORK/no-ticket}"; export STORM_INSTALL_TICKET
         sys="$WORK/sys"; rm -rf "$sys"; mkdir -p "$sys/sda" "$WORK/survey"
         echo 0 > "$sys/sda/removable"; echo 3907029168 > "$sys/sda/size"
         ASSIMILATE="$1"; shift
@@ -365,7 +366,7 @@ survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behi
         export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS
         SLAB="nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1"
         . "$WORK/survey.sh" >/dev/null 2>&1
-        echo "$LOCAL_DISK"
+        echo "$LOCAL_DISK${FORCE_LOCAL:+ force}"
     )
 }
 
@@ -386,7 +387,18 @@ check "a lone data slab is an identity and is left" "" \
 check "'blank' leaves a drive that carries any slab" "" \
     "$(survey blank "$SYS_ONLY")"
 check "'off' takes nothing" "" "$(survey off "$SYS_ONLY")"
-check "'force' takes a lone data slab" "/dev/sda" "$(survey force "$DATA_ONLY")"
+check "'force' takes a lone data slab" "/dev/sda force" "$(survey force "$DATA_ONLY")"
+
+# An install the appliance asked for (#148) is `force`, unless this machine's
+# cmdline says off.
+TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
+check "an install ticket takes a lone data slab, with force" "/dev/sda force" \
+    "$(survey any "$DATA_ONLY")"
+check "an install ticket forces over the default policy too" "/dev/sda force" \
+    "$(survey "" "$DATA_ONLY")"
+check "'off' still refuses an install" "" "$(survey off "$DATA_ONLY")"
+TICKET=""
+check "no ticket, no force" "/dev/sda" "$(survey any "$SYS_ONLY")"
 
 [ "$fail" -eq 0 ] && echo "all boot hook, probe, takeable and survey checks passed"
 exit "$fail"

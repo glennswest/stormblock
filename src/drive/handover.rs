@@ -67,6 +67,43 @@ pub struct FlowOver {
     pub data_slab: String,
 }
 
+/// Where `boot-claim` leaves the install it was asked for (#148): written
+/// when the claim answered `intent: install`, removed when it did not. The
+/// initramfs reads its existence as "take the local disk with force";
+/// `boot-local` carries it into the handover record.
+pub const INSTALL_TICKET_PATH: &str = "/run/stormblock/install.json";
+
+/// An install the appliance asked for: who to tell, and about which clone,
+/// once the flow-over is done and the disk boots on its own (#148). The
+/// appliance sets the machine's intent back to `local` only for the clone a
+/// claim handed out under `install`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallTicket {
+    /// The appliance's base URL, as `boot-claim` was given it.
+    pub boothost: String,
+    /// The host's name on the appliance (what the claim resolved to).
+    pub host: String,
+    /// The boot clone's volume id — the claim reply's `volume.id`.
+    pub volume: String,
+}
+
+impl InstallTicket {
+    pub fn write(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("tmp");
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::other(format!("encode install ticket: {e}")))?;
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, path)
+    }
+
+    pub fn read(path: &std::path::Path) -> Option<InstallTicket> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+}
+
 /// Everything the successor needs to take over without being told.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Record {
@@ -93,6 +130,11 @@ pub struct Record {
     /// boots into a probe that rejects them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_boot: Option<String>,
+    /// This boot is an install the appliance asked for (#148): once the
+    /// flow-over and the local boot are done, the successor tells the
+    /// appliance, which sets the machine's intent back to `local`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<InstallTicket>,
 }
 
 impl Record {
@@ -160,6 +202,7 @@ mod tests {
             meta: None,
             flow_over: None,
             local_boot: None,
+            install: None,
             devices: vec![
                 Device { dev_id: 0, volume: "stormpump".into() },
                 Device { dev_id: 2, volume: "sbregistry".into() },
@@ -200,6 +243,7 @@ mod tests {
         let rec: Record = serde_json::from_slice(json).expect("reads without flow_over");
         assert_eq!(rec.flow_over, None);
         assert_eq!(rec.local_boot, None);
+        assert_eq!(rec.install, None);
         assert_eq!(rec.volumes_in_device_order(), vec!["stormpump"]);
     }
 
@@ -228,5 +272,23 @@ mod tests {
         // The fallback is the explicit --volume list, so absence has to be
         // reported as absence rather than as a failure.
         assert_eq!(Record::read(std::path::Path::new("/nonexistent/handover.json")), None);
+    }
+
+    #[test]
+    fn an_install_ticket_round_trips_on_its_own_and_in_the_record() {
+        let t = InstallTicket {
+            boothost: "http://forge:9090".into(),
+            host: "server1".into(),
+            volume: "8aa6b985-3f4d-4130-99cb-154b56dcb68b".into(),
+        };
+        let dir = std::env::temp_dir().join(format!("sb-ticket-{}", std::process::id()));
+        let path = dir.join("install.json");
+        t.write(&path).expect("writes");
+        assert_eq!(InstallTicket::read(&path), Some(t.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rec = a_record();
+        rec.install = Some(t);
+        let bytes = serde_json::to_vec(&rec).expect("encodes");
+        assert_eq!(serde_json::from_slice::<Record>(&bytes).expect("decodes"), rec);
     }
 }

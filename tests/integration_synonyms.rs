@@ -1287,3 +1287,107 @@ async fn a_default_claim_without_a_mac_is_refused() {
     assert_eq!(r["host"]["name"], "mac-0cc47a0000aa");
     server.abort();
 }
+
+// Boot intent (#148, stormbootx#11): what a machine's boot agent does before
+// it claims. Read open under the host's name or any alias (a MAC's 12 hex
+// digits for a machine that booted the default); set with the admin token;
+// `install` is one-shot, back to `local` when the node reports its install
+// done for the clone it was claimed under.
+
+async fn intent(client: &reqwest::Client, base: &str, name: &str) -> (u16, serde_json::Value) {
+    let r = client
+        .get(format!("{base}/api/v1/synonyms/boothost/{name}/intent"))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+async fn a_boot_intent_is_read_open_set_by_the_admin_and_install_is_one_shot() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    state.set_auth(stormblock::serve::api::AuthConfig {
+        api_token: Some("tok".into()),
+        admin_token: Some("adm".into()),
+    });
+
+    // A MAC nobody has seen: 404, which firmware reads as auto.
+    assert_eq!(intent(&client, &base, "ac1f6b8aa79c").await.0, 404);
+    let first = default_claim(&client, &base, "AC:1F:6B:8A:A7:9C").await;
+    assert_eq!(first["intent"], "auto", "the claim says what the intent is");
+
+    // Open, under the MAC as firmware spells it; never set is auto.
+    let (status, v) = intent(&client, &base, "ac1f6b8aa79c").await;
+    assert_eq!((status, v["intent"].as_str(), v["host"].as_str()), (200, Some("auto"), Some("mac-ac1f6b8aa79c")));
+
+    // Setting it: not without a token, not with the api token, with the admin's.
+    let put = |tok: Option<&'static str>, body: serde_json::Value| {
+        let mut r = client.put(format!("{base}/api/v1/synonyms/boothost/mac-ac1f6b8aa79c/intent")).json(&body);
+        if let Some(t) = tok {
+            r = r.bearer_auth(t);
+        }
+        r.send()
+    };
+    assert_eq!(put(None, serde_json::json!({"intent": "install"})).await.unwrap().status(), 401);
+    assert_eq!(put(Some("tok"), serde_json::json!({"intent": "install"})).await.unwrap().status(), 401);
+    assert_eq!(put(Some("adm"), serde_json::json!({"intent": "reinstall"})).await.unwrap().status(), 400);
+    let r = put(Some("adm"), serde_json::json!({"intent": "Install"})).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["intent"], "install");
+
+    // Renamed, the MAC still reaches it, and so does the new name.
+    let r = client
+        .post(format!("{base}/api/v1/boothost/mac-ac1f6b8aa79c/rename"))
+        .bearer_auth("tok")
+        .json(&serde_json::json!({"to": "server1"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(intent(&client, &base, "ac1f6b8aa79c").await.1["intent"], "install");
+    assert_eq!(intent(&client, &base, "server1").await.1["host"], "server1");
+
+    // Firmware claims, then the initramfs: both are told install, and the
+    // later clone is the install.
+    let fw = default_claim(&client, &base, "ac1f6b8aa79c").await;
+    let initramfs = boot_claim(&client, &base, "server1").await;
+    assert_eq!((fw["intent"].as_str(), initramfs["intent"].as_str()), (Some("install"), Some("install")));
+    let installed = |vol: &serde_json::Value| {
+        client
+            .post(format!("{base}/api/v1/synonyms/boothost/ac1f6b8aa79c/installed"))
+            .json(&serde_json::json!({"volume": vol}))
+            .send()
+    };
+    // A report for another clone is refused and changes nothing.
+    assert_eq!(installed(&fw["volume"]["id"]).await.unwrap().status(), 409);
+    assert_eq!(installed(&first["volume"]["id"]).await.unwrap().status(), 409);
+    assert_eq!(intent(&client, &base, "server1").await.1["intent"], "install");
+    // The right one, with no token: back to local.
+    let r = installed(&initramfs["volume"]["id"]).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((v["intent"].as_str(), v["reset"].as_bool()), (Some("local"), Some(true)));
+    assert_eq!(intent(&client, &base, "ac1f6b8aa79c").await.1["intent"], "local");
+    // Reported again (a restart): harmless.
+    let v: serde_json::Value = installed(&initramfs["volume"]["id"]).await.unwrap().json().await.unwrap();
+    assert_eq!((v["intent"].as_str(), v["reset"].as_bool()), (Some("local"), Some(false)));
+
+    // The host view shows it; other namespaces have no intent.
+    let h: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost/server1"))
+        .bearer_auth("tok")
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["intent"], "local");
+    assert_eq!(intent(&client, &base, "nobody").await.0, 404);
+    let r = client.get(format!("{base}/api/v1/synonyms/images/server1/intent")).bearer_auth("tok").send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    server.abort();
+}
