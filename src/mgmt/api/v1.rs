@@ -863,7 +863,11 @@ pub(crate) async fn ensure_nvme_namespace(
 ) -> Option<u32> {
     let target = state.nvmeof_target.read().await.as_ref().cloned()?;
 
-    if let Some(nsid) = state.v1.lock().await.nvme_nsids.get(volume_id).copied() {
+    // One lock from the check to the record: two attaches of one volume at
+    // once must not each add a namespace, and the ID is chosen and taken in
+    // one step (`add_namespace_next`) so two volumes never share one (#139).
+    let mut v1 = state.v1.lock().await;
+    if let Some(nsid) = v1.nvme_nsids.get(volume_id).copied() {
         return Some(nsid);
     }
 
@@ -873,10 +877,7 @@ pub(crate) async fn ensure_nvme_namespace(
         .await
         .get_volume(&EngineVolumeId(local_id?))?;
 
-    let nsid = target.next_free_nsid().await;
-    target.add_namespace_dynamic(nsid, device).await;
-
-    let mut v1 = state.v1.lock().await;
+    let nsid = target.add_namespace_next(device).await;
     v1.nvme_nsids.insert(volume_id.to_string(), nsid);
     v1.save();
 

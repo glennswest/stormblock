@@ -264,10 +264,9 @@ async fn create_export(
             };
             match state.nvmeof_target.read().await.as_ref() {
                 Some(target) => {
-                    // NSID 0 is reserved; namespaces start at 1.
-                    let used = target.list_namespaces().await;
-                    let id = (1u32..).find(|n| !used.contains(n)).unwrap_or(1);
-                    target.add_namespace_dynamic(id, device).await;
+                    // Chosen and taken in one step: two exports at once must
+                    // not share an NSID (#139).
+                    let id = target.add_namespace_next(device).await;
                     nsid = Some(id);
                     status = ExportStatus::Active;
                 }

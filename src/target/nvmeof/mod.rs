@@ -156,7 +156,24 @@ impl NvmeofTarget {
         let _ = self.ns_changed.send(nsid);
     }
 
-    /// Lowest unused namespace ID. NSID 0 is reserved by the spec.
+    /// Add a namespace at the lowest unused ID and answer the ID — chosen and
+    /// taken under one lock. Choosing with [`next_free_nsid`] and then adding
+    /// let two attaches at once pick the same ID; the second insert replaced
+    /// the first, and both volumes' attach URIs named one namespace: each read
+    /// the other's writes (found by the long test suite, #139).
+    pub async fn add_namespace_next(&self, device: Arc<dyn BlockDevice>) -> u32 {
+        let nsid = {
+            let mut ns = self.namespaces.write().await;
+            let nsid = (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1);
+            ns.insert(nsid, device);
+            nsid
+        };
+        self.notify_ns_changed(nsid);
+        nsid
+    }
+
+    /// Lowest unused namespace ID. NSID 0 is reserved by the spec. Only a
+    /// hint when anything else may be adding: use [`add_namespace_next`].
     pub async fn next_free_nsid(&self) -> u32 {
         let ns = self.namespaces.read().await;
         (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1)
@@ -949,6 +966,31 @@ mod tests {
 
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
+    }
+
+    /// Many attaches at once each get a namespace of their own (#139): the
+    /// ID is chosen and taken under one lock.
+    #[tokio::test]
+    async fn concurrent_adds_never_share_a_namespace() {
+        let target = Arc::new(NvmeofTarget::new(NvmeofConfig::default()));
+        let mut paths = Vec::new();
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..64 {
+            let (dev, path) = test_device(&format!("race{i}")).await;
+            paths.push(path);
+            let t = target.clone();
+            set.spawn(async move { t.add_namespace_next(dev).await });
+        }
+        let mut got = Vec::new();
+        while let Some(r) = set.join_next().await {
+            got.push(r.unwrap());
+        }
+        got.sort_unstable();
+        assert_eq!(got, (1..=64).collect::<Vec<u32>>(), "every add got its own NSID");
+        assert_eq!(target.namespace_count().await, 64);
+        for p in paths {
+            let _ = std::fs::remove_file(&p);
+        }
     }
 
     #[test]
