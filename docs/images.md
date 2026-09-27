@@ -416,6 +416,30 @@ selects B over A and starts the kernel with B's command line. That script found
 two bugs in the FAT writer that every test of ours had passed: a FAT one sector
 short of its cluster count, and every `..` pointing at the root.
 
+### A flow-over cut short (#171)
+
+The goldens move in the background, one extent per lock cycle, and the power can
+go at any point in that. The local records then name some extents on the old
+appliance clone's slab. The next boot claims a new clone, and until v19.2.2
+those extents were dropped as "not attached": the root came up with holes and
+the node could not boot.
+
+A clone restamps only the disk's GPT GUID, never the slabs inside it. So a
+fresh clone of the same image carries the same slabs, by id, with the same
+bytes. When the local records name a slab that is not on the machine,
+`boot-local` does the following:
+1. It claims a fresh clone from `STORMBLOCK_BOOTHOST`, which the initramfs
+   exports, as this machine's tag (SMBIOS serial or UUID; `STORMBLOCK_BOOT_TAG`
+   overrides it).
+2. It attaches the missing slab for its data only. The clone's records are the
+   image's and are never read.
+3. It restores onto that slab.
+4. It writes a handover record naming the clone and a flow-over into the local
+   slabs, so the successor finishes the move.
+
+Without an appliance it warns and drops the extents, as before.
+`tests/integration_flowover_resume.rs` covers both.
+
 ## 3. FAT16 or FAT32, and why both
 
 Firmware needs FAT — that is what the ESP is for — so the builder writes it

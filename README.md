@@ -30,7 +30,7 @@ drives / files / nvme-tcp:// / iscsi://          (the drive layer)
 
 | where | how it is started | what it does there |
 |---|---|---|
-| **a stormcos node** | the stormpump boot unit `00-stormblock` runs `stormblock adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the ublk devices the initramfs engine created (root and the mounted volumes) without them disappearing, restores its state from the `stormblock-state` volume, serves the API and the per-export portals (`/serve/v1`). No shared :3260/:4420 target, no discovery beacon, no cluster in this mode. |
+| **a stormcos node** | the stormpump boot unit `00-stormblock` runs `stormblock adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the ublk devices the initramfs engine created (root and the mounted volumes) without them disappearing: it stands that engine down, waits for it to exit, and only then reads the slabs, while ublk recovery holds the I/O in between (#171). It restores its state from the `stormblock-state` volume, serves the API and the per-export portals (`/serve/v1`). No shared :3260/:4420 target, no discovery beacon, no cluster in this mode. |
 | **the stormcos initramfs** | `/init` (built by `scripts/build-stormblock-initramfs.sh`) runs `boot-claim` then `boot-local`, or `boot-local` on a local slab | claims the machine's image from an appliance (`boothost/<tag>`), attaches it, exports root as `/dev/ublkb0`, and flows it over onto a local disk in the background (`--local-disk`). Boot hooks decide local vs appliance (`docs/boot-hooks.md`). |
 | **an appliance (forge)** | `stormblock --config …` (the daemon) | serves goldens and host clones over NVMe-oF/TCP, answers boot claims, builds images and pallets. |
 | **anywhere else** | the daemon, or a subcommand | a standalone storage node; `image`, `pallet`, `slab`, `golden`, `attach`, `must-gather` work offline on files and drives. |
@@ -101,7 +101,8 @@ image, the one request that needs no token (`docs/auth.md`).
 
 **Serving.** ublk devices for the local node; a shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
-(CHAP, MC/S, ALUA, thousands of LUNs) and per-export portals. `/serve/v1`
+(CHAP, MC/S, ALUA, thousands of LUNs) and per-export portals (one port per
+exported volume, 128 by default, #188). `/serve/v1`
 (the serving layer: exports, readiness, tar in/out, raw import, trim) is
 mounted by the engine whenever it has a data directory.
 
@@ -277,6 +278,9 @@ only in the file is **not applied**.
 | `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator` |
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds the data half | policy decides |
+| `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; the missing extents are dropped, with a warning |
+| `STORMBLOCK_BOOT_TAG` | this machine's tag for that claim | SMBIOS serial, else SMBIOS UUID |
+| `STORMBLOCK_RESUME_SOURCE` | a device path or `nvme-tcp://` URI used instead of claiming (tests, recovery by hand) | claim through `STORMBLOCK_BOOTHOST` |
 
 ### The config file
 
@@ -1040,6 +1044,15 @@ it, so an attached image (priority 15) still wins. See
 [docs/images.md §2b](docs/images.md); `ci-local-boot-verify.sh` boots the
 result under OVMF.
 
+**A flow-over cut short is finished, not lost.** If the power goes while
+goldens are still moving off the appliance, the local records name extents on
+the old clone's slab. The next boot's `boot-local` claims a fresh clone of the
+same image, which carries the same slabs with the same bytes, maps the
+unmoved extents onto it, and hands the rest of the move to the successor. It
+does this only when `STORMBLOCK_BOOTHOST` names an appliance. Without one it
+warns and drops those extents. See `docs/durability.md` for what survives a
+power cut and why.
+
 ### Booting: who decides where
 
 The initramfs decides where a node boots from, and `docs/boot-hooks.md`
@@ -1062,7 +1075,8 @@ and DEL_DEV leaves them there, and **a thread stuck in the kernel cannot be
 reaped** — systemd then finds a process it cannot kill and every subsequent
 restart ends in `failed` mode. So a unit's `TimeoutStopSec` must stay above the
 engine's own budget (~13 s), or SIGKILL lands in the middle of a teardown and
-makes exactly that.
+makes exactly that. `stormblock-target.service` has 30; `stormblock-ublk.service`
+still has 10 (#187).
 
 ## Not built, or not wired
 
@@ -1082,6 +1096,12 @@ What earlier docs described and the code does not do, each with its issue:
 - **Scrub** of mirror legs and parity on a schedule (#160), **erasure coding
   beyond P+Q** (#159), metadata at 40 PB a node (#155–#158), drive affinity,
   overcommit and StorageClass policy for claims (#151–#154).
+- **Serving at registry scale**: each per-volume subsystem takes its own
+  portal port, so `/serve/v1` serves at most 128 volumes per node by default
+  (#188). NSIDs on the shared subsystem are reused after a detach (#96), and
+  two subsystem schemes are live at once (#98).
+- **Known wrong reads**: a RAID-1 array reads from a member that is still
+  rebuilding (#175).
 - **"No C dependencies"** was never true: TLS brings in `aws-lc-sys` and
   `ring`.
 
@@ -1090,6 +1110,7 @@ What earlier docs described and the code does not do, each with its issue:
 | | |
 |---|---|
 | `docs/auth.md` | who may call a node's API; the boot claim; host goldens |
+| `docs/durability.md` | what survives a power cut: slot entries after their data, frees made durable before reuse, recovery from stale records, the handover order, a flow-over cut short |
 | `docs/redundancy.md` | per-volume redundancy, failure domains, health, resync, automatic rebuild, drain, whole-disk goldens and import |
 | `docs/multi-drive.md` | pools, placement, a drive's life, dedicated arrays, what a claim should ask for (part design) |
 | `docs/pallets.md` | the pallet format and lifecycle (§2.6–§2.8 are design) |
@@ -1107,17 +1128,18 @@ What earlier docs described and the code does not do, each with its issue:
 
 ## Source layout
 
-92k lines of Rust in `src/`, 13.7k in `tests/`, about 870 tests.
+93k lines of Rust in `src/`, 14.5k in `tests/`, about 880 tests, plus the
+test container's crate (`test/`, 1.1k).
 
 ```
 src/mgmt/       19.7k  management API (axum): every /api/v1 surface, /v1, kube resources,
                        auth, config, metrics, discovery, ublk exports, web UI (feature ui)
-src/volume/     17.7k  thin volumes, GEM, redundancy (mirror/parity legs), snapshots and
+src/volume/     17.9k  thin volumes, GEM, redundancy (mirror/parity legs), snapshots and
                        clones, metadata, synonyms, chunks/versions (StormFS), GC, pressure,
                        relocation, composition
-src/drive/      10.4k  BlockDevice; O_DIRECT block devices (io_uring or blocking pool),
+src/drive/      10.9k  BlockDevice; O_DIRECT block devices (io_uring or blocking pool),
                        nvme-tcp:// and iscsi:// initiators, files; slabs and the registry;
-                       ublk; handover; SMART; identity
+                       ublk; handover; SMART; identity; CrashDevice (power-cut tests)
 src/image/       7.5k  image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import decoders,
                        node layout, local boot
 src/target/      6.7k  NVMe-oF/TCP and iSCSI targets, per-core reactor
@@ -1127,9 +1149,10 @@ src/pallet/      3.9k  pallet format writer, GPT, store, manager, selection
 src/placement/   2.9k  failure domains, placement, drain moves, rebalance
 src/raid/        2.7k  drive-level RAID 1/5/6/10, parity
 src/cluster/     2.6k  openraft membership, heartbeat, replication (feature cluster)
-src/*.rs         8.8k  main.rs (CLI, daemon, subcommands), rebuild, drain, state, boot,
+src/*.rs         9.0k  main.rs (CLI, daemon, subcommands), rebuild, drain, state, boot,
                        boot_iscsi, migrate, stormfs registration, http client
 crates/pallet-format   the no_std pallet reader stormuefi links
+test/                  stormblock-test: the short/medium/long test container
 ```
 
 ## Storm components it talks to

@@ -13,7 +13,7 @@ style: |
 ---
 
 <!-- Render: npx @marp-team/marp-cli@4 docs/presentation.md -o out/presentation.html
-     (add --pdf for PDF). Written 2026-09-26 for v19.1.2 (#132), after the docs
+     (add --pdf for PDF). Written 2026-09-26 for v19.1.2 (#132), refreshed for v19.3.0; after the docs
      were rewritten from the code (#131). Every claim here is checkable against
      the code; README.md gives the file for each. -->
 
@@ -25,7 +25,7 @@ Drives in; thin, copy-on-write, per-volume-redundant volumes out — as local
 block devices (ublk), over NVMe/TCP and over iSCSI. It also builds and boots
 the disks stormcos nodes run from.
 
-v19.1.2 · `glennswest/stormblock` · Rust, one static binary
+v19.3.0 · `glennswest/stormblock` · Rust, one static binary
 
 ---
 
@@ -150,7 +150,8 @@ only the slot it touches.
   from `stormblock-state`.
 - **Update**: a new golden in a new release; the node re-claims or re-lays its
   system half, and the data half — identity and state — is kept.
-- **Build**: `sc-build` on dev, never root; ~870 tests.
+- **Build**: `sc-build` on dev, never root; ~880 tests, plus a test
+  container (`test/`: short, medium, long) for the test machines.
 
 ---
 
@@ -164,6 +165,8 @@ only the slot it touches.
 | a leg exported over `nvme_tcp` is a working namespace | `nvme_tcp_is_given_even_where_ublk_would_be` |
 | a composed disk boots in OVMF | `ci-compose-disk-verify.sh` |
 | the API is closed but the boot claim is open | `ci-auth-verify.sh` |
+| fsync'd data survives a power cut at any point | `tests/integration_power_cut.rs` (300 random cuts on a simulated write cache) |
+| the running engine does its job, unprivileged, on any machine | `test/`: short, medium, and long waves (~150,000 volume cycles clean) |
 
 ---
 
@@ -183,8 +186,12 @@ only the slot it touches.
 
 ## Status and the issues that matter
 
-**v19.1.2**, full suite green on dev apart from two image tests (#120).
+**v19.3.0**, full suite green on dev apart from two image tests (#120) and
+two timing tests on a loaded box (#134, #173).
 
+- **Power cuts (#171, P0)**: fsync'd writes were lost on a hard power-off.
+  Fixed in v19.1.4–v19.2.2: slot entries after their data, the handover
+  order, a flow-over cut short. The on-metal check is still running.
 - **The golden is held.** Since v17 the API is closed by default, and the
   engine's clients have to present a token first (#107; stormcentral#30,
   stormcos#89, and one issue per client).

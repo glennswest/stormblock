@@ -3,6 +3,27 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27 (docs refresh)
+- **docs:** refreshed from the code for everything since the #131 rewrite
+  (v19.1.3 → v19.3.0).
+  - README:
+    - `adopt-ublk` stands the initramfs engine down and waits for it to exit
+      before reading the slabs;
+    - the new `STORMBLOCK_BOOTHOST`, `STORMBLOCK_BOOT_TAG` and
+      `STORMBLOCK_RESUME_SOURCE`;
+    - a flow-over cut short resuming from a fresh clone;
+    - the per-export portal cap (128, #188);
+    - the ublk unit's short stop timeout (#187);
+    - known gaps (#96, #98, #175);
+    - `docs/durability.md` in the docs table;
+    - current sizes (93k/14.5k lines, ~880 tests, the `test/` crate).
+  - `docs/images.md` §2b: a flow-over cut short.
+  - `docs/presentation.md`: v19.3.0, #171's status, the power-cut and test
+    container proofs.
+  - CLAUDE.md: the known-red tests (#134, #173), how to run the test
+    container, the new modules (`crashdev`, `handover::take_over`,
+    `open_slabs_resuming`), current state.
+
 ## [v19.3.0] — 2026-09-27
 
 ### 2026-09-27 (test container)

@@ -27,8 +27,15 @@ commit  →  push  →  sc-build  →  read the result
 
 Tests that create files need `mkdir -p tmp && export TMPDIR=$PWD/tmp` in the
 scratch tree: dev's `/tmp/stormblock-*` directories are root-owned from old
-builds. Known red: `integration_image` (#120), and `mgmt_luns_at_scale` (#134)
-on a busy box.
+builds (stormcentral#61). Known red: `integration_image` (#120), and on a busy
+box `mgmt_luns_at_scale` (#134) and
+`integration_fstemplates::a_create_whose_caller_gives_up_still_finishes` (#173).
+
+The test container (#139): `test/build.sh` builds `stormblock` and
+`stormblock-test` (musl) and the `FROM scratch` image;
+`sc-build 'sh test/build.sh && podman run --rm --user 65532 --tmpfs /results:rw,mode=1777 stormblock-test short'`
+runs a suite the way the Job does (`medium`, `long` likewise; `STORM_WAVE_MAX`
+caps long's waves).
 
 ## Build
 ```bash
@@ -82,7 +89,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 (stormblock-csi, `/v1`) is for third-party drivers only.
 
 ## Architecture (bottom-up)
-- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slab_registry.rs`, `discover.rs`, `ublk.rs`, `handover.rs`, `identity.rs`, SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
+- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
 - `src/raid/` — drive-level RAID 1/5/6/10 for whole-device legs; parity, RAID 1 add/remove with resync. Journal on disk, scrub, rebuild and reassembly are not wired (#168)
 - `src/volume/` — thin volumes (`thin.rs`), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V8), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
 - `src/fs/` — templates (`template.rs`), ext4 (`ext4.rs`) and XFS (`xfs.rs`) seams, disk identity (`disk.rs`), files, image survey (`survey.rs`)
@@ -94,12 +101,15 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/mgmt/` — the management API (`api/`: every `/api/v1` surface, `v1.rs`, `kube.rs`, `rebuilds.rs`, …), auth, config, metrics, discovery, ublk exports, `ui/` (feature `ui`)
 - `src/cluster/` — openraft membership, heartbeat, replication (feature `cluster`)
 - `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (formats every run, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
-- `src/main.rs` — CLI, the daemon, and every subcommand
+- `src/main.rs` — CLI, the daemon, and every subcommand (`open_slabs_resuming`: a flow-over cut short claims a fresh clone, #171)
+- `test/` — `stormblock-test`, the test container: short/medium/long suites that run the engine of the same commit in the pod (#139)
 
 ## Current State
-**v19.3.0** (2026-09-27). 92k lines in `src/`, 13.7k in `tests/`, ~870 tests;
-the full suite passes on dev apart from #120 (and #134 when the box is busy).
-The README is the reference for what the code does, rewritten from the code in
+**v19.3.0** (2026-09-27). 93k lines in `src/`, 14.5k in `tests/`, ~880
+tests, plus the test container crate (`test/`). The full suite passes on dev
+apart from #120 (and #134/#173 when the box is busy). #171 (power-cut
+durability) is fixed on dev through v19.2.2 and waits on the owner's on-metal
+crash5 run. The README is the reference for what the code does, rewritten from the code in
 #131; the docs in `docs/` were checked against it and the superseded ones moved
 to `docs/history/`. What earlier docs promised and the code does not do is
 listed in the README's "Not built, or not wired" with its issues (#159–#170).
