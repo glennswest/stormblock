@@ -126,6 +126,35 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### boothost names are DNS names; serials and MACs are aliases (2026-09-27, #199)
+
+Owner: a machine is known by its DNS name (`stormblock1` is the Dell, today
+`boothost/C2NR0Q2`); stormbootx will claim `boothost/<DNS name>`. A boothost
+record is keyed by name and carries aliases (SMBIOS serial, MACs); a claim by
+any alias resolves to the same record, so agents claiming by serial keep
+working. A rename keeps the boot history and the clones (#127). Two hosts may
+never share an alias — refused, naming both; nothing becomes an alias
+automatically (MicroCloud nodes share a chassis serial).
+
+Design: host records live in the synonym store (`synonyms.json`, `hosts`,
+`serde(default)`), so a rename and the synonyms it moves persist together.
+- [ ] store: `Host {name, aliases, former_names}`; `host_of(key)` (name or
+      alias, ASCII case-insensitive; MACs normalised to `aa:bb:…`);
+      `set_aliases` and `rename_host` refuse conflicts naming both hosts;
+      `create` in `boothost` refuses a name that is another host's alias
+- [ ] claim, resolve, re-point and rollback in `boothost`/`hostgolden` go
+      through `host_of`; the claim keys everything by the canonical name and
+      reports `host {name, claimed_as}`; clone collection and host-golden
+      collection also match the host's former names
+- [ ] rename: moves `boothost/<old>` and `hostgolden/<old>` (version and
+      history kept), old name kept as an alias unless `keep_alias: false`
+- [ ] `/api/v1/boothost`: `GET` (every host: name, aliases, former names,
+      assignment, host golden), `GET /{name|alias}`, `PUT /{name}
+      {aliases}`, `POST /{name}/rename {to, keep_alias?}` — token required
+- [ ] tests (store units; HTTP: claim by alias, rename keeps history and
+      collects the old-named clone, shared alias refused naming both),
+      docs (auth.md host goldens, README), CHANGELOG; close #199
+
 ### Docs checked against the code (2026-09-27) — DONE
 
 README, `docs/` and CLAUDE.md checked against the code since 2026-09-18 by
