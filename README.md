@@ -97,7 +97,8 @@ members that stormuefi selects at boot (`docs/pallets.md`, `docs/images.md`).
 `compose` builds a bootable disk as a map over shared goldens with nothing
 written (`docs/composed-disks.md`). **Synonyms** name volumes and re-point the
 name at a new version; `boothost/<tag>` is how a machine claims its own boot
-image, the one request that needs no token (`docs/auth.md`).
+image, the one write that needs no token (the health and readiness probes are
+the only other open requests; `docs/auth.md`).
 
 **Serving.** ublk devices for the local node; a shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
@@ -296,7 +297,7 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 | `data_dir` | — | durable state (see *Files* below); also the default serve directory and token-file location |
 | `api_token` | — | bearer token for every request but the probes and the boot claim |
 | `admin_token` | — | if set, destructive verbs need this one instead |
-| `token_file` | `<data_dir>/api_token`, else `/etc/stormblock/api_token` | where a minted token is kept (mode 0600) |
+| `token_file` | `<data_dir>/api_token`, else `/etc/stormblock/api_token` when `/etc/stormblock` exists | where a minted token is kept (mode 0600) |
 | `require_auth` | unset = required | `false` opens the API deliberately (and says so every boot) |
 | `node_name` | env, then hostname | this node's name in `/v1` |
 | `topology` | `{}` | rungs above the node: `[management.topology] site = …, rack = …` |
@@ -382,6 +383,8 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   are refreshed at scrape time: `stormblock_slab_{capacity,allocated,free}_bytes{slab,tier}`
   and their `_total`s, `stormblock_drive_{capacity_bytes,healthy,media_errors,temperature_celsius,available_spare_pct,power_on_hours}{drive,serial}`;
   plus `stormblock_api_requests_total{endpoint,method}`, `stormblock_volumes_total`,
+  `stormblock_{drives,arrays,slabs,exports,luns}_total`, `stormblock_capacity_bytes`,
+  `stormblock_fstemplate_claims_total`,
   `stormblock_pool_*`, `stormblock_iscsi_sessions_*`, `stormblock_cluster_*`,
   `stormblock_replication_*`, and the serving layer's `stormblockmk_*` gauges.
 
@@ -398,15 +401,17 @@ non-dry-run GC, `trim?apply`, `fsck?repair`) need it.
 
 | surface | for |
 |---|---|
-| `/api/v1/drives`, `/arrays`, `/slabs`, `/rebuilds` | drives (open, label, drain, health), RAID arrays, slabs and the pool, GC, rebuild queue |
-| `/api/v1/volumes` | volumes: create, clone, seal, access, redundancy, tier, restripe, attach, fsck, files, cidata, import, compose, placement |
-| `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks, offline moves, names and boot claims, published releases |
+| `/api/v1/drives`, `/arrays`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID arrays, slabs and the pool (`durability`, `{id}/slots`), GC, rebuild queue |
+| `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
+| `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks (`{id}/clone`, `{id}/claim`), offline moves, names and boot claims, published releases (`index.html`, `manifest`, `notes`, `changes`) |
 | `/api/v1/pallets`, `/images` | pallets on drives, image build/convert/inspect |
-| `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery, cluster |
+| `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery (`/discovery/cluster`, `…/join`, `…/leave`), cluster (`nodes`, `nodes/{id}`, `status`, `heartbeat`) |
+| `/raft/{vote,append,snapshot}` | openraft RPCs between cluster peers (feature `cluster`) |
 | `/api/v1/stormfs` | the StormFS data path (`docs/stormfs-api.md`) |
-| `/v1` | the CSI / orchestrator contract (`contract/`) |
-| `/serve/v1` (and `/mk/v1`) | the serving layer: exports, readiness, tar, raw, trim |
-| `/apis/storage.storm.io/v1` | Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` |
+| `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement`, `prestage`, `fence`, `promote`, `dual-attach` |
+| `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
+| `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` |
+| `/ui`, `/` | the old web UI, only with `--features ui` (outside the token check, #166) |
 
 ## Files
 
@@ -437,8 +442,17 @@ is staged with `stormcentral component stage`, which runs stormcos's
 
 The same build puts the binary in the initramfs (`/usr/sbin/stormblock`) and
 the fedora golden, and every service golden is written by `stormblock golden`.
-The container images (`Dockerfile`, `Dockerfile.aarch64`) and
-`systemd/stormblock-target.service` are for running it outside stormcos.
+For running it outside stormcos: `systemd/stormblock-target.service` (the
+daemon as a storage target) and `systemd/95-stormblock-iouring.conf`.
+`systemd/stormblock-ublk.service` runs `boot-iscsi --ublk` as an early-boot
+unit, and `boot-iscsi` formats its target on every run, so it is not a boot
+path (#162). The container images (`Dockerfile`, `Dockerfile.aarch64`) are
+stale: rust 1.75, no `--locked`, and not the RouterOS profile (#196).
+`Containerfile.iscsi-test` is an old external-iSCSI test image.
+`deploy/terragrunt/` makes test VMs on Proxmox and `deploy/m0/` is the M0
+baseline setup; `scripts/build-stormblock-initramfs.sh` builds the initramfs
+and `scripts/build-stormbase-iso.sh` an ISO. The test container is `test/`
+("The test container" above).
 
 ## Using it
 

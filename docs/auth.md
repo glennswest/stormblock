@@ -31,7 +31,7 @@ because of what it cannot do (§ below). A node that must be open says
 |---|---|
 | `management.api_token` | The token, named in the config. Accepted for everything. |
 | `management.admin_token` | When set, destructive verbs need **this** one and `api_token` is not enough. |
-| `management.token_file` | Where a minted token is kept. Defaults to `<data_dir>/api_token`, then `/etc/stormblock/api_token`. |
+| `management.token_file` | Where a minted token is kept. Defaults to `<data_dir>/api_token`, then `/etc/stormblock/api_token` if `/etc/stormblock` is a directory; with neither, the token is kept in memory only. |
 | `management.require_auth` | Unset or `true` — required, minting one if there is none. `false` — deliberately open. Unset with nowhere to keep a minted token: closed anyway, with a token held in memory only, and a warning; `true` in that case fails startup. |
 
 `$STORMBLOCK_API_TOKEN` and `$STORMBLOCK_ADMIN_TOKEN` are read when the config
