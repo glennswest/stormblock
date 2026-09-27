@@ -403,7 +403,7 @@ non-dry-run GC, `trim?apply`, `fsck?repair`) need it.
 |---|---|
 | `/api/v1/drives`, `/arrays`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID arrays, slabs and the pool (`durability`, `{id}/slots`), GC, rebuild queue |
 | `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
-| `/api/v1/boothost` | boot hosts by DNS name: list, find by name or alias, `PUT {aliases}`, `POST …/rename` (#199) |
+| `/api/v1/boothost` | boot hosts by DNS name: list (`?unnamed=1`: booted the default, not named yet, #200), find by name or alias, `PUT {aliases}`, `POST …/rename` (#199) |
 | `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks (`{id}/clone`, `{id}/claim`), offline moves, names and boot claims, published releases (`index.html`, `manifest`, `notes`, `changes`) |
 | `/api/v1/pallets`, `/images` | pallets on drives, image build/convert/inspect |
 | `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery (`/discovery/cluster`, `…/join`, `…/leave`), cluster (`nodes`, `nodes/{id}`, `status`, `heartbeat`) |
@@ -650,6 +650,25 @@ curl -X POST http://forge:9090/api/v1/synonyms/boothost/stormblock1/rollback
 # and clones come with it, and the serial stays an alias.
 curl -X POST http://forge:9090/api/v1/boothost/C2NR0Q2/rename -d '{"to":"stormblock1"}'
 ```
+
+**Universal boot (#200): one ISO, no tag.** A machine nobody has named claims
+`boothost/default` with its first NIC's MAC, and gets a copy-on-write clone of
+the default release of its own — never a byte copy, never another machine's:
+
+```bash
+curl -X POST 'http://forge:9090/api/v1/synonyms/boothost/default/claim?mac=0c:c4:7a:00:00:01'
+#   → "host": {"name": "mac-0cc47a000001", "provisional": true, "new": true,
+#              "mac": "0c:c4:7a:00:00:01", "aliases": ["0c:c4:7a:00:00:01"]}
+#   → boothost/mac-0cc47a000001 pinned to the default, hostgolden/mac-… its own
+curl 'http://forge:9090/api/v1/boothost?unnamed=1'        # machines waiting for a name
+curl -X POST http://forge:9090/api/v1/boothost/mac-0cc47a000001/rename -d '{"to":"server1"}'
+```
+
+The same MAC again is the same machine and the same golden; once named, the MAC
+(and `mac-<hex>`) are aliases, so a claim of `boothost/server1` or of
+`boothost/default` with that MAC boots the same golden. SMBIOS serials are not
+used: seven MicroCloud blades share one. A default claim with no MAC, or with
+something that is not a unicast MAC, is a 400 and makes nothing.
 
 `GET /api/v1/boothost` lists every host with its aliases, former names,
 assignment and golden; `GET /api/v1/boothost/{name|alias}` finds one. Two hosts

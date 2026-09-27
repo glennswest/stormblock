@@ -116,6 +116,14 @@ it safe by what it **cannot** do rather than by who calls it:
 2. **A tag seen for the first time** takes whatever `boothost/default` names,
    and is pinned to it: `boothost/<tag>` is created then, so moving the default
    later does not move a machine that already has an image (stormbootx#15).
+   **Universal boot (#200):** a machine with no name claims `boothost/default`
+   itself and carries its first NIC's MAC (`?mac=` or `{"mac": …}` — the only
+   thing a boot claim reads). The MAC is the host it is an alias of, or else
+   the provisional host `mac-<12 hex>`, made on its first claim with the MAC
+   as its alias; from there it is an ordinary tag, with its own golden. A
+   claim of `boothost/default` without a MAC is a 400: tag `default` would be
+   one boot clone for every machine, each claim releasing the clone the last
+   machine is running on. Naming it is the #199 rename; the golden is kept.
 3. **Every boot is a fresh clone** of the host's golden (`boothost-<tag>`), and
    **every earlier clone of that tag is released** (#127) — each one that is
    not inside the grace protecting the firmware → initramfs double claim (#97,
@@ -124,7 +132,7 @@ it safe by what it **cannot** do rather than by who calls it:
    holds at most this boot's clones; the claim response lists what it
    `released` and what a guard `kept`. Nothing written to the image survives a
    reboot; a machine's state lives in its data volumes.
-4. **The claim takes no options.** Whatever the body says — a name to bind, a
+4. **The claim takes no options** (apart from `mac` on a default claim). Whatever the body says — a name to bind, a
    namespace, a size, `unsealed_ok` — is ignored in the `boothost` namespace.
    It can only hand tag X a fresh clone of X's own golden, and it refuses an
    assignment that is not sealed.

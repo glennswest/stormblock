@@ -3,6 +3,23 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27 (#200)
+- **feat:** universal boot. A claim of `boothost/default` carries the machine's
+  first NIC MAC (`?mac=` or body `{"mac": …}`) and gets a copy-on-write clone
+  of the default release for that machine alone: the MAC resolves to the host
+  it is an alias of, or to the provisional host `mac-<12 hex>` (made on the
+  first claim, MAC as its alias), which is pinned to the default and gets its
+  own sealed `hostgolden/mac-<hex>`. Same MAC, same golden; naming is the #199
+  rename, and the golden is kept. Response `host` gains `provisional`, `mac`,
+  `new`.
+- **fix:** a claim of `boothost/default` without a MAC (or with one that is
+  not a unicast MAC) is a 400. It used to be tag `default`: one boot clone
+  for every machine, each claim releasing the clone the previous machine was
+  running on.
+- **feat:** `GET /api/v1/boothost?unnamed=1` lists the machines that booted
+  the default and are still called `mac-<hex>`; every host reports
+  `provisional`.
+
 ### 2026-09-27 (#199)
 - **feat:** boot hosts are known by their DNS name, with their SMBIOS serial
   and MACs as aliases. A claim of `boothost/<alias>` is a claim of the host it
