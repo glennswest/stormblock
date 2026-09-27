@@ -153,7 +153,7 @@ boot clone per boot per #107). Naming = the #199 rename; the golden is kept.
       tests on dev at b39b9ac: lib 12/12, synonyms 23/23, auth 5/5
 - [x] full suite at b39b9ac on dev: 865 passed, 5 failed = #120 ×2, #134,
       #173 and the qcow2 import deadline (same class, noted on #173); release
-      build passed. Released v19.4.0; close #200/#199;
+      build passed. Released v19.4.0 (6af6ad3); #200 and #199 closed;
       tell the owner the version (they build the golden, test server1-4).
       Owner confirmed (2026-09-27): the per-machine golden is what stays with
       the machine through renames; each boot is a fresh CoW clone of it
