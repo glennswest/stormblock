@@ -59,6 +59,11 @@ background, after root is up. `/init` picks that drive today from
 | `off` | nothing |
 | `force` | a drive even when it is one of ours, destroying the identity on it |
 
+An install the appliance asked for (the host's boot intent is `install`, #148;
+`boot-claim` leaves `/run/stormblock/install.json`) makes the policy `force`,
+whatever the cmdline named, except `off`, which still means no. See
+`docs/auth.md` "Boot intent".
+
 **The default is to take one, because this image is an installer.** It was
 `off`, which made the common case — one drive, netbooted to be installed — do
 nothing and keep every write on the appliance until somebody knew to add a
