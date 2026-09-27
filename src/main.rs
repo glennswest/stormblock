@@ -5185,7 +5185,7 @@ async fn report_installed(ticket: stormblock::drive::handover::InstallTicket) {
             }
             // Refused — not the clone the install is for, or no such host.
             // Asking again will not change the answer.
-            Ok(resp) if resp.status().is_client_error() => {
+            Ok(resp) if (400..500).contains(&resp.status().as_u16()) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 println!("Install: {url} refused the report ({status}: {body})");
