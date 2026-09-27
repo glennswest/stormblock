@@ -105,7 +105,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `test/` — `stormblock-test`, the test container: short/medium/long suites that run the engine of the same commit in the pod (#139)
 
 ## Current State
-**v19.3.0** (2026-09-27). 93k lines in `src/`, 14.5k in `tests/`, ~880
+**v19.4.0** (2026-09-27; universal boot #200, boothost names #199). 93k lines in `src/`, 14.5k in `tests/`, ~880
 tests, plus the test container crate (`test/`). The full suite passes on dev
 apart from #120 (and #134/#173 when the box is busy). #171 (power-cut
 durability) is closed: the on-metal acceptance passed on 2026-09-27 (C2NR0Q2,
@@ -126,7 +126,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Universal boot: a default claim carries a MAC (2026-09-27, #200, P0)
+### Universal boot: a default claim carries a MAC (2026-09-27, #200, P0) — DONE (v19.4.0)
 
 Owner: one ISO for every machine; "I don't want copies, I want cows". Today a
 claim of `boothost/default` itself is tag `default`: one `hostgolden/default`
@@ -151,12 +151,14 @@ boot clone per boot per #107). Naming = the #199 rename; the golden is kept.
       the same golden; no MAC → 400; unnamed listing
 - [x] docs (auth.md, README), CHANGELOG (fab5769, b39b9ac); targeted
       tests on dev at b39b9ac: lib 12/12, synonyms 23/23, auth 5/5
-- [ ] full suite + release build on dev; release v19.4.0; close #200/#199;
+- [x] full suite at b39b9ac on dev: 865 passed, 5 failed = #120 ×2, #134,
+      #173 and the qcow2 import deadline (same class, noted on #173); release
+      build passed. Released v19.4.0; close #200/#199;
       tell the owner the version (they build the golden, test server1-4).
       Owner confirmed (2026-09-27): the per-machine golden is what stays with
       the machine through renames; each boot is a fresh CoW clone of it
 
-### boothost names are DNS names; serials and MACs are aliases (2026-09-27, #199)
+### boothost names are DNS names; serials and MACs are aliases (2026-09-27, #199) — DONE (v19.4.0)
 
 Owner: a machine is known by its DNS name (`stormblock1` is the Dell, today
 `boothost/C2NR0Q2`); stormbootx will claim `boothost/<DNS name>`. A boothost

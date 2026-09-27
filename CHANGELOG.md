@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v19.4.0] — 2026-09-27
+
 ### 2026-09-27 (#200)
 - **feat:** universal boot. A claim of `boothost/default` carries the machine's
   first NIC MAC (`?mac=` or body `{"mac": …}`) and gets a copy-on-write clone
