@@ -3,6 +3,34 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27 (docs checked against the code)
+- **docs:** README, `docs/` and CLAUDE.md checked against the code for
+  everything since 2026-09-18 (config, CLI, env, routes, auth, ports,
+  metrics, shipping, design docs).
+  - README: `pallet` has 22 actions; `golden --whiteouts/--fsck` are on by
+    default and take a value; the host NQN on a flow-over resume; the route
+    table lists every mounted surface (volumes, `/v1`, `/serve/v1`,
+    discovery, cluster, `/raft`, `/apis` discovery, `/ui`), and placement is a
+    field, not a route; the probes are open besides the boot claim; the token
+    file falls back to `/etc/stormblock` only if that directory exists; the
+    metrics list; what ships outside stormcos (`systemd/`, `deploy/`,
+    `scripts/`, the stale Dockerfiles).
+  - `docs/durability.md`: rules 8 (handover order) and 9 (flow-over resume)
+    back in the list, with their tests; the on-metal result (#171).
+  - `docs/multi-drive.md`: drive identity is #136 (not #140).
+  - `docs/metadata-scale.md`: the pending set and the per-persist slab sync
+    since #171.
+  - `docs/images.md`: `STORMBLOCK_RESUME_SOURCE`. `docs/composed-disks.md`:
+    the four compose routes. `docs/layering.md` and a comment in
+    `src/fs/template.rs`: no clone is parked in advance (#137).
+    `docs/presentation.md`: the on-metal result; the golden-release
+    decision (#194). `docs/auth.md`: token-file fallback.
+  - `docs/pallets.md`: the container design is tracked by #59 (closes #178).
+  - CLAUDE.md: #171 closed on metal; #172 is the flow-over check; #194.
+- **chore:** `tmp/` ignored; a committed `.terragrunt-cache` untracked.
+- Filed: #196 (stale Dockerfiles), #197 (`STORMBLOCKMK_*` names in messages
+  nothing reads; `stormblock_allocated_bytes` never set).
+
 ### 2026-09-27 (docs refresh)
 - **docs:** refreshed from the code for everything since the #131 rewrite
   (v19.1.3 → v19.3.0).

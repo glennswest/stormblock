@@ -126,6 +126,13 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Docs checked against the code (2026-09-27) — DONE
+
+README, `docs/` and CLAUDE.md checked against the code since 2026-09-18 by
+three read-only surveys (config/CLI/env; routes/auth/ports/metrics/shipping;
+design docs), then corrected by hand. Code the docs describe and that is
+wrong became #196 (Dockerfiles) and #197 (dead env names, unset metric).
+
 ### Test containers: short, medium, long (2026-09-26, #139, P1) — DONE (v19.3.0)
 
 Per stormcentral `docs/test-standard.md`: `test/Containerfile` (context =
