@@ -13,3 +13,6 @@ target
 
 # test/build.sh stages the image context here
 /test/.stage/
+
+# Scratch (sessions keep issue dumps and notes here)
+tmp/

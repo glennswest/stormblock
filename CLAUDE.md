@@ -108,13 +108,15 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 **v19.3.0** (2026-09-27). 93k lines in `src/`, 14.5k in `tests/`, ~880
 tests, plus the test container crate (`test/`). The full suite passes on dev
 apart from #120 (and #134/#173 when the box is busy). #171 (power-cut
-durability) is fixed on dev through v19.2.2 and waits on the owner's on-metal
-crash5 run. The README is the reference for what the code does, rewritten from the code in
+durability) is closed: the on-metal acceptance passed on 2026-09-27 (C2NR0Q2,
+11.48 = v19.2.1 engine and initramfs, 5 cuts, 1500/1500 objects). The
+flow-over resume of v19.2.2 has not met metal yet; that check is #172. The README is the reference for what the code does, rewritten from the code in
 #131; the docs in `docs/` were checked against it and the superseded ones moved
 to `docs/history/`. What earlier docs promised and the code does not do is
 listed in the README's "Not built, or not wired" with its issues (#159–#170).
 The golden has been held since v17 for the token rollout to the engine's
-clients (#107; stormcentral#30, stormcos#89 and the rest).
+clients (#107; stormcentral#30, stormcos#89 and the rest); when to release
+it is the owner's call, #194.
 
 For special runtime testing that needs its own machine, spin up a VM with
 terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
@@ -238,10 +240,10 @@ Rule for the fix: nothing durable references a slot before its data is.
       slabs by id, same bytes), attaches the missing slab data-only, restores
       onto it, and hands the flow-over to the successor.
       `tests/integration_flowover_resume.rs`. Release v19.2.2.
-- [ ] close after the on-metal power-cut check (300/300 × 5). Owner
-      (2026-09-26) is building the v19.1.4 golden himself, ahead of the #107
-      token rollout, and will report the result on #171; do not stage or
-      close it from here
+- [x] on-metal power-cut check (300/300 × 5): passed 2026-09-27 on
+      C2NR0Q2 with 11.48 (v19.2.1 engine and initramfs); #171 closed. The
+      flow-over cut is #172, still to be checked on metal with an initramfs
+      built from ≥ fd9fa51
 
 ### A boot claim releases every old clone of its tag (2026-09-26, #127) — DONE (v19.1.3)
 

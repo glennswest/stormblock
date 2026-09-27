@@ -193,7 +193,7 @@ kind, so a pallet written before the field existed is never stranded.
 
 ### 2.6 Containers: one structure, sealed or not
 
-**Status: designed 2026-08-23, not yet implemented (#62).** Everything above
+**Status: designed 2026-08-23, not yet implemented (#59).** Everything above
 this describes a pallet as sealed content and nothing else. That is what ships
 an image which *contains* a node; what makes one that **is** a node is that a
 pallet also carries the writable half.
@@ -263,7 +263,7 @@ partition = one pallet
 
 ### 2.7 The map: two levels, and the drive lives at the top
 
-**Status: design (#62), not implemented.** Nothing in `src/` builds an L1/L2
+**Status: design (#59), not implemented.** Nothing in `src/` builds an L1/L2
 map or a container descriptor. Read-through goldens were delivered a different
 way, by volumes that share slab extents (`docs/composed-disks.md`); this
 section and §2.8 are kept as the design for writable containers inside a
@@ -315,7 +315,7 @@ adding them changes no format.
 
 ### 2.8 A/B, per kind
 
-**Status: design (#62), not implemented.** See §2.7.
+**Status: design (#59), not implemented.** See §2.7.
 
 The unit of replacement differs by what is being replaced, because a pallet is
 the thing you copy whole:
