@@ -225,8 +225,8 @@ to stderr.
 |---|---|
 | `slab format\|grow\|list\|info\|volumes` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it |
 | `image build\|convert\|inspect\|formats\|lay-node\|local-boot` | build disk images and ISOs out of pallets from a TOML spec (`docs/images.md`); `lay-node` lays a node's disk layout (destroys the drive); `local-boot` copies an ESP and boot pallets onto an installed disk |
-| `pallet …` (24 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, members, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
-| `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--read-only] [--whiteouts] [--fsck]`) — how stormcentral builds service goldens |
+| `pallet …` (22 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, `add-member`/`remove-member`/`copy-member`/`move-member`, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
+| `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--label] [--read-only]`; `--whiteouts` and `--fsck` are on by default and take a value, e.g. `--fsck false`) — how stormcentral builds service goldens |
 | `attach` | attach a slab offline and export (and optionally mount) volumes in it; with no `--volume`, list them |
 | `boot-claim` | ask an appliance which image this machine boots (`--boothost URL --tag <service tag>`), print the attach URI |
 | `boot-local` | attach local slabs non-destructively, export the boot volume as `/dev/ublkb0` (plus `--image-store`, `--writable`), optionally flow over to `--local-disk`; `--check` validates and exits |
@@ -275,7 +275,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
-| `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator` |
+| `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator`; when `boot-local` claims a fresh clone to resume a flow-over, `nqn.2026-09.lo.storm:host-<tag>` |
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds the data half | policy decides |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; the missing extents are dropped, with a warning |
