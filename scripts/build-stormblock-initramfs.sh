@@ -1350,6 +1350,9 @@ if [ "$BOOT_MODE" = "local" ]; then
         done
         if [ -n "$BOOTHOST" ]; then
             echo "Appliance: $BOOTHOST"
+            # boot-local claims a fresh clone from it when this disk's
+            # records name extents a cut-short flow-over never moved (#171).
+            export STORMBLOCK_BOOTHOST="$BOOTHOST"
         else
             echo "No appliance answered. Tried:$CANDIDATE_HOSTS"
         fi

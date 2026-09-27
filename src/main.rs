@@ -2768,6 +2768,74 @@ async fn open_slabs_and_restore(
     slab_paths: &[String],
     meta: Option<&str>,
 ) -> anyhow::Result<VolumeManager> {
+    Ok(open_slabs_resuming(slab_paths, meta, false).await?.0)
+}
+
+/// What `open_slabs_resuming` had to fetch from the appliance (#171).
+struct Resumed {
+    /// The clone's attach URI, as the successor must open it.
+    uri: String,
+    /// The local slabs the flow-over resumes into.
+    system_slab: Option<stormblock::drive::slab::SlabId>,
+    data_slab: Option<stormblock::drive::slab::SlabId>,
+}
+
+/// This machine's name to the appliance: the SMBIOS serial (a Dell's service
+/// tag), else the SMBIOS UUID — the rules the initramfs uses (stormcos#46).
+/// `STORMBLOCK_BOOT_TAG` overrides both.
+fn machine_tag() -> Option<String> {
+    if let Ok(t) = std::env::var("STORMBLOCK_BOOT_TAG") {
+        if !t.trim().is_empty() {
+            return Some(t.trim().to_string());
+        }
+    }
+    let read = |f: &str| std::fs::read_to_string(f).ok().map(|s| s.trim().replace(' ', ""));
+    if let Some(serial) = read("/sys/class/dmi/id/product_serial") {
+        let placeholder = matches!(serial.as_str(), "" | "NotSpecified" | "None" | "Unknown" | "ToBeFilledByO.E.M.")
+            || serial.starts_with("Default");
+        if !placeholder {
+            return Some(serial);
+        }
+    }
+    read("/sys/class/dmi/id/product_uuid").filter(|u| !u.is_empty())
+}
+
+/// Every slab a set of volume records places an extent on.
+fn slabs_named(docs: &[Option<stormblock::volume::metadata::VolumeMetadata>]) -> std::collections::HashSet<stormblock::drive::slab::SlabId> {
+    let mut ids = std::collections::HashSet::new();
+    for d in docs.iter().flatten() {
+        for v in &d.volumes {
+            for loc in v.extents.values() {
+                ids.extend(loc.legs().map(|l| l.slab_id));
+            }
+            for g in v.parity.values() {
+                ids.extend(g.legs.iter().map(|l| l.slab_id));
+            }
+        }
+    }
+    ids
+}
+
+/// Open the slabs and restore — and when the local records place extents on
+/// a slab that is not here, fetch it (#171).
+///
+/// That is a flow-over cut short: the power went while the goldens were still
+/// moving from the appliance's clone onto this disk. The next boot claims a
+/// *new* clone, so those extents were dropped, the root came up with holes,
+/// and the node could not boot again. But every system golden is sealed and a
+/// claim is a clone of it, and cloning restamps the disk's GPT, never the
+/// slabs inside it: a fresh clone carries the same slabs, by id, holding the
+/// same bytes. So claim one, attach its slabs for their data only (their
+/// records are the image's and are never read), let the local records map
+/// onto them, and hand the flow-over on to finish. Only `boot-local` asks
+/// (`resume`), and only when an appliance is named (`STORMBLOCK_BOOTHOST`,
+/// which the initramfs exports): a claim releases the machine's earlier
+/// clones, which is not something a diagnostic may do.
+async fn open_slabs_resuming(
+    slab_paths: &[String],
+    meta: Option<&str>,
+    resume: bool,
+) -> anyhow::Result<(VolumeManager, Option<Resumed>)> {
     use std::path::{Path, PathBuf};
     use stormblock::volume::MetadataStore;
 
@@ -2881,6 +2949,79 @@ async fn open_slabs_and_restore(
         }
     } else {
         embedded.resize_with(slabs.len(), || None);
+    }
+
+    // Slabs the records need and that did not open here (#171).
+    let mut fetched: Vec<(String, Slab)> = Vec::new();
+    let mut resumed_uri: Option<String> = None;
+    {
+        let opened: std::collections::HashSet<_> = slabs.iter().map(|s| s.slab_id()).collect();
+        let mut missing: std::collections::HashSet<_> =
+            slabs_named(&embedded).into_iter().filter(|id| !opened.contains(id)).collect();
+        if resume && !missing.is_empty() {
+            let boothost = std::env::var("STORMBLOCK_BOOTHOST").ok().filter(|b| !b.trim().is_empty());
+            // A test (or an operator by hand) can name the source directly.
+            let given = std::env::var("STORMBLOCK_RESUME_SOURCE").ok().filter(|b| !b.trim().is_empty());
+            let source: Option<String> = match (given, boothost, machine_tag()) {
+                (Some(src), _, _) => Some(src),
+                (None, Some(boothost), Some(tag)) => {
+                    println!(
+                        "The local records place extents on {} slab(s) not on this machine - a \
+                         flow-over cut short. Claiming a fresh clone of {tag}'s image from {boothost} \
+                         to finish it.",
+                        missing.len()
+                    );
+                    let mut uri = claim_boot_uri(&boothost, &tag, "boothost", 120, None).await?;
+                    if std::env::var("STORMBLOCK_HOST_NQN").is_err() && !uri.contains("hostnqn=") {
+                        uri.push_str(if uri.contains('?') { "&" } else { "?" });
+                        uri.push_str(&format!("hostnqn=nqn.2026-09.lo.storm:host-{tag}"));
+                    }
+                    Some(uri)
+                }
+                _ => None,
+            };
+            match source {
+                Some(uri) => {
+                    let dev: Arc<dyn BlockDevice> = if is_fabric_uri(&uri) {
+                        let spec = stormblock::drive::nvmeof_dev::NvmeTcpSpec::parse(&uri)
+                            .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {uri}"))?;
+                        Arc::new(stormblock::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
+                    } else {
+                        open_storage(&uri).await?
+                    };
+                    let candidates: Vec<Slab> = match Slab::open(dev.clone()).await {
+                        Ok(s) => vec![s],
+                        Err(_) => stormblock::drive::discover::slabs_in_partitions(&dev)
+                            .await
+                            .into_iter()
+                            .map(|f| f.slab)
+                            .collect(),
+                    };
+                    for slab in candidates {
+                        if missing.remove(&slab.slab_id()) {
+                            println!("  {uri}: slab {} - the extents still to move", slab.slab_id().0);
+                            fetched.push((uri.clone(), slab));
+                        }
+                    }
+                    if !fetched.is_empty() {
+                        resumed_uri = Some(uri);
+                    }
+                    if !missing.is_empty() {
+                        println!(
+                            "WARNING: {} slab(s) the records need are not in this machine's image either: {}",
+                            missing.len(),
+                            missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", ")
+                        );
+                    }
+                }
+                None => println!(
+                    "WARNING: the local records place extents on {} slab(s) not on this machine \
+                     (a flow-over cut short?), and no appliance or machine tag is known to fetch \
+                     them from - those extents will be missing",
+                    missing.len()
+                ),
+            }
+        }
     }
 
     let primary = embedded.iter().position(|d| d.is_some());
@@ -3027,9 +3168,28 @@ async fn open_slabs_and_restore(
     if !metadata_slabs.is_empty() {
         mgr.persist_to_slabs(metadata_slabs);
     }
+    // Fetched slabs are sources of data only: registered, never read for
+    // records nor written with them.
+    for (uri, slab) in fetched {
+        let role = slab.role();
+        mgr.add_slab(slab).await;
+        println!("Attached {role} slab {uri} (to finish the flow-over)");
+    }
     mgr.restore().await?;
 
-    Ok(mgr)
+    let resumed = match resumed_uri {
+        None => None,
+        Some(uri) => {
+            let reg = mgr.registry().read().await;
+            let local = |data: bool| {
+                reg.iter()
+                    .find(|(id, s)| s.is_data() == data && mgr.is_metadata_slab(id))
+                    .map(|(id, _)| *id)
+            };
+            Some(Resumed { uri, system_slab: local(false), data_slab: local(true) })
+        }
+    };
+    Ok((mgr, resumed))
 }
 
 /// adopt-ublk: take over the ublk devices an earlier server created.
@@ -4866,6 +5026,19 @@ async fn handle_boot_claim(
     timeout_secs: u64,
     token: Option<&str>,
 ) -> anyhow::Result<()> {
+    let uri = claim_boot_uri(boothost, tag, namespace, timeout_secs, token).await?;
+    println!("{uri}");
+    Ok(())
+}
+
+/// Claim this machine's image and answer the attach URI of the clone.
+async fn claim_boot_uri(
+    boothost: &str,
+    tag: &str,
+    namespace: &str,
+    timeout_secs: u64,
+    token: Option<&str>,
+) -> anyhow::Result<String> {
     let base = boothost.trim_end_matches('/');
     let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
     let url = format!("{base}/api/v1/synonyms/{namespace}/{tag}/claim");
@@ -4910,8 +5083,7 @@ async fn handle_boot_claim(
                     if let Some(name) = v.get("volume").and_then(|x| x.get("name")).and_then(|x| x.as_str()) {
                         eprintln!("boot-claim: {tag} -> {name}");
                     }
-                    println!("{uri}");
-                    return Ok(());
+                    return Ok(uri.to_string());
                 }
                 // A tag nobody has decided for is a fleet decision that has
                 // not been made. Say which name was missing: it is the thing
@@ -4966,7 +5138,7 @@ async fn handle_boot_local(
         }
     }
 
-    let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
+    let (mut mgr, resumed) = open_slabs_resuming(slab_paths, meta, true).await?;
 
     // 3. Resolve the boot volume: --volume wins, else boot.toml.
     let selector = match volume {
@@ -5346,6 +5518,21 @@ async fn handle_boot_local(
             // reads the GPT and finds both slabs in it, which is the same
             // thing `rd.stormblock.slab=/dev/sda` does on a composed disk.
             slabs.push(f.disk.clone());
+        }
+        // A flow-over cut short and resumed from a fresh clone (#171): the
+        // successor opens the clone too, and moves what is left onto this
+        // disk.
+        if let Some(r) = &resumed {
+            slabs.push(r.uri.clone());
+            if laid_flow_over.is_none() {
+                if let (Some(sys), Some(data)) = (r.system_slab, r.data_slab) {
+                    laid_flow_over = Some(stormblock::drive::handover::FlowOver {
+                        disk: slab_paths.first().cloned().unwrap_or_default(),
+                        system_slab: sys.0.to_string(),
+                        data_slab: data.0.to_string(),
+                    });
+                }
+            }
         }
         let record = stormblock::drive::handover::Record {
             slabs,
