@@ -2495,6 +2495,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "stormblock-runtime-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "stormblock",
+ "stormblock-pallet-format",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "stormblock-test"
 version = "0.1.0"
 dependencies = [
