@@ -76,7 +76,7 @@ discovery_disabled = true
 export_drives = false
 EOF
 RUST_LOG=stormblock=info "$BIN" --config "$W/stormblock.toml" \
-    --device "$W/d1.img" --device "$W/d2.img" --raid raid1 \
+    --device "$W/d1.img" --device "$W/d2.img" \
     --data-dir "$W/data" --no-iscsi \
     --nvmeof-addr "127.0.0.1:$PORT" --nvmeof-nqn "$SHARED" \
     > "$W/engine.log" 2>&1 &
@@ -87,6 +87,11 @@ for _ in $(seq 1 100); do
     sleep 0.2
 done
 api "http://127.0.0.1:$MGMT/api/v1/health" >/dev/null || { echo "FAIL: engine did not start"; tail -30 "$W/engine.log"; exit 1; }
+
+for d in d1 d2; do
+    api -X POST "http://127.0.0.1:$MGMT/api/v1/slabs" -d "{\"device_path\":\"$W/$d.img\",\"role\":\"data\"}" >/dev/null \
+        || fail "slab on $d"
+done
 
 mkvol() {
     local r
