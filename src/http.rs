@@ -78,13 +78,13 @@ impl fmt::Display for StatusCode {
     }
 }
 
-/// Pick the process crypto provider once. `rustls` refuses to guess when
-/// both `aws-lc-rs` and `ring` are compiled in — which a test build does,
-/// through `reqwest` in dev-dependencies — so it is said here, explicitly,
-/// before any TLS config is built (client or server).
+/// Pick the process crypto provider once, before any TLS config is built
+/// (client or server). ring is the only backend compiled in (#209); naming it
+/// here keeps that true if a dependency ever brings a second one, which rustls
+/// would otherwise refuse to choose between.
 pub fn ensure_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default();
     }
 }
 

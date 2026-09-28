@@ -39,10 +39,23 @@ caps long's waves).
 
 ## Build
 ```bash
-sc-build 'cargo build --release --locked'                       # what goldens use
-sc-build 'cargo build --release --locked --target x86_64-unknown-linux-musl'
+sc-build 'cargo test --locked'                                   # the routine check
+sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl'  # what goldens ship
+sc-build 'cargo check --locked --features cluster'               # the Raft layer, opt-in
 sc-build 'cargo check --locked --no-default-features --features mikrotik,nvmeof'  # RouterOS
 ```
+
+**Build settings (#209, 2026-09-28).** The routine check is `cargo test` alone,
+never `cargo build --release` first. Profiles:
+- `dev`/`test`: `debug = "line-tables-only"` (file:line in backtraces), no
+  debug info for dependencies. A full-debug libstormblock was 575 MB.
+- `release`: thin LTO, 16 codegen units. Use it for performance measurement.
+- `dist`: fat LTO, 1 codegen unit. Only golden builds use it
+  (`--profile dist`); nothing else needs it.
+
+Dependencies: one TLS backend (ring; aws-lc-sys is gone), and `cluster`
+(openraft) is opt-in. Every sc-build job starts from an empty drive, so every
+dependency is compiled on every build: adding one costs every build.
 
 Features: `default = ["nvmeof", "iscsi", "cluster", "stormfs-data"]`; `ui` is
 the old web UI (off since v12.2.0, stormview is the UI); `arm64` and

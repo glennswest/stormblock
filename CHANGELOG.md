@@ -1,6 +1,12 @@
 # Changelog
 
 ## [Unreleased]
+
+### 2026-09-28
+- **build:** Build settings for everyday work (#209). `dev`/`test` keep line tables but not full debug info, and dependencies carry none. `release` is thin LTO across 16 codegen units. Fat LTO with one codegen unit moves to a `dist` profile that only golden builds use. The routine check is `cargo test`
+- **build:** One TLS crypto backend, ring. rustls's defaults and hyper-rustls's `aws-lc-rs` feature were compiling aws-lc-sys, a large cmake C build
+- **BREAKING:** `cluster` (openraft) is no longer a default feature; build with `--features cluster` for it. The engine is standalone-first and no stormcos node enables Raft. The feature pulled openraft, chrono, rust_decimal, borsh and thiserror 1.x into every build
+- **build:** socket2 0.6, the version tokio already uses
 <!-- New unreleased changes go here -->
 
 ### 2026-09-27 (#148)
