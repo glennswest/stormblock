@@ -176,8 +176,26 @@ harness = false
 name = "pdu_parsing"
 harness = false
 
+# Build settings (#209). The edit/test loop keeps file:line in backtraces but
+# not full debug info: a full-debug libstormblock was 575 MB, and every test
+# binary links it. Dependencies carry no debug info at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# The everyday optimised build: thin LTO across 16 codegen units uses every
+# core. Measuring performance uses this.
 [profile.release]
 opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = true
+
+# What goldens ship: whole-program LTO, one codegen unit. Slow to build, so
+# only the golden build uses it (`cargo build --profile dist`).
+[profile.dist]
+inherits = "release"
 lto = true
 codegen-units = 1
-strip = true
