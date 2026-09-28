@@ -92,7 +92,10 @@ async fn node(dir: &TempDir, allow_any_host: bool) -> Node {
     let golden = vm.create_volume("golden", 16 * MIB, array).await.unwrap().0;
     vm.seal_volume(VolumeId(golden), None).await.unwrap();
     let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
-    let state = Arc::new(AppState::new(config, vm, reg, gem));
+    let mut st = AppState::new(config, vm, reg, gem);
+    // Every boot claim releases the last one at once (no #97 grace).
+    st.claim_grace = std::time::Duration::ZERO;
+    let state = Arc::new(st);
     let nvme = start_target(&state).await;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -402,4 +405,56 @@ async fn a_subsystem_never_holds_one_device_twice() {
     assert!(!sub.add_namespace_at(3, dev.clone(), false).await, "not a second NSID for it");
     assert!(sub.add_namespace_at(1, dev, false).await, "its own NSID again is fine");
     assert_eq!(sub.namespace_count().await, 1);
+}
+
+/// A boot claim serves the machine's clone to that machine alone, from its
+/// own subsystem, under the host NQN its firmware composes from the name the
+/// reply gives (`nqn.2026-09.lo.storm:host-<name>`) — no firmware change —
+/// and never the golden it was cloned from. The next boot's clone replaces
+/// the last one there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_boot_claim_is_served_to_that_machine_alone() {
+    let dir = TempDir::new().unwrap();
+    let n = node(&dir, false).await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{}/api/v1/synonyms", n.api))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "server1", "volume": n.golden.to_string()}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    let claim = |c: reqwest::Client, api: String| async move {
+        let r = c.post(format!("{api}/api/v1/synonyms/boothost/server1/claim")).json(&serde_json::json!({})).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+        r.json::<serde_json::Value>().await.unwrap()
+    };
+    let first = claim(c.clone(), n.api.clone()).await;
+    let at = &first["attach"];
+    let nqn = at["nqn"].as_str().expect("a claim answers where to attach").to_string();
+    assert_eq!(nqn, format!("{SHARED}:host:server1"));
+    assert_eq!(at["port"].as_u64().unwrap() as u16, n.nvme.port());
+    let me = "nqn.2026-09.lo.storm:host-server1";
+    assert!(at["host_nqns"].as_array().unwrap().iter().any(|h| h == me), "{at}");
+
+    // The machine sees its clone, and only its clone.
+    assert_eq!(discover(n.nvme, me).await, vec![nqn.clone()]);
+    let (_, status, mut i) = connect_as(n.nvme, &nqn, me).await;
+    assert_eq!(status, 0);
+    assert_eq!(i.active_namespaces().await.unwrap(), vec![at["nsid"].as_u64().unwrap() as u32]);
+    let dev = NvmeofDevice::connect(&spec(n.nvme, &nqn, at["nsid"].as_u64().unwrap() as u32, me, None)).await.unwrap();
+    assert_eq!(dev.capacity_bytes(), 16 * MIB);
+    drop(dev);
+    // Another machine does not.
+    let (_, status, _) = connect_as(n.nvme, &nqn, "nqn.2026-09.lo.storm:host-server2").await;
+    assert_eq!(status & !DNR, INVALID_HOST);
+    assert!(discover(n.nvme, "nqn.2026-09.lo.storm:host-server2").await.is_empty());
+
+    // Next boot: a fresh clone in the same place, the old one gone from it.
+    let second = claim(c, n.api.clone()).await;
+    assert_eq!(second["attach"]["nqn"].as_str().unwrap(), nqn);
+    let (_, _, mut i) = connect_as(n.nvme, &nqn, me).await;
+    assert_eq!(i.active_namespaces().await.unwrap(), vec![second["attach"]["nsid"].as_u64().unwrap() as u32]);
+    let t = n.state.nvmeof_target.read().await.clone().unwrap();
+    assert_eq!(t.namespace_count().await, 0, "nothing on the shared subsystem");
 }
