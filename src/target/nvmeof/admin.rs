@@ -146,6 +146,11 @@ pub fn identify_controller(
     data
 }
 
+/// Identify Namespace: NSATTR's offset, and its write-protected bit. A host
+/// that reads it set makes the block device read-only (Linux: `set_disk_ro`).
+pub const NSATTR_OFFSET: usize = 99;
+pub const NSATTR_WRITE_PROTECTED: u8 = 1 << 0;
+
 /// Build Identify Namespace data (4096 bytes).
 pub fn identify_namespace(device: &Arc<dyn BlockDevice>) -> Vec<u8> {
     let mut data = vec![0u8; 4096];

@@ -2332,6 +2332,12 @@ mod transport_tests {
             listen_addr: addr.to_string(),
             nqn: NQN.into(),
             export_drives: false,
+            // This test is about the shared subsystem; a node opens it on
+            // purpose (#210).
+            allow_any_host: true,
+            allowed_hosts: Vec::new(),
+            require_dhchap: false,
+            boothost_host_nqn: None,
         });
         let mut vm = VolumeManager::new(MIB);
         let dev = FileDevice::open_with_capacity(dir.join("pool.bin").to_str().unwrap(), 128 * MIB).await.unwrap();

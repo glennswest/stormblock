@@ -215,6 +215,15 @@ impl NvmeCqe {
         cqe
     }
 
+    /// An error the host must not retry (DNR set): a refusal, not a fault.
+    pub fn error_dnr(cid: u16, sq_id: u16, sq_head: u16, status_code_type: u8, status_code: u8) -> Self {
+        let mut cqe = Self::error(cid, sq_id, sq_head, status_code_type, status_code);
+        // DNR is bit 14 of the status field, which sits one bit up in DW3.
+        let status = u16::from_le_bytes([cqe.raw[14], cqe.raw[15]]) | (1 << 15);
+        cqe.raw[14..16].copy_from_slice(&status.to_le_bytes());
+        cqe
+    }
+
     pub fn set_dw0(&mut self, val: u32) {
         self.raw[0..4].copy_from_slice(&val.to_le_bytes());
     }

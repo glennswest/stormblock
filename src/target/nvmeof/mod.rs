@@ -7,6 +7,7 @@ pub mod fabric;
 pub mod admin;
 pub mod io;
 pub mod discovery;
+pub mod auth;
 #[cfg(target_os = "linux")]
 pub mod zerocopy;
 
@@ -75,19 +76,224 @@ async fn write_ns_changed_aen<W: AsyncWriteExt + Unpin>(
     pdu::write_capsule_resp(writer, &cqe, hdgst).await
 }
 
-/// NVMe-oF/TCP target server.
-pub struct NvmeofTarget {
-    config: NvmeofConfig,
-    /// Namespace map. Behind a `RwLock` so namespaces can be added and removed
-    /// while the target is running and shared behind an `Arc` — the CoW
-    /// registry model creates exports long after boot.
-    namespaces: tokio::sync::RwLock<HashMap<u32, Arc<dyn BlockDevice>>>,
+/// Who may connect to a subsystem.
+///
+/// `Any` is how the target has always behaved and what a test harness or a
+/// single-purpose engine wants; a serving node names its hosts (#210). A
+/// named host may carry a DH-HMAC-CHAP key, and then it has to prove it
+/// holds it before any command but authentication runs on its queue.
+#[derive(Debug, Clone)]
+pub enum HostAccess {
+    Any,
+    Hosts(HashMap<String, Option<auth::DhchapKey>>),
+}
+
+impl HostAccess {
+    /// Nobody: a subsystem that exists and admits no host.
+    pub fn none() -> Self {
+        HostAccess::Hosts(HashMap::new())
+    }
+
+    /// `Some(key)` when `hostnqn` may connect (`key` = its secret, if any).
+    fn admits(&self, hostnqn: &str) -> Option<Option<auth::DhchapKey>> {
+        match self {
+            HostAccess::Any => Some(None),
+            HostAccess::Hosts(h) => h.get(hostnqn).cloned(),
+        }
+    }
+
+    pub fn is_any(&self) -> bool {
+        matches!(self, HostAccess::Any)
+    }
+}
+
+/// One namespace of a subsystem.
+#[derive(Clone)]
+struct Namespace {
+    device: Arc<dyn BlockDevice>,
+    /// Served write-protected: identify says so (NSATTR) and writes are
+    /// refused at the protocol, whatever the device would do with them.
+    read_only: bool,
+}
+
+/// An NVM subsystem: an NQN, its namespaces and who may reach them.
+///
+/// Several share one listener. A host connects to the one its Connect names
+/// and sees only that one's namespaces — which is how a host is shown only
+/// what was attached to it rather than every volume the node serves (#210).
+pub struct Subsystem {
+    nqn: String,
+    /// Behind a `RwLock` so namespaces can be added and removed while the
+    /// target is serving — the CoW registry model creates exports long after
+    /// boot.
+    namespaces: tokio::sync::RwLock<HashMap<u32, Namespace>>,
+    access: std::sync::RwLock<HostAccess>,
     /// Namespace IDs whose attributes changed, broadcast to admin connections.
     ///
     /// This is what makes hot-add cheap: a host connects once and every
     /// subsequent attach is an async event plus a rescan, with no Connect and
     /// no new TCP session per container.
     ns_changed: tokio::sync::broadcast::Sender<u32>,
+}
+
+impl Subsystem {
+    fn new(nqn: String, access: HostAccess) -> Self {
+        // Depth only bounds how far an admin connection may fall behind before
+        // it is told to rescan wholesale, so a modest buffer is fine.
+        let (ns_changed, _) = tokio::sync::broadcast::channel(256);
+        Subsystem {
+            nqn,
+            namespaces: tokio::sync::RwLock::new(HashMap::new()),
+            access: std::sync::RwLock::new(access),
+            ns_changed,
+        }
+    }
+
+    pub fn nqn(&self) -> &str {
+        &self.nqn
+    }
+
+    pub fn access(&self) -> HostAccess {
+        self.access.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replace who may connect. Connections already made are not cut: the
+    /// list is checked at Connect, as an initiator's controller is.
+    pub fn set_access(&self, access: HostAccess) {
+        *self.access.write().unwrap_or_else(|e| e.into_inner()) = access;
+    }
+
+    /// Whether `hostnqn` may connect (used for the discovery log page too).
+    pub fn admits(&self, hostnqn: &str) -> bool {
+        self.access.read().unwrap_or_else(|e| e.into_inner()).admits(hostnqn).is_some()
+    }
+
+    /// Put `device` at `nsid`. Refused (false) when the NSID holds another
+    /// device, or when this device is already served here under another
+    /// NSID: the NGUID is the volume's id, and two namespaces with one NGUID
+    /// is what the kernel reports as "duplicate IDs in subsystem" (#210).
+    pub async fn add_namespace_at(&self, nsid: u32, device: Arc<dyn BlockDevice>, read_only: bool) -> bool {
+        {
+            let mut ns = self.namespaces.write().await;
+            let uuid = device.id().uuid;
+            if let Some(cur) = ns.get(&nsid) {
+                if cur.device.id().uuid != uuid {
+                    return false;
+                }
+            } else if ns.values().any(|n| n.device.id().uuid == uuid) {
+                return false;
+            }
+            ns.insert(nsid, Namespace { device, read_only });
+        }
+        self.notify_ns_changed(nsid);
+        true
+    }
+
+    /// Add a namespace at the lowest unused ID and answer the ID — chosen and
+    /// taken under one lock. Choosing and then adding let two attaches at
+    /// once pick the same ID; the second insert replaced the first, and both
+    /// volumes' attach URIs named one namespace: each read the other's
+    /// writes (found by the long test suite, #139).
+    ///
+    /// A device already served here answers with the NSID it has: one volume
+    /// is never two namespaces of one subsystem.
+    pub async fn add_namespace_next(&self, device: Arc<dyn BlockDevice>, read_only: bool) -> u32 {
+        let nsid = {
+            let mut ns = self.namespaces.write().await;
+            let uuid = device.id().uuid;
+            if let Some((&n, _)) = ns.iter().find(|(_, v)| v.device.id().uuid == uuid) {
+                return n;
+            }
+            let nsid = (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1);
+            ns.insert(nsid, Namespace { device, read_only });
+            nsid
+        };
+        self.notify_ns_changed(nsid);
+        nsid
+    }
+
+    /// Remove a namespace. Returns true if it existed.
+    pub async fn remove_namespace(&self, nsid: u32) -> bool {
+        let existed = self.namespaces.write().await.remove(&nsid).is_some();
+        if existed {
+            self.notify_ns_changed(nsid);
+        }
+        existed
+    }
+
+    /// The NSID `device_uuid` is served at here, if it is.
+    pub async fn nsid_of(&self, device_uuid: uuid::Uuid) -> Option<u32> {
+        self.namespaces
+            .read()
+            .await
+            .iter()
+            .find(|(_, v)| v.device.id().uuid == device_uuid)
+            .map(|(n, _)| *n)
+    }
+
+    /// Announce a namespace attribute change to connected hosts.
+    ///
+    /// Fails only when nobody is listening, which is the common single-node
+    /// case — not an error.
+    fn notify_ns_changed(&self, nsid: u32) {
+        let _ = self.ns_changed.send(nsid);
+    }
+
+    /// Lowest unused namespace ID. NSID 0 is reserved by the spec.
+    pub async fn next_free_nsid(&self) -> u32 {
+        let ns = self.namespaces.read().await;
+        (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1)
+    }
+
+    /// Active namespace IDs, sorted.
+    pub async fn list_namespaces(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.namespaces.read().await.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub async fn namespace_count(&self) -> usize {
+        self.namespaces.read().await.len()
+    }
+
+    /// Resolve a namespace, cloning the `Arc` so the lock is never held
+    /// across I/O.
+    async fn namespace(&self, nsid: u32) -> Option<Namespace> {
+        self.namespaces.read().await.get(&nsid).cloned()
+    }
+}
+
+/// What a connection learned at Connect.
+struct Session {
+    /// `None` on a discovery connection.
+    sub: Option<Arc<Subsystem>>,
+    hostnqn: String,
+    /// The queue's DH-HMAC-CHAP exchange, when its host has a key. Until it
+    /// has authenticated, nothing but Authentication Send/Receive runs.
+    auth: Option<auth::ControllerAuth>,
+}
+
+impl Session {
+    fn locked(&self) -> bool {
+        self.auth.as_ref().is_some_and(|a| !a.authenticated())
+    }
+}
+
+/// Connect status: the host is not allowed on this subsystem (SCT 1, SC 0x84).
+const SC_CONNECT_INVALID_HOST: u8 = 0x84;
+/// Command status: authentication required first (SCT 1, SC 0x91).
+const SC_AUTH_REQUIRED: u8 = 0x91;
+/// Connect response DW0: authentication required (ATR), as Linux reads it.
+pub const CONNECT_AUTHREQ_ATR: u32 = 1 << 17;
+
+/// NVMe-oF/TCP target server.
+pub struct NvmeofTarget {
+    config: NvmeofConfig,
+    /// The subsystem `config.nqn` names — what every caller had before there
+    /// were several.
+    default: Arc<Subsystem>,
+    /// Every other subsystem on this listener, by NQN (#210).
+    others: std::sync::RwLock<HashMap<String, Arc<Subsystem>>>,
     next_cntlid: AtomicU16,
     /// Connections currently being served.
     ///
@@ -109,14 +315,14 @@ pub struct NvmeofTarget {
 }
 
 impl NvmeofTarget {
+    /// A target whose subsystem admits any host — a test harness, or an
+    /// engine whose caller sets [`Subsystem::set_access`] before serving.
     pub fn new(config: NvmeofConfig) -> Self {
-        // Depth only bounds how far an admin connection may fall behind before
-        // it is told to rescan wholesale, so a modest buffer is fine.
-        let (ns_changed, _) = tokio::sync::broadcast::channel(256);
+        let default = Arc::new(Subsystem::new(config.nqn.clone(), HostAccess::Any));
         NvmeofTarget {
             config,
-            namespaces: tokio::sync::RwLock::new(HashMap::new()),
-            ns_changed,
+            default,
+            others: std::sync::RwLock::new(HashMap::new()),
             next_cntlid: AtomicU16::new(1),
             live: std::sync::atomic::AtomicUsize::new(0),
             accepting: std::sync::atomic::AtomicBool::new(true),
@@ -124,77 +330,98 @@ impl NvmeofTarget {
         }
     }
 
+    /// The subsystem the configuration names.
+    pub fn default_subsystem(&self) -> Arc<Subsystem> {
+        self.default.clone()
+    }
+
+    /// The subsystem `nqn` names, if this target has it.
+    pub fn subsystem(&self, nqn: &str) -> Option<Arc<Subsystem>> {
+        if nqn == self.default.nqn {
+            return Some(self.default.clone());
+        }
+        self.others.read().unwrap_or_else(|e| e.into_inner()).get(nqn).cloned()
+    }
+
+    /// The subsystem `nqn` names, made if missing, with `access` applied.
+    pub fn ensure_subsystem(&self, nqn: &str, access: HostAccess) -> Arc<Subsystem> {
+        if let Some(s) = self.subsystem(nqn) {
+            s.set_access(access);
+            return s;
+        }
+        let mut others = self.others.write().unwrap_or_else(|e| e.into_inner());
+        others
+            .entry(nqn.to_string())
+            .or_insert_with(|| Arc::new(Subsystem::new(nqn.to_string(), access)))
+            .clone()
+    }
+
+    /// Take a subsystem off the listener. Its hosts' connections keep what
+    /// they hold until they reconnect, and then find nothing. The default
+    /// subsystem cannot be removed.
+    pub fn remove_subsystem(&self, nqn: &str) -> bool {
+        self.others.write().unwrap_or_else(|e| e.into_inner()).remove(nqn).is_some()
+    }
+
+    /// Every subsystem, the default first.
+    pub fn subsystems(&self) -> Vec<Arc<Subsystem>> {
+        let mut v = vec![self.default.clone()];
+        let mut rest: Vec<_> = self.others.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+        rest.sort_by(|a, b| a.nqn.cmp(&b.nqn));
+        v.extend(rest);
+        v
+    }
+
+    /// The address a remote initiator is told to connect to.
+    pub fn advertised(&self) -> SocketAddr {
+        self.config.advertised_addr.unwrap_or(self.config.listen_addr)
+    }
+
     /// Add a namespace mapping at startup (before the target is shared).
     pub fn add_namespace(&mut self, nsid: u32, device: Arc<dyn BlockDevice>) {
-        self.namespaces.get_mut().insert(nsid, device);
-    }
-
-    /// Add a namespace at runtime — no `&mut self`, so this works on a target
-    /// already shared behind an `Arc` and serving traffic.
-    ///
-    /// Connected hosts are notified, so the namespace shows up without a
-    /// reconnect.
-    pub async fn add_namespace_dynamic(&self, nsid: u32, device: Arc<dyn BlockDevice>) {
-        self.namespaces.write().await.insert(nsid, device);
-        self.notify_ns_changed(nsid);
-    }
-
-    /// Remove a namespace at runtime. Returns true if the namespace existed.
-    pub async fn remove_namespace(&self, nsid: u32) -> bool {
-        let existed = self.namespaces.write().await.remove(&nsid).is_some();
-        if existed {
-            self.notify_ns_changed(nsid);
+        if let Some(d) = Arc::get_mut(&mut self.default) {
+            d.namespaces.get_mut().insert(nsid, Namespace { device, read_only: false });
         }
-        existed
     }
 
-    /// Announce a namespace attribute change to connected hosts.
-    ///
-    /// Fails only when nobody is listening, which is the common single-node
-    /// case — not an error.
-    fn notify_ns_changed(&self, nsid: u32) {
-        let _ = self.ns_changed.send(nsid);
+    /// Add a namespace to the default subsystem at runtime — no `&mut self`,
+    /// so this works on a target already shared behind an `Arc` and serving
+    /// traffic. Connected hosts are notified, so the namespace shows up
+    /// without a reconnect. False when the NSID holds another device, or the
+    /// device is already served under another NSID.
+    pub async fn add_namespace_dynamic(&self, nsid: u32, device: Arc<dyn BlockDevice>) -> bool {
+        self.default.add_namespace_at(nsid, device, false).await
     }
 
-    /// Add a namespace at the lowest unused ID and answer the ID — chosen and
-    /// taken under one lock. Choosing with [`next_free_nsid`] and then adding
-    /// let two attaches at once pick the same ID; the second insert replaced
-    /// the first, and both volumes' attach URIs named one namespace: each read
-    /// the other's writes (found by the long test suite, #139).
+    /// Remove a namespace of the default subsystem. True if it existed.
+    pub async fn remove_namespace(&self, nsid: u32) -> bool {
+        self.default.remove_namespace(nsid).await
+    }
+
+    /// See [`Subsystem::add_namespace_next`]; the default subsystem.
     pub async fn add_namespace_next(&self, device: Arc<dyn BlockDevice>) -> u32 {
-        let nsid = {
-            let mut ns = self.namespaces.write().await;
-            let nsid = (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1);
-            ns.insert(nsid, device);
-            nsid
-        };
-        self.notify_ns_changed(nsid);
-        nsid
+        self.default.add_namespace_next(device, false).await
     }
 
-    /// Lowest unused namespace ID. NSID 0 is reserved by the spec. Only a
-    /// hint when anything else may be adding: use [`add_namespace_next`].
+    /// Lowest unused namespace ID of the default subsystem. Only a hint when
+    /// anything else may be adding: use [`add_namespace_next`].
     pub async fn next_free_nsid(&self) -> u32 {
-        let ns = self.namespaces.read().await;
-        (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1)
+        self.default.next_free_nsid().await
     }
 
-    /// List active namespace IDs, sorted.
+    /// Active namespace IDs of the default subsystem, sorted.
     pub async fn list_namespaces(&self) -> Vec<u32> {
-        let mut ids: Vec<u32> = self.namespaces.read().await.keys().copied().collect();
-        ids.sort_unstable();
-        ids
+        self.default.list_namespaces().await
     }
 
-    /// Number of active namespaces.
+    /// Number of namespaces of the default subsystem.
     pub async fn namespace_count(&self) -> usize {
-        self.namespaces.read().await.len()
+        self.default.namespace_count().await
     }
 
-    /// Resolve a namespace to its backing device, cloning the `Arc` so the
-    /// lock is never held across I/O.
+    #[cfg(test)]
     async fn namespace(&self, nsid: u32) -> Option<Arc<dyn BlockDevice>> {
-        self.namespaces.read().await.get(&nsid).cloned()
+        self.default.namespace(nsid).await.map(|n| n.device)
     }
 
     /// Start accepting connections.
@@ -269,12 +496,15 @@ impl NvmeofTarget {
         // Step 1: ICReq/ICResp handshake
         let (hdgst, ddgst) = self.handle_ic_handshake(&mut reader, &mut writer).await?;
 
-        // Step 2: Fabric Connect → determine admin vs I/O queue
-        let (cntlid, qid, is_discovery) =
-            self.handle_fabric_connect(&mut reader, &mut writer, hdgst).await?;
+        // Step 2: Fabric Connect → which subsystem, which queue, and whether
+        // this host is let in at all.
+        let (cntlid, qid, mut session) =
+            self.handle_fabric_connect(&mut reader, &mut writer, hdgst, peer).await?;
         tracing::info!(
-            "NVMe-oF controller {cntlid} connected from {peer}, QID={qid}{}",
-            if is_discovery { " (discovery)" } else { "" }
+            "NVMe-oF controller {cntlid} connected from {peer} ({}), QID={qid}{}{}",
+            session.hostnqn,
+            if session.sub.is_none() { " (discovery)" } else { "" },
+            if session.auth.is_some() { ", authenticating" } else { "" },
         );
 
         // Step 3: Command loop. The admin queue gets its own loop because it
@@ -282,9 +512,9 @@ impl NvmeofTarget {
         // moment a namespace changes, not just when the next command arrives.
         let mut props = ControllerProperties::new();
         if qid == 0 {
-            self.admin_loop(reader, &mut writer, cntlid, is_discovery, &mut props, hdgst, ddgst).await
+            self.admin_loop(reader, &mut writer, cntlid, &mut session, &mut props, hdgst, ddgst).await
         } else {
-            self.command_loop(&mut reader, &mut writer, qid, cntlid, is_discovery, &mut props, hdgst, ddgst).await
+            self.command_loop(&mut reader, &mut writer, qid, cntlid, &mut session, &mut props, hdgst, ddgst).await
         }
     }
 
@@ -302,7 +532,7 @@ impl NvmeofTarget {
         reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
         writer: &mut W,
         cntlid: u16,
-        is_discovery: bool,
+        session: &mut Session,
         props: &mut ControllerProperties,
         hdgst: bool,
         ddgst: bool,
@@ -333,7 +563,9 @@ impl NvmeofTarget {
             }
         });
 
-        let mut events = self.ns_changed.subscribe();
+        // A discovery connection has no namespaces to hear about; it listens
+        // on the default subsystem's stream, where nothing it acts on arrives.
+        let mut events = session.sub.as_ref().unwrap_or(&self.default).ns_changed.subscribe();
         // AERs the host has posted that we have not answered yet.
         let mut held_aers: VecDeque<u16> = VecDeque::new();
         // Namespaces changed since the host last read the log page.
@@ -352,7 +584,12 @@ impl NvmeofTarget {
                     let cid = sqe.cid();
 
                     if opcode == NVME_FABRIC_OPC {
-                        self.handle_fabric_cmd(&sqe, &data, writer, props, hdgst).await?;
+                        self.handle_fabric_cmd(&sqe, &data, writer, props, session, hdgst, ddgst).await?;
+                        continue;
+                    }
+                    if session.locked() {
+                        let cqe = NvmeCqe::error_dnr(cid, 0, 0, 1, SC_AUTH_REQUIRED);
+                        pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
                         continue;
                     }
 
@@ -380,7 +617,7 @@ impl NvmeofTarget {
                             pdu::write_c2h_data(writer, cid, 0, &page, true, true, hdgst, ddgst).await?;
                         }
                         _ => {
-                            self.handle_admin_cmd(&sqe, writer, cntlid, is_discovery, hdgst, ddgst).await?;
+                            self.handle_admin_cmd(&sqe, writer, cntlid, session, hdgst, ddgst).await?;
                         }
                     }
                 }
@@ -391,6 +628,9 @@ impl NvmeofTarget {
                         // rescan everything rather than trust a partial list.
                         Err(RecvError::Lagged(_)) => { overflow = true; }
                         Err(RecvError::Closed) => continue,
+                    }
+                    if session.sub.is_none() {
+                        continue;
                     }
                     if let Some(cid) = held_aers.pop_front() {
                         write_ns_changed_aen(writer, cid, hdgst).await?;
@@ -441,7 +681,8 @@ impl NvmeofTarget {
         reader: &mut R,
         writer: &mut W,
         hdgst: bool,
-    ) -> std::io::Result<(u16, u16, bool)>
+        peer: SocketAddr,
+    ) -> std::io::Result<(u16, u16, Session)>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
@@ -464,24 +705,44 @@ impl NvmeofTarget {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Connect data")
         })?;
 
-        // Validate NQN (allow discovery NQN or our subsystem NQN)
-        if connect.subnqn != self.config.nqn && connect.subnqn != discovery::DISCOVERY_NQN {
-            tracing::warn!("NVMe-oF: unknown subsystem NQN '{}'", connect.subnqn);
-            let cqe = NvmeCqe::error(sqe.cid(), 0, 0, 0, 0x02);
-            pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "unknown NQN"));
-        }
-
         let qid = fab.connect_qid();
-        let cntlid = self.next_cntlid.fetch_add(1, Ordering::Relaxed);
         let is_discovery = connect.subnqn == discovery::DISCOVERY_NQN;
 
+        let mut session = Session { sub: None, hostnqn: connect.hostnqn.clone(), auth: None };
+        if !is_discovery {
+            // A subsystem this target has, or nothing.
+            let Some(sub) = self.subsystem(&connect.subnqn) else {
+                tracing::warn!("NVMe-oF: {peer} ({}) asked for unknown subsystem '{}'", connect.hostnqn, connect.subnqn);
+                let cqe = NvmeCqe::error_dnr(sqe.cid(), 0, 0, 1, 0x80); // Connect Invalid Parameters
+                pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "unknown NQN"));
+            };
+            // And a host it lets in. The host NQN alone is a claim anyone can
+            // make, which is what a key is for.
+            let admitted = sub.access.read().unwrap_or_else(|e| e.into_inner()).admits(&connect.hostnqn);
+            let Some(key) = admitted else {
+                tracing::warn!(
+                    "NVMe-oF: refused {peer}: host '{}' is not allowed on '{}'",
+                    connect.hostnqn, connect.subnqn
+                );
+                let cqe = NvmeCqe::error_dnr(sqe.cid(), 0, 0, 1, SC_CONNECT_INVALID_HOST);
+                pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "host not allowed"));
+            };
+            session.auth = key.map(|k| auth::ControllerAuth::new(k, &connect.hostnqn, &connect.subnqn));
+            session.sub = Some(sub);
+        }
+
+        let cntlid = self.next_cntlid.fetch_add(1, Ordering::Relaxed);
         let mut cqe = NvmeCqe::success(sqe.cid(), 0, 0);
-        cqe.set_dw0(cntlid as u32); // CNTLID in DW0 of connect response
+        // CNTLID in DW0 of the connect response, and ATR when this queue has
+        // to authenticate before anything else.
+        let atr = if session.auth.is_some() { CONNECT_AUTHREQ_ATR } else { 0 };
+        cqe.set_dw0(cntlid as u32 | atr);
         pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
 
         tracing::debug!("NVMe-oF Connect: host='{}', sub='{}', qid={qid}, cntlid={cntlid}", connect.hostnqn, connect.subnqn);
-        Ok((cntlid, qid, is_discovery))
+        Ok((cntlid, qid, session))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -491,7 +752,7 @@ impl NvmeofTarget {
         writer: &mut W,
         qid: u16,
         cntlid: u16,
-        is_discovery: bool,
+        session: &mut Session,
         props: &mut ControllerProperties,
         hdgst: bool,
         ddgst: bool,
@@ -528,28 +789,42 @@ impl NvmeofTarget {
             let cid = sqe.cid();
 
             if opcode == NVME_FABRIC_OPC {
-                self.handle_fabric_cmd(&sqe, &data, writer, props, hdgst).await?;
+                self.handle_fabric_cmd(&sqe, &data, writer, props, session, hdgst, ddgst).await?;
+            } else if session.locked() {
+                let cqe = NvmeCqe::error_dnr(cid, 0, 0, 1, SC_AUTH_REQUIRED);
+                pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
             } else if qid == 0 {
                 // Admin queue
-                self.handle_admin_cmd(&sqe, writer, cntlid, is_discovery, hdgst, ddgst).await?;
+                self.handle_admin_cmd(&sqe, writer, cntlid, session, hdgst, ddgst).await?;
             } else {
                 // I/O queue
-                self.handle_io_cmd(&sqe, &data, reader, writer, cid, &mut pending, hdgst, ddgst)
+                self.handle_io_cmd(&sqe, &data, reader, writer, cid, session, &mut pending, hdgst, ddgst)
                     .await?;
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_fabric_cmd<W: AsyncWriteExt + Unpin>(
         &self,
         sqe: &NvmeSqe,
-        _data: &[u8],
+        data: &[u8],
         writer: &mut W,
         props: &mut ControllerProperties,
+        session: &mut Session,
         hdgst: bool,
+        ddgst: bool,
     ) -> std::io::Result<()> {
         let fab = FabricCmd::from_sqe(sqe).unwrap();
         let cid = sqe.cid();
+
+        if session.locked()
+            && fab.fctype != auth::FCTYPE_AUTH_SEND
+            && fab.fctype != auth::FCTYPE_AUTH_RECEIVE
+        {
+            let cqe = NvmeCqe::error_dnr(cid, 0, 0, 1, SC_AUTH_REQUIRED);
+            return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+        }
 
         match fab.fctype {
             FCTYPE_PROPERTY_GET => {
@@ -576,6 +851,46 @@ impl NvmeofTarget {
                 let cqe = NvmeCqe::success(cid, 0, 0);
                 pdu::write_capsule_resp(writer, &cqe, hdgst).await
             }
+            auth::FCTYPE_AUTH_SEND | auth::FCTYPE_AUTH_RECEIVE => {
+                // CDW10: SPSP0 in byte 1, SPSP1 in byte 2, SECP in byte 3;
+                // CDW11: the transfer (send) or allocation (receive) length.
+                let cdw10 = sqe.cdw10();
+                let (spsp0, spsp1, secp) = ((cdw10 >> 8) as u8, (cdw10 >> 16) as u8, (cdw10 >> 24) as u8);
+                let len = sqe.cdw11() as usize;
+                let Some(chap) = session.auth.as_mut() else {
+                    // Nothing to authenticate against on this queue.
+                    let cqe = NvmeCqe::error_dnr(cid, 0, 0, 0, 0x02);
+                    return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+                };
+                if secp != auth::SECP_DHCHAP || spsp0 != 1 || spsp1 != 1 || len == 0 || len > 8192 {
+                    let cqe = NvmeCqe::error_dnr(cid, 0, 0, 0, 0x02);
+                    return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+                }
+                if fab.fctype == auth::FCTYPE_AUTH_SEND {
+                    chap.send(&data[..len.min(data.len())]);
+                    let cqe = NvmeCqe::success(cid, 0, 0);
+                    pdu::write_capsule_resp(writer, &cqe, hdgst).await
+                } else {
+                    let r = chap.receive(len);
+                    pdu::write_c2h_data(writer, cid, 0, &r.data, true, true, hdgst, ddgst).await?;
+                    if r.fatal {
+                        writer.flush().await?;
+                        tracing::warn!(
+                            "NVMe-oF: host '{}' failed DH-HMAC-CHAP on '{}'",
+                            session.hostnqn,
+                            session.sub.as_ref().map(|s| s.nqn.as_str()).unwrap_or("")
+                        );
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "authentication failed",
+                        ));
+                    }
+                    if chap.authenticated() {
+                        tracing::debug!("NVMe-oF: host '{}' authenticated", session.hostnqn);
+                    }
+                    Ok(())
+                }
+            }
             _ => {
                 tracing::debug!("unsupported fabric fctype: {}", fab.fctype);
                 let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x01);
@@ -589,34 +904,40 @@ impl NvmeofTarget {
         sqe: &NvmeSqe,
         writer: &mut W,
         cntlid: u16,
-        is_discovery: bool,
+        session: &Session,
         hdgst: bool,
         ddgst: bool,
     ) -> std::io::Result<()> {
         let opcode = sqe.opcode();
         let cid = sqe.cid();
+        let is_discovery = session.sub.is_none();
 
         match opcode {
             admin::ADMIN_IDENTIFY => {
                 let cns = (sqe.cdw10() & 0xFF) as u8;
                 let nsid = sqe.nsid();
+                let ns_of = |nsid| async move {
+                    match session.sub.as_ref() {
+                        Some(s) => s.namespace(nsid).await,
+                        None => None,
+                    }
+                };
 
                 let data = match cns {
                     admin::CNS_CONTROLLER => {
                         let serial = format!("SB{cntlid:04X}");
                         // A connection made to the discovery NQN must identify
                         // as a discovery controller under that NQN.
-                        let subnqn = if is_discovery {
-                            discovery::DISCOVERY_NQN
-                        } else {
-                            &self.config.nqn
+                        let (subnqn, count) = match session.sub.as_ref() {
+                            None => (discovery::DISCOVERY_NQN, 0),
+                            Some(s) => (s.nqn.as_str(), s.namespace_count().await as u32),
                         };
                         let mut d = admin::identify_controller(
                             subnqn,
                             &serial,
                             "StormBlock NVMe-oF",
                             "1.0.0",
-                            self.namespace_count().await as u32,
+                            count,
                             is_discovery,
                         );
                         // Set CNTLID
@@ -624,8 +945,14 @@ impl NvmeofTarget {
                         d
                     }
                     admin::CNS_NAMESPACE => {
-                        match self.namespace(nsid).await {
-                            Some(dev) => admin::identify_namespace(&dev),
+                        match ns_of(nsid).await {
+                            Some(ns) => {
+                                let mut d = admin::identify_namespace(&ns.device);
+                                if ns.read_only {
+                                    d[admin::NSATTR_OFFSET] |= admin::NSATTR_WRITE_PROTECTED;
+                                }
+                                d
+                            }
                             None => {
                                 let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B); // NS Not Ready
                                 return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
@@ -633,12 +960,16 @@ impl NvmeofTarget {
                         }
                     }
                     admin::CNS_ACTIVE_NS_LIST => {
-                        admin::active_ns_list(&self.list_namespaces().await)
+                        let list = match session.sub.as_ref() {
+                            Some(s) => s.list_namespaces().await,
+                            None => Vec::new(),
+                        };
+                        admin::active_ns_list(&list)
                     }
                     admin::CNS_NS_DESC_LIST => {
-                        match self.namespace(nsid).await {
-                            Some(dev) => admin::identify_ns_desc_list(
-                                dev.id().uuid.as_bytes(),
+                        match ns_of(nsid).await {
+                            Some(ns) => admin::identify_ns_desc_list(
+                                ns.device.id().uuid.as_bytes(),
                             ),
                             None => {
                                 let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B);
@@ -665,15 +996,22 @@ impl NvmeofTarget {
                 // first, then the entries at their offset.
                 let lpo = (sqe.cdw12() as u64) | ((sqe.cdw13() as u64) << 32);
 
-                // Log page 0x70 = Discovery Log Page
+                // Log page 0x70 = Discovery Log Page: only the subsystems the
+                // asking host may connect to, so a host that has been given
+                // nothing is told of nothing (#210).
                 let data = if lid == 0x70 {
-                    let entries = vec![discovery::DiscoveryEntry {
-                        subnqn: self.config.nqn.clone(),
-                        traddr: self.config.advertised_addr.unwrap_or(self.config.listen_addr),
-                        portid: 1,
-                        cntlid: 0xFFFF,
-                        subsys_type: discovery::SubsysType::NvmeSubsystem,
-                    }];
+                    let entries: Vec<_> = self
+                        .subsystems()
+                        .into_iter()
+                        .filter(|s| s.admits(&session.hostnqn))
+                        .map(|s| discovery::DiscoveryEntry {
+                            subnqn: s.nqn.clone(),
+                            traddr: self.advertised(),
+                            portid: 1,
+                            cntlid: 0xFFFF,
+                            subsys_type: discovery::SubsysType::NvmeSubsystem,
+                        })
+                        .collect();
                     let log = discovery::build_discovery_log_page(&entries);
                     let start = (lpo as usize).min(log.len());
                     let mut out = log[start..].to_vec();
@@ -749,6 +1087,7 @@ impl NvmeofTarget {
         reader: &mut R,
         writer: &mut W,
         cid: u16,
+        session: &Session,
         pending: &mut std::collections::VecDeque<(NvmeSqe, Vec<u8>)>,
         hdgst: bool,
         ddgst: bool,
@@ -760,14 +1099,21 @@ impl NvmeofTarget {
         let nsid = sqe.nsid();
         // Clone the Arc out of the map so the namespace lock is not held
         // across the I/O below (and a concurrent add/remove cannot block it).
-        let device = match self.namespace(nsid).await {
-            Some(dev) => dev,
-            None => {
-                let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B);
-                return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
-            }
+        let ns = match session.sub.as_ref() {
+            Some(s) => s.namespace(nsid).await,
+            None => None,
         };
-        let device = &device;
+        let Some(ns) = ns else {
+            let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B);
+            return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+        };
+        // A write-protected namespace refuses anything that changes it,
+        // before any R2T asks the host for data it would only throw away.
+        if ns.read_only && matches!(sqe.opcode(), io::IO_WRITE | io::IO_DATASET_MGMT | io::IO_WRITE_ZEROES) {
+            let cqe = NvmeCqe::error(cid, 0, 0, 1, 0x20); // Namespace is Write Protected
+            return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+        }
+        let device = &ns.device;
 
         // Writes larger than the in-capsule allowance arrive without their
         // data: send an R2T for the remainder and collect H2CData PDUs,
@@ -932,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn namespace_changes_are_broadcast() {
         let target = Arc::new(NvmeofTarget::new(NvmeofConfig::default()));
-        let mut events = target.ns_changed.subscribe();
+        let mut events = target.default.ns_changed.subscribe();
 
         let (dev, path) = test_device("evt").await;
         target.add_namespace_dynamic(3, dev).await;

@@ -593,6 +593,22 @@ pub struct NvmeofExportConfig {
     /// exports that are the intended door.
     #[serde(default = "default_export_drives")]
     pub export_drives: bool,
+    /// The shared subsystem (`nqn`) admits any host — the behaviour before
+    /// #210, when pve could read every golden on forge by connecting. Off by
+    /// default: volumes are served to the host an attach names (`host_nqn`),
+    /// each from a subsystem of its own.
+    #[serde(default)]
+    pub allow_any_host: bool,
+    /// Host NQNs the shared subsystem admits while it is not open to all.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Give every host a DH-HMAC-CHAP secret, asked for or not.
+    #[serde(default)]
+    pub require_dhchap: bool,
+    /// Host NQN a boot host presents; `{name}` is its name. Default
+    /// `nqn.2026-09.lo.storm:host-{name}` — what stormbootx composes.
+    #[serde(default)]
+    pub boothost_host_nqn: Option<String>,
 }
 
 #[cfg(feature = "nvmeof")]
@@ -708,6 +724,10 @@ impl StormBlockConfig {
                 listen_addr: default_nvmeof_addr(),
                 nqn: default_nvmeof_nqn(),
                 export_drives: default_export_drives(),
+                allow_any_host: false,
+                allowed_hosts: Vec::new(),
+                require_dhchap: false,
+                boothost_host_nqn: None,
             });
             // `..existing` rather than a fresh struct: rebuilding it field by
             // field silently dropped everything the overrides did not mention,

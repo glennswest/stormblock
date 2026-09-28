@@ -6,6 +6,8 @@ pub mod config;
 pub mod metrics;
 pub mod discovery;
 pub mod ublk_export;
+#[cfg(feature = "nvmeof")]
+pub mod nvme_hosts;
 #[cfg(feature = "ui")]
 pub mod ui;
 
@@ -293,6 +295,9 @@ pub struct AppState {
     /// Live NVMe-oF target, so exports can add namespaces at runtime (#26).
     #[cfg(feature = "nvmeof")]
     pub nvmeof_target: tokio::sync::RwLock<Option<Arc<crate::target::nvmeof::NvmeofTarget>>>,
+    /// Per-host NVMe subsystems and who may reach them (#210).
+    #[cfg(feature = "nvmeof")]
+    pub nvme_hosts: tokio::sync::Mutex<nvme_hosts::NvmeHosts>,
     /// Live LUN table, keyed by LUN ID for O(1) lookup at thousands of
     /// LUNs (#24).
     #[cfg(feature = "iscsi")]
@@ -415,6 +420,8 @@ impl AppState {
             iscsi_target: tokio::sync::RwLock::new(None),
             #[cfg(feature = "nvmeof")]
             nvmeof_target: tokio::sync::RwLock::new(None),
+            #[cfg(feature = "nvmeof")]
+            nvme_hosts: tokio::sync::Mutex::new(nvme_hosts::NvmeHosts::default()),
             #[cfg(feature = "iscsi")]
             lun_entries: tokio::sync::RwLock::new(HashMap::new()),
             #[cfg(feature = "cluster")]

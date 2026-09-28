@@ -1059,6 +1059,7 @@ impl GoldenSource {
             nqn: nqn.to_string(),
             nsid,
             host_nqn: None,
+            dhchap: None,
         };
         let dev = crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec)
             .await

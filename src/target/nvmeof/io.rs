@@ -53,6 +53,7 @@ fn io_status(e: &crate::drive::DriveError, writing: bool) -> (u8, u8) {
 pub const IO_FLUSH: u8 = 0x00;
 pub const IO_WRITE: u8 = 0x01;
 pub const IO_READ: u8 = 0x02;
+pub const IO_WRITE_ZEROES: u8 = 0x08;
 pub const IO_DATASET_MGMT: u8 = 0x09;
 
 /// Result of an NVMe I/O command.

@@ -92,6 +92,10 @@ pub struct NvmeTcpSpec {
     /// [`default_host_nqn`], which is the usual case — a node has one
     /// identity, not one per volume.
     pub host_nqn: Option<String>,
+    /// The DH-HMAC-CHAP secret to answer with when the target asks (#210).
+    /// Never part of the URI — a URI is logged, listed and persisted. `None`
+    /// falls back to `$STORMBLOCK_DHCHAP_SECRET`.
+    pub dhchap: Option<crate::target::nvmeof::auth::DhchapKey>,
 }
 
 impl NvmeTcpSpec {
@@ -130,6 +134,7 @@ impl NvmeTcpSpec {
             nqn: nqn.to_string(),
             nsid,
             host_nqn,
+            dhchap: None,
         })
     }
 
@@ -140,6 +145,16 @@ impl NvmeTcpSpec {
             u.push_str(h);
         }
         u
+    }
+
+    /// The secret to answer DH-HMAC-CHAP with, if there is one.
+    pub fn effective_dhchap(&self) -> Option<crate::target::nvmeof::auth::DhchapKey> {
+        self.dhchap.clone().or_else(|| {
+            std::env::var("STORMBLOCK_DHCHAP_SECRET")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .and_then(|s| crate::target::nvmeof::auth::DhchapKey::parse(&s).ok())
+        })
     }
 
     /// The name to present on this connection.
@@ -191,8 +206,10 @@ struct Conn {
 }
 
 impl Conn {
-    /// TCP connect + ICReq/ICResp + Fabric Connect for `qid`.
-    async fn establish(addr: &str, nqn: &str, host_nqn: &str, qid: u16) -> io::Result<Self> {
+    /// TCP connect + ICReq/ICResp + Fabric Connect for `qid`, and
+    /// DH-HMAC-CHAP when the target asks for it.
+    async fn establish(spec: &NvmeTcpSpec, qid: u16) -> io::Result<Self> {
+        let (addr, nqn, host_nqn) = (spec.addr.as_str(), spec.nqn.as_str(), spec.effective_host_nqn());
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
         let (reader, writer) = stream.into_split();
@@ -202,8 +219,59 @@ impl Conn {
             cid: 1,
         };
         conn.ic_handshake().await?;
-        conn.fabric_connect_as(nqn, host_nqn, qid).await?;
+        let dw0 = conn.fabric_connect_as(nqn, host_nqn, qid).await?;
+        if dw0 & crate::target::nvmeof::CONNECT_AUTHREQ_ATR != 0 {
+            let key = spec.effective_dhchap().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("{nqn} requires DH-HMAC-CHAP for {host_nqn}, and no secret was given"),
+                )
+            })?;
+            conn.authenticate(&key, host_nqn, nqn).await?;
+        }
         Ok(conn)
+    }
+
+    /// Authentication Send (`send`) or Receive: SECP 0xE9, SPSP 1/1.
+    fn auth_sqe(&mut self, send: bool, len: usize) -> [u8; 64] {
+        use crate::target::nvmeof::auth;
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = NVME_FABRIC_OPC;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        sqe[4] = if send { auth::FCTYPE_AUTH_SEND } else { auth::FCTYPE_AUTH_RECEIVE };
+        // SGL: in-capsule data block (offset) out, transport data block in.
+        sqe[32..36].copy_from_slice(&(len as u32).to_le_bytes());
+        sqe[39] = if send { 0x01 } else { 0x5A };
+        sqe[41] = 1; // SPSP0
+        sqe[42] = 1; // SPSP1
+        sqe[43] = auth::SECP_DHCHAP;
+        sqe[44..48].copy_from_slice(&(len as u32).to_le_bytes());
+        sqe
+    }
+
+    /// The host's side of DH-HMAC-CHAP: negotiate, answer the challenge,
+    /// read the verdict.
+    async fn authenticate(
+        &mut self,
+        key: &crate::target::nvmeof::auth::DhchapKey,
+        host_nqn: &str,
+        nqn: &str,
+    ) -> io::Result<()> {
+        use crate::target::nvmeof::auth;
+        let denied = |e: String| io::Error::new(io::ErrorKind::PermissionDenied, e);
+        let tid = (HOSTID_COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFFFF) as u16;
+        let neg = auth::host_negotiate(tid);
+        let sqe = self.auth_sqe(true, neg.len());
+        self.cmd_write_data(&sqe, &neg).await?;
+        let sqe = self.auth_sqe(false, 256);
+        let challenge = self.cmd_read_data(&sqe, 256).await?;
+        let reply = auth::host_reply(&challenge, key, host_nqn, nqn).map_err(denied)?;
+        let sqe = self.auth_sqe(true, reply.len());
+        self.cmd_write_data(&sqe, &reply).await?;
+        let sqe = self.auth_sqe(false, 64);
+        let verdict = self.cmd_read_data(&sqe, 64).await?;
+        auth::host_check_success1(&verdict).map_err(denied)
     }
 
     fn next_cid(&mut self) -> u16 {
@@ -235,12 +303,13 @@ impl Conn {
         Ok(())
     }
 
+    /// Fabric Connect; answers the response's DW0 (CNTLID and AUTHREQ).
     async fn fabric_connect_as(
         &mut self,
         nqn: &str,
         host_nqn: &str,
         qid: u16,
-    ) -> io::Result<()> {
+    ) -> io::Result<u32> {
         let cid = self.next_cid();
         let mut sqe = [0u8; 64];
         sqe[0] = NVME_FABRIC_OPC;
@@ -272,7 +341,7 @@ impl Conn {
                 format!("fabric connect qid={qid} failed: status {:#x}", cqe_status(&cqe)),
             ));
         }
-        Ok(())
+        Ok(u32::from_le_bytes(cqe.raw[0..4].try_into().unwrap()))
     }
 
     async fn send_capsule(&mut self, sqe: &[u8; 64], data: &[u8]) -> io::Result<()> {
@@ -476,7 +545,7 @@ impl NvmeofDevice {
             spec.nqn,
             spec.nsid
         );
-        let mut admin = Conn::establish(&spec.addr, &spec.nqn, spec.effective_host_nqn(), 0)
+        let mut admin = Conn::establish(spec, 0)
             .await
             .map_err(DriveError::Io)?;
         let ctrl = admin.identify(CNS_CONTROLLER, 0).await.map_err(DriveError::Io)?;
@@ -509,7 +578,7 @@ impl NvmeofDevice {
         );
         drop(admin);
 
-        let io_conn = Conn::establish(&spec.addr, &spec.nqn, spec.effective_host_nqn(), 1)
+        let io_conn = Conn::establish(spec, 1)
             .await
             .map_err(DriveError::Io)?;
 
@@ -543,7 +612,7 @@ impl NvmeofDevice {
         let mut guard = self.conn.lock().await;
         if guard.is_none() {
             *guard = Some(
-                Conn::establish(&self.spec.addr, &self.spec.nqn, self.spec.effective_host_nqn(), 1)
+                Conn::establish(&self.spec, 1)
                     .await
                     .map_err(DriveError::Io)?,
             );
