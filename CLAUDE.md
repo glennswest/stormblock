@@ -148,6 +148,57 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP (2026-09-28, #210, P0) — IN PROGRESS
+
+pve connected to forge's `:4420` with no arrangement and saw 71 namespaces:
+every golden, every release, every machine's boot clone. Owner: a host sees
+only the clones attached to it; goldens never show up. Found while reading:
+`/v1` attach records (`nvme_nsids`) are persisted but never put back on the
+target at restart, so a recorded NSID can later be handed to another volume
+and one volume can sit at two NSIDs — the kernel's "duplicate IDs in
+subsystem" (the NGUID is the volume id).
+
+Design:
+- **Target**: many subsystems on one listener. Each has namespaces (with a
+  read-only flag: NSATTR write-protected, writes refused) and an access list:
+  any host, or named host NQNs each with an optional DH-HMAC-CHAP key.
+  Connect to an unknown subsystem is refused; a host not on the list gets
+  Connect Invalid Host (SCT 1/SC 0x84, DNR). Discovery lists only what the
+  asking host may connect to. One volume is never two NSIDs of one subsystem.
+- **DH-HMAC-CHAP** (target, and our initiator): NULL DH group, SHA-256/384/512,
+  DHHC-1 secrets, unidirectional; ATR in the Connect response on every queue;
+  nothing but Auth Send/Receive until authenticated. Wire format read from
+  Linux's `drivers/nvme/{host,target,common}/auth.c`. HMAC written over `sha2`
+  (no new crate), pinned by RFC 4231 vectors.
+- **Engine**: attach (`/v1`, `/api/v1/volumes/{id}/attach`, exports) takes
+  `host_nqn`; the volume goes into `<nqn>:host:<id>` whose only allowed host
+  is that NQN. `dhchap: true` (or `[nvmeof] require_dhchap`) mints the host a
+  secret, returned in the reply, kept in `<data_dir>/nvme_hosts.json` (0600)
+  with the subsystems and namespaces, restored at start.
+- **The shared subsystem is closed**: `[nvmeof] allowed_hosts` (default none);
+  `allow_any_host = true` reopens it and says so on every boot. An attach
+  without `host_nqn` on a closed node is refused (400). Sealed goldens never go
+  on the shared subsystem, and only read-only to a named host; `mode=ro` is a
+  read-only namespace.
+- **Boot claims**: stormbootx presents `nqn.2026-09.lo.storm:host-<name>`
+  (`attach.host` from the reply), so the engine binds the clone to that NQN
+  (and the host's aliases) without a firmware change: subsystem
+  `<nqn>:host:<name>`, `[nvmeof] boothost_host_nqn` template.
+- Out of scope, filed: `/serve/v1` per-volume subsystems (RouterOS); callers
+  sending `host_nqn`/secrets (stormcentral, stormstorage, rustkube-node, csi,
+  stormvm, stormbootx DH-HMAC-CHAP).
+
+- [ ] target: subsystems, access, Connect Invalid Host, discovery per host,
+      read-only namespaces, no volume twice
+- [ ] DH-HMAC-CHAP: `target/nvmeof/auth.rs` (secret, HMAC, transform,
+      responses), target state machine, initiator side in `nvmeof_dev`
+- [ ] engine: host subsystems store + restore, `host_nqn`/`dhchap` on
+      attach/exports, closed shared subsystem, sealed rules, `nvme_nsids`
+      restored at start, boothost claim bound to its host
+- [ ] tests (fresh host sees zero; a host sees only its own; wrong/no secret
+      refused; restart keeps the addresses), docs (auth.md, README),
+      CHANGELOG; full suite on dev; file the client issues; close
+
 ### Boot intent beside boothost/<tag> (2026-09-27, #148, stormbootx#11) — IN PROGRESS
 
 stormbootx v0.4.0 reads `GET /api/v1/synonyms/boothost/<tag>/intent` before
