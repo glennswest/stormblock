@@ -4242,7 +4242,9 @@ enum SeedWhen {
 /// attached its own disk, restored 75 volumes, dropped 5712 extent mappings
 /// pointing into the appliance's slabs, and died on
 ///
-///     Error: volume 'stormcert-data' not found in slab metadata
+/// ```text
+/// Error: volume 'stormcert-data' not found in slab metadata
+/// ```
 ///
 /// The window where copying it *is* safe is this one. `boot-local` has
 /// attached the slabs and resolved the volumes, and it has not exported a
