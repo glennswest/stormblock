@@ -285,7 +285,11 @@ pub async fn attach_for_boothost(
     let pol = policy(state);
     let nqn = boothost_subsystem_nqn(target.default_subsystem().nqn(), name);
     let hosts = pol.boothost_nqns(name, aliases);
-    let (nsid, _) = attach_into(state, &target, &nqn, &hosts, Some(name), volume, false, pol.require_dhchap).await?;
+    // No secret, even under `require_dhchap`: the claim is unauthenticated
+    // and firmware has nowhere to be handed one, so a secret here would
+    // stop every machine booting. The NQN binding is what a boot has until
+    // a claim can carry a host key (stormcos#35).
+    let (nsid, _) = attach_into(state, &target, &nqn, &hosts, Some(name), volume, false, false).await?;
     Ok((nqn, nsid, hosts))
 }
 

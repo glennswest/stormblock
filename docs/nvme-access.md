@@ -126,7 +126,7 @@ nvme connect -t tcp -a 10.0.0.5 -s 4420 -n nqn.…:host:1f2e… \
 |---|---|---|
 | `allow_any_host` | `false` | the shared subsystem admits any host (the old behaviour; said on every boot) |
 | `allowed_hosts` | `[]` | host NQNs the shared subsystem admits otherwise |
-| `require_dhchap` | `false` | every host of a host subsystem gets a secret |
+| `require_dhchap` | `false` | every host of a host subsystem gets a secret — except boot hosts: a claim is unauthenticated and firmware cannot be handed a secret, so a boot subsystem is bound by NQN only |
 | `boothost_host_nqn` | `nqn.2026-09.lo.storm:host-{name}` | what a boot host presents |
 
 ## Files
