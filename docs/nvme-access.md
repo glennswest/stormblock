@@ -118,6 +118,20 @@ nvme connect -t tcp -a 10.0.0.5 -s 4420 -n nqn.…:host:1f2e… \
   (`drivers/nvme/{common,host,target}/auth.c`); the HMAC is pinned by RFC 4231
   vectors.
 
+## Checked with the Linux kernel as initiator
+
+`ci-nvme-hosts-verify.sh` (run on dev: `sc-build 'bash ci-nvme-hosts-verify.sh'`)
+needs no root. It starts the engine on dev with volumes attached for named
+hosts, then boots dev's own kernel in QEMU from an initramfs holding
+nvme-cli and the nvme-tcp/nvme-auth modules, and runs what an operator would:
+`nvme discover` as a host given nothing (no subsystem listed) and as H1 (its
+own only); `nvme connect` to the shared subsystem and to another host's
+subsystem (the kernel logs *Connect for subsystem … is not allowed*); H1's
+clone read/written and its golden a read-only block device that refuses a
+write; H2 without its secret (`no key`), with another host's (`authentication
+failed`), and with its own (`authenticated with hash hmac(sha256) dhgroup
+null`).
+
 ## Configuration
 
 `[nvmeof]`:
