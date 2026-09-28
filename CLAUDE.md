@@ -148,7 +148,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP (2026-09-28, #210, P0) — DONE (engine side; not yet on a kernel initiator)
+### NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP (2026-09-28, #210, P0) — DONE
 
 pve connected to forge's `:4420` with no arrangement and saw 71 namespaces:
 every golden, every release, every machine's boot clone. Owner: a host sees
@@ -203,8 +203,9 @@ Design:
       build ok. Follow-ups filed: #212 (/serve/v1 open), #213 (drive secret),
       stormstorage#27, stormcentral#143, stormblock-csi#34, stormvm#53,
       rustkube-node#93
-- [ ] not verified here (needs root on a host): Linux `nvme discover` /
-      `nvme connect --dhchap-secret` against it — pve is the check. Rollout:
+- [x] the Linux kernel as initiator, without root: `ci-nvme-hosts-verify.sh`
+      boots dev's 6.17 kernel in QEMU with nvme-cli against an engine on dev,
+      13/13 (discover, refusals, clone rw, golden ro, DH-HMAC-CHAP). Rollout:
       forge needs `allow_any_host = true` until its callers send `host_nqn`,
       or they break; boot claims need nothing. Golden held (#194)
 

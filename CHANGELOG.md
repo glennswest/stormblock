@@ -14,6 +14,7 @@
 - **feat:** `GET /api/v1/volumes/{id}/attach` lists the host subsystems serving a volume; `DELETE …/attach?host_nqn=` withdraws it from one host; a volume served to a host is busy for delete. Host subsystems, hosts, secrets and NSIDs persist in `<data_dir>/nvme_hosts.json` (0600) and are restored before anything is served (#210)
 - **chore:** `.gitignore`'s `target` rule no longer hides `src/target/` (a new file there was silently left out of a commit)
 - **docs:** `docs/nvme-access.md`; README config, ports, exports and files; auth.md points at it (#210)
+- **test:** `ci-nvme-hosts-verify.sh`: the Linux kernel as initiator without root — dev's own kernel in QEMU with nvme-cli and the nvme-tcp/nvme-auth modules runs `nvme discover`/`nvme connect` (with and without `--dhchap-secret`) against an engine on dev; 13 checks (#210)
 - **test:** The 25 in-process integration-test files are one test binary, `tests/it` (each file a module), instead of 25 binaries that each linked the whole engine. Run with cargo-nextest for per-test processes (#209)
 - **test:** Runtime tests move to the `tests-runtime/` workspace crate, outside the routine check: `integration_boot_local`, `integration_flowover_resume`, `integration_image`, `integration_slab_volumes`, `integration_engine_e2e`, `iscsi_blockdev`, `external_iscsi` and `ublk_resize`. They drive the built binary through `STORMBLOCK_BIN`, kernel devices or privileges
 - **refactor:** `src/main.rs` is a wrapper around `stormblock::cli::run`. The command line moved into the library, so it is compiled and tested once
