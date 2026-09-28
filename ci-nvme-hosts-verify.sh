@@ -136,7 +136,7 @@ say "guest initramfs: busybox, nvme-cli, nvme-tcp"
 I="$W/initrd"
 mkdir -p "$I"/{bin,sbin,dev,proc,sys,run,tmp,etc/nvme,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
-for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed; do
+for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed basename cut tr sort; do
     ln -sf busybox "$I/bin/$a"
 done
 cp "$NVME" "$I/bin/nvme"
@@ -201,6 +201,10 @@ if nvme connect $T -n "$SUB1" --hostnqn "$H1" >/tmp/o 2>&1; then
     count=$(for b in /sys/block/nvme*n*; do cat $b/nsid; done 2>/dev/null | wc -l)
     [ "$count" = 2 ] && r h1-sees-two-namespaces PASS || r h1-sees-two-namespaces "FAIL ($count)"
     a=$(dev_of "$NS_A"); g=$(dev_of "$NS_G")
+    echo "GUEST clone nsid $NS_A = /dev/$a, golden nsid $NS_G = /dev/$g"
+    if [ -z "$a" ] || [ -z "$g" ] || [ ! -b "/dev/$a" ] || [ ! -b "/dev/$g" ]; then
+        r h1-block-devices "FAIL (clone '$a', golden '$g')"; a=missing; g=missing
+    fi
     dd if=/dev/urandom of=/tmp/pat bs=4096 count=16 2>/dev/null
     dd if=/tmp/pat of=/dev/$a bs=4096 count=16 oflag=direct 2>/dev/null
     dd if=/dev/$a of=/tmp/back bs=4096 count=16 iflag=direct 2>/dev/null
