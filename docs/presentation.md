@@ -25,7 +25,7 @@ Drives in; thin, copy-on-write, per-volume-redundant volumes out — as local
 block devices (ublk), over NVMe/TCP and over iSCSI. It also builds and boots
 the disks stormcos nodes run from.
 
-v19.4.0 + main · `glennswest/stormblock` · Rust, one static binary
+v20.0.0 · `glennswest/stormblock` · Rust, one static binary
 
 ---
 
@@ -186,8 +186,8 @@ only the slot it touches.
 
 ## Status and the issues that matter
 
-**v19.4.0**, and on main (unreleased, major): boot intent (#148), per-host
-NVMe/TCP subsystems with DH-HMAC-CHAP (#210), `cluster` opt-in (#209). Full
+**v20.0.0**: boot intent (#148), per-host NVMe/TCP subsystems with
+DH-HMAC-CHAP (#210), `cluster` opt-in (#209). Full
 suite green on dev apart from a timing test on a loaded box (#134).
 
 - **Power cuts (#171, P0)**: fsync'd writes were lost on a hard power-off.

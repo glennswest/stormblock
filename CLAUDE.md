@@ -135,15 +135,15 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209, not run anywhere yet: #222)
 
 ## Current State
-**v19.4.0** (2026-09-27; universal boot #200, boothost names #199), with
-unreleased on main: boot intent (#148), the build/test split (#209, `cluster`
-opt-in — BREAKING) and per-host NVMe/TCP subsystems with DH-HMAC-CHAP (#210 —
-BREAKING: the shared subsystem is closed by default). 97k lines in `src/`, 12k
+**v20.0.0** (2026-09-28): boot intent (#148), the build/test split (#209,
+`cluster` opt-in — BREAKING) and per-host NVMe/TCP subsystems with DH-HMAC-CHAP
+(#210 — BREAKING: the shared subsystem is closed by default); before it
+v19.4.0 (universal boot #200, boothost names #199). 97k lines in `src/`, 12k
 in `tests/it/`, 3.5k in `tests-runtime/`, ~920 tests, plus the test container
 crate (`test/`). The full suite (nextest) passes on dev apart from #134 when
 the box is busy; #120 is now in `tests-runtime/`, which nothing runs (#222).
-The owner asked on #148 (2026-09-28) for a release cut from main (major) and
-two forge rollout answers. #171 (power-cut
+v20.0.0 was cut at the owner's request on #148 (2026-09-28); the forge rollout
+(settings, rollback = VM snapshot only) is answered there. #171 (power-cut
 durability) is closed: the on-metal acceptance passed on 2026-09-27 (C2NR0Q2,
 11.48 = v19.2.1 engine and initramfs, 5 cuts, 1500/1500 objects). The
 flow-over resume of v19.2.2 has not met metal yet; that check is #172. The README is the reference for what the code does, rewritten from the code in
@@ -253,8 +253,15 @@ out: that is the owner's call.
 - [x] tests, docs (auth.md, README, boot-hooks.md), CHANGELOG; on dev at
       the fix commit: lib 33/33 (store, auth, handover), integration_synonyms
       24/24, integration_auth 5/5, tests/initramfs-boot-hook.sh all ok
-- [ ] full suite on dev; close. Not verified: a real machine through
-      stormbootx (local skips the claim; install → flow-over → local)
+- [x] full suite at ef7112e on dev: 837/838 (the one is #134); `dist` musl
+      build passes. Released in **v20.0.0** at the owner's request (#148,
+      2026-09-28); rollout answers on #148 (rollback = VM snapshot only: V8
+      metadata; forge needs `require_auth = false` + `allow_any_host = true`;
+      input goldens need stormcentral#143)
+- [ ] owner's decision 2026-09-28: `installed` must come from the first boot
+      off the local disk (#220) — waits on #221 (does the install ticket live
+      in the clone? that is where a pending report would ride to the local
+      boot). Not verified: a real machine through stormbootx
 
 ### Universal boot: a default claim carries a MAC (2026-09-27, #200, P0) — DONE (v19.4.0)
 

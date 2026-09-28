@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [v20.0.0] — 2026-09-28
+
+Major: `cluster` is opt-in (#209), and the shared NVMe/TCP subsystem admits no host by default (#210). Forge rollout settings and rollback: #148.
+
 ### 2026-09-28
 - **docs:** Refreshed from the code since 2026-09-27 (#199, #200, #148, #209, #210). README: the default features (`cluster` opt-in), the build and test commands (nextest, `tests/it`, `tests-runtime`, the `dist` profile, the `ci-*.sh` scenarios), RouterOS marked not shipping (owner), `STORMBLOCK_DHCHAP_SECRET`, per-host NVMe subsystems in the diagram, the TLS backend (ring only), the gaps #212/#213/#217, and the source layout and sizes. That the golden build still uses `--release` rather than `dist` is stormcos#169. auth.md and README say when an install is reported (after `local-boot` lays the disk, before any boot from it — #220). CLAUDE.md: current state, features, RouterOS, TLS, architecture (`cli.rs`, `nvme_hosts.rs`, `auth.rs`, test layout). The deck and `contract/README.md` follow (#223)
 - **BREAKING (security, #210):** NVMe/TCP serves a volume to the host an attach names. Every door that serves over NVMe/TCP (`/api/v1/volumes/{id}/attach`, `/v1` attach, `POST /api/v1/exports`, a non-boot claim) takes `host_nqn`: the volume goes into `<nqn>:host:<id>`, a subsystem whose only allowed host is that NQN. A host that is not allowed gets Connect Invalid Host; discovery lists only what the asking host may connect to. The shared subsystem admits no host unless `[nvmeof] allow_any_host = true` (or `allowed_hosts`), so an attach without `host_nqn` on such a node is refused (400). Before this, anything that reached `:4420` saw every golden, every release and every boot clone, read-write — pve saw 71 namespaces on forge
