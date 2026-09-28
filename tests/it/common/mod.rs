@@ -124,3 +124,11 @@ pub async fn wait_for_listener(addr: SocketAddr) {
     }
     panic!("server at {addr} did not become ready in time");
 }
+
+/// The stormblock binary a runtime test drives (`tests-runtime/`): the built
+/// golden's binary, named by `STORMBLOCK_BIN`. Runtime tests run against what
+/// ships, not against whatever cargo happened to build next to them.
+pub fn stormblock_bin() -> String {
+    std::env::var("STORMBLOCK_BIN")
+        .expect("STORMBLOCK_BIN must name the stormblock binary under test (tests-runtime/ runs against a built binary)")
+}

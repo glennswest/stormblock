@@ -6,8 +6,7 @@
 //! GPT through the engine's own device, and a second disk of the same layout
 //! costs nothing.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;

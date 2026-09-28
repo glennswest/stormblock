@@ -6,8 +6,7 @@
 //! drain of what has no redundancy), is emptied and rebuilt around; a drive
 //! is added and the pool grows.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use serde_json::{json, Value};

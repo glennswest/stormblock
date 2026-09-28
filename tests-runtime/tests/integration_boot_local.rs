@@ -7,8 +7,8 @@
 //! must attach non-destructively, metadata must restore, and the boot volume
 //! must resolve by name or UUID.
 
+#[path = "../../tests/it/common/mod.rs"]
 mod common;
-
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ async fn build_artifact(dir: &TempDir, volume_name: &str) -> (PathBuf, PathBuf, 
 }
 
 fn run_boot_local(args: &[&str]) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+    let out = Command::new(common::stormblock_bin())
         .arg("boot-local")
         .args(args)
         .output()
@@ -71,7 +71,7 @@ fn run_boot_local(args: &[&str]) -> (bool, String) {
 fn boot_local_until(args: &[&str], marker: &str) -> String {
     let out = tempfile::NamedTempFile::new().unwrap();
     let path = out.path().to_path_buf();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+    let mut child = Command::new(common::stormblock_bin())
         .arg("boot-local")
         .args(args)
         .stdout(std::fs::File::create(&path).unwrap())

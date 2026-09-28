@@ -5,8 +5,7 @@
 //! status codes, idempotency guards, and the promise that every clone comes
 //! out with its own filesystem identity.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;

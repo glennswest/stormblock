@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod drive;
 pub mod raid;
 pub mod volume;

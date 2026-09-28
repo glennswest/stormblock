@@ -4,8 +4,7 @@
 //! parts that only exist at the API layer: the offline guard, the two-call
 //! commit shape, and the ledger surviving a restart.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use serde_json::{json, Value};

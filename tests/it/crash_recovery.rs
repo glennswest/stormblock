@@ -1,8 +1,7 @@
 //! Crash recovery tests — journal persistence, extent allocator consistency,
 //! RAID superblock validation.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use tempfile::TempDir;

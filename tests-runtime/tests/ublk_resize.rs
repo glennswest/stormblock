@@ -12,8 +12,8 @@
 
 #![cfg(target_os = "linux")]
 
+#[path = "../../tests/it/common/mod.rs"]
 mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 

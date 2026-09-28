@@ -2,9 +2,7 @@
 //!
 //! FileDevice → RAID 1 → ThinVolume → IscsiTarget → TCP → IscsiInitiator
 
-mod common;
-
-
+use crate::common;
 use stormblock::target::iscsi::IscsiConfig;
 use stormblock::target::iscsi::chap::ChapConfig;
 use common::iscsi_initiator::IscsiInitiator;

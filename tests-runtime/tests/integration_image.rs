@@ -5,6 +5,8 @@
 //! every pallet verifies *inside the image*, and that a pallet copied in from
 //! another image arrives byte for byte.
 
+#[path = "../../tests/it/common/mod.rs"]
+mod common;
 use std::path::Path;
 
 use stormblock::image::{ImageBuilder, ImageFormat, ImageSpec};
@@ -407,7 +409,7 @@ tier = "hot"
     src.read_exact(&mut bytes).unwrap();
     std::fs::write(&slab_file, &bytes).unwrap();
 
-    let cmd = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+    let cmd = Command::new(common::stormblock_bin())
         .args([
             "boot-local",
             "--slab",
@@ -1008,7 +1010,7 @@ tier = "hot"
     // Hand over the whole disk, exactly as the kernel command line does.
     // `--check` resolves the boot volume and exits before any ublk export, so
     // this behaves the same on Linux and macOS.
-    let cmd = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+    let cmd = Command::new(common::stormblock_bin())
         .arg("boot-local")
         .args(["--slab", out.to_str().unwrap()])
         .args(["--volume", "stormpump"])

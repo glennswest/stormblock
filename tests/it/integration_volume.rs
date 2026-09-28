@@ -1,7 +1,6 @@
 //! Volume lifecycle integration tests — create, snapshot, delete, read/write.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use tempfile::TempDir;

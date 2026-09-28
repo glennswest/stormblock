@@ -13,6 +13,8 @@
 //! moved before the "cut". `STORMBLOCK_RESUME_SOURCE` hands `boot-local` the
 //! fresh clone the way a claim would.
 
+#[path = "../../tests/it/common/mod.rs"]
+mod common;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -76,7 +78,7 @@ async fn cut_short(dir: &TempDir) -> (String, String) {
 }
 
 fn boot_local(local: &str, resume_from: Option<&str>) -> (bool, String) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_stormblock"));
+    let mut cmd = Command::new(common::stormblock_bin());
     cmd.args(["boot-local", "--slab", local, "--volume", "root", "--check"])
         .env_remove("STORMBLOCK_BOOTHOST")
         .env("RUST_LOG", "stormblock=info");

@@ -4,8 +4,7 @@
 //! executable spec) against the real axum surface, plus engine-backed COW
 //! verification the mock can't do.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use serde_json::{json, Value};

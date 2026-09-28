@@ -2,8 +2,7 @@
 //!
 //! Starts axum server on ephemeral port, exercises all REST endpoints.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;

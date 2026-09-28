@@ -10,8 +10,8 @@
 //!
 //! Run: cargo test --test external_iscsi -- --ignored --nocapture
 
+#[path = "../../tests/it/common/mod.rs"]
 mod common;
-
 use std::net::SocketAddr;
 
 use common::iscsi_initiator::IscsiInitiator;

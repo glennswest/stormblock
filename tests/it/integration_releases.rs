@@ -11,8 +11,7 @@
 //! it, and a release whose volume went anyway says so rather than failing
 //! obscurely.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;

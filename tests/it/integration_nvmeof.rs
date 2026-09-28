@@ -2,9 +2,7 @@
 //!
 //! FileDevice → RAID 1 → ThinVolume → NvmeofTarget → TCP → NvmeofInitiator
 
-mod common;
-
-
+use crate::common;
 use stormblock::drive::{open_one_drive, DriveType};
 use stormblock::target::nvmeof::NvmeofConfig;
 use common::nvmeof_initiator::NvmeofInitiator;

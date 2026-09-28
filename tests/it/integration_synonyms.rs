@@ -1,8 +1,7 @@
 //! Synonyms — a stable name that points at a volume, re-pointed at will, and
 //! a client's way to ask whether what it holds is still current.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;

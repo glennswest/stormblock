@@ -1,8 +1,7 @@
 //! The Volumes and Images views (#138, #126): every volume says what it is,
 //! whether something is using it and who; the listing filters on it.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::filedev::FileDevice;

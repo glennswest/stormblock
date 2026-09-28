@@ -11,8 +11,7 @@
 //! the wiring rather than in the check: a unit test of the check passed
 //! throughout.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;

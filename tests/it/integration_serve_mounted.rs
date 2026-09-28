@@ -10,8 +10,7 @@
 //! context is present, and that the context is built from a config that says
 //! nothing about serving.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::BlockDevice;

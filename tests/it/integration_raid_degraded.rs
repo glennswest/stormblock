@@ -1,8 +1,6 @@
 //! RAID degraded-mode and rebuild integration tests.
 
-mod common;
-
-
+use crate::common;
 use tempfile::TempDir;
 
 use stormblock::drive::BlockDevice;

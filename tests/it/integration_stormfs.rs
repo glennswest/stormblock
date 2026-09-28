@@ -6,8 +6,7 @@
 //! tests are pinning is a wire contract: StormFS is a separate program, and
 //! what it sees is the status code and the JSON, not the engine types.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use serde_json::{json, Value};

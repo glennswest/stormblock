@@ -11,8 +11,8 @@
 //! caller that treats them alike boots a node off a disk that was formatted
 //! and never filled.
 
+#[path = "../../tests/it/common/mod.rs"]
 mod common;
-
 use std::process::Command;
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ const SLOT: u64 = 1024 * 1024;
 const CAP: u64 = 64 * 1024 * 1024;
 
 fn slab_volumes(args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+    let out = Command::new(common::stormblock_bin())
         .args(["slab", "volumes"])
         .args(args)
         .output()
@@ -136,7 +136,7 @@ async fn a_system_slab_formatted_by_the_cli_can_say_what_it_holds() {
     let path = dir.path().join("system.slab").to_string_lossy().to_string();
     std::fs::write(&path, vec![0u8; CAP as usize]).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+    let out = Command::new(common::stormblock_bin())
         .args(["slab", "format", &path, "--role", "system"])
         .output()
         .expect("spawn stormblock slab format");
@@ -160,7 +160,7 @@ async fn metadata_bytes_zero_formats_a_slab_that_keeps_no_record() {
     let path = dir.path().join("bare.slab").to_string_lossy().to_string();
     std::fs::write(&path, vec![0u8; CAP as usize]).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_stormblock"))
+    let out = Command::new(common::stormblock_bin())
         .args(["slab", "format", &path, "--metadata-bytes", "0"])
         .output()
         .expect("spawn stormblock slab format");

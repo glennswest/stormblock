@@ -7,8 +7,7 @@
 //! array, an ordinary volume never does, `GET /arrays/{id}` names the slab and
 //! its volumes, and the array cannot be deleted from under them.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use serde_json::{json, Value};

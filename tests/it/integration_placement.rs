@@ -1,8 +1,7 @@
 //! Where a volume lives (#136, #114): slabs, drives, the state of each leg,
 //! and a generation a mirror can ask "changed?" of.
 
-mod common;
-
+use crate::common;
 use std::sync::Arc;
 
 use stormblock::drive::filedev::FileDevice;

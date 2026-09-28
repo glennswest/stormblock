@@ -2,7 +2,7 @@
 # The pallet format's decode side is its own crate so firmware and the engine
 # can share one reader rather than maintaining two that must stay
 # bit-compatible forever (#53).
-members = ["crates/pallet-format", "test"]
+members = ["crates/pallet-format", "test", "tests-runtime"]
 
 [package]
 name = "stormblock"
@@ -13,6 +13,8 @@ description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI
 repository = "https://github.com/glennswest/stormblock"
 license = "TBD"
 rust-version = "1.75"
+# One in-process integration-test binary (tests/it), not one per file (#209).
+autotests = false
 
 [lib]
 name = "stormblock"
@@ -171,6 +173,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 # Tests drive the HTTP surface with reqwest; the binary does not carry it.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# The in-process integration tests: one binary, run with cargo-nextest so each
+# test still gets its own process. Runtime tests are in tests-runtime/.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
 
 [[bench]]
 name = "parity"
