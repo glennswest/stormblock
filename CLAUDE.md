@@ -39,7 +39,7 @@ caps long's waves).
 
 ## Build
 ```bash
-sc-build 'cargo nextest run --locked && cargo test --locked --doc'   # the routine check
+sc-build 'cargo nextest run --locked'                               # the routine check
 sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl'  # what goldens ship
 sc-build 'cargo check --locked --features cluster'                   # the Raft layer, opt-in
 ```

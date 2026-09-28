@@ -6,7 +6,7 @@
 - **test:** The 25 in-process integration-test files are one test binary, `tests/it` (each file a module), instead of 25 binaries that each linked the whole engine. Run with cargo-nextest for per-test processes (#209)
 - **test:** Runtime tests move to the `tests-runtime/` workspace crate, outside the routine check: `integration_boot_local`, `integration_flowover_resume`, `integration_image`, `integration_slab_volumes`, `integration_engine_e2e`, `iscsi_blockdev`, `external_iscsi` and `ublk_resize`. They drive the built binary through `STORMBLOCK_BIN`, kernel devices or privileges
 - **refactor:** `src/main.rs` is a wrapper around `stormblock::cli::run`. The command line moved into the library, so it is compiled and tested once
-- **docs:** The routine check is `cargo nextest run && cargo test --doc`. The RouterOS check is dropped (nothing ships for RouterOS)
+- **docs:** The routine check is `cargo nextest run` (the crate has no doc tests). The RouterOS check is dropped (nothing ships for RouterOS)
 - **build:** Build settings for everyday work (#209). `dev`/`test` keep line tables but not full debug info, and dependencies carry none. `release` is thin LTO across 16 codegen units. Fat LTO with one codegen unit moves to a `dist` profile that only golden builds use. The routine check is `cargo test`
 - **build:** One TLS crypto backend, ring. rustls's defaults and hyper-rustls's `aws-lc-rs` feature were compiling aws-lc-sys, a large cmake C build
 - **BREAKING:** `cluster` (openraft) is no longer a default feature; build with `--features cluster` for it. The engine is standalone-first and no stormcos node enables Raft. The feature pulled openraft, chrono, rust_decimal, borsh and thiserror 1.x into every build
