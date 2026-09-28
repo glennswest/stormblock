@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
     response::{IntoResponse, Response},
     Json,
@@ -1111,6 +1111,14 @@ pub struct AttachRequest {
     /// ublk when it can, nvme-tcp otherwise.
     #[serde(default)]
     pub transport: Option<String>,
+    /// The host NQN that will connect over NVMe/TCP. The volume is served
+    /// from that host's own subsystem and no other host sees it (#210);
+    /// required when the node's shared subsystem admits no host.
+    #[serde(default)]
+    pub host_nqn: Option<String>,
+    /// Give that host a DH-HMAC-CHAP secret (returned as `dhchap_secret`).
+    #[serde(default)]
+    pub dhchap: bool,
 }
 
 /// `POST /api/v1/volumes/{id}/attach` — a block device for any engine
@@ -1201,10 +1209,16 @@ async fn attach_volume(
     }
 
     #[cfg(feature = "nvmeof")]
-    let nsid = super::v1::ensure_nvme_namespace(&state, &key, Some(uuid)).await;
+    {
+        let ro = mode != crate::volume::Access::ReadWrite;
+        match super::v1::nvme_attach(&state, &key, uuid, req.host_nqn.as_deref(), req.dhchap, ro).await {
+            Ok(info) => Json(info).into_response(),
+            Err(super::v1::NvmeAttachError::BadRequest(m)) => ApiError::bad_request(m),
+            Err(super::v1::NvmeAttachError::Conflict(m)) => ApiError::conflict(m),
+        }
+    }
     #[cfg(not(feature = "nvmeof"))]
-    let nsid = None;
-    Json(super::v1::attach_info_for(&state, nsid)).into_response()
+    Json(super::v1::attach_info_for(&state, None)).into_response()
 }
 
 /// `GET /api/v1/volumes/{id}/attach` — how the volume is being served
@@ -1222,15 +1236,51 @@ async fn get_attach(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         return Json(serde_json::json!({ "id": uuid, "attached": true, "info": super::v1::AttachInfo::Ublk { device_hint: path } })).into_response();
     }
     let nsid = state.v1.lock().await.nvme_nsids.get(&key).copied();
+    // And every host it is served to from a host's own subsystem (#210).
+    #[cfg(feature = "nvmeof")]
+    let hosts: Vec<serde_json::Value> = {
+        let h = state.nvme_hosts.lock().await;
+        h.subsystems
+            .values()
+            .filter_map(|s| {
+                s.namespaces.iter().find(|n| n.volume == uuid).map(|n| {
+                    serde_json::json!({
+                        "nqn": s.nqn,
+                        "nsid": n.nsid,
+                        "read_only": n.read_only,
+                        "hosts": s.hosts.iter().map(|e| serde_json::json!({
+                            "host_nqn": e.nqn,
+                            "dhchap": e.dhchap_secret.is_some(),
+                        })).collect::<Vec<_>>(),
+                        "boothost": s.boothost,
+                    })
+                })
+            })
+            .collect()
+    };
+    #[cfg(not(feature = "nvmeof"))]
+    let hosts: Vec<serde_json::Value> = Vec::new();
     match nsid {
-        Some(n) => Json(serde_json::json!({ "id": uuid, "attached": true, "info": super::v1::attach_info_for(&state, Some(n)) })).into_response(),
+        Some(n) => Json(serde_json::json!({ "id": uuid, "attached": true, "info": super::v1::attach_info_for(&state, Some(n)), "hosts": hosts })).into_response(),
+        None if !hosts.is_empty() => Json(serde_json::json!({ "id": uuid, "attached": true, "hosts": hosts })).into_response(),
         None => Json(serde_json::json!({ "id": uuid, "attached": false })).into_response(),
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct DetachQuery {
+    /// Stop serving it to this host only; absent = to every host.
+    #[serde(default)]
+    pub host_nqn: Option<String>,
+}
+
 /// `DELETE /api/v1/volumes/{id}/attach` — stop serving it: the ublk device
 /// goes, the NVMe namespace is withdrawn. Idempotent.
-async fn detach_volume(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+async fn detach_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<DetachQuery>,
+) -> Response {
     let uuid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
@@ -1247,9 +1297,20 @@ async fn detach_volume(State(state): State<Arc<AppState>>, Path(id): Path<String
             ));
         }
     }
+    #[cfg(feature = "nvmeof")]
+    if let Some(host) = q.host_nqn.as_deref() {
+        // One host's view goes; the volume stays served to anyone else.
+        crate::mgmt::nvme_hosts::detach(&state, uuid, Some(host)).await;
+        return Json(serde_json::json!({ "id": uuid, "host_nqn": host, "attached": false })).into_response();
+    }
+    #[cfg(not(feature = "nvmeof"))]
+    let _ = q;
     state.ublk_exports.lock().await.remove(&key);
     #[cfg(feature = "nvmeof")]
-    super::v1::release_nvme_namespace(&state, &key).await;
+    {
+        super::v1::release_nvme_namespace(&state, &key).await;
+        crate::mgmt::nvme_hosts::detach(&state, uuid, None).await;
+    }
     Json(serde_json::json!({ "id": uuid, "attached": false })).into_response()
 }
 

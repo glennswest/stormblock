@@ -160,6 +160,8 @@ async fn an_exported_volume_cannot_be_moved() {
         status: ExportStatus::Active,
         lun_id: Some(0),
         nsid: None,
+        host_nqn: None,
+        subsystem: None,
     });
 
     let (base, server) = start(state.clone()).await;

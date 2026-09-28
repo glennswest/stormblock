@@ -1,4 +1,7 @@
 target
+# src/target/ is the NVMe-oF/iSCSI target code, not a build directory: a new
+# file there was silently left out of a commit (#210).
+!/src/target/
 **/*.rs.bk
 # Cargo.lock is committed (#128): goldens are built --locked from a commit.
 # The fuzz crate is its own workspace and ships nothing.

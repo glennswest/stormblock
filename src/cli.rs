@@ -1442,7 +1442,13 @@ pub async fn run() -> anyhow::Result<()> {
             // Before the exports, because a template is a fact about a
             // volume and an export is a decision about one.
             mgmt::api::fstemplates::adopt_slab_templates(&state).await;
+            // Who may connect, before anything is served (#210): the shared
+            // subsystem admits no host unless the config opens it, and each
+            // host subsystem admits its own hosts.
+            mgmt::nvme_hosts::apply_shared_policy(&state, &nvmeof);
+            mgmt::nvme_hosts::restore(&state).await;
             mgmt::api::exports::restore_exports(&state).await;
+            mgmt::api::v1::restore_nvme_nsids(&state).await;
             let reactor_for_nvmeof = reactor.clone();
             tokio::spawn({
                 let nvmeof = nvmeof.clone();

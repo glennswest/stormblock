@@ -31,6 +31,17 @@ pub struct ExportResponse {
     /// Namespace ID assigned on the NVMe-oF target.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nsid: Option<u32>,
+    /// The NVMe subsystem the namespace is in, and the port to dial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nqn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// The only host that may connect, when one was named (#210).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_nqn: Option<String>,
+    /// Its DH-HMAC-CHAP secret, on the reply to the create that asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dhchap_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,10 +49,22 @@ pub struct CreateExportRequest {
     pub volume_id: Uuid,
     pub protocol: ExportProtocol,
     pub target_id: Option<String>,
+    /// NVMe-oF: the host that will connect; the volume is served from that
+    /// host's own subsystem (#210). Required on a node whose shared
+    /// subsystem admits no host.
+    #[serde(default)]
+    pub host_nqn: Option<String>,
+    /// NVMe-oF: give that host a DH-HMAC-CHAP secret.
+    #[serde(default)]
+    pub dhchap: bool,
 }
 
 fn export_to_response(e: &ExportEntry) -> ExportResponse {
     ExportResponse {
+        nqn: e.subsystem.clone(),
+        port: None,
+        host_nqn: e.host_nqn.clone(),
+        dhchap_secret: None,
         id: e.id,
         volume_id: e.volume_id,
         protocol: e.protocol.to_string(),
@@ -150,6 +173,22 @@ pub async fn restore_exports(state: &Arc<AppState>) -> usize {
     for mut entry in persisted {
         match entry.protocol {
             #[cfg(feature = "nvmeof")]
+            ExportProtocol::Nvmeof if entry.subsystem.is_some() => {
+                // Served from a host subsystem, which `nvme_hosts::restore`
+                // puts back with its access list.
+                let served = match (state.nvmeof_target.read().await.as_ref(), entry.subsystem.as_deref()) {
+                    (Some(t), Some(nqn)) => match t.subsystem(nqn) {
+                        Some(sub) => sub.nsid_of(entry.volume_id).await.is_some(),
+                        None => false,
+                    },
+                    _ => false,
+                };
+                entry.status = if served { ExportStatus::Active } else { ExportStatus::PendingRestart };
+                if served {
+                    restored += 1;
+                }
+            }
+            #[cfg(feature = "nvmeof")]
             ExportProtocol::Nvmeof => {
                 let Some(nsid) = entry.nsid else {
                     tracing::warn!(
@@ -170,11 +209,34 @@ pub async fn restore_exports(state: &Arc<AppState>) -> usize {
                     entries.push(entry);
                     continue;
                 };
+                // A golden is never on the shared subsystem (#210). Exports
+                // made before that rule stay recorded and unserved, so the
+                // operator sees them and re-exports for a host.
+                if state.volume_manager.lock().await.is_sealed(&VolumeId(entry.volume_id)) {
+                    tracing::warn!(
+                        "export {}: volume {} is a sealed golden; not served on the shared \
+                         subsystem — export it for a host (host_nqn) instead (#210)",
+                        entry.id, entry.volume_id
+                    );
+                    entry.status = ExportStatus::PendingRestart;
+                    entries.push(entry);
+                    continue;
+                }
                 match state.nvmeof_target.read().await.as_ref() {
                     Some(target) => {
-                        target.add_namespace_dynamic(nsid, device).await;
-                        entry.status = ExportStatus::Active;
-                        restored += 1;
+                        if target.add_namespace_dynamic(nsid, device).await {
+                            entry.status = ExportStatus::Active;
+                            restored += 1;
+                        } else {
+                            // Another volume holds the NSID, or this one is
+                            // already served at another: never two answers
+                            // at one address (#210).
+                            tracing::warn!(
+                                "export {}: nsid {nsid} for volume {} conflicts on the shared subsystem",
+                                entry.id, entry.volume_id
+                            );
+                            entry.status = ExportStatus::PendingRestart;
+                        }
                     }
                     None => {
                         tracing::warn!("NVMe-oF target not running; export stays pending");
@@ -234,6 +296,10 @@ async fn create_export(
     let mut lun_id = None;
     let mut nsid = None;
     let mut status = ExportStatus::PendingRestart;
+    let mut subsystem = None;
+    let mut host_nqn = None;
+    let mut secret = None;
+    let mut nqn_port = None;
 
     match req.protocol {
         #[cfg(feature = "iscsi")]
@@ -262,15 +328,46 @@ async fn create_export(
             let Some(device) = device else {
                 return ApiError::not_found(format!("volume {} not found", req.volume_id));
             };
-            match state.nvmeof_target.read().await.as_ref() {
-                Some(target) => {
+            let sealed = state.volume_manager.lock().await.is_sealed(&vol_id);
+            let target = state.nvmeof_target.read().await.as_ref().cloned();
+            match (target, req.host_nqn.as_deref().filter(|h| !h.trim().is_empty())) {
+                (Some(target), Some(host)) => {
+                    match crate::mgmt::nvme_hosts::attach_for_host(&state, req.volume_id, host, sealed, req.dhchap).await {
+                        Ok(a) => {
+                            nsid = Some(a.nsid);
+                            nqn_port = Some((a.nqn.clone(), target.advertised().port()));
+                            subsystem = Some(a.nqn);
+                            host_nqn = Some(a.host_nqn);
+                            secret = a.dhchap_secret;
+                            status = ExportStatus::Active;
+                        }
+                        Err(e) => return ApiError::bad_request(e),
+                    }
+                }
+                (Some(target), None) => {
+                    let pol = crate::mgmt::nvme_hosts::policy(&state);
+                    if sealed {
+                        return ApiError::bad_request(format!(
+                            "volume {} is sealed: a golden is never put on the shared NVMe subsystem. \
+                             Name the host that reads it (host_nqn) (#210)",
+                            req.volume_id
+                        ));
+                    }
+                    if !pol.shared_reachable() {
+                        return ApiError::bad_request(format!(
+                            "the shared NVMe subsystem {} admits no host: name the host that will \
+                             connect (host_nqn) (#210)",
+                            target.default_subsystem().nqn()
+                        ));
+                    }
                     // Chosen and taken in one step: two exports at once must
                     // not share an NSID (#139).
                     let id = target.add_namespace_next(device).await;
                     nsid = Some(id);
+                    nqn_port = Some((target.default_subsystem().nqn().to_string(), target.advertised().port()));
                     status = ExportStatus::Active;
                 }
-                None => {
+                (None, _) => {
                     tracing::warn!("NVMe-oF target not running; export stays pending");
                 }
             }
@@ -287,9 +384,16 @@ async fn create_export(
         status,
         lun_id,
         nsid,
+        host_nqn,
+        subsystem,
     };
 
-    let resp = export_to_response(&entry);
+    let mut resp = export_to_response(&entry);
+    if let Some((nqn, port)) = nqn_port {
+        resp.nqn = Some(nqn);
+        resp.port = Some(port);
+    }
+    resp.dhchap_secret = secret;
 
     {
         let mut exports = state.exports.write().await;
@@ -347,9 +451,21 @@ pub(crate) async fn drop_export(state: &Arc<AppState>, id: Uuid) -> bool {
         super::luns::detach_lun(state, lun).await;
     }
     #[cfg(feature = "nvmeof")]
-    if let Some(nsid) = entry.nsid {
-        if let Some(target) = state.nvmeof_target.read().await.as_ref() {
-            target.remove_namespace(nsid).await;
+    if entry.subsystem.is_some() {
+        crate::mgmt::nvme_hosts::detach(state, entry.volume_id, entry.host_nqn.as_deref()).await;
+    } else if let Some(nsid) = entry.nsid {
+        // A /v1 attach of the same volume shares the NSID: it keeps it.
+        let used = state.v1.lock().await.nvme_nsids.get(&entry.volume_id.to_string()) == Some(&nsid);
+        if !used {
+            if let Some(target) = state.nvmeof_target.read().await.as_ref() {
+                // Only if that NSID is this volume: a /serve/v1 export is
+                // NSID 1 of a subsystem of its own, and removing the shared
+                // subsystem's NSID 1 for it withdrew somebody else's volume.
+                let sub = target.default_subsystem();
+                if sub.nsid_of(entry.volume_id).await == Some(nsid) {
+                    sub.remove_namespace(nsid).await;
+                }
+            }
         }
     }
 

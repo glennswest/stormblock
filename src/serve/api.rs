@@ -506,6 +506,8 @@ async fn export_volume(
                 WireProto::Iscsi => None,
                 WireProto::Nvmeof => Some(1),
             },
+            host_nqn: None,
+            subsystem: None,
         });
         drop(ex);
         w.persist()?;

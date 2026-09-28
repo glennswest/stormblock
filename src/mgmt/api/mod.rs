@@ -245,6 +245,11 @@ pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<Str
     if let Some(nsid) = state.v1.lock().await.nvme_nsids.get(&volume_id.to_string()) {
         busy.push(format!("NVMe namespace {nsid}"));
     }
+    // Served to a host from its own subsystem (#210).
+    #[cfg(feature = "nvmeof")]
+    for (nqn, nsid) in state.nvme_hosts.lock().await.serving(volume_id) {
+        busy.push(format!("NVMe namespace {nsid} of {nqn}"));
+    }
     // A published release is a reference too, and the only one that survives
     // this process. Nothing was checking it, so eight releases ended up naming
     // volumes that had been reclaimed — manifests promising a download that

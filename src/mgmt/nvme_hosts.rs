@@ -414,7 +414,7 @@ pub async fn restore(state: &AppState) -> usize {
         for n in rec.namespaces.drain(..) {
             let dev = state.volume_manager.lock().await.get_volume(&VolumeId(n.volume));
             match dev {
-                Some(dev) if sub.add_namespace_at(n.nsid, dev, n.read_only).await => {
+                Some(dev) if sub.add_namespace_at(n.nsid, dev.clone(), n.read_only).await => {
                     restored += 1;
                     keep.push(n);
                 }

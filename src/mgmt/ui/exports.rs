@@ -137,6 +137,8 @@ pub async fn create(
         status: ExportStatus::PendingRestart,
         lun_id: None,
         nsid: None,
+        host_nqn: None,
+        subsystem: None,
     };
 
     {

@@ -191,6 +191,15 @@ pub enum AttachInfo {
         /// the controller it already has.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nsid: Option<u32>,
+        /// The host this was attached for, when one was named: `nqn` is then
+        /// that host's own subsystem, and no other host can connect to it
+        /// (#210).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_nqn: Option<String>,
+        /// The DH-HMAC-CHAP secret the host must present
+        /// (`nvme connect --dhchap-secret`), when it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dhchap_secret: Option<String>,
     },
     Ublk {
         device_hint: String,
@@ -861,6 +870,16 @@ pub(crate) async fn ensure_nvme_namespace(
     volume_id: &str,
     local_id: Option<Uuid>,
 ) -> Option<u32> {
+    ensure_nvme_namespace_ro(state, volume_id, local_id, false).await
+}
+
+#[cfg(feature = "nvmeof")]
+pub(crate) async fn ensure_nvme_namespace_ro(
+    state: &AppState,
+    volume_id: &str,
+    local_id: Option<Uuid>,
+    read_only: bool,
+) -> Option<u32> {
     let target = state.nvmeof_target.read().await.as_ref().cloned()?;
 
     // One lock from the check to the record: two attaches of one volume at
@@ -877,12 +896,84 @@ pub(crate) async fn ensure_nvme_namespace(
         .await
         .get_volume(&EngineVolumeId(local_id?))?;
 
-    let nsid = target.add_namespace_next(device).await;
+    let nsid = target.default_subsystem().add_namespace_next(device, read_only).await;
     v1.nvme_nsids.insert(volume_id.to_string(), nsid);
     v1.save();
 
     tracing::info!("volume {volume_id} hot-added as NVMe namespace {nsid}");
     Some(nsid)
+}
+
+/// Put the `/v1` and `/api/v1` attach records back on the shared subsystem
+/// at the NSIDs they were given.
+///
+/// They were persisted and never restored, so after a restart a record named
+/// an NSID nothing served — until the next attach of *another* volume took
+/// that NSID, and this volume's consumer read that one. And an attach of a
+/// volume already exported added it a second time: two namespaces with one
+/// NGUID, which the kernel reports as "duplicate IDs in subsystem" (#210). A
+/// record whose volume is gone, whose NSID is taken, or whose volume is a
+/// sealed golden (never on the shared subsystem) is dropped, loudly.
+#[cfg(feature = "nvmeof")]
+pub async fn restore_nvme_nsids(state: &AppState) -> usize {
+    let Some(target) = state.nvmeof_target.read().await.as_ref().cloned() else { return 0 };
+    let shared = target.default_subsystem();
+    let mut v1 = state.v1.lock().await;
+    let records: Vec<(String, u32)> = v1.nvme_nsids.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let mut restored = 0;
+    let mut changed = false;
+    for (key, nsid) in records {
+        let local = v1
+            .volumes
+            .get(&key)
+            .and_then(|r| r.local_id)
+            .or_else(|| key.parse::<Uuid>().ok());
+        let (device, sealed) = match local {
+            Some(l) => {
+                let vm = state.volume_manager.lock().await;
+                (vm.get_volume(&EngineVolumeId(l)), vm.is_sealed(&EngineVolumeId(l)))
+            }
+            None => (None, false),
+        };
+        let kept = match device {
+            None => {
+                tracing::warn!("NVMe namespace {nsid} for {key}: volume gone; record dropped");
+                false
+            }
+            Some(_) if sealed => {
+                tracing::warn!(
+                    "NVMe namespace {nsid} for {key}: a sealed golden, never served on the shared \
+                     subsystem (#210); record dropped — attach it for a host instead"
+                );
+                false
+            }
+            Some(dev) => {
+                // Already there at this NSID (an export of the same volume)
+                // counts as restored.
+                if shared.nsid_of(dev.id().uuid).await == Some(nsid) || shared.add_namespace_at(nsid, dev, false).await {
+                    restored += 1;
+                    true
+                } else {
+                    tracing::warn!(
+                        "NVMe namespace {nsid} for {key}: taken by another volume, or the volume is \
+                         already served at another NSID; record dropped (#210)"
+                    );
+                    false
+                }
+            }
+        };
+        if !kept {
+            v1.nvme_nsids.remove(&key);
+            changed = true;
+        }
+    }
+    if changed {
+        v1.save();
+    }
+    if restored > 0 {
+        tracing::info!("restored {restored} attach namespace(s) on {}", shared.nqn());
+    }
+    restored
 }
 
 /// Withdraw a volume's namespace on detach, so it stops being served and the
@@ -898,10 +989,30 @@ pub(crate) async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
         nsid
     };
     let Some(nsid) = nsid else { return };
+    // An export may serve the same volume at the same NSID (a subsystem
+    // never holds one volume twice): it keeps the namespace.
+    if state.exports.read().await.iter().any(|e| e.nsid == Some(nsid) && e.subsystem.is_none()) {
+        return;
+    }
 
     if let Some(target) = state.nvmeof_target.read().await.as_ref() {
         target.remove_namespace(nsid).await;
         tracing::info!("volume {volume_id} withdrawn from NVMe namespace {nsid}");
+    }
+}
+
+/// Where a remote initiator dials this node's NVMe-oF listener.
+pub(crate) fn nvme_addresses(state: &AppState, port: Option<u16>) -> Vec<NvmeAddress> {
+    match attach_info_for(state, None) {
+        AttachInfo::NvmeTcp { mut addresses, .. } => {
+            if let Some(p) = port {
+                for a in &mut addresses {
+                    a.trsvcid = p;
+                }
+            }
+            addresses
+        }
+        AttachInfo::Ublk { .. } => Vec::new(),
     }
 }
 
@@ -953,6 +1064,8 @@ pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo
         nqn,
         addresses: vec![NvmeAddress { traddr, trsvcid: port }],
         nsid,
+        host_nqn: None,
+        dhchap_secret: None,
     }
 }
 
@@ -1328,6 +1441,14 @@ struct AttachRequest {
     /// local ublk device.
     #[serde(default)]
     transport: Option<String>,
+    /// The host NQN that will connect. The volume is then served from that
+    /// host's own subsystem and no other host sees it (#210). Required for
+    /// NVMe/TCP on a node whose shared subsystem admits no host.
+    #[serde(default)]
+    host_nqn: Option<String>,
+    /// Give that host a DH-HMAC-CHAP secret (returned as `dhchap_secret`).
+    #[serde(default)]
+    dhchap: bool,
 }
 
 async fn attach_volume(
@@ -1427,15 +1548,97 @@ async fn attach_volume(
     // subsystem. A node that is already connected picks it up from the async
     // event with no Connect at all.
     #[cfg(feature = "nvmeof")]
-    let nsid = ensure_nvme_namespace(&state, &id, local_id).await;
-    #[cfg(not(feature = "nvmeof"))]
-    let nsid = None;
-    if want == WantTransport::NvmeTcp && nsid.is_none() {
-        forget_attachment(&state, &id, &req.node).await;
-        return Err(V1Error::Conflict(format!("volume {id} could not be added as an NVMe-oF namespace")));
+    {
+        let Some(local) = local_id else {
+            if want == WantTransport::NvmeTcp {
+                forget_attachment(&state, &id, &req.node).await;
+                return Err(V1Error::Conflict(format!("volume {id} could not be added as an NVMe-oF namespace")));
+            }
+            return Ok(Json(attach_info_for(&state, None)));
+        };
+        match nvme_attach(&state, &id, local, req.host_nqn.as_deref(), req.dhchap, false).await {
+            Ok(info) => Ok(Json(info)),
+            Err(NvmeAttachError::BadRequest(m)) => {
+                forget_attachment(&state, &id, &req.node).await;
+                Err(V1Error::BadRequest(m))
+            }
+            Err(NvmeAttachError::Conflict(m)) => {
+                forget_attachment(&state, &id, &req.node).await;
+                Err(V1Error::Conflict(m))
+            }
+        }
     }
+    #[cfg(not(feature = "nvmeof"))]
+    {
+        let _ = local_id;
+        if want == WantTransport::NvmeTcp {
+            forget_attachment(&state, &id, &req.node).await;
+            return Err(V1Error::Conflict(format!("volume {id} could not be added as an NVMe-oF namespace")));
+        }
+        Ok(Json(attach_info_for(&state, None)))
+    }
+}
 
-    Ok(Json(attach_info_for(&state, nsid)))
+/// Why an NVMe/TCP attach was refused.
+#[derive(Debug)]
+pub(crate) enum NvmeAttachError {
+    /// The request must change: name the host.
+    BadRequest(String),
+    /// The node cannot serve it.
+    Conflict(String),
+}
+
+/// Serve an engine volume over NVMe/TCP and say where (#210).
+///
+/// With `host_nqn` the volume goes into that host's own subsystem, which
+/// admits that host alone (and, with `dhchap` or the node's
+/// `require_dhchap`, only once it proves its secret). Without one it goes
+/// on the shared subsystem — refused for a sealed golden, which is never
+/// shown to every host the shared subsystem admits, and refused when the
+/// shared subsystem admits no host at all, since the coordinates would lead
+/// nowhere. A sealed volume is always served write-protected.
+#[cfg(feature = "nvmeof")]
+pub(crate) async fn nvme_attach(
+    state: &AppState,
+    key: &str,
+    local: Uuid,
+    host_nqn: Option<&str>,
+    dhchap: bool,
+    read_only: bool,
+) -> Result<AttachInfo, NvmeAttachError> {
+    let target = state.nvmeof_target.read().await.as_ref().cloned().ok_or_else(|| {
+        NvmeAttachError::Conflict("this node serves no NVMe-oF target".into())
+    })?;
+    let sealed = state.volume_manager.lock().await.is_sealed(&EngineVolumeId(local));
+    let read_only = read_only || sealed;
+    if let Some(host) = host_nqn.filter(|h| !h.trim().is_empty()) {
+        let a = crate::mgmt::nvme_hosts::attach_for_host(state, local, host, read_only, dhchap)
+            .await
+            .map_err(NvmeAttachError::BadRequest)?;
+        return Ok(AttachInfo::NvmeTcp {
+            nqn: a.nqn,
+            addresses: nvme_addresses(state, Some(target.advertised().port())),
+            nsid: Some(a.nsid),
+            host_nqn: Some(a.host_nqn),
+            dhchap_secret: a.dhchap_secret,
+        });
+    }
+    if sealed {
+        return Err(NvmeAttachError::BadRequest(format!(
+            "volume {local} is sealed: a golden is never put on the shared NVMe subsystem, where              every host it admits would see it. Name the host that reads it (host_nqn); it is              served to that host alone, write-protected (#210)"
+        )));
+    }
+    let pol = crate::mgmt::nvme_hosts::policy(state);
+    if !pol.shared_reachable() {
+        return Err(NvmeAttachError::BadRequest(format!(
+            "this node's shared NVMe subsystem ({}) admits no host: name the host that will              connect (host_nqn) and the volume is served from a subsystem of its own (#210)",
+            target.default_subsystem().nqn()
+        )));
+    }
+    let nsid = ensure_nvme_namespace_ro(state, key, Some(local), read_only).await.ok_or_else(|| {
+        NvmeAttachError::Conflict(format!("volume {key} could not be added as an NVMe-oF namespace"))
+    })?;
+    Ok(attach_info_for(state, Some(nsid)))
 }
 
 /// Why a volume cannot be served over NVMe-oF/TCP from here, if it cannot:
@@ -1510,6 +1713,10 @@ async fn detach_volume(
     #[cfg(feature = "nvmeof")]
     if !still_attached {
         release_nvme_namespace(&state, &id).await;
+        let local = state.v1.lock().await.volumes.get(&id).and_then(|r| r.local_id);
+        if let Some(local) = local {
+            crate::mgmt::nvme_hosts::detach(&state, local, None).await;
+        }
     }
     #[cfg(not(feature = "nvmeof"))]
     let _ = still_attached;
@@ -2388,7 +2595,7 @@ mod transport_tests {
 
         // Naming the network gets the network.
         let info = attach(&state, &leg.id, Some("nvme_tcp")).await.unwrap();
-        let AttachInfo::NvmeTcp { nqn, addresses, nsid } = info else { panic!("{info:?}") };
+        let AttachInfo::NvmeTcp { nqn, addresses, nsid, .. } = info else { panic!("{info:?}") };
         assert_eq!(nqn, NQN);
         assert_eq!((addresses[0].traddr.as_str(), addresses[0].trsvcid), ("127.0.0.1", addr.port()));
         let nsid = nsid.expect("a namespace to connect to");

@@ -129,6 +129,12 @@ pub struct ExportEntry {
     /// Namespace ID on the NVMe-oF target, for `nvmeof` exports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nsid: Option<u32>,
+    /// The host this export serves, and its own subsystem (#210). `None`:
+    /// the shared subsystem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_nqn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
 }
 
 /// Backing type for a dynamically-created LUN.

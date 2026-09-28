@@ -79,6 +79,8 @@ async fn volumes_say_what_they_are_who_uses_them_and_the_listing_filters_on_it()
         status: ExportStatus::Active,
         lun_id: None,
         nsid: Some(3),
+        host_nqn: None,
+        subsystem: None,
     });
     state.ublk_exports.lock().await.record_adopted(&root.0.to_string(), "/dev/ublkb0".into());
     let r = c
