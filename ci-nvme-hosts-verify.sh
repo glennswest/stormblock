@@ -89,8 +89,11 @@ done
 api "http://127.0.0.1:$MGMT/api/v1/health" >/dev/null || { echo "FAIL: engine did not start"; tail -30 "$W/engine.log"; exit 1; }
 
 mkvol() {
-    api -X POST "http://127.0.0.1:$MGMT/api/v1/volumes" -d "{\"name\":\"$1\",\"size\":\"64M\"}" \
-        | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1
+    local r
+    r=$(curl -s -m 20 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        -X POST "http://127.0.0.1:$MGMT/api/v1/volumes" -d "{\"name\":\"$1\",\"size\":\"64M\"}")
+    echo "$r" | grep -o '"id":"[0-9a-f-]*"' | head -1 | cut -d'"' -f4
+    echo "$r" | grep -q '"id":"' || echo "create $1: $r" >&2
 }
 field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" | head -1; }
 
