@@ -148,7 +148,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP (2026-09-28, #210, P0) — IN PROGRESS
+### NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP (2026-09-28, #210, P0) — DONE (engine side; not yet on a kernel initiator)
 
 pve connected to forge's `:4420` with no arrangement and saw 71 namespaces:
 every golden, every release, every machine's boot clone. Owner: a host sees
@@ -188,16 +188,25 @@ Design:
   sending `host_nqn`/secrets (stormcentral, stormstorage, rustkube-node, csi,
   stormvm, stormbootx DH-HMAC-CHAP).
 
-- [ ] target: subsystems, access, Connect Invalid Host, discovery per host,
-      read-only namespaces, no volume twice
-- [ ] DH-HMAC-CHAP: `target/nvmeof/auth.rs` (secret, HMAC, transform,
-      responses), target state machine, initiator side in `nvmeof_dev`
-- [ ] engine: host subsystems store + restore, `host_nqn`/`dhchap` on
-      attach/exports, closed shared subsystem, sealed rules, `nvme_nsids`
-      restored at start, boothost claim bound to its host
-- [ ] tests (fresh host sees zero; a host sees only its own; wrong/no secret
-      refused; restart keeps the addresses), docs (auth.md, README),
-      CHANGELOG; full suite on dev; file the client issues; close
+- [x] target: subsystems, access, Connect Invalid Host, discovery per host,
+      read-only namespaces, no volume twice (`target/nvmeof/mod.rs`)
+- [x] DH-HMAC-CHAP: `target/nvmeof/auth.rs`, target state machine, initiator
+      side in `nvmeof_dev` (checked against Linux's host auth.c and tcp.c:
+      Auth Send goes in-capsule on both queue types)
+- [x] engine: `mgmt/nvme_hosts.rs` (store, restore, `nvme_hosts.json` 0600),
+      `host_nqn`/`dhchap` on attach/exports/claims, closed shared subsystem,
+      sealed rules, `nvme_nsids` restored at start, boothost claim bound to its
+      host (never a secret for a boot host: firmware cannot be handed one)
+- [x] tests: `tests/it/integration_nvme_hosts.rs` (9), `auth.rs` units (RFC
+      4231 vectors); docs `docs/nvme-access.md`, README, auth.md; CHANGELOG
+- [x] full suite on dev at 53cd2d3: 837/838, the one failure #134; release
+      build ok. Follow-ups filed: #212 (/serve/v1 open), #213 (drive secret),
+      stormstorage#27, stormcentral#143, stormblock-csi#34, stormvm#53,
+      rustkube-node#93
+- [ ] not verified here (needs root on a host): Linux `nvme discover` /
+      `nvme connect --dhchap-secret` against it — pve is the check. Rollout:
+      forge needs `allow_any_host = true` until its callers send `host_nqn`,
+      or they break; boot claims need nothing. Golden held (#194)
 
 ### Boot intent beside boothost/<tag> (2026-09-27, #148, stormbootx#11) — IN PROGRESS
 
