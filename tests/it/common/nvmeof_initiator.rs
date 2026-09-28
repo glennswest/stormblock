@@ -155,6 +155,60 @@ impl NvmeofInitiator {
         Ok(self.cntlid)
     }
 
+    /// Fabric Connect that answers the response as it came: `(dw0, status)`
+    /// with the status field's DNR bit kept — a refusal is a result here.
+    pub async fn fabric_connect_raw(&mut self, subnqn: &str, hostnqn: &str, qid: u16) -> io::Result<(u32, u16)> {
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = NVME_FABRIC_OPC;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        sqe[4] = FCTYPE_CONNECT;
+        sqe[42..44].copy_from_slice(&qid.to_le_bytes());
+        sqe[44..46].copy_from_slice(&127u16.to_le_bytes());
+        let mut data = vec![0u8; 1024];
+        data[0..16].copy_from_slice(&[0x42u8; 16]);
+        data[16] = 0xFF;
+        data[17] = 0xFF;
+        let n = subnqn.as_bytes();
+        data[256..256 + n.len().min(256)].copy_from_slice(&n[..n.len().min(256)]);
+        let h = hostnqn.as_bytes();
+        data[512..512 + h.len().min(256)].copy_from_slice(&h[..h.len().min(256)]);
+        self.send_capsule_cmd(&sqe, &data).await?;
+        let (cqe, _) = self.read_capsule_resp().await?;
+        let dw0 = u32::from_le_bytes(cqe.raw[0..4].try_into().unwrap());
+        let status = u16::from_le_bytes(cqe.raw[14..16].try_into().unwrap()) >> 1;
+        Ok((dw0, status))
+    }
+
+    /// Get Log Page `lid`, `bytes` long (a multiple of 4).
+    pub async fn get_log_page(&mut self, lid: u8, bytes: usize) -> io::Result<Vec<u8>> {
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = ADMIN_GET_LOG_PAGE;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        let numd = (bytes / 4 - 1) as u32;
+        let cdw10 = lid as u32 | ((numd & 0xFFFF) << 16);
+        sqe[40..44].copy_from_slice(&cdw10.to_le_bytes());
+        sqe[44..48].copy_from_slice(&(numd >> 16).to_le_bytes());
+        self.send_capsule_cmd(&sqe, &[]).await?;
+        self.read_data_response().await
+    }
+
+    /// Identify with the Active Namespace ID list (CNS 2).
+    pub async fn active_namespaces(&mut self) -> io::Result<Vec<u32>> {
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = ADMIN_IDENTIFY;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        sqe[40..44].copy_from_slice(&2u32.to_le_bytes());
+        self.send_capsule_cmd(&sqe, &[]).await?;
+        let d = self.read_data_response().await?;
+        Ok(d.chunks(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .take_while(|n| *n != 0)
+            .collect())
+    }
+
     /// Send Identify Controller admin command.
     pub async fn identify_controller(&mut self) -> io::Result<Vec<u8>> {
         let cid = self.next_cid();

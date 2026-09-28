@@ -1614,9 +1614,11 @@ pub(crate) async fn nvme_attach(
     dhchap: bool,
     read_only: bool,
 ) -> Result<AttachInfo, NvmeAttachError> {
-    let target = state.nvmeof_target.read().await.as_ref().cloned().ok_or_else(|| {
-        NvmeAttachError::Conflict("this node serves no NVMe-oF target".into())
-    })?;
+    // No listener: nothing is served, and the answer says so by carrying no
+    // NSID — what every caller got before #210.
+    let Some(target) = state.nvmeof_target.read().await.as_ref().cloned() else {
+        return Ok(attach_info_for(state, None));
+    };
     let sealed = state.volume_manager.lock().await.is_sealed(&EngineVolumeId(local));
     let read_only = read_only || sealed;
     if let Some(host) = host_nqn.filter(|h| !h.trim().is_empty()) {
@@ -2581,7 +2583,7 @@ mod transport_tests {
 
     async fn attach(state: &Arc<AppState>, id: &str, transport: Option<&str>) -> Result<AttachInfo, u16> {
         let node = state.v1.lock().await.local_node.clone();
-        let req = AttachRequest { node, mode: AttachMode::ReadWrite, transport: transport.map(String::from) };
+        let req = AttachRequest { node, mode: AttachMode::ReadWrite, transport: transport.map(String::from), host_nqn: None, dhchap: false };
         match attach_volume(State(state.clone()), Path(id.to_string()), Json(req)).await {
             Ok(Json(info)) => Ok(info),
             Err(e) => Err(e.into_response().status().as_u16()),

@@ -23,6 +23,7 @@ mod integration_iscsi;
 mod integration_mgmt_api;
 mod integration_moves;
 mod integration_multidrive;
+mod integration_nvme_hosts;
 mod integration_nvmeof;
 mod integration_pallet;
 mod integration_placement;

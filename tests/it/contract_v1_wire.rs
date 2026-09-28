@@ -73,7 +73,7 @@ fn sync_state_detached_round_trips() {
 fn attach_info_nvme_tcp_round_trips() {
     let a: AttachInfo = round_trip("attach-info-nvme-tcp.json");
     match a {
-        AttachInfo::NvmeTcp { nqn, addresses, nsid } => {
+        AttachInfo::NvmeTcp { nqn, addresses, nsid, .. } => {
             assert_eq!(nqn, "nqn.2024.io.stormblock:default");
             assert_eq!(addresses.len(), 1);
             assert_eq!(addresses[0].traddr, "192.168.200.21");
