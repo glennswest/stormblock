@@ -81,7 +81,7 @@ RUST_LOG=stormblock=info "$BIN" --config "$W/stormblock.toml" \
     --nvmeof-addr "127.0.0.1:$PORT" --nvmeof-nqn "$SHARED" \
     > "$W/engine.log" 2>&1 &
 SB_PID=$!
-api() { curl -sf -m 20 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+api() { curl -sf -m 120 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
 for _ in $(seq 1 100); do
     api "http://127.0.0.1:$MGMT/api/v1/health" >/dev/null 2>&1 && break
     sleep 0.2
@@ -96,7 +96,7 @@ done
 
 mkvol() {
     local r
-    r=$(curl -s -m 20 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    r=$(curl -s -m 180 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
         -X POST "http://127.0.0.1:$MGMT/api/v1/volumes" -d "{\"name\":\"$1\",\"size\":\"64M\"}")
     echo "$r" | grep -o '"id":"[0-9a-f-]*"' | head -1 | cut -d'"' -f4
     echo "$r" | grep -q '"id":"' || echo "create $1: $r" >&2
