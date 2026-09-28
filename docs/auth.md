@@ -212,6 +212,16 @@ stormblock-csi #20 (manifests), stormblock-registry #40 and stormstorage #12
 join and Raft present the cluster's shared token, and the `ci-*.sh` scripts
 give their engines one.
 
+## The data path: who may connect over NVMe/TCP
+
+This document is about the management API. Who may *connect* to a volume over
+NVMe/TCP is a separate door with its own answer: a volume is served to the host
+an attach names, from a subsystem of that host's own, optionally behind a
+DH-HMAC-CHAP secret; the shared subsystem admits no host by default; a golden
+is only ever served write-protected to a named host. A boot claim's clone is
+served to that machine's NQNs alone. See [nvme-access.md](nvme-access.md)
+(#210).
+
 ## TLS
 
 The token is a bearer credential: on plain HTTP it is readable by anything on

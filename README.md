@@ -313,7 +313,11 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 
 **`[nvmeof]`** (`nvmeof`) — `export_drives` (`true`: publish each drive as a raw
 namespace; set `false` where the drives are the engine's pool) is used;
-`listen_addr` and `nqn` are not (see above).
+`listen_addr` and `nqn` are not (see above). Who may connect
+([docs/nvme-access.md](docs/nvme-access.md), #210): `allow_any_host`
+(`false`: the shared subsystem admits no host), `allowed_hosts` (`[]`),
+`require_dhchap` (`false`), `boothost_host_nqn`
+(`nqn.2026-09.lo.storm:host-{name}`).
 
 **`[[luns]]`** (`iscsi`) — `id`, `path`, `size` (creates or extends a file),
 `readonly` (`false`): LUNs on the shared target at startup.
@@ -366,7 +370,7 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
 | port | what | when |
 |---|---|---|
 | TCP 9090 | management API, `/metrics`, cluster and Raft RPCs | always (daemon, and `adopt-ublk --api`) |
-| TCP 4420 | NVMe-oF/TCP shared subsystem and discovery | daemon, with something to export at startup |
+| TCP 4420 | NVMe-oF/TCP: the shared subsystem, every host's own subsystem, and discovery (each host is shown only its own, [docs/nvme-access.md](docs/nvme-access.md)) | daemon, with something to export at startup |
 | TCP 3260 | iSCSI shared target | daemon, unless `--no-iscsi` |
 | TCP 3261–3388 | per-export portals and per-volume NVMe subsystems (`[serve] portal_base/span`) | when `/serve/v1` is mounted |
 | UDP 7447, group 239.255.42.99 | node discovery beacon | daemon, unless `discovery_disabled` |
@@ -422,7 +426,8 @@ In the data directory (`[management] data_dir`; `adopt-ublk --data-dir`):
 `volumes.dat` (+ `.bak`), `luns.json`, `exports.json`, `v1_state.json` (+
 journal), `fstemplates.json`, `synonyms.json`, `releases.json`, `moves.json`,
 `pallet_mirrors.json`, `stormfs.json`, `cluster_identity.json`, `api_token`
-(0600) and `serve/wiring.json`. Each slab with a metadata region also carries
+(0600), `nvme_hosts.json` (0600: per-host NVMe subsystems and their
+DH-HMAC-CHAP secrets, #210) and `serve/wiring.json`. Each slab with a metadata region also carries
 its own volumes' records. On stormcos, `adopt-ublk` restores these from, and
 captures them back into, the `stormblock-state` volume.
 
@@ -487,6 +492,21 @@ curl -X POST http://node:9090/api/v1/luns \
 
 Thin allocation and reclaim are visible on `/metrics` via
 `stormblock_slab_allocated_bytes` and `stormblock_slab_free_bytes`.
+
+**Over NVMe/TCP, name the host** (#210). A volume is served to the host an
+export or attach names, from a subsystem of that host's own that no other host
+can connect to or discover; the shared subsystem admits no host unless
+`[nvmeof] allow_any_host` says so; a sealed golden is only ever served
+write-protected, to a named host. `"dhchap": true` gives the host a
+DH-HMAC-CHAP secret it must prove. Boot claims are bound to the machine
+without any option. See [docs/nvme-access.md](docs/nvme-access.md).
+
+```bash
+curl -X POST http://node:9090/api/v1/exports \
+  -H 'Content-Type: application/json' \
+  -d '{"volume_id":"<uuid>","protocol":"nvmeof","host_nqn":"nqn.2014-08.org.nvmexpress:uuid:…","dhchap":true}'
+# → {"nqn":"nqn.…:host:1f2e…","port":4420,"nsid":1,"dhchap_secret":"DHHC-1:01:…:",…}
+```
 
 ### Read-write, read-only, and sealed
 
@@ -1181,6 +1201,7 @@ What earlier docs described and the code does not do, each with its issue:
 | | |
 |---|---|
 | `docs/auth.md` | who may call a node's API; the boot claim; host goldens |
+| `docs/nvme-access.md` | who may connect over NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP, goldens write-protected (#210) |
 | `docs/durability.md` | what survives a power cut: slot entries after their data, frees made durable before reuse, recovery from stale records, the handover order, a flow-over cut short |
 | `docs/redundancy.md` | per-volume redundancy, failure domains, health, resync, automatic rebuild, drain, whole-disk goldens and import |
 | `docs/multi-drive.md` | pools, placement, a drive's life, dedicated arrays, what a claim should ask for (part design) |
