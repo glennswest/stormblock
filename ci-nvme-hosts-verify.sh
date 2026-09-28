@@ -57,7 +57,7 @@ command -v qemu-system-x86_64 >/dev/null || { echo "SKIP: no qemu-system-x86_64"
 
 say "build"
 cargo build --release --locked 2>&1 | tail -2
-BIN="$ROOT/target/release/stormblock"
+BIN="${CARGO_TARGET_DIR:-$ROOT/target}/release/stormblock"
 [ -x "$BIN" ] || { echo "FAIL: no binary"; exit 1; }
 
 say "engine on 127.0.0.1:$PORT (NVMe/TCP) and :$MGMT (API)"
