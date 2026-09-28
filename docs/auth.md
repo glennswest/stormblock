@@ -189,8 +189,11 @@ wins) and answers `intent: install`. `boot-claim` then writes
 `/run/stormblock/install.json`; the initramfs survey takes the local disk with
 force (an explicit `rd.stormblock.assimilate=off` still says no); `boot-local`
 carries the ticket in the handover record; and the adopting engine, once the
-flow-over has moved every extent and the disk boots on its own, posts
-`…/installed` with that clone's id, retrying for an hour. Only that clone's
+flow-over has moved every extent and `local-boot` has laid the ESP and boot
+pallets and judged the disk bootable, posts `…/installed` with that clone's id,
+retrying for an hour. That is still the installer's session: nothing has booted
+from the disk yet. The owner's requirement is that the report come from the
+first boot off the local disk (#220). Only that clone's
 report resets the intent — any other is a 409 and changes nothing — and setting
 the intent clears it, so an install that began before a request never answers
 for it. Until the report lands the intent stays `install`, and the next power

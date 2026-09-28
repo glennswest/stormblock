@@ -40,10 +40,12 @@ caps long's waves).
 ## Build
 ```bash
 sc-build 'cargo nextest run --locked'                               # the routine check
-sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl'  # what goldens ship
+sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl'  # meant for goldens
 sc-build 'cargo check --locked --features cluster'                   # the Raft layer, opt-in
 ```
 No RouterOS check: nothing ships for RouterOS (owner, 2026-09-28).
+The golden itself is built by stormcos's `deploy/build-goldens.sh` with
+`--release`, not `--profile dist`: stormcos#169.
 
 **Tests (#209, 2026-09-28).**
 - `tests/it/` is **one** in-process integration-test binary; each former file
@@ -52,26 +54,31 @@ No RouterOS check: nothing ships for RouterOS (owner, 2026-09-28).
   interfere. `cargo nextest run` builds the lib, bins and tests, not examples.
 - `tests-runtime/` holds the **runtime tests**: they drive the built binary
   (`STORMBLOCK_BIN`), a kernel device or privileges. They are not part of the
-  routine check. They run against a built engine, the way the test golden runs:
-  `STORMBLOCK_BIN=<binary> cargo test -p stormblock-runtime-tests`.
+  routine check: `STORMBLOCK_BIN=<binary> cargo test -p stormblock-runtime-tests`.
+  Nothing runs them today (#222).
 - `src/main.rs` is a wrapper; the command line is `stormblock::cli`, compiled
   and tested once as part of the library.
 
 **Build settings.** The routine check never runs `cargo build --release`.
 - `dev`/`test`: `debug = "line-tables-only"`, no debug info for dependencies.
 - `release`: thin LTO, 16 codegen units, for performance measurement.
-- `dist`: fat LTO, 1 codegen unit. Only golden builds use it (`--profile dist`).
+- `dist`: fat LTO, 1 codegen unit, meant for goldens (`--profile dist`); the
+  golden build does not use it yet (stormcos#169).
 
 Dependencies: one TLS backend (ring), and `cluster` (openraft) is opt-in. Every
 sc-build job starts from an empty drive, so every dependency is compiled on
 every build: adding one costs every build.
 
-Features: `default = ["nvmeof", "iscsi", "cluster", "stormfs-data"]`; `ui` is
+Features: `default = ["nvmeof", "iscsi", "stormfs-data"]` (`cluster` opt-in
+since #209); `ui` is
 the old web UI (off since v12.2.0, stormview is the UI); `arm64` and
 `mikrotik` are profile names that gate no code (#169). Without `nvmeof` the
 tree does not compile (#161).
 
-**NVMe-TCP, not iSCSI, on RouterOS.** What StormBlock serves there is
+**RouterOS: not shipping** (owner, 2026-09-28) — the profile is neither built
+nor checked. Kept as history of what it was and why:
+
+**NVMe-TCP, not iSCSI, on RouterOS.** What StormBlock served there is
 containers, PVCs and sbregistry, and those are 100% NVMe because **iSCSI is
 slow**. Sharing an iSCSI disk and PXE-booting a bare-metal host are **mkube's**.
 Measured, aarch64 release, since "the binary must be small" is a real
@@ -87,8 +94,8 @@ The profile leaves out `stormfs-data` too: a node with 256 MB is not a StormFS
 data node, and a mounted surface invites being called.
 
 `Cargo.lock` is committed; goldens build `--locked`; `cargo update` is a commit
-of its own. TLS is rustls (no OpenSSL), but not C-free: `aws-lc-sys` and `ring`
-come with it.
+of its own. TLS is rustls (no OpenSSL) on `ring` only since #209 — not C-free:
+`ring` carries C and assembly.
 
 ## Where it runs (see README "Where it runs")
 
@@ -97,7 +104,7 @@ come with it.
 | stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260/:4420, no discovery, no cluster in this mode |
 | stormcos initramfs | `/init` → `boot-claim` + `boot-local` (`scripts/build-stormblock-initramfs.sh`) | boot hooks decide local vs appliance (`docs/boot-hooks.md`) |
 | appliance / forge | the daemon | serves goldens, host clones and boot claims |
-| RouterOS container | the daemon, `mikrotik,nvmeof` profile | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable; never file I/O (#140) |
+| RouterOS container | not shipping (owner, 2026-09-28); was the daemon, `mikrotik,nvmeof` profile | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable; never file I/O (#140) |
 
 Drives are opened by the kernel and `O_DIRECT` everywhere; the VFIO NVMe
 driver is a stub (#167). **RouterOS specifics:** container on RouterOS 7+ (or
@@ -118,23 +125,31 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/image/` — image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import (`import.rs`, `decode/`), node layout (`local.rs`), local boot
 - `src/pallet/` — pallet writer, GPT, store, manager, selection; the reader is `crates/pallet-format`
 - `src/placement/` — failure domains (`domain.rs`), placement, drain moves, rebalance
-- `src/target/` — NVMe-oF/TCP (`nvmeof/`), iSCSI (`iscsi/`), per-core reactor
+- `src/target/` — NVMe-oF/TCP (`nvmeof/`: several subsystems per listener with allowed hosts, `auth.rs` DH-HMAC-CHAP, #210), iSCSI (`iscsi/`), per-core reactor
 - `src/serve/` — the serving layer mounted at `/serve/v1` (wiring, reconciler, readiness, reaper, tar, raw, trim)
-- `src/mgmt/` — the management API (`api/`: every `/api/v1` surface, `v1.rs`, `kube.rs`, `rebuilds.rs`, …), auth, config, metrics, discovery, ublk exports, `ui/` (feature `ui`)
-- `src/cluster/` — openraft membership, heartbeat, replication (feature `cluster`)
+- `src/mgmt/` — the management API (`api/`: every `/api/v1` surface, `v1.rs`, `kube.rs`, `rebuilds.rs`, `boothost.rs`, …), auth, config, metrics, discovery, ublk exports, `nvme_hosts.rs` (per-host NVMe subsystems, `nvme_hosts.json`), `ui/` (feature `ui`)
+- `src/cluster/` — openraft membership, heartbeat, replication (feature `cluster`, opt-in)
 - `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (formats every run, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
-- `src/main.rs` — CLI, the daemon, and every subcommand (`open_slabs_resuming`: a flow-over cut short claims a fresh clone, #171)
+- `src/cli.rs` — CLI, the daemon, and every subcommand (`open_slabs_resuming`: a flow-over cut short claims a fresh clone, #171); `src/main.rs` only calls `stormblock::cli::run` (#209)
 - `test/` — `stormblock-test`, the test container: short/medium/long suites that run the engine of the same commit in the pod (#139)
+- `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209, not run anywhere yet: #222)
 
 ## Current State
-**v19.4.0** (2026-09-27; universal boot #200, boothost names #199). 93k lines in `src/`, 14.5k in `tests/`, ~880
-tests, plus the test container crate (`test/`). The full suite passes on dev
-apart from #120 (and #134/#173 when the box is busy). #171 (power-cut
+**v19.4.0** (2026-09-27; universal boot #200, boothost names #199), with
+unreleased on main: boot intent (#148), the build/test split (#209, `cluster`
+opt-in — BREAKING) and per-host NVMe/TCP subsystems with DH-HMAC-CHAP (#210 —
+BREAKING: the shared subsystem is closed by default). 97k lines in `src/`, 12k
+in `tests/it/`, 3.5k in `tests-runtime/`, ~920 tests, plus the test container
+crate (`test/`). The full suite (nextest) passes on dev apart from #134 when
+the box is busy; #120 is now in `tests-runtime/`, which nothing runs (#222).
+The owner asked on #148 (2026-09-28) for a release cut from main (major) and
+two forge rollout answers. #171 (power-cut
 durability) is closed: the on-metal acceptance passed on 2026-09-27 (C2NR0Q2,
 11.48 = v19.2.1 engine and initramfs, 5 cuts, 1500/1500 objects). The
 flow-over resume of v19.2.2 has not met metal yet; that check is #172. The README is the reference for what the code does, rewritten from the code in
-#131; the docs in `docs/` were checked against it and the superseded ones moved
-to `docs/history/`. What earlier docs promised and the code does not do is
+#131 and refreshed from the code on 2026-09-27 and 2026-09-28 (#199, #200,
+#148, #209, #210); the docs in `docs/` were checked against it and the
+superseded ones moved to `docs/history/`. What earlier docs promised and the code does not do is
 listed in the README's "Not built, or not wired" with its issues (#159–#170).
 The golden has been held since v17 for the token rollout to the engine's
 clients (#107; stormcentral#30, stormcos#89 and the rest); when to release

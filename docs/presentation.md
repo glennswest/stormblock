@@ -13,7 +13,7 @@ style: |
 ---
 
 <!-- Render: npx @marp-team/marp-cli@4 docs/presentation.md -o out/presentation.html
-     (add --pdf for PDF). Written 2026-09-26 for v19.1.2 (#132), refreshed for v19.3.0; after the docs
+     (add --pdf for PDF). Written 2026-09-26 for v19.1.2 (#132), refreshed for v19.3.0 and for main after v19.4.0 (2026-09-28); after the docs
      were rewritten from the code (#131). Every claim here is checkable against
      the code; README.md gives the file for each. -->
 
@@ -25,14 +25,14 @@ Drives in; thin, copy-on-write, per-volume-redundant volumes out — as local
 block devices (ublk), over NVMe/TCP and over iSCSI. It also builds and boots
 the disks stormcos nodes run from.
 
-v19.3.0 · `glennswest/stormblock` · Rust, one static binary
+v19.4.0 + main · `glennswest/stormblock` · Rust, one static binary
 
 ---
 
 ## The problem, in one slide
 
 A stormcos node needs storage that is **fast to hand out** and **safe to lose a
-drive under**, on anything from a RouterOS box to a 160-drive shelf:
+drive under**, on anything from one disk to a 160-drive shelf:
 
 - a container, VM or PVC wants its own writable disk **now** — not after an
   mkfs or a copy;
@@ -75,7 +75,7 @@ rustkube's kubelet uses it too: it **is** the built-in PVC driver's storage.
                      │
    thin volumes ── CoW clones · sealed goldens · ext4 / XFS templates
                      │
-   ublk /dev/ublkbN │ NVMe-oF/TCP (shared + per-volume) │ iSCSI (shared + portals)
+   ublk /dev/ublkbN │ NVMe-oF/TCP (per-host + per-volume) │ iSCSI (shared + portals)
                      │
    management API :9090 ── /api/v1 · /v1 · /serve/v1 · /apis/storage.storm.io/v1
 ```
@@ -127,7 +127,7 @@ only the slot it touches.
 |---|---|
 | **API** | `:9090`. `/api/v1` (drives, arrays, slabs, volumes, templates, synonyms, pallets, images, rebuilds, …), `/v1` (the CSI contract), `/serve/v1` (exports, readiness), `/apis/storage.storm.io/v1` (kube-shaped, `?watch=1`) |
 | **Data ports** | NVMe/TCP `4420`, iSCSI `3260`, per-export portals `3261–3388`, discovery UDP `7447` |
-| **Auth** | a bearer token on everything, minted at first start; open: `/api/v1/health`, the `/serve/v1` probes, the boot claim |
+| **Auth** | a bearer token on everything, minted at first start; open: `/api/v1/health`, the `/serve/v1` probes, the boot claim, a boot intent's read and install report. NVMe/TCP: a volume is served to the host an attach names, from its own subsystem, optionally behind DH-HMAC-CHAP; the shared subsystem admits no host by default (#210) |
 | **Health** | `GET /api/v1/health` (public, no I/O); `GET /serve/v1/ready` — 200 only when an attach would work now |
 | **Metrics** | `GET /metrics` (token): slab and drive gauges refreshed at scrape, API counters, pool, rebuild, iSCSI, serving |
 | **CLI** | the daemon, plus `slab`, `image`, `pallet`, `golden`, `attach`, `boot-claim`, `boot-local`, `adopt-ublk`, `must-gather` |
@@ -186,8 +186,9 @@ only the slot it touches.
 
 ## Status and the issues that matter
 
-**v19.3.0**, full suite green on dev apart from two image tests (#120) and
-two timing tests on a loaded box (#134, #173).
+**v19.4.0**, and on main (unreleased, major): boot intent (#148), per-host
+NVMe/TCP subsystems with DH-HMAC-CHAP (#210), `cluster` opt-in (#209). Full
+suite green on dev apart from a timing test on a loaded box (#134).
 
 - **Power cuts (#171, P0)**: fsync'd writes were lost on a hard power-off.
   Fixed in v19.1.4–v19.2.2: slot entries after their data, the handover
@@ -196,7 +197,9 @@ two timing tests on a loaded box (#134, #173).
 - **The golden is held.** Since v17 the API is closed by default, and the
   engine's clients have to present a token first (#107; stormcentral#30,
   stormcos#89, and one issue per client). When to release it: #194.
-- **Security**: CHAP in the config file is ignored, so a CHAP-configured
+- **Security**: the `/serve/v1` reconciler serves every export, host-bound
+  ones included, on a portal any host can reach (#217, P0);
+  CHAP in the config file is ignored, so a CHAP-configured
   iSCSI target runs open (#164); the optional `ui` pages bypass the token
   (#166).
 - **Correctness**: `boot-iscsi` formats its target every run, and a unit runs

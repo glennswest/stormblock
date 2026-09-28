@@ -19,7 +19,8 @@ drives / files / nvme-tcp:// / iscsi://          (the drive layer)
         │
    thin volumes: CoW clones, sealed goldens, filesystem templates (ext4, XFS)
         │
-   ublk /dev/ublkbN · NVMe-oF/TCP (shared subsystem, per-volume subsystems)
+   ublk /dev/ublkbN · NVMe-oF/TCP (per-host subsystems, a shared subsystem
+   closed by default, per-volume subsystems; DH-HMAC-CHAP)
    · iSCSI (shared target, per-export portals)
         │
    management API :9090 — /api/v1, /v1 (CSI contract), /serve/v1,
@@ -107,9 +108,10 @@ exported volume, 128 by default, #188). `/serve/v1`
 (the serving layer: exports, readiness, tar in/out, raw import, trim) is
 mounted by the engine whenever it has a data directory.
 
-**Cluster (optional).** UDP-multicast node discovery, openraft membership,
-heartbeats and volume replication behind the `cluster` feature; off unless
-`[cluster] enabled = true`. Single-node is the design point: nothing needs a
+**Cluster (optional).** openraft membership, heartbeats and volume
+replication behind the `cluster` feature, which is **not in the default build**
+since #209 (`--features cluster`); even then off unless
+`[cluster] enabled = true`. UDP-multicast node discovery is in every build. Single-node is the design point: nothing needs a
 cluster.
 
 ## Building
@@ -122,10 +124,25 @@ onto dev as an unprivileged user, builds in a scratch directory and deletes it.
 Nothing here needs root.
 
 ```bash
-sc-build                                           # cargo build && cargo test
-sc-build 'cargo build --release --locked'          # what a golden is built with
-sc-build 'cargo test --locked --test integration_multidrive'
+sc-build 'cargo nextest run --locked'                        # the routine check
+sc-build 'cargo nextest run --locked -E "test(multidrive)"'  # some of it
+sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl'
+sc-build 'cargo check --locked --features cluster'           # the Raft layer, opt-in
 ```
+
+**Tests** (#209). `tests/it/` is one in-process integration-test binary, each
+former file a module; cargo-nextest gives every test its own process.
+`tests-runtime/` (crate `stormblock-runtime-tests`) holds the tests that need
+the built binary (`STORMBLOCK_BIN`), a kernel device or privileges; they are
+outside the routine check, and today nothing runs them (#222). `src/main.rs` is
+a wrapper around `stormblock::cli`. The `ci-*.sh` scripts run whole scenarios on
+dev (`sc-build 'bash ci-….sh'`), e.g. `ci-nvme-hosts-verify.sh`: the Linux
+kernel as NVMe/TCP initiator, unprivileged, in QEMU (#210).
+
+**Build profiles.** `dev`/`test`: line tables only, no debug info for
+dependencies. `release`: thin LTO, 16 codegen units. `dist`: fat LTO, one
+codegen unit, meant for goldens — but the golden build (stormcos's
+`deploy/build-goldens.sh`, below) still uses `--release` (stormcos#169).
 
 Tests that write files need `TMPDIR` inside the scratch tree
 (`mkdir -p tmp && export TMPDIR=$PWD/tmp`). `Cargo.lock` is committed and every
@@ -166,14 +183,14 @@ sc-build 'sh test/build.sh && podman run --rm --user 65532 --tmpfs /results:rw,m
 `STORM_ONLY=<name>` runs the matching tests; `STORM_KEEP_WORK=1` keeps the
 engine's files and log.
 
-**Features** (`Cargo.toml`): `default = ["nvmeof", "iscsi", "cluster",
-"stormfs-data"]`.
+**Features** (`Cargo.toml`): `default = ["nvmeof", "iscsi", "stormfs-data"]`;
+`cluster` is opt-in since #209.
 
 | feature | adds |
 |---|---|
 | `nvmeof` | the NVMe-oF/TCP target, `--nvmeof-*` flags, `[nvmeof]` |
 | `iscsi` | the iSCSI target, `--iscsi-*`/`--chap-*` flags, `boot-iscsi`, `migrate-boot`, `[iscsi]`, `/api/v1/luns`, `/api/v1/sessions` |
-| `cluster` | openraft membership, heartbeats, replication, `[cluster]`, `/api/v1/cluster`, `/raft/*` |
+| `cluster` (opt-in) | openraft membership, heartbeats, replication, `[cluster]`, `/api/v1/cluster`, `/raft/*` |
 | `stormfs-data` | the StormFS data path, `/api/v1/stormfs` (`docs/stormfs-api.md`) |
 | `ui` | the old embedded web UI at `/ui` (off since v12.2.0; stormview is the UI) |
 | `arm64`, `mikrotik` | profile names only — no code is gated on them |
@@ -186,9 +203,11 @@ cargo build --release --locked --target aarch64-unknown-linux-musl \
     --no-default-features --features "mikrotik,nvmeof"                            # RouterOS (NVMe-TCP only)
 ```
 
-The RouterOS profile serves containers, PVCs and sbregistry over NVMe-TCP;
-iSCSI sharing and PXE boot on RouterOS are mkube's. `--no-default-features`
-without `nvmeof` does not currently compile (#161).
+**Nothing ships for RouterOS** (owner, 2026-09-28): the RouterOS profile is
+no longer built or checked, and the command above is kept for reference only.
+When it did ship it served containers, PVCs and sbregistry over NVMe-TCP; iSCSI
+sharing and PXE boot on RouterOS are mkube's. `--no-default-features` without
+`nvmeof` does not currently compile (#161).
 
 ## Running
 
@@ -204,7 +223,7 @@ it does not parse), then, in order:
    them**, their volumes included; with `--raid`, builds an array from them,
    and with `--volume` too, creates volumes on it; with neither, every drive
    becomes a raw NVMe namespace;
-4. starts the cluster engine (`[cluster] enabled`) and StormFS registration
+4. starts the cluster engine (`[cluster] enabled`, with `--features cluster`) and StormFS registration
    (`[stormfs] enabled`);
 5. starts the **iSCSI target** (unless `--no-iscsi`) and the **NVMe-oF/TCP
    target** — the latter only when there is something to export at startup
@@ -276,6 +295,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
+| `STORMBLOCK_DHCHAP_SECRET` | the DH-HMAC-CHAP secret (`DHHC-1:…`) the engine's NVMe/TCP initiator answers with when a target asks and the drive's spec carries none (#210) | no secret: a target that requires one refuses |
 | `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator`; when `boot-local` claims a fresh clone to resume a flow-over, `nqn.2026-09.lo.storm:host-<tag>` |
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds the data half | policy decides |
@@ -441,7 +461,8 @@ stormblock is a **`special`** component in stormcentral (`components/stormcos.to
 a bare binary plus `/etc/stormblock/stormblock.toml`, not a stormd service. It
 is staged with `stormcentral component stage`, which runs stormcos's
 `deploy/build-goldens.sh`. That builds `cargo build --release --locked
---target x86_64-unknown-linux-musl` and lays three goldens:
+--target x86_64-unknown-linux-musl` (thin LTO since #209; the fat-LTO `dist`
+profile meant for goldens is not used yet, stormcos#169) and lays three goldens:
 
 - **`stormblock`** — read-only ext4, the binary at `/usr/bin/stormblock` and a
   config with `listen_addr = "0.0.0.0:9090"`; placed in `system1`;
@@ -704,8 +725,11 @@ Hosts are kept in `synonyms.json` (`hosts`) beside the synonyms they name.
 **Boot intent (#148).** Each host carries an intent its boot agent reads before
 it claims: `auto` (never set; claim and boot), `local` (boot the local disk, no
 claim), or `install` (claim, and the initramfs takes the local disk with
-force). `install` is one-shot: once the flow-over is done and the disk boots on
-its own, the node reports it and the intent becomes `local`.
+force). `install` is one-shot: once the flow-over has moved everything and
+`local-boot` has laid the ESP and boot pallets and judged the disk bootable, the
+adopting engine reports it and the intent becomes `local`. That report comes
+from the installer's session, before the machine has booted from the disk; the
+owner wants it to come from the first local boot (#220).
 
 ```bash
 curl http://forge:9090/api/v1/synonyms/boothost/ac1f6b8aa79c/intent   # open; name or alias
@@ -1193,8 +1217,13 @@ What earlier docs described and the code does not do, each with its issue:
   two subsystem schemes are live at once (#98).
 - **Known wrong reads**: a RAID-1 array reads from a member that is still
   rebuilding (#175).
-- **"No C dependencies"** was never true: TLS brings in `aws-lc-sys` and
-  `ring`.
+- **"No C dependencies"** was never true: TLS brings in `ring` (the only
+  backend since #209; `aws-lc-sys` is gone).
+- **NVMe/TCP access** (#210, `docs/nvme-access.md`): the `/serve/v1`
+  reconciler also serves every `/api/v1` export — host-bound ones included —
+  on a per-volume portal that admits any host (#217); `/serve/v1`'s own
+  subsystems admit any host (#212); an `nvme-tcp://` drive cannot be given a
+  DH-HMAC-CHAP secret except through the environment (#213).
 
 ## Docs
 
@@ -1220,31 +1249,36 @@ What earlier docs described and the code does not do, each with its issue:
 
 ## Source layout
 
-93k lines of Rust in `src/`, 14.5k in `tests/`, about 880 tests, plus the
-test container's crate (`test/`, 1.1k).
+97k lines of Rust in `src/`, 12k in `tests/it/` and 3.5k in `tests-runtime/`,
+about 920 tests, plus the test container's crate (`test/`, 1.1k).
 
 ```
-src/mgmt/       19.7k  management API (axum): every /api/v1 surface, /v1, kube resources,
-                       auth, config, metrics, discovery, ublk exports, web UI (feature ui)
-src/volume/     17.9k  thin volumes, GEM, redundancy (mirror/parity legs), snapshots and
+src/mgmt/       21.2k  management API (axum): every /api/v1 surface, /v1, kube resources,
+                       auth, config, metrics, discovery, ublk exports, per-host NVMe
+                       subsystems (nvme_hosts), web UI (feature ui)
+src/volume/     18.5k  thin volumes, GEM, redundancy (mirror/parity legs), snapshots and
                        clones, metadata, synonyms, chunks/versions (StormFS), GC, pressure,
                        relocation, composition
-src/drive/      10.9k  BlockDevice; O_DIRECT block devices (io_uring or blocking pool),
+src/drive/      11.0k  BlockDevice; O_DIRECT block devices (io_uring or blocking pool),
                        nvme-tcp:// and iscsi:// initiators, files; slabs and the registry;
                        ublk; handover; SMART; identity; CrashDevice (power-cut tests)
 src/image/       7.5k  image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import decoders,
                        node layout, local boot
-src/target/      6.7k  NVMe-oF/TCP and iSCSI targets, per-core reactor
+src/target/      7.7k  NVMe-oF/TCP (several subsystems per listener, allowed hosts,
+                       DH-HMAC-CHAP) and iSCSI targets, per-core reactor
 src/fs/          5.6k  templates, ext4 and XFS seams, disk identity, files, image survey
 src/serve/       4.0k  the serving layer (/serve/v1): wiring, reconciler, readiness, reaper
 src/pallet/      3.9k  pallet format writer, GPT, store, manager, selection
 src/placement/   2.9k  failure domains, placement, drain moves, rebalance
 src/raid/        2.7k  drive-level RAID 1/5/6/10, parity
-src/cluster/     2.6k  openraft membership, heartbeat, replication (feature cluster)
-src/*.rs         9.0k  main.rs (CLI, daemon, subcommands), rebuild, drain, state, boot,
+src/cluster/     2.6k  openraft membership, heartbeat, replication (feature cluster, opt-in)
+src/*.rs         9.2k  cli.rs (CLI, daemon, subcommands; main.rs wraps it), rebuild, drain,
+                       state, boot,
                        boot_iscsi, migrate, stormfs registration, http client
 crates/pallet-format   the no_std pallet reader stormuefi links
 test/                  stormblock-test: the short/medium/long test container
+tests/it/              the in-process integration tests, one binary (nextest)
+tests-runtime/         tests against the built binary, devices or privileges (#222)
 ```
 
 ## Storm components it talks to
