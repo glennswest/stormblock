@@ -89,8 +89,9 @@ done
 api "http://127.0.0.1:$MGMT/api/v1/health" >/dev/null || { echo "FAIL: engine did not start"; tail -30 "$W/engine.log"; exit 1; }
 
 for d in d1 d2; do
-    api -X POST "http://127.0.0.1:$MGMT/api/v1/slabs" -d "{\"device_path\":\"$W/$d.img\",\"role\":\"data\"}" >/dev/null \
-        || fail "slab on $d"
+    r=$(curl -s -m 180 -w ' HTTP%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        -X POST "http://127.0.0.1:$MGMT/api/v1/slabs" -d "{\"device_path\":\"$W/$d.img\",\"role\":\"data\"}")
+    case "$r" in *HTTP2??) ;; *) fail "slab on $d: $r"; tail -5 "$W/engine.log" ;; esac
 done
 
 mkvol() {
