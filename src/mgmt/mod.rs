@@ -187,6 +187,10 @@ pub struct VolumeSubsystem {
     pub port: u16,
     /// Dropping this aborts the listener.
     pub task: tokio::task::JoinHandle<()>,
+    /// The target, so who may connect can be changed after it started
+    /// (#210). `None` for a subsystem this process did not start itself.
+    #[cfg(feature = "nvmeof")]
+    pub target: Option<Arc<crate::target::nvmeof::NvmeofTarget>>,
 }
 
 impl Drop for VolumeSubsystem {

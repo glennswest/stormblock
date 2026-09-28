@@ -1022,7 +1022,16 @@ impl GoldenSource {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| spec_err(format!("volume {name} has no size")))?;
 
-        let body = serde_json::json!({ "volume_id": id, "protocol": "nvmeof" });
+        // Exported to this process alone, from a subsystem of its own, and
+        // behind a secret: a golden is never on the shared subsystem where
+        // every host would see it (#210).
+        let host_nqn = crate::drive::nvmeof_dev::default_host_nqn().to_string();
+        let body = serde_json::json!({
+            "volume_id": id,
+            "protocol": "nvmeof",
+            "host_nqn": host_nqn,
+            "dhchap": true,
+        });
         let resp = client
             .post(&format!("{base}/api/v1/exports"))
             .json(&body)
@@ -1058,8 +1067,13 @@ impl GoldenSource {
             addr: format!("{host}:{port}"),
             nqn: nqn.to_string(),
             nsid,
-            host_nqn: None,
-            dhchap: None,
+            host_nqn: Some(host_nqn.clone()),
+            dhchap: export
+                .get("dhchap_secret")
+                .and_then(|s| s.as_str())
+                .map(crate::target::nvmeof::auth::DhchapKey::parse)
+                .transpose()
+                .map_err(|e| spec_err(format!("export reply's secret: {e}")))?,
         };
         let dev = crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec)
             .await

@@ -404,6 +404,24 @@ pub struct ClaimRequest {
     /// claim reads from its body; `?mac=` works too.
     #[serde(default)]
     pub mac: Option<String>,
+    /// The host NQN that will connect to the clone: it is served from that
+    /// host's own subsystem, to that host alone (#210). Not read by a boot
+    /// claim, which binds the clone to the boot host's own NQNs.
+    #[serde(default)]
+    pub host_nqn: Option<String>,
+    /// Give that host a DH-HMAC-CHAP secret (returned in `attach`).
+    #[serde(default)]
+    pub dhchap: bool,
+}
+
+/// Who a claimed clone is served to (#210).
+enum AttachFor<'a> {
+    /// A boot host: its own subsystem, admitting the NQNs it presents.
+    Boothost { name: &'a str, aliases: Vec<String> },
+    /// A named host NQN.
+    Host { nqn: &'a str, dhchap: bool },
+    /// Nobody was named: only where the node admits any host.
+    Unnamed,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -546,6 +564,9 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
     // that answers for nothing.
     #[cfg(feature = "nvmeof")]
     {
+        // Out of its host's subsystem too (#210): the host keeps the
+        // subsystem, and finds its new clone there.
+        crate::mgmt::nvme_hosts::detach(state, old.0, None).await;
         let ids: Vec<uuid::Uuid> = state
             .exports
             .read()
@@ -577,9 +598,80 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
 /// Null rather than absent when there is no NVMe-oF target running: a caller
 /// that asked for somewhere to attach should be told plainly that there is
 /// nowhere, not left to infer it from a missing field.
-async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Value {
+async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>) -> serde_json::Value {
     #[cfg(feature = "nvmeof")]
     {
+        use crate::target::nvmeof::HostAccess;
+        let pol = crate::mgmt::nvme_hosts::policy(state);
+        let target = state.nvmeof_target.read().await.as_ref().cloned();
+        let tuple = |nqn: &str, port: u16, nsid: u32| {
+            let host = state.config.management.resolve_advertised_host("0.0.0.0");
+            json!({
+                "protocol": "nvme-tcp",
+                "address": host,
+                "port": port,
+                "nqn": nqn,
+                "nsid": nsid,
+                "uri": format!("nvme-tcp://{host}:{port}/{nqn}?nsid={nsid}"),
+            })
+        };
+        // The hosts this clone may be reached by, when the claim says.
+        let named: Option<Vec<String>> = match &to {
+            AttachFor::Boothost { name, aliases } => Some(pol.boothost_nqns(name, aliases)),
+            AttachFor::Host { nqn, .. } => Some(vec![nqn.to_string()]),
+            AttachFor::Unnamed => None,
+        };
+        match (&to, target.as_ref()) {
+            // On the node's listener, in the host's own subsystem: the host
+            // sees this clone and whatever else was attached to it, and no
+            // other host sees any of it (#210).
+            (AttachFor::Boothost { name, aliases }, Some(t)) => {
+                return match crate::mgmt::nvme_hosts::attach_for_boothost(state, name, aliases, volume.0).await {
+                    Ok((nqn, nsid, hosts)) => {
+                        let mut v = tuple(&nqn, t.advertised().port(), nsid);
+                        v["host_nqns"] = json!(hosts);
+                        v
+                    }
+                    Err(e) => {
+                        tracing::warn!(%volume, "boot claim: cannot serve the clone to {name}: {e}");
+                        serde_json::Value::Null
+                    }
+                };
+            }
+            (AttachFor::Host { nqn, dhchap }, Some(t)) => {
+                return match crate::mgmt::nvme_hosts::attach_for_host(state, volume.0, nqn, false, *dhchap).await {
+                    Ok(a) => {
+                        let mut v = tuple(&a.nqn, t.advertised().port(), a.nsid);
+                        v["host_nqn"] = json!(a.host_nqn);
+                        if let Some(s) = a.dhchap_secret {
+                            v["dhchap_secret"] = json!(s);
+                        }
+                        v
+                    }
+                    Err(e) => {
+                        tracing::warn!(%volume, "claim: cannot serve the clone to {nqn}: {e}");
+                        serde_json::Value::Null
+                    }
+                };
+            }
+            _ => {}
+        }
+        // No shared listener. A subsystem of the volume's own, admitting the
+        // named hosts — or, with nobody named, any host only where the node
+        // says so.
+        let access = match named {
+            Some(hosts) => HostAccess::Hosts(hosts.into_iter().map(|h| (h, None)).collect()),
+            None if pol.allow_any_host => HostAccess::Any,
+            None => {
+                tracing::warn!(
+                    %volume,
+                    "claim names no host and this node admits no unnamed host: the clone is not \
+                     served (send host_nqn) (#210)"
+                );
+                return serde_json::Value::Null;
+            }
+        };
+        let access_any = access.is_any();
         // A subsystem of this volume's own, if it has one. The NQN carries
         // the volume uuid, so the address names what it serves: nothing to go
         // stale, and a deleted volume stops answering rather than resolving to
@@ -589,7 +681,7 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Val
         // Give it a subsystem of its own if it has not got one. A claim is
         // exactly the moment a volume acquires a consumer, so it is the right
         // moment to start serving it under its own name.
-        let own = super::v1::ensure_volume_subsystem(state, volume.0).await;
+        let own = super::v1::ensure_volume_subsystem(state, volume.0, access).await;
         if let Some((nqn, port)) = own {
             if !nqn.is_empty() {
                 let host = state.config.management.resolve_advertised_host("0.0.0.0");
@@ -608,7 +700,12 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Val
         }
 
         // Not wired as its own subsystem yet — fall back to the shared one so
-        // a node mid-boot keeps working while the two schemes overlap.
+        // a node mid-boot keeps working while the two schemes overlap. Only
+        // where that subsystem admits any host: a named host was handled
+        // above, and the shared subsystem is never how one is served.
+        if !access_any || !pol.allow_any_host {
+            return serde_json::Value::Null;
+        }
         let Some(nsid) = super::v1::ensure_nvme_namespace(state, &volume.0.to_string(), Some(volume.0)).await
         else {
             return serde_json::Value::Null;
@@ -640,7 +737,7 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId) -> serde_json::Val
     }
     #[cfg(not(feature = "nvmeof"))]
     {
-        let _ = (state, volume);
+        let _ = (state, volume, to);
         serde_json::Value::Null
     }
 }
@@ -771,7 +868,11 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // nsid is part of the address, and handing out a new one for a volume that
     // already has an address would change it under whoever holds the old one.
     note_claim(c.volume_id);
-    let attach = attach_info(&state, c.volume_id).await;
+    let to = match req.host_nqn.as_deref().filter(|h| !h.trim().is_empty()) {
+        Some(nqn) => AttachFor::Host { nqn, dhchap: req.dhchap },
+        None => AttachFor::Unnamed,
+    };
+    let attach = attach_info(&state, c.volume_id, to).await;
 
     let mut out = json!({
         "claimed_from": {
@@ -1033,7 +1134,14 @@ async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str
         store.note_install_claim(tag, c.volume_id);
         store.host(tag).map(|h| h.intent).unwrap_or_default()
     };
-    let attach = attach_info(&state, c.volume_id).await;
+    // The clone is served to this machine alone: the host NQNs its firmware
+    // and initramfs present — `…:host-<name>` with the name this reply gives,
+    // and the same for each alias and the tag it claimed as (#210).
+    let mut bind_aliases: Vec<String> = host.as_ref().map(|h| h.aliases.clone()).unwrap_or_default();
+    if claimed_as != tag {
+        bind_aliases.push(claimed_as.to_string());
+    }
+    let attach = attach_info(&state, c.volume_id, AttachFor::Boothost { name: tag, aliases: bind_aliases }).await;
     let out = json!({
         "intent": intent.as_str(),
         // Who this is, and what the machine called itself: a serial or a MAC

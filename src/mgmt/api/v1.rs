@@ -808,8 +808,12 @@ fn account_static_nodes(v1: &mut V1State, replicas: &[Replica], size: u64, charg
 pub(crate) async fn ensure_volume_subsystem(
     state: &AppState,
     volume: Uuid,
+    access: crate::target::nvmeof::HostAccess,
 ) -> Option<(String, u16)> {
     if let Some(found) = state.nvme_portals.read().await.get(&volume).cloned() {
+        if let Some(t) = state.volume_subsystems.lock().await.get(&volume).and_then(|s| s.target.clone()) {
+            t.default_subsystem().set_access(access);
+        }
         return Some(found);
     }
     let cfg = state.per_volume.read().await.clone()?;
@@ -838,9 +842,13 @@ pub(crate) async fn ensure_volume_subsystem(
                 ..Default::default()
             },
         ));
+        // Who may connect, before anything can (#210).
+        target.default_subsystem().set_access(access.clone());
         // Namespace 1, always: the volume is the only namespace here, so the
         // number carries no information and nothing can disagree about it.
-        target.add_namespace_dynamic(1, device).await;
+        // A golden is served write-protected.
+        let sealed = state.volume_manager.lock().await.is_sealed(&EngineVolumeId(volume));
+        target.default_subsystem().add_namespace_at(1, device.clone(), sealed).await;
         let runner = target.clone();
         let reactor = cfg.reactor.clone();
         let log_nqn = nqn.clone();
@@ -851,7 +859,7 @@ pub(crate) async fn ensure_volume_subsystem(
         });
         state.volume_subsystems.lock().await.insert(
             volume,
-            crate::mgmt::VolumeSubsystem { nqn: nqn.clone(), port, task },
+            crate::mgmt::VolumeSubsystem { nqn: nqn.clone(), port, task, target: Some(target.clone()) },
         );
         state.nvme_portals.write().await.insert(volume, (nqn.clone(), port));
         tracing::info!("volume {volume} served as {nqn} on port {port}");
