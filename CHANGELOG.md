@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-09-29
+- **docs:** #148 closed: the boot-intent route (`GET`/`PUT …/boothost/<tag>/intent`, `POST …/installed`) shipped in v20.0.0; re-verified on dev. `installed` from the local boot is #220
 - **feat:** A volume carries its logical block size, 512 or 4096 (default), and every transport presents it: ublk (512e — physical 4096), NVMe-oF Identify Namespace, iSCSI READ CAPACITY. `compose/disk` presents the disk at its `lba`; `POST /api/v1/volumes` takes `lba`; clones and snapshots inherit it; every volume response reports `lba`. Firmware reads boot media at 512: a 4096-byte ESP was `NOT_FOUND` to server1's AMI Aptio 4 and unbootable to OVMF on pve (#228)
 - **feat:** Volume metadata V9 records the block size. A payload whose volumes are all 4096 is still written as V8, so every slab and `volumes.dat` without a 512 volume — every release slab — stays readable by an older engine (#228)
 - **test:** `ci-boot512-verify.sh` (unprivileged, dev): a 512 boot disk (512-sector ESP with stormuefi, boot pallet with the host kernel) and its clone; the Linux kernel over NVMe/TCP sees 512 (a plain volume 4096), both partitions, and mounts the ESP; OVMF boots the clone as a virtio disk with no block-size override and stormuefi starts the kernel with the pallet's command line (#228)

@@ -264,7 +264,7 @@ Design:
       forge needs `allow_any_host = true` until its callers send `host_nqn`,
       or they break; boot claims need nothing. Golden held (#194)
 
-### Boot intent beside boothost/<tag> (2026-09-27, #148, stormbootx#11) — IN PROGRESS
+### Boot intent beside boothost/<tag> (2026-09-27, #148, stormbootx#11) — DONE (v20.0.0)
 
 stormbootx v0.4.0 reads `GET /api/v1/synonyms/boothost/<tag>/intent` before
 it claims (`install` | `local` | `auto`; any doubt = `auto`); a machine with
@@ -298,10 +298,14 @@ out: that is the owner's call.
       2026-09-28); rollout answers on #148 (rollback = VM snapshot only: V8
       metadata; forge needs `require_auth = false` + `allow_any_host = true`;
       input goldens need stormcentral#143)
-- [ ] owner's decision 2026-09-28: `installed` must come from the first boot
-      off the local disk (#220) — waits on #221 (does the install ticket live
-      in the clone? that is where a pending report would ride to the local
-      boot). Not verified: a real machine through stormbootx
+- [x] re-verified on dev at eeab4dd (2026-09-29; route code unchanged since
+      v20.0.0): 46/46 (synonym store, serve::api open/guarded, integration
+      synonyms incl. the intent test, auth). #148 closed: the route shipped in
+      v20.0.0 (golden `golden-stormblock-c92340fbd86f`, stormcos#168); forge
+      still runs 13.7.0 until the owner upgrades it
+- moved out: `installed` from the first boot off the local disk is #220
+  (P1), which waits on #221 (install ticket in the clone?). Not verified: a
+  real machine through stormbootx
 
 ### Universal boot: a default claim carries a MAC (2026-09-27, #200, P0) — DONE (v19.4.0)
 
