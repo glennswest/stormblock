@@ -188,12 +188,20 @@ Engine piece, needed by any shape of the split: **a per-volume LBA**.
   4096 whatever the disk's LBA. Then stormcos's `compose-release.py` (disk
   `lba` and the ESP's sector size) follows.
 
-- [ ] handle + record (V9, V8 when all 4096) + clone inheritance
-- [ ] API: create, compose/disk, volume JSON, attach reply
-- [ ] tests: NVMe-oF identify at 512, iSCSI capacity, clone inherits,
-      metadata round trip V8/V9; the Linux kernel sees 512 and mounts a
-      512-sector FAT (ci script on dev)
-- [ ] docs (composed-disks.md, README), CHANGELOG; question to the owner
+- [x] handle + record (V9, V8 when all 4096) + clone inheritance (4823b35)
+- [x] API: create, compose/disk, volume JSON (the `/v1` AttachInfo is the
+      CSI contract and is left alone; Identify Namespace carries the size)
+- [x] tests: unit (identify LBADS 9, 512 write in a 4K block, clone,
+      restart), metadata V8/V9, HTTP compose at 512; full suite on dev at
+      2155b9c: 841/841. `ci-boot512-verify.sh` on dev (8fdfe3a): the kernel
+      over NVMe/TCP sees 512 (plain volume 4096), both partitions, mounts the
+      512 ESP; OVMF boots the clone as a pve-style virtio disk → stormuefi →
+      kernel with the pallet's cmdline. ALL PASS
+- [x] docs (composed-disks.md, README), CHANGELOG
+- [ ] owner: one release disk at 512, or the two-volume split? (asked on
+      #228); stormcos compose-release.py follows either way (filed)
+- [ ] not verified: server1 (Aptio 4) and a real pve VM — the owner's
+      acceptance, after stormcos composes a release at 512
 
 ### NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP (2026-09-28, #210, P0) — DONE
 
