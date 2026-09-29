@@ -43,7 +43,16 @@ const MAGIC: [u8; 8] = *b"STRMVOL\0";
 /// says what a volume is and only moves one way in practice; access is a
 /// setting on a clone that moves both ways over its life. A V5 record loads
 /// read-write, which is what every volume that predates the question was.
-const VERSION: u32 = 8;
+///
+/// V9 adds the logical block size a volume is presented at (#228). It is
+/// written only when a volume needs it: a payload whose volumes are all at
+/// 4096 is written as V8, so a slab or a `volumes.dat` with no 512-byte
+/// volume in it — every release slab — stays readable by an older engine,
+/// the initramfs of a release composed on a newer appliance included.
+const VERSION: u32 = 9;
+
+/// The version written when nothing needs V9. See [`VERSION`].
+const VERSION_V8: u32 = 8;
 
 /// Whether a volume takes writes.
 ///
@@ -210,6 +219,9 @@ pub struct VolumeRecord {
     /// round-trip test was reporting.
     #[serde(default)]
     pub owner: Option<Owner>,
+    /// The logical block size the volume is presented at (#228): 512 for
+    /// what firmware reads, 4096 for everything else. V9.
+    pub lba: u32,
 }
 
 /// What a volume belongs to.
@@ -316,6 +328,103 @@ fn convert_legacy_extents(m: BTreeMap<u64, LegacyLocation>) -> BTreeMap<u64, Ext
     m.into_iter().map(|(k, v)| (k, v.into())).collect()
 }
 
+/// V8 payload shapes — the current shape before `lba` (#228). Decoded, and
+/// also *written* when every volume is at the default LBA, so an older engine
+/// can still read what a newer one wrote as long as nothing needs 512.
+mod v8 {
+    use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeMetadata {
+        pub extent_size: u64,
+        pub arrays: Vec<super::ArrayRecord>,
+        pub volumes: Vec<VolumeRecord>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct VolumeRecord {
+        pub id: VolumeId,
+        pub name: String,
+        pub virtual_size: u64,
+        pub array_id: Option<RaidArrayId>,
+        pub extents: BTreeMap<u64, ExtentLocation>,
+        pub retention: Retention,
+        pub redundancy: RedundancyPolicy,
+        pub parity: BTreeMap<u64, ParityGroup>,
+        pub failed_slabs: Vec<SlabId>,
+        pub parent: Option<VolumeId>,
+        pub sealed: bool,
+        pub template: bool,
+        pub access: Access,
+        pub fs: Option<FsInfo>,
+        pub owner: Option<Owner>,
+    }
+}
+
+impl From<v8::VolumeMetadata> for VolumeMetadata {
+    fn from(old: v8::VolumeMetadata) -> Self {
+        VolumeMetadata {
+            extent_size: old.extent_size,
+            arrays: old.arrays,
+            volumes: old
+                .volumes
+                .into_iter()
+                .map(|v| VolumeRecord {
+                    id: v.id,
+                    name: v.name,
+                    virtual_size: v.virtual_size,
+                    array_id: v.array_id,
+                    extents: v.extents,
+                    retention: v.retention,
+                    redundancy: v.redundancy,
+                    parity: v.parity,
+                    failed_slabs: v.failed_slabs,
+                    parent: v.parent,
+                    sealed: v.sealed,
+                    template: v.template,
+                    access: v.access,
+                    fs: v.fs,
+                    owner: v.owner,
+                    // Every volume before V9 was presented at 4096.
+                    lba: crate::volume::thin::Lba::DEFAULT,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The V8 shape of a payload, when nothing in it needs V9.
+fn as_v8(m: &VolumeMetadata) -> Option<v8::VolumeMetadata> {
+    if m.volumes.iter().any(|v| v.lba != crate::volume::thin::Lba::DEFAULT) {
+        return None;
+    }
+    Some(v8::VolumeMetadata {
+        extent_size: m.extent_size,
+        arrays: m.arrays.clone(),
+        volumes: m
+            .volumes
+            .iter()
+            .map(|v| v8::VolumeRecord {
+                id: v.id,
+                name: v.name.clone(),
+                virtual_size: v.virtual_size,
+                array_id: v.array_id,
+                extents: v.extents.clone(),
+                retention: v.retention,
+                redundancy: v.redundancy.clone(),
+                parity: v.parity.clone(),
+                failed_slabs: v.failed_slabs.clone(),
+                parent: v.parent,
+                sealed: v.sealed,
+                template: v.template,
+                access: v.access,
+                fs: v.fs.clone(),
+                owner: v.owner.clone(),
+            })
+            .collect(),
+    })
+}
+
 /// V6 payload shapes — decode-only, converted on load. Everything a V7
 /// record carries except `template`.
 ///
@@ -387,6 +496,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     // Nothing claimed these; they predate owners being
                     // recorded at all, which is the truth about them.
                     owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                 })
                 .collect(),
         }
@@ -444,6 +554,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     access: v.access,
                     fs: v.fs,
                     owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                     // Nothing before V7 could say which goldens were blanks.
                     // A slab written then simply has no templates, which is
                     // what it had anyway.
@@ -509,6 +620,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     access: Access::ReadWrite,
                     fs: v.fs,
                     owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
                     })
                 .collect(),
@@ -566,6 +678,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     access: Access::ReadWrite,
                     fs: None,
                     owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
                     })
                 .collect(),
@@ -625,6 +738,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     access: Access::ReadWrite,
                     fs: None,
                     owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
                     })
                 .collect(),
@@ -678,6 +792,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     access: Access::ReadWrite,
                     fs: None,
                     owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
                     })
                 .collect(),
@@ -734,6 +849,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     access: Access::ReadWrite,
                     fs: None,
                     owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
                     })
                 .collect(),
@@ -762,8 +878,11 @@ impl MetadataStore {
     /// that carries its own metadata stores exactly these bytes, so there is
     /// one encoder however the record is kept.
     pub fn encode(metadata: &VolumeMetadata) -> io::Result<Vec<u8>> {
-        let payload = bincode::serde::encode_to_vec(metadata, bincode::config::standard())
-            .map_err(|e| io::Error::other(format!("bincode encode: {e}")))?;
+        let (version, payload) = match as_v8(metadata) {
+            Some(old) => (VERSION_V8, bincode::serde::encode_to_vec(&old, bincode::config::standard())),
+            None => (VERSION, bincode::serde::encode_to_vec(metadata, bincode::config::standard())),
+        };
+        let payload = payload.map_err(|e| io::Error::other(format!("bincode encode: {e}")))?;
 
         let payload_len = payload.len() as u64;
         let timestamp = SystemTime::now()
@@ -775,7 +894,7 @@ impl MetadataStore {
         let total = 28 + payload.len() + 4; // +4 for CRC32C
         let mut buf = Vec::with_capacity(total);
         buf.extend_from_slice(&MAGIC);
-        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&version.to_le_bytes());
         buf.extend_from_slice(&payload_len.to_le_bytes());
         buf.extend_from_slice(&timestamp.to_le_bytes());
         buf.extend_from_slice(&payload);
@@ -852,6 +971,12 @@ impl MetadataStore {
             let (old, _): (v4::VolumeMetadata, _) =
                 bincode::serde::decode_from_slice(payload, bincode::config::standard())
                     .map_err(|e| io::Error::other(format!("bincode decode (v4): {e}")))?;
+            return Ok(old.into());
+        }
+        if version == 8 {
+            let (old, _): (v8::VolumeMetadata, _) =
+                bincode::serde::decode_from_slice(payload, bincode::config::standard())
+                    .map_err(|e| io::Error::other(format!("bincode decode (v8): {e}")))?;
             return Ok(old.into());
         }
         if version == 7 {
@@ -990,6 +1115,7 @@ mod tests {
                 access: Access::ReadWrite,
                 fs: None,
                 owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                 template: false,
                 }],
         }
@@ -1126,6 +1252,7 @@ mod tests {
                 }),
                 template: false,
                 owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1209,6 +1336,7 @@ mod tests {
                 access: Access::ReadWrite,
                 fs: None,
                 owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                 template: false,
                 }],
         };
@@ -1253,13 +1381,39 @@ mod tests {
         // Verify header
         assert_eq!(&encoded[0..8], b"STRMVOL\0");
         let version = u32::from_le_bytes(encoded[8..12].try_into().unwrap());
-        assert_eq!(version, VERSION);
+        // Nothing here needs V9, so it is written as V8 (#228).
+        assert_eq!(version, VERSION_V8);
 
         let decoded = MetadataStore::decode(&encoded).unwrap();
         assert_eq!(decoded.extent_size, meta.extent_size);
         assert_eq!(decoded.volumes.len(), 1);
         assert_eq!(decoded.volumes[0].name, "test-vol");
         assert_eq!(decoded.volumes[0].extents.len(), 2);
+        assert_eq!(decoded.volumes[0].lba, 4096);
+    }
+
+    /// #228: a 512-byte volume makes the payload V9 and keeps its LBA; the
+    /// same payload without it is V8 bytes an older engine decodes as its
+    /// own current shape.
+    #[test]
+    fn lba_512_is_v9_and_default_is_v8() {
+        let mut meta = test_metadata();
+        let v8_bytes = MetadataStore::encode(&meta).unwrap();
+        assert_eq!(u32::from_le_bytes(v8_bytes[8..12].try_into().unwrap()), 8);
+        // What a V8 engine does with it: decode the payload as its own shape.
+        let (old, _): (v8::VolumeMetadata, _) = bincode::serde::decode_from_slice(
+            &v8_bytes[28..v8_bytes.len() - 4],
+            bincode::config::standard(),
+        )
+        .expect("an older engine reads a payload with no 512 volume");
+        assert_eq!(old.volumes[0].name, "test-vol");
+
+        meta.volumes[0].lba = 512;
+        let v9_bytes = MetadataStore::encode(&meta).unwrap();
+        assert_eq!(u32::from_le_bytes(v9_bytes[8..12].try_into().unwrap()), 9);
+        let back = MetadataStore::decode(&v9_bytes).unwrap();
+        assert_eq!(back.volumes[0].lba, 512);
+        assert_eq!(back.volumes[0].extents.len(), 2);
     }
 
     /// A V1 file (pre-#13) must still load: legacy shapes decode and convert,
@@ -1405,6 +1559,7 @@ mod retention_tests {
                 access: Access::ReadWrite,
                 fs: None,
                 owner: None,
+                    lba: crate::volume::thin::Lba::DEFAULT,
                 template: false,
                 }],
         }

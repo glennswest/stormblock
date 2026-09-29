@@ -68,6 +68,9 @@ pub struct VolumeResponse {
     /// A sealed volume reports `access: "rw", writable: false` — sealing is
     /// the stronger statement and does not disturb the setting underneath.
     pub writable: bool,
+    /// Bytes per logical block the volume is presented at: 4096, or 512 for
+    /// a disk firmware boots from (#228). Clones inherit it.
+    pub lba: u32,
     /// Which half of the node's mutable storage the volume lives in:
     /// `system` (replaced wholesale by an install) or `data` (identity and
     /// state, which no install path formats). A clone is in its source's
@@ -107,6 +110,7 @@ struct Described {
     sealed: bool,
     access: String,
     writable: bool,
+    lba: u32,
     role: String,
     fs: Option<serde_json::Value>,
     fs_uuid: Option<Uuid>,
@@ -127,6 +131,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
                 sealed: handle.is_sealed(),
                 access: handle.access().to_string(),
                 writable: handle.writable(),
+                lba: handle.lba(),
                 role: handle.placement_role().to_string(),
                 fs: fs.map(|f| f.json()),
                 fs_uuid: fs.and_then(|f| f.uuid),
@@ -142,6 +147,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             sealed: false,
             access: crate::volume::Access::ReadWrite.to_string(),
             writable: true,
+            lba: crate::volume::Lba::DEFAULT,
             role: crate::drive::slab::SlabRole::System.to_string(),
             fs: None,
             fs_uuid: None,
@@ -187,6 +193,11 @@ pub struct CreateVolumeRequest {
     /// a cleanup would find it unclaimed.
     #[serde(default)]
     pub owner: Option<crate::volume::metadata::Owner>,
+    /// Bytes per logical block to present the volume at: 4096 (the default)
+    /// or 512, for media firmware reads — an ESP, a boot disk (#228). A clone
+    /// (`from_template`) takes its source's.
+    #[serde(default)]
+    pub lba: Option<u32>,
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -307,6 +318,7 @@ async fn list_volumes(
             physical_bytes: d.physical_bytes,
             parent: d.parent,
             sealed: d.sealed,
+            lba: d.lba,
             access: d.access.clone(),
             writable: d.writable,
             role: d.role.clone(),
@@ -376,6 +388,7 @@ async fn get_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                lba: d.lba,
                 access: d.access.clone(),
                 writable: d.writable,
                 role: d.role.clone(),
@@ -557,6 +570,7 @@ async fn compose_volume(
         physical_bytes: allocated,
         parent: placements.first().map(|(p, _)| p.0),
         sealed: false,
+        lba: vm.lba(&id).unwrap_or(crate::volume::Lba::DEFAULT),
         access: crate::volume::Access::ReadWrite.to_string(),
         writable: true,
         role: vm
@@ -584,6 +598,19 @@ async fn create_volume(
         Ok(s) => s,
         Err(e) => return ApiError::bad_request(e),
     };
+    if let Some(bs) = req.lba {
+        if !crate::volume::Lba::valid(bs) {
+            return ApiError::bad_request(format!(
+                "lba {bs}: a volume is presented at 512 or 4096 bytes per block"
+            ));
+        }
+        if req.from_template.is_some() {
+            return ApiError::bad_request(
+                "lba: a clone is presented at its source's block size, which its \
+                 filesystem was laid in; drop \"lba\" or clone a source made at that size",
+            );
+        }
+    }
 
     // Cloning a template — or any sealed volume, by id or name — is a
     // snapshot plus a fresh filesystem UUID: no mkfs, no attach. Placement
@@ -635,6 +662,7 @@ async fn create_volume(
             physical_bytes: d.physical_bytes,
             parent: d.parent,
             sealed: d.sealed,
+            lba: d.lba,
             access: d.access.clone(),
             writable: d.writable,
             role: d.role.clone(),
@@ -720,6 +748,11 @@ async fn create_volume(
             if req.owner.is_some() {
                 let _ = vm.set_owner(vol_id, req.owner.clone()).await;
             }
+            if let Some(bs) = req.lba {
+                if let Err(e) = vm.set_lba(vol_id, bs).await {
+                    return ApiError::bad_request(e.to_string());
+                }
+            }
             let resp = VolumeResponse {
                 placement: None,
                 usage: Default::default(),
@@ -738,6 +771,7 @@ async fn create_volume(
                 physical_bytes: 0,
                 parent: None,
                 sealed: false,
+                lba: vm.lba(&vol_id).unwrap_or(crate::volume::Lba::DEFAULT),
                 access: crate::volume::Access::ReadWrite.to_string(),
                 writable: true,
                 // What it was actually placed in, which is not always what
@@ -1074,6 +1108,7 @@ async fn clone_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                lba: d.lba,
                 access: d.access.clone(),
                 writable: d.writable,
                 role: d.role.clone(),
@@ -1643,6 +1678,7 @@ async fn create_snapshot(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                lba: d.lba,
                 access: d.access.clone(),
                 writable: d.writable,
                 role: d.role.clone(),
@@ -1721,6 +1757,7 @@ async fn resize_volume(
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
                 sealed: d.sealed,
+                lba: d.lba,
                 access: d.access.clone(),
                 writable: d.writable,
                 role: d.role.clone(),
@@ -2076,7 +2113,8 @@ pub struct ComposeDiskRequest {
     /// Total size. Omit for the chain plus the GPT.
     #[serde(default)]
     pub size: Option<String>,
-    /// LBA size. Defaults to 4096 — what the engine presents a volume at.
+    /// LBA size. Defaults to 4096. The disk is presented at this size (512 or
+    /// 4096, #228): a disk firmware boots from says 512.
     #[serde(default)]
     pub lba: Option<u32>,
     /// Give this disk its own GUID, at the cost of the two GPT slots.
@@ -2167,6 +2205,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
         physical_bytes: d.physical_bytes,
         parent: d.parent,
         sealed: d.sealed,
+        lba: d.lba,
         access: d.access,
         writable: d.writable,
         role: d.role,

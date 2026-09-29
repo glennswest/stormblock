@@ -646,6 +646,15 @@ impl VolumeManager {
         }
         placements.push((tail_id, total - slot));
         let id = self.compose_volume(&spec.name, Some(total), &placements).await?;
+        // Presented at the LBA its table was written in (#228): firmware
+        // parses a GPT, and a FAT's sectors, in the medium's own block size,
+        // so a 512-byte disk served at 4096 is a disk with no partitions to
+        // it. The composition inherited its head golden's size; this is the
+        // size that matters. Sizes a volume cannot be presented at (1024,
+        // 2048) keep the default, as every disk did before.
+        if crate::volume::Lba::valid(lba) {
+            self.set_lba(id, lba).await?;
+        }
         let shared_bytes: u64 = laid.iter().map(|l| l.span).sum::<u64>() + 2 * slot;
 
         let result: Result<(Uuid, u64), VolumeError> = async {

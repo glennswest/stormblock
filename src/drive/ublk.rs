@@ -716,6 +716,10 @@ impl UblkServer {
         self.dev_sectors.store(sectors, Ordering::Relaxed);
         if self.adopt.is_none() {
         let bs_shift = block_size.trailing_zeros() as u8;
+        // A volume presented at 512 is 512e (#228): its storage is 4096-byte
+        // blocks underneath, and saying so keeps a filesystem's own I/O whole
+        // blocks rather than read-modify-writes.
+        let phys_shift = bs_shift.max(12);
         let max_sectors = DEFAULT_MAX_IO_BYTES / 512;
 
         let mut params = UblkParams {
@@ -734,9 +738,9 @@ impl UblkServer {
                 // adopted device keeps what its creator declared.
                 attrs: UBLK_ATTR_VOLATILE_CACHE,
                 logical_bs_shift: bs_shift,
-                physical_bs_shift: bs_shift,
+                physical_bs_shift: phys_shift,
                 io_opt_shift: 12, // 4096
-                io_min_shift: bs_shift,
+                io_min_shift: phys_shift,
                 max_sectors,
                 chunk_sectors: 0,
                 dev_sectors: sectors,

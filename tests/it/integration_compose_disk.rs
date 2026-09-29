@@ -237,3 +237,82 @@ async fn a_pallet_and_a_disk_compose_over_http_and_read_back_as_a_gpt() {
 
     server.abort();
 }
+
+/// #228: a disk composed at 512-byte LBAs is *presented* at 512 — what
+/// firmware parses its GPT and FAT in — and so is every clone of it; a plain
+/// volume can ask for 512 too, and nothing else is accepted.
+#[tokio::test]
+async fn a_disk_composed_at_512_is_presented_at_512_and_its_clones_too() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    golden(&state, "esp512.golden", 2 * SLOT, 0xE5).await;
+    let (status, disk) = post(
+        &client,
+        &format!("{base}/api/v1/volumes/compose/disk"),
+        serde_json::json!({
+            "name": "boot512.disk",
+            "lba": 512,
+            "partitions": [{"volume": "esp512.golden", "name": "EFI", "type": "esp"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{disk}");
+    assert_eq!(disk["disk"]["lba"], 512);
+    assert_eq!(disk["lba"], 512, "the volume is presented at the size its table was laid in");
+    let disk_id = Uuid::parse_str(disk["id"].as_str().unwrap()).unwrap();
+
+    let dev: Arc<dyn BlockDevice> = {
+        let vm = state.volume_manager.lock().await;
+        vm.get_volume(&VolumeId(disk_id)).unwrap()
+    };
+    assert_eq!(dev.block_size(), 512);
+    let gpt = Gpt::read(&dev).await.unwrap();
+    assert_eq!(gpt.block_size, 512);
+    // The primary header where firmware on a 512-byte medium looks: LBA 1.
+    let mut lba1 = vec![0u8; 512];
+    dev.read(512, &mut lba1).await.unwrap();
+    assert_eq!(&lba1[..8], b"EFI PART");
+
+    // A clone — what a boot claim hands a machine — keeps it.
+    let (status, sealed) = post(&client, &format!("{base}/api/v1/volumes/{disk_id}/seal"), serde_json::json!({"force": true})).await;
+    assert_eq!(status, 200, "{sealed}");
+    let (status, clone) = post(
+        &client,
+        &format!("{base}/api/v1/volumes/{disk_id}/clone"),
+        serde_json::json!({"name": "boot512-clone"}),
+    )
+    .await;
+    assert!(status == 200 || status == 201, "{status} {clone}");
+    let clone_id = clone["id"].as_str().or_else(|| clone["volume"]["id"].as_str()).unwrap().to_string();
+    let got: serde_json::Value = client
+        .get(format!("{base}/api/v1/volumes/{clone_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["lba"], 512, "{got}");
+
+    // A plain create: 512 when asked, 4096 otherwise, nothing else.
+    let (status, v) = post(&client, &format!("{base}/api/v1/volumes"), serde_json::json!({"name": "esp-raw", "size": "64M", "lba": 512})).await;
+    assert_eq!(status, 201, "{v}");
+    assert_eq!(v["lba"], 512);
+    let (status, v) = post(&client, &format!("{base}/api/v1/volumes"), serde_json::json!({"name": "data", "size": "64M"})).await;
+    assert_eq!(status, 201, "{v}");
+    assert_eq!(v["lba"], 4096);
+    let (status, _) = post(&client, &format!("{base}/api/v1/volumes"), serde_json::json!({"name": "odd", "size": "64M", "lba": 1024})).await;
+    assert_eq!(status, 400);
+    let (status, _) = post(
+        &client,
+        &format!("{base}/api/v1/volumes"),
+        serde_json::json!({"name": "c", "from_template": "esp512.golden", "lba": 512}),
+    )
+    .await;
+    assert_eq!(status, 400, "a clone takes its source's size");
+
+    server.abort();
+}

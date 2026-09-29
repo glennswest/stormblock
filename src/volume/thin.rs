@@ -421,6 +421,30 @@ pub struct ThinVolumeHandle {
     /// volume is. A sealed volume is read-only whatever this says; a clone
     /// moves between the two over its life.
     read_only: std::sync::atomic::AtomicBool,
+    /// The logical block size the volume is presented at (#228): 4096 unless
+    /// the volume says otherwise. Firmware reads boot media at 512; the
+    /// kernel reads everything else at 4096. See [`Lba`].
+    lba: std::sync::atomic::AtomicU32,
+}
+
+/// The logical block sizes a volume can be presented at (#228).
+///
+/// Two, deliberately. 4096 is what every volume has always been, and what
+/// the slabs underneath are laid out in. 512 is what a UEFI firmware's FAT
+/// driver and the GPT it reads before it are dependable at: a 4096-byte ESP
+/// is `NOT_FOUND` to AMI Aptio 4 and to OVMF's boot manager on a virtio
+/// disk. A volume at 512 is 512e underneath — its slots are still whole
+/// 4096-byte multiples, and a sub-4K write is a read-modify-write.
+pub struct Lba;
+
+impl Lba {
+    pub const DEFAULT: u32 = 4096;
+    pub const BOOT: u32 = 512;
+
+    /// Whether `bs` is a size a volume may be presented at.
+    pub fn valid(bs: u32) -> bool {
+        bs == Self::DEFAULT || bs == Self::BOOT
+    }
 }
 
 impl ThinVolumeHandle {
@@ -459,7 +483,25 @@ impl ThinVolumeHandle {
             stripe_log: std::sync::RwLock::new(super::stripelog::StripeLog::none()),
             sealed: std::sync::atomic::AtomicBool::new(false),
             read_only: std::sync::atomic::AtomicBool::new(false),
+            lba: std::sync::atomic::AtomicU32::new(Lba::DEFAULT),
         }
+    }
+
+    /// The logical block size this volume is presented at (#228).
+    pub fn lba(&self) -> u32 {
+        self.lba.load(Ordering::Relaxed)
+    }
+
+    /// Present the volume at another logical block size. Takes effect for
+    /// whoever attaches next: an initiator already attached keeps the size
+    /// it was told, so callers change it only on a volume nothing serves.
+    /// A size that is not one of [`Lba`]'s is ignored and reported false.
+    pub fn set_lba(&self, bs: u32) -> bool {
+        if !Lba::valid(bs) {
+            return false;
+        }
+        self.lba.store(bs, Ordering::Relaxed);
+        true
     }
 
     /// Which half of the node's mutable storage this volume allocates from.
@@ -2596,9 +2638,11 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     fn block_size(&self) -> u32 {
-        4096
+        self.lba()
     }
 
+    /// 4096 whatever the logical size: a 512 volume is 512e (#228), and an
+    /// initiator that honours this keeps its I/O whole slots' multiples.
     fn optimal_io_size(&self) -> u32 {
         4096
     }

@@ -37,7 +37,7 @@ use crate::raid::RaidArrayId;
 pub use extent::{ExtentAllocator, VolumeId, DEFAULT_EXTENT_SIZE};
 pub use metadata::{Access, FsInfo, MetadataStore, Retention};
 pub use synonym::{Synonym, SynonymError, SynonymStore, Target as SynonymTarget};
-pub use thin::{ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport, ResyncOptions, ResyncCheckpoint};
+pub use thin::{Lba, ThinVolume, ThinVolumeHandle, VolumeError, PlacementPolicy, VolumeHealth, HealthState, ResyncReport, ResyncOptions, ResyncCheckpoint};
 pub use redundancy::{Redundancy, RedundancyPolicy};
 
 /// What a restripe did.
@@ -301,6 +301,30 @@ impl VolumeManager {
         handle.set_sealed(true);
         if let Some(fs) = fs {
             self.fs_info.insert(id, fs);
+        }
+        self.persist().await;
+        Ok(())
+    }
+
+    /// The logical block size a volume is presented at (#228).
+    pub fn lba(&self, id: &VolumeId) -> Option<u32> {
+        self.volumes.get(id).map(|h| h.lba())
+    }
+
+    /// Present a volume at another logical block size (512 or 4096, #228).
+    ///
+    /// The size a GPT and a FAT were laid in is a property of their bytes, so
+    /// this is said once, by whoever laid them — `compose/disk` or a create —
+    /// and clones inherit it. An initiator already attached keeps what it was
+    /// told at connect; the caller refuses a change on a volume being served.
+    pub async fn set_lba(&mut self, id: VolumeId, bs: u32) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        if !handle.set_lba(bs) {
+            return Err(VolumeError::InvalidSize(format!(
+                "a volume is presented at {} or {} bytes per LBA, not {bs}",
+                thin::Lba::BOOT,
+                thin::Lba::DEFAULT
+            )));
         }
         self.persist().await;
         Ok(())
@@ -923,6 +947,7 @@ impl VolumeManager {
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
+            handle.set_lba(vrec.lba);
             if vrec.template {
                 self.templates.insert(vrec.id);
             }
@@ -1551,9 +1576,9 @@ impl VolumeManager {
     /// data volume that copied-on-write into a *system* slab would put half
     /// of the node's identity in the half an install replaces (#88).
     fn inherit_handle(&self, vol: ThinVolume, source_id: &VolumeId) -> ThinVolumeHandle {
-        let (policy, failed, role, pinned) = match self.volumes.get(source_id) {
-            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab()),
-            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None),
+        let (policy, failed, role, pinned, lba) = match self.volumes.get(source_id) {
+            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab(), src.lba()),
+            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None, thin::Lba::DEFAULT),
         };
         // A clone of a pinned volume shares its slots on that slab, and its
         // copy-on-writes stay there with them (#150).
@@ -1565,6 +1590,10 @@ impl VolumeManager {
             policy,
         );
         handle.set_failed_slabs(failed);
+        // A clone is read by whoever read its source: a boot disk's clone is
+        // still what firmware reads, at the size its GPT and FAT were laid in
+        // (#228).
+        handle.set_lba(lba);
         handle
     }
 
@@ -1957,6 +1986,7 @@ impl VolumeManager {
                 handle.is_sealed(),
                 handle.access(),
                 handle.pinned_slab(),
+                handle.lba(),
             ));
         }
 
@@ -1975,7 +2005,7 @@ impl VolumeManager {
             .collect();
         let volumes = vol_info
             .into_iter()
-            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed, access, pinned)| metadata::VolumeRecord {
+            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed, access, pinned, lba)| metadata::VolumeRecord {
                 id,
                 name,
                 virtual_size,
@@ -1988,6 +2018,7 @@ impl VolumeManager {
                 access,
                 fs: self.fs_info.get(&id).cloned(),
                 owner: self.owners.get(&id).cloned(),
+                lba,
                 extents: gem
                     .get_volume_map(&id)
                     .map(|m| m.extents.clone())
@@ -2164,6 +2195,7 @@ impl VolumeManager {
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
+            handle.set_lba(vrec.lba);
             if vrec.template {
                 self.templates.insert(vrec.id);
             }
@@ -3232,6 +3264,64 @@ mod redundancy_tests {
         let want: Vec<u8> = (0..4096).map(|_| 9u8 ^ 2u8).collect();
         assert_eq!(p, want, "stripe 0 parity recomputed on restart");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #228: a volume presented at 512 says so to every reader, takes a
+    /// 512-byte write without disturbing its neighbours, hands the size to
+    /// its clones, and keeps it across a restart.
+    #[tokio::test]
+    async fn a_512_byte_volume_is_512_to_readers_clones_and_restarts() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let (boot, clone, plain, path) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let (s, p) = file_slab(&d, "a", slot).await;
+            mgr.add_slab(s).await;
+            let boot = mgr.create_volume_any("boot", 1 << 20).await.unwrap();
+            let plain = mgr.create_volume_any("plain", 1 << 20).await.unwrap();
+            assert_eq!(mgr.lba(&boot), Some(Lba::DEFAULT), "4096 unless told");
+            assert!(mgr.set_lba(boot, 1024).await.is_err(), "only 512 and 4096");
+            mgr.set_lba(boot, Lba::BOOT).await.unwrap();
+
+            let dev = mgr.get_volume(&boot).unwrap();
+            assert_eq!(dev.block_size(), 512);
+            assert_eq!(mgr.get_volume(&plain).unwrap().block_size(), 4096);
+            // What an NVMe/TCP host is told: LBADS 9, and the capacity in
+            // 512-byte blocks.
+            #[cfg(feature = "nvmeof")]
+            {
+                let id = crate::target::nvmeof::admin::identify_namespace(&dev);
+                assert_eq!(id[130], 9);
+                assert_eq!(u64::from_le_bytes(id[0..8].try_into().unwrap()), (1 << 20) / 512);
+            }
+
+            // A one-sector write in the middle of a 4096-byte block.
+            dev.write(0, &[0xAAu8; 4096]).await.unwrap();
+            dev.write(1024, &[0x55u8; 512]).await.unwrap();
+            let mut back = vec![0u8; 4096];
+            dev.read(0, &mut back).await.unwrap();
+            assert!(back[..1024].iter().all(|&b| b == 0xAA));
+            assert!(back[1024..1536].iter().all(|&b| b == 0x55));
+            assert!(back[1536..].iter().all(|&b| b == 0xAA));
+
+            mgr.seal_volume(boot, None).await.unwrap();
+            let clone = mgr.create_snapshot(boot, "boot-clone").await.unwrap();
+            assert_eq!(mgr.lba(&clone), Some(Lba::BOOT), "a clone is read by whoever read its source");
+            mgr.persist().await;
+            (boot, clone, plain, p)
+        };
+
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        let dev = FileDevice::open(&path).await.unwrap();
+        mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        mgr.restore().await.unwrap();
+        assert_eq!(mgr.lba(&boot), Some(Lba::BOOT), "the size survives a restart");
+        assert_eq!(mgr.lba(&clone), Some(Lba::BOOT));
+        assert_eq!(mgr.lba(&plain), Some(Lba::DEFAULT));
+        let mut back = vec![0u8; 512];
+        mgr.get_volume(&clone).unwrap().read(1024, &mut back).await.unwrap();
+        assert!(back.iter().all(|&b| b == 0x55));
     }
 
     /// #76: a sealed volume takes no writes, a clone records its parent and
