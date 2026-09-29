@@ -163,6 +163,38 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Boot media at 512-byte LBAs (2026-09-29, #228, P0) — IN PROGRESS
+
+server1 (AMI Aptio 4) and pve's OVMF cannot boot a release: every volume is
+presented at 4096-byte LBAs (`ThinVolumeHandle::block_size` is a constant),
+so firmware reads a 4K GPT and a 4K FAT. Owner: what firmware reads is
+512; everything the kernel alone reads stays 4096 (owner's split: a boot
+volume @512 = ESP + boot pallet, the slabs @4096).
+
+Engine piece, needed by any shape of the split: **a per-volume LBA**.
+- `lba` (512 | 4096, default 4096) on the volume: `ThinVolumeHandle`
+  presents it to ublk, NVMe-oF (Identify Namespace LBADS) and iSCSI
+  (READ CAPACITY), and to every reader of `block_size()`.
+- Persisted: `VolumeRecord.lba`, metadata **V9**; the encoder writes **V8**
+  when every volume is at 4096, so a slab or `volumes.dat` holding no 512
+  volume stays readable by an older engine (a release's slabs never hold
+  one — an older initramfs keeps reading them).
+- Inherited by clones and snapshots; set by `POST /api/v1/volumes {lba}`
+  and by `compose/disk`'s `lba` (the disk is presented at the LBA its GPT
+  was written for); shown on every volume and in the attach reply.
+- Left for the owner: whether the release must become two volumes (boot@512
+  + slabs@4096) or one composed disk at 512 is enough — the slabs inside are
+  read by the engine at byte offsets and the volumes it exports from them are
+  4096 whatever the disk's LBA. Then stormcos's `compose-release.py` (disk
+  `lba` and the ESP's sector size) follows.
+
+- [ ] handle + record (V9, V8 when all 4096) + clone inheritance
+- [ ] API: create, compose/disk, volume JSON, attach reply
+- [ ] tests: NVMe-oF identify at 512, iSCSI capacity, clone inherits,
+      metadata round trip V8/V9; the Linux kernel sees 512 and mounts a
+      512-sector FAT (ci script on dev)
+- [ ] docs (composed-disks.md, README), CHANGELOG; question to the owner
+
 ### NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP (2026-09-28, #210, P0) — DONE
 
 pve connected to forge's `:4420` with no arrangement and saw 71 namespaces:
