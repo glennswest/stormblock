@@ -529,6 +529,19 @@ curl -X POST http://node:9090/api/v1/exports \
 # → {"nqn":"nqn.…:host:1f2e…","port":4420,"nsid":1,"dhchap_secret":"DHHC-1:01:…:",…}
 ```
 
+### Block size: 512 for what firmware reads, 4096 for the rest
+
+Every volume is presented at 4096-byte logical blocks unless it says 512
+(`lba` on `POST /api/v1/volumes`, and on `POST /api/v1/volumes/compose/disk`,
+which presents the disk at the LBA its GPT was written in). Clones inherit it;
+every volume response reports it. Firmware's GPT and FAT drivers are
+dependable at 512 — a 4096-byte ESP does not boot on AMI Aptio 4 or on OVMF
+over a pve virtio disk — so boot media is composed at 512 with a 512-sector
+ESP (`mkfs.vfat -S 512`); the slabs and everything the kernel alone reads stay
+4096 (#228, [docs/composed-disks.md](docs/composed-disks.md)). A 512 volume is
+512e underneath. The size is persisted in the volume record (metadata V9; a
+payload with no 512 volume is still written as V8, so older engines read it).
+
 ### Read-write, read-only, and sealed
 
 Two different statements, both enforced, reported separately:

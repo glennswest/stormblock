@@ -167,23 +167,42 @@ partition's manifest checks — before it is returned; the disk is recorded as
 `fs.kind = gpt` with its GUID, and is left *unsealed*: it is a node's disk and
 the node writes to it.
 
-**The LBA size defaults to 4096.** A volume is presented at 4096-byte blocks
-over NVMe/TCP and ublk (`ThinVolumeHandle::block_size`), and firmware parses
-a GPT in the media's own block size — a 512-LBA table on a 4Kn namespace is
-one this engine can read and the node cannot boot
-([docs/pallets.md §2.4](pallets.md#24-block-sizes--the-one-that-bites)). A
-pallet's extent table counts in the same unit, so `compose/pallet` takes the
-same `lba`. A disk meant to be copied onto a 512-byte drive says `"lba": 512`
-on both.
+**The LBA size defaults to 4096, and a disk is presented at its own
+(#228).** Firmware parses a GPT, and a FAT's sectors, in the medium's own
+block size ([docs/pallets.md §2.4](pallets.md#24-block-sizes--the-one-that-bites)),
+so the size a disk's table was written in is the size it must be served at.
+`compose/disk` presents the disk at its `lba` — 4096, or 512 — and every
+clone of it inherits that, so a boot claim hands a machine the size its GPT
+was laid in. A pallet's extent table counts in the same unit, so
+`compose/pallet` takes the same `lba`. Other sizes (1024, 2048) are still
+accepted for a table and the disk is then presented at 4096, as before.
+
+**What firmware reads is 512.** A 4096-byte ESP is `NOT_FOUND` to AMI Aptio 4
+(server1 over stormbootx) and "no bootable option or device" to OVMF on a pve
+virtio disk forced to 4096. A disk firmware boots from — ESP and boot pallet —
+is composed at `"lba": 512`; everything the kernel alone reads (the slabs,
+every volume inside them, PVCs) stays 4096. A 512 volume is 512e: its storage
+is 4096-byte slots underneath, ublk reports a 4096-byte physical block, and a
+sub-4K write is a read-modify-write. Over NVMe/TCP the kernel sees 512/512
+(the namespace does not claim atomic 4K writes, which is what Linux would
+need to report a larger physical block).
 
 **The ESP has to agree.** A FAT filesystem records its own sector size, and
 the kernel and firmware compare it with the device's: a 512-sector FAT image
 on a disk presented at 4096-byte LBAs is called vfat by `blkid` and refused
 by `mount` with "can't read superblock", and firmware's FAT driver makes the
-same comparison. Format the ESP for the disk it lands in — `mkfs.vfat -S 4096`
-— and give FAT16 at 4 KiB sectors at least 64 MiB, its 4085-cluster floor.
-`ci-compose-disk-verify.sh` found this; the first ESP it built mounted only
-after it was reformatted.
+same comparison. Format the ESP for the disk it lands in — `mkfs.vfat -S 512`
+for a 512 disk (FAT16, 64 MiB), `-S 4096` for a 4096 one, where FAT16 needs at
+least 64 MiB for its 4085-cluster floor. `ci-compose-disk-verify.sh` found
+this; the first ESP it built mounted only after it was reformatted.
+
+**`ci-boot512-verify.sh` is the check that counts** (unprivileged, on dev):
+it composes a 512 disk of a 512-sector ESP holding stormuefi and a boot pallet
+holding the host's kernel, clones it, and then (1) the host's kernel in QEMU
+connects over NVMe/TCP with nvme-cli, sees the clone at 512 and a plain
+volume at 4096, finds both partitions and mounts the ESP; (2) OVMF boots the
+clone's bytes as a virtio disk with no block-size override — the pve shape —
+and stormuefi starts the kernel with the pallet's command line.
 
 ## 3b. A slab is a composed volume too
 
