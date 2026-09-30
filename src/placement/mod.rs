@@ -618,7 +618,7 @@ impl PlacementEngine {
             .ok_or(PlacementError::SlabNotFound(dest_id))?
             .read_slot(dest_slot, 0, &mut check)
             .await;
-        if back.is_err() || check != data {
+        if !matches!(back, Ok(n) if n == data.len()) || check != data {
             if let Some(slab) = registry.get_mut(&dest_id) {
                 let _ = slab.free(dest_slot).await;
             }
@@ -627,7 +627,10 @@ impl PlacementEngine {
                 slot_idx: dest_slot,
                 error: match back {
                     Err(e) => format!("reading the copy back: {e}"),
-                    Ok(()) => {
+                    Ok(n) if n != data.len() => {
+                        format!("the copy reads back {n} of {} bytes", data.len())
+                    }
+                    Ok(_) => {
                         let at = check.iter().zip(&data).position(|(a, b)| a != b).unwrap_or(0);
                         format!("the copy reads back different from the source at byte {at}")
                     }
