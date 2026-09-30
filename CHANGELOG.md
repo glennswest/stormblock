@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-09-30
+- **fix:** An install boot lays a fresh slab without a boot intent (#236, stopgap until forge serves intents, #235). The initramfs's local-slab probe no longer boots a local disk on sight when a boothost is known: it claims the machine's image and boots the disk only if it already holds that release (`stormblock slab holds`, new: every golden by volume id); a release the disk does not hold is an install. A boot that runs from an image claimed from an appliance stating no intent (`/run/stormblock/no-intent`, written by `boot-claim`) takes its local disk with force — a new data slab, never the old data half — and says on the console that the old slab was discarded. `assimilate=off` still means no; with intents served, the intent decides.
+
 ### 2026-09-29
 - **docs:** #148 closed: the boot-intent route (`GET`/`PUT …/boothost/<tag>/intent`, `POST …/installed`) shipped in v20.0.0; re-verified on dev. `installed` from the local boot is #220
 - **feat:** A volume carries its logical block size, 512 or 4096 (default), and every transport presents it: ublk (512e — physical 4096), NVMe-oF Identify Namespace, iSCSI READ CAPACITY. `compose/disk` presents the disk at its `lba`; `POST /api/v1/volumes` takes `lba`; clones and snapshots inherit it; every volume response reports `lba`. Firmware reads boot media at 512: a 4096-byte ESP was `NOT_FOUND` to server1's AMI Aptio 4 and unbootable to OVMF on pve (#228)

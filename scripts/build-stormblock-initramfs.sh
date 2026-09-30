@@ -1426,6 +1426,86 @@ if [ "$BOOT_MODE" = "local" ]; then
         echo "rd.stormblock.wipe=$WIPE is not a block device - ignoring"
     fi
 
+    # --- BEGIN boothost claim
+    # Ask the appliance which image this machine boots, and claim it: sets
+    # CLAIMED to the attach URI. A function because two places ask (#236): the
+    # diskless path below, and the local-slab probe, which has to know what
+    # this machine is assigned before it can tell an install from a reboot.
+    # Returns non-zero, having said why, rather than dropping to a shell: the
+    # probe's caller still has a local disk to boot.
+    CLAIMED=""
+    boothost_claim() {
+        [ -n "$CLAIMED" ] && return 0
+        # The identity is not worked out here. stormbootx read it from SMBIOS
+        # and claimed on it before Linux existed; this asks again in its own
+        # right — the firmware's block device went with the UEFI that
+        # published it — but on the *same* name, handed down rather than
+        # rediscovered. Two implementations of "who is this machine" drift,
+        # and the one in firmware is the one proven on hardware.
+        #
+        # When nothing handed it down, read it where the firmware read it.
+        # Nothing appends to the command line between the pallet and the
+        # kernel, so a tag on it was a tag typed into the image spec - one
+        # image per machine, which is the opposite of an image. SMBIOS type 1
+        # serial is the Dell service tag, and the same field stormbootx
+        # claims on, so the name is the same by construction.
+        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_serial ]; then
+            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_serial)
+            # "Not Specified" and friends are what firmware writes when it has
+            # nothing to say, and they are not a machine's identity: every VM
+            # from one hypervisor would answer the same string and claim each
+            # other's images.
+            case "$BOOTTAG" in
+            NotSpecified|Default*|None|Unknown|ToBeFilledByO.E.M.|"") BOOTTAG="" ;;
+            esac
+            [ -n "$BOOTTAG" ] && echo "Service tag from SMBIOS: $BOOTTAG"
+        fi
+        # No serial? Use the SMBIOS UUID (stormcos#46).
+        #
+        # A Dell has a service tag and a VM has none — Proxmox sets `uuid=`
+        # and leaves `serial=` empty — so a machine that is not hardware could
+        # not be told which image was its own at all. It dropped to a shell
+        # saying SMBIOS had no tag, which is true and not useful.
+        #
+        # The UUID is the same *kind* of fact: one per machine rather than per
+        # interface, stable across a NIC being replaced, and already set by
+        # every hypervisor. A MAC was the other candidate and is worse on both
+        # counts — a machine with two NICs has two identities, and replacing a
+        # card changes who the machine is for no reason anyone would expect.
+        #
+        # Serial first, so a deliberately-assigned name wins over a generated
+        # hex string: `boothost/flow-1` is readable and `boothost/28bae105-…`
+        # is not, and on hardware the serial *is* the service tag, so nothing
+        # about the Dell path changes.
+        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_uuid ]; then
+            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_uuid)
+            [ -n "$BOOTTAG" ] && echo "Machine UUID from SMBIOS: $BOOTTAG"
+        fi
+        if [ -z "$BOOTTAG" ]; then
+            echo "Nothing identifies this machine to $BOOTHOST:"
+            echo "  not on the command line (rd.stormblock.tag=), no SMBIOS serial,"
+            echo "  and no SMBIOS UUID. On a VM, set one:"
+            echo "    qm set <id> --smbios1 serial=\$(printf %s <name> | base64),base64=1"
+            return 1
+        fi
+        # The host NQN follows the tag the same way, in the format stormbootx
+        # composes (src/main.rs): what the firmware presented on its connect
+        # is what Linux presents on its own.
+        if [ -z "$HOSTNQN" ]; then
+            HOSTNQN="nqn.2026-09.lo.storm:host-$BOOTTAG"
+            export STORMBLOCK_HOST_NQN="$HOSTNQN"
+            echo "Host NQN: $HOSTNQN (from the service tag)"
+        fi
+        echo "Asking $BOOTHOST which image $BOOTTAG boots..."
+        CLAIMED=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" boot-claim --boothost "$BOOTHOST" --tag "$BOOTTAG")
+        if [ -z "$CLAIMED" ]; then
+            echo "No image is assigned to $BOOTTAG on $BOOTHOST"
+            return 1
+        fi
+        echo "  claimed: $CLAIMED"
+    }
+    # --- END boothost claim
+
     # --- BEGIN boot hook (covered by tests/initramfs-boot-hook.sh)
     #
     # Ask an installed hook where this node boots from, *before* probing the
@@ -1675,6 +1755,64 @@ if [ "$BOOT_MODE" = "local" ]; then
             ;;
         esac
     fi
+    # A local disk that can boot is not yet a reason to boot it (#236).
+    #
+    # stormbootx claims on every boot until the appliance serves boot intents
+    # (forge on stormblock < 20, #235), so the network image this kernel came
+    # from says nothing about whether the machine is being reinstalled or
+    # just rebooted - and the probe above booted the old disk either way. A
+    # new release never went on: the old one came back up under the new
+    # kernel, or, once the disk had been wiped by hand, the new goldens came
+    # up on the old data half (11.53 on 11.51's fastetcd, stormcentral#196).
+    #
+    # What tells the two apart is the release. Ask the appliance what this
+    # machine is assigned and whether the local disk already holds it: held
+    # is a reboot and boots the disk as before; not held is an install, which
+    # boots the claimed image and lays a fresh slab over this disk (the
+    # survey below). An install the appliance asked for (the ticket, #148)
+    # installs whatever the disk holds. No answer, or one that cannot say,
+    # boots the disk: the network this kernel came over is not a reason to
+    # drop a node that can boot to a shell.
+    INSTALL_OVER=""
+    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ] && [ -n "$BOOTHOST" ] \
+       && [ "${ASSIMILATE:-}" != off ]; then
+        case "$SLAB" in
+        *://*) ;;
+        *)
+            echo "$SLAB can boot this node; asking $BOOTHOST whether it holds the release assigned here"
+            if boothost_claim; then
+                if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
+                    echo "  $BOOTHOST asks for an install: booting the claimed image, installing over $SLAB"
+                    HELD_RC=1
+                else
+                    HELD=$($SB slab holds "$SLAB" "$CLAIMED" 2>&1)
+                    HELD_RC=$?
+                    echo "  $HELD"
+                fi
+                case "$HELD_RC" in
+                0) echo "  the same release: booting $SLAB, its data kept" ;;
+                1)
+                    echo "  INSTALL: a release $SLAB does not hold - booting the claimed image"
+                    if [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ] \
+                       || [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
+                        echo "  every slab on $SLAB will be discarded and a fresh one laid"
+                    fi
+                    # The disk, not the partition the cmdline named.
+                    case "$SLAB" in
+                    /dev/nvme*p[0-9]*) INSTALL_OVER="${SLAB%p[0-9]*}" ;;
+                    /dev/sd*[0-9])     INSTALL_OVER="${SLAB%%[0-9]*}" ;;
+                    *)                 INSTALL_OVER="$SLAB" ;;
+                    esac
+                    SLAB="$CLAIMED"
+                    ;;
+                *) echo "  cannot tell which release $SLAB holds - booting it as before" ;;
+                esac
+            else
+                echo "  no image from $BOOTHOST - booting $SLAB as before"
+            fi
+            ;;
+        esac
+    fi
     # --- END local-slab probe
 
     # Diskless: this machine's slab is a namespace on the appliance, and which
@@ -1684,74 +1822,12 @@ if [ "$BOOT_MODE" = "local" ]; then
     # ceased to exist when the kernel started, so the node asks in its own
     # right rather than inheriting anything.
     if [ -z "$SLAB" ] && [ -n "$BOOTHOST" ]; then
-        # The identity is not worked out here. stormbootx read it from SMBIOS
-        # and claimed on it before Linux existed; this asks again in its own
-        # right — the firmware's block device went with the UEFI that
-        # published it — but on the *same* name, handed down rather than
-        # rediscovered. Two implementations of "who is this machine" drift,
-        # and the one in firmware is the one proven on hardware.
-        #
-        # When nothing handed it down, read it where the firmware read it.
-        # Nothing appends to the command line between the pallet and the
-        # kernel, so a tag on it was a tag typed into the image spec - one
-        # image per machine, which is the opposite of an image. SMBIOS type 1
-        # serial is the Dell service tag, and the same field stormbootx
-        # claims on, so the name is the same by construction.
-        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_serial ]; then
-            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_serial)
-            # "Not Specified" and friends are what firmware writes when it has
-            # nothing to say, and they are not a machine's identity: every VM
-            # from one hypervisor would answer the same string and claim each
-            # other's images.
-            case "$BOOTTAG" in
-            NotSpecified|Default*|None|Unknown|ToBeFilledByO.E.M.|"") BOOTTAG="" ;;
-            esac
-            [ -n "$BOOTTAG" ] && echo "Service tag from SMBIOS: $BOOTTAG"
-        fi
-        # No serial? Use the SMBIOS UUID (stormcos#46).
-        #
-        # A Dell has a service tag and a VM has none — Proxmox sets `uuid=`
-        # and leaves `serial=` empty — so a machine that is not hardware could
-        # not be told which image was its own at all. It dropped to a shell
-        # saying SMBIOS had no tag, which is true and not useful.
-        #
-        # The UUID is the same *kind* of fact: one per machine rather than per
-        # interface, stable across a NIC being replaced, and already set by
-        # every hypervisor. A MAC was the other candidate and is worse on both
-        # counts — a machine with two NICs has two identities, and replacing a
-        # card changes who the machine is for no reason anyone would expect.
-        #
-        # Serial first, so a deliberately-assigned name wins over a generated
-        # hex string: `boothost/flow-1` is readable and `boothost/28bae105-…`
-        # is not, and on hardware the serial *is* the service tag, so nothing
-        # about the Dell path changes.
-        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_uuid ]; then
-            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_uuid)
-            [ -n "$BOOTTAG" ] && echo "Machine UUID from SMBIOS: $BOOTTAG"
-        fi
-        if [ -z "$BOOTTAG" ]; then
-            echo "FATAL: rd.stormblock.boothost= and nothing identifies this machine:"
-            echo "  not on the command line (rd.stormblock.tag=), no SMBIOS serial,"
-            echo "  and no SMBIOS UUID. On a VM, set one:"
-            echo "    qm set <id> --smbios1 serial=\$(printf %s <name> | base64),base64=1"
+        if ! boothost_claim; then
+            echo "FATAL: $BOOTHOST gave this machine no image to boot"
             echo "Dropping to shell..."
             exec /bin/sh
         fi
-        # The host NQN follows the tag the same way, in the format stormbootx
-        # composes (src/main.rs): what the firmware presented on its connect
-        # is what Linux presents on its own.
-        if [ -z "$HOSTNQN" ]; then
-            HOSTNQN="nqn.2026-09.lo.storm:host-$BOOTTAG"
-            export STORMBLOCK_HOST_NQN="$HOSTNQN"
-            echo "Host NQN: $HOSTNQN (from the service tag)"
-        fi
-        echo "Asking $BOOTHOST which image $BOOTTAG boots..."
-        SLAB=$(/usr/sbin/stormblock boot-claim --boothost "$BOOTHOST" --tag "$BOOTTAG")
-        if [ -z "$SLAB" ]; then
-            echo "FATAL: no image is assigned to $BOOTTAG on $BOOTHOST"
-            echo "Dropping to shell..."
-            exec /bin/sh
-        fi
+        SLAB="$CLAIMED"
         echo "  slab: $SLAB"
     fi
 
@@ -1906,13 +1982,41 @@ if [ "$BOOT_MODE" = "local" ]; then
             echo "  an install was requested: the local disk is taken whatever it carries"
         fi
     fi
+    # An install without an intent (#236, a stopgap until forge serves intents,
+    # #235): this boot claimed its image from an appliance that stated no
+    # intent at all (`boot-claim` leaves the marker), and it boots that image.
+    # Every such boot that takes a local disk is an install, and an install
+    # lays a fresh slab: never the old data half, whose volumes belong to the
+    # release being replaced. Once the appliance states intents the marker is
+    # not written and the intent decides; `off` on this machine still means no.
+    INSTALL_FRESH=""
+    if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
+       && [ "${ASSIMILATE:-}" = force ]; then
+        INSTALL_FRESH=1
+    elif [ -n "${CLAIMED:-}" ] && [ "$SLAB" = "$CLAIMED" ] \
+         && [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ]; then
+        if [ "${ASSIMILATE:-}" = off ]; then
+            echo "  an install (no boot intent from the appliance), and rd.stormblock.assimilate=off says no"
+        else
+            ASSIMILATE=force
+            INSTALL_FRESH=1
+            echo "  an install: the appliance states no boot intent, so a fresh slab is laid (#236)"
+        fi
+    fi
     SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
     SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
     LOCAL_DISK=""
+    # The disk the probe found bootable and ruled an install over: that is
+    # the one to install onto, not whichever drive the scan meets first.
+    if [ -n "$INSTALL_FRESH" ] && [ -n "${INSTALL_OVER:-}" ] && [ -e "$INSTALL_OVER" ]; then
+        LOCAL_DISK="$INSTALL_OVER"
+        echo "  installing over $INSTALL_OVER, the disk this machine booted from until now"
+    fi
     case "${ASSIMILATE:-any}" in
     off) echo "  rd.stormblock.assimilate=off: leaving every local drive alone" ;;
     blank|any|force)
         for d in "$SURVEY_SYS"/sd? "$SURVEY_SYS"/nvme?n?; do
+            [ -n "$LOCAL_DISK" ] && break
             [ -e "$d" ] || continue
             dev="/dev/$(basename "$d")"
             [ "$(cat "$d/removable" 2>/dev/null)" = "1" ] && continue
@@ -2005,6 +2109,10 @@ if [ "$BOOT_MODE" = "local" ]; then
         if [ "$ASSIMILATE" = force ] && [ -n "$LOCAL_DISK" ]; then
             FORCE_LOCAL=1
             echo "  policy is 'force': whatever $LOCAL_DISK carries will be destroyed"
+            if [ -n "$INSTALL_FRESH" ]; then
+                echo "  INSTALL: the old slab on $LOCAL_DISK is discarded - nothing of the"
+                echo "  previous install is kept; a fresh slab is laid for this release"
+            fi
         fi
         ;;
     *) echo "  unknown rd.stormblock.assimilate='$ASSIMILATE' (off|blank|any|force)" ;;

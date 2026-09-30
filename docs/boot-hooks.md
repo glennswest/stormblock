@@ -64,6 +64,34 @@ An install the appliance asked for (the host's boot intent is `install`, #148;
 whatever the cmdline named, except `off`, which still means no. See
 `docs/auth.md` "Boot intent".
 
+### An install without an intent (#236, a stopgap)
+
+An appliance older than v20 (forge on 13.7, #235) serves no boot intent, and
+stormbootx then claims on every boot, so "this kernel came over the network"
+is true of a reboot as much as an install. Until intents can be used:
+
+- **The local-slab probe asks about the release.** A local disk that can boot
+  the node is no longer booted on sight when a boothost is known: `/init`
+  claims the machine's image and asks `stormblock slab holds <disk> <image>`
+  whether the disk already holds every golden (sealed volume, by id) of it.
+  Held is a reboot: the disk boots, its data kept. Not held is an **install**:
+  the claimed image boots and the disk is installed over. An install the
+  appliance asked for (the ticket) installs whatever the disk holds. No image,
+  or "cannot say" (exit 2), boots the disk as before.
+- **An install lays a fresh slab.** When the appliance stated no intent,
+  `boot-claim` leaves `/run/stormblock/no-intent`; a boot running from the
+  image it claimed then takes its local disk with `force` — a new data slab,
+  never the old data half, whose volumes belong to the release being
+  replaced — and says so on the console (`INSTALL: the old slab on /dev/sda
+  is discarded`). The disk the probe ruled the install over is the one taken,
+  not whichever drive a scan meets first.
+- `rd.stormblock.assimilate=off` still means no, to both.
+- Not covered: reinstalling the **same** release fresh. Assign another
+  release first, or use the `install` intent once the appliance serves them.
+
+Once the appliance states intents, the marker is not written and the intent
+decides (`install` = fresh; keeping data is #234's `upgrade`).
+
 **The default is to take one, because this image is an installer.** It was
 `off`, which made the common case — one drive, netbooted to be installed — do
 nothing and keep every write on the appliance until somebody knew to add a

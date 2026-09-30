@@ -1152,6 +1152,13 @@ Three answers, deliberately distinct, because a boot decision turns on which:
 | `slab <id> holds no volumes` | the slab can say, and says it is empty — formatted and never filled |
 | `slab <id> keeps no volume metadata` | the slab cannot say; its records live wherever `rd.stormblock.meta=` points |
 
+`slab holds <local> <image>` asks the release question the same way (#236):
+does the local drive already hold every golden (sealed volume, by id) of the
+image — a path, a file or an `nvme-tcp://` URI? Exit 0 held, 1 not held, 2
+cannot say. `/init` uses it to tell an install from a reboot when the
+appliance serves no boot intent (`docs/boot-hooks.md`, "An install without an
+intent").
+
 Every slab this engine formats reserves a region for that record — `slab
 format`, `POST /api/v1/slabs` and the pool-growth path alike, sized from the
 device. It used to be `data` slabs alone, on the reasoning that outliving

@@ -73,6 +73,15 @@ pub struct FlowOver {
 /// `boot-local` carries it into the handover record.
 pub const INSTALL_TICKET_PATH: &str = "/run/stormblock/install.json";
 
+/// Where `boot-claim` notes that the appliance stated **no** intent at all
+/// (#236): an engine older than v20 (#148), which serves none. Written when
+/// the claim reply carries no `intent`, removed when it does. The initramfs
+/// reads it as "an install without an intent": a boot that claims and takes
+/// a local disk lays a fresh slab rather than keeping the old data half. Once
+/// the appliance states intents, this is never written and the intent
+/// decides.
+pub const NO_INTENT_PATH: &str = "/run/stormblock/no-intent";
+
 /// An install the appliance asked for: who to tell, and about which clone,
 /// once the flow-over is done and the disk boots on its own (#148). The
 /// appliance sets the machine's intent back to `local` only for the clone a

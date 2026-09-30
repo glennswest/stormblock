@@ -29,6 +29,8 @@ sed -n '/# --- BEGIN hook takeable/,/# --- END hook takeable/p' "$GEN" > "$WORK/
 [ -s "$WORK/takeable.sh" ] || { echo "FAIL: could not extract the takeable block"; exit 1; }
 sed -n '/# --- BEGIN assimilate survey/,/# --- END assimilate survey/p' "$GEN" > "$WORK/survey.sh"
 [ -s "$WORK/survey.sh" ] || { echo "FAIL: could not extract the assimilate survey"; exit 1; }
+sed -n '/# --- BEGIN boothost claim/,/# --- END boothost claim/p' "$GEN" > "$WORK/claim.sh"
+[ -s "$WORK/claim.sh" ] || { echo "FAIL: could not extract the boothost claim"; exit 1; }
 
 fail=0
 check() { # name expected actual
@@ -210,11 +212,16 @@ check "an erroring hook offers nothing" "" "$(offered "$d")"
 STUB="$WORK/stormblock"
 cat > "$STUB" <<'STUBEOF'
 #!/bin/sh
-# $1 = slab, $2 = list|volumes, $3 = device
+# $1 = slab, $2 = list|volumes|holds, $3 = device; or $1 = boot-claim
+if [ "$1" = boot-claim ]; then
+    [ -n "${STUB_CLAIM:-}" ] && echo "$STUB_CLAIM"
+    exit 0
+fi
 answers="$STUB_ANSWERS/$(basename "$3")"
 case "$2" in
 list)    sed -n '1p' "$answers" 2>/dev/null ;;
 volumes) sed -n '2,$p' "$answers" 2>/dev/null ;;
+holds)   echo "holds? (stub)"; exit "${STUB_HOLDS:-2}" ;;
 esac
 exit 0
 STUBEOF
@@ -237,8 +244,11 @@ probe() { # slab-path [VOLUME] [META] -> the SLAB the probe leaves behind
         VOLUME="${2:-}"
         META="${3:-}"
         BOOTHOST="http://boothost:9090"
+        BOOTTAG="TESTTAG"; HOSTNQN="nqn.test"
+        STORM_INSTALL_TICKET="${TICKET:-$WORK/no-ticket}"; export STORM_INSTALL_TICKET
+        . "$WORK/claim.sh" >/dev/null 2>&1
         . "$WORK/probe.sh" >/dev/null 2>&1
-        echo "$SLAB"
+        echo "$SLAB${INSTALL_OVER:+|$INSTALL_OVER}"
     )
 }
 
@@ -289,6 +299,24 @@ check "a device that is not on this machine goes to the appliance" "" \
 # A fabric URI is not probed at all: there is no local device to ask about.
 check "a remote slab is left alone" "nvme-tcp://10.0.0.1:4420/nqn.x" \
     "$(probe nvme-tcp://10.0.0.1:4420/nqn.x)"
+
+# A bootable local disk and a release (#236). Without a boot intent a netboot
+# says nothing about install vs reboot; the release does.
+URI="nvme-tcp://10.0.0.1:4420/nqn.x:boothost-TESTTAG?nsid=1"
+check "no image from the appliance: the local disk boots" "$part" \
+    "$(STUB_CLAIM="" STUB_HOLDS=1 probe "$part")"
+check "the disk holds the assigned release: a reboot, the disk boots" "$part" \
+    "$(STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+check "a release the disk does not hold: an install, over this disk" "$URI|$part" \
+    "$(STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+check "cannot tell which release: the disk boots as before" "$part" \
+    "$(STUB_CLAIM="$URI" STUB_HOLDS=2 probe "$part")"
+TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
+check "an install the appliance asked for installs whatever the disk holds" "$URI|$part" \
+    "$(STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+TICKET=""
+check "assimilate=off: the disk boots and nothing is asked" "$part" \
+    "$(ASSIMILATE=off STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
 
 # ---------------------------------------------------------------------------
 # The drive a hook offers to assimilate onto (ZB_TAKEABLE).
@@ -364,7 +392,10 @@ survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behi
         printf '%s\n' "$@" > "$WORK/survey/sda"
         STORM_STORMBLOCK="$SVSTUB"; STORM_SYS_BLOCK="$sys"; SURVEY_ANSWERS="$WORK/survey"
         export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS
-        SLAB="nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1"
+        STORM_NO_INTENT="${NOINTENT:-$WORK/no-marker}"; export STORM_NO_INTENT
+        SLAB="${BOOTING:-nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1}"
+        CLAIMED="${CLAIMED_T:-}"
+        INSTALL_OVER="${OVER:-}"
         . "$WORK/survey.sh" >/dev/null 2>&1
         echo "$LOCAL_DISK${FORCE_LOCAL:+ force}"
     )
@@ -399,6 +430,28 @@ check "an install ticket forces over the default policy too" "/dev/sda force" \
 check "'off' still refuses an install" "" "$(survey off "$DATA_ONLY")"
 TICKET=""
 check "no ticket, no force" "/dev/sda" "$(survey any "$SYS_ONLY")"
+
+# An install without an intent (#236): the appliance stated none, and this boot
+# runs from the image it claimed. The old layout is not updated in place (its
+# data half belongs to the release being replaced): it is forced, fresh.
+CLAIM_URI="nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1"
+NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
+check "no intent stated: the node's own layout is forced, not kept" "/dev/sda force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "no intent stated, default policy: forced too" "/dev/sda force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
+check "no intent stated, but 'off': nothing is taken" "" \
+    "$(CLAIMED_T="$CLAIM_URI" survey off "$DATA_ONLY" "$SYS_HALF")"
+check "no intent stated, but booting the local disk: no force" "" \
+    "$(CLAIMED_T="$CLAIM_URI" BOOTING=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
+over="$WORK/sdz"; : > "$over"
+check "the disk the probe ruled an install over is the one taken" "$over force" \
+    "$(CLAIMED_T="$CLAIM_URI" OVER="$over" survey any "$SYS_ONLY")"
+NOINTENT=""
+check "an intent was stated: the old layout is updated, not forced" "/dev/sda" \
+    "$(CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "and INSTALL_OVER alone forces nothing" "/dev/sda" \
+    "$(CLAIMED_T="$CLAIM_URI" OVER="$over" survey any "$SYS_ONLY")"
 
 [ "$fail" -eq 0 ] && echo "all boot hook, probe, takeable and survey checks passed"
 exit "$fail"

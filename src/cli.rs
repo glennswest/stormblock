@@ -488,6 +488,22 @@ enum SlabAction {
         /// Device paths, partitions or image files to read
         devices: Vec<String>,
     },
+    /// Does a local drive already hold the release on an image? (#236)
+    ///
+    /// Compares the image's goldens (its sealed volumes, by id) with every
+    /// volume the local drive's slabs record. Read-only on both. This is how
+    /// the initramfs tells an install from a reboot when the appliance serves
+    /// no boot intent: a netboot of a release the local disk holds is a
+    /// reboot; of one it does not, an install.
+    ///
+    /// Exit 0: held. Exit 1: not held. Exit 2: cannot say (one side keeps no
+    /// records, or the image has no sealed volume) — neither answer.
+    Holds {
+        /// The local drive (a disk whose partitions are slabs, or a slab)
+        local: String,
+        /// The image: a device path, a file or an nvme-tcp:// URI
+        image: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -1799,6 +1815,35 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                 slab.total_slots() * slab.slot_size()));
             println!("  free: {}", crate::mgmt::config::human_size(
                 slab.free_slots() * slab.slot_size()));
+        }
+        SlabAction::Holds { local, image } => {
+            use crate::image::local::{release_held, ReleaseHeld};
+            let open = |p: String| async move {
+                inspect_storage(&p).await.map_err(|e| anyhow::anyhow!("cannot open {p}: {e}"))
+            };
+            let (l, i) = match (open(local.clone()).await, open(image.clone()).await) {
+                (Ok(l), Ok(i)) => (l, i),
+                (Err(e), _) | (_, Err(e)) => {
+                    println!("cannot say: {e}");
+                    std::process::exit(2);
+                }
+            };
+            match release_held(&l, &i).await {
+                ReleaseHeld::Held { goldens } => {
+                    println!("{local} holds the release on {image}: all {goldens} golden(s)");
+                }
+                ReleaseHeld::NotHeld { goldens, missing } => {
+                    println!(
+                        "{local} does not hold the release on {image}: {missing} of {goldens} \
+                         golden(s) missing"
+                    );
+                    std::process::exit(1);
+                }
+                ReleaseHeld::CannotSay(why) => {
+                    println!("cannot say whether {local} holds the release on {image}: {why}");
+                    std::process::exit(2);
+                }
+            }
         }
         SlabAction::Volumes { devices } => {
             for device in devices {
@@ -5147,8 +5192,10 @@ async fn claim_boot_uri(
 fn note_install_ticket(base: &str, reply: &serde_json::Value) {
     use crate::drive::handover::{InstallTicket, INSTALL_TICKET_PATH};
     let path = std::path::Path::new(INSTALL_TICKET_PATH);
-    let intent = reply.get("intent").and_then(|i| i.as_str()).unwrap_or("auto");
-    eprintln!("boot-claim: intent {intent}");
+    let stated = reply.get("intent").and_then(|i| i.as_str());
+    let intent = stated.unwrap_or("auto");
+    eprintln!("boot-claim: intent {intent}{}", if stated.is_none() { " (none stated)" } else { "" });
+    note_no_intent(std::path::Path::new(crate::drive::handover::NO_INTENT_PATH), base, stated.is_none());
     let ticket = (intent == "install")
         .then(|| {
             let host = reply.get("host")?.get("name")?.as_str()?;
@@ -5164,6 +5211,22 @@ fn note_install_ticket(base: &str, reply: &serde_json::Value) {
         None => {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+/// Note an appliance that stated no intent (#236, see `NO_INTENT_PATH`).
+/// Best effort, like the ticket: a marker that cannot be written is a boot
+/// that keeps the old behaviour.
+fn note_no_intent(path: &std::path::Path, base: &str, none_stated: bool) {
+    if none_stated {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(path, format!("{base}\n")) {
+            eprintln!("boot-claim: {}: {e}", path.display());
+        }
+    } else {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -5866,4 +5929,24 @@ async fn handle_migrate_boot(
     println!("\nAll data migrated to local device. Boot volumes now on {}", target_device);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note_no_intent;
+
+    /// An appliance that states no intent (older than v20) leaves the marker
+    /// the initramfs reads as "install without an intent" (#236); one that
+    /// states any intent takes it away.
+    #[test]
+    fn no_intent_marker_follows_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run/stormblock/no-intent");
+        note_no_intent(&path, "http://forge:9090", true);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "http://forge:9090\n");
+        note_no_intent(&path, "http://forge:9090", false);
+        assert!(!path.exists());
+        // Removing what is not there is not an error.
+        note_no_intent(&path, "http://forge:9090", false);
+    }
 }

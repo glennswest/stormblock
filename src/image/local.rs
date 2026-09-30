@@ -273,6 +273,84 @@ pub async fn system_slab_volumes(
     Ok(Some(meta.volumes.into_iter().map(|v| v.id.0).collect()))
 }
 
+/// Whether a local drive already holds a release (#236).
+///
+/// Without a boot intent (forge on an engine older than v20, #235) nothing
+/// says whether a netboot is an install: stormbootx claims on every boot, so
+/// "it came over the network" is true of a reboot too. What does tell them
+/// apart is the release. A reboot boots the release the local disk already
+/// holds; an install boots one it does not. So this compares the image's
+/// goldens — its sealed volumes, by id, which a flow-over keeps (it moves a
+/// volume's extents, it does not make a new volume) — with every volume the
+/// local drive records. The same test as the flow-over's "already up to
+/// date", asked before anything is attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseHeld {
+    /// Every golden of the image is on the local drive.
+    Held { goldens: usize },
+    /// `missing` of the image's `goldens` are not on the local drive.
+    NotHeld { goldens: usize, missing: usize },
+    /// One side cannot answer: no slab, no metadata, or no sealed volume in
+    /// the image. A caller must not read this as either answer.
+    CannotSay(String),
+}
+
+/// Every volume record the slabs on `device` keep, read offline. `device` is
+/// a slab, or a disk whose partitions are slabs. `None` when no slab there
+/// keeps a record of itself.
+pub async fn recorded_volumes(
+    device: &Arc<dyn BlockDevice>,
+) -> Option<Vec<crate::volume::metadata::VolumeRecord>> {
+    let slabs: Vec<Slab> = match Slab::open(device.clone()).await {
+        Ok(s) => vec![s],
+        Err(_) => crate::drive::discover::slabs_in_partitions(device)
+            .await
+            .into_iter()
+            .map(|f| f.slab)
+            .collect(),
+    };
+    let mut answered = false;
+    let mut out = Vec::new();
+    for slab in slabs {
+        if !slab.has_metadata_region() {
+            continue;
+        }
+        match slab.read_metadata().await {
+            Ok(Some(bytes)) => {
+                if let Ok(meta) = crate::volume::MetadataStore::decode(&bytes) {
+                    answered = true;
+                    out.extend(meta.volumes);
+                }
+            }
+            Ok(None) => answered = true,
+            Err(_) => {}
+        }
+    }
+    answered.then_some(out)
+}
+
+/// Does `local` hold the release on `image`? See [`ReleaseHeld`].
+pub async fn release_held(local: &Arc<dyn BlockDevice>, image: &Arc<dyn BlockDevice>) -> ReleaseHeld {
+    let Some(image_vols) = recorded_volumes(image).await else {
+        return ReleaseHeld::CannotSay("the image keeps no volume records".into());
+    };
+    let goldens: std::collections::HashSet<uuid::Uuid> =
+        image_vols.iter().filter(|v| v.sealed).map(|v| v.id.0).collect();
+    if goldens.is_empty() {
+        return ReleaseHeld::CannotSay("the image holds no sealed volume".into());
+    }
+    let Some(local_vols) = recorded_volumes(local).await else {
+        return ReleaseHeld::CannotSay("the local drive keeps no volume records".into());
+    };
+    let have: std::collections::HashSet<uuid::Uuid> = local_vols.iter().map(|v| v.id.0).collect();
+    let missing = goldens.iter().filter(|id| !have.contains(id)).count();
+    if missing == 0 {
+        ReleaseHeld::Held { goldens: goldens.len() }
+    } else {
+        ReleaseHeld::NotHeld { goldens: goldens.len(), missing }
+    }
+}
+
 /// What the *data* half of a drive already holds, read offline.
 ///
 /// The same question as `system_slab_volumes` and a far more consequential
@@ -821,6 +899,66 @@ mod tests {
 
         let held = system_slab_volumes(&dev).await.unwrap().unwrap();
         assert_eq!(held, wanted, "the system half must name what it holds");
+    }
+
+    /// An install is a release the local drive does not hold; a reboot is one
+    /// it does (#236). Asked of two drives, before anything is attached.
+    #[tokio::test]
+    async fn a_release_is_held_only_when_every_golden_is() {
+        use crate::raid::RaidArrayId;
+        use crate::volume::VolumeManager;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut layout = LocalLayout::for_drive(CAP);
+        layout.slot_size = 1024 * 1024;
+
+        // A drive laid out and given some volumes; the flag says which are goldens.
+        async fn drive(
+            path: &str,
+            layout: &LocalLayout,
+            vols: &[(&str, bool)],
+        ) -> (Arc<dyn BlockDevice>, Vec<uuid::Uuid>) {
+            let dev: Arc<dyn BlockDevice> =
+                Arc::new(FileDevice::open_with_capacity(path, CAP).await.unwrap());
+            let laid = lay_node_slabs(dev.clone(), layout).await.unwrap();
+            let system_id = laid.system.slab_id();
+            let mut mgr = VolumeManager::new(layout.slot_size);
+            mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), laid.system).await.unwrap();
+            mgr.persist_to_slab(system_id);
+            let mut ids = Vec::new();
+            for (name, seal) in vols {
+                let id = mgr.create_volume_any(name, 4 * 1024 * 1024).await.unwrap();
+                if *seal {
+                    mgr.seal_volume(id, None).await.unwrap();
+                }
+                ids.push(id.0);
+            }
+            mgr.persist().await;
+            (dev, ids)
+        }
+
+        let p = |n: &str| dir.path().join(n).to_string_lossy().to_string();
+        let (image, image_ids) =
+            drive(&p("image"), &layout, &[("stormpump", true), ("etc", true), ("scratch", false)])
+                .await;
+
+        // A drive that is nobody's cannot say.
+        let blank: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&p("blank"), CAP).await.unwrap());
+        assert!(matches!(release_held(&blank, &image).await, ReleaseHeld::CannotSay(_)));
+
+        // Another release's goldens: not held, and every golden is missing.
+        let (other, _) = drive(&p("other"), &layout, &[("stormpump", true)]).await;
+        assert_eq!(release_held(&other, &image).await, ReleaseHeld::NotHeld { goldens: 2, missing: 2 });
+
+        // The same release: the image read against itself holds everything,
+        // and its unsealed volume is not a golden, so it is not asked for.
+        assert_eq!(release_held(&image, &image).await, ReleaseHeld::Held { goldens: 2 });
+
+        // An image with nothing sealed cannot name a release.
+        let (unsealed, _) = drive(&p("unsealed"), &layout, &[("scratch", false)]).await;
+        assert!(matches!(release_held(&image, &unsealed).await, ReleaseHeld::CannotSay(_)));
+        assert_eq!(image_ids.len(), 3);
     }
 
     /// The wipe is bounded by the drive, so a small one is not asked for more
