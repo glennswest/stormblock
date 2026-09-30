@@ -7,6 +7,7 @@
 #[cfg(feature = "stormfs-data")]
 pub mod chunk;
 pub mod extent;
+pub mod fence;
 pub mod gem;
 pub mod metadata;
 pub mod redundancy;

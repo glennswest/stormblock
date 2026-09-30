@@ -4698,10 +4698,21 @@ async fn seed_data_half(
     const SEED_PERSIST_EVERY: u32 = 64;
     let mut since_persist = 0u32;
     for (vol, vext) in todo {
+        // Under the slot fence, like every move (#239). Nothing is exported
+        // yet, so nothing contends for it; it is what a move is made of.
+        let Some(leg) = mgr.gem().read().await.lookup(vol, vext).map(|l| l.primary()) else {
+            continue;
+        };
+        // A shared slot moves once, for every map that names it.
+        if leg.slab_id == dest {
+            moved += 1;
+            continue;
+        }
+        let fence = crate::volume::fence::exclusive(leg).await;
         {
         let mut gem = mgr.gem().write().await;
         let mut reg = mgr.registry().write().await;
-        match engine.migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest)).await {
+        match engine.migrate_leg_fenced(&mut gem, &mut reg, vol, vext, leg.slab_id, Some(dest), &fence).await {
             Ok(_) => moved += 1,
             Err(e) => {
                 failed += 1;
@@ -4753,6 +4764,98 @@ async fn seed_data_half(
         if failed > 0 { format!(", {failed} failed") } else { String::new() }
     );
     Ok(())
+}
+
+/// Move every extent on `sources` onto `dest`, one per lock cycle, while the
+/// volumes on them are mounted and written (#239).
+///
+/// Each extent is taken under the slot fence: the move waits for the I/O on
+/// that slot to finish, keeps new I/O out while it copies and rewrites the
+/// maps, and an I/O that looked the slot up meanwhile finds the copy. Without
+/// it a write landing after the copy was lost, and a copy-on-write reading
+/// the source after it was freed — discarded, so zeros on the appliance's
+/// thin clone — wrote those zeros into the clone: `cni-bin`'s root directory
+/// on 11.56, which Cilium was filling while this ran.
+///
+/// The map is made durable (`persist`) before the sources it no longer
+/// names are freed, after every extent. `None` when it gave up: more than 16
+/// extents that would not move.
+#[cfg(target_os = "linux")]
+pub(crate) async fn flow_system_half<P, F>(
+    gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
+    registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
+    sources: &[crate::drive::slab::SlabId],
+    dest: crate::drive::slab::SlabId,
+    persist: P,
+) -> Option<(u64, u64)>
+where
+    P: Fn() -> F,
+    F: std::future::Future<Output = ()>,
+{
+    use crate::placement::PlacementError;
+    let engine = crate::placement::PlacementEngine::new();
+    let (mut moved, mut failed) = (0u64, 0u64);
+    // Looks that found the extent changed under them, in a row. An extent
+    // that keeps changing is being written as fast as it can be looked at;
+    // past this it counts as one that would not move.
+    let mut again = 0u32;
+    for &source in sources {
+        loop {
+            // Which slot, under the map's read lock only: the fence is waited
+            // for with no lock held, since an I/O holding it may be waiting
+            // for the map.
+            let pick = {
+                let g = gem.read().await;
+                g.slab_extents(source)
+                    .into_iter()
+                    .find_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
+            };
+            let Some((vol, vext, leg)) = pick else { break };
+            let fence = crate::volume::fence::exclusive(leg).await;
+            let res = {
+                let mut g = gem.write().await;
+                let mut r = registry.write().await;
+                engine
+                    .migrate_leg_fenced(&mut g, &mut r, vol, vext, source, Some(dest), &fence)
+                    .await
+            };
+            drop(fence);
+            match res {
+                Ok(_) => {
+                    moved += 1;
+                    again = 0;
+                }
+                // The extent changed while the fence was awaited (a
+                // copy-on-write took it, a discard freed it): look again.
+                Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. })
+                    if again < 64 =>
+                {
+                    again += 1;
+                    continue;
+                }
+                Err(e) => {
+                    again = 0;
+                    failed += 1;
+                    tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
+                    // A handful of bad extents is a disk worth giving up
+                    // on, and giving up leaves the node exactly where it
+                    // was: running from the appliance.
+                    if failed > 16 {
+                        return None;
+                    }
+                }
+            }
+            // The map, then the slots it no longer names. Same order and
+            // same reason as the data half: this runs for minutes on a
+            // machine that can lose power at any point in them, and a slot
+            // table that has run ahead of the map is a volume with a hole in
+            // it.
+            persist().await;
+            let mut r = registry.write().await;
+            engine.release_owed(&mut r).await;
+        }
+    }
+    Some((moved, failed))
 }
 
 /// Move the goldens onto the disk the boot laid out, in the background.
@@ -4836,52 +4939,21 @@ fn spawn_flow_over(
             sources.len(),
             flow.disk
         );
-        let engine = crate::placement::PlacementEngine::new();
-        let (mut moved, mut failed) = (0u64, 0u64);
-        for source in sources {
-            loop {
-                let done = {
-                let mut gem = gem_arc.write().await;
-                let mut reg = reg_arc.write().await;
-                let Some((vol, vext, _)) = gem.slab_extents(source).into_iter().next() else {
-                    break;
-                };
-                match engine.migrate_extent(&mut gem, &mut reg, vol, vext, Some(dest)).await {
-                    Ok(_) => moved += 1,
-                    Err(e) => {
-                        failed += 1;
-                        tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
-                        // A handful of bad extents is a disk worth giving up
-                        // on, and giving up leaves the node exactly where it
-                        // was: running from the appliance.
-                        if failed > 16 {
-                            tracing::error!(
-                                "flow-over: {} failures — abandoning {}; the node keeps \
-                                 running from the appliance",
-                                failed,
-                                flow.disk
-                            );
-                            return;
-                        }
-                    }
-                }
-                ()
-                };
-                let _ = done;
-                // The map, then the slots it no longer names. Same order and
-                // same reason as the data half: this runs for minutes on a
-                // machine that can lose power at any point in them, and a
-                // slot table that has run ahead of the map is a volume with a
-                // hole in it.
-                if let Some(state) = state_for_persist.upgrade() {
-                    state.volume_manager.lock().await.persist().await;
-                }
-                {
-                    let mut reg = reg_arc.write().await;
-                    engine.release_owed(&mut reg).await;
-                }
+        let persist = || async {
+            if let Some(state) = state_for_persist.upgrade() {
+                state.volume_manager.lock().await.persist().await;
             }
-        }
+        };
+        let Some((moved, failed)) =
+            flow_system_half(&gem_arc, &reg_arc, &sources, dest, persist).await
+        else {
+            tracing::error!(
+                "flow-over: too many failures — abandoning {}; the node keeps running from \
+                 the appliance",
+                flow.disk
+            );
+            return;
+        };
         tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
         println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
         if failed == 0 {
@@ -6133,5 +6205,158 @@ file = "{state}"
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// The background flow-over moves a golden's slots while a clone of it
+    /// is written and read (#239): what cni-bin went through on 11.56 while
+    /// Cilium filled it. Every write must be there afterwards and the golden
+    /// must read as it was, throughout.
+    ///
+    /// `FENCE_OFF_239=1` runs it without the slot fence, to see the race it
+    /// closes (expected to fail then; not part of the routine check).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn the_flow_over_moves_a_live_clone_without_losing_a_byte() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+
+        if std::env::var("FENCE_OFF_239").is_ok() {
+            crate::volume::fence::OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 1024;
+        const BLOCK: usize = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let slab = |name: &str| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                let dev = Arc::new(
+                    FileDevice::open_with_capacity(&path, 3 * EXTENTS * SLOT).await.unwrap(),
+                ) as Arc<dyn BlockDevice>;
+                Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // The appliance's system slab, holding a golden and its clone.
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = slab("appliance.slab").await;
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("cni-bin.golden", EXTENTS * SLOT).await.unwrap();
+        let mut seed = 0x239u64;
+        let mut content = vec![0u8; (EXTENTS * SLOT) as usize];
+        for c in content.chunks_mut(8) {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            c.copy_from_slice(&seed.to_le_bytes());
+        }
+        let g = mgr.get_volume(&golden).unwrap();
+        g.write(0, &content).await.unwrap();
+        g.flush().await.unwrap();
+        mgr.seal_volume(golden, None).await.unwrap();
+        let clone = mgr.create_snapshot(golden, "cni-bin").await.unwrap();
+        // The local disk's system slab, laid by the install.
+        let local = slab("local.slab").await;
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+
+        let content = Arc::new(content);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let bad = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        // Writers, each on its own blocks of the clone, keeping what they
+        // wrote; readers of the golden, which must never change.
+        let mut writers = Vec::new();
+        for w in 0..8u64 {
+            let vol = mgr.get_volume(&clone).unwrap();
+            let stop = stop.clone();
+            writers.push(tokio::spawn(async move {
+                let mut mine: std::collections::HashMap<u64, u8> = Default::default();
+                let blocks = EXTENTS * SLOT / BLOCK as u64;
+                let mut x = 0x9E37_79B9u64 ^ w;
+                let mut n = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) || n < 256 {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    // Block b belongs to writer b % 8.
+                    let b = ((x >> 33) % (blocks / 8)) * 8 + w;
+                    let tag = (n % 250) as u8 + 1;
+                    vol.write(b * BLOCK as u64, &vec![tag; BLOCK]).await.unwrap();
+                    mine.insert(b, tag);
+                    n += 1;
+                }
+                mine
+            }));
+        }
+        let mut readers = Vec::new();
+        for r in 0..4u64 {
+            let vol = mgr.get_volume(&golden).unwrap();
+            let (stop, content, bad) = (stop.clone(), content.clone(), bad.clone());
+            readers.push(tokio::spawn(async move {
+                let mut x = 0xC0FFEEu64 ^ r;
+                let mut buf = vec![0u8; BLOCK];
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let off = ((x >> 33) % (EXTENTS * SLOT / BLOCK as u64)) * BLOCK as u64;
+                    vol.read(off, &mut buf).await.unwrap();
+                    if buf[..] != content[off as usize..off as usize + BLOCK] {
+                        bad.lock().unwrap().push(format!("the golden read wrong at byte {off}"));
+                    }
+                }
+            }));
+        }
+
+        let flowed = super::flow_system_half(
+            mgr.gem(),
+            mgr.registry(),
+            &[source_id],
+            local_id,
+            || mgr.persist(),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut wrote = std::collections::HashMap::new();
+        for w in writers {
+            wrote.extend(w.await.unwrap());
+        }
+        for r in readers {
+            r.await.unwrap();
+        }
+        let (moved, failed) = flowed.expect("the flow-over finished");
+        assert_eq!(failed, 0);
+        assert!(moved >= EXTENTS, "moved {moved}");
+        assert!(mgr.gem().read().await.slab_extents(source_id).is_empty(), "all moved");
+
+        // The clone: the golden, with every write on top.
+        let mut want = (*content).clone();
+        for (b, tag) in &wrote {
+            let at = *b as usize * BLOCK;
+            want[at..at + BLOCK].fill(*tag);
+        }
+        let mut got = vec![0u8; want.len()];
+        mgr.get_volume(&clone).unwrap().read(0, &mut got).await.unwrap();
+        let mut bad = bad.lock().unwrap().clone();
+        bad.truncate(8);
+        for (i, (a, b)) in want.chunks(BLOCK).zip(got.chunks(BLOCK)).enumerate() {
+            if a != b {
+                bad.push(format!(
+                    "the clone's block {i} (extent {}) reads {} where {} was expected",
+                    i as u64 * BLOCK as u64 / SLOT,
+                    if b.iter().all(|&v| v == 0) { "zeros".to_string() } else { format!("{:#04x}..", b[0]) },
+                    if wrote.contains_key(&(i as u64)) { "a write" } else { "the golden" },
+                ));
+                if bad.len() > 24 {
+                    break;
+                }
+            }
+        }
+        let mut gold = vec![0u8; content.len()];
+        mgr.get_volume(&golden).unwrap().read(0, &mut gold).await.unwrap();
+        if gold[..] != content[..] {
+            bad.push("the golden changed".into());
+        }
+        assert!(bad.is_empty(), "{} writes; {}", wrote.len(), bad.join("\n"));
     }
 }

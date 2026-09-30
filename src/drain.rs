@@ -202,16 +202,17 @@ async fn run(
                 .collect()
         };
 
-        // One step under the locks: pick a leg, move it.
-        let step = {
-            let mut g = gem.write().await;
-            let mut r = registry.write().await;
+        // Pick a leg under the map's read lock, wait for the slot's fence with
+        // no lock held (an I/O holding it may be waiting for the map), then
+        // move it under the locks (#239).
+        let pick = {
+            let g = gem.read().await;
             let mut pick = None;
             'slabs: for s in &slabs {
                 for (vol, vext, loc) in g.slab_extents(*s) {
                     if let Some(leg) = loc.leg_on(*s) {
                         if !stuck.contains(&leg) {
-                            pick = Some((vol, vext, *s, false));
+                            pick = Some((vol, vext, *s, false, leg));
                             break 'slabs;
                         }
                     }
@@ -219,26 +220,38 @@ async fn run(
                 for (vol, stripe, grp) in g.slab_parity(*s) {
                     if let Some(leg) = grp.legs.iter().find(|l| l.slab_id == *s) {
                         if !stuck.contains(leg) {
-                            pick = Some((vol, stripe, *s, true));
+                            pick = Some((vol, stripe, *s, true, *leg));
                             break 'slabs;
                         }
                     }
                 }
             }
+            pick
+        };
+        let fence = match pick {
+            Some((.., false, leg)) => Some(crate::volume::fence::exclusive(leg).await),
+            _ => None,
+        };
+        let step = {
+            let mut g = gem.write().await;
+            let mut r = registry.write().await;
             match pick {
                 None => None,
-                Some((vol, idx, slab, is_parity)) => {
+                Some((vol, idx, slab, is_parity, _)) => {
                     let rung = spread.get(&vol).map(String::as_str).unwrap_or("drive");
                     let res = if is_parity {
                         engine.migrate_parity_leg_at(&mut g, &mut r, vol, idx, slab, rung).await
                     } else {
-                        engine.migrate_leg_at(&mut g, &mut r, vol, idx, slab, rung).await
+                        engine
+                            .migrate_leg_at_held(&mut g, &mut r, vol, idx, slab, rung, fence.as_ref())
+                            .await
                     };
                     let remaining = remaining_on(&g, &slabs);
                     Some((res, remaining, vol, idx, slab, is_parity))
                 }
             }
         };
+        drop(fence);
 
         match step {
             None => {
@@ -265,6 +278,9 @@ async fn run(
                 st.remaining = remaining;
                 since_persist += 1;
             }
+            // In use by an I/O, or changed while the fence was awaited:
+            // nothing moved, and the next pass looks again.
+            Some((Err(crate::placement::PlacementError::Busy { .. }), ..)) => {}
             Some((Err(e), remaining, vol, idx, slab, is_parity)) => {
                 // Find the leg to skip.
                 let leg = {

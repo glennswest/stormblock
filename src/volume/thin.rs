@@ -29,6 +29,7 @@ use super::metadata::Access;
 use super::gem::{ExtentLocation, GlobalExtentMap, Leg, ParityGroup, parity_vext};
 use super::redundancy::{Redundancy, RedundancyPolicy};
 use super::stripe;
+use super::fence;
 
 /// A physical extent with reference counting for COW snapshots.
 /// Legacy type — kept for metadata V1 compatibility.
@@ -685,6 +686,25 @@ impl ThinVolumeHandle {
 
     fn shard(&self, key: u64) -> &tokio::sync::Mutex<()> {
         &self.shards[(key % SHARDS as u64) as usize]
+    }
+
+    /// The extent's location, with a shared fence on its slots (#239).
+    ///
+    /// The map is read again once the fence is held: a move that ran in
+    /// between has pointed the map at the copy, and the slot first found may
+    /// already be freed. Hold the returned guard until the I/O on those slots
+    /// is done. Never call it holding the map or the registry.
+    async fn fenced_lookup(&self, vext: u64) -> (Option<ExtentLocation>, Option<fence::Held>) {
+        let mut loc = { self.gem.read().await.lookup(self.id, vext).cloned() };
+        loop {
+            let Some(found) = &loc else { return (None, None) };
+            let held = fence::hold(found.legs()).await;
+            let again = { self.gem.read().await.lookup(self.id, vext).cloned() };
+            match &again {
+                Some(a) if a.legs().eq(found.legs()) => return (again, Some(held)),
+                _ => loc = again,
+            }
+        }
     }
 
     /// Lock key for an extent under the current policy: the stripe for a
@@ -1381,10 +1401,7 @@ impl ThinVolumeHandle {
         if let Redundancy::Parity { data, parity } = policy.scheme {
             return self.release_parity_member(vext_idx, data as usize, parity, &policy).await;
         }
-        let loc = {
-            let gem = self.gem.read().await;
-            gem.lookup(self.id, vext_idx).cloned()
-        };
+        let (loc, _held) = self.fenced_lookup(vext_idx).await;
         let Some(loc) = loc else { return Ok(()) };
         {
             let mut gem = self.gem.write().await;
@@ -2056,7 +2073,8 @@ impl ThinVolumeHandle {
             t.take(self.slot_size).await;
         }
         let _e = self.shard(vext).lock().await;
-        let Some(loc) = ({ let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() }) else {
+        let (loc, _held) = self.fenced_lookup(vext).await;
+        let Some(loc) = loc else {
             return (out, Vec::new());
         };
         let (healthy, missing): (Vec<Leg>, Vec<Leg>) = {
@@ -2458,11 +2476,9 @@ impl ThinVolumeHandle {
                 Some(self.shard(self.lock_key(vext_idx, &policy)).lock().await)
             };
 
-            // Look up existing extent in GEM
-            let location = {
-                let gem = self.gem.read().await;
-                gem.lookup(self.id, vext_idx).cloned()
-            };
+            // Look up existing extent in GEM, its slots fenced against a
+            // move until the write has landed (#239).
+            let (location, held) = self.fenced_lookup(vext_idx).await;
 
             match location {
                 // Exclusively owned: write straight through, no serialisation.
@@ -2470,13 +2486,12 @@ impl ThinVolumeHandle {
                     self.write_in_place(vext_idx, &loc, off_in_slot, chunk).await?;
                 }
                 // Shared, or not yet mapped — the mapping is about to change,
-                // so serialise per volume and re-read it under the lock.
+                // so serialise per volume and re-read it under the lock. The
+                // fence goes first: the volume lock is taken before it.
                 _ => {
+                    drop(held);
                     let _vol = self.inner.lock().await;
-                    let fresh = {
-                        let gem = self.gem.read().await;
-                        gem.lookup(self.id, vext_idx).cloned()
-                    };
+                    let (fresh, _held) = self.fenced_lookup(vext_idx).await;
                     match fresh {
                         Some(loc) if loc.ref_count > 1 => {
                             self.cow_write(vext_idx, off_in_slot, chunk, &loc, &policy).await?;
@@ -2565,11 +2580,8 @@ impl ThinVolumeHandle {
             let buf_start = bytes_read as usize;
             let buf_end = buf_start + to_read;
 
-            // Look up extent in GEM
-            let location = {
-                let gem = self.gem.read().await;
-                gem.lookup(self.id, vext_idx).cloned()
-            };
+            // Look up extent in GEM, its slots fenced against a move (#239)
+            let (location, _held) = self.fenced_lookup(vext_idx).await;
 
             match location {
                 Some(loc) => {

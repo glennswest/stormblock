@@ -75,6 +75,8 @@ pub enum PlacementError {
     Other(String),
     /// The destination would put two legs of one extent on one domain.
     DomainCollision(SlabId),
+    /// An I/O is using the slot right now (#239). Nothing moved; try again.
+    Busy { slab_id: SlabId, slot_idx: u32 },
 }
 
 impl fmt::Display for PlacementError {
@@ -96,6 +98,9 @@ impl fmt::Display for PlacementError {
                 write!(f, "write failed: slab {slab_id} slot {slot_idx}: {error}")
             }
             PlacementError::Other(e) => write!(f, "{e}"),
+            PlacementError::Busy { slab_id, slot_idx } => {
+                write!(f, "slab {slab_id} slot {slot_idx} is in use by an I/O; not moved")
+            }
         }
     }
 }
@@ -394,6 +399,26 @@ impl PlacementEngine {
         self.migrate_leg(gem, registry, volume_id, vext_idx, from, dest_slab_id).await
     }
 
+    /// [`migrate_leg`](Self::migrate_leg) for a caller that already holds the
+    /// slot's fence (#239): it waited for the volume's I/O on the slot
+    /// *before* taking the map and the registry, which is the only way a
+    /// move of a live volume is sure to get its turn. The leg the guard
+    /// covers must still be the one on `from_slab`, or the extent moved
+    /// meanwhile and this reports `Busy`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn migrate_leg_fenced(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        from_slab: SlabId,
+        dest_slab_id: Option<SlabId>,
+        fence: &crate::volume::fence::Exclusive,
+    ) -> Result<MigrateExtentResult, PlacementError> {
+        self.migrate_leg_held(gem, registry, volume_id, vext_idx, from_slab, dest_slab_id, Some(fence)).await
+    }
+
     /// Move the leg of `(volume, extent)` that lives on `from_slab` to another
     /// slab, keeping every other leg where it is.
     ///
@@ -412,6 +437,20 @@ impl PlacementEngine {
         from_slab: SlabId,
         dest_slab_id: Option<SlabId>,
     ) -> Result<MigrateExtentResult, PlacementError> {
+        self.migrate_leg_held(gem, registry, volume_id, vext_idx, from_slab, dest_slab_id, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn migrate_leg_held(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        from_slab: SlabId,
+        dest_slab_id: Option<SlabId>,
+        fence: Option<&crate::volume::fence::Exclusive>,
+    ) -> Result<MigrateExtentResult, PlacementError> {
         let loc = gem.lookup(volume_id, vext_idx)
             .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?
             .clone();
@@ -423,7 +462,7 @@ impl PlacementEngine {
             .map(|l| registry.domain_of(&l.slab_id))
             .collect();
         let new = self
-            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, dest_slab_id)
+            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, dest_slab_id, fence)
             .await?;
         Ok(MigrateExtentResult {
             volume_id,
@@ -464,7 +503,7 @@ impl PlacementEngine {
             }
         }
         let new = self
-            .move_slot(gem, registry, volume_id, parity_vext_for(&g, old), old, g.ref_count, g.generation, &others, dest_slab_id)
+            .move_slot(gem, registry, volume_id, parity_vext_for(&g, old), old, g.ref_count, g.generation, &others, dest_slab_id, None)
             .await?;
         Ok(MigrateExtentResult {
             volume_id,
@@ -490,9 +529,26 @@ impl PlacementEngine {
         generation: u64,
         keep_apart_from: &[FailureDomain],
         dest_slab_id: Option<SlabId>,
+        fence: Option<&crate::volume::fence::Exclusive>,
     ) -> Result<Leg, PlacementError> {
         let source_slab_id = old.slab_id;
         let source_slot_idx = old.slot_idx;
+
+        // No I/O on the slot while it is copied and the maps are rewritten
+        // (#239): a write after the copy would be lost, and a read after the
+        // source is freed reads a discarded slot. A caller holding the map
+        // and the registry cannot wait for the fence (an I/O holding it may
+        // be waiting for them), so it only tries.
+        let _tried;
+        match fence {
+            Some(f) if f.covers(old) => {}
+            _ => {
+                _tried = crate::volume::fence::try_exclusive(old).ok_or(PlacementError::Busy {
+                    slab_id: source_slab_id,
+                    slot_idx: source_slot_idx,
+                })?;
+            }
+        }
 
         // Read data from source slot
         let slot_size = registry.get(&source_slab_id)
@@ -554,6 +610,30 @@ impl PlacementEngine {
                 slot_idx: dest_slot,
                 error: e.to_string(),
             })?;
+        // Read back before any map names the copy (#239). A copy that does
+        // not read back as what was read is refused here, where the source
+        // still holds the data, rather than found by a filesystem later.
+        let mut check = vec![0u8; data.len()];
+        let back = registry.get(&dest_id)
+            .ok_or(PlacementError::SlabNotFound(dest_id))?
+            .read_slot(dest_slot, 0, &mut check)
+            .await;
+        if back.is_err() || check != data {
+            if let Some(slab) = registry.get_mut(&dest_id) {
+                let _ = slab.free(dest_slot).await;
+            }
+            return Err(PlacementError::WriteFailed {
+                slab_id: dest_id,
+                slot_idx: dest_slot,
+                error: match back {
+                    Err(e) => format!("reading the copy back: {e}"),
+                    Ok(()) => {
+                        let at = check.iter().zip(&data).position(|(a, b)| a != b).unwrap_or(0);
+                        format!("the copy reads back different from the source at byte {at}")
+                    }
+                },
+            });
+        }
         // Its entry is published at the destination's next flush, after the
         // data it names (#171).
         if let Some(slab) = registry.get(&dest_id) {
@@ -905,6 +985,22 @@ impl PlacementEngine {
         from_slab: SlabId,
         rung: &str,
     ) -> Result<MigrateExtentResult, PlacementError> {
+        self.migrate_leg_at_held(gem, registry, volume_id, vext_idx, from_slab, rung, None).await
+    }
+
+    /// [`migrate_leg_at`](Self::migrate_leg_at) under a fence the caller
+    /// already holds; see [`migrate_leg_fenced`](Self::migrate_leg_fenced).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn migrate_leg_at_held(
+        &self,
+        gem: &mut GlobalExtentMap,
+        registry: &mut SlabRegistry,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        from_slab: SlabId,
+        rung: &str,
+        fence: Option<&crate::volume::fence::Exclusive>,
+    ) -> Result<MigrateExtentResult, PlacementError> {
         let loc = gem.lookup(volume_id, vext_idx)
             .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?
             .clone();
@@ -918,7 +1014,7 @@ impl PlacementEngine {
         let tier = registry.get(&from_slab).ok_or(PlacementError::SlabNotFound(from_slab))?.tier();
         let dest = self.best_slab_apart_at(registry, tier, from_slab, &others, rung)?;
         let new = self
-            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, Some(dest))
+            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, Some(dest), fence)
             .await?;
         Ok(MigrateExtentResult { volume_id, vext_idx, source_slab: old.slab_id, dest_slab: new.slab_id, dest_slot: new.slot_idx })
     }
@@ -946,7 +1042,7 @@ impl PlacementEngine {
         let tier = registry.get(&from_slab).ok_or(PlacementError::SlabNotFound(from_slab))?.tier();
         let dest = self.best_slab_apart_at(registry, tier, from_slab, &others, rung)?;
         let new = self
-            .move_slot(gem, registry, volume_id, parity_vext_for(&g, old), old, g.ref_count, g.generation, &others, Some(dest))
+            .move_slot(gem, registry, volume_id, parity_vext_for(&g, old), old, g.ref_count, g.generation, &others, Some(dest), None)
             .await?;
         Ok(MigrateExtentResult { volume_id, vext_idx: stripe, source_slab: old.slab_id, dest_slab: new.slab_id, dest_slot: new.slot_idx })
     }
