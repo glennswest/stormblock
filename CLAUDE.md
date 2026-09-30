@@ -191,10 +191,14 @@ not hold.** Same release = a reboot: boot the local disk, keep its data.
 - Not covered: reinstalling the *same* release fresh (repoint to another
   release first, or use the intent once forge is on v20).
 
-- [ ] `slab holds` + tests
-- [ ] `/init`: claim function, probe comparison, fresh install without intent
-- [ ] `tests/initramfs-boot-hook.sh` cases; docs (boot-hooks.md, README), CHANGELOG
-- [ ] sc-build: nextest + boot-hook test; close #236
+- [x] `slab holds` + tests (`image::local::release_held`, 984f203)
+- [x] `/init`: claim function, probe comparison, fresh install without intent
+- [x] `tests/initramfs-boot-hook.sh` cases; docs (boot-hooks.md, README), CHANGELOG
+- [x] sc-build at 984f203: boot-hook test 13 new cases, all pass under sh and
+      busybox sh; nextest 842/843 (the one is #134); `slab holds` exit 2 on
+      blank/missing checked with the built binary
+- [ ] golden staged; not verified on metal (needs a stormcos release with
+      this initramfs, then a netboot of a new release on C2NR0Q2)
 
 ### Boot media at 512-byte LBAs (2026-09-29, #228, P0) — IN PROGRESS
 
