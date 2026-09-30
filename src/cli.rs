@@ -6226,6 +6226,47 @@ file = "{state}"
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
+    /// The appliance, as the node sees it: a device a network round trip
+    /// away. Each I/O takes a millisecond or two, which is the window a move
+    /// used to land in between an I/O finding its slot and using it.
+    struct Remote(Arc<dyn BlockDevice>);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for Remote {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.0.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.0.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.0.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.0.optimal_io_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.0.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            tokio::time::sleep(std::time::Duration::from_micros(1500)).await;
+            self.0.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            tokio::time::sleep(std::time::Duration::from_micros(1500)).await;
+            self.0.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.0.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.0.discard(offset, len).await
+        }
+        fn smart_status(&self) -> crate::drive::DriveResult<crate::drive::SmartData> {
+            self.0.smart_status()
+        }
+    }
+
     /// The background flow-over moves a golden's slots while a clone of it
     /// is written and read (#239): what cni-bin went through on 11.56 while
     /// Cilium filled it. Every write must be there afterwards and the golden
@@ -6246,12 +6287,15 @@ file = "{state}"
         const EXTENTS: u64 = 1024;
         const BLOCK: usize = 4096;
         let dir = tempfile::tempdir().unwrap();
-        let slab = |name: &str| {
+        let slab = |name: &str, remote: bool| {
             let path = dir.path().join(name).display().to_string();
             async move {
-                let dev = Arc::new(
+                let mut dev = Arc::new(
                     FileDevice::open_with_capacity(&path, 3 * EXTENTS * SLOT).await.unwrap(),
                 ) as Arc<dyn BlockDevice>;
+                if remote {
+                    dev = Arc::new(Remote(dev));
+                }
                 Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
                     .await
                     .unwrap()
@@ -6260,7 +6304,7 @@ file = "{state}"
 
         // The appliance's system slab, holding a golden and its clone.
         let mut mgr = VolumeManager::new(SLOT);
-        let source = slab("appliance.slab").await;
+        let source = slab("appliance.slab", true).await;
         let source_id = source.slab_id();
         mgr.add_slab(source).await;
         let golden = mgr.create_volume_any("cni-bin.golden", EXTENTS * SLOT).await.unwrap();
@@ -6278,7 +6322,7 @@ file = "{state}"
         mgr.seal_volume(golden, None).await.unwrap();
         let clone = mgr.create_snapshot(golden, "cni-bin").await.unwrap();
         // The local disk's system slab, laid by the install.
-        let local = slab("local.slab").await;
+        let local = slab("local.slab", false).await;
         let local_id = local.slab_id();
         mgr.add_slab(local).await;
 
