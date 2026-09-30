@@ -6229,7 +6229,17 @@ file = "{state}"
     /// The appliance, as the node sees it: a device a network round trip
     /// away. Each I/O takes a millisecond or two, which is the window a move
     /// used to land in between an I/O finding its slot and using it.
-    struct Remote(Arc<dyn BlockDevice>);
+    struct Remote(Arc<dyn BlockDevice>, Arc<Gate>);
+
+    /// Stops the next read inside the device, after the I/O has found its
+    /// slot and before it reads it, until the test lets it go.
+    #[derive(Default)]
+    struct Gate {
+        armed: std::sync::atomic::AtomicBool,
+        jitter: std::sync::atomic::AtomicBool,
+        arrived: tokio::sync::Notify,
+        go: tokio::sync::Notify,
+    }
 
     /// 0–4 ms, different for every I/O: a round trip that is not always the
     /// same length, so an I/O that found its slot first can land last.
@@ -6258,18 +6268,28 @@ file = "{state}"
             self.0.device_type()
         }
         async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
-            round_trip().await;
+            if self.1.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                self.1.arrived.notify_one();
+                self.1.go.notified().await;
+            }
+            if self.1.jitter.load(std::sync::atomic::Ordering::Relaxed) {
+                round_trip().await;
+            }
             self.0.read(offset, buf).await
         }
         async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
-            round_trip().await;
+            if self.1.jitter.load(std::sync::atomic::Ordering::Relaxed) {
+                round_trip().await;
+            }
             self.0.write(offset, buf).await
         }
         async fn flush(&self) -> crate::drive::DriveResult<()> {
             self.0.flush().await
         }
         async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
-            round_trip().await;
+            if self.1.jitter.load(std::sync::atomic::Ordering::Relaxed) {
+                round_trip().await;
+            }
             self.0.discard(offset, len).await
         }
         fn discard_granularity(&self) -> u32 {
@@ -6307,7 +6327,9 @@ file = "{state}"
                     FileDevice::open_with_capacity(&path, 3 * EXTENTS * SLOT).await.unwrap(),
                 ) as Arc<dyn BlockDevice>;
                 if remote {
-                    dev = Arc::new(Remote(dev));
+                    let gate = Arc::new(Gate::default());
+                    gate.jitter.store(true, std::sync::atomic::Ordering::Relaxed);
+                    dev = Arc::new(Remote(dev, gate));
                 }
                 Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
                     .await
@@ -6434,5 +6456,108 @@ file = "{state}"
             bad.push("the golden changed".into());
         }
         assert!(bad.is_empty(), "{} writes; {}", wrote.len(), bad.join("\n"));
+    }
+
+    /// The interleaving itself, made to happen (#239): an I/O finds its slot
+    /// in the map and is held inside the device read; the flow-over moves
+    /// that slot and frees it — a discard, zeros — and then the I/O reads.
+    /// A read of the golden and a copy-on-write of the clone, both.
+    ///
+    /// With the fence the move waits for the I/O, and both read the golden's
+    /// bytes. `FENCE_OFF_239=1` shows what it did before: zeros.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_io_that_found_its_slot_before_a_move_reads_what_was_there() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+
+        if std::env::var("FENCE_OFF_239").is_ok() {
+            crate::volume::fence::OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 16;
+        let dir = tempfile::tempdir().unwrap();
+        let gate = Arc::new(Gate::default());
+        let open = |name: &str| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                Arc::new(FileDevice::open_with_capacity(&path, 4 * EXTENTS * SLOT).await.unwrap())
+                    as Arc<dyn BlockDevice>
+            }
+        };
+        let fmt = || SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System);
+        let remote = Arc::new(Remote(open("appliance.slab").await, gate.clone())) as Arc<dyn BlockDevice>;
+        let source = Slab::format_with(remote, fmt()).await.unwrap();
+        let source_id = source.slab_id();
+        let mut mgr = VolumeManager::new(SLOT);
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("cni-bin.golden", EXTENTS * SLOT).await.unwrap();
+        let content: Vec<u8> = (0..EXTENTS * SLOT).map(|i| (i / 4096 % 251) as u8 + 1).collect();
+        let g = mgr.get_volume(&golden).unwrap();
+        g.write(0, &content).await.unwrap();
+        g.flush().await.unwrap();
+        mgr.seal_volume(golden, None).await.unwrap();
+        let clone = mgr.create_snapshot(golden, "cni-bin").await.unwrap();
+        let local = Slab::format_with(open("local.slab").await, fmt()).await.unwrap();
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+        let mgr = Arc::new(mgr);
+
+        let mut bad = Vec::new();
+        // 1. A read of the golden. 2. The clone's first write to a shared
+        // extent: a copy-on-write, which reads the whole slot first.
+        for (what, vext) in [("a read of the golden", 3u64), ("a copy-on-write of the clone", 5)] {
+            gate.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let io = {
+                let mgr = mgr.clone();
+                tokio::spawn(async move {
+                    if vext == 3 {
+                        let mut buf = vec![0u8; SLOT as usize];
+                        mgr.get_volume(&golden).unwrap().read(vext * SLOT, &mut buf).await.unwrap();
+                        buf
+                    } else {
+                        let v = mgr.get_volume(&clone).unwrap();
+                        v.write(vext * SLOT, &[0xEE; 4096]).await.unwrap();
+                        let mut buf = vec![0u8; SLOT as usize];
+                        v.read(vext * SLOT, &mut buf).await.unwrap();
+                        buf
+                    }
+                })
+            };
+            gate.arrived.notified().await;
+            // The move, while that I/O is inside the device.
+            let flow = {
+                let mgr = mgr.clone();
+                tokio::spawn(async move {
+                    super::flow_system_half(mgr.gem(), mgr.registry(), &[source_id], local_id, || {
+                        mgr.persist()
+                    })
+                    .await
+                })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            gate.go.notify_one();
+            let got = io.await.unwrap();
+            flow.await.unwrap().expect("the flow-over finished");
+            let mut want = content[(vext * SLOT) as usize..((vext + 1) * SLOT) as usize].to_vec();
+            if vext == 5 {
+                want[..4096].fill(0xEE);
+            }
+            if got != want {
+                let zeros = got.chunks(4096).filter(|b| b.iter().all(|&v| v == 0)).count();
+                bad.push(format!(
+                    "{what}: extent {vext} read wrong ({zeros} of {} blocks zeros)",
+                    SLOT / 4096
+                ));
+            }
+            // Put everything back on the appliance for the next case.
+            super::flow_system_half(mgr.gem(), mgr.registry(), &[local_id], source_id, || mgr.persist())
+                .await
+                .unwrap();
+            let mut r = mgr.registry().write().await;
+            r.set_quarantined(source_id, false);
+            r.set_quarantined(local_id, false);
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 }
