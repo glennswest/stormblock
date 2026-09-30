@@ -6075,12 +6075,12 @@ mod install_tests {
 name = "install-239"
 size = "1G"
 [slab]
-size = "256M"
+size = "rest"
 [[slab.golden]]
 name = "root"
 file = "{root}"
 [data_slab]
-size = "rest"
+size = "512M"
 [[data_slab.golden]]
 name = "cni-bin"
 file = "{blank}"
