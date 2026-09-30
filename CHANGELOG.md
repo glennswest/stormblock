@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-09-30
+- **feat:** The initramfs writes its boot messages to every `console=` on the kernel line, not only `/dev/console` (the last one). With `console=tty0 console=ttyS0,115200n8` the screen now shows the install, the flow-over and a FATAL too; serial is unchanged. `/init` and the engine it starts write through a fifo to a `tee` onto each console that exists and opens; the reader ignores HUP/INT/QUIT/TERM/PIPE and reruns `tee` if it is killed, so the engine never meets a broken pipe. stdout goes back to `/dev/console` before `switch_root`. The emergency shell also starts on every other console. `tests/initramfs-console.sh` (#237)
 - **fix:** An install boot lays a fresh slab without a boot intent (#236, stopgap until forge serves intents, #235). The initramfs's local-slab probe no longer boots a local disk on sight when a boothost is known: it claims the machine's image and boots the disk only if it already holds that release (`stormblock slab holds`, new: every golden by volume id); a release the disk does not hold is an install. A boot that runs from an image claimed from an appliance stating no intent (`/run/stormblock/no-intent`, written by `boot-claim`) takes its local disk with force — a new data slab, never the old data half — and says on the console that the old slab was discarded. `assimilate=off` still means no; with intents served, the intent decides.
 
 ### 2026-09-29

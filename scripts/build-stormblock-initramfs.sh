@@ -529,6 +529,87 @@ mount -t devpts devpts /dev/pts
 # via mount --move (#14).
 mount -t tmpfs tmpfs /run
 
+# Every console= hears the boot, not only the last one (#237).
+#
+# The kernel prints to every console= on its command line, but /dev/console —
+# which is all this script and everything it starts write to — is the *last*
+# one. With `console=tty0 console=ttyS0,115200n8` a server's screen shows the
+# kernel's lines and then nothing: the install, the flow-over and a FATAL all
+# go to serial alone, and on a blade whose serial-over-LAN drops at every
+# reset that is nowhere anyone is looking.
+#
+# So when two or more consoles are there, stdout and stderr go through a fifo
+# to a tee onto each of them. The order on the command line is left alone:
+# serial stays what /dev/console is, for the VMs and the console capture that
+# read it.
+#
+# The fan-out must not be a pipe that can break. The engine started below
+# writes to it and serves the root device; its println! panics on EPIPE. So
+# the reader ignores every signal it can, holds the fifo's read end itself,
+# and runs tee again if tee is killed. It ends when the last writer closes.
+# --- BEGIN console fan-out (covered by tests/initramfs-console.sh)
+console_list() { # cmdline -> the console devices that exist and open, in order
+    _seen=" "
+    for _p in $1; do
+        case "$_p" in console=*) ;; *) continue ;; esac
+        _n=${_p#console=}; _n=${_n%%,*}; _n=${_n#/dev/}
+        case "$_n" in ""|*/*) continue ;; esac
+        _d="${STORM_CONSOLE_DEV:-/dev}/$_n"
+        case "$_seen" in *" $_d "*) continue ;; esac
+        [ -e "$_d" ] || continue
+        # A ttyS0 with no UART behind it is a node that refuses to open (EIO).
+        ( : >> "$_d" ) 2>/dev/null || continue
+        _seen="$_seen$_d "
+        printf '%s\n' "$_d"
+    done
+}
+
+console_fanout() { # devices... — stdout and stderr go to each of them
+    [ $# -ge 2 ] || return 0
+    command -v mkfifo >/dev/null 2>&1 || return 0
+    _fifo="${STORM_CONSOLE_FIFO:-/run/console.fifo}"
+    rm -f "$_fifo"
+    mkfifo "$_fifo" 2>/dev/null || return 0
+    (
+        trap '' HUP INT QUIT TERM PIPE
+        exec 3<"$_fifo" </dev/null >/dev/null 2>&1
+        # tee exits 0 at the end of input; anything else (killed, or a
+        # console that failed a write) is run again, and at the end of input
+        # the rerun reads nothing and exits 0.
+        until tee -a "$@" <&3 >/dev/null; do :; done
+    ) &
+    CONSOLE_FANOUT_PID=$!
+    exec >"$_fifo" 2>&1
+}
+
+console_restore() { # back to /dev/console alone: for switch_root, for a shell
+    [ -n "$CONSOLE_FANOUT_PID" ] || return 0
+    exec >/dev/console 2>&1
+}
+
+# The emergency shell, on every console: /bin/sh on /dev/console as always,
+# and a shell of its own on each other console, so whoever is at the screen
+# gets a prompt as well as whoever is on serial.
+rescue_shell() {
+    echo "Dropping to shell..."
+    console_restore
+    _primary=""
+    for _d in $CONSOLES; do _primary="$_d"; done
+    if command -v setsid >/dev/null 2>&1; then
+        for _d in $CONSOLES; do
+            [ "$_d" = "$_primary" ] && continue
+            setsid sh -c 'exec sh -i <"$1" >"$1" 2>&1' sh "$_d" &
+        done
+    fi
+    exec /bin/sh
+}
+
+CONSOLE_FANOUT_PID=""
+CONSOLES=$(console_list "$(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null)")
+# shellcheck disable=SC2086
+console_fanout $CONSOLES
+# --- END console fan-out
+
 # Parse kernel cmdline parameters
 PORTAL=""
 IQN=""
@@ -617,8 +698,7 @@ if [ "$BOOT_MODE" = "iscsi" ] && { [ -z "$PORTAL" ] || [ -z "$IQN" ] || [ -z "$L
     echo "  rd.stormblock.iqn=$IQN"
     echo "  rd.stormblock.layout=$LAYOUT"
     echo "  (or rd.stormblock.slab=<dev> for local-slab boot)"
-    echo "Dropping to shell..."
-    exec /bin/sh
+    rescue_shell
 fi
 
 echo "StormBlock LinuxBoot init ($BOOT_MODE)"
@@ -875,7 +955,7 @@ if [ -z "$IFACE" ]; then
         NO_NETWORK=1
     else
         echo "FATAL: No network interface found"
-        exec /bin/sh
+        rescue_shell
     fi
 fi
 if [ -z "${NO_NETWORK:-}" ]; then
@@ -1824,8 +1904,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     if [ -z "$SLAB" ] && [ -n "$BOOTHOST" ]; then
         if ! boothost_claim; then
             echo "FATAL: $BOOTHOST gave this machine no image to boot"
-            echo "Dropping to shell..."
-            exec /bin/sh
+            rescue_shell
         fi
         SLAB="$CLAIMED"
         echo "  slab: $SLAB"
@@ -1853,8 +1932,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         if [ ! -e "$SLAB" ]; then
             echo "FATAL: slab device $SLAB never appeared (storage driver missing?)"
             echo "Loaded modules:"; cat /proc/modules 2>/dev/null | cut -d' ' -f1
-            echo "Dropping to shell..."
-            exec /bin/sh
+            rescue_shell
         fi
         ;;
     esac
@@ -2243,8 +2321,7 @@ if [ ! -b "$ROOTDEV" ]; then
     echo "StormBlock PID: $STORMBLOCK_PID"
     echo "Available block devices:"
     ls -la /dev/ublk* 2>/dev/null || echo "  (none)"
-    echo "Dropping to shell..."
-    exec /bin/sh
+    rescue_shell
 fi
 
 echo "Root device ready: $ROOTDEV"
@@ -2266,13 +2343,13 @@ if [ -n "$OVERLAY" ]; then
     echo "Overlay root: lower=$ROOTDEV upper=$OVERLAY"
     mkdir -p /run/stormblock/lower /run/stormblock/rw
     mount_root "$ROOTDEV" /run/stormblock/lower \
-        || { echo "FATAL: Failed to mount overlay lower"; exec /bin/sh; }
+        || { echo "FATAL: Failed to mount overlay lower"; rescue_shell; }
 
     case "$OVERLAY" in
         tmpfs|tmpfs:*)
             SIZE="${OVERLAY#tmpfs}"; SIZE="${SIZE#:}"
             mount -t tmpfs -o "size=${SIZE:-512m}" tmpfs /run/stormblock/rw \
-                || { echo "FATAL: Failed to mount overlay tmpfs"; exec /bin/sh; }
+                || { echo "FATAL: Failed to mount overlay tmpfs"; rescue_shell; }
             ;;
         *)
             TIMEOUT=15
@@ -2280,17 +2357,17 @@ if [ -n "$OVERLAY" ]; then
                 sleep 1; TIMEOUT=$((TIMEOUT - 1))
             done
             mount "$OVERLAY" /run/stormblock/rw \
-                || { echo "FATAL: Failed to mount overlay upper $OVERLAY"; exec /bin/sh; }
+                || { echo "FATAL: Failed to mount overlay upper $OVERLAY"; rescue_shell; }
             ;;
     esac
     mkdir -p /run/stormblock/rw/upper /run/stormblock/rw/work
     mount -t overlay overlay \
         -o lowerdir=/run/stormblock/lower,upperdir=/run/stormblock/rw/upper,workdir=/run/stormblock/rw/work \
         /sysroot \
-        || { echo "FATAL: Failed to mount overlay root"; exec /bin/sh; }
+        || { echo "FATAL: Failed to mount overlay root"; rescue_shell; }
 else
     mount_root "$ROOTDEV" /sysroot \
-        || { echo "FATAL: Failed to mount root"; exec /bin/sh; }
+        || { echo "FATAL: Failed to mount root"; rescue_shell; }
 fi
 
 if [ "$BOOT_MODE" = "iscsi" ]; then
@@ -2389,8 +2466,7 @@ fi
 # Verify systemd exists in the new root
 if [ ! -x /sysroot/sbin/init ] && [ ! -x /sysroot/usr/lib/systemd/systemd ]; then
     echo "FATAL: No init found in /sysroot"
-    echo "Dropping to shell..."
-    exec /bin/sh
+    rescue_shell
 fi
 
 stamp "root ready"
@@ -2483,6 +2559,10 @@ fi
 for _p in $(pidof systemd-udevd udevd 2>/dev/null); do
     kill "$_p" 2>/dev/null || true
 done
+
+# The init that follows gets /dev/console, as it always did; the fan-out goes
+# on for as long as the engine writes to it.
+console_restore
 
 # switch_root — PID 1 becomes /sbin/init, stormblock continues in background
 exec switch_root /sysroot /sbin/init

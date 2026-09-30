@@ -1197,6 +1197,18 @@ describes how to take that decision over: any executable in
 before — and that probe now uses `slab volumes`, so it works on the partition
 a loader entry names rather than only on a whole disk with a GPT.
 
+### The initramfs console: every `console=`
+
+The kernel prints to every `console=` on its command line; `/dev/console`,
+which `/init` and the engine write to, is only the last. So when two or more
+consoles are there (`console=tty0 console=ttyS0,115200n8`), `/init` sends its
+output and the engine's through a fifo to a `tee` onto each of them: the screen
+sees the install, the flow-over and a FATAL as well as serial (#237). A console
+that is not there or will not open is skipped; with one console nothing
+changes, and serial is untouched either way. The emergency shell runs on
+`/dev/console` as before and on each other console too. `tests/initramfs-console.sh`
+pins it.
+
 ### Stopping a node
 
 Every step of shutdown is bounded, and that is a correctness property rather
