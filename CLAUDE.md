@@ -163,7 +163,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — IN PROGRESS
+### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — DONE (golden-stormblock-296e38521d4c)
 
 server3 on 11.56 (#236 fresh-slab path): cni-bin (256M data-role blank,
 e2fsprogs `mkfs.ext4 -b 4096`, imported as `cni-bin.golden` + stamped clone
@@ -186,11 +186,14 @@ install) or the successor's restore of what it moved.
 - [x] fix: `volume/fence.rs` slot fence (I/O shared, a move exclusive);
       flow-over/seed/drain wait for it before the locks; `move_slot` reads
       its copy back; the flow-over quarantines its sources (087fcbe..)
-- [ ] rule size out (owner): the golden's free space vs what cilium's
-      install-cni-binaries writes
-- [ ] existing nodes: re-seed a derived data volume found corrupt (owner's
-      item 3) — or say why not
-- [ ] docs, CHANGELOG, golden
+- [x] size ruled out: a 256M e2fsprogs 1.47.3 blank has 223.6 MiB free
+      (12.8 MiB reserved), ~5x the ~40 MB of plugins; the error is not ENOSPC.
+      The blank has `metadata_csum_seed`, so stamping is one superblock write
+- [x] full nextest on dev at c7e6c2f: 847/847. Golden staged
+      (golden-stormblock-296e38521d4c, stormcos#168). Not on metal yet: needs a
+      stormcos release with this engine and initramfs, then a fresh install
+- moved out: item 3 (re-seed a corrupt derived volume) is a question, #241;
+  parity and StormFS paths not fenced, #240
 
 ### Boot messages on every console= (2026-09-30, #237, P1) — DONE
 

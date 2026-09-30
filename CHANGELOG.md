@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-09-30
+- **docs:** #239 verified on dev (847/847) and staged as golden-stormblock-296e38521d4c. Size ruled out for cni-bin. Follow-ups: #240 (parity and StormFS paths not fenced), #241 (re-seed a derived volume, owner's question)
 - **fix:** A fresh install no longer corrupts the volumes the system half's flow-over moves while they are in use (#239, P0). The flow-over moved a slot, then freed and discarded the source. An I/O that had looked up the old slot and not yet used it lost its write, or read zeros. A copy-on-write copied those zeros into the clone. On 11.56 that was `cni-bin`'s root directory while Cilium's install-cni-binaries filled it (`No space for directory leaf checksum`), so Cilium never started. Now a slot fence (`volume/fence.rs`) covers every read, write, copy-on-write, discard and resync: the I/O holds the slots it found shared, and a move holds its slot exclusive. The flow-over, the data seed and drain wait for the fence before taking the map and registry. Whole-run moves (rebalance, evacuation) only try it and get `Busy`
 - **fix:** Every extent move reads its copy back and refuses one that differs from what it read, before any map names it (#239)
 - **fix:** The background flow-over quarantines the slabs it empties, so a copy-on-write made while it runs lands on the local disk. Before, it could land on the appliance behind the move and be left there. If the flow-over gives up, the quarantine is lifted (#239)
