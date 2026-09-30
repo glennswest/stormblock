@@ -4778,8 +4778,9 @@ async fn seed_data_half(
 /// on 11.56, which Cilium was filling while this ran.
 ///
 /// The map is made durable (`persist`) before the sources it no longer
-/// names are freed, after every extent. `None` when it gave up: more than 16
-/// extents that would not move.
+/// names are freed, after every extent. The sources are quarantined for new
+/// allocations, and stay so once empty. `None` when it gave up: more than 16
+/// extents that would not move (the quarantine is lifted).
 #[cfg(target_os = "linux")]
 pub(crate) async fn flow_system_half<P, F>(
     gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
@@ -4799,6 +4800,22 @@ where
     // that keeps changing is being written as fast as it can be looked at;
     // past this it counts as one that would not move.
     let mut again = 0u32;
+    // Nothing new lands on a source while it is emptied, the way a drain
+    // quarantines its drive: a copy-on-write in the meantime takes a slot on
+    // the local disk, not one more on the appliance for this loop to chase —
+    // or to leave behind once it has finished.
+    {
+        let mut r = registry.write().await;
+        for s in sources {
+            r.set_quarantined(*s, true);
+        }
+    }
+    let give_up = || async {
+        let mut r = registry.write().await;
+        for s in sources {
+            r.set_quarantined(*s, false);
+        }
+    };
     for &source in sources {
         loop {
             // Which slot, under the map's read lock only: the fence is waited
@@ -4841,6 +4858,8 @@ where
                     // on, and giving up leaves the node exactly where it
                     // was: running from the appliance.
                     if failed > 16 {
+                        // The node goes on running from the appliance.
+                        give_up().await;
                         return None;
                     }
                 }
