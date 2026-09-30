@@ -1205,9 +1205,14 @@ consoles are there (`console=tty0 console=ttyS0,115200n8`), `/init` sends its
 output and the engine's through a fifo to a `tee` onto each of them: the screen
 sees the install, the flow-over and a FATAL as well as serial (#237). A console
 that is not there or will not open is skipped; with one console nothing
-changes, and serial is untouched either way. The emergency shell runs on
-`/dev/console` as before and on each other console too. `tests/initramfs-console.sh`
-pins it.
+changes, and serial is untouched either way. A serial port with no UART
+behind it (sysfs `type` 0: it opens, and every write is EIO) is skipped. The
+emergency shell runs on `/dev/console` as before and on each other console
+too; which console `/dev/console` is comes from
+`/sys/class/tty/console/active`, not from the order of `console=` (two serial
+ports share the 8250 driver's one console, and the first wins).
+`tests/initramfs-console.sh` pins the block; `ci-console-verify.sh` boots
+dev's kernel in QEMU with it as PID 1 and two serial ports as the consoles.
 
 ### Stopping a node
 

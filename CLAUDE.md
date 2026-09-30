@@ -163,7 +163,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Boot messages on every console= (2026-09-30, #237, P1) — IN PROGRESS
+### Boot messages on every console= (2026-09-30, #237, P1) — DONE
 
 Owner: "can we get the stormcos boot messages to also go to vga?" The release
 cmdline is `console=tty0 console=ttyS0,115200n8`; `/dev/console` is the last
@@ -180,11 +180,17 @@ one (ttyS0), so after the kernel's own lines VGA shows nothing.
 - The emergency shell (`rescue_shell`): `/bin/sh` on `/dev/console` as now,
   plus one `setsid` shell on every other console, so VGA gets a prompt too.
 
-- [ ] console block (`# --- BEGIN console fan-out`), `rescue_shell` for
-      every `exec /bin/sh`, restore before switch_root
-- [ ] `tests/initramfs-console.sh`; docs (boot-hooks.md / README), CHANGELOG
-- [ ] sc-build: the new test under sh and busybox sh, boot-hook tests
-- [ ] not verifiable here: server1 (VGA via BMC KVM), pvetest1 (serial)
+- [x] console block (`# --- BEGIN console fan-out`), `rescue_shell` for
+      every `exec /bin/sh`, restore before switch_root (78eb14e)
+- [x] `tests/initramfs-console.sh`; `ci-console-verify.sh` (QEMU, PID 1,
+      two serial ports); README, CHANGELOG
+- [x] on dev: both tests under sh and busybox sh, boot-hook and NIC tests,
+      the generated /init parses. Found by the QEMU run and fixed:
+      `/dev/console` is not always the last `console=` (8250: one console for
+      every ttyS, the first wins) → read `/sys/class/tty/console/active`; a
+      ttyS with no UART opens → skip sysfs `type` 0
+- [ ] not verifiable here: server1 (VGA via BMC KVM), pvetest1 (serial) —
+      needs a stormcos release with this initramfs
 
 ### Stopgap: an install boot always lays a fresh slab (2026-09-30, #236, P0) — DONE (golden-stormblock-436eb75ed6c9)
 

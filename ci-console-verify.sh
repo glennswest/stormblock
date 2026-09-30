@@ -7,8 +7,9 @@
 #
 #   console=ttyS1 console=ttyS3 console=ttyS0,115200n8
 #
-# ttyS0 is last, so it is /dev/console (serial on a release); ttyS1 is the
-# screen that saw nothing before; ttyS3 has no UART behind it and must be
+# ttyS1 stands in for the screen and ttyS0 for serial; whichever the kernel
+# makes /dev/console, the other is the one that saw nothing before. ttyS3 has
+# no UART behind it and must be
 # skipped (it opens, and the 8250 driver reports it as type 0). Each port is
 # captured to a file. Checked: every /init line and
 # a background child's (the engine's) reach both ports; after the restore
