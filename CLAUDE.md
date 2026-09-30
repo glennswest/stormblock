@@ -163,6 +163,27 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — IN PROGRESS
+
+server3 on 11.56 (#236 fresh-slab path): cni-bin (256M data-role blank,
+e2fsprogs `mkfs.ext4 -b 4096`, imported as `cni-bin.golden` + stamped clone
+`cni-bin` in the image's data slab) reads its root directory block without
+the dirent csum tail (`No space for directory leaf checksum`) — a block that
+is not the golden's. Suspect: `seed_data_half` (the data half's flow-over on
+install) or the successor's restore of what it moved.
+- [ ] reproduce on files: image with an e2fsprogs blank in the data slab →
+      the install's flow-over onto a file disk → sha256 of every volume
+      before, after the seed, and after a fresh open of both (the successor);
+      name the first differing extent. The flow-over closure of `boot-local`
+      becomes `take_local_disk` so a test can drive it
+- [ ] fix; verify every seeded volume against its source after the seed and
+      refuse the local disk on a mismatch
+- [ ] rule size out (owner): the golden's free space vs what cilium's
+      install-cni-binaries writes
+- [ ] existing nodes: re-seed a derived data volume found corrupt (owner's
+      item 3) — or say why not
+- [ ] docs, CHANGELOG, golden
+
 ### Boot messages on every console= (2026-09-30, #237, P1) — DONE
 
 Owner: "can we get the stormcos boot messages to also go to vga?" The release
