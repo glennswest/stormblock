@@ -163,6 +163,29 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Boot messages on every console= (2026-09-30, #237, P1) — IN PROGRESS
+
+Owner: "can we get the stormcos boot messages to also go to vga?" The release
+cmdline is `console=tty0 console=ttyS0,115200n8`; `/dev/console` is the last
+one (ttyS0), so after the kernel's own lines VGA shows nothing.
+- `/init` reads the `console=` list from /proc/cmdline, keeps the devices
+  that exist and open, and when there are two or more sends its stdout and
+  stderr (and the engine's, which it starts) through a fifo to a `tee` onto
+  each. The fan-out ignores HUP/INT/QUIT/TERM/PIPE and holds the fifo's read
+  end itself, restarting `tee` if it is killed, so a writer never sees a
+  broken pipe (the engine's `println!` panics on one). One console or none:
+  nothing changes. Serial stays exactly as it is.
+- stdout goes back to `/dev/console` before `switch_root` (PID 1 hands init
+  what it had) and before the emergency shell.
+- The emergency shell (`rescue_shell`): `/bin/sh` on `/dev/console` as now,
+  plus one `setsid` shell on every other console, so VGA gets a prompt too.
+
+- [ ] console block (`# --- BEGIN console fan-out`), `rescue_shell` for
+      every `exec /bin/sh`, restore before switch_root
+- [ ] `tests/initramfs-console.sh`; docs (boot-hooks.md / README), CHANGELOG
+- [ ] sc-build: the new test under sh and busybox sh, boot-hook tests
+- [ ] not verifiable here: server1 (VGA via BMC KVM), pvetest1 (serial)
+
 ### Stopgap: an install boot always lays a fresh slab (2026-09-30, #236, P0) — DONE (golden-stormblock-436eb75ed6c9)
 
 Owner: "can we just make installs always run, and then fix the intent?" Forge
