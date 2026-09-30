@@ -590,14 +590,32 @@ console_restore() { # back to /dev/console alone: for switch_root, for a shell
 # The emergency shell, on every console: /bin/sh on /dev/console as always,
 # and a shell of its own on each other console, so whoever is at the screen
 # gets a prompt as well as whoever is on serial.
+#
+# Which console /dev/console is, the kernel says: the last entry of
+# /sys/class/tty/console/active. Not "the last console=": two serial ports
+# share the 8250 driver's one console, so console=ttyS1 console=ttyS0 makes
+# ttyS1 /dev/console (seen in ci-console-verify.sh). A VT is one console
+# whatever its number (tty0 is the VT in front), so a VT /dev/console gets no
+# second shell on another tty<N>: two shells reading one keyboard.
+console_primary() {
+    _last=""
+    for _n in $(cat "${STORM_CONSOLE_ACTIVE:-/sys/class/tty/console/active}" 2>/dev/null); do
+        _last="${STORM_CONSOLE_DEV:-/dev}/$_n"
+    done
+    [ -n "$_last" ] || for _d in $CONSOLES; do _last="$_d"; done
+    printf '%s\n' "$_last"
+}
+
 rescue_shell() {
     echo "Dropping to shell..."
     console_restore
-    _primary=""
-    for _d in $CONSOLES; do _primary="$_d"; done
+    _primary=$(console_primary)
     if command -v setsid >/dev/null 2>&1; then
         for _d in $CONSOLES; do
             [ "$_d" = "$_primary" ] && continue
+            case "${_primary##*/} ${_d##*/}" in
+                tty[0-9]*" "tty[0-9]*) continue ;;
+            esac
             setsid sh -c 'exec sh -i <"$1" >"$1" 2>&1' sh "$_d" &
         done
     fi
@@ -605,7 +623,7 @@ rescue_shell() {
 }
 
 CONSOLE_FANOUT_PID=""
-CONSOLES=$(console_list "$(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null)")
+CONSOLES=$(console_list "$(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null)" | tr '\n' ' ')
 # shellcheck disable=SC2086
 console_fanout $CONSOLES
 # --- END console fan-out
