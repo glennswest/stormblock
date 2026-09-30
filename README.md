@@ -1179,6 +1179,13 @@ it, so an attached image (priority 15) still wins. See
 [docs/images.md §2b](docs/images.md); `ci-local-boot-verify.sh` boots the
 result under OVMF.
 
+**The flow-over moves volumes that are in use.** The system half goes on
+moving after the node is up, while its clones (`cni-bin`, the `-logs`
+volumes) are mounted and written. Each slot is moved under a fence: the move
+waits for the I/O on that slot, and an I/O that looked the slot up meanwhile
+finds the copy. Each copy is read back before any map names it. The slabs
+being emptied take no new allocations (#239; `docs/durability.md` rule 10).
+
 **A flow-over cut short is finished, not lost.** If the power goes while
 goldens are still moving off the appliance, the local records name extents on
 the old clone's slab. The next boot's `boot-local` claims a fresh clone of the

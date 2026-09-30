@@ -171,13 +171,21 @@ e2fsprogs `mkfs.ext4 -b 4096`, imported as `cni-bin.golden` + stamped clone
 the dirent csum tail (`No space for directory leaf checksum`) — a block that
 is not the golden's. Suspect: `seed_data_half` (the data half's flow-over on
 install) or the successor's restore of what it moved.
-- [ ] reproduce on files: image with an e2fsprogs blank in the data slab →
-      the install's flow-over onto a file disk → sha256 of every volume
-      before, after the seed, and after a fresh open of both (the successor);
-      name the first differing extent. The flow-over closure of `boot-local`
-      becomes `take_local_disk` so a test can drive it
-- [ ] fix; verify every seeded volume against its source after the seed and
-      refuse the local disk on a mismatch
+- [x] reproduce on files. The data seed is clean: every volume's sha256 is
+      the same after the seed, after a fresh open and from the disk alone
+      (`take_local_disk`, c692344). **cni-bin is not in the data slab.**
+      stormcos `deploy/image.toml` puts it under `[[slab.golden]]`, the
+      system half, which `spawn_flow_over` moves in the background while it
+      is mounted and Cilium writes to it
+- [x] cause: I/O looked up its slot and used it with no lock held; a move
+      copied the slot, rewrote the maps and freed (discarded) the source
+      in between. A read got zeros, a write after the copy was lost, and a
+      copy-on-write copied zeros into the clone. Reproduced deterministically
+      (an I/O held inside the device during the move): without the fence the
+      copy-on-write leaves 15 of 16 blocks zeros, the golden read 16 of 16
+- [x] fix: `volume/fence.rs` slot fence (I/O shared, a move exclusive);
+      flow-over/seed/drain wait for it before the locks; `move_slot` reads
+      its copy back; the flow-over quarantines its sources (087fcbe..)
 - [ ] rule size out (owner): the golden's free space vs what cilium's
       install-cni-binaries writes
 - [ ] existing nodes: re-seed a derived data volume found corrupt (owner's

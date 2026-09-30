@@ -4882,8 +4882,14 @@ where
 /// Only the system half, and only ever the system half. A data slab is being
 /// written the whole time it is mounted — logs, state, claims — and moving its
 /// extents out from under a live filesystem corrupted every one of them on the
-/// first machine it was tried on. The goldens survive it because nothing
-/// writes to them.
+/// first machine it was tried on.
+///
+/// "The goldens survive it because nothing writes to them" was only half
+/// true. The system half holds clones that are written too (`cni-bin`, the
+/// `-logs` volumes), and every clone reads its golden's slots. The corruption
+/// was the move racing the I/O, not the writing itself. The slot fence closes
+/// that race (#239, see [`flow_system_half`]); the data half still moves only
+/// before anything is exported.
 ///
 /// One extent per lock cycle, so root I/O interleaves with the copy instead of
 /// stalling behind the whole migration.

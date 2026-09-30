@@ -64,6 +64,22 @@ tests run on.
    was moving from), `boot-local` claims a fresh clone of the same image,
    which carries the same slabs with the same bytes. It maps the unmoved
    extents onto the clone and hands the rest of the move to the successor.
+10. **A move and an I/O on the same slot never overlap** (#239). An I/O
+   looks its extent up and then uses the slot it found; the unreplicated path
+   holds no lock between the two. A move (the flow-over, a drain, a
+   rebalance) copies the slot, points every map at the copy and frees the
+   source, and a free discards it. An I/O in that gap loses a write made after
+   the copy, or reads zeros from the freed slot. A copy-on-write that reads
+   zeros copies them into the clone's new slot around the bytes it writes.
+   That was `cni-bin` on 11.56: the system half flowed onto the local disk while
+   Cilium filled it, and its root directory came back without its checksum
+   tail. The slot fence (`volume/fence.rs`) closes the gap. I/O holds the slots
+   it looked up shared and looks again once it has them. A move holds the slot
+   exclusive for the copy and the map rewrite, waiting for it before it takes
+   the map and the registry. A move that already holds those only tries, and
+   reports the slot busy. Every copy is read back and compared before any map
+   names it. The flow-over quarantines its sources, so a copy-on-write made
+   meanwhile lands on the local disk rather than behind the move.
 
 ## How it is checked
 
@@ -82,6 +98,18 @@ tests run on.
 * `tests/integration_flowover_resume.rs` (rule 9):
   `a_cut_short_flow_over_resumes_from_a_fresh_clone`, and
   `without_a_source_the_unmoved_extents_are_missing_and_said_so`.
+* `cli::install_tests` (rule 10):
+  `an_io_that_found_its_slot_before_a_move_reads_what_was_there` holds a read
+  of a golden, then a copy-on-write of its clone, inside the device while the
+  flow-over moves the slot. Without the fence (`FENCE_OFF_239=1`) the read is
+  16 of 16 blocks zeros, and the copy-on-write leaves 15 of 16.
+  `the_flow_over_moves_a_live_clone_without_losing_a_byte` runs the flow-over
+  under eight writers and four readers of a clone and its golden, over a
+  source with a 0–4 ms round trip.
+  `a_fresh_install_seeds_every_data_volume_byte_for_byte` builds an image with
+  an e2fsprogs blank in its data slab and installs it onto an empty disk. It
+  checks every volume's sha256 after the seed, after a fresh open of the image
+  and the disk, and from the disk alone.
 * On metal: stormcentral's power-cut check (fastetcd, 300 objects, hard
   power-off, 5 runs). Passed 2026-09-27 on C2NR0Q2 with v19.2.1 in the engine
   and the initramfs: 1500 of 1500 objects (#171). Rule 9 has not yet met
