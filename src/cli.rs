@@ -6231,6 +6231,15 @@ file = "{state}"
     /// used to land in between an I/O finding its slot and using it.
     struct Remote(Arc<dyn BlockDevice>);
 
+    /// 0–4 ms, different for every I/O: a round trip that is not always the
+    /// same length, so an I/O that found its slot first can land last.
+    async fn round_trip() {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x239);
+        let n = N.fetch_add(0x9E37_79B9_7F4A_7C15, std::sync::atomic::Ordering::Relaxed);
+        let us = (n.wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 40) % 4000;
+        tokio::time::sleep(std::time::Duration::from_micros(us)).await;
+    }
+
     #[async_trait::async_trait]
     impl BlockDevice for Remote {
         fn id(&self) -> &crate::drive::DeviceId {
@@ -6249,18 +6258,22 @@ file = "{state}"
             self.0.device_type()
         }
         async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
-            tokio::time::sleep(std::time::Duration::from_micros(1500)).await;
+            round_trip().await;
             self.0.read(offset, buf).await
         }
         async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
-            tokio::time::sleep(std::time::Duration::from_micros(1500)).await;
+            round_trip().await;
             self.0.write(offset, buf).await
         }
         async fn flush(&self) -> crate::drive::DriveResult<()> {
             self.0.flush().await
         }
         async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            round_trip().await;
             self.0.discard(offset, len).await
+        }
+        fn discard_granularity(&self) -> u32 {
+            self.0.discard_granularity()
         }
         fn smart_status(&self) -> crate::drive::DriveResult<crate::drive::SmartData> {
             self.0.smart_status()
