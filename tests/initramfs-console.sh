@@ -78,7 +78,11 @@ fanout() { # cmdline — runs a stand-in /init, prints nothing itself
             # Kill the tee: the reader must run it again, and a writer must
             # never see a broken pipe.
             sleep 0.3
-            for t in $(pgrep -P "$CONSOLE_FANOUT_PID" tee 2>/dev/null); do kill -9 "$t"; done
+            k=0
+            for t in $(pgrep -P "$CONSOLE_FANOUT_PID" tee 2>/dev/null); do
+                kill -9 "$t" && k=$((k + 1))
+            done
+            echo "$k" > "$WORK/killed"
             sleep 0.2
             echo "after the tee was killed"
         fi
@@ -99,6 +103,7 @@ for c in tty0 ttyS0; do
     check "$c: a child after /init is gone" 1 "$(grep -c '^Flow-over: from the engine' "$DEV/$c" || true)"
     check "$c: a line after tee was killed" 1 "$(grep -c '^after the tee was killed' "$DEV/$c" || true)"
 done
+check "a tee was killed" 1 "$(cat "$WORK/killed")"
 check "nothing left on the old stdout" "" "$(cat "$WORK/stdout")"
 check "the fan-out ended with its writers" "" "$(pgrep -f "tee -a $DEV/" || true)"
 
