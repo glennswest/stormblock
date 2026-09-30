@@ -6551,12 +6551,11 @@ file = "{state}"
                 ));
             }
             // Put everything back on the appliance for the next case.
+            mgr.registry().write().await.set_quarantined(source_id, false);
             super::flow_system_half(mgr.gem(), mgr.registry(), &[local_id], source_id, || mgr.persist())
                 .await
                 .unwrap();
-            let mut r = mgr.registry().write().await;
-            r.set_quarantined(source_id, false);
-            r.set_quarantined(local_id, false);
+            mgr.registry().write().await.set_quarantined(local_id, false);
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
