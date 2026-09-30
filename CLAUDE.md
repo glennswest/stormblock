@@ -163,6 +163,39 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Stopgap: an install boot always lays a fresh slab (2026-09-30, #236, P0) — IN PROGRESS
+
+Owner: "can we just make installs always run, and then fix the intent?" Forge
+is 13.7 (#235), so no boot intent is served, and today a netboot of a new
+release either boots the old local disk (the local-slab probe finds it
+bootable and never asks) or, when that fails, assimilates it keeping the old
+data half (11.53 on 11.51's fastetcd, stormcentral#196). The decision is the
+initramfs's (`/init`, built here), so this is stormblock's.
+
+What counts as an install without an intent: stormbootx claims on every boot
+(`auto`), so a netboot alone is not one — that would wipe the node on every
+reboot. **An install is a boot whose assigned release the local disk does
+not hold.** Same release = a reboot: boot the local disk, keep its data.
+- `stormblock slab holds <local> <image>`: exit 0 when the local disk holds
+  every sealed volume (golden) of the image, 1 when it does not, 2 when it
+  cannot say. By volume id, the same test the flow-over's "already up to
+  date" uses.
+- `/init` probe: a bootable local disk with a boothost known → claim, then
+  `slab holds`. Not held → boot the claimed image and install fresh; held,
+  or no answer → boot the local disk as before.
+- A boot that claimed and takes a local disk installs fresh
+  (`--local-disk-force`, a new data slab), never keeping the old data half,
+  unless the claim reply stated an intent (a v20 engine, #148): then the
+  intent decides and this stopgap path is off by itself. `assimilate=off`
+  still means no. The console says the old slab was discarded.
+- Not covered: reinstalling the *same* release fresh (repoint to another
+  release first, or use the intent once forge is on v20).
+
+- [ ] `slab holds` + tests
+- [ ] `/init`: claim function, probe comparison, fresh install without intent
+- [ ] `tests/initramfs-boot-hook.sh` cases; docs (boot-hooks.md, README), CHANGELOG
+- [ ] sc-build: nextest + boot-hook test; close #236
+
 ### Boot media at 512-byte LBAs (2026-09-29, #228, P0) — IN PROGRESS
 
 server1 (AMI Aptio 4) and pve's OVMF cannot boot a release: every volume is
