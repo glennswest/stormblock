@@ -9,7 +9,8 @@
 #
 # ttyS0 is last, so it is /dev/console (serial on a release); ttyS1 is the
 # screen that saw nothing before; ttyS3 has no UART behind it and must be
-# skipped. Each port is captured to a file. Checked: every /init line and
+# skipped (it opens, and the 8250 driver reports it as type 0). Each port is
+# captured to a file. Checked: every /init line and
 # a background child's (the engine's) reach both ports; after the restore
 # before switch_root, /init's lines reach /dev/console only while the child's
 # still reach both; the emergency shell prompts on both. /dev/console is

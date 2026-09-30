@@ -557,7 +557,9 @@ console_list() { # cmdline -> the console devices that exist and open, in order
         _d="${STORM_CONSOLE_DEV:-/dev}/$_n"
         case "$_seen" in *" $_d "*) continue ;; esac
         [ -e "$_d" ] || continue
-        # A ttyS0 with no UART behind it is a node that refuses to open (EIO).
+        # A serial port with no UART behind it: the node is there and opens,
+        # and every write is EIO. The 8250 driver says so as type 0.
+        [ "$(cat "${STORM_CONSOLE_SYS:-/sys/class/tty}/$_n/type" 2>/dev/null)" = 0 ] && continue
         ( : >> "$_d" ) 2>/dev/null || continue
         _seen="$_seen$_d "
         printf '%s\n' "$_d"

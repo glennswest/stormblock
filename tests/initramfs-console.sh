@@ -41,6 +41,8 @@ pick() { # cmdline -> the picked devices, space-separated, relative to $DEV
     printf '%s\n' "$1" > "$WORK/cmdline"
     (
         STORM_CONSOLE_DEV="$DEV" STORM_CMDLINE="$WORK/cmdline"
+        # Not this host's /sys: its ttyS0 may have no UART.
+        STORM_CONSOLE_SYS="${STORM_CONSOLE_SYS:-$WORK/nosys}"
         STORM_CONSOLE_FIFO="$WORK/pick.fifo"
         # Only the functions: the block's last lines would start a fan-out.
         eval "$(sed '/^CONSOLE_FANOUT_PID=""$/,$d' "$WORK/console.sh")"
@@ -61,6 +63,10 @@ if ! ( : >> "$DEV/hvc0" ) 2>/dev/null; then
     check "a console that will not open is skipped" "tty0" "$(pick 'console=hvc0 console=tty0')"
 fi
 chmod 0644 "$DEV/hvc0"
+mkdir -p "$WORK/sys/ttyS1" "$WORK/sys/ttyS0"; : > "$DEV/ttyS1"
+echo 0 > "$WORK/sys/ttyS1/type"; echo 4 > "$WORK/sys/ttyS0/type"
+check "a serial port with no UART (type 0) is skipped" "tty0 ttyS0" \
+    "$(STORM_CONSOLE_SYS="$WORK/sys" pick 'console=tty0 console=ttyS1 console=ttyS0,115200n8')"
 
 # Every line to every console, from /init and from what it starts.
 fanout() { # cmdline — runs a stand-in /init, prints nothing itself
@@ -68,6 +74,8 @@ fanout() { # cmdline — runs a stand-in /init, prints nothing itself
     : > "$DEV/tty0"; : > "$DEV/ttyS0"
     (
         STORM_CONSOLE_DEV="$DEV" STORM_CMDLINE="$WORK/cmdline"
+        # Not this host's /sys: its ttyS0 may have no UART.
+        STORM_CONSOLE_SYS="${STORM_CONSOLE_SYS:-$WORK/nosys}"
         STORM_CONSOLE_FIFO="$WORK/fan.fifo"
         . "$WORK/console.sh"
         echo "INSTALL: a release the disk does not hold"
