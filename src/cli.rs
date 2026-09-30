@@ -4279,6 +4279,266 @@ enum SeedWhen {
     Asked,
 }
 
+/// Take the local disk for this boot: lay it (or update its system half),
+/// register its slabs with `mgr` and seed the data half (#118). `boot-local`
+/// calls it before exporting anything; a test drives it the same way (#239).
+///
+/// `Ok(None)`: the disk already holds everything this boot would copy.
+#[cfg(target_os = "linux")]
+pub(crate) async fn take_local_disk(
+    mgr: &mut crate::volume::VolumeManager,
+    disk: &str,
+    local_tier: &str,
+    local_disk_force: bool,
+) -> anyhow::Result<Option<crate::drive::handover::FlowOver>> {
+    let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let dest_dev: Arc<dyn BlockDevice> =
+        open_storage(disk).await?;
+    let mut layout =
+        crate::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
+    layout.slot_size = mgr.slot_size();
+    layout.tier = tier;
+    // The table in the drive's own sector size: firmware parses a GPT
+    // in the medium's block size, and `FileDevice` reports 4096 for
+    // every drive (#123). A file has none, and follows the device.
+    layout.lba = crate::drive::filedev::logical_sector_size(disk);
+
+    // **A drive that is already this node's is updated, not replaced.**
+    //
+    // A reinstall is "boot a fresh image and flow over onto the disk
+    // the last install used", and that disk carries two things: the
+    // goldens, which this boot exists to replace, and the data slab,
+    // which holds the node's CA key and its ServiceAccount signing key
+    // and cannot be made again. Laying a fresh table destroys the
+    // second to refresh the first; refusing the drive leaves the node
+    // running from the appliance for the rest of its life. Neither is
+    // an install.
+    //
+    // The partition types say which half is which — that is what they
+    // are for (#88) — so the system half is formatted afresh, the data
+    // half is opened and left alone, and the node boots normally with
+    // the identity it already had. No force, because nothing is
+    // destroyed that an install is not meant to destroy.
+    if !local_disk_force
+        && crate::image::local::node_layout(&dest_dev).await?.is_some()
+    {
+        // **And if it is already up to date, do nothing at all.**
+        //
+        // A node that netboots regularly would otherwise reformat its
+        // own system half and re-copy every golden on every boot —
+        // destroying a working local half to rebuild the same bytes,
+        // and running from the appliance for the minutes that takes,
+        // each time.
+        //
+        // By volume id, which is what a migration preserves: the
+        // flow-over moves a volume's extents, it does not make a new
+        // volume, so a system half that has already had this image
+        // flowed onto it holds the same ids. A new build makes new
+        // volumes and this comes out false, which is what should
+        // happen.
+        //
+        // Conservative in the direction that costs least: a wrong
+        // "not up to date" reformats and re-copies, which is wasteful;
+        // a wrong "up to date" leaves the node booting from the
+        // appliance. Neither loses anything, and only a superset
+        // counts as up to date.
+        let want: std::collections::HashSet<uuid::Uuid> = mgr
+            .list_volumes()
+            .await
+            .into_iter()
+            .map(|(id, ..)| id.0)
+            .collect();
+        let have = crate::image::local::system_slab_volumes(&dest_dev)
+            .await
+            .unwrap_or(None);
+        // And only a disk that can boot on its own counts: one laid
+        // before local boot existed holds every golden and has no
+        // boot area, and the shortcut would leave it that way (#123).
+        let boot_ready =
+            crate::image::local::boot_ready(&dest_dev, &layout).await;
+        if !boot_ready {
+            println!(
+                "Flow-over: {disk} has no room to boot on its own (no boot area, or a \
+                 table firmware cannot read) — laying the system half again"
+            );
+        }
+        if let Some(have) = have.filter(|_| boot_ready) {
+            if !want.is_empty() && want.iter().all(|id| have.contains(id)) {
+                println!(
+                    "Flow-over: {disk} already holds all {} volume(s) this boot would \
+                     copy — nothing to do",
+                    want.len()
+                );
+                println!(
+                    "Flow-over: leaving it as it stands; the node boots from it next \
+                     time, which is what the local-slab probe is for."
+                );
+                return Ok(None);
+            }
+            let missing = want.iter().filter(|id| !have.contains(id)).count();
+            println!(
+                "Flow-over: {disk} holds {} of the {} volume(s) this boot carries; {} \
+                 to copy",
+                want.len() - missing,
+                want.len(),
+                missing
+            );
+        }
+        println!(
+            "Flow-over: {disk} is already this node's — replacing the system half, \
+             keeping the data half"
+        );
+        let laid = crate::image::local::update_system_slab(dest_dev, &layout)
+            .await
+            .map_err(|e| anyhow::anyhow!("updating the system slab on {disk}: {e}"))?;
+        let data_id = laid.data.slab_id();
+        let system_id = laid.system.slab_id();
+        println!(
+            "Flow-over: {disk} updated — data slab {data_id} kept ({}), system slab \
+             {system_id} replaced ({})",
+            crate::mgmt::config::human_size(laid.data_bytes),
+            crate::mgmt::config::human_size(laid.system_bytes),
+        );
+        let flow = crate::drive::handover::FlowOver {
+            disk: disk.to_string(),
+            system_slab: system_id.0.to_string(),
+            data_slab: data_id.0.to_string(),
+        };
+        {
+            let mut reg = mgr.registry().write().await;
+            reg.add(laid.data);
+            reg.add(laid.system);
+        }
+        // Not seeded by default. The data slab kept here holds this
+        // node's records, and adopting them over the fresh clone's
+        // volumes of the same names is the upgrade path, which is not
+        // built yet. Seeding without it would move extents onto the
+        // drive and record them nowhere.
+        seed_data_half(&mgr, data_id, disk, SeedWhen::Asked).await?;
+        println!(
+            "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
+        );
+        return Ok(Some(flow));
+    }
+
+    // The target is about to be formatted. An operator supplies a path,
+    // and a path proves nothing about what is on the device — so ask the
+    // device (#88). A reinstall is exactly "boot a fresh image and flow
+    // over onto the disk the previous install was on", and that disk is
+    // where this node's CA and its ServiceAccount signing key live.
+    if let Some(what) = data_slab_on(disk).await? {
+        // The override exists because the guard cannot tell a live
+        // identity from a dead one.
+        //
+        // A drive carrying a data slab from an install that was
+        // abandoned — interrupted mid-migration, corrupted, replaced
+        // — looks exactly like a drive carrying the identity of a
+        // node that is running. The guard refuses both, forever, and
+        // no sequence of boots recovers the drive: zeroing a header
+        // is not something a node does to itself, and every policy
+        // the survey offers is still refused right here.
+        //
+        // `--local-disk-force` is that sequence, and it is
+        // deliberately not a policy. `assimilate=any` is a statement
+        // about a fleet; this is a statement about one drive that
+        // somebody has looked at. It names what it destroys first.
+        if !local_disk_force {
+            anyhow::bail!(
+                "refusing to format {disk} for flow-over: {what}. That partition holds \
+                 this node's identity — its CA key and its ServiceAccount signing key — \
+                 and nothing can mint it again. Point --local-disk at the system \
+                 partition, at a drive that carries no data slab, or pass \
+                 --local-disk-force if that identity is spent and you mean to destroy it"
+            );
+        }
+        println!("Flow-over: {what} — destroying it, as --local-disk-force was given.");
+        tracing::warn!("flow-over: --local-disk-force overrides the identity guard: {what}");
+    }
+    // Both halves, each onto a slab of its own role.
+    //
+    // This formatted the whole device as one slab — which takes
+    // `SlabRole`'s default, System — and then drained only the non-data
+    // slabs onto it. So the goldens came local and the *writes* did not:
+    // every log line, every claim and every byte of `stormcos-state`
+    // still landed in a clone on the appliance, for the life of the node.
+    // One node can afford that. Twenty write to one appliance.
+    //
+    // The layout is the image's own, for the image's own reason: an
+    // install replaces the system end and leaves the data end alone, and
+    // the two are told apart from the partition table (#88).
+    let laid = crate::image::local::lay_node_slabs(dest_dev, &layout)
+        .await
+        .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
+    let data_id = laid.data.slab_id();
+    let system_id = laid.system.slab_id();
+    println!(
+        "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({})",
+        crate::mgmt::config::human_size(laid.data_bytes),
+        crate::mgmt::config::human_size(laid.system_bytes),
+    );
+
+    // The system half only, and not from here. **Do not migrate a
+    // live data slab, and do not migrate anything from a process
+    // that is about to be killed.**
+    //
+    // Migrating the data slab was tried on hardware and it corrupts:
+    // the flow-over moves extents out from under mounted, actively
+    // written filesystems, and the data slab is exactly the half
+    // being written — logs, state, claims. Within a minute the node
+    // reported
+    //
+    //   EXT4-fs error (device ublkb26): __ext4_find_entry:
+    //       checksumming directory block 0
+    //   capturing state: no ext2/3/4 superblock found (magic 0x0000)
+    //
+    // and stormdrive was in a restart loop. Goldens survive it
+    // because nothing writes to them; a data volume does not.
+    //
+    // Migrating the *system* half from here is safe and still wrong,
+    // because this process does not live long enough to finish. It is
+    // the initramfs engine: twenty-six seconds after it laid these
+    // slabs the successor adopted its ublk devices, and `switch_root`
+    // had already deleted the filesystem its binary came from. The
+    // copy is minutes. Every run of it was killed part-way, leaving a
+    // slab that is real, incomplete and unable to boot the node —
+    // which is precisely the shape the local-slab probe now has to
+    // reject on the next boot.
+    //
+    // So the long-lived process does the long-running job. This lays
+    // the structure, which is fast and bounded, and writes down what
+    // it laid; the engine that adopts the devices moves the extents
+    // at its leisure and is still there when they land.
+    let flow = crate::drive::handover::FlowOver {
+        disk: disk.to_string(),
+        system_slab: system_id.0.to_string(),
+        data_slab: data_id.0.to_string(),
+    };
+    {
+        let mut reg = mgr.registry().write().await;
+        reg.add(laid.data);
+        reg.add(laid.system);
+    }
+    // **The records go where the extents go.** The slabs just laid
+    // keep metadata of their own, and this manager was only ever
+    // writing into the slabs it opened, which are the appliance
+    // clone's. So a seeded data half had its extents on the drive and
+    // its records on a clone the next boot never attaches, and the
+    // engine that adopted the boot died on
+    //
+    //   Error: volume 'stormcert-data' not found in slab metadata
+    //
+    // Safe here, and only here: both slabs were formatted a moment
+    // ago and hold nothing a persist could overwrite. The update path
+    // above keeps a data slab that holds this node's records, and
+    // writing this manager's view of it would replace them.
+    mgr.keep_metadata_in_first(&[data_id, system_id]);
+    seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
+    println!(
+        "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
+    );
+    Ok(Some(flow))
+}
+
 /// Put the writable half on the local disk, **now**, before anything is
 /// exported.
 ///
@@ -5411,255 +5671,8 @@ async fn handle_boot_local(
         //
         // — a failure that names the root device and says nothing about the
         // local disk, for a node whose root was reachable the whole time.
-        let flow_over: anyhow::Result<Option<crate::drive::handover::FlowOver>> = async {
-            let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let dest_dev: Arc<dyn BlockDevice> =
-                open_storage(disk).await?;
-            let mut layout =
-                crate::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
-            layout.slot_size = mgr.slot_size();
-            layout.tier = tier;
-            // The table in the drive's own sector size: firmware parses a GPT
-            // in the medium's block size, and `FileDevice` reports 4096 for
-            // every drive (#123). A file has none, and follows the device.
-            layout.lba = crate::drive::filedev::logical_sector_size(disk);
-
-            // **A drive that is already this node's is updated, not replaced.**
-            //
-            // A reinstall is "boot a fresh image and flow over onto the disk
-            // the last install used", and that disk carries two things: the
-            // goldens, which this boot exists to replace, and the data slab,
-            // which holds the node's CA key and its ServiceAccount signing key
-            // and cannot be made again. Laying a fresh table destroys the
-            // second to refresh the first; refusing the drive leaves the node
-            // running from the appliance for the rest of its life. Neither is
-            // an install.
-            //
-            // The partition types say which half is which — that is what they
-            // are for (#88) — so the system half is formatted afresh, the data
-            // half is opened and left alone, and the node boots normally with
-            // the identity it already had. No force, because nothing is
-            // destroyed that an install is not meant to destroy.
-            if !local_disk_force
-                && crate::image::local::node_layout(&dest_dev).await?.is_some()
-            {
-                // **And if it is already up to date, do nothing at all.**
-                //
-                // A node that netboots regularly would otherwise reformat its
-                // own system half and re-copy every golden on every boot —
-                // destroying a working local half to rebuild the same bytes,
-                // and running from the appliance for the minutes that takes,
-                // each time.
-                //
-                // By volume id, which is what a migration preserves: the
-                // flow-over moves a volume's extents, it does not make a new
-                // volume, so a system half that has already had this image
-                // flowed onto it holds the same ids. A new build makes new
-                // volumes and this comes out false, which is what should
-                // happen.
-                //
-                // Conservative in the direction that costs least: a wrong
-                // "not up to date" reformats and re-copies, which is wasteful;
-                // a wrong "up to date" leaves the node booting from the
-                // appliance. Neither loses anything, and only a superset
-                // counts as up to date.
-                let want: std::collections::HashSet<uuid::Uuid> = mgr
-                    .list_volumes()
-                    .await
-                    .into_iter()
-                    .map(|(id, ..)| id.0)
-                    .collect();
-                let have = crate::image::local::system_slab_volumes(&dest_dev)
-                    .await
-                    .unwrap_or(None);
-                // And only a disk that can boot on its own counts: one laid
-                // before local boot existed holds every golden and has no
-                // boot area, and the shortcut would leave it that way (#123).
-                let boot_ready =
-                    crate::image::local::boot_ready(&dest_dev, &layout).await;
-                if !boot_ready {
-                    println!(
-                        "Flow-over: {disk} has no room to boot on its own (no boot area, or a \
-                         table firmware cannot read) — laying the system half again"
-                    );
-                }
-                if let Some(have) = have.filter(|_| boot_ready) {
-                    if !want.is_empty() && want.iter().all(|id| have.contains(id)) {
-                        println!(
-                            "Flow-over: {disk} already holds all {} volume(s) this boot would \
-                             copy — nothing to do",
-                            want.len()
-                        );
-                        println!(
-                            "Flow-over: leaving it as it stands; the node boots from it next \
-                             time, which is what the local-slab probe is for."
-                        );
-                        return Ok(None);
-                    }
-                    let missing = want.iter().filter(|id| !have.contains(id)).count();
-                    println!(
-                        "Flow-over: {disk} holds {} of the {} volume(s) this boot carries; {} \
-                         to copy",
-                        want.len() - missing,
-                        want.len(),
-                        missing
-                    );
-                }
-                println!(
-                    "Flow-over: {disk} is already this node's — replacing the system half, \
-                     keeping the data half"
-                );
-                let laid = crate::image::local::update_system_slab(dest_dev, &layout)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("updating the system slab on {disk}: {e}"))?;
-                let data_id = laid.data.slab_id();
-                let system_id = laid.system.slab_id();
-                println!(
-                    "Flow-over: {disk} updated — data slab {data_id} kept ({}), system slab \
-                     {system_id} replaced ({})",
-                    crate::mgmt::config::human_size(laid.data_bytes),
-                    crate::mgmt::config::human_size(laid.system_bytes),
-                );
-                let flow = crate::drive::handover::FlowOver {
-                    disk: disk.to_string(),
-                    system_slab: system_id.0.to_string(),
-                    data_slab: data_id.0.to_string(),
-                };
-                {
-                    let mut reg = mgr.registry().write().await;
-                    reg.add(laid.data);
-                    reg.add(laid.system);
-                }
-                // Not seeded by default. The data slab kept here holds this
-                // node's records, and adopting them over the fresh clone's
-                // volumes of the same names is the upgrade path, which is not
-                // built yet. Seeding without it would move extents onto the
-                // drive and record them nowhere.
-                seed_data_half(&mgr, data_id, disk, SeedWhen::Asked).await?;
-                println!(
-                    "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
-                );
-                return Ok(Some(flow));
-            }
-
-            // The target is about to be formatted. An operator supplies a path,
-            // and a path proves nothing about what is on the device — so ask the
-            // device (#88). A reinstall is exactly "boot a fresh image and flow
-            // over onto the disk the previous install was on", and that disk is
-            // where this node's CA and its ServiceAccount signing key live.
-            if let Some(what) = data_slab_on(disk).await? {
-                // The override exists because the guard cannot tell a live
-                // identity from a dead one.
-                //
-                // A drive carrying a data slab from an install that was
-                // abandoned — interrupted mid-migration, corrupted, replaced
-                // — looks exactly like a drive carrying the identity of a
-                // node that is running. The guard refuses both, forever, and
-                // no sequence of boots recovers the drive: zeroing a header
-                // is not something a node does to itself, and every policy
-                // the survey offers is still refused right here.
-                //
-                // `--local-disk-force` is that sequence, and it is
-                // deliberately not a policy. `assimilate=any` is a statement
-                // about a fleet; this is a statement about one drive that
-                // somebody has looked at. It names what it destroys first.
-                if !local_disk_force {
-                    anyhow::bail!(
-                        "refusing to format {disk} for flow-over: {what}. That partition holds \
-                         this node's identity — its CA key and its ServiceAccount signing key — \
-                         and nothing can mint it again. Point --local-disk at the system \
-                         partition, at a drive that carries no data slab, or pass \
-                         --local-disk-force if that identity is spent and you mean to destroy it"
-                    );
-                }
-                println!("Flow-over: {what} — destroying it, as --local-disk-force was given.");
-                tracing::warn!("flow-over: --local-disk-force overrides the identity guard: {what}");
-            }
-            // Both halves, each onto a slab of its own role.
-            //
-            // This formatted the whole device as one slab — which takes
-            // `SlabRole`'s default, System — and then drained only the non-data
-            // slabs onto it. So the goldens came local and the *writes* did not:
-            // every log line, every claim and every byte of `stormcos-state`
-            // still landed in a clone on the appliance, for the life of the node.
-            // One node can afford that. Twenty write to one appliance.
-            //
-            // The layout is the image's own, for the image's own reason: an
-            // install replaces the system end and leaves the data end alone, and
-            // the two are told apart from the partition table (#88).
-            let laid = crate::image::local::lay_node_slabs(dest_dev, &layout)
-                .await
-                .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
-            let data_id = laid.data.slab_id();
-            let system_id = laid.system.slab_id();
-            println!(
-                "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({})",
-                crate::mgmt::config::human_size(laid.data_bytes),
-                crate::mgmt::config::human_size(laid.system_bytes),
-            );
-
-            // The system half only, and not from here. **Do not migrate a
-            // live data slab, and do not migrate anything from a process
-            // that is about to be killed.**
-            //
-            // Migrating the data slab was tried on hardware and it corrupts:
-            // the flow-over moves extents out from under mounted, actively
-            // written filesystems, and the data slab is exactly the half
-            // being written — logs, state, claims. Within a minute the node
-            // reported
-            //
-            //   EXT4-fs error (device ublkb26): __ext4_find_entry:
-            //       checksumming directory block 0
-            //   capturing state: no ext2/3/4 superblock found (magic 0x0000)
-            //
-            // and stormdrive was in a restart loop. Goldens survive it
-            // because nothing writes to them; a data volume does not.
-            //
-            // Migrating the *system* half from here is safe and still wrong,
-            // because this process does not live long enough to finish. It is
-            // the initramfs engine: twenty-six seconds after it laid these
-            // slabs the successor adopted its ublk devices, and `switch_root`
-            // had already deleted the filesystem its binary came from. The
-            // copy is minutes. Every run of it was killed part-way, leaving a
-            // slab that is real, incomplete and unable to boot the node —
-            // which is precisely the shape the local-slab probe now has to
-            // reject on the next boot.
-            //
-            // So the long-lived process does the long-running job. This lays
-            // the structure, which is fast and bounded, and writes down what
-            // it laid; the engine that adopts the devices moves the extents
-            // at its leisure and is still there when they land.
-            let flow = crate::drive::handover::FlowOver {
-                disk: disk.to_string(),
-                system_slab: system_id.0.to_string(),
-                data_slab: data_id.0.to_string(),
-            };
-            {
-                let mut reg = mgr.registry().write().await;
-                reg.add(laid.data);
-                reg.add(laid.system);
-            }
-            // **The records go where the extents go.** The slabs just laid
-            // keep metadata of their own, and this manager was only ever
-            // writing into the slabs it opened, which are the appliance
-            // clone's. So a seeded data half had its extents on the drive and
-            // its records on a clone the next boot never attaches, and the
-            // engine that adopted the boot died on
-            //
-            //   Error: volume 'stormcert-data' not found in slab metadata
-            //
-            // Safe here, and only here: both slabs were formatted a moment
-            // ago and hold nothing a persist could overwrite. The update path
-            // above keeps a data slab that holds this node's records, and
-            // writing this manager's view of it would replace them.
-            mgr.keep_metadata_in_first(&[data_id, system_id]);
-            seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
-            println!(
-                "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
-            );
-            Ok(Some(flow))
-        }
-        .await;
+        let flow_over =
+            take_local_disk(&mut mgr, disk, local_tier, local_disk_force).await;
         match flow_over {
             Ok(f) => {
                 laid_flow_over = f;
@@ -5948,5 +5961,177 @@ mod tests {
         assert!(!path.exists());
         // Removing what is not there is not an error.
         note_no_intent(&path, "http://forge:9090", false);
+    }
+}
+
+/// A fresh install's flow-over, on files, end to end (#239).
+#[cfg(all(test, target_os = "linux"))]
+mod install_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use sha2::{Digest, Sha256};
+
+    use crate::drive::BlockDevice;
+    use crate::volume::VolumeManager;
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// sha256 of every volume the manager holds, by name, read through the
+    /// volume the way a consumer reads it.
+    async fn digests(mgr: &VolumeManager) -> BTreeMap<String, (String, Vec<u64>)> {
+        let mut out = BTreeMap::new();
+        for (id, name, size, _) in mgr.list_volumes().await {
+            let vol: Arc<dyn BlockDevice> = mgr.get_volume(&id).unwrap();
+            let mut whole = Sha256::new();
+            // Per MiB too, so a mismatch names where it is.
+            let mut per: Vec<u64> = Vec::new();
+            let mut buf = vec![0u8; MIB as usize];
+            let mut off = 0;
+            while off < size {
+                let n = (size - off).min(MIB) as usize;
+                vol.read(off, &mut buf[..n]).await.unwrap();
+                whole.update(&buf[..n]);
+                let h = Sha256::digest(&buf[..n]);
+                per.push(u64::from_le_bytes(h[..8].try_into().unwrap()));
+                off += n as u64;
+            }
+            out.insert(name, (format!("{:x}", whole.finalize()), per));
+        }
+        out
+    }
+
+    fn compare(
+        when: &str,
+        want: &BTreeMap<String, (String, Vec<u64>)>,
+        got: &BTreeMap<String, (String, Vec<u64>)>,
+    ) -> Vec<String> {
+        let mut bad = Vec::new();
+        for (name, (h, per)) in want {
+            match got.get(name) {
+                None => bad.push(format!("{when}: volume {name} is missing")),
+                Some((g, gper)) if g != h => {
+                    let first = per.iter().zip(gper).position(|(a, b)| a != b);
+                    bad.push(format!(
+                        "{when}: volume {name} differs, first at MiB {first:?} of {}",
+                        per.len()
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        bad
+    }
+
+    fn mkfs_ext4() -> Option<String> {
+        for p in ["/usr/sbin/mkfs.ext4", "/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"] {
+            if std::path::Path::new(p).exists() {
+                return Some(p.to_string());
+            }
+        }
+        None
+    }
+
+    /// An image whose data slab carries an e2fsprogs blank (the shape of
+    /// stormcos's `cni-bin`) and a golden of noise, installed onto an empty
+    /// disk: every volume must read the same after the seed, and again from a
+    /// fresh open of the image and the disk (the engine that adopts the boot).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_fresh_install_seeds_every_data_volume_byte_for_byte() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4 (the golden is made by it, #239)");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+
+        // The blank, exactly as stormcos makes it.
+        let blank = p("cni-bin.img");
+        std::fs::File::create(&blank).unwrap().set_len(256 * MIB).unwrap();
+        let st = std::process::Command::new(&mkfs)
+            .args(["-q", "-F", "-b", "4096", &blank])
+            .status()
+            .unwrap();
+        assert!(st.success(), "mkfs.ext4 failed");
+        // Noise, so a slot that lands in the wrong place cannot pass.
+        let mut seed = 0x239u64;
+        let mut noise = |len: u64| {
+            let mut v = vec![0u8; len as usize];
+            for c in v.chunks_mut(8) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                c.copy_from_slice(&seed.to_le_bytes()[..c.len()]);
+            }
+            v
+        };
+        let state = p("state.img");
+        std::fs::write(&state, noise(37 * MIB + 4096)).unwrap();
+        let root = p("root.img");
+        std::fs::write(&root, noise(24 * MIB)).unwrap();
+
+        let spec = format!(
+            r#"
+name = "install-239"
+size = "1G"
+[slab]
+size = "256M"
+[[slab.golden]]
+name = "root"
+file = "{root}"
+[data_slab]
+size = "rest"
+[[data_slab.golden]]
+name = "cni-bin"
+file = "{blank}"
+template = true
+[[data_slab.golden]]
+name = "state"
+file = "{state}"
+"#
+        );
+        let image = p("image.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&image))
+            .await
+            .unwrap();
+
+        // The install boot: the image's slabs, then the empty local disk.
+        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true)
+            .await
+            .unwrap();
+        let before = digests(&mgr).await;
+        assert!(before.contains_key("cni-bin"), "volumes: {:?}", before.keys());
+        let disk = p("disk.raw");
+        std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
+        let flow = super::take_local_disk(&mut mgr, &disk, "hot", false)
+            .await
+            .unwrap()
+            .expect("a fresh disk is laid");
+        let mut bad = compare("after the seed", &before, &digests(&mgr).await);
+        drop(mgr);
+
+        // The engine that adopts the boot opens the image and the disk.
+        let (succ, _) = super::open_slabs_resuming(&[image.clone(), flow.disk.clone()], None, true)
+            .await
+            .unwrap();
+        bad.extend(compare("after a fresh open", &before, &digests(&succ).await));
+        drop(succ);
+
+        // And the disk alone: what the node boots from next time.
+        let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false)
+            .await
+            .unwrap();
+        let alone = digests(&local).await;
+        for name in ["cni-bin", "cni-bin.golden", "state", "state.golden"] {
+            if let (Some(a), Some(b)) = (before.get(name), alone.get(name)) {
+                if a.0 != b.0 {
+                    bad.push(format!("the disk alone: volume {name} differs"));
+                }
+            } else {
+                bad.push(format!("the disk alone: volume {name} is missing"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 }
