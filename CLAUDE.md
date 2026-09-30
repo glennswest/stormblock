@@ -163,7 +163,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Stopgap: an install boot always lays a fresh slab (2026-09-30, #236, P0) — IN PROGRESS
+### Stopgap: an install boot always lays a fresh slab (2026-09-30, #236, P0) — DONE (golden-stormblock-436eb75ed6c9)
 
 Owner: "can we just make installs always run, and then fix the intent?" Forge
 is 13.7 (#235), so no boot intent is served, and today a netboot of a new
@@ -197,8 +197,9 @@ not hold.** Same release = a reboot: boot the local disk, keep its data.
 - [x] sc-build at 984f203: boot-hook test 13 new cases, all pass under sh and
       busybox sh; nextest 842/843 (the one is #134); `slab holds` exit 2 on
       blank/missing checked with the built binary
-- [ ] golden staged; not verified on metal (needs a stormcos release with
-      this initramfs, then a netboot of a new release on C2NR0Q2)
+- [x] golden staged (golden-stormblock-436eb75ed6c9, stormcos#168); #236
+      closed. Not verified on metal (needs a stormcos release with this
+      initramfs, then a netboot of a new release on C2NR0Q2)
 
 ### Boot media at 512-byte LBAs (2026-09-29, #228, P0) — IN PROGRESS
 
