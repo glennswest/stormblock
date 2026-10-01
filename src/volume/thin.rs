@@ -1169,6 +1169,27 @@ impl ThinVolumeHandle {
     }
 
     /// Write into an extent this volume already owns exclusively.
+    /// Whether any leg of this extent is on a quarantined slab: one being
+    /// emptied — the appliance's per-boot clone a flow-over is moving off
+    /// (#239), or a drive being drained.
+    ///
+    /// A write there must not land in place. The slab is on its way out, and
+    /// for a flow-over it is a clone the next boot does not attach: it claims
+    /// a fresh, pristine one and resumes from that. A write left in place is
+    /// lost at the next boot, while the same node's copy-on-writes, which
+    /// already land on the local disk, are kept — so a filesystem comes back
+    /// with a directory that names an inode its inode table never got. The
+    /// write goes through copy-on-write instead: the slot is copied onto a
+    /// slab that is staying, with the write on top, and the old one is freed.
+    /// It is also one less extent for the flow-over to move.
+    async fn on_leaving_slab(&self, loc: &ExtentLocation) -> bool {
+        if fence::relocate_off() {
+            return false;
+        }
+        let reg = self.registry.read().await;
+        loc.legs().any(|l| reg.is_quarantined(&l.slab_id))
+    }
+
     async fn write_in_place(
         &self,
         vext_idx: u64,
@@ -2481,8 +2502,9 @@ impl ThinVolumeHandle {
             let (location, held) = self.fenced_lookup(vext_idx).await;
 
             match location {
-                // Exclusively owned: write straight through, no serialisation.
-                Some(loc) if loc.ref_count == 1 => {
+                // Exclusively owned: write straight through, no serialisation —
+                // unless the slot is on a slab being emptied (below).
+                Some(loc) if loc.ref_count == 1 && !self.on_leaving_slab(&loc).await => {
                     self.write_in_place(vext_idx, &loc, off_in_slot, chunk).await?;
                 }
                 // Shared, or not yet mapped — the mapping is about to change,
@@ -2493,8 +2515,23 @@ impl ThinVolumeHandle {
                     let _vol = self.inner.lock().await;
                     let (fresh, _held) = self.fenced_lookup(vext_idx).await;
                     match fresh {
+                        // Shared, or owned and on a slab being emptied: the
+                        // write goes to a fresh slot with the old data under it.
                         Some(loc) if loc.ref_count > 1 => {
                             self.cow_write(vext_idx, off_in_slot, chunk, &loc, &policy).await?;
+                        }
+                        Some(loc) if self.on_leaving_slab(&loc).await => {
+                            match self.cow_write(vext_idx, off_in_slot, chunk, &loc, &policy).await {
+                                // Nowhere else to put it: a slab quarantined
+                                // for its health with no other of its role.
+                                // In place beats refusing the write.
+                                Err(DriveError::NoSpace(why)) => {
+                                    tracing::warn!(volume = %self.id, extent = vext_idx,
+                                        "no room off a slab being emptied ({why}) — writing in place");
+                                    self.write_in_place(vext_idx, &loc, off_in_slot, chunk).await?;
+                                }
+                                r => r?,
+                            }
                         }
                         Some(loc) => {
                             // Another writer allocated it, or the sharer went

@@ -45,6 +45,23 @@ const SHARDS: usize = 4096;
 #[cfg(test)]
 pub static OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Off switch for relocate-on-write (writes to a slab being emptied land in
+/// place again), for a test to show what it prevents. Tests only.
+#[cfg(test)]
+pub static RELOCATE_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether relocate-on-write is switched off (only ever by a test).
+pub fn relocate_off() -> bool {
+    #[cfg(test)]
+    {
+        RELOCATE_OFF.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
 fn off() -> bool {
     OFF.load(std::sync::atomic::Ordering::Relaxed)

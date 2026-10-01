@@ -4782,6 +4782,42 @@ async fn seed_data_half(
 /// allocations, and stay so once empty. `None` when it gave up: more than 16
 /// extents that would not move (the quarantine is lifted).
 #[cfg(target_os = "linux")]
+/// Quarantine the slabs a flow-over empties: every system slab but the one
+/// it fills. Nothing new is placed on them, and a write to an extent still on
+/// one goes to a fresh slot on a slab that stays (`ThinVolumeHandle`'s
+/// relocate-on-write) rather than in place.
+///
+/// They are the appliance's per-boot clone. A boot cut short before the
+/// flow-over reaches an extent resumes from a fresh, pristine clone, so
+/// whatever was written in place there is gone at the next boot — while the
+/// copy-on-writes, which already land locally, are kept. A filesystem then
+/// reads a directory naming an inode its inode table never got (#239: the
+/// first free inodes of cadvisor, stormlb, vmimages, stormvm and stormimds on
+/// 11.57; hubble-relay's on 11.50). So this is set as soon as the boot knows
+/// a flow-over is coming, in the engine that laid the disk and again in the
+/// one that adopts it, before either serves a write.
+pub(crate) async fn quarantine_flow_sources(
+    mgr: &crate::volume::VolumeManager,
+    flow: &crate::drive::handover::FlowOver,
+) {
+    let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(crate::drive::slab::SlabId) else {
+        return;
+    };
+    let mut reg = mgr.registry().write().await;
+    let sources: Vec<_> =
+        reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect();
+    for s in &sources {
+        reg.set_quarantined(*s, true);
+    }
+    if !sources.is_empty() {
+        println!(
+            "Flow-over: {} appliance slab(s) quarantined — writes to what is still on them go to {}",
+            sources.len(),
+            flow.disk
+        );
+    }
+}
+
 pub(crate) async fn flow_system_half<P, F>(
     gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
     registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
@@ -5146,6 +5182,8 @@ async fn handle_adopt_ublk(
                 if !local.is_empty() {
                     mgr.keep_metadata_in_first(&local);
                 }
+                // Before anything is served, not when the flow-over starts.
+                quarantine_flow_sources(&mgr, flow).await;
             }
 
             // Resolve every volume before serving any. The incumbent is gone by
@@ -5820,6 +5858,11 @@ async fn handle_boot_local(
                     });
                 }
             }
+        }
+        // From here the appliance's system slabs are on their way out: a
+        // write to an extent still on one lands on the local disk (#239).
+        if let Some(f) = &laid_flow_over {
+            quarantine_flow_sources(&mgr, f).await;
         }
         let record = crate::drive::handover::Record {
             slabs,
@@ -6605,6 +6648,112 @@ file = "{state}"
             }
         }
         bad
+    }
+
+    /// A write the node made during its install boot must survive the boot
+    /// being cut short (#239, reopened). Until the flow-over reaches it, a
+    /// clone's private extent — the slot its UUID stamp copied, where an
+    /// ext4's inode table is — is on the appliance's per-boot clone, while
+    /// its copy-on-writes land on the local disk. The next boot claims a
+    /// fresh, pristine clone of the release to finish the flow-over from. A
+    /// write left in place on the old one is gone, and the volume reads a
+    /// directory that names an inode its inode table never got: what
+    /// cadvisor, stormlb, vmimages, stormvm and stormimds read on 11.57
+    /// (#155–#164, the first free inodes), and hubble-relay on 11.50 (#1410).
+    ///
+    /// `RELOCATE_OFF_239=1` writes in place as before (expected to fail).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_write_during_the_install_boot_survives_a_flow_over_cut_short() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        if std::env::var("RELOCATE_OFF_239").is_ok() {
+            crate::volume::fence::RELOCATE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        // A service golden the way stormcentral builds one, so the image's
+        // clone of it is stamped and owns its first extent.
+        let blank = p("svc.img");
+        std::fs::File::create(&blank).unwrap().set_len(32 * MIB).unwrap();
+        let st = std::process::Command::new(&mkfs)
+            .args(["-q", "-F", "-b", "4096", "-O", "^has_journal", "-m", "0", &blank])
+            .status()
+            .unwrap();
+        assert!(st.success(), "mkfs.ext4 failed");
+        let spec = format!(
+            r#"
+name = "resume-239"
+size = "512M"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "svc"
+file = "{blank}"
+template = true
+[data_slab]
+size = "64M"
+"#
+        );
+        let image = p("image.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&image))
+            .await
+            .unwrap();
+        // Each boot claims its own copy of the release.
+        let claim = |n: &str| {
+            let c = p(n);
+            std::fs::copy(&image, &c).unwrap();
+            c
+        };
+
+        // Boot 1: lay the disk, then the successor starts the flow-over
+        // (its sources quarantined) and the node writes the clone: a block in
+        // its first extent, which it owns, and one in an extent it shares.
+        let disk = p("disk.raw");
+        std::fs::File::create(&disk).unwrap().set_len(40 * 1024 * MIB).unwrap();
+        let first = claim("claim1.raw");
+        let (mut mgr, _) = super::open_slabs_resuming(&[first.clone()], None, true).await.unwrap();
+        let flow = super::take_local_disk(&mut mgr, &disk, "hot", true).await.unwrap().expect("laid");
+        drop(mgr);
+        let mut mgr = super::open_slabs_and_restore(&[first.clone(), flow.disk.clone()], None).await.unwrap();
+        let dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
+        let data = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let local: Vec<_> = [data, dest].into_iter().filter(|id| mgr.is_metadata_slab(id)).collect();
+        mgr.keep_metadata_in_first(&local);
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        let svc = super::resolve_boot_volume(&mgr, "svc").await.unwrap();
+        let v = mgr.get_volume(&svc).unwrap();
+        // Block 16 is in the first MiB (owned), block 600 past it (shared).
+        for b in [16u64, 600] {
+            v.write(b * 4096, &[0xA5; 4096]).await.unwrap();
+        }
+        v.flush().await.unwrap();
+        mgr.persist().await;
+        // Power cut: the flow-over moved nothing yet.
+        drop(v);
+        drop(mgr);
+
+        // Boot 2: the disk, and a fresh claim to finish the flow-over from.
+        let second = claim("claim2.raw");
+        std::env::set_var("STORMBLOCK_RESUME_SOURCE", &second);
+        let (mgr, resumed) = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await.unwrap();
+        std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
+        let svc = super::resolve_boot_volume(&mgr, "svc").await.unwrap();
+        let v = mgr.get_volume(&svc).unwrap();
+        let mut bad = Vec::new();
+        for b in [16u64, 600] {
+            let mut got = vec![0u8; 4096];
+            v.read(b * 4096, &mut got).await.unwrap();
+            if got != [0xA5; 4096] {
+                bad.push(format!(
+                    "block {b} ({}) is not what boot 1 wrote",
+                    if b < 256 { "the clone's own first extent" } else { "a shared extent" }
+                ));
+            }
+        }
+        assert!(bad.is_empty(), "resumed from {:?}: {}", resumed.map(|r| r.uri), bad.join("; "));
     }
 
     /// Every unsealed volume overwritten, its first 64 MiB, with noise.
