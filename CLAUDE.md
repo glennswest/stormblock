@@ -163,6 +163,35 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The initramfs claims as the machine stormbootx claimed as (2026-10-01, #249, P0) — IN PROGRESS
+
+server8 (X9 MicroCloud blade): stormbootx claimed `boothost/server8` (DHCP +
+reverse DNS), then `/init` claimed `boothost/<SMBIOS serial>` — the chassis
+serial all eight blades share, server1's old trial synonym, 11.50 — and laid
+the local disk from it with `--local-disk-force` (#236). Nothing hands the
+firmware's name down, so the SMBIOS fallback always ran.
+
+Mechanism (picked here, the stormbootx side filed there): **a volatile EFI
+variable** set by stormbootx before it starts stormuefi — attributes
+BOOTSERVICE_ACCESS|RUNTIME_ACCESS (0x6, not NV), vendor GUID
+`STORMBOOT_GUID` (in /init), `StormBootTag` = the name it claimed on (the
+engine's host name when the claim reply gave one), `StormBootHostNqn` = the
+NQN it attached as, ASCII, no NUL. Linux reads them at
+`/sys/firmware/efi/efivars/<Name>-<guid>` (4 attribute bytes, then the
+value). No change to the pallet's cmdline or to stormuefi.
+- `/init`: firmware variable > `rd.stormblock.tag=` > SMBIOS serial > SMBIOS
+  UUID; the source is kept (`BOOTTAG_FROM`). A cmdline tag that differs from
+  the firmware's is reported and the firmware's used; an SMBIOS serial that
+  differs is reported.
+- A guessed identity (SMBIOS) never installs over a disk: the probe boots the
+  local disk instead of an install, and the survey takes only a blank drive
+  (no #236 force, no ticket force). `rd.stormblock.trust-smbios=1` restores
+  the old behaviour for an image whose machines are named by serial.
+- [ ] identity block + guards in `scripts/build-stormblock-initramfs.sh`
+- [ ] `tests/initramfs-boot-hook.sh` cases (efivar, cmdline, differ, guess)
+- [ ] docs (boot-hooks.md, README), CHANGELOG; stormbootx issue filed
+- [ ] sc-build: the boot-hook test under sh and busybox sh; nextest
+
 ### #239 reopened: service goldens still corrupt on 11.57 (2026-10-01, P0) — DONE (golden-stormblock-d3181a25ed62)
 
 Owner, 11.57 (initramfs = stormblock@955a8f8, the fence included), fresh
