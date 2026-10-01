@@ -163,6 +163,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The ConnectX-3 port in the initramfs: mlx4_en (2026-10-01, #250, P0) — IN PROGRESS
+
+server7/server8 (X9 blades, 11.58): stormbootx's mlx4 brings the ConnectX-3
+up, the initramfs lists only the Intel. `mlx4_core` matches the PCI ID;
+`mlx4_en` matches `auxiliary:mlx4_core.eth`, a device `mlx4_core` creates at
+the end of a probe that takes seconds — after the modalias walk stopped (a
+pass that loaded nothing new). Both modules are in `kernel/drivers/net`,
+copied whole; ConnectX-3 needs no firmware file.
+- after discovery (`# --- BEGIN protocol halves`): a table of core → network
+  half (`mlx4_core:mlx4_en`; mlx5/qede/bnxt/ice/i40e carry their own netdev
+  or match a PCI ID — checked with modinfo on 6.17), loaded when the core is
+- then wait (bounded, `STORM_NETDEV_WAIT`, 15 s) until every network-class
+  PCI function with a driver bound has a netdev, re-walking auxiliary-bus
+  modaliases each second; name what never appeared
+- uplink tie (equal speed, both carrier): unchanged and pinned by a test
+  (sort -r: the later name); both ports are printed
+- [ ] block + `tests/initramfs-nic-selection.sh` (or a new test) cases
+- [ ] build an initramfs on dev and check mlx4_en.ko + deps are in it
+- [ ] docs, CHANGELOG; stormcos#211 is the running system's side
+
 ### The initramfs claims as the machine stormbootx claimed as (2026-10-01, #249, P0) — DONE
 
 server8 (X9 MicroCloud blade): stormbootx claimed `boothost/server8` (DHCP +
