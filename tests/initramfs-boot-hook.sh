@@ -31,6 +31,16 @@ sed -n '/# --- BEGIN assimilate survey/,/# --- END assimilate survey/p' "$GEN" >
 [ -s "$WORK/survey.sh" ] || { echo "FAIL: could not extract the assimilate survey"; exit 1; }
 sed -n '/# --- BEGIN boothost claim/,/# --- END boothost claim/p' "$GEN" > "$WORK/claim.sh"
 [ -s "$WORK/claim.sh" ] || { echo "FAIL: could not extract the boothost claim"; exit 1; }
+sed -n '/# --- BEGIN boot identity/,/# --- END boot identity/p' "$GEN" > "$WORK/identity.sh"
+[ -s "$WORK/identity.sh" ] || { echo "FAIL: could not extract the boot identity block"; exit 1; }
+GUID=$(sed -n 's/^STORMBOOT_GUID="\(.*\)"$/\1/p' "$WORK/identity.sh")
+[ -n "$GUID" ] || { echo "FAIL: no STORMBOOT_GUID in the boot identity block"; exit 1; }
+
+# A fake SMBIOS: the MicroCloud chassis serial every X9 blade reports.
+DMI="$WORK/dmi"; mkdir -p "$DMI"
+echo "S11075924402016" > "$DMI/product_serial"
+echo "00000000-0000-0000-0000-0cc47a000008" > "$DMI/product_uuid"
+NOVARS="$WORK/efivars.none"; mkdir -p "$NOVARS"
 
 fail=0
 check() { # name expected actual
@@ -244,8 +254,12 @@ probe() { # slab-path [VOLUME] [META] -> the SLAB the probe leaves behind
         VOLUME="${2:-}"
         META="${3:-}"
         BOOTHOST="http://boothost:9090"
-        BOOTTAG="TESTTAG"; HOSTNQN="nqn.test"
+        # GUESS=1: nothing handed a name down, so SMBIOS is read (#249).
+        if [ -n "${GUESS:-}" ]; then BOOTTAG=""; HOSTNQN=""; else BOOTTAG="TESTTAG"; HOSTNQN="nqn.test"; fi
+        BOOTTAG_FROM=""; TRUST_SMBIOS="${TRUST:-}"
+        STORM_EFIVARS="$NOVARS"; STORM_DMI="$DMI"
         STORM_INSTALL_TICKET="${TICKET:-$WORK/no-ticket}"; export STORM_INSTALL_TICKET
+        . "$WORK/identity.sh" >/dev/null 2>&1
         . "$WORK/claim.sh" >/dev/null 2>&1
         . "$WORK/probe.sh" >/dev/null 2>&1
         echo "$SLAB${INSTALL_OVER:+|$INSTALL_OVER}"
@@ -317,6 +331,78 @@ check "an install the appliance asked for installs whatever the disk holds" "$UR
 TICKET=""
 check "assimilate=off: the disk boots and nothing is asked" "$part" \
     "$(ASSIMILATE=off STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+# #249: a name guessed from SMBIOS may be another machine's, and so may the
+# release it claimed. The disk boots; nothing is installed over it.
+check "a guessed name's release the disk does not hold: the disk boots" "$part" \
+    "$(GUESS=1 STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
+check "a guessed name's install ticket: the disk boots" "$part" \
+    "$(GUESS=1 STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+TICKET=""
+check "rd.stormblock.trust-smbios=1: a guess installs as before" "$URI|$part" \
+    "$(GUESS=1 TRUST=1 STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+
+# ---------------------------------------------------------------------------
+# The machine's name: handed down by the firmware, or guessed (#249).
+# ---------------------------------------------------------------------------
+
+echo "boot identity:"
+
+efivars() { # dir tag [nqn] -> a fake efivarfs with stormbootx's variables
+    rm -rf "$1"; mkdir -p "$1"
+    [ -n "$2" ] && printf '\006\000\000\000%s' "$2" > "$1/StormBootTag-$GUID"
+    [ -n "${3:-}" ] && printf '\006\000\000\000%s' "$3" > "$1/StormBootHostNqn-$GUID"
+    return 0
+}
+
+# What boothost_claim claims as: <tag>|<source>|<host NQN>|<what boot-claim was asked>
+identity() { # efivars-dir [cmdline tag] [cmdline nqn]
+    (
+        set +e
+        STORM_EFIVARS="$1"; STORM_DMI="$DMI"
+        BOOTTAG="${2:-}"; HOSTNQN="${3:-}"; BOOTTAG_FROM=""; TRUST_SMBIOS=""
+        BOOTHOST="http://boothost:9090"
+        ASKED="$WORK/asked"; rm -f "$ASKED"
+        cat > "$WORK/stormblock-claim" <<STUBEOF
+#!/bin/sh
+echo "\$*" > "$ASKED"
+echo "nvme-tcp://10.0.0.1:4420/nqn.x?nsid=1"
+STUBEOF
+        chmod +x "$WORK/stormblock-claim"
+        STORM_STORMBLOCK="$WORK/stormblock-claim"
+        . "$WORK/identity.sh" >/dev/null 2>&1
+        . "$WORK/claim.sh" >/dev/null 2>&1
+        boothost_claim >/dev/null 2>&1
+        echo "$BOOTTAG|$BOOTTAG_FROM|$HOSTNQN|$(cat "$ASKED" 2>/dev/null)"
+    )
+}
+
+V="$WORK/efivars"
+efivars "$V" server8 nqn.2026-09.lo.storm:host-server8
+check "the firmware's name and NQN are what Linux claims and connects as" \
+    "server8|firmware|nqn.2026-09.lo.storm:host-server8|boot-claim --boothost http://boothost:9090 --tag server8" \
+    "$(identity "$V")"
+efivars "$V" server8
+check "a name without an NQN: the NQN follows the name" \
+    "server8|firmware|nqn.2026-09.lo.storm:host-server8|boot-claim --boothost http://boothost:9090 --tag server8" \
+    "$(identity "$V")"
+check "the firmware's name wins over a different rd.stormblock.tag=" \
+    "server8|firmware|nqn.2026-09.lo.storm:host-server8|boot-claim --boothost http://boothost:9090 --tag server8" \
+    "$(identity "$V" server1)"
+efivars "$V" server8 nqn.2026-09.lo.storm:host-server8
+check "and its NQN over a different rd.stormblock.hostnqn=" \
+    "server8|firmware|nqn.2026-09.lo.storm:host-server8|boot-claim --boothost http://boothost:9090 --tag server8" \
+    "$(identity "$V" "" nqn.other)"
+check "no variable: rd.stormblock.tag= is used, and is not a guess" \
+    "flow-1|cmdline|nqn.2026-09.lo.storm:host-flow-1|boot-claim --boothost http://boothost:9090 --tag flow-1" \
+    "$(identity "$NOVARS" flow-1)"
+check "nothing handed down: the SMBIOS serial, marked a guess" \
+    "S11075924402016|smbios|nqn.2026-09.lo.storm:host-S11075924402016|boot-claim --boothost http://boothost:9090 --tag S11075924402016" \
+    "$(identity "$NOVARS")"
+efivars "$V" 'server8;reboot'
+check "a variable that is not a name is ignored" \
+    "S11075924402016|smbios|nqn.2026-09.lo.storm:host-S11075924402016|boot-claim --boothost http://boothost:9090 --tag S11075924402016" \
+    "$(identity "$V")"
 
 # ---------------------------------------------------------------------------
 # The drive a hook offers to assimilate onto (ZB_TAKEABLE).
@@ -396,6 +482,10 @@ survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behi
         SLAB="${BOOTING:-nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1}"
         CLAIMED="${CLAIMED_T:-}"
         INSTALL_OVER="${OVER:-}"
+        BOOTTAG="TESTTAG"; BOOTTAG_FROM="${FROM:-firmware}"; TRUST_SMBIOS="${TRUST:-}"
+        STORM_EFIVARS="$NOVARS"
+        . "$WORK/identity.sh" >/dev/null 2>&1
+        BOOTTAG_FROM="${FROM:-firmware}"
         . "$WORK/survey.sh" >/dev/null 2>&1
         echo "$LOCAL_DISK${FORCE_LOCAL:+ force}"
     )
@@ -447,11 +537,29 @@ check "no intent stated, but booting the local disk: no force" "" \
 over="$WORK/sdz"; : > "$over"
 check "the disk the probe ruled an install over is the one taken" "$over force" \
     "$(CLAIMED_T="$CLAIM_URI" OVER="$over" survey any "$SYS_ONLY")"
+# #249: under a guessed name the claim, and the appliance's silence about an
+# intent, may be another machine's. Only a blank drive is taken.
+check "a guessed name with no intent stated: the node's layout is left" "" \
+    "$(FROM=smbios CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "a guessed name: a lone system slab is left too" "" \
+    "$(FROM=smbios CLAIMED_T="$CLAIM_URI" survey any "$SYS_ONLY")"
+check "a guessed name: a blank drive is still taken" "/dev/sda" \
+    "$(FROM=smbios CLAIMED_T="$CLAIM_URI" survey any "/dev/sda: not a slab (bad slab magic)")"
+check "a guessed name: 'force' on the cmdline is not a licence" "" \
+    "$(FROM=smbios CLAIMED_T="$CLAIM_URI" survey force "$DATA_ONLY" "$SYS_HALF")"
+check "a guessed name, rd.stormblock.trust-smbios=1: forced as before" "/dev/sda force" \
+    "$(FROM=smbios TRUST=1 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "a name given on the cmdline is not a guess: forced" "/dev/sda force" \
+    "$(FROM=cmdline CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
+check "a guessed name's install ticket forces nothing" "" \
+    "$(FROM=smbios survey any "$DATA_ONLY")"
+TICKET=""
 NOINTENT=""
 check "an intent was stated: the old layout is updated, not forced" "/dev/sda" \
     "$(CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 check "and INSTALL_OVER alone forces nothing" "/dev/sda" \
     "$(CLAIMED_T="$CLAIM_URI" OVER="$over" survey any "$SYS_ONLY")"
 
-[ "$fail" -eq 0 ] && echo "all boot hook, probe, takeable and survey checks passed"
+[ "$fail" -eq 0 ] && echo "all boot hook, probe, identity, takeable and survey checks passed"
 exit "$fail"

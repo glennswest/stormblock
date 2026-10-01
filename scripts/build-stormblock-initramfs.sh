@@ -639,6 +639,8 @@ IP_CONF=""
 SLAB=""
 BOOTHOST=""
 BOOTTAG=""
+BOOTTAG_FROM=""
+TRUST_SMBIOS=""
 HOSTNQN=""
 META=""
 VOLUME=""
@@ -661,6 +663,10 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
         rd.stormblock.assimilate=*)  ASSIMILATE="${param#*=}" ;;
         rd.stormblock.wipe=*)        WIPE="${param#*=}" ;;
+        # A guessed (SMBIOS) identity may install over a disk after all: for
+        # an image whose machines are named by serial and booted without
+        # stormbootx (#249).
+        rd.stormblock.trust-smbios=*) TRUST_SMBIOS="${param#*=}" ;;
         rd.stormblock.bond=*)        BOND_MODE="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
@@ -680,6 +686,78 @@ for param in $(cat /proc/cmdline); do
         ip=*)                        IP_CONF="${param#*=}" ;;
     esac
 done
+
+# --- BEGIN boot identity (covered by tests/initramfs-boot-hook.sh)
+# Who this machine is, as the firmware that loaded this kernel claimed it
+# (#249).
+#
+# stormbootx names the machine before Linux exists - by DHCP and reverse DNS
+# on chassis that share a serial, by the engine's own name for it when the
+# claim reply gives one - and claims `boothost/<name>`. Working the name out
+# again here, from SMBIOS, gets a different answer exactly where it matters:
+# the eight blades of a Supermicro MicroCloud all report the chassis serial,
+# and server8 claimed server1's old synonym, booted 11.58 from the firmware
+# and then laid its disk from 11.50.
+#
+# So the firmware hands the name down, in two volatile EFI variables it sets
+# before it starts the loader (BOOTSERVICE_ACCESS | RUNTIME_ACCESS, not
+# non-volatile: they die with the boot that set them, and a stale one can
+# never name the next boot):
+#
+#   StormBootTag-<STORMBOOT_GUID>      the name it claimed boothost/<name> on
+#   StormBootHostNqn-<STORMBOOT_GUID>  the host NQN it attached as
+#
+# efivarfs shows each as four attribute bytes and then the value. Nothing
+# about the pallet's command line or the loader between the two changes.
+#
+# Order: the firmware's variable, then `rd.stormblock.tag=`, then (in
+# boothost_claim) the SMBIOS serial and UUID. Where it came from is kept in
+# BOOTTAG_FROM, because a guess is not allowed to destroy a disk (below).
+STORMBOOT_GUID="ab361f54-0166-44a4-a088-1ac22e98ab76"
+EFIVARS="${STORM_EFIVARS:-/sys/firmware/efi/efivars}"
+if [ -z "${STORM_EFIVARS:-}" ] && [ -d /sys/firmware/efi ] \
+   && [ -z "$(ls -A "$EFIVARS" 2>/dev/null)" ]; then
+    modprobe -q efivarfs 2>/dev/null || true
+    mount -t efivarfs efivarfs "$EFIVARS" 2>/dev/null || true
+fi
+efi_value() { # name -> the variable's value, if it is set and plausible
+    _f="$EFIVARS/$1-$STORMBOOT_GUID"
+    [ -r "$_f" ] || return 0
+    _v=$(tail -c +5 "$_f" 2>/dev/null | tr -d '\000\n\r ')
+    # A name goes into a URL path, an NQN and a volume name: anything outside
+    # this set is not one stormbootx would set, and is not used.
+    case "$_v" in
+    "") ;;
+    *[!A-Za-z0-9._:-]*) echo "  ignoring $1: '$_v' is not a name" >&2 ;;
+    *) printf '%s\n' "$_v" ;;
+    esac
+}
+FW_TAG=$(efi_value StormBootTag)
+FW_NQN=$(efi_value StormBootHostNqn)
+if [ -n "$FW_TAG" ]; then
+    if [ -n "$BOOTTAG" ] && [ "$BOOTTAG" != "$FW_TAG" ]; then
+        echo "WARNING: rd.stormblock.tag=$BOOTTAG, but the firmware claimed as $FW_TAG - using $FW_TAG"
+    fi
+    BOOTTAG="$FW_TAG"
+    BOOTTAG_FROM=firmware
+    echo "Machine name from the firmware: $BOOTTAG"
+elif [ -n "$BOOTTAG" ]; then
+    BOOTTAG_FROM=cmdline
+fi
+if [ -n "$FW_NQN" ]; then
+    if [ -n "$HOSTNQN" ] && [ "$HOSTNQN" != "$FW_NQN" ]; then
+        echo "WARNING: rd.stormblock.hostnqn=$HOSTNQN, but the firmware attached as $FW_NQN - using $FW_NQN"
+    fi
+    HOSTNQN="$FW_NQN"
+fi
+# Whether this boot's identity is a guess: SMBIOS read here, not a name the
+# firmware or the operator gave. A guess may claim an image to boot - there
+# is nothing better to boot - but never installs over a disk that carries a
+# slab: a wrong guess there is another machine's release laid over this one's.
+identity_guessed() {
+    [ "$BOOTTAG_FROM" = smbios ] && [ "${TRUST_SMBIOS:-}" != 1 ]
+}
+# --- END boot identity
 
 # Local-slab boot (stormcos) when a slab is named on the cmdline, or when the
 # initramfs carries a boot.toml handoff and no iSCSI portal was given.
@@ -1536,21 +1614,25 @@ if [ "$BOOT_MODE" = "local" ]; then
     CLAIMED=""
     boothost_claim() {
         [ -n "$CLAIMED" ] && return 0
-        # The identity is not worked out here. stormbootx read it from SMBIOS
+        # The identity is not worked out here. stormbootx named the machine
         # and claimed on it before Linux existed; this asks again in its own
         # right — the firmware's block device went with the UEFI that
         # published it — but on the *same* name, handed down rather than
-        # rediscovered. Two implementations of "who is this machine" drift,
-        # and the one in firmware is the one proven on hardware.
+        # rediscovered (the boot identity block, #249). Two implementations
+        # of "who is this machine" drift, and they did: on a MicroCloud blade
+        # the firmware's name is server8 and SMBIOS says the chassis serial.
+        if [ "$BOOTTAG_FROM" = firmware ] && [ -r "${STORM_DMI:-/sys/class/dmi/id}/product_serial" ]; then
+            _serial=$(tr -d " \n" < "${STORM_DMI:-/sys/class/dmi/id}/product_serial")
+            [ -n "$_serial" ] && [ "$_serial" != "$BOOTTAG" ] \
+                && echo "  SMBIOS serial $_serial is not used: the firmware claimed as $BOOTTAG"
+        fi
         #
-        # When nothing handed it down, read it where the firmware read it.
-        # Nothing appends to the command line between the pallet and the
-        # kernel, so a tag on it was a tag typed into the image spec - one
-        # image per machine, which is the opposite of an image. SMBIOS type 1
-        # serial is the Dell service tag, and the same field stormbootx
-        # claims on, so the name is the same by construction.
-        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_serial ]; then
-            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_serial)
+        # When nothing handed it down - a loader older than #249, or no
+        # stormbootx at all - read it where the old firmware read it, and
+        # say that it is a guess. SMBIOS type 1 serial is the Dell service
+        # tag. It is not a machine's identity on a chassis that shares one.
+        if [ -z "$BOOTTAG" ] && [ -r "${STORM_DMI:-/sys/class/dmi/id}/product_serial" ]; then
+            BOOTTAG=$(tr -d " \n" < "${STORM_DMI:-/sys/class/dmi/id}/product_serial")
             # "Not Specified" and friends are what firmware writes when it has
             # nothing to say, and they are not a machine's identity: every VM
             # from one hypervisor would answer the same string and claim each
@@ -1558,7 +1640,8 @@ if [ "$BOOT_MODE" = "local" ]; then
             case "$BOOTTAG" in
             NotSpecified|Default*|None|Unknown|ToBeFilledByO.E.M.|"") BOOTTAG="" ;;
             esac
-            [ -n "$BOOTTAG" ] && echo "Service tag from SMBIOS: $BOOTTAG"
+            [ -n "$BOOTTAG" ] && BOOTTAG_FROM=smbios \
+                && echo "Service tag from SMBIOS: $BOOTTAG (a guess: the firmware handed no name down)"
         fi
         # No serial? Use the SMBIOS UUID (stormcos#46).
         #
@@ -1577,9 +1660,13 @@ if [ "$BOOT_MODE" = "local" ]; then
         # hex string: `boothost/flow-1` is readable and `boothost/28bae105-…`
         # is not, and on hardware the serial *is* the service tag, so nothing
         # about the Dell path changes.
-        if [ -z "$BOOTTAG" ] && [ -r /sys/class/dmi/id/product_uuid ]; then
-            BOOTTAG=$(tr -d " \n" < /sys/class/dmi/id/product_uuid)
-            [ -n "$BOOTTAG" ] && echo "Machine UUID from SMBIOS: $BOOTTAG"
+        if [ -z "$BOOTTAG" ] && [ -r "${STORM_DMI:-/sys/class/dmi/id}/product_uuid" ]; then
+            BOOTTAG=$(tr -d " \n" < "${STORM_DMI:-/sys/class/dmi/id}/product_uuid")
+            [ -n "$BOOTTAG" ] && BOOTTAG_FROM=smbios \
+                && echo "Machine UUID from SMBIOS: $BOOTTAG (a guess: the firmware handed no name down)"
+        fi
+        if identity_guessed; then
+            echo "  a guessed name boots, and installs over no disk that carries a slab (#249)"
         fi
         if [ -z "$BOOTTAG" ]; then
             echo "Nothing identifies this machine to $BOOTHOST:"
@@ -1594,7 +1681,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         if [ -z "$HOSTNQN" ]; then
             HOSTNQN="nqn.2026-09.lo.storm:host-$BOOTTAG"
             export STORMBLOCK_HOST_NQN="$HOSTNQN"
-            echo "Host NQN: $HOSTNQN (from the service tag)"
+            echo "Host NQN: $HOSTNQN (from the machine's name)"
         fi
         echo "Asking $BOOTHOST which image $BOOTTAG boots..."
         CLAIMED=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" boot-claim --boothost "$BOOTHOST" --tag "$BOOTTAG")
@@ -1889,8 +1976,16 @@ if [ "$BOOT_MODE" = "local" ]; then
                     HELD_RC=$?
                     echo "  $HELD"
                 fi
+                # A guessed name's image is not a reason to replace this disk:
+                # it may be another machine's (#249). The disk boots.
+                if [ "$HELD_RC" = 1 ] && identity_guessed; then
+                    echo "  NOT INSTALLING: $BOOTTAG is a guess from SMBIOS, and its image may be"
+                    echo "  another machine's - booting $SLAB as before (rd.stormblock.trust-smbios=1 to allow)"
+                    HELD_RC=guess
+                fi
                 case "$HELD_RC" in
                 0) echo "  the same release: booting $SLAB, its data kept" ;;
+                guess) ;;
                 1)
                     echo "  INSTALL: a release $SLAB does not hold - booting the claimed image"
                     if [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ] \
@@ -2072,7 +2167,20 @@ if [ "$BOOT_MODE" = "local" ]; then
     # when the claim answered `intent: install`. That is the operator saying
     # "this drive is spent", so it is `force` - except that an explicit
     # `rd.stormblock.assimilate=off` on this machine still means no.
-    if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
+    #
+    # Neither install, and no drive that carries a slab, when this machine's
+    # name is a guess (#249): the image it claimed, and the intent the
+    # appliance stated, may be another machine's. A blank drive is still
+    # taken - nothing on it is lost, and the next boot under the right name
+    # finds the release not held and installs it.
+    GUESSED=""
+    if identity_guessed 2>/dev/null; then
+        GUESSED=1
+    fi
+    if [ -n "$GUESSED" ] && [ "${ASSIMILATE:-}" != off ]; then
+        echo "  $BOOTTAG is a guess from SMBIOS: only a blank drive is taken (#249)"
+        ASSIMILATE=blank
+    elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
             echo "  an install was requested, and rd.stormblock.assimilate=off says no"
         else
@@ -2088,7 +2196,9 @@ if [ "$BOOT_MODE" = "local" ]; then
     # release being replaced. Once the appliance states intents the marker is
     # not written and the intent decides; `off` on this machine still means no.
     INSTALL_FRESH=""
-    if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
+    if [ -n "$GUESSED" ]; then
+        :
+    elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
        && [ "${ASSIMILATE:-}" = force ]; then
         INSTALL_FRESH=1
     elif [ -n "${CLAIMED:-}" ] && [ "$SLAB" = "$CLAIMED" ] \
@@ -2663,7 +2773,9 @@ echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
 echo "  netboot: root=/dev/ublkb0   — both parameters below are optional:"
 echo "           rd.stormblock.boothost=<url>  overrides DHCP option 17, then http://boothost:9090"
-echo "           rd.stormblock.tag=<tag>       overrides the SMBIOS service tag"
+echo "           the name: the firmware's StormBootTag EFI variable (stormbootx), else"
+echo "           rd.stormblock.tag=<tag>, else the SMBIOS serial/UUID - a guess, which"
+echo "           installs over no disk carrying a slab unless rd.stormblock.trust-smbios=1"
 echo "           [rd.stormblock.hostnqn=<nqn>]  — the name firmware presented, echoed on every connect"
 echo "           — claims boothost/<tag> and uses the namespace it names as the slab"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file-or-nvme-tcp://...> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
