@@ -1184,13 +1184,19 @@ moving after the node is up, while its clones (`cni-bin`, the `-logs`
 volumes) are mounted and written. Each slot is moved under a fence: the move
 waits for the I/O on that slot, and an I/O that looked the slot up meanwhile
 finds the copy. Each copy is read back before any map names it. The slabs
-being emptied take no new allocations (#239; `docs/durability.md` rule 10).
+being emptied take no new allocations (#239; `docs/durability.md` rule 10),
+and from the moment a boot knows a flow-over is coming (`boot-local` once the
+disk is laid or the move resumed, `adopt-ublk` before it serves) nothing is
+written in place on them either: a write to an extent still on the appliance
+is a copy-on-write onto the local disk (rule 11).
 
 **A flow-over cut short is finished, not lost.** If the power goes while
 goldens are still moving off the appliance, the local records name extents on
 the old clone's slab. The next boot's `boot-local` claims a fresh clone of the
-same image, which carries the same slabs with the same bytes, maps the
-unmoved extents onto it, and hands the rest of the move to the successor. It
+same image, which carries the same slabs with the image's bytes, maps the
+unmoved extents onto it, and hands the rest of the move to the successor.
+Nothing the last boot wrote is on that clone, which is why nothing is written
+in place on the appliance during a flow-over. It
 does this only when `STORMBLOCK_BOOTHOST` names an appliance. Without one it
 warns and drops those extents. See `docs/durability.md` for what survives a
 power cut and why.
