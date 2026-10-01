@@ -33,6 +33,9 @@ set -euo pipefail
 STORMBLOCK_BIN="${1:-target/x86_64-unknown-linux-musl/release/stormblock}"
 KVER="${2:-$(uname -r)}"
 OUTPUT="${3:-/tmp/stormblock-initramfs.img}"
+# Absolute: the main archive is appended after a `cd` into the staging tree,
+# so a relative path would put it there, and the image would be microcode alone.
+case "$OUTPUT" in /*) ;; *) OUTPUT="$PWD/$OUTPUT" ;; esac
 
 if [ ! -f "$STORMBLOCK_BIN" ]; then
     echo "ERROR: stormblock binary not found: $STORMBLOCK_BIN"
