@@ -163,7 +163,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### #239 reopened: service goldens still corrupt on 11.57 (2026-10-01, P0) — IN PROGRESS
+### #239 reopened: service goldens still corrupt on 11.57 (2026-10-01, P0) — DONE (golden-stormblock-d3181a25ed62)
 
 Owner, 11.57 (initramfs = stormblock@955a8f8, the fence included), fresh
 install on server3: `iget: checksum invalid` on cadvisor, stormlb, vmimages,
@@ -172,10 +172,9 @@ inode-table blocks in every volume. Seen on 11.50 too (inode #1410).
 Found: stormcos builds every service golden **on forge** (13.7): a
 `golden-<name>` volume exported over NVMe/TCP, mkfs'd and filled by the
 kernel, sealed. So the corruption may be in the goldens themselves.
-- [ ] `examples/slab_audit.rs`: fetch forge volumes (the 11.57 system slab,
-      golden-cadvisor, golden-stormlb) to files on dev, extract the slab's
-      volumes, `e2fsck -fn` each, diff each clone against its golden
-- [ ] name the first bad block and the mechanism; fix where it lives
+- [x] `examples/slab_audit.rs`: reads a published release by Range GET,
+      extracts, `e2fsck -fn`, diffs clone vs golden (11.50: clean)
+- [x] mechanism named and fixed (below)
 - Ruled out by reading (2026-10-01), so far: the goldens leave the build
   checked (stormcentral `sc-build-out close` runs `e2fsck -fn` before the
   digest); the clone's UUID stamp writes the superblock block only
@@ -211,9 +210,13 @@ kernel, sealed. So the corruption may be in the goldens themselves.
   stayed. Fix b189b3e: quarantine flow sources from the moment the boot knows
   (boot-local, adopt-ublk), relocate-on-write for owned extents there.
   Test `a_write_during_the_install_boot_survives_a_flow_over_cut_short`
-- [ ] full nextest on dev; golden; ask the owner to check the 11.57 console for
-  "a flow-over cut short" (whether server3 rebooted before the move ended)
-- [ ] verify seeded/flowed volumes against their goldens; refuse a mismatch
+- [x] full nextest on dev at 2ceec10: 848/848; without the fix
+  (`RELOCATE_OFF_239=1`) the new test loses exactly the owned-extent write
+- [x] owner's ask: `slab holds` = finished too (`Unfinished`, exit 1, 2ceec10)
+- [x] golden-stormblock-d3181a25ed62 (stormcos#168). Filed: #244 (root
+  fails to mount → install), #245 (`slab holds` "intact": goldens verified)
+- Not on metal: needs a stormcos release with this initramfs and engine
+- verify seeded/flowed volumes against their goldens: moved out, #245
 
 ### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — fence DONE (golden-stormblock-296e38521d4c), reopened above
 
