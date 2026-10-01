@@ -6566,6 +6566,49 @@ file = "{state}"
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
+    /// Every unsealed volume overwritten, its first 64 MiB, with noise.
+    async fn noise_over_clones(mgr: &VolumeManager) {
+        let mut x = 0x239u64;
+        for (id, _name, size, _) in mgr.list_volumes().await {
+            if mgr.is_sealed(&id) {
+                continue;
+            }
+            let v = mgr.get_volume(&id).unwrap();
+            let mut buf = vec![0u8; MIB as usize];
+            let mut off = 0;
+            while off < size.min(64 * MIB) {
+                for c in buf.chunks_mut(8) {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    c.copy_from_slice(&x.to_le_bytes());
+                }
+                let n = (size - off).min(MIB) as usize;
+                v.write(off, &buf[..n]).await.unwrap();
+                off += n as u64;
+            }
+            v.flush().await.unwrap();
+        }
+    }
+
+    /// `compare`, for the sealed volumes only.
+    async fn compare_sealed(
+        when: &str,
+        want: &BTreeMap<String, (String, Vec<u64>)>,
+        mgr: &VolumeManager,
+    ) -> Vec<String> {
+        let sealed: std::collections::HashSet<String> = mgr
+            .list_volumes()
+            .await
+            .into_iter()
+            .filter(|(id, ..)| mgr.is_sealed(id))
+            .map(|(_, n, ..)| n)
+            .collect();
+        let want: BTreeMap<_, _> = want.iter().filter(|(n, _)| sealed.contains(*n)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        eprintln!("{when}: checking {} sealed volumes", want.len());
+        compare(when, &want, &digests(mgr).await)
+    }
+
     /// A real release (#239, reopened): `AUDIT_239_IMAGE` names a copy of a
     /// published image (`slab_audit fetch`). Installed fresh onto an empty
     /// disk with the system half flowed over, every volume must read as the
@@ -6609,42 +6652,51 @@ file = "{state}"
                 let reg = mgr.registry().read().await;
                 reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect()
             };
+            // The second time, the clones are written before the move as well:
+            // what the initramfs engine's consumers do on the appliance side.
+            let used = round == "over a used disk";
+            if used {
+                noise_over_clones(&mgr).await;
+                bad.extend(compare_sealed(&format!("{round}: goldens after writes before the move"), &before, &mgr).await);
+            }
             let (moved, failed) =
                 super::flow_system_half(mgr.gem(), mgr.registry(), &sources, dest, || mgr.persist())
                     .await
                     .expect("the flow-over finished");
             eprintln!("{round}: moved {moved}, failed {failed}");
-            bad.extend(compare(&format!("{round}: after the flow-over"), &before, &digests(&mgr).await));
+            if used {
+                bad.extend(compare_sealed(&format!("{round}: goldens after the flow-over"), &before, &mgr).await);
+            } else {
+                bad.extend(compare(&format!("{round}: after the flow-over"), &before, &digests(&mgr).await));
+            }
+            if used {
+                noise_over_clones(&mgr).await;
+                bad.extend(compare_sealed(&format!("{round}: goldens after writes in the engine that moved them"), &before, &mgr).await);
+                mgr.persist().await;
+            }
             drop(mgr);
 
             let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
-            let alone = digests(&local).await;
-            bad.extend(compare(&format!("{round}: the disk alone"), &before, &alone));
-            // A node that ran: every clone written over, end to end.
+            if used {
+                bad.extend(compare_sealed(&format!("{round}: goldens on the disk alone"), &before, &local).await);
+            } else {
+                bad.extend(compare(&format!("{round}: the disk alone"), &before, &digests(&local).await));
+            }
+            // A node that ran: every clone written over, and through the
+            // live engine first, the map the move just rewrote. No golden
+            // may change: a clone that writes in place into a slot it shares
+            // is a golden that reads as the clone (#239).
             if round == "fresh disk" {
-                let mut x = 0x239u64;
-                for (id, name, size, _) in local.list_volumes().await {
-                    if local.is_sealed(&id) {
-                        continue;
-                    }
-                    let v = local.get_volume(&id).unwrap();
-                    let mut buf = vec![0u8; MIB as usize];
-                    let mut off = 0;
-                    while off < size.min(64 * MIB) {
-                        for c in buf.chunks_mut(8) {
-                            x ^= x << 13;
-                            x ^= x >> 7;
-                            x ^= x << 17;
-                            c.copy_from_slice(&x.to_le_bytes());
-                        }
-                        let n = (size - off).min(MIB) as usize;
-                        v.write(off, &buf[..n]).await.unwrap();
-                        off += n as u64;
-                    }
-                    v.flush().await.unwrap();
-                    eprintln!("noise over {name}");
-                }
-                local.persist().await;
+                drop(local);
+                let (live, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
+                noise_over_clones(&live).await;
+                bad.extend(compare_sealed(&format!("{round}: goldens after the clones were written"), &before, &live).await);
+                live.persist().await;
+                drop(live);
+                let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
+                bad.extend(compare_sealed(&format!("{round}: goldens after a reopen"), &before, &local).await);
+                drop(local);
+                continue;
             }
             drop(local);
         }
