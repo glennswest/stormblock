@@ -163,6 +163,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### RAID at the shelf/bay level (2026-10-01, #252, P2) — WAITING ON THE OWNER
+
+Owner: a shelf (NetApp DS2246, 24 × 1 TB) laid out as RAID sets with hot
+spares. This conflicts with the recorded #142 decision ("redundancy is per
+volume, never a RAID across drives", docs/multi-drive.md), so nothing is
+built until the owner picks: (A) per-volume redundancy with per-shelf drive
+groups and reserved/standby spares, or (B) drive-level RAID sets (needs #168
+wired: journal, reassembly, array rebuild, scrub). Asked on #252
+(`needs-owner`); recommended A. Bay identity/SES is stormdrive's either way.
+
 ### The initramfs steps the clock from NTP, bounded (2026-10-01, #251, P1) — DONE
 
 X9 blades have no RTC battery (stormcos#213): after a power cut the kernel
