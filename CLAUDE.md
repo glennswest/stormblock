@@ -188,9 +188,17 @@ kernel, sealed. So the corruption may be in the goldens themselves.
   CoW, made on forge by 13.7's `compose/slab`) and so the one the background
   flow-over moves while it is mounted. Data-half volumes (seeded before
   export) are not reported.
-- Blocked: reading forge (exports or the release download) was refused by
-  this session's permission classifier as touching a shared resource; asked
-  the owner (2026-10-01).
+- Unblocked (master, 2026-10-01): read-only Range GETs of published release
+  images are allowed. `slab_audit` reads `http://…/image.img` by Range GET.
+- **11.50's published image is clean** (ef71961, on dev): all 126 volumes
+  pass `e2fsck -fn`; every clone differs from its golden in block 0 only
+  (the stamp). cadvisor there: inode table at blocks 7-518, ITABLE_ZEROED,
+  inodes 1-154 used, "Free inodes: 155-8192" — so the node's lookups of
+  #155/#156/#160/#164 name inodes that table never had: a directory and an
+  inode table from different states. The corruption is made on the node.
+- [ ] `cli::install_tests::a_real_release_installs_byte_for_byte` (ignored,
+  `AUDIT_239_IMAGE`): the real image installed fresh, then again over a
+  disk whose clones were overwritten (a reinstall over an older release)
 - [ ] verify seeded/flowed volumes against their goldens; refuse a mismatch
 
 ### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — fence DONE (golden-stormblock-296e38521d4c), reopened above
