@@ -300,7 +300,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds the data half | policy decides |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; the missing extents are dropped, with a warning |
-| `STORMBLOCK_BOOT_TAG` | this machine's tag for that claim | SMBIOS serial, else SMBIOS UUID |
+| `STORMBLOCK_BOOT_TAG` | this machine's tag for that claim | SMBIOS serial, else SMBIOS UUID (the initramfs passes `--tag`: the firmware's name first, #249) |
 | `STORMBLOCK_RESUME_SOURCE` | a device path or `nvme-tcp://` URI used instead of claiming (tests, recovery by hand) | claim through `STORMBLOCK_BOOTHOST` |
 
 ### The config file
@@ -764,6 +764,13 @@ DHCP's job stays the one it is good at: handing the machine an IP.
 
 A service tag is the right key because it is the machine, not a NIC: it
 survives a network card being swapped, which a MAC does not.
+
+The initramfs claims as the machine **the firmware claimed as** (#249):
+stormbootx hands its name and host NQN down in two volatile EFI variables
+(`StormBootTag`, `StormBootHostNqn`), and only when nothing was handed down
+does `/init` fall back to the SMBIOS serial or UUID — a guess, which boots but
+never installs over a disk carrying a slab (`rd.stormblock.trust-smbios=1`
+lifts that). See `docs/boot-hooks.md` "Whose image".
 
 ### Where a volume is placed: `system` or `data`
 

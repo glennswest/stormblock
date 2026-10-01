@@ -93,6 +93,46 @@ is true of a reboot as much as an install. Until intents can be used:
 Once the appliance states intents, the marker is not written and the intent
 decides (`install` = fresh; keeping data is #234's `upgrade`).
 
+### Whose image: the name the firmware claimed on (#249)
+
+`/init` claims as the machine **stormbootx claimed as**, not as whatever it
+works out for itself. stormbootx names the machine (DHCP and reverse DNS on a
+chassis whose blades share one SMBIOS serial, the engine's own host name when
+the claim reply gives one) and, before it starts the loader, sets two
+**volatile** EFI variables (attributes `BOOTSERVICE_ACCESS | RUNTIME_ACCESS`,
+`0x6`, never non-volatile) under vendor GUID
+`ab361f54-0166-44a4-a088-1ac22e98ab76`:
+
+| variable | value (ASCII, no NUL) |
+|---|---|
+| `StormBootTag` | the name it claimed `boothost/<name>` on |
+| `StormBootHostNqn` | the host NQN it attached as |
+
+Linux reads them from efivarfs (`/sys/firmware/efi/efivars/<Name>-<guid>`,
+four attribute bytes then the value; `/init` mounts efivarfs if nothing has).
+A value outside `[A-Za-z0-9._:-]` is ignored. Nothing about the pallet's
+command line or stormuefi changes.
+
+Order: the firmware's variable, then `rd.stormblock.tag=`, then the SMBIOS
+serial, then the SMBIOS UUID. A cmdline tag (or `rd.stormblock.hostnqn=`)
+that differs from the firmware's is reported on the console and the
+firmware's is used; so is an SMBIOS serial that differs.
+
+**A guessed name never installs over a disk.** A name read from SMBIOS
+because nothing handed one down may be another machine's — eight MicroCloud
+blades report one chassis serial, and server8 booted 11.58 from stormbootx and
+then laid its disk from server1's old synonym, 11.50. Under a guess:
+
+- the local-slab probe boots the local disk instead of installing a release it
+  does not hold, ticket or not;
+- the survey takes only a **blank** drive (`blank`): no `force` from #236's
+  no-intent marker or from an install ticket, and no drive carrying a slab;
+- the guessed image still boots when there is nothing local to boot — there is
+  nothing better — and the next boot under the right name installs.
+
+`rd.stormblock.trust-smbios=1` lifts this for an image whose machines are
+named by serial and booted without a loader that hands a name down.
+
 **The default is to take one, because this image is an installer.** It was
 `off`, which made the common case — one drive, netbooted to be installed — do
 nothing and keep every write on the appliance until somebody knew to add a
