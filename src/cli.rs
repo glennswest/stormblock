@@ -6670,7 +6670,13 @@ file = "{state}"
 
         let mut bad = Vec::new();
         let mut before = BTreeMap::new();
+        // `AUDIT_239_ROUNDS=used` runs the second only (the disk is laid
+        // fresh by it all the same, over an empty file).
+        let only_used = std::env::var("AUDIT_239_ROUNDS").is_ok_and(|r| r == "used");
         for round in ["fresh disk", "over a used disk"] {
+            if only_used && round == "fresh disk" {
+                continue;
+            }
             // Every boot claims a fresh clone of the release: a pristine copy.
             let claim = dir.join("audit-239-claim.raw").display().to_string();
             let st = std::process::Command::new("cp")
@@ -6689,21 +6695,36 @@ file = "{state}"
                 .expect("the disk is laid");
             bad.extend(compare(&format!("{round}: after the seed"), &before, &digests(&mgr).await));
             let dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
+            let data_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+            // The second time, as on a node: the initramfs engine's consumers
+            // write the clones, the engine stops, and its successor opens the
+            // claim and the disk from their records (`adopt-ublk`) and runs
+            // the flow-over itself. It must see every write the first made.
+            let used = round == "over a used disk";
+            let mut after_noise = BTreeMap::new();
+            if used {
+                noise_over_clones(&mgr).await;
+                bad.extend(compare_sealed(&format!("{round}: goldens after the incumbent's writes"), &before, &mgr).await);
+                after_noise = digests_where_unsealed(&mgr).await;
+                mgr.persist().await;
+                drop(mgr);
+                let mut succ = super::open_slabs_and_restore(&[claim.clone(), flow.disk.clone()], None).await.unwrap();
+                let local: Vec<_> = [data_dest, dest].into_iter().filter(|id| succ.is_metadata_slab(id)).collect();
+                if !local.is_empty() {
+                    succ.keep_metadata_in_first(&local);
+                }
+                let got = digests(&succ).await;
+                bad.extend(compare(&format!("{round}: the successor's clones"), &after_noise, &got));
+                bad.extend(compare(&format!("{round}: the successor's goldens"), &before.iter().filter(|(n, _)| !after_noise.contains_key(*n)).map(|(k, v)| (k.clone(), v.clone())).collect(), &got));
+                mgr = succ;
+            }
             let sources: Vec<_> = {
                 let reg = mgr.registry().read().await;
                 reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect()
             };
-            // The second time, the clones are written before the move as well:
-            // what the initramfs engine's consumers do on the appliance side.
-            let used = round == "over a used disk";
-            if used {
-                noise_over_clones(&mgr).await;
-                bad.extend(compare_sealed(&format!("{round}: goldens after writes before the move"), &before, &mgr).await);
-            }
             // And while the move runs, one writer per clone keeps rewriting
             // the blocks of its first extent — where an ext4's inode table is,
             // the block the node lost — against a model of what it wrote.
-            let after_noise = if used { digests_where_unsealed(&mgr).await } else { BTreeMap::new() };
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let mut writers = Vec::new();
             if used {
