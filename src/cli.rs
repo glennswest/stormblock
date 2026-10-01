@@ -6573,6 +6573,40 @@ file = "{state}"
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
+    async fn digests_where_unsealed(mgr: &VolumeManager) -> BTreeMap<String, (String, Vec<u64>)> {
+        let all = digests(mgr).await;
+        let mut out = BTreeMap::new();
+        for (id, name, ..) in mgr.list_volumes().await {
+            if !mgr.is_sealed(&id) {
+                if let Some(d) = all.get(&name) {
+                    out.insert(name, d.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Every MiB but the first (which the live writers own) as it was.
+    async fn compare_rest(
+        when: &str,
+        want: &BTreeMap<String, (String, Vec<u64>)>,
+        mgr: &VolumeManager,
+    ) -> Vec<String> {
+        let got = digests(mgr).await;
+        let mut bad = Vec::new();
+        for (name, (_, per)) in want {
+            match got.get(name) {
+                None => bad.push(format!("{when}: {name} missing")),
+                Some((_, g)) => {
+                    if let Some(i) = (1..per.len()).find(|&i| per[i] != g[i]) {
+                        bad.push(format!("{when}: {name} differs at MiB {i}"));
+                    }
+                }
+            }
+        }
+        bad
+    }
+
     /// Every unsealed volume overwritten, its first 64 MiB, with noise.
     async fn noise_over_clones(mgr: &VolumeManager) {
         let mut x = 0x239u64;
@@ -6666,18 +6700,62 @@ file = "{state}"
                 noise_over_clones(&mgr).await;
                 bad.extend(compare_sealed(&format!("{round}: goldens after writes before the move"), &before, &mgr).await);
             }
+            // And while the move runs, one writer per clone keeps rewriting
+            // the blocks of its first extent — where an ext4's inode table is,
+            // the block the node lost — against a model of what it wrote.
+            let after_noise = if used { digests_where_unsealed(&mgr).await } else { BTreeMap::new() };
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut writers = Vec::new();
+            if used {
+                for (id, name, _, _) in mgr.list_volumes().await {
+                    if mgr.is_sealed(&id) {
+                        continue;
+                    }
+                    let v = mgr.get_volume(&id).unwrap();
+                    let stop = stop.clone();
+                    writers.push(tokio::spawn(async move {
+                        let mut model = vec![0u8; MIB as usize];
+                        v.read(0, &mut model).await.unwrap();
+                        let mut x = 0x5EEDu64 ^ name.len() as u64;
+                        let mut n = 0u64;
+                        while !stop.load(std::sync::atomic::Ordering::Relaxed) || n < 64 {
+                            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                            let b = ((x >> 33) % 256) as usize;
+                            let blk = vec![(n % 251) as u8 + 1; 4096];
+                            v.write(b as u64 * 4096, &blk).await.unwrap();
+                            model[b * 4096..(b + 1) * 4096].copy_from_slice(&blk);
+                            n += 1;
+                        }
+                        v.flush().await.unwrap();
+                        (name, v, model, n)
+                    }));
+                }
+            }
             let (moved, failed) =
                 super::flow_system_half(mgr.gem(), mgr.registry(), &sources, dest, || mgr.persist())
                     .await
                     .expect("the flow-over finished");
-            eprintln!("{round}: moved {moved}, failed {failed}");
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut models = BTreeMap::new();
+            for w in writers {
+                let (name, v, model, n) = w.await.unwrap();
+                let mut got = vec![0u8; MIB as usize];
+                v.read(0, &mut got).await.unwrap();
+                let lost: Vec<usize> =
+                    (0..256).filter(|&b| got[b * 4096..(b + 1) * 4096] != model[b * 4096..(b + 1) * 4096]).collect();
+                if !lost.is_empty() {
+                    bad.push(format!("{round}: clone {name}: {} of 256 blocks of extent 0 not as written ({n} writes), first {:?}", lost.len(), &lost[..lost.len().min(8)]));
+                }
+                models.insert(name, model);
+            }
+            eprintln!("{round}: moved {moved}, failed {failed}, {} live writers", models.len());
             if used {
+                bad.extend(compare_rest(&format!("{round}: clones after the flow-over"), &after_noise, &mgr).await);
                 bad.extend(compare_sealed(&format!("{round}: goldens after the flow-over"), &before, &mgr).await);
             } else {
                 bad.extend(compare(&format!("{round}: after the flow-over"), &before, &digests(&mgr).await));
             }
             if used {
-                noise_over_clones(&mgr).await;
                 bad.extend(compare_sealed(&format!("{round}: goldens after writes in the engine that moved them"), &before, &mgr).await);
                 mgr.persist().await;
             }
@@ -6686,6 +6764,17 @@ file = "{state}"
             let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
             if used {
                 bad.extend(compare_sealed(&format!("{round}: goldens on the disk alone"), &before, &local).await);
+                for (name, model) in &models {
+                    let Ok(id) = super::resolve_boot_volume(&local, name).await else {
+                        bad.push(format!("{round}: clone {name} missing on the disk alone"));
+                        continue;
+                    };
+                    let mut got = vec![0u8; MIB as usize];
+                    local.get_volume(&id).unwrap().read(0, &mut got).await.unwrap();
+                    if &got != model {
+                        bad.push(format!("{round}: clone {name}: extent 0 on the disk alone is not what was written"));
+                    }
+                }
             } else {
                 bad.extend(compare(&format!("{round}: the disk alone"), &before, &digests(&local).await));
             }
