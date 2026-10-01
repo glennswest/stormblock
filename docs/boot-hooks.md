@@ -73,8 +73,9 @@ is true of a reboot as much as an install. Until intents can be used:
 - **The local-slab probe asks about the release.** A local disk that can boot
   the node is no longer booted on sight when a boothost is known: `/init`
   claims the machine's image and asks `stormblock slab holds <disk> <image>`
-  whether the disk already holds every golden (sealed volume, by id) of it.
-  Held is a reboot: the disk boots, its data kept. Not held is an **install**:
+  whether the disk already holds every golden (sealed volume, by id) of it,
+  with the install finished: records that still place extents on a slab not
+  on the disk (a flow-over cut short) count as not held (#239). Held is a reboot: the disk boots, its data kept. Not held is an **install**:
   the claimed image boots and the disk is installed over. An install the
   appliance asked for (the ticket) installs whatever the disk holds. No image,
   or "cannot say" (exit 2), boots the disk as before.

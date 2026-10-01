@@ -1154,8 +1154,10 @@ Three answers, deliberately distinct, because a boot decision turns on which:
 
 `slab holds <local> <image>` asks the release question the same way (#236):
 does the local drive already hold every golden (sealed volume, by id) of the
-image — a path, a file or an `nvme-tcp://` URI? Exit 0 held, 1 not held, 2
-cannot say. `/init` uses it to tell an install from a reboot when the
+image — a path, a file or an `nvme-tcp://` URI — and has the install
+finished, i.e. do its records place no extent on a slab that is not on the
+drive (#239)? Exit 0 held, 1 not held (a golden missing, or an install whose
+flow-over never finished), 2 cannot say. `/init` uses it to tell an install from a reboot when the
 appliance serves no boot intent (`docs/boot-hooks.md`, "An install without an
 intent").
 
