@@ -6565,4 +6565,89 @@ file = "{state}"
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
+
+    /// A real release (#239, reopened): `AUDIT_239_IMAGE` names a copy of a
+    /// published image (`slab_audit fetch`). Installed fresh onto an empty
+    /// disk with the system half flowed over, every volume must read as the
+    /// image's; then every clone is overwritten with noise (a node that ran)
+    /// and the same image installed fresh over that disk, which must leave
+    /// no noise behind anywhere. Not routine: it needs the image.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn a_real_release_installs_byte_for_byte() {
+        let Ok(image) = std::env::var("AUDIT_239_IMAGE") else {
+            eprintln!("SKIP: set AUDIT_239_IMAGE to a release image");
+            return;
+        };
+        let dir = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap_or_else(|_| "tmp".into()));
+        let disk = dir.join("audit-239-disk.raw").display().to_string();
+        let _ = std::fs::remove_file(&disk);
+        std::fs::File::create(&disk).unwrap().set_len(200 * 1024 * MIB).unwrap();
+
+        let mut bad = Vec::new();
+        let mut before = BTreeMap::new();
+        for round in ["fresh disk", "over a used disk"] {
+            // Every boot claims a fresh clone of the release: a pristine copy.
+            let claim = dir.join("audit-239-claim.raw").display().to_string();
+            let st = std::process::Command::new("cp")
+                .args(["--sparse=always", "--reflink=auto", &image, &claim])
+                .status()
+                .unwrap();
+            assert!(st.success(), "copying the image");
+            let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+            if before.is_empty() {
+                before = digests(&mgr).await;
+                eprintln!("{} volumes in the image", before.len());
+            }
+            let flow = super::take_local_disk(&mut mgr, &disk, "hot", true)
+                .await
+                .unwrap()
+                .expect("the disk is laid");
+            bad.extend(compare(&format!("{round}: after the seed"), &before, &digests(&mgr).await));
+            let dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
+            let sources: Vec<_> = {
+                let reg = mgr.registry().read().await;
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect()
+            };
+            let (moved, failed) =
+                super::flow_system_half(mgr.gem(), mgr.registry(), &sources, dest, || mgr.persist())
+                    .await
+                    .expect("the flow-over finished");
+            eprintln!("{round}: moved {moved}, failed {failed}");
+            bad.extend(compare(&format!("{round}: after the flow-over"), &before, &digests(&mgr).await));
+            drop(mgr);
+
+            let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
+            let alone = digests(&local).await;
+            bad.extend(compare(&format!("{round}: the disk alone"), &before, &alone));
+            // A node that ran: every clone written over, end to end.
+            if round == "fresh disk" {
+                let mut x = 0x239u64;
+                for (id, name, size, _) in local.list_volumes().await {
+                    if local.is_sealed(&id) {
+                        continue;
+                    }
+                    let v = local.get_volume(&id).unwrap();
+                    let mut buf = vec![0u8; MIB as usize];
+                    let mut off = 0;
+                    while off < size.min(64 * MIB) {
+                        for c in buf.chunks_mut(8) {
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            c.copy_from_slice(&x.to_le_bytes());
+                        }
+                        let n = (size - off).min(MIB) as usize;
+                        v.write(off, &buf[..n]).await.unwrap();
+                        off += n as u64;
+                    }
+                    v.flush().await.unwrap();
+                    eprintln!("noise over {name}");
+                }
+                local.persist().await;
+            }
+            drop(local);
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
 }
