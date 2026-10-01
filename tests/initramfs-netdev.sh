@@ -125,7 +125,7 @@ mkdir -p "$t/aux/mlx4_core.eth.0"; echo "auxiliary:mlx4_core.eth" > "$t/aux/mlx4
 out=$(STUB_NO_NETDEV=1 run "$t" 2)
 check "a port that never appears is waited for, bounded, and named" \
     "0000:05:00.0" "$(grep -o '0000:05:00.0' "$t/out" | head -1)"
-check "the aux bus is walked during the wait" "1" \
+check "the aux bus is walked every second of the wait" "2" \
     "$(grep -c 'auxiliary:mlx4_core.eth' "$t/log")"
 
 # Functions that are not NICs, or that no driver took, are not waited for.
