@@ -176,6 +176,21 @@ kernel, sealed. So the corruption may be in the goldens themselves.
       golden-cadvisor, golden-stormlb) to files on dev, extract the slab's
       volumes, `e2fsck -fn` each, diff each clone against its golden
 - [ ] name the first bad block and the mechanism; fix where it lives
+- Ruled out by reading (2026-10-01), so far: the goldens leave the build
+  checked (stormcentral `sc-build-out close` runs `e2fsck -fn` before the
+  digest); the clone's UUID stamp writes the superblock block only
+  (mkfs-ext4 v3 `flush_superblock`); ublk WRITE_ZEROES zeroes exactly its
+  range; every ThinVolumeHandle read/write/CoW path takes the fence; 11.57's
+  stormblock golden (296e38521d4c) is 955a8f8, fence included.
+- Where the bad bytes are: a 32M `mkfs.ext4 -b 4096 -O ^has_journal -m 0`
+  has its inode table at block 37, so #145–176 are blocks 46–47 (184–192 KiB),
+  in extent 0 — the one slot of each slab clone that is private (the stamp's
+  CoW, made on forge by 13.7's `compose/slab`) and so the one the background
+  flow-over moves while it is mounted. Data-half volumes (seeded before
+  export) are not reported.
+- Blocked: reading forge (exports or the release download) was refused by
+  this session's permission classifier as touching a shared resource; asked
+  the owner (2026-10-01).
 - [ ] verify seeded/flowed volumes against their goldens; refuse a mismatch
 
 ### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — fence DONE (golden-stormblock-296e38521d4c), reopened above
