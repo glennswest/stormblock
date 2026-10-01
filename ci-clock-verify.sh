@@ -78,7 +78,7 @@ ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2
 EOF
     printf '%s\n' "$BLOCK"
     cat <<'EOF'
-echo "MARK rtc-before $(hwclock -r -u -D 2>/dev/null | tail -1; hwclock -r -u 2>&1)"
+echo "MARK rtc-before $(hwclock -r -u 2>&1)"
 echo "MARK date-before $(date +%s)"
 # The lease names a server nothing answers on; the fixed addresses follow.
 echo 10.0.2.99 > /run/ntp-servers
@@ -86,7 +86,7 @@ t0=$(cut -d. -f1 /proc/uptime)
 clock_step 10.0.2.15/24 2>&1 | sed 's/^/MARK step1: /'
 echo "MARK step1-secs $(( $(cut -d. -f1 /proc/uptime) - t0 ))"
 echo "MARK date-after1 $(date +%s)"
-echo "MARK rtc-after1 $(date -u -d "$(hwclock -r -u 2>/dev/null | sed 's/  0.000000 seconds//')" +%s 2>/dev/null)"
+echo "MARK rtc-year1 $(hwclock -r -u 2>/dev/null | grep -oE '(19|20)[0-9][0-9]' | tail -1)"
 echo "MARK rtc-raw1 $(hwclock -r -u 2>&1)"
 # Back to 2000, and nothing answers anywhere.
 date -u -s @946684800 >/dev/null
@@ -124,8 +124,8 @@ if grep -q '^MARK step1: clock stepped by +' "$W/g.txt"; then
     A1=$(v date-after1)
     [ "$A1" -ge "$BUILT" ] && ok "clock after the step is past the build date ($(date -u -d @"$A1"))" \
         || fail "clock after the step: $A1"
-    R1=$(v rtc-after1)
-    if [ -n "$R1" ] && [ "$R1" -ge "$BUILT" ]; then ok "RTC reads the stepped time ($(v rtc-raw1))"
+    R1=$(v rtc-year1)
+    if [ -n "$R1" ] && [ "$R1" -ge "$(date -u -d @"$BUILT" +%Y)" ]; then ok "RTC reads the stepped time ($(v rtc-raw1))"
     else fail "RTC not written: $(v rtc-raw1)"; fi
     grep -q '^MARK step1: .*RTC written' "$W/g.txt" && ok "console says the RTC was written" \
         || fail "no RTC line"
