@@ -88,5 +88,11 @@ t=$(make_tree nospeed eth0:1:1000 eth1:1:0)
 rm -f "$WORK/net.nospeed/eth1/speed"
 check "unreadable speed sorts last, does not break ordering" "eth0 eth1" "$(select_on "$t")"
 
+# Two live ports at one speed (an X9 blade cabled on ixgbe and the ConnectX-3,
+# both 10G, #250): the order is fixed - the later name leads - so the same
+# machine picks the same port every boot. Both are printed above it.
+t=$(make_tree tie eth0:1:10000 eth1:1:10000)
+check "equal speeds order the same way every boot" "eth1 eth0" "$(select_on "$t")"
+
 [ "$fail" -eq 0 ] && echo "all uplink selection checks passed"
 exit "$fail"

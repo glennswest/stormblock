@@ -907,6 +907,36 @@ else
     echo "  udev not present in this image"
 fi
 
+# --- BEGIN protocol halves (covered by tests/initramfs-netdev.sh)
+# The network half of a driver that comes in two (#250).
+#
+# The walk above loads what a device's modalias names, and for most NICs that
+# is the whole driver. Not for the ConnectX-3: its PCI ID (15b3:1003) names
+# `mlx4_core`, and the Ethernet ports are `mlx4_en`, which matches only
+# `auxiliary:mlx4_core.eth` - a device mlx4_core creates at the *end* of a
+# probe that talks to the card's firmware for seconds. By then the walk has
+# had a pass that loaded nothing new and stopped, so the X9 blades booted with
+# the Intel port alone while stormbootx had just DHCP'd over the Mellanox.
+#
+# So: core loaded -> its network half, asked for by name. Checked against the
+# 6.17 modules: mlx5_core, qede, bnxt_en, ice and i40e each carry their own
+# netdev or match a PCI ID, so mlx4 is the one pair today. Loading the half
+# before the core's devices exist is fine: it binds them when they appear.
+PROTO_HALVES="${STORM_PROTO_HALVES:-mlx4_core:mlx4_en}"
+SYS_MODULE="${STORM_SYS_MODULE:-/sys/module}"
+MODPROBE="${STORM_MODPROBE:-modprobe}"
+for pair in $PROTO_HALVES; do
+    core="${pair%%:*}"; half="${pair#*:}"
+    [ -d "$SYS_MODULE/$core" ] || continue
+    [ -d "$SYS_MODULE/$half" ] && continue
+    if $MODPROBE -q "$half" 2>/dev/null; then
+        echo "  $half loaded: the network half of $core"
+    else
+        echo "  WARNING: $core is loaded but $half would not load - its ports will not appear"
+    fi
+done
+# --- END protocol halves
+
 # The ones no device announces: filesystems, and the block driver this image
 # exports its root through.
 for m in ublk_drv erofs overlay ext4 xfs vfat; do
@@ -972,6 +1002,48 @@ ip addr add 169.254.169.254/32 dev lo 2>/dev/null || true
 # up first and the link is given time to negotiate. That wait is not a fixed
 # sleep: it ends as soon as anything reports carrier, so a machine whose link
 # is already up does not pay for one that is slow.
+# --- BEGIN netdev wait (covered by tests/initramfs-netdev.sh)
+# Every NIC a driver took has to be a network interface before the ports are
+# counted (#250). A driver can bind a PCI function and make its netdev
+# seconds later - mlx4_en's ports appear only once mlx4_core has finished
+# with the card's firmware - and the uplink selection below enumerates once.
+# So wait, bounded, until every network-class PCI function with a driver has
+# a netdev under it, walking the auxiliary bus's modaliases each second for a
+# split driver whose device came late. A function that never gets one is
+# named: a ConnectX-3 port set to InfiniBand is one, and says why the wait
+# took its full length.
+PCI_SYSFS="${STORM_PCI_SYSFS:-/sys/bus/pci/devices}"
+AUX_SYSFS="${STORM_AUX_SYSFS:-/sys/bus/auxiliary/devices}"
+NETDEV_WAIT="${STORM_NETDEV_WAIT:-15}"
+netdev_missing() {
+    for _d in "$PCI_SYSFS"/*; do
+        case "$(cat "$_d/class" 2>/dev/null)" in 0x02*) ;; *) continue ;; esac
+        [ -e "$_d/driver" ] || continue
+        [ -n "$(ls "$_d/net" 2>/dev/null)" ] && continue
+        printf '%s ' "$(basename "$_d")"
+    done
+}
+nd_waited=0
+MISSING_NET=$(netdev_missing)
+while [ -n "$MISSING_NET" ] && [ "$nd_waited" -lt "$NETDEV_WAIT" ]; do
+    [ "$nd_waited" -eq 0 ] && echo "  waiting for the network interfaces of: $MISSING_NET"
+    for _ma in "$AUX_SYSFS"/*/modalias; do
+        [ -f "$_ma" ] && ${MODPROBE:-modprobe} -q "$(cat "$_ma")" 2>/dev/null
+    done
+    sleep 1
+    nd_waited=$((nd_waited + 1))
+    MISSING_NET=$(netdev_missing)
+done
+if [ -n "$MISSING_NET" ]; then
+    echo "  WARNING: no network interface after ${nd_waited}s for: $MISSING_NET"
+    for _d in $MISSING_NET; do
+        echo "    $_d driver $(basename "$(readlink "$PCI_SYSFS/$_d/driver" 2>/dev/null)") $(cat "$PCI_SYSFS/$_d/modalias" 2>/dev/null)"
+    done
+elif [ "$nd_waited" -gt 0 ]; then
+    echo "  every network port is an interface after ${nd_waited}s"
+fi
+# --- END netdev wait
+
 # --- BEGIN uplink selection (covered by tests/initramfs-nic-selection.sh)
 LINK_WAIT="${STORM_LINK_WAIT:-10}"
 # Injectable only so the selection can be tested against a fake tree; nothing
