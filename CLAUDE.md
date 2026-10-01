@@ -163,7 +163,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The ConnectX-3 port in the initramfs: mlx4_en (2026-10-01, #250, P0) — IN PROGRESS
+### The ConnectX-3 port in the initramfs: mlx4_en (2026-10-01, #250, P0) — DONE
 
 server7/server8 (X9 blades, 11.58): stormbootx's mlx4 brings the ConnectX-3
 up, the initramfs lists only the Intel. `mlx4_core` matches the PCI ID;
@@ -179,9 +179,15 @@ copied whole; ConnectX-3 needs no firmware file.
   modaliases each second; name what never appeared
 - uplink tie (equal speed, both carrier): unchanged and pinned by a test
   (sort -r: the later name); both ports are printed
-- [ ] block + `tests/initramfs-nic-selection.sh` (or a new test) cases
-- [ ] build an initramfs on dev and check mlx4_en.ko + deps are in it
-- [ ] docs, CHANGELOG; stormcos#211 is the running system's side
+- [x] blocks + `tests/initramfs-netdev.sh` (7) + a tie case in
+      `tests/initramfs-nic-selection.sh` (4bea801..d38b07c); all initramfs
+      tests pass under sh and busybox sh on dev
+- [x] an initramfs built on dev for 6.17.1 carries mlx4_core.ko.xz and
+      mlx4_en.ko.xz (modules.dep: en → core) and both blocks; /init parses
+- [x] docs (README "The initramfs network"), CHANGELOG; stormcos#211 is the
+      running system's side
+- Not on metal: needs a stormcos release whose initramfs is built from
+  stormblock ≥ 4bea801, then an X9 blade cabled on the Mellanox only
 
 ### The initramfs claims as the machine stormbootx claimed as (2026-10-01, #249, P0) — DONE
 

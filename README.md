@@ -1236,6 +1236,31 @@ ports share the 8250 driver's one console, and the first wins).
 `tests/initramfs-console.sh` pins the block; `ci-console-verify.sh` boots
 dev's kernel in QEMU with it as PID 1 and two serial ports as the consoles.
 
+### The initramfs network: every port a driver took
+
+`/init` loads drivers by walking every device's modalias until a pass loads
+nothing new. Some NICs come in two modules and the walk finds only the first.
+The ConnectX-3 (15b3:1003) matches `mlx4_core`, and its Ethernet ports are
+`mlx4_en`, matched only by the auxiliary device `auxiliary:mlx4_core.eth`.
+`mlx4_core` creates that device at the end of a probe that takes seconds,
+after the walk has stopped (#250). So, after discovery:
+
+- **The network half is loaded by name.** A table of core → half
+  (`mlx4_core:mlx4_en`) is checked against `/sys/module`. On the 6.17 modules,
+  mlx5_core, qede, bnxt_en, ice and i40e each carry their own netdev or match
+  a PCI ID, so mlx4 is the only pair today.
+- **Late ports are waited for.** Before the uplink is chosen, `/init` waits up
+  to 15 s for every network-class PCI function with a driver bound to have a
+  netdev, walking the auxiliary bus's modaliases each second. It names any
+  function that never gets one (a ConnectX-3 port set to InfiniBand is one).
+
+Then the uplink selection sees every port, picks carrier first and fastest
+next, and prints them all. Ports at equal speed always order the same way:
+the later name first.
+
+`tests/initramfs-netdev.sh` and `tests/initramfs-nic-selection.sh` pin both.
+The running system loading `mlx4_en` itself is stormcos#211.
+
 ### Stopping a node
 
 Every step of shutdown is bounded, and that is a correctness property rather
