@@ -69,6 +69,11 @@ mkdir -p "$INITRD_DIR"/{bin,sbin,usr/sbin,lib/modules,dev,proc,sys,sysroot,etc,r
 # path: /init tests for executables in here and does nothing when there are
 # none.
 mkdir -p "$INITRD_DIR/etc/stormblock/boot.d"
+# When this image was built, in epoch seconds: the floor /init sets the clock
+# to when no time server answers and the clock reads earlier (#251). A
+# reproducible build says when with SOURCE_DATE_EPOCH.
+BUILD_EPOCH="${SOURCE_DATE_EPOCH:-$(date -u +%s)}"
+echo "$BUILD_EPOCH" > "$INITRD_DIR/etc/stormblock/build-date"
 
 # Busybox (static) + a symlink for **every applet it has**.
 #
@@ -648,6 +653,7 @@ OVERLAY=""
 IMAGE_STORE=""
 WRITABLE=""
 MOUNTS=""
+NTP_MODE=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -668,6 +674,9 @@ for param in $(cat /proc/cmdline); do
         # stormbootx (#249).
         rd.stormblock.trust-smbios=*) TRUST_SMBIOS="${param#*=}" ;;
         rd.stormblock.bond=*)        BOND_MODE="${param#*=}" ;;
+        # `off`: no NTP step in the initramfs (#251); the build-date floor
+        # still applies.
+        rd.stormblock.ntp=*)         NTP_MODE="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the
@@ -1492,24 +1501,92 @@ else
     echo "WARNING: $IFACE has no address - nothing on this node will be reachable"
 fi
 
-# The clock is not set here.
-#
-# It used to be, and it cost 50 seconds when the name it was given would not
-# resolve, then 5 seconds once bounded — for a machine whose RTC is already
-# close enough that nothing in this script would read a different value.
-# Meanwhile the only consumer of these timestamps is the console text, which
-# carries kernel-relative times anyway.
-#
-# So it moved to where it belongs: `timesync` is a supervised service on the
-# node, started immediately after the root is up, and it keeps the clock rather
-# than setting it once. Nothing waits on it, and a time server that is slow or
-# gone delays nothing.
-#
-# What the lease offered is written down for that service to use:
+# The clock is stepped once below (the clock step block), after this branch,
+# from what the lease offered:
 #   /run/ntp-servers   DHCP option 42, if any
 
 fi
 fi
+
+# --- BEGIN clock step (covered by tests/initramfs-clock.sh)
+# Set the clock once, bounded, before anything reads it (#251).
+#
+# The X9 blades have no RTC battery: after a power cut the kernel starts at
+# whatever the RTC says, which is 2000. The node's own `timesync` keeps the
+# clock, but nothing orders it before stormcert's one-shots and fastetcd, and
+# they check certificates against it. So the initramfs steps it here, where
+# everything after it waits by construction.
+#
+# It once cost 50 s of a 74 s boot, waiting on a name that would not resolve.
+# So: no names. The lease's option-42 servers (addresses by definition), then
+# fixed addresses, each try under `timeout`. Worst case is two waits of
+# STORM_NTP_WAIT seconds, on a network with no time at all. Never fatal.
+#
+# A step is written to the RTC, so the next boot of a machine that has one
+# starts right. Without a step, a clock before this image was built is
+# certainly wrong, and the build date is a better guess than 2000.
+NTP_FALLBACK="${STORM_NTP_FALLBACK:-162.159.200.1 216.239.35.0}"
+NTP_WAIT="${STORM_NTP_WAIT:-3}"
+# Wall-clock seconds less uptime: changes only when the clock is set, so the
+# difference across a try is the step, not the time the try took.
+clock_base() {
+    _up=$(cut -d. -f1 "${STORM_UPTIME:-/proc/uptime}" 2>/dev/null)
+    echo $(( $(date +%s) - ${_up:-0} ))
+}
+# servers... -> 0 when ntpd set the clock; CLOCK_FROM = who answered
+clock_try() {
+    [ $# -gt 0 ] || return 1
+    _args=""
+    for _s in "$@"; do _args="$_args -p $_s"; done
+    _out=$(timeout "$NTP_WAIT" ntpd -n -q -d $_args 2>&1) || return 1
+    CLOCK_FROM=$(printf '%s\n' "$_out" | sed -n 's/.*reply from \([^: ]*\).*/\1/p' | tail -1)
+    [ -n "$CLOCK_FROM" ] || CLOCK_FROM=$(echo "$*" | tr ' ' ',')
+    return 0
+}
+clock_step() { # $1 = the node's address, empty when there is no network
+    CLOCK_FROM=""
+    _stepped=""
+    _dhcp=$(cat "${STORM_NTP_SERVERS:-/run/ntp-servers}" 2>/dev/null)
+    case "${NTP_MODE:-}:$1" in
+        off:*|0:*|no:*) echo "Clock: not stepped (rd.stormblock.ntp=$NTP_MODE)" ;;
+        *:)             echo "Clock: not stepped (no network)" ;;
+        *:169.254.*)    echo "Clock: not stepped (link-local address only)" ;;
+        *)
+            _before=$(clock_base)
+            # shellcheck disable=SC2086 # word lists on purpose
+            if { [ -n "$_dhcp" ] && clock_try $_dhcp; } || clock_try $NTP_FALLBACK; then
+                _d=$(( $(clock_base) - _before ))
+                [ "$_d" -ge 0 ] && _d="+$_d"
+                echo "clock stepped by $_d s from $CLOCK_FROM ($(date -u '+%Y-%m-%d %H:%M:%S') UTC)"
+                if hwclock -w -u >/dev/null 2>&1; then
+                    echo "  RTC written (UTC)"
+                else
+                    echo "  RTC not written (no RTC, or it refused)"
+                fi
+                _stepped=1
+            else
+                echo "WARNING: no time server answered within ${NTP_WAIT}s each (${_dhcp:+$_dhcp; }$NTP_FALLBACK)"
+            fi ;;
+    esac
+    [ -n "$_stepped" ] && return 0
+    _floor=$(cat "${STORM_BUILD_DATE:-/etc/stormblock/build-date}" 2>/dev/null)
+    case "$_floor" in ''|*[!0-9]*) return 0 ;; esac
+    _now=$(date +%s)
+    [ "$_now" -lt "$_floor" ] || return 0
+    _was=$(date -u -d "@$_now" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$_now")
+    if date -u -s "@$_floor" >/dev/null 2>&1; then
+        echo "WARNING: ************************************************************"
+        echo "WARNING: CLOCK WAS $_was UTC, BEFORE THIS IMAGE WAS BUILT."
+        echo "WARNING: SET TO THE BUILD DATE $(date -u '+%Y-%m-%d %H:%M:%S') UTC - NOT THE REAL TIME."
+        echo "WARNING: ************************************************************"
+    else
+        echo "WARNING: clock is $_was UTC, before this image was built, and could not be set"
+    fi
+    return 0
+}
+# --- END clock step
+clock_step "${NETADDR:-}"
+stamp "clock"
 
 # Start stormblock with ublk export
 echo "Starting StormBlock..."
