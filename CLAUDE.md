@@ -163,7 +163,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The initramfs steps the clock from NTP, bounded (2026-10-01, #251, P1) — IN PROGRESS
+### The initramfs steps the clock from NTP, bounded (2026-10-01, #251, P1) — DONE
 
 X9 blades have no RTC battery (stormcos#213): after a power cut the kernel
 boots at a 2000-era time, and stormcert/fastetcd start beside `timesync`
@@ -178,10 +178,18 @@ boots at a 2000-era time, and stormcert/fastetcd start beside `timesync`
 - failure: clock before the image's build date (`/etc/stormblock/build-date`,
   epoch, `SOURCE_DATE_EPOCH` or the build's `date`) → set to it, loudly.
   Never blocks the boot.
-- [ ] block + `tests/initramfs-clock.sh` (stubbed ntpd/date/hwclock)
-- [ ] sc-build: test under sh and busybox sh, /init parses, other initramfs
-      tests; busybox on dev has ntpd, hwclock, timeout
-- [ ] docs (README), CHANGELOG
+- [x] block + `tests/initramfs-clock.sh` (stubbed ntpd/date/hwclock)
+- [x] sc-build: every initramfs test under sh and busybox sh; an image
+      generated on dev carries `build-date`, the block, and the ntpd/hwclock/
+      timeout applets, and its /init parses. `ci-clock-verify.sh` (QEMU, PID 1,
+      RTC at 2000): real ntpd stepped +844 Ms from 216.239.35.0, and
+      `hwclock -r` read 2026 afterwards. With nothing reachable it floored at
+      the build date in 6 s. Found by it: ash printed "Terminated" when
+      timeout killed ntpd (silenced)
+- [x] docs (README), CHANGELOG. Also fixed: a relative output path lost the
+      main archive
+- Not on metal: needs a stormcos release with this initramfs, then an X9
+  blade with its power pulled
 
 ### The ConnectX-3 port in the initramfs: mlx4_en (2026-10-01, #250, P0) — DONE
 

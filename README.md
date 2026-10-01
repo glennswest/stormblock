@@ -1261,6 +1261,30 @@ the later name first.
 `tests/initramfs-netdev.sh` and `tests/initramfs-nic-selection.sh` pin both.
 The running system loading `mlx4_en` itself is stormcos#211.
 
+### The initramfs clock: stepped once, before anything checks a certificate
+
+The X9 blades have no RTC battery, so after a power cut the kernel starts in
+2000 (#251, stormcos#213). After the network and before the engine starts,
+`/init` steps the clock once:
+
+- `busybox ntpd -n -q` under `timeout` (3 s, `STORM_NTP_WAIT`), first to the
+  lease's option-42 servers (`/run/ntp-servers`), then to fixed addresses
+  (`162.159.200.1`, `216.239.35.0`). Addresses only, so no DNS lookup can
+  stall it; at worst two waits on a network with no time server.
+- On a step: `hwclock -w -u`, and `clock stepped by +N s from <server>` on the
+  console.
+- Without one (no answer, no network, link-local only, or
+  `rd.stormblock.ntp=off`): a clock earlier than the image's build date
+  (`/etc/stormblock/build-date`, from `SOURCE_DATE_EPOCH` or the build's
+  clock) is set to it, with a loud warning. The RTC is not written with that
+  guess. The boot never waits for the time.
+
+The node's `timesync` (stormcos) keeps the clock after this.
+`tests/initramfs-clock.sh` pins the block against stubs.
+`ci-clock-verify.sh` runs it as PID 1 in QEMU with the guest RTC at 2000:
+real ntpd steps it, and the RTC reads the new time afterwards. With nothing
+reachable it is floored at the build date within 6 s.
+
 ### Stopping a node
 
 Every step of shutdown is bounded, and that is a correctness property rather
