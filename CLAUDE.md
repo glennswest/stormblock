@@ -163,7 +163,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — DONE (golden-stormblock-296e38521d4c)
+### #239 reopened: service goldens still corrupt on 11.57 (2026-10-01, P0) — IN PROGRESS
+
+Owner, 11.57 (initramfs = stormblock@955a8f8, the fence included), fresh
+install on server3: `iget: checksum invalid` on cadvisor, stormlb, vmimages,
+stormvm, stormimds — inodes #155/#156/#160/#164 only, the same one or two
+inode-table blocks in every volume. Seen on 11.50 too (inode #1410).
+Found: stormcos builds every service golden **on forge** (13.7): a
+`golden-<name>` volume exported over NVMe/TCP, mkfs'd and filled by the
+kernel, sealed. So the corruption may be in the goldens themselves.
+- [ ] `examples/slab_audit.rs`: fetch forge volumes (the 11.57 system slab,
+      golden-cadvisor, golden-stormlb) to files on dev, extract the slab's
+      volumes, `e2fsck -fn` each, diff each clone against its golden
+- [ ] name the first bad block and the mechanism; fix where it lives
+- [ ] verify seeded/flowed volumes against their goldens; refuse a mismatch
+
+### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — fence DONE (golden-stormblock-296e38521d4c), reopened above
 
 server3 on 11.56 (#236 fresh-slab path): cni-bin (256M data-role blank,
 e2fsprogs `mkfs.ext4 -b 4096`, imported as `cni-bin.golden` + stamped clone
