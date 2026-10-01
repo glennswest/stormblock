@@ -163,7 +163,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The initramfs claims as the machine stormbootx claimed as (2026-10-01, #249, P0) — IN PROGRESS
+### The initramfs claims as the machine stormbootx claimed as (2026-10-01, #249, P0) — DONE
 
 server8 (X9 MicroCloud blade): stormbootx claimed `boothost/server8` (DHCP +
 reverse DNS), then `/init` claimed `boothost/<SMBIOS serial>` — the chassis
@@ -174,7 +174,7 @@ firmware's name down, so the SMBIOS fallback always ran.
 Mechanism (picked here, the stormbootx side filed there): **a volatile EFI
 variable** set by stormbootx before it starts stormuefi — attributes
 BOOTSERVICE_ACCESS|RUNTIME_ACCESS (0x6, not NV), vendor GUID
-`STORMBOOT_GUID` (in /init), `StormBootTag` = the name it claimed on (the
+`ab361f54-0166-44a4-a088-1ac22e98ab76` (`STORMBOOT_GUID` in /init), `StormBootTag` = the name it claimed on (the
 engine's host name when the claim reply gave one), `StormBootHostNqn` = the
 NQN it attached as, ASCII, no NUL. Linux reads them at
 `/sys/firmware/efi/efivars/<Name>-<guid>` (4 attribute bytes, then the
@@ -187,10 +187,14 @@ value). No change to the pallet's cmdline or to stormuefi.
   local disk instead of an install, and the survey takes only a blank drive
   (no #236 force, no ticket force). `rd.stormblock.trust-smbios=1` restores
   the old behaviour for an image whose machines are named by serial.
-- [ ] identity block + guards in `scripts/build-stormblock-initramfs.sh`
-- [ ] `tests/initramfs-boot-hook.sh` cases (efivar, cmdline, differ, guess)
-- [ ] docs (boot-hooks.md, README), CHANGELOG; stormbootx issue filed
-- [ ] sc-build: the boot-hook test under sh and busybox sh; nextest
+- [x] identity block + guards in `scripts/build-stormblock-initramfs.sh` (d9c0f00)
+- [x] `tests/initramfs-boot-hook.sh` cases (efivar, cmdline, differ, guess)
+- [x] docs (boot-hooks.md, README), CHANGELOG (4c02258); stormbootx#76 filed
+- [x] sc-build at d9c0f00: boot-hook test (+20 cases) under sh and busybox
+      sh, the generated /init parses, console and NIC tests pass. No Rust
+      changed, so no nextest run for this
+- Not on metal: needs stormbootx#76 and a stormcos release with this
+  initramfs; then server8's console must say "Machine name from the firmware"
 
 ### #239 reopened: service goldens still corrupt on 11.57 (2026-10-01, P0) — DONE (golden-stormblock-d3181a25ed62)
 
