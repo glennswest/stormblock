@@ -120,7 +120,7 @@ B=$(v date-before)
 [ -n "$B" ] && [ "$B" -lt 1000000000 ] && ok "guest booted at $(date -u -d @"$B") (the RTC)" \
     || fail "guest did not boot in 2000: $B"
 if grep -q '^MARK step1: clock stepped by +' "$W/g.txt"; then
-    ok "step 1: $(sed -n 's/^MARK step1: //p' "$W/g.txt" | head -1)"
+    ok "step 1: $(sed -n 's/^MARK step1: \(clock stepped.*\)/\1/p' "$W/g.txt" | head -1)"
     A1=$(v date-after1)
     [ "$A1" -ge "$BUILT" ] && ok "clock after the step is past the build date ($(date -u -d @"$A1"))" \
         || fail "clock after the step: $A1"
@@ -135,6 +135,8 @@ else
     fail "step 1 said neither: $(grep '^MARK step1' "$W/g.txt" | tr '\n' ' ')"
 fi
 S2=$(v step2-secs)
+grep -q '^MARK step[12]: Terminated' "$W/g.txt" && fail "the console says 'Terminated' when a try times out" \
+    || ok "no 'Terminated' on the console"
 grep -q '^MARK step2: WARNING: no time server answered' "$W/g.txt" \
     && ok "step 2: nothing answered, said so" || fail "step 2 did not say nothing answered"
 grep -q 'BEFORE THIS IMAGE WAS BUILT' "$W/g.txt" && ok "step 2: floor said loudly" \

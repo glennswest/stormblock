@@ -1538,7 +1538,9 @@ clock_try() {
     [ $# -gt 0 ] || return 1
     _args=""
     for _s in "$@"; do _args="$_args -p $_s"; done
-    _out=$(timeout "$NTP_WAIT" ntpd -n -q -d $_args 2>&1) || return 1
+    # fd 2 to /dev/null first: ash says "Terminated" on its stderr when
+    # timeout kills ntpd, and that is not news for the console.
+    _out=$(exec 2>/dev/null; timeout "$NTP_WAIT" ntpd -n -q -d $_args 2>&1) || return 1
     CLOCK_FROM=$(printf '%s\n' "$_out" | sed -n 's/.*reply from \([^: ]*\).*/\1/p' | tail -1)
     [ -n "$CLOCK_FROM" ] || CLOCK_FROM=$(echo "$*" | tr ' ' ',')
     return 0
