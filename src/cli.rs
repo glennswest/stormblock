@@ -6077,8 +6077,15 @@ mod install_tests {
     /// sha256 of every volume the manager holds, by name, read through the
     /// volume the way a consumer reads it.
     async fn digests(mgr: &VolumeManager) -> BTreeMap<String, (String, Vec<u64>)> {
+        digests_where(mgr, false).await
+    }
+
+    async fn digests_where(mgr: &VolumeManager, sealed_only: bool) -> BTreeMap<String, (String, Vec<u64>)> {
         let mut out = BTreeMap::new();
         for (id, name, size, _) in mgr.list_volumes().await {
+            if sealed_only && !mgr.is_sealed(&id) {
+                continue;
+            }
             let vol: Arc<dyn BlockDevice> = mgr.get_volume(&id).unwrap();
             let mut whole = Sha256::new();
             // Per MiB too, so a mismatch names where it is.
@@ -6606,7 +6613,7 @@ file = "{state}"
             .collect();
         let want: BTreeMap<_, _> = want.iter().filter(|(n, _)| sealed.contains(*n)).map(|(k, v)| (k.clone(), v.clone())).collect();
         eprintln!("{when}: checking {} sealed volumes", want.len());
-        compare(when, &want, &digests(mgr).await)
+        compare(when, &want, &digests_where(mgr, true).await)
     }
 
     /// A real release (#239, reopened): `AUDIT_239_IMAGE` names a copy of a
