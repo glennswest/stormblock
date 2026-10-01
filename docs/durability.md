@@ -80,6 +80,24 @@ tests run on.
    reports the slot busy. Every copy is read back and compared before any map
    names it. The flow-over quarantines its sources, so a copy-on-write made
    meanwhile lands on the local disk rather than behind the move.
+11. **Nothing is written in place on a slab being emptied** (#239, reopened).
+   Rule 9's fresh clone carries the *image's* bytes, not what the last boot
+   wrote on its own clone, so a write left on the appliance side is lost the
+   moment the boot is cut short. Copy-on-writes already went to the local disk
+   (rule 10's quarantine). In-place writes did not: a clone's own extents (the
+   slot its UUID stamp copied, which holds an ext4's superblock, group
+   descriptors, bitmaps and the start of its inode table) were written where
+   they were. A resumed boot then read the local disk's directory blocks
+   against the pristine image's inode table, and every file the node had
+   created named an inode that table never got. That was the first free inodes
+   of cadvisor, stormlb, vmimages, stormvm and stormimds on 11.57
+   (`iget: checksum invalid`, #155–#164), and of hubble-relay on 11.50 (#1410).
+   So the appliance's system slabs are quarantined as soon as a boot knows a
+   flow-over is coming (`boot-local` once the disk is laid or the flow-over
+   resumed, `adopt-ublk` before it serves), and a write to an extent with a leg
+   on a quarantined slab goes through copy-on-write onto a slab that stays,
+   freeing the old slot. Only with no room anywhere else does it fall back to
+   writing in place.
 
 ## How it is checked
 

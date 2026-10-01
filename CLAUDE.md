@@ -196,9 +196,23 @@ kernel, sealed. So the corruption may be in the goldens themselves.
   inodes 1-154 used, "Free inodes: 155-8192" — so the node's lookups of
   #155/#156/#160/#164 name inodes that table never had: a directory and an
   inode table from different states. The corruption is made on the node.
-- [ ] `cli::install_tests::a_real_release_installs_byte_for_byte` (ignored,
-  `AUDIT_239_IMAGE`): the real image installed fresh, then again over a
-  disk whose clones were overwritten (a reinstall over an older release)
+- [x] `cli::install_tests::a_real_release_installs_byte_for_byte` (ignored,
+  `AUDIT_239_IMAGE`): the real image installed fresh, over a used disk,
+  through a successor reopening claim + disk, 64 live writers on every
+  clone's first extent during the flow-over — all byte-exact on dev. The
+  engine's own install is not where the bytes go wrong.
+- [x] 11.50 hubble-relay: 1409 inodes used, so #1410 is also the first free
+  inode. Every case: a directory naming a runtime-created inode, read
+  against an inode-table block (extent 0, the clone's own stamped slot) of
+  an older state.
+- [x] cause found by reading: owned extents on the appliance's per-boot clone
+  were written in place; copy-on-writes went local. A boot cut short resumes
+  from a fresh pristine clone (rule 9), so in-place writes vanished and CoWs
+  stayed. Fix b189b3e: quarantine flow sources from the moment the boot knows
+  (boot-local, adopt-ublk), relocate-on-write for owned extents there.
+  Test `a_write_during_the_install_boot_survives_a_flow_over_cut_short`
+- [ ] full nextest on dev; golden; ask the owner to check the 11.57 console for
+  "a flow-over cut short" (whether server3 rebooted before the move ended)
 - [ ] verify seeded/flowed volumes against their goldens; refuse a mismatch
 
 ### A fresh install's data volumes come out corrupt (2026-09-30, #239, P0) — fence DONE (golden-stormblock-296e38521d4c), reopened above
