@@ -163,6 +163,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The initramfs steps the clock from NTP, bounded (2026-10-01, #251, P1) — IN PROGRESS
+
+X9 blades have no RTC battery (stormcos#213): after a power cut the kernel
+boots at a 2000-era time, and stormcert/fastetcd start beside `timesync`
+(stormpump has no ordering) and check certificates against it.
+- `# --- BEGIN clock step` in `/init`, run after the network, before the
+  engine starts (so before switch_root and everything after it): one
+  `busybox ntpd -n -q` under `timeout` (`STORM_NTP_WAIT`, 3 s) to
+  `/run/ntp-servers` (option 42), then again to fixed addresses
+  (162.159.200.1, 216.239.35.0) — no DNS, so the old 50 s cannot recur.
+  Skipped with no address or link-local only; `rd.stormblock.ntp=off`.
+- success: `hwclock -w -u`, console `clock stepped by +N s from <server>`
+- failure: clock before the image's build date (`/etc/stormblock/build-date`,
+  epoch, `SOURCE_DATE_EPOCH` or the build's `date`) → set to it, loudly.
+  Never blocks the boot.
+- [ ] block + `tests/initramfs-clock.sh` (stubbed ntpd/date/hwclock)
+- [ ] sc-build: test under sh and busybox sh, /init parses, other initramfs
+      tests; busybox on dev has ntpd, hwclock, timeout
+- [ ] docs (README), CHANGELOG
+
 ### The ConnectX-3 port in the initramfs: mlx4_en (2026-10-01, #250, P0) — DONE
 
 server7/server8 (X9 blades, 11.58): stormbootx's mlx4 brings the ConnectX-3
