@@ -290,6 +290,13 @@ pub enum ReleaseHeld {
     Held { goldens: usize },
     /// `missing` of the image's `goldens` are not on the local drive.
     NotHeld { goldens: usize, missing: usize },
+    /// Every golden is recorded, but the install never finished: the local
+    /// records still place extents on `slabs` slab(s) that are not on the
+    /// drive — the appliance clone a flow-over was moving from (#239). Not
+    /// held: a boot that resumed from a fresh clone would read what this
+    /// node wrote against the image's pristine bytes, so the next boot
+    /// installs again.
+    Unfinished { goldens: usize, slabs: usize },
     /// One side cannot answer: no slab, no metadata, or no sealed volume in
     /// the image. A caller must not read this as either answer.
     CannotSay(String),
@@ -301,6 +308,13 @@ pub enum ReleaseHeld {
 pub async fn recorded_volumes(
     device: &Arc<dyn BlockDevice>,
 ) -> Option<Vec<crate::volume::metadata::VolumeRecord>> {
+    recorded_volumes_and_slabs(device).await.map(|(v, _)| v)
+}
+
+/// `recorded_volumes`, and the ids of the slabs on `device`.
+async fn recorded_volumes_and_slabs(
+    device: &Arc<dyn BlockDevice>,
+) -> Option<(Vec<crate::volume::metadata::VolumeRecord>, std::collections::HashSet<crate::drive::slab::SlabId>)> {
     let slabs: Vec<Slab> = match Slab::open(device.clone()).await {
         Ok(s) => vec![s],
         Err(_) => crate::drive::discover::slabs_in_partitions(device)
@@ -309,6 +323,7 @@ pub async fn recorded_volumes(
             .map(|f| f.slab)
             .collect(),
     };
+    let ids: std::collections::HashSet<_> = slabs.iter().map(|s| s.slab_id()).collect();
     let mut answered = false;
     let mut out = Vec::new();
     for slab in slabs {
@@ -326,7 +341,7 @@ pub async fn recorded_volumes(
             Err(_) => {}
         }
     }
-    answered.then_some(out)
+    answered.then_some((out, ids))
 }
 
 /// Does `local` hold the release on `image`? See [`ReleaseHeld`].
@@ -339,16 +354,31 @@ pub async fn release_held(local: &Arc<dyn BlockDevice>, image: &Arc<dyn BlockDev
     if goldens.is_empty() {
         return ReleaseHeld::CannotSay("the image holds no sealed volume".into());
     }
-    let Some(local_vols) = recorded_volumes(local).await else {
+    let Some((local_vols, here)) = recorded_volumes_and_slabs(local).await else {
         return ReleaseHeld::CannotSay("the local drive keeps no volume records".into());
     };
     let have: std::collections::HashSet<uuid::Uuid> = local_vols.iter().map(|v| v.id.0).collect();
     let missing = goldens.iter().filter(|id| !have.contains(id)).count();
-    if missing == 0 {
-        ReleaseHeld::Held { goldens: goldens.len() }
-    } else {
-        ReleaseHeld::NotHeld { goldens: goldens.len(), missing }
+    if missing > 0 {
+        return ReleaseHeld::NotHeld { goldens: goldens.len(), missing };
     }
+    // Complete, not only recorded: nothing still placed on a slab that is
+    // not on this drive.
+    let elsewhere: std::collections::HashSet<_> = local_vols
+        .iter()
+        .flat_map(|v| {
+            v.extents
+                .values()
+                .flat_map(|l| l.legs().map(|leg| leg.slab_id))
+                .chain(v.parity.values().flat_map(|g| g.legs.iter().map(|l| l.slab_id)))
+                .collect::<Vec<_>>()
+        })
+        .filter(|id| !here.contains(id))
+        .collect();
+    if !elsewhere.is_empty() {
+        return ReleaseHeld::Unfinished { goldens: goldens.len(), slabs: elsewhere.len() };
+    }
+    ReleaseHeld::Held { goldens: goldens.len() }
 }
 
 /// What the *data* half of a drive already holds, read offline.
@@ -954,6 +984,35 @@ mod tests {
         // The same release: the image read against itself holds everything,
         // and its unsealed volume is not a golden, so it is not asked for.
         assert_eq!(release_held(&image, &image).await, ReleaseHeld::Held { goldens: 2 });
+
+        // Every golden recorded, but an extent still on a slab that is not
+        // on the drive (a flow-over that never finished, #239): not held.
+        let (half, _) = drive(&p("half"), &layout, &[("stormpump", true), ("etc", true)]).await;
+        {
+            let away = Arc::new(FileDevice::open_with_capacity(&p("away"), 64 * 1024 * 1024).await.unwrap())
+                as Arc<dyn BlockDevice>;
+            let away = crate::drive::slab::Slab::format(away, layout.slot_size, StorageTier::Hot).await.unwrap();
+            let found = crate::drive::discover::slabs_in_partitions(&half).await;
+            let mut mgr = VolumeManager::new(layout.slot_size);
+            let sys = found.iter().find(|f| !f.slab.is_data()).map(|f| f.slab.slab_id()).unwrap();
+            mgr.adopt_slabs(found).await.unwrap();
+            mgr.persist_to_slab(sys);
+            mgr.add_slab(away).await;
+            // A volume written while the drive's own slab is quarantined
+            // lands on the other one, as an extent not yet moved would be.
+            let scratch = mgr.create_volume_any("scratch", 4 * 1024 * 1024).await.unwrap();
+            {
+                let mut reg = mgr.registry().write().await;
+                reg.set_quarantined(sys, true);
+            }
+            mgr.get_volume(&scratch).unwrap().write(0, &[7u8; 4096]).await.unwrap();
+            mgr.persist().await;
+        }
+        assert!(
+            matches!(release_held(&half, &half).await, ReleaseHeld::Unfinished { slabs: 1, .. }),
+            "{:?}",
+            release_held(&half, &half).await
+        );
 
         // An image with nothing sealed cannot name a release.
         let (unsealed, _) = drive(&p("unsealed"), &layout, &[("scratch", false)]).await;

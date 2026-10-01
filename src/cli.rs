@@ -1839,6 +1839,14 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                     );
                     std::process::exit(1);
                 }
+                ReleaseHeld::Unfinished { goldens, slabs } => {
+                    println!(
+                        "{local} does not hold the release on {image}: all {goldens} golden(s) are \
+                         recorded, but the install never finished — extents are still placed on \
+                         {slabs} slab(s) not on this drive"
+                    );
+                    std::process::exit(1);
+                }
                 ReleaseHeld::CannotSay(why) => {
                     println!("cannot say whether {local} holds the release on {image}: {why}");
                     std::process::exit(2);
