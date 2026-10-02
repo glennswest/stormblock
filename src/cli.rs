@@ -4841,18 +4841,26 @@ pub(crate) async fn quarantine_flow_sources(
     let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(crate::drive::slab::SlabId) else {
         return;
     };
-    let mut reg = mgr.registry().write().await;
-    let sources: Vec<_> =
-        reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect();
-    for s in &sources {
-        reg.set_quarantined(*s, true);
-    }
+    let sources: Vec<_> = {
+        let mut reg = mgr.registry().write().await;
+        let sources: Vec<_> =
+            reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect();
+        for s in &sources {
+            reg.set_quarantined(*s, true);
+        }
+        sources
+    };
     if !sources.is_empty() {
         println!(
             "Flow-over: {} appliance slab(s) quarantined — writes to what is still on them go to {}",
             sources.len(),
             flow.disk
         );
+        // And the disk names what is still to come (#258), written now: a
+        // power cut before the first extent moves must leave a disk that
+        // says what it is missing, not one that looks like somebody else's.
+        mgr.record_flow_over(dest, sources);
+        mgr.persist().await;
     }
 }
 
@@ -6792,6 +6800,127 @@ size = "64M"
             }
         }
         assert!(bad.is_empty(), "resumed from {:?}: {}", resumed.map(|r| r.uri), bad.join("; "));
+    }
+
+    /// Every volume name the slabs on `disk` record, read the way the
+    /// initramfs probe reads them (`slab volumes`).
+    async fn names_on_disk(disk: &str) -> std::collections::BTreeSet<String> {
+        let dev = super::open_storage(disk).await.unwrap();
+        let mut names = std::collections::BTreeSet::new();
+        for f in crate::drive::discover::slabs_in_partitions(&dev).await {
+            if let Ok(Some(bytes)) = f.slab.read_metadata().await {
+                for v in crate::volume::MetadataStore::decode(&bytes).unwrap().volumes {
+                    names.insert(v.name);
+                }
+            }
+        }
+        names
+    }
+
+    /// A power cut during the install's flow-over, before it moved anything
+    /// (#258): the disk alone must still name every volume the node boots, or
+    /// the initramfs reads it as "missing N mounted volume(s)", asks the
+    /// appliance, and — with no boot intent — installs over it, destroying
+    /// the data half (11.63 on server3: 0 of 300 objects). And the next boot,
+    /// from the disk, finishes the flow-over from a fresh clone (#171) with
+    /// every volume as the image had it and the data half's writes kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_power_cut_before_the_flow_over_moves_anything_keeps_the_disk_bootable() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let mut seed = 0x258u64;
+        let mut noise = |len: u64| {
+            let mut v = vec![0u8; len as usize];
+            for c in v.chunks_mut(8) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                c.copy_from_slice(&seed.to_le_bytes()[..c.len()]);
+            }
+            v
+        };
+        let root = p("root.img");
+        std::fs::write(&root, noise(6 * MIB)).unwrap();
+        let pump = p("pump.img");
+        std::fs::write(&pump, noise(5 * MIB + 4096)).unwrap();
+        let state = p("state.img");
+        std::fs::write(&state, noise(4 * MIB)).unwrap();
+        let spec = format!(
+            r#"
+name = "cut-258"
+size = "512M"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "stormpump"
+file = "{root}"
+[[slab.golden]]
+name = "pump-svc"
+file = "{pump}"
+[data_slab]
+size = "64M"
+[[data_slab.golden]]
+name = "state"
+file = "{state}"
+"#
+        );
+        let image = p("image.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&image))
+            .await
+            .unwrap();
+        let claim = |n: &str| {
+            let c = p(n);
+            std::fs::copy(&image, &c).unwrap();
+            c
+        };
+
+        // Boot 1, the install: lay the disk (fresh, as #236 does), then the
+        // engine that adopts it starts the flow-over and the node writes its
+        // state.
+        let disk = p("disk.raw");
+        std::fs::File::create(&disk).unwrap().set_len(40 * 1024 * MIB).unwrap();
+        let first = claim("claim1.raw");
+        let (mut mgr, _) = super::open_slabs_resuming(&[first.clone()], None, true).await.unwrap();
+        let want = digests(&mgr).await;
+        let flow = super::take_local_disk(&mut mgr, &disk, "hot", true).await.unwrap().expect("laid");
+        drop(mgr);
+        let mut mgr = super::open_slabs_and_restore(&[first.clone(), flow.disk.clone()], None).await.unwrap();
+        let dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
+        let data = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let local: Vec<_> = [data, dest].into_iter().filter(|id| mgr.is_metadata_slab(id)).collect();
+        mgr.keep_metadata_in_first(&local);
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        let st = super::resolve_boot_volume(&mgr, "state").await.unwrap();
+        let v = mgr.get_volume(&st).unwrap();
+        v.write(MIB + 8192, &[0x58; 4096]).await.unwrap();
+        v.flush().await.unwrap();
+        mgr.persist().await;
+        // The power goes: nothing has moved yet.
+        drop(v);
+        drop(mgr);
+
+        // What the probe reads off the disk: every volume, not just the ones
+        // the flow-over reached.
+        let on_disk = names_on_disk(&flow.disk).await;
+        let missing: Vec<_> = want.keys().filter(|n| !on_disk.contains(*n)).collect();
+        assert!(missing.is_empty(), "the disk does not name {missing:?} (it names {on_disk:?})");
+
+        // Boot 2, from the disk, finishing the flow-over from a fresh claim.
+        let second = claim("claim2.raw");
+        std::env::set_var("STORMBLOCK_RESUME_SOURCE", &second);
+        let (mgr, resumed) = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await.unwrap();
+        std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
+        assert!(resumed.is_some(), "the boot from the disk did not resume the flow-over");
+        let got = digests(&mgr).await;
+        let mut bad = compare("after the cut", &want.iter().filter(|(n, _)| *n != "state").map(|(k, v)| (k.clone(), v.clone())).collect(), &got);
+        let st = super::resolve_boot_volume(&mgr, "state").await.unwrap();
+        let mut back = vec![0u8; 4096];
+        mgr.get_volume(&st).unwrap().read(MIB + 8192, &mut back).await.unwrap();
+        if back != [0x58; 4096] {
+            bad.push("the data half's write before the cut is gone".into());
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
     /// Every unsealed volume overwritten, its first 64 MiB, with noise.

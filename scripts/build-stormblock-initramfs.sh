@@ -2350,6 +2350,31 @@ if [ "$BOOT_MODE" = "local" ]; then
     # lays a fresh slab: never the old data half, whose volumes belong to the
     # release being replaced. Once the appliance states intents the marker is
     # not written and the intent decides; `off` on this machine still means no.
+    #
+    # **Unless the disk is this node's and nothing says the release changed**
+    # (#258). Booting the claimed image is not evidence of an install: the
+    # probe also sends here a disk it could not boot - and after a power cut
+    # during the install's flow-over that was this node's own disk, its data
+    # half full of what the node had acknowledged. Forcing over it lost every
+    # object on 11.63 (server3, 0 of 300). So without a ticket, `force` is for
+    # the two cases that are an install by evidence: the probe found the disk
+    # bootable and the release not held on it (`INSTALL_OVER`), or no local
+    # drive carries a data slab at all. Any other disk with a data slab is
+    # kept: the survey below updates its system half and leaves the data half
+    # alone, as it did before #236. An intent of `install` still wipes it.
+    SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
+    SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
+    local_data_slab() { # -> the first local drive that carries a data slab
+        for d in "$SURVEY_SYS"/sd? "$SURVEY_SYS"/nvme?n?; do
+            [ -e "$d" ] || continue
+            [ "$(cat "$d/removable" 2>/dev/null)" = "1" ] && continue
+            if "$SURVEY_SB" slab list "/dev/$(basename "$d")" 2>/dev/null | grep -q "role=data"; then
+                echo "/dev/$(basename "$d")"
+                return 0
+            fi
+        done
+        return 1
+    }
     INSTALL_FRESH=""
     if [ -n "$GUESSED" ]; then
         :
@@ -2360,14 +2385,16 @@ if [ "$BOOT_MODE" = "local" ]; then
          && [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
             echo "  an install (no boot intent from the appliance), and rd.stormblock.assimilate=off says no"
+        elif [ -z "${INSTALL_OVER:-}" ] && KEPT=$(local_data_slab); then
+            echo "  NOT an install: $KEPT carries this node's data slab, and nothing showed a new"
+            echo "  release on it (it could not be booted: a power cut, a flow-over cut short) -"
+            echo "  its data half is kept; only a boot intent of 'install' re-lays it (#258)"
         else
             ASSIMILATE=force
             INSTALL_FRESH=1
             echo "  an install: the appliance states no boot intent, so a fresh slab is laid (#236)"
         fi
     fi
-    SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
-    SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
     LOCAL_DISK=""
     # The disk the probe found bootable and ruled an install over: that is
     # the one to install onto, not whichever drive the scan meets first.

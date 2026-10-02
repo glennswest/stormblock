@@ -526,10 +526,20 @@ check "no ticket, no force" "/dev/sda" "$(survey any "$SYS_ONLY")"
 # data half belongs to the release being replaced): it is forced, fresh.
 CLAIM_URI="nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1"
 NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
-check "no intent stated: the node's own layout is forced, not kept" "/dev/sda force" \
+# #258: but booting the claimed image is not evidence of an install. A disk
+# the probe could not boot (a power cut during the flow-over) that carries
+# this node's data slab is kept - updated, never forced - unless the probe
+# ruled an install over it (a bootable disk without the assigned release).
+check "no intent, a data slab the probe could not boot: kept, not forced (#258)" "/dev/sda" \
     "$(CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
-check "no intent stated, default policy: forced too" "/dev/sda force" \
+check "no intent, default policy, a lone data slab: left, not forced (#258)" "" \
     "$(CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
+check "no intent, the probe ruled an install over the node's layout: forced (#236)" "/dev/sda force" \
+    "$(CLAIMED_T="$CLAIM_URI" OVER=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
+check "no intent, a drive with no data slab: forced, nothing to keep" "/dev/sda force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey any "$SYS_ONLY")"
+check "no intent, an install ticket still forces a data slab" "/dev/sda force" \
+    "$(TICKET="$WORK/install.json" CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 check "no intent stated, but 'off': nothing is taken" "" \
     "$(CLAIMED_T="$CLAIM_URI" survey off "$DATA_ONLY" "$SYS_HALF")"
 check "no intent stated, but booting the local disk: no force" "" \
@@ -548,9 +558,9 @@ check "a guessed name: a blank drive is still taken" "/dev/sda" \
 check "a guessed name: 'force' on the cmdline is not a licence" "" \
     "$(FROM=smbios CLAIMED_T="$CLAIM_URI" survey force "$DATA_ONLY" "$SYS_HALF")"
 check "a guessed name, rd.stormblock.trust-smbios=1: forced as before" "/dev/sda force" \
-    "$(FROM=smbios TRUST=1 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+    "$(FROM=smbios TRUST=1 CLAIMED_T="$CLAIM_URI" OVER=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
 check "a name given on the cmdline is not a guess: forced" "/dev/sda force" \
-    "$(FROM=cmdline CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+    "$(FROM=cmdline CLAIMED_T="$CLAIM_URI" OVER=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
 TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
 check "a guessed name's install ticket forces nothing" "" \
     "$(FROM=smbios survey any "$DATA_ONLY")"

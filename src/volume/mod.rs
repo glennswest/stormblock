@@ -188,6 +188,13 @@ pub struct VolumeManager {
     /// time a volume, its lineage or its placement changes. A mirror asks
     /// "has anything changed since N" instead of re-reading everything (#136).
     generation: std::sync::atomic::AtomicU64,
+    /// A flow-over in progress: the local system slab, and the slabs being
+    /// emptied into it (#258). The destination records every volume with a
+    /// leg on a source, moved or not, so a disk whose flow-over is cut short
+    /// still names everything the node boots — and the next boot finishes the
+    /// flow-over from a fresh clone (#171) instead of finding volumes missing
+    /// and re-installing.
+    flowing_into: std::sync::Mutex<Option<(SlabId, Vec<SlabId>)>>,
 }
 
 impl VolumeManager {
@@ -211,6 +218,7 @@ impl VolumeManager {
             owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
+            flowing_into: std::sync::Mutex::new(None),
         }
     }
 
@@ -232,6 +240,7 @@ impl VolumeManager {
             owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
+            flowing_into: std::sync::Mutex::new(None),
         })
     }
 
@@ -502,6 +511,19 @@ impl VolumeManager {
         let mut next: Vec<SlabId> = slab_ids.to_vec();
         next.extend(self.metadata_slabs.iter().copied().filter(|s| !slab_ids.contains(s)));
         self.metadata_slabs = next;
+    }
+
+    /// A flow-over empties `sources` into `dest` (#258): from now on `dest`'s
+    /// record names every volume with a leg on a source as well as its own.
+    ///
+    /// Until the flow-over reaches it, a golden lives wholly on the
+    /// appliance's clone, so the local disk's record left it out — and a
+    /// power cut then left a disk that "is missing N mounted volume(s)", which
+    /// the initramfs read as not this node's and installed over (11.63 on
+    /// server3). Recorded, the extents on the absent clone are what the next
+    /// boot fetches from a fresh one (#171).
+    pub fn record_flow_over(&self, dest: SlabId, sources: Vec<SlabId>) {
+        *self.flowing_into.lock().unwrap() = Some((dest, sources));
     }
 
     /// Which slab, if any, this manager writes its metadata into. The first
@@ -1928,6 +1950,12 @@ impl VolumeManager {
             .map(|(array, slab)| (*slab, *array))
             .collect();
 
+        let flowing = self.flowing_into.lock().unwrap().clone();
+        let flows_into = |slab_id: &SlabId, on: &HashSet<SlabId>| match &flowing {
+            Some((dest, sources)) => dest == slab_id && sources.iter().any(|s| on.contains(s)),
+            None => false,
+        };
+
         self.metadata_slabs
             .iter()
             .map(|slab_id| {
@@ -1935,7 +1963,7 @@ impl VolumeManager {
                     .volumes
                     .iter()
                     .filter(|v| match touched.get(&v.id) {
-                        Some(on) if !on.is_empty() => on.contains(slab_id),
+                        Some(on) if !on.is_empty() => on.contains(slab_id) || flows_into(slab_id, on),
                         _ => home(&v.id) == Some(*slab_id),
                     })
                     .cloned()
