@@ -1185,7 +1185,9 @@ finished, i.e. do its records place no extent on a slab that is not on the
 drive (#239)? Exit 0 held, 1 not held (a golden missing), 2 cannot say, 3
 the same release with its flow-over cut short (boot the drive: the engine
 finishes the move, #258). `/init` uses it to tell an install from a reboot when the
-appliance serves no boot intent (`docs/boot-hooks.md`, "An install without an
+appliance serves no boot intent — on a disk it can boot, and on one it cannot
+but which carries this node's data slab (an older release missing a volume
+the new one mounts is an upgrade, #261) (`docs/boot-hooks.md`, "An install without an
 intent").
 
 Every slab this engine formats reserves a region for that record — `slab

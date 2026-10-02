@@ -99,6 +99,13 @@ is true of a reboot as much as an install. Until intents can be used:
   drive carries a data slab. Otherwise the console says `NOT an install`, and
   the survey takes the node's own layout as before #236: the system half is
   replaced and the data half kept. Only an `install` intent re-lays it.
+- **But the release still decides** (#261). The probe also cannot boot a disk
+  of an **older release** that lacks a volume the new release's command line
+  mounts (C2NR0Q2: 11.56 → 11.65 came back up on 11.56's slab). So before
+  keeping a disk with a data slab, `/init` asks `slab holds <disk> <claimed>`:
+  exit 1 (another release) is an upgrade — `UPGRADE: … holds another release`,
+  and a fresh slab is laid over that disk; exit 0 (the same release), 3 (the
+  same release cut short, #258) or 2 (cannot say) keep it.
 - `rd.stormblock.assimilate=off` still means no, to both.
 - Not covered: reinstalling the **same** release fresh. Assign another
   release first, or use the `install` intent once the appliance serves them.

@@ -477,6 +477,8 @@ echo "assimilate survey:"
 SVSTUB="$WORK/stormblock-survey"
 cat > "$SVSTUB" <<'STUBEOF'
 #!/bin/sh
+# `slab holds`: the release check (#261), answered by STUB_HOLDS (2 = cannot say)
+if [ "$2" = holds ]; then echo "holds? (stub)"; exit "${STUB_HOLDS:-2}"; fi
 cat "$SURVEY_ANSWERS/$(basename "$3")" 2>/dev/null
 exit 0
 STUBEOF
@@ -548,6 +550,19 @@ check "no intent, a data slab the probe could not boot: kept, not forced (#258)"
     "$(CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 check "no intent, default policy, a lone data slab: left, not forced (#258)" "" \
     "$(CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
+# #261: the probe also rejects a disk of an *older* release that lacks a volume
+# the new release mounts (C2NR0Q2, 11.56 -> 11.65). The release decides: a disk
+# that does not hold the claimed release is an upgrade, and installs fresh.
+check "no intent, the unbootable disk holds another release: forced (#261)" "/dev/sda force" \
+    "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "no intent, another release on a lone data slab: forced (#261)" "/dev/sda force" \
+    "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
+check "no intent, the same release cut short: kept (#258, #261)" "/dev/sda" \
+    "$(STUB_HOLDS=3 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "no intent, the same release: kept (#261)" "/dev/sda" \
+    "$(STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "a guessed name, another release: still left (#249)" "" \
+    "$(STUB_HOLDS=1 FROM=smbios CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 check "no intent, the probe ruled an install over the node's layout: forced (#236)" "/dev/sda force" \
     "$(CLAIMED_T="$CLAIM_URI" OVER=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
 check "no intent, a drive with no data slab: forced, nothing to keep" "/dev/sda force" \

@@ -2390,7 +2390,29 @@ if [ "$BOOT_MODE" = "local" ]; then
         done
         return 1
     }
+    # Whether the release on a disk the probe could not boot is another one
+    # (#261). The probe rejects a disk that lacks a volume the *new* release's
+    # command line mounts, so an upgrade to a release that mounts one more
+    # volume (C2NR0Q2, 11.56 -> 11.65) arrives here just like a power cut
+    # mid-install (#258) - and was kept, booting the old system and data.
+    # The release decides, as on the bootable path: a disk that does not hold
+    # the claimed release (`slab holds` exit 1) is an upgrade, and installs;
+    # the same release (0), the same release cut short (3), or no answer (2)
+    # keeps the data half.
+    release_replaced() { # disk -> 0 when it holds a release other than $CLAIMED
+        R_OUT=$("$SURVEY_SB" slab holds "$1" "$CLAIMED" 2>&1)
+        R_RC=$?
+        [ -n "$R_OUT" ] && echo "  $R_OUT"
+        case "$R_RC" in
+        1) echo "  UPGRADE: $1 holds another release than the one claimed (#261)"; return 0 ;;
+        0) echo "  the same release on $1 (#261)" ;;
+        3) echo "  the same release on $1, its install cut short (#258)" ;;
+        *) echo "  cannot tell which release $1 holds: keeping it (#261)" ;;
+        esac
+        return 1
+    }
     INSTALL_FRESH=""
+    KEPT=""
     if [ -n "$GUESSED" ]; then
         :
     elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
@@ -2400,11 +2422,13 @@ if [ "$BOOT_MODE" = "local" ]; then
          && [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
             echo "  an install (no boot intent from the appliance), and rd.stormblock.assimilate=off says no"
-        elif [ -z "${INSTALL_OVER:-}" ] && KEPT=$(local_data_slab); then
+        elif [ -z "${INSTALL_OVER:-}" ] && KEPT=$(local_data_slab) \
+             && ! release_replaced "$KEPT"; then
             echo "  NOT an install: $KEPT carries this node's data slab, and nothing showed a new"
             echo "  release on it (it could not be booted: a power cut, a flow-over cut short) -"
             echo "  its data half is kept; only a boot intent of 'install' re-lays it (#258)"
         else
+            [ -z "${INSTALL_OVER:-}" ] && [ -n "${KEPT:-}" ] && INSTALL_OVER="$KEPT"
             ASSIMILATE=force
             INSTALL_FRESH=1
             echo "  an install: the appliance states no boot intent, so a fresh slab is laid (#236)"

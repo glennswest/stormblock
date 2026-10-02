@@ -172,6 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### An upgrade without intents boots the old slab (2026-10-02, #261, P0) — IN PROGRESS
+
+C2NR0Q2 (Dell R230) claimed 11.65 over its 11.56 disk and came up on 11.56
+(forge 13.7, no intents). By reading: the probe found the 11.56 disk "missing
+N mounted volume(s)" (11.65's cmdline mounts a volume 11.56 lacks), so it
+booted the claimed image with no `INSTALL_OVER`; #258's no-intent rule then
+kept every disk carrying a data slab (`NOT an install`). server3 11.64→11.65
+had the same volume set, so its disk was bootable and `slab holds` said 1.
+- [x] /init survey: before keeping a disk with a data slab, `slab holds
+      <disk> <claimed>`: 1 = UPGRADE (INSTALL_OVER = that disk, forced), 0/3/2
+      kept; printed on the console
+- [x] boot-hook test cases; docs (boot-hooks.md, README), CHANGELOG
+- [ ] sc-build: initramfs tests under sh and busybox sh, the generated /init
+      parses
+- Not on metal: needs a stormcos release with this initramfs; then
+  stormcentral's `testhost install C2NR0Q2 <release>` (fresh-slab stage)
+
 ### Finishing a cut-short flow-over claims as the SMBIOS serial (2026-10-02, #259, P0) — DONE
 
 server3, 11.64 (after #258): the probe claimed `boothost/server3` (the
