@@ -1077,7 +1077,7 @@ pub async fn run() -> anyhow::Result<()> {
         // the set's, found on the set once it is put back together. So those
         // drives are taken out of everything below — the slab scan, `--raid`,
         // the raw namespaces — and nothing formats over them.
-        let mut assembled_sets = false;
+        let assembled_sets;
         {
             let (report, claimed) = crate::mgmt::raid_sets::assemble_and_adopt(&state, &drives).await;
             if !report.arrays.is_empty() || !report.spares.is_empty() || !report.refused.is_empty() {
