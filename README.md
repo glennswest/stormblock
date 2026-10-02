@@ -70,7 +70,7 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   the volume records themselves, so a slab is self-describing and can be
   adopted by another engine. Each has a **role** — `system` (goldens, replaced
   by an install) or `data` (identity and state, never formatted by an install)
-  — a tier, and a failure domain (`site/…/rack/node/hba/shelf/bay/drive`).
+  — a tier, and a failure domain (`site/…/rack/node/hba/shelf/set/bay/drive`).
 - **Thin volumes** allocate on write and give space back on discard (iSCSI
   UNMAP / WRITE SAME, NVMe DSM). **Copy-on-write clones** share extents by
   refcount; a **sealed** volume takes no writes and is what clones come from.
@@ -79,10 +79,17 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   (`mirror:2@shelf`). A failed drive's volumes are **rebuilt automatically**,
   most endangered first, several at once, under one byte budget
   (`/api/v1/rebuilds`). See `docs/redundancy.md`, `docs/multi-drive.md`.
-- **Drive-level RAID 1/5/6/10** (`/api/v1/arrays`) exists for whole-device
-  legs — a RAID 1 across NVMe/TCP legs is how stormstorage builds a
-  distributed volume. An API-created array is *dedicated* by default, and a
-  volume created with its `array_id` lives only on it.
+- **Drive-level RAID 1/5/6/10 sets with hot spares** (`/api/v1/arrays`,
+  `/api/v1/shelves`, `/api/v1/spares`; `docs/raid-sets.md`, #252). A shelf
+  is laid out as several sets, each its own failure domain
+  (`shelf=…/set=…`), with spares per shelf or global. A failed member takes
+  a spare and rebuilds in the background. The sets are reassembled from
+  their members' superblocks at startup, and a write-intent bitmap limits
+  the resync after a crash to the chunks being written. Volumes are
+  allocated onto the sets' slabs. A RAID 1 across NVMe/TCP legs is how
+  stormstorage builds a distributed volume: an API-created array is
+  *dedicated* by default, and a volume created with its `array_id` lives
+  only on it.
 
 **Filesystems.** Templates formatted in-process — ext2/3/4 with
 [`mkfs-ext4`](https://github.com/glennswest/mkfs.ext4.rs), XFS with
@@ -398,7 +405,8 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
 ## Health, readiness and metrics
 
 - `GET /api/v1/health` — public, no locks, no I/O:
-  `{"status":"ok","service":"stormblock","version":…,"auth":"required"|"none"}`.
+  `{"status":"ok","service":"stormblock","version":…,"auth":"required"|"none"}`,
+  plus `"raid"` (the worst RAID set's state) on a node that has sets.
   A booting node asks this of every candidate address before it has a token.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
@@ -408,6 +416,7 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   and their `_total`s, `stormblock_drive_{capacity_bytes,healthy,media_errors,temperature_celsius,available_spare_pct,power_on_hours}{drive,serial}`;
   plus `stormblock_api_requests_total{endpoint,method}`, `stormblock_volumes_total`,
   `stormblock_{drives,arrays,slabs,exports,luns}_total`, `stormblock_capacity_bytes`,
+  `stormblock_raid_{state,failed_members,rebuild_percent}{array,name}`,
   `stormblock_fstemplate_claims_total`,
   `stormblock_pool_*`, `stormblock_iscsi_sessions_*`, `stormblock_cluster_*`,
   `stormblock_replication_*`, and the serving layer's `stormblockmk_*` gauges.
@@ -427,7 +436,7 @@ intent) need it.
 
 | surface | for |
 |---|---|
-| `/api/v1/drives`, `/arrays`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID arrays, slabs and the pool (`durability`, `{id}/slots`), GC, rebuild queue |
+| `/api/v1/drives`, `/arrays`, `/shelves`, `/spares`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID sets (create, `assemble`, members `{slot}/fail` and `/replace`, `scrub`, `rebuild` rate), shelf layout, hot spares, slabs and the pool (`durability`, `{id}/slots`), GC, rebuild queue |
 | `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
 | `/api/v1/boothost` | boot hosts by DNS name: list (`?unnamed=1`: booted the default, not named yet, #200), find by name or alias, `PUT {aliases}`, `POST …/rename` (#199) |
 | `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks (`{id}/clone`, `{id}/claim`), offline moves, names and boot claims, published releases (`index.html`, `manifest`, `notes`, `changes`) |
@@ -1348,10 +1357,11 @@ What earlier docs described and the code does not do, each with its issue:
 
 - **NVMe userspace (VFIO) driver** — a stub; NVMe drives are served through
   the kernel, opened `O_DIRECT` (#167).
-- **Drive-level RAID extras** — the write-intent journal is in memory only,
-  and journal recovery, scrub, array rebuild (other than RAID 1 resync on
-  `add_member`) and reassembly from superblocks are not wired; RAID 6 Q parity
-  is scalar (#168). Per-volume redundancy is the rebuild path in use.
+- **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a
+  parity set; no proactive replacement of a `failing` drive; a returning
+  member is not re-added from the bitmap; Q has no SIMD path; bay LEDs are
+  stormdrive's (stormdrive#44); `[[arrays]]` in the config is not acted on
+  (#165).
 - **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with
   nothing starting it; `arm64`/`mikrotik` gate nothing (#169).
 - **Config the daemon ignores** — see *The config file* (#163, #164, #165).
@@ -1364,8 +1374,6 @@ What earlier docs described and the code does not do, each with its issue:
   portal port, so `/serve/v1` serves at most 128 volumes per node by default
   (#188). NSIDs on the shared subsystem are reused after a detach (#96), and
   two subsystem schemes are live at once (#98).
-- **Known wrong reads**: a RAID-1 array reads from a member that is still
-  rebuilding (#175).
 - **"No C dependencies"** was never true: TLS brings in `ring` (the only
   backend since #209; `aws-lc-sys` is gone).
 - **NVMe/TCP access** (#210, `docs/nvme-access.md`): the `/serve/v1`
@@ -1382,8 +1390,7 @@ What earlier docs described and the code does not do, each with its issue:
   it yet: whether a release is one disk at 512 or two volumes is the owner's
   call (#233), and whether to keep the capability at all is #248.
 - **Smaller known faults**: ublk attach polls device readiness with a blocking
-  sleep under the export lock (#231); `POST /api/v1/arrays` takes drives that
-  are already array members (#215); the volume listing's `generation` does not
+  sleep under the export lock (#231); the volume listing's `generation` does not
   move on attach, detach or slab state (#218); `local-boot`'s ladder retention
   ignores `successful`/`tries` (#205).
 
@@ -1396,6 +1403,7 @@ What earlier docs described and the code does not do, each with its issue:
 | `docs/durability.md` | what survives a power cut: slot entries after their data, frees made durable before reuse, recovery from stale records, the handover order, a flow-over cut short |
 | `docs/redundancy.md` | per-volume redundancy, failure domains, health, resync, automatic rebuild, drain, whole-disk goldens and import |
 | `docs/multi-drive.md` | pools, placement, a drive's life, dedicated arrays, what a claim should ask for (part design) |
+| `docs/raid-sets.md` | a shelf as RAID sets with hot spares: on-disk superblock and bitmap, failure → spare → rebuild, assembly, scrub, the API (#252) |
 | `docs/pallets.md` | the pallet format and lifecycle (§2.6–§2.8 are design) |
 | `docs/images.md` | building disk images and ISOs, local boot |
 | `docs/composed-disks.md` | per-node disks composed from shared goldens |
@@ -1432,7 +1440,7 @@ src/fs/          5.6k  templates, ext4 and XFS seams, disk identity, files, imag
 src/serve/       4.0k  the serving layer (/serve/v1): wiring, reconciler, readiness, reaper
 src/pallet/      3.9k  pallet format writer, GPT, store, manager, selection
 src/placement/   3.0k  failure domains, placement, drain moves, rebalance
-src/raid/        2.7k  drive-level RAID 1/5/6/10, parity
+src/raid/        4.7k  drive-level RAID 1/5/6/10 sets: superblock, bitmap, assembly, rebuild, spares, parity
 src/cluster/     2.6k  openraft membership, heartbeat, replication (feature cluster, opt-in)
 src/*.rs        10.3k  cli.rs (CLI, daemon, subcommands; main.rs wraps it), rebuild, drain,
                        state, boot,

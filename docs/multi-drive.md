@@ -14,6 +14,10 @@ The owner's frame:
 > by failure domain (drive < shelf of 160 < rack) and rebuilds per volume
 > (#146).
 
+**Reversed for shelves (owner, 2026-10-02, #252):** a shelf is divided into
+drive-level RAID sets with hot spares, and volumes are allocated onto the
+sets — [raid-sets.md](raid-sets.md).
+
 And the scale it has to hold: 160-drive shelves of 256 TB, stacked per rack
 (stormcos#93), on a fleet of mixed hardware where most nodes today have one
 or two drives.
@@ -46,11 +50,16 @@ volume = extents; each extent has N legs (mirror) or a stripe (parity);
   named pool. Adding a drive's slab grows its pool, and draining one shrinks
   it. What an operator asks of a pool is capacity, pressure and tier. That is
   `GET /api/v1/slabs/pool` (a total and a per-tier breakdown) and `/metrics`.
-* **No RAID across drives.** The drive-level `RaidArray` stays for what it
-  already serves, whole-device legs such as a remote RAID-1 leg over
-  NVMe/TCP, but it is **not** how a pool is made or how a volume is protected.
-  A pool is never an array. A volume is protected by where its own members
-  are.
+* **No RAID across drives — except a shelf's RAID sets (#252).** For the
+  single-node pool of a few drives this stands: a volume is protected by
+  where its own members are. At shelf scale the owner reversed it
+  (2026-10-02): per-volume parity costs every clone's first write into a
+  stripe a full-stripe read and new P/Q, so a shelf (a DS2246, a row of 16) is
+  divided into drive-level **RAID sets with hot spares**, each its own
+  failure domain (`shelf=…/set=…`), and volumes are allocated onto the sets'
+  slabs like onto drives. See [raid-sets.md](raid-sets.md). The drive-level
+  `RaidArray` also still serves whole-device legs (a remote RAID-1 over
+  NVMe/TCP).
 
 ### An array as one consumer's storage (#150)
 
@@ -277,6 +286,7 @@ above ran on files.
 | a new drive: slab by policy, then rebalance onto it *(decision 3)*; `POST /slabs/rebalance`; drain rate limit | stormblock #154 |
 | Drives and Pools pages | stormconsole #29 (#32, 160 drives, is closed) |
 | drive-level RAID failure states — only for whole-device legs now | stormblock #69 |
+| shelf RAID sets with hot spares, rebuild, scrub, reassembly — **done** ([raid-sets.md](raid-sets.md)) | stormblock #252, #168 |
 | replicas on other servers (a different axis: across nodes) | rustkube-node #68 |
 
 **Decisions for the owner:** (1) drive affinity for non-redundant volumes;
