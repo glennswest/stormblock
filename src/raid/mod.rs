@@ -1206,11 +1206,12 @@ impl RaidArray {
             while j < segs.len() && segs[j].stripe == segs[i].stripe {
                 j += 1;
             }
-            groups.push(&segs[i..j]);
+            groups.push((i, j));
             i = j;
         }
+        let (geo, segs) = (&geo, &segs);
         let results: Vec<DriveResult<()>> = futures_util::stream::iter(groups)
-            .map(|g| self.parity_write_stripe(&geo, g, buf))
+            .map(|(i, j)| self.parity_write_stripe(geo, &segs[i..j], buf))
             .buffer_unordered(IO_PARALLEL)
             .collect()
             .await;
