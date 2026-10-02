@@ -4,8 +4,6 @@
 
 ### 2026-10-02
 - **docs:** #252 work plan — shelf/row RAID answer to the owner (how per-volume parity handles a failure and what it costs at row width); recommendation moved to drive-level RAID sets; waiting on the owner
-
-### 2026-10-02
 - **docs:** Refreshed from the code since 2026-09-28 (#228, #236, #237, #239, #249, #250, #251). README: a table of every kernel command-line parameter `/init` reads (with defaults) and its bounded waits; `slab holds` in the subcommands; the initramfs's files (`boot.d`, `build-date`, `install.json`, `no-intent`, the stormbootx EFI variables); "Not built, or not wired" adds #240, #232, #228/#233/#248, #231, #215, #218, #205; source sizes. The cross-component corrections of stormcos#65 (#242): `compose-release.py` is stormcos's, the component registry is stormcentral's database, the PVC blanks are cut by stormcos's build (sbregistry names and surveys them), and the console reads `placement`. CLAUDE.md current state and the deck's status slide follow
 
 ### 2026-10-01
