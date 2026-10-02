@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -66,6 +67,8 @@ pub const DEFAULT_STRIPE_SIZE: u64 = 64 * 1024;
 pub const MIRROR_UNIT: u64 = 1024 * 1024;
 
 const LOCK_SHARDS: usize = 1024;
+/// Stripes (or rebuild units) one request works on at once.
+const IO_PARALLEL: usize = 16;
 /// A rebuild or resync locks this much member data at once.
 const REBUILD_BATCH: u64 = 4 * 1024 * 1024;
 /// How long a chunk must have been idle before a flush clears its bit.
@@ -1194,19 +1197,24 @@ impl RaidArray {
         let last = segs[segs.len() - 1].stripe;
         let r = self.bitmap.chunks(first * self.stripe_size, (last + 1 - first) * self.stripe_size);
         self.intent_begin(r.clone()).await?;
-        let mut res = Ok(());
+        // One group per stripe; the stripes of a large write go at once, each
+        // under its own lock.
+        let mut groups = Vec::new();
         let mut i = 0;
         while i < segs.len() {
             let mut j = i;
             while j < segs.len() && segs[j].stripe == segs[i].stripe {
                 j += 1;
             }
-            if let Err(e) = self.parity_write_stripe(&geo, &segs[i..j], buf).await {
-                res = Err(e);
-                break;
-            }
+            groups.push(&segs[i..j]);
             i = j;
         }
+        let results: Vec<DriveResult<()>> = futures_util::stream::iter(groups)
+            .map(|g| self.parity_write_stripe(&geo, g, buf))
+            .buffer_unordered(IO_PARALLEL)
+            .collect()
+            .await;
+        let res = results.into_iter().find(|r| r.is_err()).unwrap_or(Ok(()));
         self.bitmap.end(r);
         self.persist_if_dirty().await;
         res
@@ -1679,12 +1687,16 @@ impl RaidArray {
             let end_key = (key + batch).min(last);
             {
                 let _g = self.locks.lock_many(key..end_key).await;
-                for k in key..end_key {
-                    if let Err(e) = self.rebuild_unit(k, &targets).await {
-                        progress.finish(Some(e.to_string()));
-                        self.persist_if_dirty().await;
-                        return Err(e);
-                    }
+                // The batch's units at once: they are locked, and disjoint.
+                let results: Vec<Result<(), RaidError>> = futures_util::stream::iter(key..end_key)
+                    .map(|k| self.rebuild_unit(k, &targets))
+                    .buffer_unordered(IO_PARALLEL)
+                    .collect()
+                    .await;
+                if let Some(e) = results.into_iter().find_map(|r| r.err()) {
+                    progress.finish(Some(e.to_string()));
+                    self.persist_if_dirty().await;
+                    return Err(e);
                 }
                 let end = (end_key * lu).min(self.data_size);
                 let mut members = self.members.write().unwrap();

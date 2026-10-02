@@ -31,6 +31,11 @@ async fn main() {
         let f = std::fs::File::create(&p).unwrap();
         f.set_len(per + stormblock::raid::DATA_OFFSET).unwrap();
         drop(f);
+        // O_DIRECT, as a real drive is opened: the page cache would
+        // otherwise be what is measured.
+        #[cfg(target_os = "linux")]
+        devs.push(Arc::new(stormblock::drive::sas::SasDevice::open_file_direct(&p, 4096).await.unwrap()));
+        #[cfg(not(target_os = "linux"))]
         devs.push(Arc::from(stormblock::drive::open_one_drive(&p).await.unwrap()));
         paths.push(p);
     }
