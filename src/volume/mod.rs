@@ -523,6 +523,11 @@ impl VolumeManager {
     /// server3). Recorded, the extents on the absent clone are what the next
     /// boot fetches from a fresh one (#171).
     pub fn record_flow_over(&self, dest: SlabId, sources: Vec<SlabId>) {
+        // `RECORD_FLOW_OFF_258=1`: the old behaviour, for showing the test
+        // fails without it.
+        if std::env::var_os("RECORD_FLOW_OFF_258").is_some() {
+            return;
+        }
         *self.flowing_into.lock().unwrap() = Some((dest, sources));
     }
 

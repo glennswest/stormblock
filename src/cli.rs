@@ -6824,6 +6824,8 @@ size = "64M"
     /// the data half (11.63 on server3: 0 of 300 objects). And the next boot,
     /// from the disk, finishes the flow-over from a fresh clone (#171) with
     /// every volume as the image had it and the data half's writes kept.
+    ///
+    /// `RECORD_FLOW_OFF_258=1` records as before (expected to fail).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_power_cut_before_the_flow_over_moves_anything_keeps_the_disk_bootable() {
         let dir = tempfile::tempdir().unwrap();
