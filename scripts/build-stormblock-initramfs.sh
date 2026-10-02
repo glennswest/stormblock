@@ -756,6 +756,9 @@ if [ -n "$FW_TAG" ]; then
 elif [ -n "$BOOTTAG" ]; then
     BOOTTAG_FROM=cmdline
 fi
+# The engine claims again to finish a cut-short flow-over (#171): it must
+# claim as this machine, not work the name out again from SMBIOS (#259).
+[ -n "$BOOTTAG" ] && export STORMBLOCK_BOOT_TAG="$BOOTTAG"
 if [ -n "$FW_NQN" ]; then
     if [ -n "$HOSTNQN" ] && [ "$HOSTNQN" != "$FW_NQN" ]; then
         echo "WARNING: rd.stormblock.hostnqn=$HOSTNQN, but the firmware attached as $FW_NQN - using $FW_NQN"
@@ -1823,6 +1826,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         if identity_guessed; then
             echo "  a guessed name boots, and installs over no disk that carries a slab (#249)"
         fi
+        [ -n "$BOOTTAG" ] && export STORMBLOCK_BOOT_TAG="$BOOTTAG"
         if [ -z "$BOOTTAG" ]; then
             echo "Nothing identifies this machine to $BOOTHOST:"
             echo "  not on the command line (rd.stormblock.tag=), no SMBIOS serial,"
@@ -2146,7 +2150,10 @@ if [ "$BOOT_MODE" = "local" ]; then
                     # engine finishes the flow-over from a fresh clone (#171).
                     # Installing over it lost every object on 11.63.
                     echo "  the same release, its install cut short: booting $SLAB, its data kept;"
-                    echo "  the engine finishes the flow-over from a fresh clone of $BOOTTAG's image"
+                    echo "  the engine finishes the flow-over from the clone just claimed as $BOOTTAG"
+                    # That clone, not a second claim: the one `slab holds`
+                    # just compared is the one known to be this release (#259).
+                    export STORMBLOCK_RESUME_SOURCE="$CLAIMED"
                     ;;
                 guess) ;;
                 1)

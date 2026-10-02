@@ -2881,24 +2881,84 @@ struct Resumed {
     data_slab: Option<crate::drive::slab::SlabId>,
 }
 
-/// This machine's name to the appliance: the SMBIOS serial (a Dell's service
-/// tag), else the SMBIOS UUID — the rules the initramfs uses (stormcos#46).
-/// `STORMBLOCK_BOOT_TAG` overrides both.
+/// The vendor GUID of stormbootx's volatile variables (#249).
+const STORMBOOT_GUID: &str = "ab361f54-0166-44a4-a088-1ac22e98ab76";
+
+/// This machine's name to the appliance, by the initramfs's rules (#249):
+/// `STORMBLOCK_BOOT_TAG` (what `/init` resolved and exported), else the name
+/// stormbootx claimed on (`StormBootTag`, a volatile EFI variable), else the
+/// SMBIOS serial (a Dell's service tag), else the SMBIOS UUID. The SMBIOS
+/// values are a guess: a MicroCloud's blades share one serial, and a resume
+/// that claimed by it got another machine's image (#259).
 fn machine_tag() -> Option<String> {
-    if let Ok(t) = std::env::var("STORMBLOCK_BOOT_TAG") {
-        if !t.trim().is_empty() {
-            return Some(t.trim().to_string());
+    let efivars = std::env::var("STORM_EFIVARS").unwrap_or_else(|_| "/sys/firmware/efi/efivars".into());
+    let dmi = std::env::var("STORM_DMI").unwrap_or_else(|_| "/sys/class/dmi/id".into());
+    let read = |f: String| std::fs::read_to_string(f).ok();
+    machine_tag_from(
+        std::env::var("STORMBLOCK_BOOT_TAG").ok(),
+        std::fs::read(format!("{efivars}/StormBootTag-{STORMBOOT_GUID}")).ok(),
+        read(format!("{dmi}/product_serial")),
+        read(format!("{dmi}/product_uuid")),
+    )
+}
+
+fn machine_tag_from(
+    env: Option<String>,
+    efivar: Option<Vec<u8>>,
+    serial: Option<String>,
+    uuid: Option<String>,
+) -> Option<String> {
+    if let Some(t) = env.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        return Some(t);
+    }
+    // 4 attribute bytes, then the value: ASCII, no NUL (stormbootx#76). A
+    // value outside the name alphabet is not one stormbootx would set — the
+    // same check `/init` makes.
+    if let Some(raw) = efivar.filter(|r| r.len() > 4) {
+        let v: String = String::from_utf8_lossy(&raw[4..])
+            .chars()
+            .filter(|c| !matches!(c, '\0' | '\n' | '\r' | ' '))
+            .collect();
+        if !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || "._:-".contains(c)) {
+            return Some(v);
         }
     }
-    let read = |f: &str| std::fs::read_to_string(f).ok().map(|s| s.trim().replace(' ', ""));
-    if let Some(serial) = read("/sys/class/dmi/id/product_serial") {
+    let clean = |s: Option<String>| s.map(|s| s.trim().replace(' ', ""));
+    if let Some(serial) = clean(serial) {
         let placeholder = matches!(serial.as_str(), "" | "NotSpecified" | "None" | "Unknown" | "ToBeFilledByO.E.M.")
             || serial.starts_with("Default");
         if !placeholder {
             return Some(serial);
         }
     }
-    read("/sys/class/dmi/id/product_uuid").filter(|u| !u.is_empty())
+    clean(uuid).filter(|u| !u.is_empty())
+}
+
+/// Extents the records place only on slabs not in `have`: no leg left to
+/// read them from (#259). Volumes with parity groups are left out — a lost
+/// data leg there is reconstructed, and a missing drive is their ordinary
+/// degraded state. Returns (volume name, extents) per volume affected.
+fn stranded_extents(
+    docs: &[Option<crate::volume::metadata::VolumeMetadata>],
+    have: &std::collections::HashSet<crate::drive::slab::SlabId>,
+) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for d in docs.iter().flatten() {
+        for v in &d.volumes {
+            if !v.parity.is_empty() {
+                continue;
+            }
+            let n = v
+                .extents
+                .values()
+                .filter(|loc| !loc.legs().any(|l| have.contains(&l.slab_id)))
+                .count();
+            if n > 0 {
+                out.push((v.name.clone(), n));
+            }
+        }
+    }
+    out
 }
 
 /// Every slab a set of volume records places an extent on.
@@ -3064,7 +3124,14 @@ async fn open_slabs_resuming(
             // A test (or an operator by hand) can name the source directly.
             let given = std::env::var("STORMBLOCK_RESUME_SOURCE").ok().filter(|b| !b.trim().is_empty());
             let source: Option<String> = match (given, boothost, machine_tag()) {
-                (Some(src), _, _) => Some(src),
+                (Some(src), _, _) => {
+                    println!(
+                        "The local records place extents on {} slab(s) not on this machine - a \
+                         flow-over cut short. Finishing it from {src}.",
+                        missing.len()
+                    );
+                    Some(src)
+                }
                 (None, Some(boothost), Some(tag)) => {
                     println!(
                         "The local records place extents on {} slab(s) not on this machine - a \
@@ -3081,6 +3148,7 @@ async fn open_slabs_resuming(
                 }
                 _ => None,
             };
+            let tried = source.clone();
             match source {
                 Some(uri) => {
                     let dev: Arc<dyn BlockDevice> = if is_fabric_uri(&uri) {
@@ -3118,9 +3186,34 @@ async fn open_slabs_resuming(
                 None => println!(
                     "WARNING: the local records place extents on {} slab(s) not on this machine \
                      (a flow-over cut short?), and no appliance or machine tag is known to fetch \
-                     them from - those extents will be missing",
+                     them from",
                     missing.len()
                 ),
+            }
+            // Booting on with those mappings dropped is a root that reads
+            // holes: PID 1 died of SIGSEGV on server3 (#259). Stop, and say
+            // what is missing and from where it was looked for.
+            let mut have = opened.clone();
+            have.extend(fetched.iter().map(|(_, s)| s.slab_id()));
+            let stranded = stranded_extents(&embedded, &have);
+            if !stranded.is_empty() {
+                let total: usize = stranded.iter().map(|(_, n)| n).sum();
+                let names: Vec<String> =
+                    stranded.iter().take(8).map(|(v, n)| format!("{v} ({n})")).collect();
+                anyhow::bail!(
+                    "refusing to boot: the local records place {total} extent(s) of {} volume(s) \
+                     [{}{}] only on slab(s) {} - not on this machine, and not in the image claimed \
+                     to finish the flow-over{}. That image is not the one this disk was laid from \
+                     (the wrong machine name?), or the flow-over's source is gone (#259)",
+                    stranded.len(),
+                    names.join(", "),
+                    if stranded.len() > 8 { ", ..." } else { "" },
+                    missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", "),
+                    match &tried {
+                        Some(t) => format!(" ({t})"),
+                        None => " (none was: no appliance or machine name known)".into(),
+                    },
+                );
             }
         }
     }
@@ -6926,6 +7019,23 @@ file = "{state}"
             "slab holds after the cut: {held:?}"
         );
 
+        // Boot 2 claimed as the wrong machine (#259: the SMBIOS serial the
+        // blades share, another machine's release): its clone does not carry
+        // the slab the records need. The boot stops, naming it, rather than
+        // dropping every mapping there and coming up on a root of holes.
+        let other = p("other.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&other))
+            .await
+            .unwrap();
+        std::env::set_var("STORMBLOCK_RESUME_SOURCE", &other);
+        let wrong = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await;
+        std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
+        match wrong {
+            Ok(_) => panic!("the boot resumed from another machine's image and came up"),
+            Err(e) => assert!(e.to_string().contains("refusing to boot"), "{e}"),
+        }
+
         // Boot 2, from the disk, finishing the flow-over from a fresh claim.
         let second = claim("claim2.raw");
         std::env::set_var("STORMBLOCK_RESUME_SOURCE", &second);
@@ -6941,6 +7051,30 @@ file = "{state}"
             bad.push("the data half's write before the cut is gone".into());
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// The resume claims as the machine the firmware claimed as (#259):
+    /// `/init`'s export, then stormbootx's `StormBootTag`, and only then the
+    /// SMBIOS guess.
+    #[test]
+    fn the_resume_names_the_machine_as_the_firmware_did() {
+        let fw = |v: &str| {
+            let mut b = vec![6u8, 0, 0, 0];
+            b.extend_from_slice(v.as_bytes());
+            Some(b)
+        };
+        let serial = Some("S11075924402016\n".to_string());
+        let uuid = Some("4c4c4544-0000\n".to_string());
+        let t = super::machine_tag_from;
+        assert_eq!(t(Some("server3".into()), fw("other"), serial.clone(), uuid.clone()).as_deref(), Some("server3"));
+        assert_eq!(t(None, fw("server3"), serial.clone(), uuid.clone()).as_deref(), Some("server3"));
+        assert_eq!(t(Some("  ".into()), fw("server3"), serial.clone(), None).as_deref(), Some("server3"));
+        // Not a name: ignored, as /init ignores it.
+        assert_eq!(t(None, fw("a/b"), serial.clone(), None).as_deref(), Some("S11075924402016"));
+        assert_eq!(t(None, Some(vec![6, 0, 0, 0]), serial.clone(), None).as_deref(), Some("S11075924402016"));
+        assert_eq!(t(None, None, serial, uuid.clone()).as_deref(), Some("S11075924402016"));
+        assert_eq!(t(None, None, Some("To Be Filled By O.E.M.".into()), uuid).as_deref(), Some("4c4c4544-0000"));
+        assert_eq!(t(None, None, None, None), None);
     }
 
     /// Every unsealed volume overwritten, its first 64 MiB, with noise.

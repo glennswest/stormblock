@@ -262,7 +262,12 @@ probe() { # slab-path [VOLUME] [META] -> the SLAB the probe leaves behind
         . "$WORK/identity.sh" >/dev/null 2>&1
         . "$WORK/claim.sh" >/dev/null 2>&1
         . "$WORK/probe.sh" >/dev/null 2>&1
-        echo "$SLAB${INSTALL_OVER:+|$INSTALL_OVER}"
+        if [ -n "${SHOW_HANDED:-}" ]; then
+            # What boot-local is handed for finishing a flow-over (#259).
+            echo "${STORMBLOCK_BOOT_TAG:-}|${STORMBLOCK_RESUME_SOURCE:-}"
+        else
+            echo "$SLAB${INSTALL_OVER:+|$INSTALL_OVER}"
+        fi
     )
 }
 
@@ -327,6 +332,12 @@ check "the same release, its flow-over cut short: the disk boots (#258)" "$part"
     "$(STUB_CLAIM="$URI" STUB_HOLDS=3 probe "$part")"
 check "cannot tell which release: the disk boots as before" "$part" \
     "$(STUB_CLAIM="$URI" STUB_HOLDS=2 probe "$part")"
+# #259: the engine finishes the flow-over as this machine, from the clone the
+# probe just compared - never by a second claim under the SMBIOS serial.
+check "cut short: boot-local is handed the name and the clone just claimed" "TESTTAG|$URI" \
+    "$(SHOW_HANDED=1 STUB_CLAIM="$URI" STUB_HOLDS=3 probe "$part")"
+check "held: the name is handed down, no clone to resume from" "TESTTAG|" \
+    "$(SHOW_HANDED=1 STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
 TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
 check "an install the appliance asked for installs whatever the disk holds" "$URI|$part" \
     "$(STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
@@ -375,6 +386,7 @@ STUBEOF
         . "$WORK/identity.sh" >/dev/null 2>&1
         . "$WORK/claim.sh" >/dev/null 2>&1
         boothost_claim >/dev/null 2>&1
+        [ "${STORMBLOCK_BOOT_TAG:-}" = "$BOOTTAG" ] || { echo "exported '${STORMBLOCK_BOOT_TAG:-}', not '$BOOTTAG'"; return; }
         echo "$BOOTTAG|$BOOTTAG_FROM|$HOSTNQN|$(cat "$ASKED" 2>/dev/null)"
     )
 }
