@@ -292,10 +292,13 @@ pub enum ReleaseHeld {
     NotHeld { goldens: usize, missing: usize },
     /// Every golden is recorded, but the install never finished: the local
     /// records still place extents on `slabs` slab(s) that are not on the
-    /// drive — the appliance clone a flow-over was moving from (#239). Not
-    /// held: a boot that resumed from a fresh clone would read what this
-    /// node wrote against the image's pristine bytes, so the next boot
-    /// installs again.
+    /// drive — the appliance clone a flow-over was moving from (#239). The
+    /// same release, cut short (a power cut during the flow-over): the drive
+    /// boots and the engine finishes the flow-over from a fresh clone (#171).
+    /// Since b189b3e nothing the node writes stays on the clone (owned
+    /// extents relocate while it is a flow source), so the fresh clone's
+    /// pristine bytes are exactly what the records still point at; installing
+    /// over the drive instead destroyed its data half (#258).
     Unfinished { goldens: usize, slabs: usize },
     /// One side cannot answer: no slab, no metadata, or no sealed volume in
     /// the image. A caller must not read this as either answer.

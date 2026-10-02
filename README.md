@@ -250,7 +250,7 @@ to stderr.
 
 | subcommand | what it does |
 |---|---|
-| `slab format\|grow\|list\|info\|volumes\|holds` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it; `holds <local> <image>` says whether a local drive already holds a release, finished (exit 0 held, 1 not, 2 cannot say; #236, #239) |
+| `slab format\|grow\|list\|info\|volumes\|holds` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it; `holds <local> <image>` says whether a local drive already holds a release (exit 0 held, 1 not, 2 cannot say, 3 held with its flow-over cut short; #236, #239, #258) |
 | `image build\|convert\|inspect\|formats\|lay-node\|local-boot` | build disk images and ISOs out of pallets from a TOML spec (`docs/images.md`); `lay-node` lays a node's disk layout (destroys the drive); `local-boot` copies an ESP and boot pallets onto an installed disk |
 | `pallet …` (22 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, `add-member`/`remove-member`/`copy-member`/`move-member`, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
 | `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--label] [--read-only]`; `--whiteouts` and `--fsck` are on by default and take a value, e.g. `--fsck false`) — how stormcentral builds service goldens |
@@ -1181,8 +1181,9 @@ Three answers, deliberately distinct, because a boot decision turns on which:
 does the local drive already hold every golden (sealed volume, by id) of the
 image — a path, a file or an `nvme-tcp://` URI — and has the install
 finished, i.e. do its records place no extent on a slab that is not on the
-drive (#239)? Exit 0 held, 1 not held (a golden missing, or an install whose
-flow-over never finished), 2 cannot say. `/init` uses it to tell an install from a reboot when the
+drive (#239)? Exit 0 held, 1 not held (a golden missing), 2 cannot say, 3
+the same release with its flow-over cut short (boot the drive: the engine
+finishes the move, #258). `/init` uses it to tell an install from a reboot when the
 appliance serves no boot intent (`docs/boot-hooks.md`, "An install without an
 intent").
 
@@ -1223,7 +1224,11 @@ the old clone's slab. The next boot's `boot-local` claims a fresh clone of the
 same image, which carries the same slabs with the image's bytes, maps the
 unmoved extents onto it, and hands the rest of the move to the successor.
 Nothing the last boot wrote is on that clone, which is why nothing is written
-in place on the appliance during a flow-over. It
+in place on the appliance during a flow-over. From the moment the flow-over
+starts, the local system slab's record names every volume still on the
+appliance's slab as well as those already moved (#258), so a disk cut short
+at any point names everything the node boots, and the initramfs boots it
+rather than finding volumes "missing" and installing over it. It
 does this only when `STORMBLOCK_BOOTHOST` names an appliance. Without one it
 warns and drops those extents. See `docs/durability.md` for what survives a
 power cut and why.

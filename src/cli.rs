@@ -497,7 +497,10 @@ enum SlabAction {
     /// reboot; of one it does not, an install.
     ///
     /// Exit 0: held. Exit 1: not held. Exit 2: cannot say (one side keeps no
-    /// records, or the image has no sealed volume) — neither answer.
+    /// records, or the image has no sealed volume) — neither answer. Exit 3:
+    /// the same release, its flow-over cut short (records still place extents
+    /// on a slab not on the drive): boot the drive, which finishes it from a
+    /// fresh clone (#171) — never a reason to install over it (#258).
     Holds {
         /// The local drive (a disk whose partitions are slabs, or a slab)
         local: String,
@@ -1870,12 +1873,16 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
                 ReleaseHeld::Unfinished { goldens, slabs } => {
+                    // The same release, cut short: a power cut during the
+                    // install's flow-over. Booting the drive finishes it; an
+                    // install over it would destroy what the node wrote
+                    // since (#258, 0 of 300 objects on 11.63).
                     println!(
-                        "{local} does not hold the release on {image}: all {goldens} golden(s) are \
-                         recorded, but the install never finished — extents are still placed on \
-                         {slabs} slab(s) not on this drive"
+                        "{local} holds the release on {image}, unfinished: all {goldens} golden(s) \
+                         are recorded, and extents are still placed on {slabs} slab(s) not on this \
+                         drive — booting it finishes the flow-over from a fresh clone"
                     );
-                    std::process::exit(1);
+                    std::process::exit(3);
                 }
                 ReleaseHeld::CannotSay(why) => {
                     println!("cannot say whether {local} holds the release on {image}: {why}");
@@ -6907,6 +6914,17 @@ file = "{state}"
         let on_disk = names_on_disk(&flow.disk).await;
         let missing: Vec<_> = want.keys().filter(|n| !on_disk.contains(*n)).collect();
         assert!(missing.is_empty(), "the disk does not name {missing:?} (it names {on_disk:?})");
+        // And the release question the probe asks next says "the same
+        // release, cut short" (exit 3: boot it), not "not held" (install).
+        let held = crate::image::local::release_held(
+            &super::open_storage(&flow.disk).await.unwrap(),
+            &super::open_storage(&image).await.unwrap(),
+        )
+        .await;
+        assert!(
+            matches!(held, crate::image::local::ReleaseHeld::Unfinished { .. }),
+            "slab holds after the cut: {held:?}"
+        );
 
         // Boot 2, from the disk, finishing the flow-over from a fresh claim.
         let second = claim("claim2.raw");

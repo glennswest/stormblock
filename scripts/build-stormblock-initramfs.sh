@@ -2140,6 +2140,14 @@ if [ "$BOOT_MODE" = "local" ]; then
                 fi
                 case "$HELD_RC" in
                 0) echo "  the same release: booting $SLAB, its data kept" ;;
+                3)
+                    # The same release, its flow-over cut short (a power cut
+                    # during the install, #258): the disk boots and the
+                    # engine finishes the flow-over from a fresh clone (#171).
+                    # Installing over it lost every object on 11.63.
+                    echo "  the same release, its install cut short: booting $SLAB, its data kept;"
+                    echo "  the engine finishes the flow-over from a fresh clone of $BOOTTAG's image"
+                    ;;
                 guess) ;;
                 1)
                     echo "  INSTALL: a release $SLAB does not hold - booting the claimed image"

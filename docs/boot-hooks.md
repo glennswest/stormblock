@@ -74,8 +74,10 @@ is true of a reboot as much as an install. Until intents can be used:
   the node is no longer booted on sight when a boothost is known: `/init`
   claims the machine's image and asks `stormblock slab holds <disk> <image>`
   whether the disk already holds every golden (sealed volume, by id) of it,
-  with the install finished: records that still place extents on a slab not
-  on the disk (a flow-over cut short) count as not held (#239). Held is a reboot: the disk boots, its data kept. Not held is an **install**:
+  with the install finished. Held is a reboot: the disk boots, its data kept.
+  The same release with its flow-over cut short (records that still place
+  extents on a slab not on the disk; exit 3) boots the disk too: the engine
+  finishes the move from a fresh clone (#171, #258). Not held is an **install**:
   the claimed image boots and the disk is installed over. An install the
   appliance asked for (the ticket) installs whatever the disk holds. No image,
   or "cannot say" (exit 2), boots the disk as before.
@@ -86,6 +88,14 @@ is true of a reboot as much as an install. Until intents can be used:
   replaced — and says so on the console (`INSTALL: the old slab on /dev/sda
   is discarded`). The disk the probe ruled the install over is the one taken,
   not whichever drive a scan meets first.
+- **A disk with a data slab is never forced without evidence** (#258). The
+  claimed image also boots when the probe could not boot the disk at all (a
+  power cut during an older engine's flow-over left its records short). That
+  is not an install: without a ticket, `force` applies only when the probe
+  ruled an install over a bootable disk (the release not held) or no local
+  drive carries a data slab. Otherwise the console says `NOT an install`, and
+  the survey takes the node's own layout as before #236: the system half is
+  replaced and the data half kept. Only an `install` intent re-lays it.
 - `rd.stormblock.assimilate=off` still means no, to both.
 - Not covered: reinstalling the **same** release fresh. Assign another
   release first, or use the `install` intent once the appliance serves them.

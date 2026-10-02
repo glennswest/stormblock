@@ -323,6 +323,8 @@ check "the disk holds the assigned release: a reboot, the disk boots" "$part" \
     "$(STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
 check "a release the disk does not hold: an install, over this disk" "$URI|$part" \
     "$(STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+check "the same release, its flow-over cut short: the disk boots (#258)" "$part" \
+    "$(STUB_CLAIM="$URI" STUB_HOLDS=3 probe "$part")"
 check "cannot tell which release: the disk boots as before" "$part" \
     "$(STUB_CLAIM="$URI" STUB_HOLDS=2 probe "$part")"
 TICKET="$WORK/install.json"; echo '{}' > "$TICKET"

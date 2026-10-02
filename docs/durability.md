@@ -64,6 +64,12 @@ tests run on.
    was moving from), `boot-local` claims a fresh clone of the same image,
    which carries the same slabs with the same bytes. It maps the unmoved
    extents onto the clone and hands the rest of the move to the successor.
+   For that, the local system slab records every volume still on a flow
+   source from the moment the flow-over starts (#258), not only the ones it
+   has reached; otherwise a cut before a golden moved left a disk that did not
+   name it, and the initramfs installed over the disk and its data half
+   (11.63: 0 of 300 objects). `slab holds` answers such a disk with exit 3
+   (the same release, unfinished), and `/init` boots it.
 10. **A move and an I/O on the same slot never overlap** (#239). An I/O
    looks its extent up and then uses the slot it found; the unreplicated path
    holds no lock between the two. A move (the flow-over, a drain, a
