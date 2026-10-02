@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A power cut during the install's flow-over re-installs the node (2026-10-02, #258, P0) — IN PROGRESS
+### A power cut during the install's flow-over re-installs the node (2026-10-02, #258, P0) — DONE
 
 server3, 11.63: 300 objects written, BMC power off, and the next boot laid a
 fresh slab (every namespace re-created). Cause, by reading:
@@ -180,20 +180,26 @@ fresh slab (every namespace re-created). Cause, by reading:
    leg on the local system slab, so `per_slab_metadata` records it only in the
    appliance clone's slab: the local disk's record leaves it out;
 2. after the cut the probe sees `stormpump` but "missing N mounted
-   volume(s)" and asks the appliance (the #171 resume, which would finish the
-   flow-over from a fresh clone, is never reached);
+   volume(s)" and asks the appliance (the #171 resume is never reached); and
+   `slab holds` called a cut-short disk "not held" (#239's Unfinished, exit 1)
+   = an install;
 3. with no boot intent (forge 13.7) #236's stopgap calls every claimed boot
    an install and passes `--local-disk-force`: the data slab is destroyed.
-Fix:
-- [ ] engine: from the moment the flow sources are quarantined, the
-      destination system slab records every volume with a leg on a source, so
-      a cut-short disk names everything and boots local through the resume
-- [ ] /init: the no-intent stopgap forces only when the probe ruled an install
-      over a bootable disk (a release it does not hold), or no local drive
-      carries a data slab; otherwise the disk is kept (no force), said so
-- [ ] tests: a cut before anything moved lists and restores every volume, and
-      the data half's writes; boot-hook cases; sc-build
-- [ ] docs (boot-hooks.md, README), CHANGELOG, golden
+- [x] engine: `record_flow_over` (set by `quarantine_flow_sources`, persisted
+      at once): the destination system slab records every volume with a leg
+      on a source (81537b0)
+- [x] `slab holds` Unfinished = exit 3; `/init` boots the disk then (the
+      engine resumes, #171). Reverses #239's "unfinished = install again":
+      its reason (writes left in place on the clone) is gone since b189b3e
+- [x] /init: the no-intent stopgap forces only with `INSTALL_OVER` or no local
+      data slab; otherwise `NOT an install`, data half kept (65a3b2d)
+- [x] tests: `a_power_cut_before_the_flow_over_moves_anything_keeps_the_disk_bootable`
+      (fails as server3 did with `RECORD_FLOW_OFF_258=1`: the disk names only
+      the data half); boot-hook cases (all pass under sh and busybox sh); full
+      nextest on dev at 65a3b2d: 860/860; generated /init parses (busybox)
+- [x] docs (boot-hooks.md, durability.md rule 9, README), CHANGELOG
+- Not on metal: needs a stormcos release with this initramfs and engine; then
+  stormcentral's durability stage (BMC power off mid-flow-over) is the test
 
 ### RAID sets on a shelf, with hot spares (2026-10-02, #252, P2) — DONE
 
