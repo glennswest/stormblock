@@ -1,7 +1,9 @@
 //! SIMD parity computation — AVX2/AVX-512 (x86_64) and NEON (aarch64).
 //!
-//! Provides XOR parity for RAID 5 and GF(2^8) multiply for RAID 6 Q syndrome.
-//! Runtime detection selects the best available instruction set.
+//! Provides XOR parity for RAID 5, the RAID 6 Q syndrome, and recovery of any
+//! two lost strips of a RAID 6 stripe (`StripeStrips::recover`). XOR uses the
+//! best instruction set detected at runtime; GF(2^8) work is portable code
+//! (log tables, and eight lanes at a time for multiplying by g).
 
 /// Detected SIMD capability level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +96,12 @@ impl ParityEngine {
         compute_q_syndrome_generic(data_strips, q);
     }
 
+    /// Fold a change to data strip `index` into a stripe's Q: `q ^= g^index * delta`,
+    /// where `delta` is old data XOR new data — RAID-6's read-modify-write.
+    pub fn q_update(&self, q: &mut [u8], delta: &[u8], index: usize) {
+        gf_mul_xor(q, delta, gf_pow2(index));
+    }
+
     /// Reconstruct a missing data strip from surviving strips using XOR.
     ///
     /// For RAID 5 single-disk failure: missing = XOR of all surviving + parity.
@@ -171,17 +179,233 @@ fn gf_mul2(x: u8) -> u8 {
 
 /// Compute Q syndrome for RAID 6.
 /// Q[i] = g^0 * D0[i] ^ g^1 * D1[i] ^ ... ^ g^(n-1) * D(n-1)[i]
+///
+/// Horner's method over whole strips, eight bytes at a time: Q = D(n-1),
+/// then Q = g*Q ^ D(i) down to D0. Multiplying eight bytes by g at once is
+/// the shift-and-reduce of `gf_mul2` done lane by lane in a u64.
 fn compute_q_syndrome_generic(data_strips: &[&[u8]], q: &mut [u8]) {
-    let len = q.len();
     q.iter_mut().for_each(|b| *b = 0);
+    for strip in data_strips.iter().rev() {
+        q_step(q, strip);
+    }
+}
 
-    // Use Horner's method: Q = Dn-1 ^ g*(Dn-2 ^ g*(... ^ g*D0))
-    for i in 0..len {
-        let mut acc: u8 = 0;
-        for strip in data_strips.iter().rev() {
-            acc = gf_mul2(acc) ^ strip[i];
+/// `q = g*q ^ d`, byte-wise in GF(2^8).
+fn q_step(q: &mut [u8], d: &[u8]) {
+    let len = q.len();
+    let mut i = 0;
+    while i + 8 <= len {
+        let x = u64::from_ne_bytes(q[i..i + 8].try_into().unwrap());
+        let s = u64::from_ne_bytes(d[i..i + 8].try_into().unwrap());
+        q[i..i + 8].copy_from_slice(&(gf_mul2_x8(x) ^ s).to_ne_bytes());
+        i += 8;
+    }
+    while i < len {
+        q[i] = gf_mul2(q[i]) ^ d[i];
+        i += 1;
+    }
+}
+
+/// Eight independent `gf_mul2`s in one u64.
+#[inline]
+fn gf_mul2_x8(x: u64) -> u64 {
+    let high = x & 0x8080_8080_8080_8080;
+    let shifted = (x << 1) & 0xFEFE_FEFE_FEFE_FEFE;
+    // Each lane whose top bit was set becomes 0x01, then 0x1D.
+    shifted ^ ((high >> 7) * 0x1D)
+}
+
+// --- GF(2^8) arithmetic (polynomial 0x11D, generator 2) ---
+//
+// What RAID-6 recovery needs beyond multiplying by g: multiply by any
+// constant, and divide. Log/antilog tables, built at compile time.
+
+const fn gf_tables() -> ([u8; 512], [u8; 256]) {
+    let mut exp = [0u8; 512];
+    let mut log = [0u8; 256];
+    let mut x: u16 = 1;
+    let mut i = 0;
+    while i < 255 {
+        exp[i] = x as u8;
+        log[x as usize] = i as u8;
+        x <<= 1;
+        if x & 0x100 != 0 {
+            x ^= 0x11D;
         }
-        q[i] = acc;
+        i += 1;
+    }
+    // Doubled so a sum of two logs needs no reduction.
+    let mut j = 255;
+    while j < 512 {
+        exp[j] = exp[j - 255];
+        j += 1;
+    }
+    (exp, log)
+}
+
+const GF: ([u8; 512], [u8; 256]) = gf_tables();
+
+/// a * b in GF(2^8).
+#[inline]
+pub fn gf_mul(a: u8, b: u8) -> u8 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    GF.0[GF.1[a as usize] as usize + GF.1[b as usize] as usize]
+}
+
+/// g^n.
+#[inline]
+pub fn gf_pow2(n: usize) -> u8 {
+    GF.0[n % 255]
+}
+
+/// The multiplicative inverse of a non-zero a.
+#[inline]
+pub fn gf_inv(a: u8) -> u8 {
+    assert!(a != 0, "zero has no inverse in GF(2^8)");
+    GF.0[255 - GF.1[a as usize] as usize]
+}
+
+/// `dst ^= c * src`, byte-wise.
+pub fn gf_mul_xor(dst: &mut [u8], src: &[u8], c: u8) {
+    assert_eq!(dst.len(), src.len());
+    if c == 0 {
+        return;
+    }
+    if c == 1 {
+        xor_in_place_generic(dst, src);
+        return;
+    }
+    let mut table = [0u8; 256];
+    for (b, t) in table.iter_mut().enumerate() {
+        *t = gf_mul(c, b as u8);
+    }
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d ^= table[*s as usize];
+    }
+}
+
+/// `buf = c * buf`, byte-wise.
+fn gf_scale(buf: &mut [u8], c: u8) {
+    let mut table = [0u8; 256];
+    for (b, t) in table.iter_mut().enumerate() {
+        *t = gf_mul(c, b as u8);
+    }
+    for b in buf.iter_mut() {
+        *b = table[*b as usize];
+    }
+}
+
+/// What a stripe could not be recovered from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unrecoverable {
+    pub missing: usize,
+    pub tolerated: usize,
+}
+
+impl std::fmt::Display for Unrecoverable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} strips of a stripe are lost; it tolerates {}", self.missing, self.tolerated)
+    }
+}
+
+/// One stripe's strips, any of which may be missing, all the same length
+/// when present. `q` is `None` for RAID-5 (no Q), `Some(None)` for a RAID-6
+/// stripe whose Q is lost.
+pub struct StripeStrips {
+    pub data: Vec<Option<Vec<u8>>>,
+    pub p: Option<Vec<u8>>,
+    pub q: Option<Option<Vec<u8>>>,
+}
+
+impl StripeStrips {
+    /// Fill in every missing strip, data and parity alike.
+    ///
+    /// RAID-5 recovers any one; RAID-6 any two — two data strips, a data
+    /// strip with P or with Q, or P with Q (H. P. Anvin, "The mathematics of
+    /// RAID-6"). Data strip `i` carries the coefficient g^i in Q.
+    pub fn recover(&mut self, len: usize) -> Result<(), Unrecoverable> {
+        let raid6 = self.q.is_some();
+        let tolerated = if raid6 { 2 } else { 1 };
+        let lost_data: Vec<usize> =
+            self.data.iter().enumerate().filter(|(_, d)| d.is_none()).map(|(i, _)| i).collect();
+        let p_lost = self.p.is_none();
+        let q_lost = matches!(self.q, Some(None));
+        let missing = lost_data.len() + p_lost as usize + q_lost as usize;
+        if missing > tolerated {
+            return Err(Unrecoverable { missing, tolerated });
+        }
+
+        match (lost_data.as_slice(), p_lost, q_lost) {
+            ([], _, _) => {}
+            ([x], false, _) => {
+                // P and the other data give it back.
+                let mut out = self.p.clone().unwrap();
+                for (i, d) in self.data.iter().enumerate() {
+                    if i != *x {
+                        xor_in_place_generic(&mut out, d.as_ref().unwrap());
+                    }
+                }
+                self.data[*x] = Some(out);
+            }
+            ([x], true, false) => {
+                // Q with D(x) taken as zero, then divide out g^x.
+                let mut qx = vec![0u8; len];
+                let zero = vec![0u8; len];
+                for d in self.data.iter().rev() {
+                    q_step(&mut qx, d.as_deref().unwrap_or(&zero));
+                }
+                let q = self.q.as_ref().unwrap().as_ref().unwrap();
+                xor_in_place_generic(&mut qx, q);
+                gf_scale(&mut qx, gf_inv(gf_pow2(*x)));
+                self.data[*x] = Some(qx);
+            }
+            ([x, y], false, false) => {
+                let (x, y) = (*x, *y);
+                // Pxy, Qxy: P and Q of the stripe with D(x) = D(y) = 0.
+                let mut pxy = vec![0u8; len];
+                let mut qxy = vec![0u8; len];
+                let zero = vec![0u8; len];
+                for d in self.data.iter().rev() {
+                    let d = d.as_deref().unwrap_or(&zero);
+                    xor_in_place_generic(&mut pxy, d);
+                    q_step(&mut qxy, d);
+                }
+                let p = self.p.as_ref().unwrap();
+                let q = self.q.as_ref().unwrap().as_ref().unwrap();
+                xor_in_place_generic(&mut pxy, p); // P + Pxy = Dx + Dy
+                xor_in_place_generic(&mut qxy, q); // Q + Qxy = g^x Dx + g^y Dy
+                let gyx = gf_pow2(y - x);
+                let denom = gf_inv(gyx ^ 1);
+                let a = gf_mul(gyx, denom);
+                let b = gf_mul(gf_inv(gf_pow2(x)), denom);
+                let mut dx = vec![0u8; len];
+                gf_mul_xor(&mut dx, &pxy, a);
+                gf_mul_xor(&mut dx, &qxy, b);
+                let mut dy = pxy;
+                xor_in_place_generic(&mut dy, &dx);
+                self.data[x] = Some(dx);
+                self.data[y] = Some(dy);
+            }
+            _ => unreachable!("more than the tolerated strips are lost"),
+        }
+
+        // Parity last: every data strip is present now.
+        if p_lost || q_lost {
+            let refs: Vec<&[u8]> = self.data.iter().map(|d| d.as_deref().unwrap()).collect();
+            if p_lost {
+                let mut p = vec![0u8; len];
+                xor_parity_generic(&refs, &mut p);
+                self.p = Some(p);
+            }
+            if q_lost {
+                let mut q = vec![0u8; len];
+                compute_q_syndrome_generic(&refs, &mut q);
+                self.q = Some(Some(q));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -366,6 +590,127 @@ mod tests {
         // step2: acc = gf_mul2(0x03) ^ D1 = 0x06 ^ 0x02 = 0x04
         // step3: acc = gf_mul2(0x04) ^ D0 = 0x08 ^ 0x01 = 0x09
         assert!(q.iter().all(|&x| x == 0x09));
+    }
+
+    fn pattern(seed: u32, len: usize) -> Vec<u8> {
+        (0..len).map(|i| ((i as u32).wrapping_mul(2654435761).wrapping_add(seed * 97) >> 13) as u8).collect()
+    }
+
+    #[test]
+    fn gf_tables_agree_with_shift_and_reduce() {
+        for a in 0..=255u8 {
+            assert_eq!(gf_mul(a, 2), gf_mul2(a));
+            if a != 0 {
+                assert_eq!(gf_mul(a, gf_inv(a)), 1);
+            }
+        }
+        assert_eq!(gf_pow2(0), 1);
+        assert_eq!(gf_pow2(8), 0x1D);
+        // Byte by byte, the long way.
+        let slow = |mut a: u8, mut b: u8| {
+            let mut r = 0u8;
+            while b != 0 {
+                if b & 1 != 0 {
+                    r ^= a;
+                }
+                a = gf_mul2(a);
+                b >>= 1;
+            }
+            r
+        };
+        for a in [0u8, 1, 2, 3, 0x53, 0x80, 0xCA, 0xFF] {
+            for b in [0u8, 1, 7, 0x1D, 0x8E, 0xFF] {
+                assert_eq!(gf_mul(a, b), slow(a, b));
+            }
+        }
+    }
+
+    #[test]
+    fn q_is_the_weighted_sum() {
+        let strips: Vec<Vec<u8>> = (0..5).map(|s| pattern(s, 37)).collect();
+        let refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+        let mut q = vec![0u8; 37];
+        compute_q_syndrome_generic(&refs, &mut q);
+        for i in 0..37 {
+            let mut want = 0u8;
+            for (k, s) in strips.iter().enumerate() {
+                want ^= gf_mul(gf_pow2(k), s[i]);
+            }
+            assert_eq!(q[i], want, "byte {i}");
+        }
+    }
+
+    #[test]
+    fn q_update_matches_a_recompute() {
+        let engine = ParityEngine::with_level(SimdLevel::Generic);
+        let mut strips: Vec<Vec<u8>> = (0..6).map(|s| pattern(s, 64)).collect();
+        let refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+        let (mut p, mut q) = (vec![0u8; 64], vec![0u8; 64]);
+        engine.compute_raid6_parity(&refs, &mut p, &mut q);
+        let new = pattern(99, 64);
+        let mut delta = strips[4].clone();
+        engine.xor_in_place(&mut delta, &new);
+        engine.xor_in_place(&mut p, &delta);
+        engine.q_update(&mut q, &delta, 4);
+        strips[4] = new;
+        let refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+        let (mut p2, mut q2) = (vec![0u8; 64], vec![0u8; 64]);
+        engine.compute_raid6_parity(&refs, &mut p2, &mut q2);
+        assert_eq!(p, p2);
+        assert_eq!(q, q2);
+    }
+
+    /// Every way of losing one or two strips of a 6+2 stripe comes back.
+    #[test]
+    fn raid6_recovers_any_two() {
+        let len = 61;
+        let n = 6;
+        let data: Vec<Vec<u8>> = (0..n as u32).map(|s| pattern(s + 1, len)).collect();
+        let refs: Vec<&[u8]> = data.iter().map(|s| s.as_slice()).collect();
+        let (mut p, mut q) = (vec![0u8; len], vec![0u8; len]);
+        ParityEngine::with_level(SimdLevel::Generic).compute_raid6_parity(&refs, &mut p, &mut q);
+        // Strips 0..n are data, n is P, n+1 is Q.
+        for a in 0..n + 2 {
+            for b in a..n + 2 {
+                let mut s = StripeStrips {
+                    data: data.iter().cloned().map(Some).collect(),
+                    p: Some(p.clone()),
+                    q: Some(Some(q.clone())),
+                };
+                for lost in [a, b] {
+                    match lost {
+                        i if i < n => s.data[i] = None,
+                        i if i == n => s.p = None,
+                        _ => s.q = Some(None),
+                    }
+                }
+                s.recover(len).unwrap_or_else(|e| panic!("lost {a},{b}: {e}"));
+                for i in 0..n {
+                    assert_eq!(s.data[i].as_ref().unwrap(), &data[i], "lost {a},{b}: data {i}");
+                }
+                assert_eq!(s.p.as_ref().unwrap(), &p, "lost {a},{b}: P");
+                assert_eq!(s.q.as_ref().unwrap().as_ref().unwrap(), &q, "lost {a},{b}: Q");
+            }
+        }
+    }
+
+    #[test]
+    fn raid5_recovers_one_and_refuses_two() {
+        let len = 40;
+        let data: Vec<Vec<u8>> = (0..4).map(|s| pattern(s, len)).collect();
+        let refs: Vec<&[u8]> = data.iter().map(|s| s.as_slice()).collect();
+        let mut p = vec![0u8; len];
+        xor_parity_generic(&refs, &mut p);
+        for lost in 0..5 {
+            let mut s = StripeStrips { data: data.iter().cloned().map(Some).collect(), p: Some(p.clone()), q: None };
+            if lost < 4 { s.data[lost] = None } else { s.p = None }
+            s.recover(len).unwrap();
+            assert_eq!(s.data.iter().map(|d| d.clone().unwrap()).collect::<Vec<_>>(), data);
+            assert_eq!(s.p.unwrap(), p);
+        }
+        let mut s = StripeStrips { data: data.iter().cloned().map(Some).collect(), p: None, q: None };
+        s.data[1] = None;
+        assert_eq!(s.recover(len), Err(Unrecoverable { missing: 2, tolerated: 1 }));
     }
 
     #[test]

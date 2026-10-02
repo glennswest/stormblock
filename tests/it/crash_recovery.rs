@@ -1,5 +1,5 @@
-//! Crash recovery tests — journal persistence, extent allocator consistency,
-//! RAID superblock validation.
+//! Crash recovery tests — extent allocator consistency, RAID superblocks and
+//! the write-intent bitmap at reassembly.
 
 use crate::common;
 use std::sync::Arc;
@@ -8,131 +8,41 @@ use tempfile::TempDir;
 
 use stormblock::drive::BlockDevice;
 use stormblock::drive::filedev::FileDevice;
-use stormblock::raid::journal::WriteIntentJournal;
 use stormblock::raid::parity::ParityEngine;
-use stormblock::raid::{RaidArray, RaidLevel, RaidSuperblock, RaidArrayId, DATA_OFFSET};
+use stormblock::raid::{read_superblock, scan, RaidArray, RaidArrayId, RaidLevel, Superblock, DATA_OFFSET};
 use stormblock::volume::extent::ExtentAllocator;
 
 #[test]
-fn journal_persist_and_recovery() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("journal.bin");
-
-    // Simulate a crash: mark stripes dirty, flush, then "crash" (drop without clean)
-    {
-        let mut journal = WriteIntentJournal::open(&path, 1024).unwrap();
-        journal.mark_dirty(0);
-        journal.mark_dirty(100);
-        journal.mark_dirty(500);
-        journal.mark_dirty(999);
-        // Clean one to verify partial state
-        journal.mark_clean(100);
-        journal.flush().unwrap();
-        // "Crash" — drop without clearing
-    }
-
-    // Recovery: reopen and verify dirty stripes
-    {
-        let journal = WriteIntentJournal::open(&path, 1024).unwrap();
-        assert_eq!(journal.dirty_count(), 3);
-        assert!(journal.is_dirty(0));
-        assert!(!journal.is_dirty(100)); // was cleaned before crash
-        assert!(journal.is_dirty(500));
-        assert!(journal.is_dirty(999));
-
-        let dirty = journal.dirty_stripes();
-        assert_eq!(dirty, vec![0, 500, 999]);
-    }
-}
-
-#[test]
-fn journal_large_bitmap() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("large-journal.bin");
-
-    let stripe_count = 1_000_000;
-    {
-        let mut journal = WriteIntentJournal::open(&path, stripe_count).unwrap();
-        // Mark every 1000th stripe dirty
-        for i in (0..stripe_count).step_by(1000) {
-            journal.mark_dirty(i);
-        }
-        assert_eq!(journal.dirty_count(), 1000);
-        journal.flush().unwrap();
-    }
-
-    {
-        let journal = WriteIntentJournal::open(&path, stripe_count).unwrap();
-        assert_eq!(journal.dirty_count(), 1000);
-        // Verify sampling
-        assert!(journal.is_dirty(0));
-        assert!(journal.is_dirty(1000));
-        assert!(!journal.is_dirty(1));
-        assert!(!journal.is_dirty(999));
-    }
-}
-
-#[test]
-fn journal_clear_all_recovery() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("clear-journal.bin");
-
-    {
-        let mut journal = WriteIntentJournal::open(&path, 100).unwrap();
-        journal.mark_dirty(10);
-        journal.mark_dirty(50);
-        journal.clear_all().unwrap();
-    }
-
-    {
-        let journal = WriteIntentJournal::open(&path, 100).unwrap();
-        assert_eq!(journal.dirty_count(), 0);
-        assert!(journal.dirty_stripes().is_empty());
-    }
-}
-
-#[test]
 fn superblock_roundtrip_validation() {
-    let uuid = uuid::Uuid::new_v4();
-    let member_uuid = uuid::Uuid::new_v4();
-    let sb = RaidSuperblock::new(
-        uuid, 0, member_uuid,
-        RaidLevel::Raid5, 4, 65536,
-        100 * 1024 * 1024,
-    );
-
+    let sb = Superblock {
+        array_uuid: uuid::Uuid::new_v4(),
+        member_uuid: uuid::Uuid::new_v4(),
+        slot: Some(0),
+        level: Some(RaidLevel::Raid5),
+        stripe_size: 65536,
+        data_offset: DATA_OFFSET,
+        data_size: 1024 * 1024,
+        create_time: 1,
+        update_time: 1,
+        events: 1,
+        bitmap_offset: 65536,
+        bitmap_bytes: 4096,
+        bitmap_chunk: 64 << 20,
+        name: "set".into(),
+        pool: String::new(),
+        slots: Vec::new(),
+    };
     let bytes = sb.to_bytes();
     assert_eq!(bytes.len(), 4096);
+    assert_eq!(Superblock::from_bytes(&bytes).unwrap().unwrap(), sb);
 
-    // Valid roundtrip
-    let sb2 = RaidSuperblock::from_bytes(&bytes).unwrap();
-    sb2.validate().unwrap();
-    assert_eq!(sb2.array_uuid, *uuid.as_bytes());
-    assert_eq!(sb2.member_index, 0);
-    assert_eq!(sb2.level, 5);
-    assert_eq!(sb2.member_count, 4);
-    assert_eq!(sb2.stripe_size, 65536);
-}
+    let mut bad = bytes.clone();
+    bad[50] ^= 0xFF;
+    assert!(Superblock::from_bytes(&bad).is_err(), "corruption must be detected");
 
-#[test]
-fn superblock_corruption_detected() {
-    let uuid = uuid::Uuid::new_v4();
-    let sb = RaidSuperblock::new(
-        uuid, 0, uuid::Uuid::new_v4(),
-        RaidLevel::Raid1, 2, 65536, 50 * 1024 * 1024,
-    );
-    let mut bytes = sb.to_bytes();
-
-    // Corrupt a byte in the middle
-    bytes[30] ^= 0xFF;
-    assert!(RaidSuperblock::from_bytes(&bytes).is_err());
-}
-
-#[test]
-fn superblock_bad_magic() {
-    let mut bytes = vec![0u8; 4096];
-    bytes[0..8].copy_from_slice(b"NOTMAGIC");
-    assert!(RaidSuperblock::from_bytes(&bytes).is_err());
+    let mut other = vec![0u8; 4096];
+    other[0..8].copy_from_slice(b"BADMAGIC");
+    assert!(Superblock::from_bytes(&other).unwrap().is_none(), "not a superblock at all");
 }
 
 #[test]
@@ -193,88 +103,63 @@ fn extent_allocator_exhaustion() {
 async fn raid_superblock_written_to_members() {
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 2, 4 * 1024 * 1024).await;
+    let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.unwrap();
 
-    // Keep references for raw reads
-    let dev0_path = dir.path().join("dev-0.bin");
-    let dev1_path = dir.path().join("dev-1.bin");
-
-    let array = RaidArray::create(RaidLevel::Raid1, devices, None)
-        .await
-        .unwrap();
-    let _array_id = array.array_id();
-
-    // Read raw superblocks from both members
-    let dev0 = FileDevice::open(dev0_path.to_str().unwrap()).await.unwrap();
-    let mut sb_buf = vec![0u8; 4096];
-    dev0.read(0, &mut sb_buf).await.unwrap();
-    let sb0 = RaidSuperblock::from_bytes(&sb_buf).unwrap();
-    sb0.validate().unwrap();
-    assert_eq!(sb0.member_index, 0);
-    assert_eq!(sb0.level, 1); // RAID-1
-
-    let dev1 = FileDevice::open(dev1_path.to_str().unwrap()).await.unwrap();
-    dev1.read(0, &mut sb_buf).await.unwrap();
-    let sb1 = RaidSuperblock::from_bytes(&sb_buf).unwrap();
-    sb1.validate().unwrap();
-    assert_eq!(sb1.member_index, 1);
-
-    // Both should have the same array UUID
-    assert_eq!(sb0.array_uuid, sb1.array_uuid);
+    let mut seen = Vec::new();
+    for i in 0..2 {
+        let dev: Arc<dyn BlockDevice> = Arc::new(
+            FileDevice::open(dir.path().join(format!("dev-{i}.bin")).to_str().unwrap()).await.unwrap(),
+        );
+        let sb = read_superblock(&dev).await.unwrap().expect("a superblock");
+        assert_eq!(sb.slot, Some(i));
+        assert_eq!(sb.level, Some(RaidLevel::Raid1));
+        assert_eq!(sb.slots.len(), 2);
+        seen.push(sb.array_uuid);
+    }
+    assert_eq!(seen[0], array.array_id().0);
+    assert_eq!(seen[0], seen[1]);
 }
 
+/// A torn stripe after a crash: the bitmap names its chunk, and putting the
+/// array back together from its drives recomputes the parity.
 #[tokio::test]
-async fn journal_recovery_repairs_parity() {
+async fn assembly_repairs_parity_of_a_dirty_chunk() {
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 4, 2 * 1024 * 1024).await;
-    let stripe_size = 4096u64;
+    let raw: Vec<Arc<dyn BlockDevice>> = devices.iter().map(Arc::clone).collect();
 
-    // Keep raw device references for direct manipulation
-    let raw_devices: Vec<Arc<dyn BlockDevice>> = devices.iter().map(Arc::clone).collect();
-
-    let array = RaidArray::create(RaidLevel::Raid5, devices, Some(stripe_size))
-        .await
-        .unwrap();
-
-    // Write a full stripe of known data (3 data disks x 4096 = 12288 bytes)
+    let array = RaidArray::create(RaidLevel::Raid5, devices, Some(4096)).await.unwrap();
     let full_stripe: Vec<u8> = (0..12288u32).map(|i| (i % 256) as u8).collect();
     array.write(0, &full_stripe).await.unwrap();
-    array.flush().await.unwrap();
+    array.close().await.unwrap();
+    drop(array);
 
-    // Read back to verify data is correct
+    // Stripe 0's parity is on the last member. Tear it and set the chunk's
+    // bit, as a crash between the data write and the parity write leaves it.
+    raw[3].write(DATA_OFFSET, &[0xFF_u8; 4096]).await.unwrap();
+    let mut page = vec![0u8; 4096];
+    page[0] = 1;
+    for d in &raw {
+        d.write(stormblock::raid::bitmap::BITMAP_OFFSET, &page).await.unwrap();
+    }
+
+    let found = scan(&raw).await;
+    let array = RaidArray::assemble(found.arrays[0].clone()).await.unwrap();
+
+    let engine = ParityEngine::detect();
+    let mut strips: Vec<Vec<u8>> = Vec::new();
+    for d in &raw {
+        let mut buf = vec![0u8; 4096];
+        d.read(DATA_OFFSET, &mut buf).await.unwrap();
+        strips.push(buf);
+    }
+    let refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+    let mut check = vec![0u8; 4096];
+    engine.compute_xor_parity(&refs, &mut check);
+    assert!(check.iter().all(|&x| x == 0), "parity not repaired at assembly");
+    assert_eq!(array.dirty_chunks(), 0);
+
     let mut readback = vec![0u8; 12288];
     array.read(0, &mut readback).await.unwrap();
     assert_eq!(readback, full_stripe);
-
-    // Corrupt parity: stripe 0, parity is on disk 3 (parity_disk_for_stripe(0, 4) = 3)
-    let corrupt = vec![0xFF_u8; 4096];
-    raw_devices[3].write(DATA_OFFSET, &corrupt).await.unwrap();
-    raw_devices[3].flush().await.unwrap();
-
-    // Simulate crash state: manually mark stripe 0 dirty in the journal
-    {
-        let mut j = array.journal_mut().await;
-        j.mark_dirty(0);
-        let _ = j.flush();
-    }
-
-    // Run journal recovery
-    let repaired = array.recover_journal().await.unwrap();
-    assert_eq!(repaired, 1, "expected 1 stripe repaired");
-
-    // Verify parity is now correct: read all 4 strips at stripe 0 and XOR should be zero
-    let engine = ParityEngine::detect();
-    let mut strips: Vec<Vec<u8>> = Vec::new();
-    for i in 0..4 {
-        let mut buf = vec![0u8; 4096];
-        raw_devices[i].read(DATA_OFFSET, &mut buf).await.unwrap();
-        strips.push(buf);
-    }
-    let strip_refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
-    let mut check = vec![0u8; 4096];
-    engine.compute_xor_parity(&strip_refs, &mut check);
-    assert!(check.iter().all(|&x| x == 0), "parity check failed after recovery");
-
-    // Verify journal is clean
-    let dirty = array.journal_mut().await.dirty_count();
-    assert_eq!(dirty, 0, "journal should be clean after recovery");
 }

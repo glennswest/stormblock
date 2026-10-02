@@ -10,7 +10,7 @@ use stormblock::raid::{RaidArray, RaidLevel, RaidMemberState};
 async fn raid1_degraded_read() {
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 3, 4 * 1024 * 1024).await;
-    let mut array = RaidArray::create(RaidLevel::Raid1, devices, None)
+    let array = RaidArray::create(RaidLevel::Raid1, devices, None)
         .await
         .unwrap();
 
@@ -38,7 +38,7 @@ async fn raid1_degraded_read() {
 async fn raid1_degraded_write() {
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 2, 4 * 1024 * 1024).await;
-    let mut array = RaidArray::create(RaidLevel::Raid1, devices, None)
+    let array = RaidArray::create(RaidLevel::Raid1, devices, None)
         .await
         .unwrap();
 
@@ -59,7 +59,7 @@ async fn raid1_degraded_write() {
 async fn raid1_all_failed() {
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 2, 4 * 1024 * 1024).await;
-    let mut array = RaidArray::create(RaidLevel::Raid1, devices, None)
+    let array = RaidArray::create(RaidLevel::Raid1, devices, None)
         .await
         .unwrap();
 
@@ -77,7 +77,7 @@ async fn raid1_all_failed() {
 async fn raid5_degraded_read_reconstructs() {
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 4, 4 * 1024 * 1024).await;
-    let mut array = RaidArray::create(RaidLevel::Raid5, devices, Some(4096))
+    let array = RaidArray::create(RaidLevel::Raid5, devices, Some(4096))
         .await
         .unwrap();
 
@@ -102,7 +102,7 @@ async fn raid5_degraded_read_reconstructs() {
 async fn raid_member_states() {
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 2, 4 * 1024 * 1024).await;
-    let mut array = RaidArray::create(RaidLevel::Raid1, devices, None)
+    let array = RaidArray::create(RaidLevel::Raid1, devices, None)
         .await
         .unwrap();
 
@@ -116,15 +116,31 @@ async fn raid_member_states() {
     assert_eq!(states[1].1, RaidMemberState::Active);
 }
 
+/// A failed member replaced on file drives: the rebuild runs to the end and
+/// the new member alone holds the data.
 #[tokio::test]
-async fn raid_rebuild_progress() {
+async fn raid5_replace_rebuilds_onto_a_file_drive() {
     let dir = TempDir::new().unwrap();
-    let devices = common::create_file_devices(&dir, 2, 4 * 1024 * 1024).await;
-    let array = RaidArray::create(RaidLevel::Raid1, devices, None)
-        .await
-        .unwrap();
+    let devices = common::create_file_devices(&dir, 5, 4 * 1024 * 1024).await;
+    let array = std::sync::Arc::new(RaidArray::create(RaidLevel::Raid5, devices[..4].to_vec(), Some(4096)).await.unwrap());
+    let data: Vec<u8> = (0..array.capacity_bytes() as u32).map(|i| (i.wrapping_mul(7) >> 3) as u8).collect();
+    array.write(0, &data).await.unwrap();
 
-    // Start rebuild returns progress tracker
-    let progress = array.start_rebuild(0).await.unwrap();
-    assert!(progress.total_stripes > 0);
+    assert!(array.fail_member(2, "test"));
+    array.replace(2, devices[4].clone()).await.unwrap();
+    for _ in 0..500 {
+        if array.status().state == "clean" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(array.status().state, "clean");
+    let p = array.rebuild_progress().unwrap();
+    assert!(p.is_finished());
+    assert_eq!(p.done(), array.data_size());
+
+    array.set_member_state(0, RaidMemberState::Failed);
+    let mut back = vec![0u8; data.len()];
+    array.read(0, &mut back).await.unwrap();
+    assert_eq!(back, data);
 }

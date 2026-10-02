@@ -16,7 +16,7 @@ use crate::drive::slab::{Slab, SlabId};
 use crate::drive::slab_registry::SlabRegistry;
 use crate::placement::topology::StorageTier;
 use crate::placement::PlacementEngine;
-use crate::raid::{RaidArray, RaidLevel};
+use crate::raid::{RaidArray, RaidLevel, RaidMemberState};
 use crate::volume::gem::GlobalExtentMap;
 
 /// How long a rebuild may take before the migration gives up.
@@ -109,14 +109,14 @@ pub async fn migrate_to_local(
 
         // The new member is what is being waited on. Every member active is
         // the only positive statement that the copy is complete.
-        if states.iter().all(|(_, s)| s.to_string() == "Active") {
+        if states.iter().all(|(_, s)| *s == RaidMemberState::Active) {
             break;
         }
 
         // Any failure ends it, and the source is left alone. Removing the
         // remote member here is exactly the bug.
         if let Some((uuid, _)) =
-            states.iter().find(|(_, s)| s.to_string() == "failed" || s.to_string() == "Failed")
+            states.iter().find(|(_, s)| *s == RaidMemberState::Failed)
         {
             return Err(MigrateError::RebuildFailed(format!(
                 "member {uuid} failed during rebuild; the remote member is untouched \
@@ -124,7 +124,7 @@ pub async fn migrate_to_local(
             )));
         }
 
-        let rebuilding = states.iter().filter(|(_, s)| s.to_string() == "Rebuilding").count();
+        let rebuilding = states.iter().filter(|(_, s)| *s == RaidMemberState::Rebuilding).count();
         if rebuilding == 0 {
             // Neither finished nor failed nor rebuilding: unknown, and unknown
             // is not success. Previously this was the silent exit.
