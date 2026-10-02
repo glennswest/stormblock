@@ -170,54 +170,51 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### RAID sets on a shelf, with hot spares (2026-10-02, #252, P2) — IN PROGRESS
+### RAID sets on a shelf, with hot spares (2026-10-02, #252, P2) — DONE
 
 Owner (2026-10-02, on #252): **B** — drive-level RAID sets with hot spares,
 **several sets per shelf**, each its own failure domain, spares per shelf or
-global; volumes are allocated onto the sets; #168 is wired first. This
-reverses #142's "never a RAID across drives" for parity at shelf scale;
-per-volume `mirror` stays for surviving the loss of a whole set or shelf.
+global; volumes are allocated onto the sets; #168 wired first. Reverses
+#142's "never a RAID across drives" for parity at shelf scale; per-volume
+`mirror` stays for surviving the loss of a set or shelf. `docs/raid-sets.md`.
 
-Found reading `src/raid/` (it was never used beyond RAID 1 legs): RAID-6
-never computes or writes Q (it is RAID-5 with an unused disk); RAID-10 is
-RAID-1 over every member while reporting pairs × capacity; partial-stripe
-read-modify-writes take no stripe lock (two writers lose a parity update);
-reads go to a member still rebuilding (#175); RAID-5/6 errors fail nothing;
-the journal is in memory; nothing reassembles; `start_rebuild` is a stub;
-two RAID-6 arrays share the failure domain `drive=RAID-6` (serial is the
-level). Only RAID-1's on-disk layout is kept (data at 1 MiB, mirrored), so
-stormstorage's legs keep working; RAID-5/6/10 were never assembled after a
-restart, so their layout is free to change.
+Found reading `src/raid/` (only RAID 1 legs had ever been used): RAID-6 never
+computed Q; RAID-10 was RAID-1 over all members reporting pairs × capacity;
+partial-stripe RMW took no lock; reads went to a rebuilding member (#175);
+RAID-5/6 errors failed nothing; the journal was in memory; nothing
+reassembled; `start_rebuild` was a stub; two RAID-6 arrays shared one failure
+domain (serial = level); `migrate_to_local` compared states to "Active".
+Only RAID-1's data layout is kept (data at 1 MiB) for stormstorage's legs.
 
-Plan, one commit (or a few) per step, each pushed:
-- [ ] parity: GF(2^8) tables, Q, and recovery of any two lost strips
-      (two data, data+P, data+Q, P+Q); tests against hand-computed bytes
-- [ ] layout + I/O: RAID-5/6 left-symmetric with P/Q rotation, RAID-10 near-2
-      (pairs, striped); per-stripe lock table; read-modify-write when every
-      member it touches is live, reconstruct-write otherwise; a member's I/O
-      error fails it and the I/O continues degraded; reads never touch a
-      rebuilding member above its watermark (#175)
-- [ ] superblock v2 (events counter, set name, pool, slot table with each
-      slot's member uuid/state/rebuild position) + on-disk write-intent
-      bitmap in each member's first MiB (64 MiB chunks, set before a write,
-      cleared lazily); `assemble` from superblocks (newest events wins,
-      missing = failed), dirty chunks resynced at assembly
-- [ ] rebuild onto a replacement (`replace`): stripe by stripe under the
-      stripe lock, watermark, position persisted, resumed at assembly,
-      progress; hot spares (spare superblock, pool = shelf name or global):
-      a member that fails takes a spare from its own pool, then global
-- [ ] scrub: RAID-6 checks P and Q, RAID-10 compares pairs; progress
-- [ ] engine: assemble at startup from the configured drives (members and
-      spares are not slab-scanned; their slabs are found on the array),
-      `POST /api/v1/arrays/assemble`; `name`, `spares`, `pool` on create;
-      `POST /api/v1/shelves` lays a shelf out (N sets of a level + spares,
-      general pool, domain `shelf=<name>/set=<set>/drive=raid:<uuid>`);
-      spares API; scrub API; rebuild progress on the array; 409 on a drive
-      already a member or spare (#215); delete wipes the superblocks; a
-      drive health report of `failed` fails the member; degraded arrays in
-      health + metrics; the dead member's drive identity and bay labels
-- [ ] docs (docs/raid-sets.md, multi-drive.md's reversal, README), CHANGELOG;
-      full nextest on dev; file SES LED / bay identity on stormdrive
+- [x] parity: GF(2^8) tables, real Q, recovery of any two lost strips
+- [x] layout (`layout.rs`): RAID-5/6 left-symmetric P/Q, RAID-10 near-2; stripe
+      locks; RMW / reconstruct-write; errors fail the member unless that loses
+      data; reads below a rebuilding member's watermark only
+- [x] superblock v2 (`superblock.rs`: slot table, events, name, pool) and the
+      on-disk write-intent bitmap (`bitmap.rs`); `assemble`, dirty chunks
+      resynced
+- [x] `replace` + background rebuild (watermark, checkpoint, resume);
+      `SparePool` (`spares.rs`), own pool then global; supervisor (`start`)
+- [x] scrub (P and Q, mirrors), progress, cancel
+- [x] engine (`mgmt/raid_sets.rs`): assembly at startup before the slab scan,
+      `POST /api/v1/arrays/assemble`, `/api/v1/shelves`, `/api/v1/spares`,
+      members `{slot}/fail` and `/replace`, `scrub`, `rebuild` rate; 409s
+      (#215); drive health `failed` fails the member; `set` rung; health
+      `raid`; `stormblock_raid_*` gauges; delete wipes superblocks
+- [x] tests: `src/raid/tests.rs` (in-memory faulty drives), parity, superblock,
+      bitmap units; `tests/it/integration_raid_sets.rs` (14-drive shelf over
+      HTTP, failure → spare → rebuild, restart reassembles); full nextest on dev
+      at 63e486c: 859/859; RAID tests 5 runs in a row green; `--features
+      cluster` and the `dist` musl build pass
+- [x] `examples/raid_set_rate` on dev (11 × RAID-6 on O_DIRECT files, all on
+      one virtual disk): seq write 57 MiB/s, 4K random write 684 IOPS, read
+      310 MiB/s healthy / 98 MiB/s with two lost, rebuild 22 MiB/s per member
+      (~240 MiB/s physical: the virtual disk's ceiling), rebuilt member verified
+- [x] docs (raid-sets.md, multi-drive.md reversal, README), CHANGELOG; filed
+      stormdrive#44 (bay labels, fault LED), stormstorage#43 (assemble after a
+      restart), stormconsole#67 (shelves view)
+- Not on metal: needs a shelf (DS2246) on a node; `[[arrays]]` config is still
+  not acted on (#165)
 
 ### The initramfs steps the clock from NTP, bounded (2026-10-01, #251, P1) — DONE
 
