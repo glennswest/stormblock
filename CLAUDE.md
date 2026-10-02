@@ -119,7 +119,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 
 ## Architecture (bottom-up)
 - `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
-- `src/raid/` — drive-level RAID 1/5/6/10 for whole-device legs; parity, RAID 1 add/remove with resync. Journal on disk, scrub, rebuild and reassembly are not wired (#168)
+- `src/raid/` — drive-level RAID 1/5/6/10 sets (#252): `layout.rs` (P/Q rotation, RAID-10 pairs), `superblock.rs` (v2: slot table, events, name, pool), `bitmap.rs` (on-disk write-intent bitmap), `spares.rs` (hot spares by pool), `rebuild.rs` (progress, rates); `mod.rs`: stripe locks, degraded I/O, assembly, rebuild onto a spare, scrub. `src/mgmt/raid_sets.rs` joins them to slabs and the API (`docs/raid-sets.md`)
 - `src/volume/` — thin volumes (`thin.rs`), the slot fence (`fence.rs`: I/O shared, a move exclusive, #239), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V9; V8 written when every volume is 4096), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
 - `src/fs/` — templates (`template.rs`), ext4 (`ext4.rs`) and XFS (`xfs.rs`) seams, disk identity (`disk.rs`), files, image survey (`survey.rs`)
 - `src/image/` — image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import (`import.rs`, `decode/`), node layout (`local.rs`), local boot
@@ -140,6 +140,8 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 (#210 — BREAKING: the shared subsystem is closed by default); before it
 v19.4.0 (universal boot #200, boothost names #199). Unreleased since v20.0.0
 (Cargo still says 20.0.0; goldens staged for the P0s through stormcos#168):
+RAID sets on a shelf with hot spares, reassembly, bitmap, rebuild, scrub
+(#252, #168, #175, #215);
 per-volume LBA 512|4096, metadata V9 (#228); the install stopgap and
 `slab holds` (#236, #239); the slot fence and no in-place writes on a slab
 being emptied (#239, durability rules 10–11); and in the initramfs: every
