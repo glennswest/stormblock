@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### An upgrade without intents boots the old slab (2026-10-02, #261, P0) — IN PROGRESS
+### An upgrade without intents boots the old slab (2026-10-02, #261, P0) — DONE
 
 C2NR0Q2 (Dell R230) claimed 11.65 over its 11.56 disk and came up on 11.56
 (forge 13.7, no intents). By reading: the probe found the 11.56 disk "missing
@@ -184,8 +184,8 @@ had the same volume set, so its disk was bootable and `slab holds` said 1.
       <disk> <claimed>`: 1 = UPGRADE (INSTALL_OVER = that disk, forced), 0/3/2
       kept; printed on the console
 - [x] boot-hook test cases; docs (boot-hooks.md, README), CHANGELOG
-- [ ] sc-build: initramfs tests under sh and busybox sh, the generated /init
-      parses
+- [x] sc-build at aed9f7e: every initramfs test under sh and busybox sh
+      (boot-hook +5 cases), the generated /init parses. No Rust changed
 - Not on metal: needs a stormcos release with this initramfs; then
   stormcentral's `testhost install C2NR0Q2 <release>` (fresh-slab stage)
 
