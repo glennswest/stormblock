@@ -129,7 +129,7 @@ async fn raid5_replace_rebuilds_onto_a_file_drive() {
     assert!(array.fail_member(2, "test"));
     array.replace(2, devices[4].clone()).await.unwrap();
     for _ in 0..500 {
-        if array.status().state == "clean" {
+        if array.status().state == "clean" && array.rebuild_progress().is_some_and(|p| p.is_finished()) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

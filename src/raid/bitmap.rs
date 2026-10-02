@@ -13,7 +13,7 @@
 //! lowers `durable` *before* it writes the zeros, so a writer arriving in
 //! between waits for the next write instead of trusting a bit on its way out.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::time::Instant;
 
@@ -47,6 +47,9 @@ struct State {
     durable: BitVec<u8, Lsb0>,
     active: HashMap<u64, u32>,
     last_end: HashMap<u64, Instant>,
+    /// Pages whose disk copy may still carry bits cleared since: `durable`
+    /// was lowered for them, so it no longer differs from `wanted`.
+    stale: HashSet<u64>,
 }
 
 pub struct IntentBitmap {
@@ -75,6 +78,7 @@ impl IntentBitmap {
                 durable: bitvec![u8, Lsb0; 0; len],
                 active: HashMap::new(),
                 last_end: HashMap::new(),
+                stale: HashSet::new(),
             }),
             io: tokio::sync::Mutex::new(()),
         }
@@ -132,7 +136,7 @@ impl IntentBitmap {
         for p in 0..pages {
             let lo = p * PAGE * 8;
             let hi = lo + PAGE * 8;
-            if st.wanted[lo..hi] != st.durable[lo..hi] {
+            if st.wanted[lo..hi] != st.durable[lo..hi] || st.stale.contains(&(p as u64)) {
                 let bytes = st.wanted.as_raw_slice()[p * PAGE..(p + 1) * PAGE].to_vec();
                 out.push((p as u64, bytes));
             }
@@ -146,6 +150,7 @@ impl IntentBitmap {
         for (p, bytes) in &w.pages {
             let lo = *p as usize * PAGE;
             st.durable.as_raw_mut_slice()[lo..lo + PAGE].copy_from_slice(bytes);
+            st.stale.remove(p);
         }
     }
 
@@ -167,6 +172,7 @@ impl IntentBitmap {
                 st.wanted.set(c, false);
                 st.durable.set(c, false);
                 st.last_end.remove(&c64);
+                st.stale.insert(page_of(c64));
                 n += 1;
             }
         }
@@ -234,6 +240,10 @@ mod tests {
         assert_eq!(b.clear_idle(Instant::now() + std::time::Duration::from_secs(1)), 0);
         b.end(r.clone());
         assert_eq!(b.clear_idle(Instant::now() + std::time::Duration::from_secs(1)), 1);
+        // The zero must still be written.
+        let w = b.pending();
+        assert_eq!(w.pages.len(), 1);
+        assert_eq!(w.pages[0].1[0], 0);
         // The bit is no longer trusted before the zero is written.
         assert!(!b.is_durable(r.clone()));
         assert!(b.begin(r.clone()), "a writer arriving mid-clear must write again");
