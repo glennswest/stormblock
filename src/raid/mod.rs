@@ -1697,6 +1697,7 @@ impl RaidArray {
             }
             let done = (end_key * lu).min(self.data_size);
             progress.set_done(done);
+            self.publish_metrics();
             self.persist_if_dirty().await;
             if checkpoint.elapsed() >= CHECKPOINT_EVERY {
                 self.persist_rebuild_position().await;
@@ -1729,6 +1730,7 @@ impl RaidArray {
         self.events.fetch_add(1, Ordering::SeqCst);
         self.write_superblocks().await?;
         progress.finish(None);
+        self.publish_metrics();
         tracing::info!(
             "{} {} ({}): rebuild of slot(s) {finished:?} complete in {:.0?}",
             self.level, self.id, self.name(), started.elapsed()
@@ -1821,6 +1823,7 @@ impl RaidArray {
                     a.persist_if_dirty().await;
                     a.take_spares().await;
                     a.spawn_rebuild();
+                    a.publish_metrics();
                 }
                 let wait = async {
                     match &arrived {
@@ -1834,6 +1837,24 @@ impl RaidArray {
                 let _ = tokio::time::timeout(Duration::from_secs(30), wait).await;
             }
         });
+    }
+
+    /// The set's state as gauges: `stormblock_raid_state` (0 clean,
+    /// 1 rebuilding, 2 degraded, 3 failed), failed members, rebuild percent.
+    pub fn publish_metrics(&self) {
+        let st = self.status();
+        let code = match st.state {
+            "clean" => 0.0,
+            "rebuilding" => 1.0,
+            "degraded" => 2.0,
+            _ => 3.0,
+        };
+        let (id, name) = (self.id.to_string(), self.name());
+        metrics::gauge!("stormblock_raid_state", "array" => id.clone(), "name" => name.clone()).set(code);
+        metrics::gauge!("stormblock_raid_failed_members", "array" => id.clone(), "name" => name.clone())
+            .set(st.failed as f64);
+        let pct = st.rebuild.filter(|r| r.running).map(|r| r.percent).unwrap_or(0.0);
+        metrics::gauge!("stormblock_raid_rebuild_percent", "array" => id, "name" => name).set(pct);
     }
 
     /// Put spares into failed slots, as many as there are.

@@ -243,6 +243,12 @@ impl Recorder for RegistryHandle {
 pub fn register_metrics() {
     metrics::describe_gauge!("stormblock_drives_total", "Number of opened drives");
     metrics::describe_gauge!("stormblock_arrays_total", "Number of RAID arrays");
+    metrics::describe_gauge!(
+        "stormblock_raid_state",
+        "RAID set state: 0 clean, 1 rebuilding, 2 degraded, 3 failed"
+    );
+    metrics::describe_gauge!("stormblock_raid_failed_members", "Failed members of a RAID set");
+    metrics::describe_gauge!("stormblock_raid_rebuild_percent", "Progress of a RAID set's running rebuild");
     metrics::describe_gauge!("stormblock_volumes_total", "Number of volumes");
     metrics::describe_gauge!("stormblock_exports_total", "Number of active exports");
     metrics::describe_gauge!(

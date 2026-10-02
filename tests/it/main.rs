@@ -29,6 +29,7 @@ mod integration_pallet;
 mod integration_placement;
 mod integration_power_cut;
 mod integration_raid_degraded;
+mod integration_raid_sets;
 mod integration_releases;
 mod integration_serve_mounted;
 mod integration_stormfs;
