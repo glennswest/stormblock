@@ -192,6 +192,8 @@ async fn a_shelf_survives_a_failed_drive_and_a_restart() {
     assert_eq!(report.arrays.len(), 2, "{report:?}");
     assert!(report.refused.is_empty(), "{report:?}");
     assert_eq!(report.spares.len(), 1);
+    assert_eq!(report.stale.len(), 1, "bay 2 was replaced: {report:?}");
+    assert!(report.stale[0].ends_with("bay-02.bin"));
     assert!(report.volumes_adopted >= 2, "{report:?}");
     assert_eq!(claimed.len(), DRIVES);
     for a in state.arrays.read().await.values() {

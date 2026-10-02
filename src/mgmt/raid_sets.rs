@@ -71,6 +71,10 @@ pub struct AssembleReport {
     pub refused: Vec<Refused>,
     /// Drives whose superblock is damaged.
     pub damaged: Vec<Refused>,
+    /// Drives that were members of an assembled array and are no longer —
+    /// replaced after they failed. Left alone; `force` on a spare or create
+    /// request reuses one.
+    pub stale: Vec<String>,
     /// Slabs found on the arrays and adopted, and the volumes they held.
     pub slabs_adopted: usize,
     pub volumes_adopted: usize,
@@ -123,9 +127,19 @@ pub async fn assemble_and_adopt(
             });
             continue;
         }
+        let members_of_group = group.clone();
         match RaidArray::assemble(group).await {
             Ok(array) => {
                 let array = Arc::new(array);
+                for (d, _) in &members_of_group {
+                    if array.slot_of(d.id()).is_none() {
+                        tracing::warn!(
+                            "drive {} carries an old superblock of array {uuid} ('{name}'): it was replaced; left alone",
+                            d.id().path
+                        );
+                        report.stale.push(d.id().path.clone());
+                    }
+                }
                 let st = array.status();
                 tracing::info!(
                     "assembled {} {} '{}' from its drives: {} ({} of {} members failed)",
