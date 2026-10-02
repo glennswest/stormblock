@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Finishing a cut-short flow-over claims as the SMBIOS serial (2026-10-02, #259, P0) — IN PROGRESS
+### Finishing a cut-short flow-over claims as the SMBIOS serial (2026-10-02, #259, P0) — DONE
 
 server3, 11.64 (after #258): the probe claimed `boothost/server3` (the
 firmware's name, #249) and `slab holds` said "unfinished" (exit 3), but
@@ -181,13 +181,19 @@ with `machine_tag()` = SMBIOS serial `S11075924402016` (shared by the blades;
 server1's old 11.50 image). That clone does not carry the slab the records
 need: every mapping on it dropped, PID 1 SIGSEGV, panic. /init never exported
 its `BOOTTAG` (`STORMBLOCK_BOOT_TAG` existed, unset).
-- [ ] /init: export `STORMBLOCK_BOOT_TAG` once the identity is resolved; on
+- [x] /init: export `STORMBLOCK_BOOT_TAG` once the identity is resolved; on
       exit 3 hand the clone already claimed to the engine
-      (`STORMBLOCK_RESUME_SOURCE=$CLAIMED`), no second claim
-- [ ] engine `machine_tag`: env > EFI `StormBootTag` > SMBIOS serial > UUID
-- [ ] engine: a resume that leaves extents with no leg on any slab it has
+      (`STORMBLOCK_RESUME_SOURCE=$CLAIMED`), no second claim (9d906c2)
+- [x] engine `machine_tag`: env > EFI `StormBootTag` > SMBIOS serial > UUID
+- [x] engine: a resume that leaves extents with no leg on any slab it has
       refuses to boot (named error) instead of dropping the mappings
-- [ ] tests (wrong image refused; efivar tag), docs, CHANGELOG; sc-build
+      (`stranded_extents`; parity volumes left out: degraded is their normal)
+- [x] tests: the #258 test first resumes from another image (refused);
+      `the_resume_names_the_machine_as_the_firmware_did`; boot-hook cases.
+      On dev at ad2bd77: nextest 861/861, every initramfs test under busybox
+      sh, the generated /init parses. Docs (README, boot-hooks, durability)
+- Not on metal: needs a stormcos release with this initramfs and engine;
+  then stormcentral's durability stage (cut mid-flow-over, reboot)
 
 ### A power cut during the install's flow-over re-installs the node (2026-10-02, #258, P0) — DONE
 
