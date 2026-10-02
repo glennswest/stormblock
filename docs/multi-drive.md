@@ -106,8 +106,9 @@ DELETE /api/v1/arrays/{id} → 409 while any volume is on it; otherwise removes 
 | `raid5:D+1`, `raid6:D+2` | data legs and P/Q legs likewise, every member of a stripe on its own domain |
 
 A volume's placement is visible per slab and per drive (`placement` on
-`GET /api/v1/volumes/{id}`, #136), for the console's Volumes view to read
-(stormconsole#29; the console does not read it yet).
+`GET /api/v1/volumes/{id}`, #136, and `?placement=true` on the list); the
+console's stormblock plugin reads it for its Volumes view (stormconsole#29,
+closed).
 
 ### Failure domains
 
@@ -238,7 +239,7 @@ back to the host (NVMe `CAPACITY_EXCEEDED`, SCSI `SPACE ALLOCATION FAILED`).
 
 ## 6. What the console shows
 
-**Status: design (stormconsole#29).**
+**Status:** the console reads the engine's placement (`GET /api/v1/volumes?placement=true`, stormconsole#29, closed). What follows is what it should show; overcommit and headroom wait on #152.
 
 * **Drives:** identity (serial, WWN, model), where it is (shelf, bay, hba),
   health, its slabs and how full each is, overcommit setting, and a drain in

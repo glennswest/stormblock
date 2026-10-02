@@ -294,7 +294,7 @@ a ublk block device, and hands it to tools that are not ours:
   `POST /api/v1/volumes/compose`, `…/compose/pallet`, `…/compose/disk` and
   `…/compose/slab`.
 - **`image build` still lays pallets and slabs as bytes.** It is the file
-  path; a release is composed instead (stormpump's `deploy/compose-release.py`
+  path; a release is composed instead (stormcos's `deploy/compose-release.py`
   runs `compose/pallet`, `compose/slab` and `compose/disk` from the same
   `image.toml`). Making `image build` itself compose when its output is a
   volume on an engine would leave one code path.

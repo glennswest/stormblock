@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-10-02
+- **docs:** Refreshed from the code since 2026-09-28 (#228, #236, #237, #239, #249, #250, #251). README: a table of every kernel command-line parameter `/init` reads (with defaults) and its bounded waits; `slab holds` in the subcommands; the initramfs's files (`boot.d`, `build-date`, `install.json`, `no-intent`, the stormbootx EFI variables); "Not built, or not wired" adds #240, #232, #228/#233/#248, #231, #215, #218, #205; source sizes. The cross-component corrections of stormcos#65 (#242): `compose-release.py` is stormcos's, the component registry is stormcentral's database, the PVC blanks are cut by stormcos's build (sbregistry names and surveys them), and the console reads `placement`. CLAUDE.md current state and the deck's status slide follow
+
 ### 2026-10-01
 - **fix:** The initramfs steps the clock from NTP before anything checks a certificate, and writes the RTC (#251, stormcos#213). The X9 blades have no RTC battery: after a power cut the kernel started in 2000, and stormcert and fastetcd start next to `timesync`. After the network, `/init` runs one `busybox ntpd -n -q` under `timeout` (3 s, `STORM_NTP_WAIT`), first to the lease's option-42 servers, then to `162.159.200.1` and `216.239.35.0` (addresses only, no DNS). On a step it runs `hwclock -w -u` and prints `clock stepped by +N s from <server>`. Otherwise a clock before the image's build date (`/etc/stormblock/build-date`, `SOURCE_DATE_EPOCH` or the build's clock) is set to that date, with a loud warning. It never blocks the boot. `rd.stormblock.ntp=off` skips the NTP step
 - **test:** `tests/initramfs-clock.sh` (stubbed ntpd/date/hwclock: lease first, fixed fallback, floor, ahead, no network, link-local, off, no RTC, the bound). `ci-clock-verify.sh` runs the block as PID 1 in QEMU with the RTC at 2000 and real busybox ntpd

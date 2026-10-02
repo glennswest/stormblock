@@ -187,8 +187,11 @@ only the slot it touches.
 ## Status and the issues that matter
 
 **v20.0.0**: boot intent (#148), per-host NVMe/TCP subsystems with
-DH-HMAC-CHAP (#210), `cluster` opt-in (#209). Full
-suite green on dev apart from a timing test on a loaded box (#134).
+DH-HMAC-CHAP (#210), `cluster` opt-in (#209). Since then (unreleased):
+fresh installs that kept their data intact (#236, #239: a slot fence, no
+in-place writes on a slab being emptied), per-volume 512-byte LBA (#228), and
+initramfs fixes for the X9 blades (#249 boot name, #250 ConnectX-3, #251
+clock). Full suite green on dev apart from a timing test on a loaded box (#134).
 
 - **Power cuts (#171, P0)**: fsync'd writes were lost on a hard power-off.
   Fixed in v19.1.4–v19.2.2: slot entries after their data, the handover

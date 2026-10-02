@@ -243,7 +243,7 @@ to stderr.
 
 | subcommand | what it does |
 |---|---|
-| `slab format\|grow\|list\|info\|volumes` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it |
+| `slab format\|grow\|list\|info\|volumes\|holds` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it; `holds <local> <image>` says whether a local drive already holds a release, finished (exit 0 held, 1 not, 2 cannot say; #236, #239) |
 | `image build\|convert\|inspect\|formats\|lay-node\|local-boot` | build disk images and ISOs out of pallets from a TOML spec (`docs/images.md`); `lay-node` lays a node's disk layout (destroys the drive); `local-boot` copies an ESP and boot pallets onto an installed disk |
 | `pallet …` (22 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, `add-member`/`remove-member`/`copy-member`/`move-member`, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
 | `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--label] [--read-only]`; `--whiteouts` and `--fsck` are on by default and take a value, e.g. `--fsck false`) — how stormcentral builds service goldens |
@@ -455,10 +455,19 @@ Elsewhere: `/etc/stormblock/stormblock.toml`, `/etc/stormblock/boot.toml`
 (`boot-local`), `/run/stormblock/handover.json` (the initramfs engine's record
 for `adopt-ublk`), `/var/lib/stormblock/raft` (`[cluster] data_dir`).
 
+In the initramfs: `/etc/stormblock/boot.d/` (boot hooks,
+`docs/boot-hooks.md`), `/etc/stormblock/build-date` (the image's build time,
+the clock's floor, #251), `/run/stormblock/install.json` (written by
+`boot-claim` when the appliance says `install`, #148) and
+`/run/stormblock/no-intent` (the appliance stated no intent, #236), and the
+EFI variables `StormBootTag` and `StormBootHostNqn` (vendor GUID
+`ab361f54-0166-44a4-a088-1ac22e98ab76`) that stormbootx leaves for it (#249).
+
 ## How it ships
 
-stormblock is a **`special`** component in stormcentral (`components/stormcos.toml`):
-a bare binary plus `/etc/stormblock/stormblock.toml`, not a stormd service. It
+stormblock is a **`special`** component in stormcentral's component registry
+(stormcentral's database since stormcentral#185; `components/stormcos.toml`
+there is only the seed): a bare binary plus `/etc/stormblock/stormblock.toml`, not a stormd service. It
 is staged with `stormcentral component stage`, which runs stormcos's
 `deploy/build-goldens.sh`. That builds `cargo build --release --locked
 --target x86_64-unknown-linux-musl` (thin LTO since #209; the fat-LTO `dist`
@@ -1219,6 +1228,38 @@ describes how to take that decision over: any executable in
 before — and that probe now uses `slab volumes`, so it works on the partition
 a loader entry names rather than only on a whole disk with a GPT.
 
+### The initramfs command line
+
+What `/init` (`scripts/build-stormblock-initramfs.sh`) reads from the kernel
+command line. A netbooted stormcos node needs none of it: the appliance comes
+from DHCP and the name from the firmware.
+
+| parameter | default | |
+|---|---|---|
+| `rd.stormblock.boothost=<url>` | DHCP option 17, then `http://boothost.<domain>:<port>`, `http://boothost:<port>` | the appliance to claim from |
+| `rd.stormblock.bootport=<port>` | `9090` | port for the derived appliance addresses |
+| `rd.stormblock.tag=<name>` | the firmware's `StormBootTag`, else this, else SMBIOS serial/UUID | the name claimed as (`boothost/<name>`); a firmware name that differs wins, with a warning (#249) |
+| `rd.stormblock.hostnqn=<nqn>` | the firmware's `StormBootHostNqn` | the NQN presented on every NVMe/TCP connect |
+| `rd.stormblock.trust-smbios=1` | off | let a name guessed from SMBIOS install over a disk (#249) |
+| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any`, `blank`, `off`, `force` (`docs/boot-hooks.md`) |
+| `rd.stormblock.wipe=<dev>` | — | clear that disk's partition table and slab headers once, before the survey |
+| `rd.stormblock.slab=<dev\|file\|nvme-tcp://…>` | — | boot from a local (or named) slab instead of claiming |
+| `rd.stormblock.meta=<dir>` | — | where the volume records are, for a slab that keeps none |
+| `stormblock.volume=<uuid\|name>` | `boot.toml`, else the slab's boot volume | the root volume |
+| `rd.stormblock.overlay=tmpfs[:SIZE]\|<blockdev>` | `tmpfs`, 512m | writable overlay over a read-only (erofs) root |
+| `rd.stormblock.image-store=<vol>` | — | export a second volume (`/dev/ublkb1`) as the image store |
+| `rd.stormblock.writable=<vol>:<path>,…` | — | writable volumes, written to fstab |
+| `rd.stormblock.mount=<vol>:<path>,…` | — | volumes `/init` exports and mounts itself, for a PID 1 that is not systemd |
+| `rd.stormblock.bond=` | `off` | `active-backup` or `802.3ad` to bond the fastest uplinks |
+| `rd.stormblock.ntp=off` | on | skip the NTP step (the build-date floor still applies, #251) |
+| `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`, which formats its target, #162) |
+| `ip=<addr>::<gw>:<mask>…` | DHCP | a static address for the uplink; `ip=dhcp` or none means DHCP (a static address declared elsewhere is overridden by DHCP, #229) |
+| `console=` | — | every one that exists gets the boot messages (#237) |
+
+Bounded waits, overridable in the environment (for tests): `STORM_NETDEV_WAIT`
+(15 s, late netdevs, #250), `STORM_LINK_WAIT` (10 s, carrier on the uplinks)
+and `STORM_NTP_WAIT` (3 s per NTP attempt, #251).
+
 ### The initramfs console: every `console=`
 
 The kernel prints to every `console=` on its command line; `/dev/console`,
@@ -1332,6 +1373,19 @@ What earlier docs described and the code does not do, each with its issue:
   on a per-volume portal that admits any host (#217); `/serve/v1`'s own
   subsystems admit any host (#212); an `nvme-tcp://` drive cannot be given a
   DH-HMAC-CHAP secret except through the environment (#213).
+- **The slot fence (#239)** covers thin, mirrored and copy-on-write I/O; parity
+  stripes and the StormFS chunk/versioned paths are not fenced against a move
+  (#240).
+- **`/v1` `encrypted: true`** is stored and reported; nothing is encrypted
+  (#232).
+- **Per-volume 512-byte LBA** (#228) is built and verified, but no release uses
+  it yet: whether a release is one disk at 512 or two volumes is the owner's
+  call (#233), and whether to keep the capability at all is #248.
+- **Smaller known faults**: ublk attach polls device readiness with a blocking
+  sleep under the export lock (#231); `POST /api/v1/arrays` takes drives that
+  are already array members (#215); the volume listing's `generation` does not
+  move on attach, detach or slab state (#218); `local-boot`'s ladder retention
+  ignores `successful`/`tries` (#205).
 
 ## Docs
 
@@ -1357,30 +1411,30 @@ What earlier docs described and the code does not do, each with its issue:
 
 ## Source layout
 
-97k lines of Rust in `src/`, 12k in `tests/it/` and 3.5k in `tests-runtime/`,
+99k lines of Rust in `src/`, 12k in `tests/it/` and 3.5k in `tests-runtime/`,
 about 920 tests, plus the test container's crate (`test/`, 1.1k).
 
 ```
 src/mgmt/       21.2k  management API (axum): every /api/v1 surface, /v1, kube resources,
                        auth, config, metrics, discovery, ublk exports, per-host NVMe
                        subsystems (nvme_hosts), web UI (feature ui)
-src/volume/     18.5k  thin volumes, GEM, redundancy (mirror/parity legs), snapshots and
-                       clones, metadata, synonyms, chunks/versions (StormFS), GC, pressure,
-                       relocation, composition
+src/volume/     19.0k  thin volumes, GEM, redundancy (mirror/parity legs), snapshots and
+                       clones, metadata (V9: per-volume LBA), the slot fence, synonyms,
+                       chunks/versions (StormFS), GC, pressure, relocation, composition
 src/drive/      11.0k  BlockDevice; O_DIRECT block devices (io_uring or blocking pool),
                        nvme-tcp:// and iscsi:// initiators, files; slabs and the registry;
                        ublk; handover; SMART; identity; CrashDevice (power-cut tests)
-src/image/       7.5k  image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import decoders,
+src/image/       7.7k  image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import decoders,
                        node layout, local boot
 src/target/      7.7k  NVMe-oF/TCP (several subsystems per listener, allowed hosts,
                        DH-HMAC-CHAP) and iSCSI targets, per-core reactor
 src/fs/          5.6k  templates, ext4 and XFS seams, disk identity, files, image survey
 src/serve/       4.0k  the serving layer (/serve/v1): wiring, reconciler, readiness, reaper
 src/pallet/      3.9k  pallet format writer, GPT, store, manager, selection
-src/placement/   2.9k  failure domains, placement, drain moves, rebalance
+src/placement/   3.0k  failure domains, placement, drain moves, rebalance
 src/raid/        2.7k  drive-level RAID 1/5/6/10, parity
 src/cluster/     2.6k  openraft membership, heartbeat, replication (feature cluster, opt-in)
-src/*.rs         9.2k  cli.rs (CLI, daemon, subcommands; main.rs wraps it), rebuild, drain,
+src/*.rs        10.3k  cli.rs (CLI, daemon, subcommands; main.rs wraps it), rebuild, drain,
                        state, boot,
                        boot_iscsi, migrate, stormfs registration, http client
 crates/pallet-format   the no_std pallet reader stormuefi links
@@ -1396,7 +1450,7 @@ tests-runtime/         tests against the built binary, devices or privileges (#2
 | [stormcos](https://github.com/glennswest/stormcos) | ships the engine (`adopt-ublk` under stormpump), its goldens, and the initramfs that runs `boot-claim`/`boot-local` |
 | [rustkube](https://github.com/glennswest/rustkube), rustkube-node | the built-in PVC driver: clones blanks and attaches them over ublk through `/api/v1` |
 | [stormblock-csi](https://github.com/glennswest/stormblock-csi) | the CSI driver for third-party use, over `/v1` |
-| [stormblock-registry](https://github.com/glennswest/stormblock-registry) (sbregistry) | builds blanks and goldens, posts image specs to `/api/v1/images/build` |
+| [stormblock-registry](https://github.com/glennswest/stormblock-registry) (sbregistry) | names and surveys blanks and goldens, posts image specs to `/api/v1/images/build`. The PVC blanks (`pvc-ext4j-<MiB>m`) are cut by stormcos's `deploy/build-goldens.sh`, and the kubelet mints a missing one |
 | [stormbootx](https://github.com/glennswest/stormbootx), [stormuefi](https://github.com/glennswest/stormuefi) | UEFI: claim `boothost/<tag>` and attach it over NVMe/TCP; boot a pallet (the reader is `crates/pallet-format`) |
 | [stormdrive](https://github.com/glennswest/stormdrive) | registers and labels drives (`shelf`, `bay`, `hba`), reports their health |
 | [stormstorage](https://github.com/glennswest/stormstorage) | distributed volumes: RAID 1 over NVMe/TCP legs through `/v1` and `/api/v1/arrays` |

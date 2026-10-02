@@ -120,7 +120,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 ## Architecture (bottom-up)
 - `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
 - `src/raid/` — drive-level RAID 1/5/6/10 for whole-device legs; parity, RAID 1 add/remove with resync. Journal on disk, scrub, rebuild and reassembly are not wired (#168)
-- `src/volume/` — thin volumes (`thin.rs`), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V8), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
+- `src/volume/` — thin volumes (`thin.rs`), the slot fence (`fence.rs`: I/O shared, a move exclusive, #239), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V9; V8 written when every volume is 4096), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
 - `src/fs/` — templates (`template.rs`), ext4 (`ext4.rs`) and XFS (`xfs.rs`) seams, disk identity (`disk.rs`), files, image survey (`survey.rs`)
 - `src/image/` — image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import (`import.rs`, `decode/`), node layout (`local.rs`), local boot
 - `src/pallet/` — pallet writer, GPT, store, manager, selection; the reader is `crates/pallet-format`
@@ -138,7 +138,13 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 **v20.0.0** (2026-09-28): boot intent (#148), the build/test split (#209,
 `cluster` opt-in — BREAKING) and per-host NVMe/TCP subsystems with DH-HMAC-CHAP
 (#210 — BREAKING: the shared subsystem is closed by default); before it
-v19.4.0 (universal boot #200, boothost names #199). 97k lines in `src/`, 12k
+v19.4.0 (universal boot #200, boothost names #199). Unreleased since v20.0.0
+(Cargo still says 20.0.0; goldens staged for the P0s through stormcos#168):
+per-volume LBA 512|4096, metadata V9 (#228); the install stopgap and
+`slab holds` (#236, #239); the slot fence and no in-place writes on a slab
+being emptied (#239, durability rules 10–11); and in the initramfs: every
+`console=` (#237), the firmware's boot name from EFI variables (#249),
+mlx4_en and late netdevs (#250), the NTP clock step (#251). 99k lines in `src/`, 12k
 in `tests/it/`, 3.5k in `tests-runtime/`, ~920 tests, plus the test container
 crate (`test/`). The full suite (nextest) passes on dev apart from #134 when
 the box is busy; #120 is now in `tests-runtime/`, which nothing runs (#222).
@@ -147,10 +153,11 @@ v20.0.0 was cut at the owner's request on #148 (2026-09-28); the forge rollout
 durability) is closed: the on-metal acceptance passed on 2026-09-27 (C2NR0Q2,
 11.48 = v19.2.1 engine and initramfs, 5 cuts, 1500/1500 objects). The
 flow-over resume of v19.2.2 has not met metal yet; that check is #172. The README is the reference for what the code does, rewritten from the code in
-#131 and refreshed from the code on 2026-09-27 and 2026-09-28 (#199, #200,
-#148, #209, #210); the docs in `docs/` were checked against it and the
+#131 and refreshed from the code on 2026-09-27, 2026-09-28 (#199, #200,
+#148, #209, #210) and 2026-10-02 (#228–#251: the initramfs command line,
+`slab holds`, boot-time files, stormcos#65's corrections #242); the docs in `docs/` were checked against it and the
 superseded ones moved to `docs/history/`. What earlier docs promised and the code does not do is
-listed in the README's "Not built, or not wired" with its issues (#159–#170).
+listed in the README's "Not built, or not wired" with its issues (#159–#170, #205–#248).
 The golden has been held since v17 for the token rollout to the engine's
 clients (#107; stormcentral#30, stormcos#89 and the rest); when to release
 it is the owner's call, #194.
