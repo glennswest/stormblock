@@ -77,7 +77,10 @@ is true of a reboot as much as an install. Until intents can be used:
   with the install finished. Held is a reboot: the disk boots, its data kept.
   The same release with its flow-over cut short (records that still place
   extents on a slab not on the disk; exit 3) boots the disk too: the engine
-  finishes the move from a fresh clone (#171, #258). Not held is an **install**:
+  finishes the move from the clone just claimed and compared
+  (`STORMBLOCK_RESUME_SOURCE`), never a second claim, and claims as the name
+  resolved here (`STORMBLOCK_BOOT_TAG`), never the SMBIOS serial worked out
+  again (#171, #258, #259). Not held is an **install**:
   the claimed image boots and the disk is installed over. An install the
   appliance asked for (the ticket) installs whatever the disk holds. No image,
   or "cannot say" (exit 2), boots the disk as before.

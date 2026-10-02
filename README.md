@@ -306,8 +306,9 @@ only in the file is **not applied**.
 | `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator`; when `boot-local` claims a fresh clone to resume a flow-over, `nqn.2026-09.lo.storm:host-<tag>` |
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds the data half | policy decides |
-| `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; the missing extents are dropped, with a warning |
-| `STORMBLOCK_BOOT_TAG` | this machine's tag for that claim | SMBIOS serial, else SMBIOS UUID (the initramfs passes `--tag`: the firmware's name first, #249) |
+| `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
+| `STORMBLOCK_BOOT_TAG` | this machine's name for that claim; the initramfs exports the name it resolved (#259) | the firmware's `StormBootTag` EFI variable, else SMBIOS serial, else SMBIOS UUID (#249) |
+| `STORMBLOCK_RESUME_SOURCE` | the clone to finish a cut-short flow-over from, instead of a claim; the initramfs exports the clone its probe claimed when `slab holds` exits 3 (#259) | a claim from `STORMBLOCK_BOOTHOST` |
 | `STORMBLOCK_RESUME_SOURCE` | a device path or `nvme-tcp://` URI used instead of claiming (tests, recovery by hand) | claim through `STORMBLOCK_BOOTHOST` |
 
 ### The config file
@@ -1229,8 +1230,14 @@ starts, the local system slab's record names every volume still on the
 appliance's slab as well as those already moved (#258), so a disk cut short
 at any point names everything the node boots, and the initramfs boots it
 rather than finding volumes "missing" and installing over it. It
-does this only when `STORMBLOCK_BOOTHOST` names an appliance. Without one it
-warns and drops those extents. See `docs/durability.md` for what survives a
+finishes from the clone the initramfs's probe has just claimed and compared
+(`STORMBLOCK_RESUME_SOURCE`), else it claims one from `STORMBLOCK_BOOTHOST` as
+this machine: `STORMBLOCK_BOOT_TAG` (exported by `/init`), else the firmware's
+`StormBootTag`, else SMBIOS (#259: claiming by the SMBIOS serial the blades
+share got another machine's image). When the records still place extents only
+on slabs it does not have, from either source or with no source at all, it
+**refuses to boot** and names them, rather than dropping the mappings and
+bringing up a root of holes (PID 1 SIGSEGV on server3). See `docs/durability.md` for what survives a
 power cut and why.
 
 ### Booting: who decides where

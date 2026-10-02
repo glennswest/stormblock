@@ -69,7 +69,10 @@ tests run on.
    has reached; otherwise a cut before a golden moved left a disk that did not
    name it, and the initramfs installed over the disk and its data half
    (11.63: 0 of 300 objects). `slab holds` answers such a disk with exit 3
-   (the same release, unfinished), and `/init` boots it.
+   (the same release, unfinished), and `/init` boots it, handing the engine
+   the clone it compared and the machine's name (#259). A clone that does not
+   carry the slab the records need is another machine's image: `boot-local`
+   refuses to boot rather than drop those mappings and run a root of holes.
 10. **A move and an I/O on the same slot never overlap** (#239). An I/O
    looks its extent up and then uses the slot it found; the unreplicated path
    holds no lock between the two. A move (the flow-over, a drain, a
