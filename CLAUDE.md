@@ -179,6 +179,14 @@ built until the owner picks: (A) per-volume redundancy with per-shelf drive
 groups and reserved/standby spares, or (B) drive-level RAID sets (needs #168
 wired: journal, reassembly, array rebuild, scrub). Asked on #252
 (`needs-owner`); recommended A. Bay identity/SES is stormdrive's either way.
+Owner (2026-10-02) asked how A handles a failure and objected to the overhead
+of per-volume parity on rows of 16. Answered on #252 from the code: a failure
+rebuilds per volume into the row's free space (works today), but per-volume
+parity costs a full-stripe read + new P/Q on each clone's first write into a
+stripe, P/Q per touched stripe for small volumes, and a stripe must be
+narrower than its row. **Now recommending B** (RAID sets per row/shelf with
+hot spares, volumes allocated onto them; #168 wired first). Asked again,
+`needs-owner`.
 
 ### The initramfs steps the clock from NTP, bounded (2026-10-01, #251, P1) — DONE
 
