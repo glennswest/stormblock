@@ -665,6 +665,13 @@ impl RaidArray {
             .collect()
     }
 
+    /// The slot a device is in.
+    pub fn slot_of(&self, id: &DeviceId) -> Option<usize> {
+        self.members.read().unwrap().iter().position(|m| {
+            m.device.as_ref().is_some_and(|d| d.id().uuid == id.uuid && d.id().path == id.path)
+        })
+    }
+
     /// The device ids (uuid, path) of every drive this array holds.
     pub fn drive_ids(&self) -> Vec<DeviceId> {
         self.members.read().unwrap().iter().filter_map(|m| m.device.as_ref().map(|d| d.id().clone())).collect()

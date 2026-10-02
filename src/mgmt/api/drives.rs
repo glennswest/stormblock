@@ -284,6 +284,16 @@ async fn close_drive(
         return ApiError::not_found(format!("no open drive {id}"));
     };
 
+    // A RAID set's member or a spare is the set's (#252): closing it is
+    // failing it, which is said explicitly
+    // (`POST /api/v1/arrays/{id}/members/{slot}/fail`), not by accident.
+    if let Some(why) = crate::mgmt::raid_sets::drive_in_use(&state, &dev).await {
+        if !q.force {
+            return ApiError::conflict(format!("{path}: {why}; fail it out of its set (or remove the spare) first"));
+        }
+        tracing::warn!("drive {index} ({path}) is closed while in use: {why}");
+    }
+
     if let Some(slab) = slab_on(&state, &dev).await {
         if !q.force {
             return ApiError::conflict(format!(
@@ -612,6 +622,27 @@ async fn drive_health(
     }
     volumes_touched.sort_by_key(|v| v.0);
     volumes_touched.dedup();
+    // A drive that is a RAID set's member (#252): a drive reported failed or
+    // missing is failed out of its set, and the set takes a spare. Degraded
+    // or failing is reported, not acted on — the set still has it.
+    let mut raid_member = None;
+    if let Some((array_id, slot)) = crate::mgmt::raid_sets::member_of(&state, &dev).await {
+        let failed = if matches!(state_lc.as_str(), "failed" | "missing") {
+            let array = state.arrays.read().await.get(&array_id).map(|i| i.array.clone());
+            match array {
+                Some(a) => {
+                    let why = format!("drive reported {state_lc}: {}", report.reason.as_deref().unwrap_or("-"));
+                    let f = a.fail_member(slot, &why);
+                    a.persist_if_dirty().await;
+                    f
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        raid_member = Some(serde_json::json!({ "array": array_id.0, "slot": slot, "failed": failed }));
+    }
     // Rebuild every redundant volume with a member here, most endangered
     // first, onto drives of its own choosing (#146).
     let rebuild_job = if distrust && state.rebuilds.automatic() && !volumes_touched.is_empty() {
@@ -655,6 +686,7 @@ async fn drive_health(
         "state": state_lc,
         "slabs": slabs.iter().map(|s| s.0.to_string()).collect::<Vec<_>>(),
         "quarantined": distrust,
+        "raid_member": raid_member,
         "volumes_distrusting": volumes_touched.iter().map(|v| v.0.to_string()).collect::<Vec<_>>(),
         "drain_started": drain_started,
         "drain_after_rebuild": drain_after_rebuild,

@@ -6,6 +6,7 @@ pub mod config;
 pub mod metrics;
 pub mod discovery;
 pub mod ublk_export;
+pub mod raid_sets;
 #[cfg(feature = "nvmeof")]
 pub mod nvme_hosts;
 #[cfg(feature = "ui")]
@@ -202,6 +203,8 @@ impl Drop for VolumeSubsystem {
 pub struct AppState {
     pub drives: tokio::sync::RwLock<Vec<DriveInfo>>,
     pub arrays: tokio::sync::RwLock<HashMap<RaidArrayId, ArrayInfo>>,
+    /// Hot spares for the RAID sets, by pool (#252).
+    pub spares: Arc<crate::raid::spares::SparePool>,
     /// Behind an `Arc` so work that outlives a request can hold it.
     pub volume_manager: Arc<tokio::sync::Mutex<VolumeManager>>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
@@ -371,6 +374,7 @@ impl AppState {
         AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),
             arrays: tokio::sync::RwLock::new(HashMap::new()),
+            spares: crate::raid::spares::SparePool::new(),
             volume_manager,
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,

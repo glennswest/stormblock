@@ -17,7 +17,7 @@ use crate::placement::topology::StorageTier;
 use crate::raid::{RaidArray, RaidArrayId, RaidLevel};
 use crate::volume::VolumeManager;
 use crate::target::{self, reactor::{ReactorConfig, ReactorPool}};
-use crate::mgmt::{self, AppState, ArrayInfo, DriveInfo};
+use crate::mgmt::{self, AppState, DriveInfo};
 use crate::mgmt::config::{StormBlockConfig, parse_size};
 #[cfg(feature = "cluster")]
 use crate::cluster;
@@ -1072,6 +1072,30 @@ pub async fn run() -> anyhow::Result<()> {
         }
         tracing::info!("{} drive(s) ready", drives.len());
 
+        // RAID sets first (#252). A drive that is a set's member or a hot
+        // spare carries a RAID superblock, not a slab: the storage on it is
+        // the set's, found on the set once it is put back together. So those
+        // drives are taken out of everything below — the slab scan, `--raid`,
+        // the raw namespaces — and nothing formats over them.
+        let mut assembled_sets = false;
+        {
+            let (report, claimed) = crate::mgmt::raid_sets::assemble_and_adopt(&state, &drives).await;
+            if !report.arrays.is_empty() || !report.spares.is_empty() || !report.refused.is_empty() {
+                tracing::info!(
+                    "RAID: {} set(s) assembled, {} refused, {} spare(s); {} slab(s) and {} volume(s) on them",
+                    report.arrays.len(),
+                    report.refused.len(),
+                    report.spares.len(),
+                    report.slabs_adopted,
+                    report.volumes_adopted
+                );
+            }
+            assembled_sets = report.arrays.iter().any(|a| !a.already);
+            drives.retain(|d| {
+                !claimed.iter().any(|c| std::ptr::addr_eq(Arc::as_ptr(c), Arc::as_ptr(d)))
+            });
+        }
+
         // Take on the storage that is already on them. For an appliance whose
         // drives *are* its storage pool this is the difference between coming
         // back up holding what it held and coming back up empty: slabs were
@@ -1115,8 +1139,16 @@ pub async fn run() -> anyhow::Result<()> {
             drives.iter().map(|d| d.capacity_bytes() as f64).sum::<f64>()
         );
 
-        // Phase 2: Create RAID array if requested
-        if let Some(level) = cli.raid {
+        // Phase 2: Create RAID array if requested — unless the drives already
+        // carry one, which was assembled above: re-creating it on every start
+        // formatted the data away.
+        if cli.raid.is_some() && assembled_sets {
+            tracing::info!("--raid: the drives already carry a RAID set (assembled above); not creating another");
+            let vm = state.volume_manager.lock().await;
+            if let Some((id, ..)) = vm.list_volumes().await.first() {
+                export_device = vm.get_volume(id);
+            }
+        } else if let Some(level) = cli.raid {
             let stripe_size = cli.stripe_kb * 1024;
             tracing::info!(
                 "Creating {} array with {} members, stripe_size={}KB",
@@ -1149,21 +1181,17 @@ pub async fn run() -> anyhow::Result<()> {
                         let arc_array = Arc::new(array);
                         let backing: Arc<dyn BlockDevice> = arc_array.clone();
 
-                        // Register array in state + volume manager
+                        // Register array in state + volume manager. The slab
+                        // carries its volumes' records, so a restart that
+                        // reassembles the array finds them (#252).
                         {
                             let mut vm = state.volume_manager.lock().await;
-                            vm.add_backing_device(array_id, backing).await;
+                            if let Err(e) = vm.add_array_slab(array_id, backing, false).await {
+                                tracing::error!("formatting the slab on array {array_id}: {e}");
+                            }
                         }
-                        {
-                            let mut state_arrays = state.arrays.write().await;
-                            state_arrays.insert(array_id, ArrayInfo {
-                                array: arc_array,
-                                level: array_level,
-                                member_count: array_member_count,
-                                capacity_bytes: array_capacity,
-                                stripe_size: array_stripe,
-                            });
-                        }
+                        let _ = (array_level, array_member_count, array_capacity, array_stripe);
+                        crate::mgmt::raid_sets::register(&state, arc_array).await;
 
                         // Try restoring persisted volumes first
                         let mut restored = false;
@@ -1235,7 +1263,9 @@ pub async fn run() -> anyhow::Result<()> {
                         metrics::gauge!("stormblock_volumes_total").set(vols.len() as f64);
                     } else {
                         // No volumes specified — export the raw array
-                        export_device = Some(Arc::new(array));
+                        let arc_array = Arc::new(array);
+                        crate::mgmt::raid_sets::register(&state, arc_array.clone()).await;
+                        export_device = Some(arc_array);
                     }
                 }
                 Err(e) => {

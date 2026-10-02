@@ -2,8 +2,8 @@
 //! how far (`StorageTier`, `Locality`).
 //!
 //! A domain is an ordered chain of `rung=value` pairs from the widest blast
-//! radius to the narrowest: `site/building/room/row/rack/node/hba/shelf/bay/
-//! drive`. Two slabs are the same domain *at rung R* when their chains agree
+//! radius to the narrowest: `site/building/room/row/rack/node/hba/shelf/set/
+//! bay/drive` (`set`: a RAID set a shelf is divided into, #252). Two slabs are the same domain *at rung R* when their chains agree
 //! through R, so "spread across drives" and "spread across shelves" are the
 //! same comparison at different depths (#71, #72). The chain is what the
 //! engine keeps; who fills the upper rungs — stormdrive per drive (#70), an
@@ -22,7 +22,7 @@ use crate::drive::DeviceId;
 /// The rungs of the ladder, widest first. Unknown labels are allowed and
 /// sort after these, in the order they were given.
 pub const RUNGS: &[&str] = &[
-    "site", "building", "room", "row", "rack", "node", "hba", "shelf", "bay", "drive",
+    "site", "building", "room", "row", "rack", "node", "hba", "shelf", "set", "bay", "drive",
 ];
 
 /// The rung a policy spreads at when it does not say: one leg per drive.

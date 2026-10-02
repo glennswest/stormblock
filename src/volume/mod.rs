@@ -651,11 +651,27 @@ impl VolumeManager {
         array_id: RaidArrayId,
         device: Arc<dyn BlockDevice>,
     ) -> Result<SlabId, VolumeError> {
+        self.add_array_slab(array_id, device, true).await
+    }
+
+    /// Format an array's slab in the data role with a metadata region of its
+    /// own — dedicated (#150), or in the general pool, which is what a RAID
+    /// set on a shelf is (#252): volumes are allocated onto it like onto any
+    /// drive, and the slab carries their records, so a restart that
+    /// reassembles the set finds them on it.
+    pub async fn add_array_slab(
+        &mut self,
+        array_id: RaidArrayId,
+        device: Arc<dyn BlockDevice>,
+        dedicated: bool,
+    ) -> Result<SlabId, VolumeError> {
         let cap = device.capacity_bytes();
-        let fmt = crate::drive::slab::SlabFormat::new(self.slot_size, StorageTier::Hot)
+        let mut fmt = crate::drive::slab::SlabFormat::new(self.slot_size, StorageTier::Hot)
             .with_role(SlabRole::Data)
-            .with_auto_metadata(cap)
-            .dedicated();
+            .with_auto_metadata(cap);
+        if dedicated {
+            fmt = fmt.dedicated();
+        }
         let slab = Slab::format_with(device, fmt)
             .await
             .map_err(|e| VolumeError::AllocatorError(format!("formatting the slab on array {array_id}: {e}")))?;
@@ -665,7 +681,11 @@ impl VolumeManager {
         if !self.metadata_slabs.contains(&slab_id) {
             self.metadata_slabs.push(slab_id);
         }
-        tracing::info!("array {array_id} is dedicated slab {}", slab_id.0);
+        tracing::info!(
+            "array {array_id} is {} slab {}",
+            if dedicated { "dedicated" } else { "general-pool" },
+            slab_id.0
+        );
         self.persist().await;
         Ok(slab_id)
     }

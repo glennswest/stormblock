@@ -2,6 +2,7 @@
 
 pub mod drives;
 pub mod arrays;
+pub mod shelves;
 pub mod volumes;
 pub mod exports;
 pub mod fstemplates;
@@ -68,12 +69,27 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         service: &'static str,
         version: &'static str,
         auth: &'static str,
+        /// The worst of this node's RAID sets — `clean`, `rebuilding`,
+        /// `degraded`, `failed` — when it has any (#252). Read without
+        /// waiting: when the array table is busy it is left out.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        raid: Option<&'static str>,
     }
+    let raid = state.arrays.try_read().ok().and_then(|a| {
+        let rank = |s: &str| match s {
+            "failed" => 3,
+            "degraded" => 2,
+            "rebuilding" => 1,
+            _ => 0,
+        };
+        a.values().map(|i| i.array.status().state).max_by_key(|s| rank(s))
+    });
     Json(Health {
         status: "ok",
         service: "stormblock",
         version: env!("CARGO_PKG_VERSION"),
         auth: if state.auth_enforced() { "required" } else { "none" },
+        raid,
     })
     .into_response()
 }
@@ -84,6 +100,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/health", axum::routing::get(health).with_state(state.clone()))
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
+        .nest("/api/v1/shelves", shelves::shelves_router(state.clone()))
+        .nest("/api/v1/spares", shelves::spares_router(state.clone()))
         .nest("/api/v1/volumes", volumes::router(state.clone()))
         .nest("/api/v1/exports", exports::router(state.clone()))
         .nest("/api/v1/slabs", slabs::router(state.clone()))
