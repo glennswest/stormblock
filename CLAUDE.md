@@ -172,6 +172,29 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A power cut during the install's flow-over re-installs the node (2026-10-02, #258, P0) — IN PROGRESS
+
+server3, 11.63: 300 objects written, BMC power off, and the next boot laid a
+fresh slab (every namespace re-created). Cause, by reading:
+1. while the background flow-over runs, a system volume not yet moved has no
+   leg on the local system slab, so `per_slab_metadata` records it only in the
+   appliance clone's slab: the local disk's record leaves it out;
+2. after the cut the probe sees `stormpump` but "missing N mounted
+   volume(s)" and asks the appliance (the #171 resume, which would finish the
+   flow-over from a fresh clone, is never reached);
+3. with no boot intent (forge 13.7) #236's stopgap calls every claimed boot
+   an install and passes `--local-disk-force`: the data slab is destroyed.
+Fix:
+- [ ] engine: from the moment the flow sources are quarantined, the
+      destination system slab records every volume with a leg on a source, so
+      a cut-short disk names everything and boots local through the resume
+- [ ] /init: the no-intent stopgap forces only when the probe ruled an install
+      over a bootable disk (a release it does not hold), or no local drive
+      carries a data slab; otherwise the disk is kept (no force), said so
+- [ ] tests: a cut before anything moved lists and restores every volume, and
+      the data half's writes; boot-hook cases; sc-build
+- [ ] docs (boot-hooks.md, README), CHANGELOG, golden
+
 ### RAID sets on a shelf, with hot spares (2026-10-02, #252, P2) — DONE
 
 Owner (2026-10-02, on #252): **B** — drive-level RAID sets with hot spares,
