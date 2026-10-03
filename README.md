@@ -251,7 +251,7 @@ to stderr.
 
 | subcommand | what it does |
 |---|---|
-| `slab format\|grow\|list\|info\|volumes\|holds` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it; `holds <local> <image>` says whether a local drive already holds a release (exit 0 held, 1 not, 2 cannot say, 3 held with its flow-over cut short; #236, #239, #258) |
+| `slab format\|grow\|list\|info\|volumes\|holds\|cat` | format a device as a slab (`--role system\|data`, `--tier`, `--metadata-bytes`), grow a node disk's data half, and read slabs offline — `volumes` lists what a slab says it holds without attaching it; `holds <local> <image>` says whether a local drive already holds a release (exit 0 held, 1 not, 2 cannot say, 3 held with its flow-over cut short; #236, #239, #258); `cat --slab <s>… --volume <v> --out <file> <path>` copies a file out of a volume's filesystem with nothing attached (exit 0 read, 1 no such file, 2 the volume cannot be read; #262) |
 | `image build\|convert\|inspect\|formats\|lay-node\|local-boot` | build disk images and ISOs out of pallets from a TOML spec (`docs/images.md`); `lay-node` lays a node's disk layout (destroys the drive); `local-boot` copies an ESP and boot pallets onto an installed disk |
 | `pallet …` (22 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, `add-member`/`remove-member`/`copy-member`/`move-member`, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
 | `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--label] [--read-only]`; `--whiteouts` and `--fsck` are on by default and take a value, e.g. `--fsck false`) — how stormcentral builds service goldens |
@@ -1296,7 +1296,7 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.overlay=tmpfs[:SIZE]\|<blockdev>` | `tmpfs`, 512m | writable overlay over a read-only (erofs) root |
 | `rd.stormblock.image-store=<vol>` | — | export a second volume (`/dev/ublkb1`) as the image store |
 | `rd.stormblock.writable=<vol>:<path>,…` | — | writable volumes, written to fstab |
-| `rd.stormblock.mount=<vol>:<path>,…` | — | volumes `/init` exports and mounts itself, for a PID 1 that is not systemd |
+| `rd.stormblock.mount=<vol>:<path>,…` | the root volume's `/etc/stormblock/mounts` | volumes `/init` exports and mounts itself, for a PID 1 that is not systemd. **Without it on the line, `/init` reads the list from the root volume** of the slab it boots: `/etc/stormblock/mounts`, one `<vol>:<path>` per line, `#` comments, read with `slab cat` before anything is exported (#262). A list on the line does not fit: x86 caps the line at 2048 bytes and the EFI stub truncates it and boots anyway (11.68 mounted nothing). The line still works, and wins, for older images |
 | `rd.stormblock.bond=` | `off` | `active-backup` or `802.3ad` to bond the fastest uplinks |
 | `rd.stormblock.ntp=off` | on | skip the NTP step (the build-date floor still applies, #251) |
 | `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`, which formats its target, #162) |

@@ -172,23 +172,27 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The mount list leaves the kernel command line (2026-10-03, #262, P1) — IN PROGRESS
+### The mount list leaves the kernel command line (2026-10-03, #262, P1) — DONE
 
 x86's command line is 2048 bytes; the EFI stub truncates and boots anyway,
 and `rd.stormblock.mount=` (one ~1.8 KB word) went whole: 11.68 mounted
 nothing (stormcos#236). The issue's option 1: the list lives in the root
 volume, `/etc/stormblock/mounts`, one `<vol>:<path>` per line, written by
 stormcos at build time.
-- [ ] `stormblock slab cat <slab>... --volume <name> <path>`: a file out of
-      a volume's filesystem, read-only, no attach (userspace ext4 reader);
-      exit 0 read, 1 no such file, 2 cannot read the volume
-- [ ] `/init`: with no `rd.stormblock.mount=` on the line, read the list
-      from the root volume of the slab it boots (local probe and claimed
-      clone alike) before `boot-local` exports anything; the cmdline still
-      works for old images (it wins when present)
-- [ ] tests: Rust (cat from a slab), initramfs (list from the file, from the
-      cmdline, comments/blank lines, neither); docs (README, boot-hooks),
-      CHANGELOG
+- [x] `stormblock slab cat --slab <s>… --volume <v> --out <file> <path>`:
+      a file out of a volume's filesystem, nothing attached (userspace ext4);
+      exit 0 read, 1 no such file, 2 the slabs/volume cannot be read
+- [x] `/init` `# --- BEGIN mount list`: with no `rd.stormblock.mount=`,
+      `mounts_from <slab>` reads the root volume's list — in the local-disk
+      probe (that disk's own release) and again once the slab is settled
+      (claimed clone or local), before `boot-local` exports anything; the
+      cmdline still works and wins. The console says where the list came from
+- [x] tests: `cli::slab_cat_tests`, `tests/initramfs-mounts.sh` (6 cases);
+      on dev: nextest 875/875, every initramfs test under sh and busybox sh,
+      the generated /init parses, `slab cat` CLI exit 2 on a missing slab.
+      Docs (README), CHANGELOG
+- Not on metal: stormcos moves its list to `/etc/stormblock/mounts` in the
+  stormpump golden and drops `rd.stormblock.mount=` (stormcos#236 follow-up)
 
 ### Forge mode turned on per node, kept by the engine (2026-10-03, #272, P1) — DONE
 
