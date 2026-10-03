@@ -710,7 +710,7 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         else {
             return serde_json::Value::Null;
         };
-        let listen: std::net::SocketAddr = match state.config.nvmeof.as_ref() {
+        let listen: std::net::SocketAddr = match state.nvmeof_settings().as_ref() {
             Some(n) => n.listen_addr.parse().unwrap_or_else(|_| "0.0.0.0:4420".parse().unwrap()),
             None => "0.0.0.0:4420".parse().unwrap(),
         };
@@ -721,10 +721,8 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
             .management
             .resolve_advertised_host(&listen.ip().to_string());
         let nqn = state
-            .config
-            .nvmeof
-            .as_ref()
-            .map(|n| n.nqn.clone())
+            .nvmeof_settings()
+            .map(|n| n.nqn)
             .unwrap_or_else(|| "nqn.2024.io.stormblock:default".to_string());
         return json!({
             "protocol": "nvme-tcp",

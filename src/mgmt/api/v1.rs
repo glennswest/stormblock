@@ -1029,10 +1029,8 @@ pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo
         #[cfg(feature = "nvmeof")]
         {
             state
-                .config
-                .nvmeof
-                .as_ref()
-                .map(|n| n.listen_addr.clone())
+                .nvmeof_settings()
+                .map(|n| n.listen_addr)
                 .unwrap_or_else(|| "0.0.0.0:4420".to_string())
         }
         #[cfg(not(feature = "nvmeof"))]
@@ -1056,10 +1054,8 @@ pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo
         #[cfg(feature = "nvmeof")]
         {
             state
-                .config
-                .nvmeof
-                .as_ref()
-                .map(|n| n.nqn.clone())
+                .nvmeof_settings()
+                .map(|n| n.nqn)
                 .unwrap_or_else(|| crate::target::nvmeof::NvmeofConfig::default().nqn)
         }
         #[cfg(not(feature = "nvmeof"))]

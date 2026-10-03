@@ -21,6 +21,8 @@ pub mod moves;
 pub mod synonyms;
 pub mod boothost;
 pub mod releases;
+#[cfg(feature = "nvmeof")]
+pub mod forge;
 #[cfg(feature = "iscsi")]
 pub mod luns;
 #[cfg(feature = "iscsi")]
@@ -128,6 +130,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/v1", v1::router(state.clone()))
         // Kubernetes-shaped resources, served by the engine itself (#80).
         .merge(kube::router(state.clone()));
+
+    // This node as its site's forge (#272).
+    #[cfg(feature = "nvmeof")]
+    let r = r.nest("/api/v1/forge", forge::router(state.clone()));
 
     // The StormFS data path (#49, #50). Out of the `mikrotik` profile: a
     // RouterOS node with 256 MB serves container volumes over NVMe-TCP; it is

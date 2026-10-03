@@ -9,6 +9,8 @@ pub mod ublk_export;
 pub mod raid_sets;
 #[cfg(feature = "nvmeof")]
 pub mod nvme_hosts;
+#[cfg(feature = "nvmeof")]
+pub mod forge;
 #[cfg(feature = "ui")]
 pub mod ui;
 
@@ -316,6 +318,14 @@ pub struct AppState {
     /// Per-host NVMe subsystems and who may reach them (#210).
     #[cfg(feature = "nvmeof")]
     pub nvme_hosts: tokio::sync::Mutex<nvme_hosts::NvmeHosts>,
+    /// The `[nvmeof]` settings in force: `--config`'s, or the forge settings
+    /// this node keeps (#272). Read through [`AppState::nvmeof_settings`],
+    /// never `config.nvmeof`, which is only what the file said at start.
+    #[cfg(feature = "nvmeof")]
+    pub nvmeof_settings: std::sync::RwLock<Option<config::NvmeofExportConfig>>,
+    /// Who set up the shared target, for `/api/v1/forge` (#272).
+    #[cfg(feature = "nvmeof")]
+    pub forge: tokio::sync::Mutex<forge::Forge>,
     /// Live LUN table, keyed by LUN ID for O(1) lookup at thousands of
     /// LUNs (#24).
     #[cfg(feature = "iscsi")]
@@ -325,6 +335,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The `[nvmeof]` settings in force (#272).
+    #[cfg(feature = "nvmeof")]
+    pub fn nvmeof_settings(&self) -> Option<config::NvmeofExportConfig> {
+        self.nvmeof_settings.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// This node's name in the /v1 surface and in discovery beacons.
     pub fn local_node_name(&self) -> String {
         local_node_name(&self.config)
@@ -375,6 +391,8 @@ impl AppState {
             }
         }
         let holds = volume_manager.holds();
+        #[cfg(feature = "nvmeof")]
+        let nvmeof_settings = config.nvmeof.clone();
         let volume_manager = Arc::new(tokio::sync::Mutex::new(volume_manager));
         let rebuilds = crate::rebuild::Rebuilds::new(volume_manager.clone(), &config.rebuild);
         AppState {
@@ -443,6 +461,10 @@ impl AppState {
             nvmeof_target: tokio::sync::RwLock::new(None),
             #[cfg(feature = "nvmeof")]
             nvme_hosts: tokio::sync::Mutex::new(nvme_hosts::NvmeHosts::default()),
+            #[cfg(feature = "nvmeof")]
+            nvmeof_settings: std::sync::RwLock::new(nvmeof_settings),
+            #[cfg(feature = "nvmeof")]
+            forge: tokio::sync::Mutex::new(forge::Forge::default()),
             #[cfg(feature = "iscsi")]
             lun_entries: tokio::sync::RwLock::new(HashMap::new()),
             #[cfg(feature = "cluster")]

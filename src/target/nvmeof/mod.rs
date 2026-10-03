@@ -372,6 +372,11 @@ impl NvmeofTarget {
         v
     }
 
+    /// The address the target listens on.
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.config.listen_addr
+    }
+
     /// The address a remote initiator is told to connect to.
     pub fn advertised(&self) -> SocketAddr {
         self.config.advertised_addr.unwrap_or(self.config.listen_addr)

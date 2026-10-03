@@ -176,7 +176,7 @@ impl Context {
             // Namespaces on the shared NVMe subsystem: what an attach through
             // `/api/v1/volumes/{id}/attach` or `/v1` hot-adds. Keyed by the
             // engine id for the first, by the `/v1` id for the second.
-            let nqn = state.config.nvmeof.as_ref().map(|n| n.nqn.clone());
+            let nqn = state.nvmeof_settings().map(|n| n.nqn);
             let found: Vec<(Uuid, u32)> = v1
                 .nvme_nsids
                 .iter()

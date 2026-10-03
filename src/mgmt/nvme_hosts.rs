@@ -125,7 +125,7 @@ pub struct Policy {
 }
 
 pub fn policy(state: &AppState) -> Policy {
-    match state.config.nvmeof.as_ref() {
+    match state.nvmeof_settings().as_ref() {
         Some(n) => Policy {
             allow_any_host: n.allow_any_host,
             allowed_hosts: n.allowed_hosts.clone(),
