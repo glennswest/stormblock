@@ -172,18 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The Dell never installs: a guessed name takes no slab drive (2026-10-03, #268, P0) — WAITING ON THE OWNER
+### The Dell never installs: a guessed name takes no slab drive (2026-10-03, #268, P0) — DONE here, proof on metal pending
 
-C2NR0Q2 on 11.77 boots stormbootx 0.4.0 from the iDRAC's virtual optical,
-which hands no name down, so `/init` names it from SMBIOS (a guess, #249).
-sda holds an older stormcos slab, neither blank nor this release, so #249's
-guard leaves it and every boot runs from a fresh forge clone (durability
-0/300). The fix asked for (a guess installs over any stormblock slab) is
-#249's own failure on the MicroCloud blades, which share a chassis serial;
-nothing on a disk records the name it was installed under. Asked on the
-issue (`needs-owner`): A as asked; B stormbootx ≥ v0.14.0 on the Dell's
-virtual media (no rule change, recommended); C a per-machine flag (no
-channel on forge 13.7). No code changed yet.
+C2NR0Q2 on 11.77 booted stormbootx 0.4.0 from the iDRAC's virtual optical,
+which hands no name down, so `/init` named it from SMBIOS (a guess, #249).
+sda held an older stormcos slab, so #249's guard left it and every boot ran
+from a fresh forge clone (durability 0/300). Asking a guess to install over
+any stormblock slab would be #249's own failure on the MicroCloud blades
+(shared chassis serial). Owner's decision (2026-10-03): **B** — the master put
+stormbootx v0.14.0 (hands `StormBootTag` down) on the Dell's virtual CD;
+#249 stays. **No stormblock code changes.** With the name from the
+firmware, the existing rules install onto sda: `tests/initramfs-boot-hook.sh`
+"no intent, the unbootable disk holds another release: wiped (#261)",
+re-run at e3c922d under sh and busybox sh, every initramfs test passing.
+- Proof is the master's: 11.78 on C2NR0Q2 must come up from sda and keep
+  300/300 in the durability stage (posted on #268)
 
 ### A mounted image clone is deleted under its containers (2026-10-03, #267, P0) — DONE
 
