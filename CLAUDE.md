@@ -172,6 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Forge mode on a stormcos node: adopt-ublk serves NVMe/TCP (2026-10-03, #206, P1) — IN PROGRESS
+
+A bastion (stormcos#90) is a stormcos node that is also forge: `adopt-ublk`
+read `--config` only for `/serve/v1` and never built the shared NVMe-oF
+target, so `state.nvmeof_target` was None and a boothost claim's `attach`
+was null. One engine owns the node's slab, so it is this engine that serves.
+- [ ] `adopt-ublk` starts the shared target when the config has an
+      `[nvmeof]` section (`listen_addr`, `nqn`, the #210 host policy); no
+      section = as now (stormcos's baked config has none). No raw drive
+      namespaces: the slab is the engine's pool
+- [ ] the daemon's store/policy/restore/run sequence in one function, used
+      by both
+- [ ] test: adopt-ublk with `[nvmeof]` answers a boothost claim with an
+      NVMe/TCP attach (and the kernel connects: QEMU); docs, CHANGELOG
+
 ### The node API stalls during flow-over (2026-10-03, #269, P0) — DONE
 
 11.78 on C2NR0Q2 (engine 507750d), the first real install onto its 2 TB
