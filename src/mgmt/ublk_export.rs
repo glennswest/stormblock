@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn unavailable_host_declines_so_caller_uses_nvme_tcp() {
-        let mut mgr = UblkExportManager { available: false, ..UblkExportManager::new() };
+        let mgr = UblkExportManager { available: false, ..UblkExportManager::new() };
         // No panic, just None — nvme-tcp fallback. (device is never touched.)
         assert!(mgr.device_path("vol-x").is_none());
     }
