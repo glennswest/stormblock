@@ -64,7 +64,7 @@ for b in "$BIN" "$DMSETUP" "$CURL"; do
     done
 done
 : > "$I/lib/mods/order"
-for m in ublk_drv dm-delay; do
+for m in virtio_blk ublk_drv dm-delay; do
     modprobe -S "$KVER" --show-depends "$m" 2>/dev/null | awk '$1=="insmod"{print $2}'
 done | awk '!seen[$0]++' | while read -r ko; do
     base=$(basename "$ko" | sed 's/\.xz$//; s/\.zst$//')
@@ -93,7 +93,7 @@ rnd() { echo $(( (RANDOM * 32768 + RANDOM) % 16384 )); }
 
 run() {
     mode=$1; disk=$2; port=$3
-    S=$(cat /sys/block/$disk/size)
+    S=$(cat /sys/block/$disk/size) || { r $mode-disk "FAIL (no /dev/$disk)"; return; }
     dmsetup create --noudevsync slow$disk --table "0 $S delay /dev/$disk 0 8 /dev/$disk 0 8 /dev/$disk 0 20" \
         > /tmp/dm.out 2>&1 || { r $mode-dm "FAIL ($(cat /tmp/dm.out))"; return; }
     sed 's/^/LOG dmsetup: /' /tmp/dm.out
