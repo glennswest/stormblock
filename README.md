@@ -846,7 +846,12 @@ rest without naming conventions:
   now. That covers ublk devices with the mount point, boot devices the engine
   adopted, NVMe namespaces on the shared subsystem, per-volume subsystems, the
   serving layer's wiring, exports and iSCSI LUNs. The delete guards use the
-  same answer.
+  same answer. Below them, a ublk device (created or adopted) **holds** its
+  volume in the volume manager, which refuses to delete a held volume on
+  every path, the internal ones included (`409 … in use by ublk device
+  /dev/ublkbN: detach it first`, #267). The serving layer's GC of an
+  ephemeral export whose volume is still a device on the node keeps the
+  withdrawn row and deletes the volume once it is detached.
 - **`consumer`**: the volume's owner (`PUT …/owner`: a PVC, a VMI, …), else the
   mount a ublk device carries.
 - Filters: `?kind=volume|golden|blank|media|snapshot|template` (comma-separated),
