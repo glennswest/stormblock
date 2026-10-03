@@ -62,8 +62,11 @@ either token.
 * `GET /api/v1/health` — the question "is the thing at this address an
   appliance at all". An initramfs asks it of every candidate address DHCP gave
   it, before it has any credential; a 401 there is indistinguishable from "not
-  an appliance" and drops a booting node to a shell. It answers a constant:
-  name, version, and whether a token is required.
+  an appliance" and drops a booting node to a shell. It answers name,
+  version and whether a token is required, plus two counts read without a
+  lock (the worst RAID set's state, #252; the extents a flow-over still has
+  to move, #260): what a supervisor holding no token needs to tell a settled
+  node from one still busy.
 * `/serve/v1/health`, `/serve/v1/ready` — supervisor probes, and the same two
   under the deprecated `/mk/v1` prefix.
 * `POST /api/v1/synonyms/boothost/<tag>/claim` — the boot claim, matched

@@ -288,6 +288,11 @@ pub struct AppState {
     /// Pallet name → drives it should be on (#56). Persisted as
     /// `<data_dir>/pallet_mirrors.json`; the drives carry no record of it.
     pub pallet_mirrors: tokio::sync::RwLock<HashMap<String, u8>>,
+    /// Extents of this node's volumes still on a flow-over source (the
+    /// appliance's slab), for `/api/v1/health` (#260). -1 when this engine
+    /// runs no flow-over; 0 once it has finished. An atomic so the open probe
+    /// never waits on the extent map the flow-over is holding.
+    pub flow_over_remaining: Arc<std::sync::atomic::AtomicI64>,
     /// Drives being emptied so they can be pulled (#70 item 3).
     pub drains: tokio::sync::RwLock<crate::drain::Drains>,
     /// Per-volume rebuilds after a drive fails (#146).
@@ -375,6 +380,7 @@ impl AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),
             arrays: tokio::sync::RwLock::new(HashMap::new()),
             spares: crate::raid::spares::SparePool::new(),
+            flow_over_remaining: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             volume_manager,
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,

@@ -4970,6 +4970,7 @@ pub(crate) async fn flow_system_half<P, F>(
     sources: &[crate::drive::slab::SlabId],
     dest: crate::drive::slab::SlabId,
     persist: P,
+    remaining: Option<&std::sync::atomic::AtomicI64>,
 ) -> Option<(u64, u64)>
 where
     P: Fn() -> F,
@@ -4998,16 +4999,39 @@ where
             r.set_quarantined(*s, false);
         }
     };
-    for &source in sources {
+    // What is left, for `/api/v1/health` (#260): the extents with a leg on
+    // a source, counted from the lists this loop reads anyway. Sources not
+    // reached yet keep their count from the start; nothing lands on them
+    // meanwhile (quarantined above).
+    let mut later: Vec<usize> = {
+        let g = gem.read().await;
+        sources
+            .iter()
+            .map(|s| g.slab_extents(*s).iter().filter(|(_, _, loc)| loc.leg_on(*s).is_some()).count())
+            .collect()
+    };
+    let report = |n: usize| {
+        if let Some(r) = remaining {
+            r.store(n as i64, std::sync::atomic::Ordering::Relaxed);
+        }
+    };
+    report(later.iter().sum());
+    for (i, &source) in sources.iter().enumerate() {
+        later[i] = 0;
+        let after: usize = later.iter().sum();
         loop {
             // Which slot, under the map's read lock only: the fence is waited
             // for with no lock held, since an I/O holding it may be waiting
             // for the map.
             let pick = {
                 let g = gem.read().await;
-                g.slab_extents(source)
+                let on_source: Vec<_> = g
+                    .slab_extents(source)
                     .into_iter()
-                    .find_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
+                    .filter_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
+                    .collect();
+                report(on_source.len() + after);
+                on_source.into_iter().next()
             };
             let Some((vol, vext, leg)) = pick else { break };
             let fence = crate::volume::fence::exclusive(leg).await;
@@ -5056,6 +5080,7 @@ where
             engine.release_owed(&mut r).await;
         }
     }
+    report(0);
     Some((moved, failed))
 }
 
@@ -5095,6 +5120,7 @@ fn spawn_flow_over(
     };
     let gem_arc = state.gem.clone();
     let reg_arc = state.slab_registry.clone();
+    let flow_remaining = state.flow_over_remaining.clone();
     // Weak, so a migration in flight cannot keep the whole engine alive past
     // a shutdown that is trying to end.
     let state_for_persist = Arc::downgrade(state);
@@ -5137,6 +5163,7 @@ fn spawn_flow_over(
             }
         };
         if sources.is_empty() {
+            flow_remaining.store(0, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("flow-over: nothing left to move onto {}", flow.disk);
             local_boot(then_local_boot).await;
             return;
@@ -5152,7 +5179,7 @@ fn spawn_flow_over(
             }
         };
         let Some((moved, failed)) =
-            flow_system_half(&gem_arc, &reg_arc, &sources, dest, persist).await
+            flow_system_half(&gem_arc, &reg_arc, &sources, dest, persist, Some(&*flow_remaining)).await
         else {
             tracing::error!(
                 "flow-over: too many failures — abandoning {}; the node keeps running from \
@@ -6502,6 +6529,63 @@ file = "{state}"
         }
     }
 
+    /// What `/api/v1/health` reports as `flow_over_remaining` (#260): the
+    /// extents still on a source, from the first look to 0 when the move is
+    /// done, never going up on the way.
+    #[tokio::test]
+    async fn the_flow_over_counts_down_what_is_left_on_the_appliance() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 24;
+        let dir = tempfile::tempdir().unwrap();
+        let slab = |name: &str| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                let dev = Arc::new(FileDevice::open_with_capacity(&path, 4 * EXTENTS * SLOT).await.unwrap())
+                    as Arc<dyn BlockDevice>;
+                Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = slab("appliance.slab").await;
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        g.write(0, &vec![0x5A; (EXTENTS * SLOT) as usize]).await.unwrap();
+        g.flush().await.unwrap();
+        let local = slab("local.slab").await;
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+
+        let remaining = AtomicI64::new(-1);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let (moved, failed) = super::flow_system_half(
+            mgr.gem(),
+            mgr.registry(),
+            &[source_id],
+            local_id,
+            || {
+                seen.lock().unwrap().push(remaining.load(Ordering::Relaxed));
+                mgr.persist()
+            },
+            Some(&remaining),
+        )
+        .await
+        .expect("the flow-over finished");
+        assert_eq!((moved, failed), (EXTENTS, 0));
+        assert_eq!(remaining.load(Ordering::Relaxed), 0, "done is 0");
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.first(), Some(&(EXTENTS as i64)), "the first extent moved with all of them left");
+        assert!(seen.windows(2).all(|w| w[1] < w[0]), "one fewer per extent moved: {seen:?}");
+    }
+
     /// The background flow-over moves a golden's slots while a clone of it
     /// is written and read (#239): what cni-bin went through on 11.56 while
     /// Cilium filled it. Every write must be there afterwards and the golden
@@ -6614,6 +6698,7 @@ file = "{state}"
             &[source_id],
             local_id,
             || mgr.persist(),
+            None,
         )
         .await;
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -6733,7 +6818,7 @@ file = "{state}"
                 tokio::spawn(async move {
                     super::flow_system_half(mgr.gem(), mgr.registry(), &[source_id], local_id, || {
                         mgr.persist()
-                    })
+                    }, None)
                     .await
                 })
             };
@@ -6754,7 +6839,7 @@ file = "{state}"
             }
             // Put everything back on the appliance for the next case.
             mgr.registry().write().await.set_quarantined(source_id, false);
-            super::flow_system_half(mgr.gem(), mgr.registry(), &[local_id], source_id, || mgr.persist())
+            super::flow_system_half(mgr.gem(), mgr.registry(), &[local_id], source_id, || mgr.persist(), None)
                 .await
                 .unwrap();
             mgr.registry().write().await.set_quarantined(local_id, false);
@@ -7223,7 +7308,7 @@ file = "{state}"
                 }
             }
             let (moved, failed) =
-                super::flow_system_half(mgr.gem(), mgr.registry(), &sources, dest, || mgr.persist())
+                super::flow_system_half(mgr.gem(), mgr.registry(), &sources, dest, || mgr.persist(), None)
                     .await
                     .expect("the flow-over finished");
             stop.store(true, std::sync::atomic::Ordering::Relaxed);

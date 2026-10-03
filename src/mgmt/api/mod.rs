@@ -74,7 +74,16 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// waiting: when the array table is busy it is left out.
         #[serde(skip_serializing_if = "Option::is_none")]
         raid: Option<&'static str>,
+        /// Extents of this node's volumes still on a remote slab while the
+        /// flow-over moves them onto the local disk; 0 once it has finished
+        /// (#260). Left out when this engine runs no flow-over. Kept by the
+        /// flow-over itself, so it is never left out for being busy: absent
+        /// must not read as settled mid-move.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_over_remaining: Option<u64>,
     }
+    let flow_over_remaining =
+        u64::try_from(state.flow_over_remaining.load(std::sync::atomic::Ordering::Relaxed)).ok();
     let raid = state.arrays.try_read().ok().and_then(|a| {
         let rank = |s: &str| match s {
             "failed" => 3,
@@ -90,6 +99,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         version: env!("CARGO_PKG_VERSION"),
         auth: if state.auth_enforced() { "required" } else { "none" },
         raid,
+        flow_over_remaining,
     })
     .into_response()
 }

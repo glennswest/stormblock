@@ -408,7 +408,12 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
 
 - `GET /api/v1/health` — public, no locks, no I/O:
   `{"status":"ok","service":"stormblock","version":…,"auth":"required"|"none"}`,
-  plus `"raid"` (the worst RAID set's state) on a node that has sets.
+  plus `"raid"` (the worst RAID set's state) on a node that has sets, and
+  `"flow_over_remaining"` (#260) on an engine running a flow-over: the extents
+  of this node's volumes still on a remote slab (the appliance's), 0 once the
+  flow-over has finished, left out when there is none. Kept by the flow-over
+  as it goes, so it is never missing for being busy; an abandoned flow-over
+  leaves it above 0 (the node still runs from the appliance).
   A booting node asks this of every candidate address before it has a token.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
