@@ -7511,3 +7511,111 @@ file = "{state}"
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 }
+
+/// Forge mode on an adopting engine (#206): what a bastion's `adopt-ublk`
+/// does with an `[nvmeof]` section, and what it does without one.
+#[cfg(all(test, feature = "nvmeof"))]
+mod forge_mode_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::nvmeof_dev::{NvmeTcpSpec, NvmeofDevice};
+    use crate::mgmt::config::NvmeofExportConfig;
+
+    const MIB: u64 = 1024 * 1024;
+    const SHARED: &str = "nqn.2026-10.test:bastion";
+
+    fn section(listen: &str) -> NvmeofExportConfig {
+        NvmeofExportConfig {
+            listen_addr: listen.into(),
+            nqn: SHARED.into(),
+            export_drives: true,
+            allow_any_host: false,
+            allowed_hosts: Vec::new(),
+            require_dhchap: false,
+            boothost_host_nqn: None,
+        }
+    }
+
+    /// A stormcos node's own config has no `[nvmeof]`: no target, no port.
+    #[test]
+    fn no_section_no_target() {
+        assert!(adopted_nvmeof_target(&StormBlockConfig::default()).unwrap().is_none());
+        let mut c = StormBlockConfig::default();
+        c.nvmeof = Some(section("not an address"));
+        assert!(adopted_nvmeof_target(&c).is_err(), "a bad listen_addr is said, not guessed");
+    }
+
+    /// With `[nvmeof]`, a boothost claim answers with an NVMe/TCP attach a
+    /// booting machine can connect to as its host NQN, and read the image.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bastion_answers_a_boot_claim_with_something_to_attach() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut config = StormBlockConfig::default();
+        config.management.data_dir = Some(dir.path().to_string_lossy().to_string());
+        config.management.advertised_addr = Some("127.0.0.1".into());
+        config.nvmeof = Some(section(&format!("127.0.0.1:{port}")));
+
+        let mut vm = VolumeManager::new(MIB);
+        let array = RaidArrayId(uuid::Uuid::new_v4());
+        let dev = FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 128 * MIB)
+            .await
+            .unwrap();
+        vm.add_backing_device(array, Arc::new(dev)).await;
+        let golden = vm.create_volume("release-11.79", 8 * MIB, array).await.unwrap();
+        let image: Vec<u8> = (0..MIB as usize).map(|i| (i % 253) as u8).collect();
+        let g = vm.get_volume(&golden).unwrap();
+        g.write(0, &image).await.unwrap();
+        g.flush().await.unwrap();
+        vm.seal_volume(golden, None).await.unwrap();
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = Arc::new(AppState::new(config.clone(), vm, reg, gem));
+
+        // What adopt-ublk does with the config.
+        let target = adopted_nvmeof_target(&config).unwrap().expect("[nvmeof] starts a target");
+        let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false }));
+        serve_shared_nvmeof(&state, &reactor, Arc::new(target)).await;
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = listener.local_addr().unwrap();
+        let router = mgmt::api::router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let c = reqwest::Client::new();
+        let r = c
+            .post(format!("http://{api}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": "server8", "volume": golden.0.to_string()}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "boothost synonym: {}", r.status());
+        let claim: serde_json::Value = c
+            .post(format!("http://{api}/api/v1/synonyms/boothost/server8/claim"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let attach = &claim["attach"];
+        assert_eq!(attach["protocol"], "nvme-tcp", "the claim names something to attach: {claim}");
+        assert_eq!(attach["port"], port);
+        let nqn = attach["nqn"].as_str().unwrap().to_string();
+        let nsid = attach["nsid"].as_u64().unwrap() as u32;
+        let host = attach["host_nqns"][0].as_str().unwrap().to_string();
+
+        // The machine connects as itself and reads its image.
+        let spec = NvmeTcpSpec { addr: addr.to_string(), nqn, nsid, host_nqn: Some(host), dhchap: None };
+        let dev = NvmeofDevice::connect(&spec).await.expect("the booting machine connects");
+        let mut back = vec![0u8; MIB as usize];
+        dev.read(0, &mut back).await.unwrap();
+        assert_eq!(back, image, "the clone reads as the release it was claimed from");
+    }
+}
