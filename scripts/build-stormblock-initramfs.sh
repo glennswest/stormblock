@@ -2157,11 +2157,8 @@ if [ "$BOOT_MODE" = "local" ]; then
                     ;;
                 guess) ;;
                 1)
-                    echo "  INSTALL: a release $SLAB does not hold - booting the claimed image"
-                    if [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ] \
-                       || [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
-                        echo "  every slab on $SLAB will be discarded and a fresh one laid"
-                    fi
+                    echo "  INSTALL: a release $SLAB does not hold - booting the claimed image;"
+                    echo "  every slab on its disk, system and data, will be wiped and laid fresh (#261)"
                     # The disk, not the partition the cmdline named.
                     case "$SLAB" in
                     /dev/nvme*p[0-9]*) INSTALL_OVER="${SLAB%p[0-9]*}" ;;
@@ -2358,25 +2355,35 @@ if [ "$BOOT_MODE" = "local" ]; then
             echo "  an install was requested: the local disk is taken whatever it carries"
         fi
     fi
-    # An install without an intent (#236, a stopgap until forge serves intents,
-    # #235): this boot claimed its image from an appliance that stated no
-    # intent at all (`boot-claim` leaves the marker), and it boots that image.
-    # Every such boot that takes a local disk is an install, and an install
-    # lays a fresh slab: never the old data half, whose volumes belong to the
-    # release being replaced. Once the appliance states intents the marker is
-    # not written and the intent decides; `off` on this machine still means no.
+    # Install = wipe; the same release = recovery (#261, owner 2026-10-02:
+    # "We should not be updating at boot time like that, it should be a wipe.
+    # An update is done from a running system, not a half-ass install.").
     #
-    # **Unless the disk is this node's and nothing says the release changed**
-    # (#258). Booting the claimed image is not evidence of an install: the
-    # probe also sends here a disk it could not boot - and after a power cut
-    # during the install's flow-over that was this node's own disk, its data
-    # half full of what the node had acknowledged. Forcing over it lost every
-    # object on 11.63 (server3, 0 of 300). So without a ticket, `force` is for
-    # the two cases that are an install by evidence: the probe found the disk
-    # bootable and the release not held on it (`INSTALL_OVER`), or no local
-    # drive carries a data slab at all. Any other disk with a data slab is
-    # kept: the survey below updates its system half and leaves the data half
-    # alone, as it did before #236. An intent of `install` still wipes it.
+    # This boot runs from the image it claimed, and a local drive may carry
+    # this node's data slab. Which release that drive holds decides, with or
+    # without a boot intent from the appliance:
+    #
+    #   another release (`slab holds` exit 1), or the probe ruled the disk an
+    #       install (`INSTALL_OVER`): an INSTALL. Everything on the disk is
+    #       laid fresh - system slab and data slab - with `--local-disk-force`.
+    #       Nothing of the old release is kept or merged: an old data slab
+    #       lacks the new release's data volumes (stormcos#236, 11.68:
+    #       kubelet-data) and its records are another release's.
+    #   the same release (0), or the same release cut short (3, a power cut
+    #       during the install's flow-over, #258/#259): RECOVERY. The disk is
+    #       kept, its data half untouched.
+    #   cannot say (2): neither. Wiping on a doubt loses a node's data, and
+    #       keeping would merge an unknown release with this one, so every
+    #       local drive is left alone this boot and it runs from the appliance.
+    #
+    # Updating a running node to a new release is stormupdate's (stormupdate#1):
+    # it stages the new volumes and reboots, and that boot is a same-release
+    # boot. No release change is decided here.
+    #
+    # With no data slab anywhere and no intent stated (#236), a drive is laid
+    # fresh (forced) as well: there is nothing to keep, and a partition table
+    # from an abandoned install must not stop it. An intent of `install` (the
+    # ticket) wipes whatever is there; `off` on this machine still means no.
     SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
     SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
     local_data_slab() { # -> the first local drive that carries a data slab
@@ -2390,48 +2397,60 @@ if [ "$BOOT_MODE" = "local" ]; then
         done
         return 1
     }
-    # Whether the release on a disk the probe could not boot is another one
-    # (#261). The probe rejects a disk that lacks a volume the *new* release's
-    # command line mounts, so an upgrade to a release that mounts one more
-    # volume (C2NR0Q2, 11.56 -> 11.65) arrives here just like a power cut
-    # mid-install (#258) - and was kept, booting the old system and data.
-    # The release decides, as on the bootable path: a disk that does not hold
-    # the claimed release (`slab holds` exit 1) is an upgrade, and installs;
-    # the same release (0), the same release cut short (3), or no answer (2)
-    # keeps the data half.
-    release_replaced() { # disk -> 0 when it holds a release other than $CLAIMED
+    release_on() { # disk -> sets RELEASE_ON: another | same | cut | unknown
         R_OUT=$("$SURVEY_SB" slab holds "$1" "$CLAIMED" 2>&1)
         R_RC=$?
         [ -n "$R_OUT" ] && echo "  $R_OUT"
         case "$R_RC" in
-        1) echo "  UPGRADE: $1 holds another release than the one claimed (#261)"; return 0 ;;
-        0) echo "  the same release on $1 (#261)" ;;
-        3) echo "  the same release on $1, its install cut short (#258)" ;;
-        *) echo "  cannot tell which release $1 holds: keeping it (#261)" ;;
+        1) RELEASE_ON=another ;;
+        0) RELEASE_ON=same ;;
+        3) RELEASE_ON=cut ;;
+        *) RELEASE_ON=unknown ;;
         esac
-        return 1
     }
     INSTALL_FRESH=""
     KEPT=""
+    RELEASE_ON=""
     if [ -n "$GUESSED" ]; then
         :
     elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
        && [ "${ASSIMILATE:-}" = force ]; then
         INSTALL_FRESH=1
-    elif [ -n "${CLAIMED:-}" ] && [ "$SLAB" = "$CLAIMED" ] \
-         && [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ]; then
+    elif [ -n "${CLAIMED:-}" ] && [ "$SLAB" = "$CLAIMED" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
-            echo "  an install (no boot intent from the appliance), and rd.stormblock.assimilate=off says no"
-        elif [ -z "${INSTALL_OVER:-}" ] && KEPT=$(local_data_slab) \
-             && ! release_replaced "$KEPT"; then
-            echo "  NOT an install: $KEPT carries this node's data slab, and nothing showed a new"
-            echo "  release on it (it could not be booted: a power cut, a flow-over cut short) -"
-            echo "  its data half is kept; only a boot intent of 'install' re-lays it (#258)"
-        else
-            [ -z "${INSTALL_OVER:-}" ] && [ -n "${KEPT:-}" ] && INSTALL_OVER="$KEPT"
+            echo "  booting the claimed image, and rd.stormblock.assimilate=off: no local drive is touched"
+        elif [ -n "${INSTALL_OVER:-}" ]; then
             ASSIMILATE=force
             INSTALL_FRESH=1
-            echo "  an install: the appliance states no boot intent, so a fresh slab is laid (#236)"
+            echo "  INSTALL: $INSTALL_OVER does not hold the claimed release - wiping it,"
+            echo "  system and data slab both, and laying the release fresh (#261)"
+        elif KEPT=$(local_data_slab); then
+            release_on "$KEPT"
+            case "$RELEASE_ON" in
+            another)
+                INSTALL_OVER="$KEPT"
+                ASSIMILATE=force
+                INSTALL_FRESH=1
+                echo "  INSTALL: $KEPT holds another release than the one claimed - wiping it,"
+                echo "  system and data slab both, and laying the release fresh (#261)"
+                ;;
+            same)
+                echo "  RECOVERY: $KEPT holds the release claimed - kept, its data half untouched (#261)"
+                ;;
+            cut)
+                echo "  RECOVERY: $KEPT holds the release claimed, its install cut short -"
+                echo "  kept, its data half untouched (#258)"
+                ;;
+            *)
+                ASSIMILATE=held
+                echo "  LEFT ALONE: cannot tell which release $KEPT holds - neither wiped nor"
+                echo "  merged; every local drive is left alone and this boot runs from the appliance (#261)"
+                ;;
+            esac
+        elif [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ]; then
+            ASSIMILATE=force
+            INSTALL_FRESH=1
+            echo "  INSTALL: no local drive carries a data slab, so a fresh slab is laid (#236)"
         fi
     fi
     LOCAL_DISK=""
@@ -2443,6 +2462,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     fi
     case "${ASSIMILATE:-any}" in
     off) echo "  rd.stormblock.assimilate=off: leaving every local drive alone" ;;
+    held) echo "  leaving every local drive alone this boot; writes stay on the appliance (#261)" ;;
     blank|any|force)
         for d in "$SURVEY_SYS"/sd? "$SURVEY_SYS"/nvme?n?; do
             [ -n "$LOCAL_DISK" ] && break

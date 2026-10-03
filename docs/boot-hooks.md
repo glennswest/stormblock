@@ -84,28 +84,28 @@ is true of a reboot as much as an install. Until intents can be used:
   the claimed image boots and the disk is installed over. An install the
   appliance asked for (the ticket) installs whatever the disk holds. No image,
   or "cannot say" (exit 2), boots the disk as before.
-- **An install lays a fresh slab.** When the appliance stated no intent,
-  `boot-claim` leaves `/run/stormblock/no-intent`; a boot running from the
-  image it claimed then takes its local disk with `force` — a new data slab,
-  never the old data half, whose volumes belong to the release being
-  replaced — and says so on the console (`INSTALL: the old slab on /dev/sda
-  is discarded`). The disk the probe ruled the install over is the one taken,
-  not whichever drive a scan meets first.
-- **A disk with a data slab is never forced without evidence** (#258). The
-  claimed image also boots when the probe could not boot the disk at all (a
-  power cut during an older engine's flow-over left its records short). That
-  is not an install: without a ticket, `force` applies only when the probe
-  ruled an install over a bootable disk (the release not held) or no local
-  drive carries a data slab. Otherwise the console says `NOT an install`, and
-  the survey takes the node's own layout as before #236: the system half is
-  replaced and the data half kept. Only an `install` intent re-lays it.
-- **But the release still decides** (#261). The probe also cannot boot a disk
-  of an **older release** that lacks a volume the new release's command line
-  mounts (C2NR0Q2: 11.56 → 11.65 came back up on 11.56's slab). So before
-  keeping a disk with a data slab, `/init` asks `slab holds <disk> <claimed>`:
-  exit 1 (another release) is an upgrade — `UPGRADE: … holds another release`,
-  and a fresh slab is laid over that disk; exit 0 (the same release), 3 (the
-  same release cut short, #258) or 2 (cannot say) keep it.
+- **Install = wipe; the same release = recovery** (#261; owner, 2026-10-02:
+  "We should not be updating at boot time like that, it should be a wipe. An
+  update is done from a running system, not a half-ass install."). Whenever a
+  boot runs from the image it claimed and a local drive carries this node's
+  data slab, `/init` asks `slab holds <disk> <claimed>`, with or without a
+  boot intent:
+  - exit 1, another release (or the probe already ruled the bootable disk an
+    install): **INSTALL** — the whole disk, system slab *and* data slab, is
+    wiped and the release laid fresh (`--local-disk-force`). Nothing of the old
+    release is kept or merged: an old data slab lacks the new release's data
+    volumes (stormcos#236: 11.68's `kubelet-data`) and holds another release's
+    records. The disk the probe ruled the install over is the one taken.
+  - exit 0, the same release, or 3, the same release cut short (a power cut
+    during the flow-over, #258/#259): **RECOVERY** — the disk is kept and its
+    data half is not touched.
+  - exit 2, cannot say: **LEFT ALONE** — neither wiped (a doubt is no reason to
+    destroy a node's data) nor merged; every local drive is left alone and the
+    boot runs from the appliance.
+  With no data slab on any drive and no intent stated, a drive is laid fresh
+  (forced): there is nothing to keep. Updating a running node to a new release
+  is stormupdate's (stormupdate#1), which stages the new volumes and reboots
+  into a same-release boot; no release change is decided in the initramfs.
 - `rd.stormblock.assimilate=off` still means no, to both.
 - Not covered: reinstalling the **same** release fresh. Assign another
   release first, or use the `install` intent once the appliance serves them.
@@ -175,7 +175,7 @@ on it is not garbage. Three cases, and they get three answers:
 
 | the drive | what happens |
 |---|---|
-| this node's own layout — a data half and a system half | **updated**: the system half is formatted afresh for the new goldens, the data half is opened and kept, and the node boots normally with the identity it already had. This is what an install *is*, and it needs no `force`. |
+| this node's own layout — a data half and a system half | **kept** when it holds the release claimed (recovery: the system half is re-laid only if it cannot boot on its own, the data half is opened and kept); **wiped**, both halves, when it holds another release (#261: an install is a wipe, never an update at boot). |
 | the same, already holding what this boot carries, and able to boot on its own | **nothing at all.** The system half's own record is read offline and compared by volume id; if it already holds everything this boot would copy, it is left exactly as it is and the node boots from it. An update that has nothing to update must not reformat a working half and re-copy the same bytes. |
 | a lone data slab | refused. That is an install abandoned part-way, and it is indistinguishable from a live node's identity — `--local-disk-force` is the deliberate act for a drive whose identity is spent. |
 | a lone system slab | **taken** under `any` and `force` (no identity lives on it; fresh slabs are laid over it), left alone under `blank`. |

@@ -1184,11 +1184,13 @@ image — a path, a file or an `nvme-tcp://` URI — and has the install
 finished, i.e. do its records place no extent on a slab that is not on the
 drive (#239)? Exit 0 held, 1 not held (a golden missing), 2 cannot say, 3
 the same release with its flow-over cut short (boot the drive: the engine
-finishes the move, #258). `/init` uses it to tell an install from a reboot when the
-appliance serves no boot intent — on a disk it can boot, and on one it cannot
-but which carries this node's data slab (an older release missing a volume
-the new one mounts is an upgrade, #261) (`docs/boot-hooks.md`, "An install without an
-intent").
+finishes the move, #258). `/init` uses it to tell an install from a reboot — on a disk it can boot,
+and on one it cannot but which carries this node's data slab. Install = wipe
+(#261): another release (1) wipes the whole disk, system and data slab, and
+lays the claimed release fresh; the same release (0, 3) is recovery and keeps
+the disk; cannot say (2) leaves every local drive alone. A boot never updates
+a disk to a new release while keeping its data half: that is stormupdate's, on
+the running node (`docs/boot-hooks.md`, "An install without an intent").
 
 Every slab this engine formats reserves a region for that record — `slab
 format`, `POST /api/v1/slabs` and the pool-growth path alike, sized from the

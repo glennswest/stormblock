@@ -542,25 +542,24 @@ check "no ticket, no force" "/dev/sda" "$(survey any "$SYS_ONLY")"
 # data half belongs to the release being replaced): it is forced, fresh.
 CLAIM_URI="nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1"
 NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
-# #258: but booting the claimed image is not evidence of an install. A disk
-# the probe could not boot (a power cut during the flow-over) that carries
-# this node's data slab is kept - updated, never forced - unless the probe
-# ruled an install over it (a bootable disk without the assigned release).
-check "no intent, a data slab the probe could not boot: kept, not forced (#258)" "/dev/sda" \
-    "$(CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
-check "no intent, default policy, a lone data slab: left, not forced (#258)" "" \
-    "$(CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
-# #261: the probe also rejects a disk of an *older* release that lacks a volume
-# the new release mounts (C2NR0Q2, 11.56 -> 11.65). The release decides: a disk
-# that does not hold the claimed release is an upgrade, and installs fresh.
-check "no intent, the unbootable disk holds another release: forced (#261)" "/dev/sda force" \
+# #261 (owner, 2026-10-02): install = wipe, the same release = recovery. The
+# release on the drive decides: another release is wiped whole (forced); the
+# same release, or the same release cut short (#258), is kept; when it cannot
+# be told, the drive is left alone (neither wiped nor merged).
+check "no intent, the unbootable disk holds another release: wiped (#261)" "/dev/sda force" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
-check "no intent, another release on a lone data slab: forced (#261)" "/dev/sda force" \
+check "no intent, another release on a lone data slab: wiped (#261)" "/dev/sda force" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
-check "no intent, the same release cut short: kept (#258, #261)" "/dev/sda" \
+check "no intent, the same release cut short: kept, not forced (#258)" "/dev/sda" \
     "$(STUB_HOLDS=3 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
-check "no intent, the same release: kept (#261)" "/dev/sda" \
+check "no intent, the same release: kept, not forced (#261)" "/dev/sda" \
     "$(STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "no intent, the same release on a lone data slab: left, not forced (#258)" "" \
+    "$(STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
+check "no intent, cannot tell the release: the node's layout is left alone (#261)" "" \
+    "$(STUB_HOLDS=2 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "cannot tell the release: even 'force' on the cmdline merges nothing" "" \
+    "$(STUB_HOLDS=2 CLAIMED_T="$CLAIM_URI" survey force "$DATA_ONLY" "$SYS_HALF")"
 check "a guessed name, another release: still left (#249)" "" \
     "$(STUB_HOLDS=1 FROM=smbios CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 check "no intent, the probe ruled an install over the node's layout: forced (#236)" "/dev/sda force" \
@@ -595,10 +594,19 @@ check "a guessed name's install ticket forces nothing" "" \
     "$(FROM=smbios survey any "$DATA_ONLY")"
 TICKET=""
 NOINTENT=""
-check "an intent was stated: the old layout is updated, not forced" "/dev/sda" \
-    "$(CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
-check "and INSTALL_OVER alone forces nothing" "/dev/sda" \
+# An intent other than `install` changes nothing about #261: another release
+# is still an install, and an install wipes (no system-half update over the
+# old data half).
+check "an intent was stated, another release on the disk: wiped (#261)" "/dev/sda force" \
+    "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "an intent was stated, the same release: kept, not forced" "/dev/sda" \
+    "$(STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "an intent was stated, cannot tell: left alone" "" \
+    "$(STUB_HOLDS=2 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "an intent was stated, the probe ruled an install: wiped (#261)" "$over force" \
     "$(CLAIMED_T="$CLAIM_URI" OVER="$over" survey any "$SYS_ONLY")"
+check "an intent was stated, no data slab anywhere: taken, not forced" "/dev/sda" \
+    "$(CLAIMED_T="$CLAIM_URI" survey any "$SYS_ONLY")"
 
 [ "$fail" -eq 0 ] && echo "all boot hook, probe, identity, takeable and survey checks passed"
 exit "$fail"

@@ -172,7 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### An upgrade without intents boots the old slab (2026-10-02, #261, P0) — DONE
+### Install = wipe at boot (2026-10-02, #261 reopened, P0) — IN PROGRESS
+
+Owner: "We should not be updating at boot time like that, it should be a
+wipe. An update is done from a running system, not a half-ass install."
+aed9f7e still kept the data half on "cannot say", and with an intent stated
+it updated the system half over any old data half; stormcos#236 (11.68: kept
+data slabs without `kubelet-data`) is that path.
+- [x] /init survey: booting the claimed image with a local data slab, with or
+      without intents: `slab holds` 1 (or probe's INSTALL_OVER) = wipe both
+      slabs (force); 0/3 = recovery, kept; 2 = `ASSIMILATE=held`, every local
+      drive left alone. Console `INSTALL:`/`RECOVERY:`/`LEFT ALONE:`
+- [x] tests, docs (boot-hooks.md, README), CHANGELOG
+- [ ] sc-build: every initramfs test under sh and busybox sh, /init parses
+
+### An upgrade without intents boots the old slab (2026-10-02, #261, P0) — superseded above
 
 C2NR0Q2 (Dell R230) claimed 11.65 over its 11.56 disk and came up on 11.56
 (forge 13.7, no intents). By reading: the probe found the 11.56 disk "missing
