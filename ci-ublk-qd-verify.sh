@@ -94,8 +94,14 @@ rnd() { echo $(( (RANDOM * 32768 + RANDOM) % 16384 )); }
 run() {
     mode=$1; disk=$2; port=$3
     S=$(cat /sys/block/$disk/size)
-    dmsetup create slow$disk --table "0 $S delay /dev/$disk 0 8 /dev/$disk 0 8 /dev/$disk 0 20" \
+    dmsetup create --noudevsync slow$disk --table "0 $S delay /dev/$disk 0 8 /dev/$disk 0 8 /dev/$disk 0 20" \
         || { r $mode-dm FAIL; return; }
+    # No udev here, so no /dev/mapper node: devtmpfs names it dm-N.
+    slow=
+    for d in /sys/block/dm-*; do
+        [ "$(cat $d/dm/name)" = slow$disk ] && slow=/dev/$(basename $d)
+    done
+    [ -b "$slow" ] || { r $mode-dm "FAIL (no node for slow$disk)"; return; }
     mkdir -p /run/sb$disk
     cat > /run/sb$disk.toml <<EOT
 [management]
@@ -113,14 +119,14 @@ EOT
     for i in $(seq 1 100); do api http://127.0.0.1:$port/api/v1/health >/dev/null 2>&1 && break; sleep 0.2; done
     out=$(curl -s -m 120 -w ' HTTP%{http_code}' -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
         -X POST http://127.0.0.1:$port/api/v1/slabs \
-        -d "{\"device_path\":\"/dev/mapper/slow$disk\",\"role\":\"data\"}")
+        -d "{\"device_path\":\"$slow\",\"role\":\"data\"}")
     case "$out" in *HTTP2??) ;; *) r $mode-slab "FAIL ($out)"; sed 's/^/LOG /' /run/engine-$mode.log | tail -8; kill $pid; return ;; esac
     id=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d '{"name":"qd","size":"256M"}' \
         | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     dev=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$id/attach -d '{"transport":"ublk"}' \
         | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
     [ -b "$dev" ] || { r $mode-attach "FAIL ($id '$dev')"; sed 's/^/LOG /' /run/engine-$mode.log | tail -8; kill $pid; return; }
-    echo "GUEST $mode: volume $id on $dev over /dev/mapper/slow$disk"
+    echo "GUEST $mode: volume $id on $dev over $slow (slow$disk)"
 
     # Allocate the first 64 MiB so reads reach the disk.
     dd if=/dev/urandom of=/tmp/fill bs=1M count=64 2>/dev/null
