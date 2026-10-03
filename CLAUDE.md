@@ -172,6 +172,27 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The node API stalls during flow-over (2026-10-03, #269, P0) — IN PROGRESS
+
+11.78 on C2NR0Q2 (engine 507750d), the first real install onto its 2 TB
+spinning sda: while the flow-over moves 7528 extents from forge, template
+clones and `GET /api/v1/volumes` time out (60 s), so every claim and VM
+stalls for the whole flow-over. By reading: `move_slot` reads the source
+(forge, NVMe/TCP), writes sda and reads it back **holding the GEM and the
+registry write locks**; every volume's I/O lookup and every API operation
+waits behind each copy. The slot fence (#239) already keeps I/O off the
+slot being moved, so the global locks are needed only to allocate and to
+publish.
+- [ ] `flow_system_half`: copy with only the fence held (registry write to
+      allocate, then no locks for read/write/read-back, then GEM+registry
+      write to publish, re-checked: old slot still mapped, carry its slab
+      ref count). The per-extent persist (map, then owed slots) unchanged
+- [ ] foreground first: the flow-over pauses between extents while volume
+      I/O has run since the last one (paced by the last move's time, capped)
+- [ ] item 3 is #260 (`flow_over_remaining`, in 507750d)
+- [ ] tests: a move stuck in its source read leaves the GEM, the registry
+      and a clone + persist free; pacing; flow-over tests still pass; docs
+
 ### The Dell never installs: a guessed name takes no slab drive (2026-10-03, #268, P0) — DONE here, proof on metal pending
 
 C2NR0Q2 on 11.77 booted stormbootx 0.4.0 from the iDRAC's virtual optical,
