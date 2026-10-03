@@ -192,7 +192,7 @@ EOT
       echo "STACK $(cat $t/comm) $(cat $t/wchan)"; sed 's/^/STACK   /' $t/stack | head -8
     done
   done
-  ps | sed 's/^/PS /'
+  ps | grep -E ' (dd|stormblock|sh|sleep|timeout) ' | sed 's/^/PS /'
   poweroff -f ) &
 run serial vda 9091
 run concurrent vdb 9092
@@ -210,7 +210,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/a.img",if=virtio,format=raw \
     -drive file="$W/b.img",if=virtio,format=raw > "$W/guest.log" 2>&1
-tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG|STEP|STACK|PS|WATCHDOG)|ERROR|panick' | tail -150
+tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG|STEP|STACK|PS|WATCHDOG)|ERROR|panick'
 
 t() { tr -d '\r' < "$W/guest.log" | awk -v m="$1" -v w="$2" '$1=="TIME" && $2==m && $3==w {print $4}'; }
 SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
