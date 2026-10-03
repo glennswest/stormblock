@@ -64,7 +64,7 @@ for b in "$BIN" "$DMSETUP" "$CURL"; do
     done
 done
 : > "$I/lib/mods/order"
-for m in virtio_blk ublk_drv dm-delay; do
+for m in ublk_drv dm-delay; do
     modprobe -S "$KVER" --show-depends "$m" 2>/dev/null | awk '$1=="insmod"{print $2}'
 done | awk '!seen[$0]++' | while read -r ko; do
     base=$(basename "$ko" | sed 's/\.xz$//; s/\.zst$//')
@@ -100,7 +100,7 @@ run() {
     # No udev here, so no /dev/mapper node: devtmpfs names it dm-N.
     slow=
     for d in /sys/block/dm-*; do
-        [ "$(cat $d/dm/name)" = slow$disk ] && slow=/dev/$(basename $d)
+        [ "$(cat $d/dm/name)" = slow$disk ] && slow=/dev/${d##*/}
     done
     if [ ! -b "$slow" ]; then
         r $mode-dm "FAIL (no node for slow$disk)"
