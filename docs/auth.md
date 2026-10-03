@@ -53,7 +53,9 @@ ever presents a minted token to an engine on its own machine.
 `admin_token` splits the surface in two. What counts as destructive is decided
 in `serve::api::is_destructive`: every `DELETE`, any path ending in `/seal`
 (a volume's or a template's, whatever the method), writing
-files or a tar into a volume's filesystem, `?repair=true` on an fsck,
+files or a tar into a volume's filesystem, `PUT /api/v1/forge` (making the
+node a forge serves goldens and boot clones to other machines, #272),
+`?repair=true` on an fsck,
 `?apply` on a trim, and a slab GC that is not a dry run. Everything else takes
 either token.
 

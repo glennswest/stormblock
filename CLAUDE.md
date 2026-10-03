@@ -101,7 +101,7 @@ of its own. TLS is rustls (no OpenSSL) on `ring` only since #209 — not C-free:
 
 | where | started as | notes |
 |---|---|---|
-| stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260, no discovery, no cluster in this mode; the shared :4420 target only with an `[nvmeof]` section in `--config` (forge mode, a bastion, #206) |
+| stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260, no discovery, no cluster in this mode; the shared :4420 target only in forge mode: `[nvmeof]` in `--config` (#206) or `PUT /api/v1/forge`, kept in `forge.json` (#272) |
 | stormcos initramfs | `/init` → `boot-claim` + `boot-local` (`scripts/build-stormblock-initramfs.sh`) | boot hooks decide local vs appliance (`docs/boot-hooks.md`) |
 | appliance / forge | the daemon | serves goldens, host clones and boot claims |
 | RouterOS container | not shipping (owner, 2026-09-28); was the daemon, `mikrotik,nvmeof` profile | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable; never file I/O (#140) |
@@ -172,22 +172,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Forge mode turned on per node, kept by the engine (2026-10-03, #272, P1) — IN PROGRESS
+### Forge mode turned on per node, kept by the engine (2026-10-03, #272, P1) — DONE
 
 For stormcos#187: one image, the forge role chosen at install, no argv or
 mount change on the stormcos side. Owner's preferred shape (option 1):
-- [ ] `GET/PUT/DELETE /api/v1/forge` (admin for PUT/DELETE): PUT takes the
-      `[nvmeof]` settings, starts the shared target live, keeps them in
-      `<data_dir>/forge.json` (mirrored to `stormblock-state` like the rest
-      of the data dir); DELETE stops accepting and forgets them; GET says
-      what runs and where it came from
-- [ ] `adopt-ublk` (and the daemon with no target of its own) serves
+- [x] `GET/PUT/DELETE /api/v1/forge` (`mgmt/forge.rs`, `api/forge.rs`;
+      PUT and DELETE need the admin token): PUT starts the shared target live
+      (bound before it is published) and keeps the settings in
+      `<data_dir>/forge.json`; DELETE stops accepting (open connections
+      finish) and forgets them; GET reports `source` api|config
+- [x] `adopt-ublk` (and the daemon with no export device) serves
       `forge.json` at start when `--config` has no `[nvmeof]`
-- [ ] the live `[nvmeof]` is one `AppState` value (policy, claim attach,
-      `/v1` attach, usage read it) instead of `state.config.nvmeof`
-- [ ] a target the command line configured is not the API's to change (409)
-- [ ] tests (PUT → claim attach + connect; restart from forge.json; DELETE;
-      409), docs (README, auth.md), CHANGELOG
+- [x] the live `[nvmeof]` is `AppState::nvmeof_settings()` (policy, claim
+      attach, `/v1` attach, usage)
+- [x] a target the command line or `--config` set up answers 409
+- [x] tests `integration_forge` (3), `forge_mode_is_set_by_the_admin`; full
+      nextest on dev 874/874, `--features cluster` checks. Docs (README,
+      auth.md), CHANGELOG
+- Not on a node yet: stormcos#82's install-config apply makes the PUT
 
 ### Forge mode on a stormcos node: adopt-ublk serves NVMe/TCP (2026-10-03, #206, P1) — DONE
 
