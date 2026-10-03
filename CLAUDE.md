@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Install = wipe at boot (2026-10-02, #261 reopened, P0) — IN PROGRESS
+### Install = wipe at boot (2026-10-02, #261 reopened, P0) — DONE
 
 Owner: "We should not be updating at boot time like that, it should be a
 wipe. An update is done from a running system, not a half-ass install."
@@ -184,7 +184,10 @@ data slabs without `kubelet-data`) is that path.
       slabs (force); 0/3 = recovery, kept; 2 = `ASSIMILATE=held`, every local
       drive left alone. Console `INSTALL:`/`RECOVERY:`/`LEFT ALONE:`
 - [x] tests, docs (boot-hooks.md, README), CHANGELOG
-- [ ] sc-build: every initramfs test under sh and busybox sh, /init parses
+- [x] sc-build at 7eaa520: every initramfs test under sh and busybox sh
+      (boot-hook: 7 #261 cases rewritten/added), the /init parses. No Rust
+- Not on metal: needs a stormcos release with this initramfs; then an
+  upgrade boot (console `INSTALL:` + fresh data slab) and a reboot (`RECOVERY`)
 
 ### An upgrade without intents boots the old slab (2026-10-02, #261, P0) — superseded above
 
