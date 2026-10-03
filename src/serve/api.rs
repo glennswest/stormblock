@@ -178,6 +178,12 @@ fn is_destructive(method: &Method, path: &str, query: Option<&str>) -> bool {
         // node's identity included (#148).
         return true;
     }
+    if *method == Method::PUT && path.trim_end_matches('/') == "/api/v1/forge" {
+        // Makes this node its site's forge: an NVMe/TCP target serving
+        // goldens and boot clones to other machines, `allow_any_host`
+        // included (#272).
+        return true;
+    }
     if *method == Method::POST && path.ends_with("/tar") {
         // `POST /mk/v1/volumes/{id}/tar` unpacks an archive straight into a
         // volume's filesystem — it overwrites whatever an entry's path already
@@ -1360,6 +1366,21 @@ mod tests {
             (Method::POST, "/api/v1/synonyms/boothost/../installed"),
         ] {
             assert!(!as_(m.clone(), p, None), "{m} {p} must need the token");
+        }
+    }
+
+    /// Making a node a forge, or stopping it being one, needs the admin token
+    /// when one is configured; reading the setting needs the ordinary one
+    /// (#272).
+    #[test]
+    fn forge_mode_is_set_by_the_admin() {
+        let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()) };
+        let as_ = |m: Method, tok: Option<&str>| decide(&auth, &m, "/api/v1/forge", None, tok).is_ok();
+        assert!(!as_(Method::GET, None));
+        assert!(as_(Method::GET, Some("t")));
+        for m in [Method::PUT, Method::DELETE] {
+            assert!(!as_(m.clone(), Some("t")), "{m}: the api token is not enough");
+            assert!(as_(m, Some("a")));
         }
     }
 }
