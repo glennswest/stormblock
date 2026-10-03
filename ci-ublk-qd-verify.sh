@@ -15,8 +15,13 @@
 #   round trip       8 writers at distinct offsets, then everything read back
 #                    and compared (correctness of concurrent service)
 #
-# Pass: the round trip is exact in both modes, and served at once is at least
-# 3× faster on parallel reads than served serially.
+# And, with the engine serving at once (#267): a volume attached over ublk
+# and given an ephemeral export, the export withdrawn (what the registry's reap
+# of a kubelet's image clone does) — the volume must stay with its data, a
+# DELETE be refused (409), and the volume go once the device is detached.
+#
+# Pass: the round trips are exact in both modes, the #267 checks hold, and
+# served at once is at least 3× faster on parallel reads than served serially.
 #
 # Needs: cargo, qemu-system-x86_64, /boot/vmlinuz-$(uname -r) and its modules
 # (ublk_drv, dm-delay), a static busybox, dmsetup and curl (copied in with
@@ -86,6 +91,7 @@ r() { echo "RESULT $1 $2"; }
 echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
 [ -e /dev/ublk-control ] || { r ublk_drv FAIL; poweroff -f; }
 now() { cut -d' ' -f1 /proc/uptime; }
+api() { curl -sf -m 120 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' "$@"; }
 ms() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%d", (b-a)*1000}'; }
 
 # One random 4 KiB block inside the first 64 MiB.
@@ -117,12 +123,14 @@ listen_addr = "127.0.0.1:$port"
 data_dir = "/run/sb$disk"
 node_name = "ci-ublk"
 discovery_disabled = true
+
+[serve]
+reconcile_secs = 1
 EOT
     if [ "$mode" = serial ]; then export STORMBLOCK_UBLK_SERIAL=1; else unset STORMBLOCK_UBLK_SERIAL; fi
     RUST_LOG=stormblock=info stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
         --no-iscsi > /run/engine-$mode.log 2>&1 &
     pid=$!
-    api() { curl -sf -m 120 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' "$@"; }
     for i in $(seq 1 100); do api http://127.0.0.1:$port/api/v1/health >/dev/null 2>&1 && break; sleep 0.2; done
     out=$(curl -s -m 120 -w ' HTTP%{http_code}' -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
         -X POST http://127.0.0.1:$port/api/v1/slabs \
@@ -177,6 +185,8 @@ EOT
     dd if=$dev of=/tmp/back bs=64k skip=2048 count=256 iflag=direct 2>/dev/null
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
+    [ "$mode" = concurrent ] && in_use
+
     step stop
     kill -TERM $pid; wait $pid
     grep -E "ERROR|panicked" /run/engine-$mode.log | head -5
@@ -194,6 +204,51 @@ EOT
   done
   ps | grep -E ' (dd|stormblock|sh|sleep|timeout) ' | sed 's/^/PS /'
   poweroff -f ) &
+# #267: an ephemeral export withdrawn while its volume is a ublk device on
+# this node — what the registry's reap of an image clone does to the
+# kubelet's mounted image. The volume must stay, with its data, and go once
+# the device is detached.
+in_use() {
+    step in-use
+    v=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d '{"name":"clone-image-1","size":"64M"}' \
+        | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    d=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$v/attach -d '{"transport":"ublk"}' \
+        | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    [ -b "$d" ] || { r in-use-attach "FAIL ($v '$d')"; return; }
+    dd if=/dev/urandom of=/tmp/img bs=1M count=4 2>/dev/null
+    dd if=/tmp/img of=$d bs=1M count=4 oflag=direct 2>/dev/null
+    e=$(api -X POST http://127.0.0.1:$port/serve/v1/exports \
+        -d "{\"volume_id\":\"$v\",\"protocol\":\"nvme-tcp\",\"ephemeral\":true}" \
+        | sed -n 's/.*"export_id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    [ -n "$e" ] || { r in-use-export FAIL; sed 's/^/LOG /' /run/engine-$mode.log | tail -5; return; }
+    api -X DELETE http://127.0.0.1:$port/serve/v1/exports/$e >/dev/null || { r in-use-withdraw FAIL; return; }
+    st=
+    for i in $(seq 1 30); do
+        st=$(api http://127.0.0.1:$port/serve/v1/exports/$e | sed -n 's/.*"state":"\([a-z]*\)".*/\1/p')
+        [ "$st" = withdrawn ] && break
+        sleep 1
+    done
+    sleep 3
+    echo "GUEST in-use: export $e is ${st:-gone} after its delete"
+    if api http://127.0.0.1:$port/api/v1/volumes/$v >/dev/null; then
+        dd if=$d of=/tmp/imgback bs=1M count=4 iflag=direct 2>/dev/null
+        cmp -s /tmp/img /tmp/imgback && r in-use-kept PASS || r in-use-kept "FAIL (data changed)"
+    else
+        r in-use-kept "FAIL (the volume was deleted under its device)"
+    fi
+    code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer t' \
+        -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v)
+    [ "$code" = 409 ] && r in-use-delete-refused PASS || r in-use-delete-refused "FAIL ($code)"
+    api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v/attach >/dev/null
+    gone=
+    for i in $(seq 1 20); do
+        api http://127.0.0.1:$port/api/v1/volumes/$v >/dev/null 2>&1 || { gone=1; break; }
+        sleep 1
+    done
+    [ -n "$gone" ] && r in-use-deleted-after-detach PASS || r in-use-deleted-after-detach FAIL
+    grep -E "kept until it is detached|ephemeral volume .* deleted" /run/engine-$mode.log | sed 's/^/LOG /' | tail -3
+}
+
 run serial vda 9091
 run concurrent vdb 9092
 echo "GUEST done"
@@ -217,8 +272,8 @@ SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
 SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
-for m in serial concurrent; do
-    tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m-round-trip PASS" || fail "$m round trip"
+for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach; do
+    tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ -n "$SP" ] && [ -n "$CP" ] && [ "$CP" -gt 0 ]; then
     [ $((SP)) -ge $((CP * 3)) ] || fail "served at once is not 3x faster on parallel reads ($SP vs $CP ms)"
