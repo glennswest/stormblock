@@ -172,6 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Health reports the flow-over still running (2026-10-03, #260) — IN PROGRESS
+
+stormcentral#301 waits for an installed node to settle before measuring;
+one condition is "no extents left on a remote slab". The node's API is
+closed except `/api/v1/health`, so: `flow_over_remaining` there, open and
+read without waiting. Not a `try_read` of the GEM like `raid`: absent while
+the map is busy would read as settled mid-flow. The flow-over loop keeps the
+count in an atomic on `AppState` instead.
+- [ ] `AppState.flow_over_remaining` (-1 = no flow-over in this engine);
+      `flow_system_half` updates it from the extents it already looks at;
+      0 when done; stays > 0 when abandoned (still on the appliance)
+- [ ] health: `flow_over_remaining` when ≥ 0
+- [ ] test (flow over two file slabs, the counter falls to 0; health JSON),
+      docs (README health, auth.md open paths), CHANGELOG
+
 ### ublk serves one request at a time: QD1 on a spinning disk (2026-10-03, #264, P1) — DONE
 
 #264 (server3, 7200 rpm disk): pod `sandbox` 265–621 ms, first pod 2.3 s,
