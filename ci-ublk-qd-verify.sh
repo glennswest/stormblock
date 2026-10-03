@@ -3,8 +3,8 @@
 # time and served at once (#264). Unprivileged on dev: the engine runs as root
 # inside a QEMU guest, where ublk_drv and device-mapper are its own.
 #
-# The guest's disks go through dm-delay (8 ms per read and write, 20 ms per
-# flush) so they behave like the 7200 rpm drive of an X9 blade rather than
+# The guest's disks go through dm-delay (8 ms per read, write and flush)
+# so they behave like the 7200 rpm drive of an X9 blade rather than
 # dev's storage. On each, the engine (the same binary) serves a volume over
 # ublk, once with STORMBLOCK_UBLK_SERIAL=1 (the queue worker as it was: one
 # request at a time) and once without, and the guest measures:
@@ -94,7 +94,7 @@ rnd() { echo $(( (RANDOM * 32768 + RANDOM) % 16384 )); }
 run() {
     mode=$1; disk=$2; port=$3
     S=$(cat /sys/block/$disk/size) || { r $mode-disk "FAIL (no /dev/$disk)"; return; }
-    dmsetup create --noudevsync slow$disk --table "0 $S delay /dev/$disk 0 8 /dev/$disk 0 8 /dev/$disk 0 20" \
+    dmsetup create --noudevsync slow$disk --table "0 $S delay /dev/$disk 0 8 /dev/$disk 0 8" \
         > /tmp/dm.out 2>&1 || { r $mode-dm "FAIL ($(cat /tmp/dm.out))"; return; }
     sed 's/^/LOG dmsetup: /' /tmp/dm.out
     # No udev here, so no /dev/mapper node: devtmpfs names it dm-N.
