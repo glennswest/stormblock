@@ -94,6 +94,12 @@ tests run on.
    reports the slot busy. Every copy is read back and compared before any map
    names it. The flow-over quarantines its sources, so a copy-on-write made
    meanwhile lands on the local disk rather than behind the move.
+   The flow-over's copy holds the fence and nothing else (#269): the
+   registry is taken to allocate the destination (reserved against the
+   collector), and the map and the registry to publish, after checking that
+   the extent still names the source and carrying the source slot's share
+   count as the slab has it then. Holding both for the copy queued every
+   volume's I/O and every API call behind each move.
 11. **Nothing is written in place on a slab being emptied** (#239, reopened).
    Rule 9's fresh clone carries the *image's* bytes, not what the last boot
    wrote on its own clone, so a write left on the appliance side is lost the

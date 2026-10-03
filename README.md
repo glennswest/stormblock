@@ -1234,6 +1234,15 @@ disk is laid or the move resumed, `adopt-ublk` before it serves) nothing is
 written in place on them either: a write to an extent still on the appliance
 is a copy-on-write onto the local disk (rule 11).
 
+**The node stays usable while it moves** (#269). A move holds only its slot's
+fence while it copies; the extent map and the registry are taken just to
+allocate and to publish, so the API (claims, clones, listings) and other
+volumes' I/O are not queued behind the copies. Between moves the flow-over
+gives the disk back to foreground I/O: when any volume was read or written
+since the last move, it waits as long as that move took (at most 250 ms). An
+idle node moves at full speed. `GET /api/v1/health` reports what is left
+(`flow_over_remaining`, #260).
+
 **A flow-over cut short is finished, not lost.** If the power goes while
 goldens are still moving off the appliance, the local records name extents on
 the old clone's slab. The next boot's `boot-local` claims a fresh clone of the
