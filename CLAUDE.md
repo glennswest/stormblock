@@ -172,6 +172,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The Dell never installs: a guessed name takes no slab drive (2026-10-03, #268, P0) — WAITING ON THE OWNER
+
+C2NR0Q2 on 11.77 boots stormbootx 0.4.0 from the iDRAC's virtual optical,
+which hands no name down, so `/init` names it from SMBIOS (a guess, #249).
+sda holds an older stormcos slab, neither blank nor this release, so #249's
+guard leaves it and every boot runs from a fresh forge clone (durability
+0/300). The fix asked for (a guess installs over any stormblock slab) is
+#249's own failure on the MicroCloud blades, which share a chassis serial;
+nothing on a disk records the name it was installed under. Asked on the
+issue (`needs-owner`): A as asked; B stormbootx ≥ v0.14.0 on the Dell's
+virtual media (no rule change, recommended); C a per-machine flag (no
+channel on forge 13.7). No code changed yet.
+
 ### A mounted image clone is deleted under its containers (2026-10-03, #267, P0) — DONE
 
 pvetest1 11.73 (engine 953cba6): a running container's executable changes
