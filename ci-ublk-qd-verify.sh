@@ -54,7 +54,7 @@ I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
 for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed \
-         awk cut tr kill seq mkdir rm timeout pidof ps; do
+         awk cut tr kill seq mkdir rm timeout pidof ps touch; do
     ln -sf busybox "$I/bin/$a"
 done
 for b in "$BIN" "$DMSETUP" "$CURL"; do
