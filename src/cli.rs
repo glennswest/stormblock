@@ -6590,7 +6590,8 @@ file = "{state}"
         let app = mgr.get_volume(&app).unwrap();
 
         gate.armed.store(true, Ordering::SeqCst);
-        let flow = super::flow_system_half(mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None);
+        let sources = [source_id];
+        let flow = super::flow_system_half(mgr.gem(), mgr.registry(), &sources, local_id, || mgr.persist(), None);
         let check = async {
             gate.arrived.notified().await;
             // The move is inside its read of the appliance's slot now.
