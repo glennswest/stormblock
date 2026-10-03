@@ -54,7 +54,7 @@ I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
 for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed \
-         awk cut tr kill seq mkdir rm; do
+         awk cut tr kill seq mkdir rm timeout pidof ps; do
     ln -sf busybox "$I/bin/$a"
 done
 for b in "$BIN" "$DMSETUP" "$CURL"; do
@@ -119,7 +119,7 @@ node_name = "ci-ublk"
 discovery_disabled = true
 EOT
     if [ "$mode" = serial ]; then export STORMBLOCK_UBLK_SERIAL=1; else unset STORMBLOCK_UBLK_SERIAL; fi
-    RUST_LOG=stormblock=warn stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
+    RUST_LOG=stormblock=info stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
         --no-iscsi > /run/engine-$mode.log 2>&1 &
     pid=$!
     api() { curl -sf -m 120 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' "$@"; }
@@ -135,11 +135,14 @@ EOT
     [ -b "$dev" ] || { r $mode-attach "FAIL ($id '$dev')"; sed 's/^/LOG /' /run/engine-$mode.log | tail -8; kill $pid; return; }
     echo "GUEST $mode: volume $id on $dev over $slow (slow$disk)"
 
+    step() { echo "STEP $mode $* at $(now)"; }
+    step fill
     # Allocate the first 64 MiB so reads reach the disk.
     dd if=/dev/urandom of=/tmp/fill bs=1M count=64 2>/dev/null
     dd if=/tmp/fill of=$dev bs=1M count=64 oflag=direct 2>/dev/null
     echo 3 > /proc/sys/vm/drop_caches
 
+    step parallel-reads
     t0=$(now)
     for j in $(seq 1 16); do
         ( for k in $(seq 1 32); do dd if=$dev of=/dev/null bs=4096 count=1 skip=$(rnd) iflag=direct 2>/dev/null; done ) &
@@ -148,6 +151,7 @@ EOT
     t1=$(now)
     echo "TIME $mode parallel-reads $(ms $t0 $t1)"
 
+    step reads-under-fsync
     ( while [ ! -e /tmp/stop ]; do
         dd if=/dev/urandom of=$dev bs=4096 count=1 seek=$(rnd) oflag=direct conv=fsync 2>/dev/null
       done ) &
@@ -159,6 +163,7 @@ EOT
     touch /tmp/stop; wait $w; rm -f /tmp/stop
     echo "TIME $mode reads-under-fsync $(ms $t0 $t1)"
 
+    step round-trip
     dd if=/dev/urandom of=/tmp/pat bs=1M count=16 2>/dev/null
     for j in 0 1 2 3 4 5 6 7; do
         dd if=/tmp/pat of=$dev bs=64k skip=$((j * 32)) seek=$((2048 + j * 32)) count=32 oflag=direct 2>/dev/null &
@@ -167,10 +172,23 @@ EOT
     dd if=$dev of=/tmp/back bs=64k skip=2048 count=256 iflag=direct 2>/dev/null
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
+    step stop
     kill -TERM $pid; wait $pid
     grep -E "ERROR|panicked" /run/engine-$mode.log | head -5
 }
 
+# A hang must say where it is: the engine's log and every one of its threads'
+# kernel stacks, then the guest powers off.
+( sleep ${WATCHDOG:-200}
+  echo "WATCHDOG fired"
+  for l in /run/engine-*.log; do sed "s|^|LOG ${l##*/}: |" $l | tail -15; done
+  for p in $(pidof stormblock); do
+    for t in /proc/$p/task/*; do
+      echo "STACK $(cat $t/comm) $(cat $t/wchan)"; sed 's/^/STACK   /' $t/stack | head -8
+    done
+  done
+  ps | sed 's/^/PS /'
+  poweroff -f ) &
 run serial vda 9091
 run concurrent vdb 9092
 echo "GUEST done"
@@ -187,7 +205,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/a.img",if=virtio,format=raw \
     -drive file="$W/b.img",if=virtio,format=raw > "$W/guest.log" 2>&1
-tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG)|ublk|ERROR|panick' | tail -60
+tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG|STEP|STACK|PS|WATCHDOG)|ERROR|panick' | tail -150
 
 t() { tr -d '\r' < "$W/guest.log" | awk -v m="$1" -v w="$2" '$1=="TIME" && $2==m && $3==w {print $4}'; }
 SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
