@@ -115,6 +115,28 @@ async fn probes_stay_public_and_health_reports_the_mode() {
     server.abort();
 }
 
+/// `flow_over_remaining` (#260): absent with no flow-over, then whatever the
+/// flow-over last counted, 0 included — open, like the rest of health.
+#[tokio::test]
+async fn health_reports_what_the_flow_over_has_left() {
+    use std::sync::atomic::Ordering;
+    let dir = TempDir::new().unwrap();
+    let state = state_with(&dir, config_with_token("sekrit")).await;
+    let (base, server) = serve(state.clone()).await;
+    let c = reqwest::Client::new();
+    let get = || async {
+        c.get(format!("{base}/api/v1/health")).send().await.unwrap().json::<serde_json::Value>().await.unwrap()
+    };
+
+    assert!(get().await.get("flow_over_remaining").is_none(), "no flow-over: left out");
+    state.flow_over_remaining.store(1234, Ordering::Relaxed);
+    assert_eq!(get().await["flow_over_remaining"], 1234);
+    state.flow_over_remaining.store(0, Ordering::Relaxed);
+    assert_eq!(get().await["flow_over_remaining"], 0, "finished: 0, not left out");
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn health_says_when_the_node_is_open() {
     let dir = TempDir::new().unwrap();
