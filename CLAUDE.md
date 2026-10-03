@@ -101,7 +101,7 @@ of its own. TLS is rustls (no OpenSSL) on `ring` only since #209 — not C-free:
 
 | where | started as | notes |
 |---|---|---|
-| stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260/:4420, no discovery, no cluster in this mode |
+| stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260, no discovery, no cluster in this mode; the shared :4420 target only with an `[nvmeof]` section in `--config` (forge mode, a bastion, #206) |
 | stormcos initramfs | `/init` → `boot-claim` + `boot-local` (`scripts/build-stormblock-initramfs.sh`) | boot hooks decide local vs appliance (`docs/boot-hooks.md`) |
 | appliance / forge | the daemon | serves goldens, host clones and boot claims |
 | RouterOS container | not shipping (owner, 2026-09-28); was the daemon, `mikrotik,nvmeof` profile | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable; never file I/O (#140) |
@@ -172,20 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Forge mode on a stormcos node: adopt-ublk serves NVMe/TCP (2026-10-03, #206, P1) — IN PROGRESS
+### Forge mode on a stormcos node: adopt-ublk serves NVMe/TCP (2026-10-03, #206, P1) — DONE
 
 A bastion (stormcos#90) is a stormcos node that is also forge: `adopt-ublk`
 read `--config` only for `/serve/v1` and never built the shared NVMe-oF
 target, so `state.nvmeof_target` was None and a boothost claim's `attach`
 was null. One engine owns the node's slab, so it is this engine that serves.
-- [ ] `adopt-ublk` starts the shared target when the config has an
-      `[nvmeof]` section (`listen_addr`, `nqn`, the #210 host policy); no
-      section = as now (stormcos's baked config has none). No raw drive
-      namespaces: the slab is the engine's pool
-- [ ] the daemon's store/policy/restore/run sequence in one function, used
-      by both
-- [ ] test: adopt-ublk with `[nvmeof]` answers a boothost claim with an
-      NVMe/TCP attach (and the kernel connects: QEMU); docs, CHANGELOG
+- [x] `adopt-ublk` starts the shared target when the config has an
+      `[nvmeof]` section (`adopted_nvmeof_target`: `listen_addr`, `nqn`, the
+      #210 host policy); no section = as now (stormcos's baked config has
+      none). No raw drive namespaces: the slab is the engine's pool
+- [x] the daemon's store/policy/restore/run sequence is
+      `serve_shared_nvmeof`, used by both
+- [x] tests `cli::forge_mode_tests` (no section → no target; with one, a
+      boothost claim's attach is connected with the engine's initiator as
+      the boot host's NQN and reads the release's bytes); full nextest on
+      dev 870/870, `--features cluster` checks. Docs (README, here), CHANGELOG
+- Not run as the real `adopt-ublk` on a node (needs root + a handover):
+  the bastion install (stormcos#90, server8) is that check; stormcos's
+  bastion unit passes `--config` with `[nvmeof]`
 
 ### The node API stalls during flow-over (2026-10-03, #269, P0) — DONE
 

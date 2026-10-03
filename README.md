@@ -31,7 +31,7 @@ drives / files / nvme-tcp:// / iscsi://          (the drive layer)
 
 | where | how it is started | what it does there |
 |---|---|---|
-| **a stormcos node** | the stormpump boot unit `00-stormblock` runs `stormblock adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the ublk devices the initramfs engine created (root and the mounted volumes) without them disappearing: it stands that engine down, waits for it to exit, and only then reads the slabs, while ublk recovery holds the I/O in between (#171). It restores its state from the `stormblock-state` volume, serves the API and the per-export portals (`/serve/v1`). No shared :3260/:4420 target, no discovery beacon, no cluster in this mode. |
+| **a stormcos node** | the stormpump boot unit `00-stormblock` runs `stormblock adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the ublk devices the initramfs engine created (root and the mounted volumes) without them disappearing: it stands that engine down, waits for it to exit, and only then reads the slabs, while ublk recovery holds the I/O in between (#171). It restores its state from the `stormblock-state` volume, serves the API and the per-export portals (`/serve/v1`). No shared :3260 target, no discovery beacon, no cluster in this mode; the shared NVMe/TCP target only when its `--config` has an `[nvmeof]` section (forge mode, a bastion: #206). |
 | **the stormcos initramfs** | `/init` (built by `scripts/build-stormblock-initramfs.sh`) runs `boot-claim` then `boot-local`, or `boot-local` on a local slab | claims the machine's image from an appliance (`boothost/<tag>`), attaches it, exports root as `/dev/ublkb0`, and flows it over onto a local disk in the background (`--local-disk`). Boot hooks decide local vs appliance (`docs/boot-hooks.md`). |
 | **an appliance (forge)** | `stormblock --config …` (the daemon) | serves goldens and host clones over NVMe-oF/TCP, answers boot claims, builds images and pallets. |
 | **anywhere else** | the daemon, or a subcommand | a standalone storage node; `image`, `pallet`, `slab`, `golden`, `attach`, `must-gather` work offline on files and drives. |
@@ -258,7 +258,7 @@ to stderr.
 | `attach` | attach a slab offline and export (and optionally mount) volumes in it; with no `--volume`, list them |
 | `boot-claim` | ask an appliance which image this machine boots (`--boothost URL --tag <host name or alias>`; the SMBIOS serial by default), print the attach URI |
 | `boot-local` | attach local slabs non-destructively, export the boot volume as `/dev/ublkb0` (plus `--image-store`, `--writable`), optionally flow over to `--local-disk`; `--check` validates and exits |
-| `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs |
+| `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs. With an `[nvmeof]` section in `--config` (`listen_addr`, `nqn`, the #210 host policy) it also serves the shared NVMe/TCP target, so boot claims get an attach (forge mode, #206); never the slab's drive raw |
 | `must-gather` | collect what is needed to debug a node into one directory, read-only |
 | `boot-iscsi` | provision a partitioned disk on a remote iSCSI target and export it over ublk. **It formats the target every run** (#162): a first-install tool, not a boot path |
 | `migrate-boot` | copy boot volumes from an iSCSI slab onto a local disk |
