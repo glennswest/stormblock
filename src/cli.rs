@@ -2892,7 +2892,7 @@ async fn open_slabs_and_restore(
 /// A file out of a volume's filesystem on `slabs`, read-only (#262). The
 /// error carries `slab cat`'s exit code: 1 for the file, 2 for the volume.
 async fn volume_file_on_slabs(slabs: &[String], volume: &str, path: &str) -> Result<Vec<u8>, (i32, String)> {
-    let mgr = open_slabs_resuming(slabs, None, false)
+    let mgr = open_slabs_and_restore(slabs, None)
         .await
         .map_err(|e| (2, format!("cannot read the slabs: {e}")))?;
     let id = mgr
