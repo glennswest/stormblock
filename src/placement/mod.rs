@@ -692,6 +692,168 @@ impl PlacementEngine {
         Ok(new)
     }
 
+    /// Move the leg of `(volume, extent)` on `from_slab` to `dest`, holding
+    /// the map and the registry only to allocate and to publish (#269).
+    ///
+    /// [`move_slot`](Self::move_slot) reads the source, writes the copy and
+    /// reads it back with both write locks held. For a flow-over that is a
+    /// round trip to the appliance and two I/Os on a spinning disk per
+    /// extent, thousands of times, and every volume's I/O and every API call
+    /// that touches the map or the registry queued behind each one: on the
+    /// Dell (11.78) template clones and volume listings timed out at 60 s for
+    /// the whole install.
+    ///
+    /// The slot fence (`fence`, held exclusively on the source slot by the
+    /// caller) is what keeps I/O off the slot while it is copied, as it did
+    /// for `move_slot` (#239); the global locks were never needed for the
+    /// copy itself. Here they are taken twice, briefly:
+    ///
+    /// 1. the registry, to allocate the destination slot (reserved, so the
+    ///    extent collector does not take it while it is unmapped);
+    /// 2. the map and the registry, to publish — after checking the extent
+    ///    still names the source (a delete or a discard may have released it
+    ///    meanwhile; the copy is given back then) and carrying the source
+    ///    slot's share count as the slab has it now.
+    ///
+    /// The source is owed, as in `move_slot`: freed once the map that no
+    /// longer names it is on disk.
+    pub async fn migrate_leg_unlocked(
+        &self,
+        gem: &tokio::sync::RwLock<GlobalExtentMap>,
+        registry: &tokio::sync::RwLock<SlabRegistry>,
+        volume_id: VolumeId,
+        vext_idx: u64,
+        old: Leg,
+        dest_id: SlabId,
+        fence: &crate::volume::fence::Exclusive,
+    ) -> Result<MigrateExtentResult, PlacementError> {
+        if !fence.covers(old) {
+            return Err(PlacementError::Busy { slab_id: old.slab_id, slot_idx: old.slot_idx });
+        }
+        let generation = {
+            let g = gem.read().await;
+            let loc = g
+                .lookup(volume_id, vext_idx)
+                .ok_or(PlacementError::ExtentNotFound { volume_id, vext_idx })?;
+            if loc.leg_on(old.slab_id) != Some(old) {
+                return Err(PlacementError::ExtentNotFound { volume_id, vext_idx });
+            }
+            loc.generation
+        };
+
+        // The source's device and where the slot is on it, then no lock.
+        let (src_dev, src_at, slot_size) = {
+            let r = registry.read().await;
+            let src = r.get(&old.slab_id).ok_or(PlacementError::SlabNotFound(old.slab_id))?;
+            let size = src.slot_size();
+            (src.device().clone(), src.data_offset() + old.slot_idx as u64 * size, size)
+        };
+        let mut data = vec![0u8; slot_size as usize];
+        let read_err = |e: String| PlacementError::ReadFailed {
+            slab_id: old.slab_id,
+            slot_idx: old.slot_idx,
+            error: e,
+        };
+        match src_dev.read(src_at, &mut data).await {
+            Ok(n) if n == data.len() => {}
+            Ok(n) => return Err(read_err(format!("read {n} of {} bytes", data.len()))),
+            Err(e) => return Err(read_err(e.to_string())),
+        }
+
+        // 1. Allocate, briefly.
+        let (dest_slot, dest_dev, dest_at) = {
+            let mut r = registry.write().await;
+            let slab = r.get(&dest_id).ok_or(PlacementError::SlabNotFound(dest_id))?;
+            if slab.free_slots() == 0 {
+                return Err(PlacementError::SlabFull);
+            }
+            if r.is_quarantined(&dest_id) {
+                return Err(PlacementError::NoDestination);
+            }
+            let slab = r.get_mut(&dest_id).ok_or(PlacementError::SlabNotFound(dest_id))?;
+            let slot = slab
+                .allocate_deferred(volume_id, vext_idx, generation)
+                .await
+                .map_err(|_| PlacementError::SlabFull)?;
+            let at = slab.data_offset() + slot as u64 * slab.slot_size();
+            let dev = slab.device().clone();
+            r.reserve(dest_id, slot);
+            (slot, dev, at)
+        };
+        let give_back = |why: PlacementError| async move {
+            let mut r = registry.write().await;
+            r.commit(dest_id, dest_slot);
+            if let Some(slab) = r.get_mut(&dest_id) {
+                let _ = slab.free(dest_slot).await;
+            }
+            Err(why)
+        };
+
+        // The copy, with only the fence held, and read back before any map
+        // names it (#239).
+        let write_err = |e: String| PlacementError::WriteFailed { slab_id: dest_id, slot_idx: dest_slot, error: e };
+        if let Err(e) = dest_dev.write(dest_at, &data).await {
+            return give_back(write_err(e.to_string())).await;
+        }
+        let mut check = vec![0u8; data.len()];
+        match dest_dev.read(dest_at, &mut check).await {
+            Ok(n) if n == data.len() && check == data => {}
+            Ok(n) if n != data.len() => {
+                return give_back(write_err(format!("the copy reads back {n} of {} bytes", data.len()))).await
+            }
+            Ok(_) => {
+                let at = check.iter().zip(&data).position(|(a, b)| a != b).unwrap_or(0);
+                return give_back(write_err(format!("the copy reads back different from the source at byte {at}")))
+                    .await;
+            }
+            Err(e) => return give_back(write_err(format!("reading the copy back: {e}"))).await,
+        }
+
+        // 2. Publish, briefly — if the extent still names the source.
+        let mut g = gem.write().await;
+        let mut r = registry.write().await;
+        r.commit(dest_id, dest_slot);
+        let still = g.lookup(volume_id, vext_idx).and_then(|l| l.leg_on(old.slab_id)) == Some(old);
+        let shares = r
+            .get(&old.slab_id)
+            .and_then(|s| s.get_slot(old.slot_idx))
+            .filter(|s| s.state != crate::drive::slab::SlotState::Free)
+            .map(|s| s.ref_count);
+        let Some(shares) = shares.filter(|_| still) else {
+            if let Some(slab) = r.get_mut(&dest_id) {
+                let _ = slab.free(dest_slot).await;
+            }
+            return Err(PlacementError::ExtentNotFound { volume_id, vext_idx });
+        };
+        let Some(slab) = r.get_mut(&dest_id) else {
+            return Err(PlacementError::SlabNotFound(dest_id));
+        };
+        // Its entry is published at the destination's next flush, after the
+        // data it names (#171).
+        slab.confirm(dest_slot);
+        for _ in 1..shares.max(1) {
+            if let Err(e) = slab.inc_ref(dest_slot).await {
+                tracing::warn!(
+                    volume = %volume_id, slab = %dest_id, slot = dest_slot,
+                    "could not carry the share count to the moved slot: {e}"
+                );
+                break;
+            }
+        }
+        let new = Leg::new(dest_id, dest_slot);
+        let mut moves = HashMap::new();
+        moves.insert(old, new);
+        g.rewrite_legs(&moves);
+        self.owed.lock().unwrap().push((old.slab_id, old.slot_idx));
+        Ok(MigrateExtentResult {
+            volume_id,
+            vext_idx,
+            source_slab: old.slab_id,
+            dest_slab: dest_id,
+            dest_slot,
+        })
+    }
+
     /// Evacuate all extents from a slab, moving them to other available slabs.
     ///
     /// Iterates the GEM's reverse index for all extents on the target slab.

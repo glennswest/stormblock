@@ -4964,6 +4964,11 @@ pub(crate) async fn quarantine_flow_sources(
     }
 }
 
+/// The longest a flow-over waits between two moves for foreground I/O
+/// (#269): a move is a slot read from the appliance and a write and read back
+/// on the local disk, tens of milliseconds on a spinning one.
+const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub(crate) async fn flow_system_half<P, F>(
     gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
     registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
@@ -5016,6 +5021,8 @@ where
         }
     };
     report(later.iter().sum());
+    let mut foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
+    let mut last_move = std::time::Duration::ZERO;
     for (i, &source) in sources.iter().enumerate() {
         later[i] = 0;
         let after: usize = later.iter().sum();
@@ -5034,15 +5041,24 @@ where
                 on_source.into_iter().next()
             };
             let Some((vol, vext, leg)) = pick else { break };
+            // Foreground first (#269): when a volume has been read or written
+            // since the last move, give the disk back for as long as that move
+            // took (capped) before the next. An idle node moves at full speed.
+            if crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed) != foreground {
+                tokio::time::sleep(last_move.min(FLOW_YIELD_MAX)).await;
+            }
+            foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
+            let started = std::time::Instant::now();
             let fence = crate::volume::fence::exclusive(leg).await;
-            let res = {
-                let mut g = gem.write().await;
-                let mut r = registry.write().await;
-                engine
-                    .migrate_leg_fenced(&mut g, &mut r, vol, vext, source, Some(dest), &fence)
-                    .await
-            };
+            // The copy holds only the fence on this slot; the map and the
+            // registry are taken to allocate and to publish (#269). Holding
+            // them for the copy stalled every volume's I/O and every API call
+            // behind each of the 7528 extents of the Dell's install.
+            let res = engine
+                .migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence)
+                .await;
             drop(fence);
+            last_move = started.elapsed();
             match res {
                 Ok(_) => {
                     moved += 1;
@@ -6527,6 +6543,76 @@ file = "{state}"
         fn smart_status(&self) -> crate::drive::DriveResult<crate::drive::SmartData> {
             self.0.smart_status()
         }
+    }
+
+    /// A flow-over move stuck reading the appliance holds nothing the rest
+    /// of the node needs (#269): the map and the registry are free, and a
+    /// write and flush on another volume finish meanwhile. On the Dell (11.78)
+    /// each copy held both write locks, and clones and volume listings timed
+    /// out at 60 s for the whole install.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_flow_over_copy_holds_no_lock_the_node_needs() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+        use std::sync::atomic::Ordering;
+
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 16;
+        let dir = tempfile::tempdir().unwrap();
+        let gate = Arc::new(Gate::default());
+        let slab = |name: &str, gate: Option<Arc<Gate>>| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                let mut dev = Arc::new(FileDevice::open_with_capacity(&path, 4 * EXTENTS * SLOT).await.unwrap())
+                    as Arc<dyn BlockDevice>;
+                if let Some(g) = gate {
+                    dev = Arc::new(Remote(dev, g));
+                }
+                Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = slab("appliance.slab", Some(gate.clone())).await;
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        g.write(0, &vec![0x5A; (EXTENTS * SLOT) as usize]).await.unwrap();
+        g.flush().await.unwrap();
+        let local = slab("local.slab", None).await;
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+        // A volume of the node's, written while the move is stuck.
+        let app = mgr.create_volume_any("app", 4 * SLOT).await.unwrap();
+        let app = mgr.get_volume(&app).unwrap();
+
+        gate.armed.store(true, Ordering::SeqCst);
+        let flow = super::flow_system_half(mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None);
+        let check = async {
+            gate.arrived.notified().await;
+            // The move is inside its read of the appliance's slot now.
+            assert!(mgr.gem().try_write().is_ok(), "the extent map is free during the copy");
+            assert!(mgr.registry().try_write().is_ok(), "the registry is free during the copy");
+            let io = async {
+                app.write(0, &vec![0xA5; SLOT as usize]).await.unwrap();
+                app.flush().await.unwrap();
+            };
+            let done = tokio::time::timeout(std::time::Duration::from_secs(2), io).await;
+            gate.go.notify_one();
+            assert!(done.is_ok(), "a write and flush on another volume finish while a move is stuck");
+        };
+        let (flowed, ()) = tokio::join!(flow, check);
+        let (moved, failed) = flowed.expect("the flow-over finished");
+        assert_eq!((moved, failed), (EXTENTS, 0));
+        let mut back = vec![0u8; (EXTENTS * SLOT) as usize];
+        g.read(0, &mut back).await.unwrap();
+        assert!(back.iter().all(|&b| b == 0x5A), "the golden reads as written after the move");
+        let mut back = vec![0u8; SLOT as usize];
+        app.read(0, &mut back).await.unwrap();
+        assert!(back.iter().all(|&b| b == 0xA5));
     }
 
     /// What `/api/v1/health` reports as `flow_over_remaining` (#260): the

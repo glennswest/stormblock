@@ -96,6 +96,12 @@ impl Default for PlacementPolicy {
     }
 }
 
+/// Reads and writes of volumes, as their consumers issue them (#269). A
+/// background mover (the flow-over) compares this between its moves to know
+/// whether anything else wants the disk; its own copies go to the slabs
+/// directly and are not counted.
+pub static FOREGROUND_IO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Volume manager errors.
 #[derive(Debug)]
 pub enum VolumeError {
@@ -2715,6 +2721,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bs = u64::from(self.block_size());
         if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
             return self.read_blocks(offset, buf).await;
@@ -2739,6 +2746,7 @@ impl BlockDevice for ThinVolumeHandle {
     /// writers in different stripes never touch the same parity slot.
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         self.refuse_if_sealed()?;
+        FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bs = u64::from(self.block_size());
         if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
             return self.write_blocks(offset, buf).await;
