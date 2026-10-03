@@ -23,6 +23,11 @@ tests run on.
    writes the entries of slots confirmed since, and flushes again. A volume
    FLUSH calls `sync` on every slab the volume maps; writing the volume
    records (`VolumeManager::persist`) syncs every slab first.
+   `sync` is a group commit (#264): one runs at a time per slab, and it
+   covers every caller that asked before it began, so concurrent FLUSHes on
+   one slab cost one round of device flushes. Unserialised, a second caller
+   could find the `ready` set already taken by a sync still writing it and
+   acknowledge its FLUSH before its slots' entries were on the device.
    Before: the entry was written at allocation and the data after it, so a
    power cut could keep the entry without the data, and recovery mapped the
    extent to a slot that never got it, losing what had been fsync'd in the

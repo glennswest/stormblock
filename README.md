@@ -108,7 +108,8 @@ name at a new version; `boothost/<tag>` is how a machine claims its own boot
 image, the one write that needs no token (the health and readiness probes are
 the only other open requests; `docs/auth.md`).
 
-**Serving.** ublk devices for the local node; a shared NVMe-oF/TCP subsystem
+**Serving.** ublk devices for the local node, each request served as it
+arrives up to the queue depth (128), not one at a time (#264); a shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
 (CHAP, MC/S, ALUA, thousands of LUNs) and per-export portals (one port per
 exported volume, 128 by default, #188). `/serve/v1`
