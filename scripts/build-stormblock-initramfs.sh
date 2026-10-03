@@ -774,6 +774,42 @@ identity_guessed() {
 }
 # --- END boot identity
 
+# --- BEGIN mount list (covered by tests/initramfs-mounts.sh)
+# Which volumes this init mounts, and where (#262).
+#
+# This used to be the command line alone, `rd.stormblock.mount=<vol>:<path>,…`:
+# one word of ~1.8 KB on a line x86 caps at 2048 bytes. Past the cap the EFI
+# stub truncates and boots anyway, and 11.68 came up with nothing mounted at
+# all (stormcos#236). So the list lives with the release, in its root volume:
+#
+#   /etc/stormblock/mounts      one `<vol>:<path>` per line, `#` comments
+#
+# read out of the slab with `stormblock slab cat` before anything is exported
+# - nothing is attached to read it. `rd.stormblock.mount=` still works, and
+# wins when it is there: an older image carries its list nowhere else.
+MOUNTS_CMDLINE="$MOUNTS"
+MOUNTS_FROM=""
+mounts_from() { # slab -> MOUNTS (comma-separated) and MOUNTS_FROM
+    MOUNTS="$MOUNTS_CMDLINE"
+    if [ -n "$MOUNTS" ]; then
+        MOUNTS_FROM="the command line"
+        return 0
+    fi
+    MOUNTS_FROM=""
+    [ -n "${1:-}" ] || return 0
+    _ml_out="${STORM_RUN:-/run/stormblock}/mounts.list"
+    mkdir -p "${_ml_out%/*}" 2>/dev/null
+    rm -f "$_ml_out"
+    if "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$1" \
+            --volume "${VOLUME:-stormpump}" --out "$_ml_out" /etc/stormblock/mounts \
+            >/dev/null 2>&1 && [ -r "$_ml_out" ]; then
+        MOUNTS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$_ml_out" | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
+        MOUNTS_FROM="/etc/stormblock/mounts in ${VOLUME:-stormpump}"
+    fi
+    return 0
+}
+# --- END mount list
+
 # Local-slab boot (stormcos) when a slab is named on the cmdline, or when the
 # initramfs carries a boot.toml handoff and no iSCSI portal was given.
 #
@@ -2079,6 +2115,8 @@ if [ "$BOOT_MODE" = "local" ]; then
                         # after listing the seventy-five it did have. Every
                         # volume the command line mounts has to be here, or
                         # this disk cannot boot this node yet.
+                        # This disk's own release says what it mounts (#262).
+                        mounts_from "$SLAB"
                         MISSING=""
                         for entry in $(printf '%s' "$MOUNTS" | tr ',' ' '); do
                             name="${entry%%:*}"
@@ -2254,6 +2292,14 @@ if [ "$BOOT_MODE" = "local" ]; then
     #
     # Same ublk numbering as the writables, continuing after them, and the map
     # is built in the same pass so the indices cannot drift apart.
+    # The release this boot runs says what it mounts (#262): read again, since
+    # the slab may have changed since the probe (a claimed image, an install).
+    mounts_from "$SLAB"
+    if [ -n "$MOUNTS" ]; then
+        echo "Mount list: $(printf '%s' "$MOUNTS" | tr ',' '\n' | grep -c .) volume(s), from $MOUNTS_FROM"
+    else
+        echo "Mount list: none (no rd.stormblock.mount=, and no /etc/stormblock/mounts in ${VOLUME:-stormpump})"
+    fi
     MOUNT_MAP=""
     if [ -n "$MOUNTS" ]; then
         OIFS=$IFS; IFS=,
