@@ -500,6 +500,27 @@ pub struct Slab {
     free_count: u64,
     /// Slots allocated whose table entry is not on the device yet (#171).
     pending: std::sync::Mutex<Pending>,
+    /// Group commit for [`sync`](Self::sync) (#264).
+    syncs: SyncGate,
+}
+
+/// One [`Slab::sync`] at a time, and one for many callers (#264).
+///
+/// Every caller is numbered when it asks. A sync covers every caller numbered
+/// before it began: their writes had completed when they asked, so its first
+/// device flush made their data durable, and the slots they confirmed were in
+/// the `ready` set it published. A caller that finds such a sync finished
+/// while it waited returns without flushing again.
+///
+/// Serialising also closes a hole the unserialised sync had: two volumes'
+/// flushes on one slab, the second taking an empty `ready` set because the
+/// first had just taken it, returned before the first had written those
+/// entries — a FLUSH acknowledged with its slots still unpublished (#171).
+#[derive(Default)]
+struct SyncGate {
+    asked: std::sync::atomic::AtomicU64,
+    done: std::sync::atomic::AtomicU64,
+    running: tokio::sync::Mutex<()>,
 }
 
 /// The write-ordering rule for a slot (#171): **its table entry reaches the
@@ -657,6 +678,7 @@ impl Slab {
             extent_index: HashMap::new(),
             free_count: total_slots,
             pending: Default::default(),
+            syncs: Default::default(),
         })
     }
 
@@ -715,6 +737,7 @@ impl Slab {
             extent_index,
             free_count,
             pending: Default::default(),
+            syncs: Default::default(),
         })
     }
 
@@ -762,6 +785,20 @@ impl Slab {
     /// on the media), write the confirmed slots' table entries, flush again.
     /// With nothing waiting, one flush.
     pub async fn sync(&self) -> DriveResult<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ticket = self.syncs.asked.fetch_add(1, SeqCst) + 1;
+        let _running = self.syncs.running.lock().await;
+        if self.syncs.done.load(SeqCst) >= ticket {
+            return Ok(());
+        }
+        let covers = self.syncs.asked.load(SeqCst);
+        self.sync_now().await?;
+        self.syncs.done.fetch_max(covers, SeqCst);
+        Ok(())
+    }
+
+    /// The sync itself; [`sync`](Self::sync) decides who runs it.
+    async fn sync_now(&self) -> DriveResult<()> {
         // Free entries written before this flush are durable after it.
         let freeing = std::mem::take(&mut self.pending.lock().unwrap().freeing);
         if let Err(e) = self.device.flush().await {

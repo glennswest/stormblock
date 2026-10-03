@@ -1406,10 +1406,143 @@ fn submit_ctrl_cmd(
 // Per-queue I/O worker (runs on a dedicated OS thread)
 // ===========================================================================
 
+/// `user_data` of the eventfd read that says requests have finished.
+const WAKE: u64 = u64::MAX;
+
+/// A request served: its result, and the tag's buffer back.
+struct Done {
+    tag: u16,
+    result: i32,
+    buf: Vec<u8>,
+}
+
+/// Where requests served on the runtime hand their results back to the queue
+/// thread (#264). Only that thread may issue the queue's io_uring commands,
+/// so a task never commits its own request: it posts here and wakes the
+/// thread through the eventfd, whose read is armed in the queue's ring.
+struct Completions {
+    list: std::sync::Mutex<Vec<Done>>,
+    /// Held by every task as well as the thread, so the fd is never closed
+    /// (and its number reused) while a late task may still write to it.
+    efd: std::os::fd::OwnedFd,
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+impl Completions {
+    fn post(&self, done: Done) {
+        use std::os::fd::AsRawFd;
+        self.list.lock().unwrap().push(done);
+        let one = 1u64.to_ne_bytes();
+        // An eventfd write fails only when the counter would overflow, and
+        // then it already says "wake".
+        unsafe { libc::write(self.efd.as_raw_fd(), one.as_ptr().cast(), 8) };
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Serve one request on the device. The buffer comes back with the result:
+/// for a read it carries the data the kernel copies out at commit.
+async fn serve(
+    device: &dyn BlockDevice,
+    op: u8,
+    offset: u64,
+    length: usize,
+    mut buf: Vec<u8>,
+) -> (i32, Vec<u8>) {
+    let result = match op {
+        UBLK_IO_OP_READ => match device.read(offset, &mut buf[..length]).await {
+            Ok(_) => length as i32,
+            Err(e) => {
+                tracing::error!("ublk read @{}+{}: {e}", offset, length);
+                -(libc::EIO)
+            }
+        },
+        UBLK_IO_OP_WRITE => match device.write(offset, &buf[..length]).await {
+            Ok(_) => length as i32,
+            Err(e) => {
+                tracing::error!("ublk write @{}+{}: {e}", offset, length);
+                -(libc::EIO)
+            }
+        },
+        UBLK_IO_OP_FLUSH => match device.flush().await {
+            Ok(()) => 0,
+            Err(e) => {
+                tracing::error!("ublk flush: {e}");
+                -(libc::EIO)
+            }
+        },
+        UBLK_IO_OP_DISCARD => match device.discard(offset, length as u64).await {
+            Ok(()) => 0,
+            Err(e) => {
+                tracing::error!("ublk discard @{}+{}: {e}", offset, length);
+                -(libc::EIO)
+            }
+        },
+        // A promise, not a hint (#171): the range must read back as zeros,
+        // and a failure is reported, never swallowed. This used to be a
+        // discard, which reclaims whole slots only and so left any partial
+        // range as it was, and answered success even when it failed.
+        UBLK_IO_OP_WRITE_ZEROES => match device.write_zeroes(offset, length as u64).await {
+            Ok(()) => 0,
+            Err(e) => {
+                tracing::error!("ublk write-zeroes @{}+{}: {e}", offset, length);
+                -(libc::EIO)
+            }
+        },
+        _ => {
+            tracing::warn!("ublk: unknown op {op}");
+            -(libc::ENOTSUP)
+        }
+    };
+    (result, buf)
+}
+
+/// Queue COMMIT_AND_FETCH_REQ for a tag: complete it and take the next.
+fn push_commit(
+    ring: &mut IoUring<squeue::Entry128>,
+    char_fd: RawFd,
+    queue_id: u16,
+    tag: u16,
+    result: i32,
+    buf: &[u8],
+) {
+    let io_cmd = UblkIoCmd { q_id: queue_id, tag, result, addr: buf.as_ptr() as u64 };
+    let mut cmd_bytes = [0u8; 80];
+    let src = io_cmd.as_bytes();
+    cmd_bytes[..src.len()].copy_from_slice(src);
+    let sqe = opcode::UringCmd80::new(types::Fd(char_fd), UBLK_U_IO_COMMIT_AND_FETCH_REQ)
+        .cmd(cmd_bytes)
+        .build()
+        .user_data(tag as u64);
+    unsafe {
+        if ring.submission().push(&sqe).is_err() {
+            tracing::error!("ublk queue {}: SQ full on commit", queue_id);
+        }
+    }
+}
+
+/// Arm the read on the completions eventfd.
+fn arm_wake(ring: &mut IoUring<squeue::Entry128>, efd: RawFd, wake_buf: *mut u8) -> bool {
+    let sqe = opcode::Read::new(types::Fd(efd), wake_buf, 8).build().user_data(WAKE);
+    unsafe { ring.submission().push(&sqe.into()).is_ok() }
+}
+
 /// I/O worker loop for a single ublk queue.
 ///
-/// Runs on its own OS thread with a dedicated io_uring ring. Uses
-/// `tokio::runtime::Handle::block_on()` to bridge async BlockDevice calls.
+/// Runs on its own OS thread with a dedicated io_uring ring, and **serves
+/// every request the kernel hands it at once** (#264): each runs as a task on
+/// the runtime, and the thread commits it when it finishes. It used to
+/// `block_on` each request before looking at the next, so a device that
+/// advertised a queue depth of 128 was served at depth one, and every FLUSH —
+/// a drive-cache flush, tens of milliseconds on a spinning disk — stalled
+/// every read and write on the volume behind it.
+///
+/// Ordering is the block layer's, as for any device with a queue: a FLUSH is
+/// sent only once the writes it must cover have completed, and a filesystem
+/// waits for a write's completion before anything that depends on it.
+///
+/// `STORMBLOCK_UBLK_SERIAL=1` restores one request at a time, for measuring
+/// the difference; nothing else should set it.
 #[allow(clippy::too_many_arguments)]
 fn queue_worker(
     queue_id: u16,
@@ -1422,10 +1555,13 @@ fn queue_worker(
     rt_handle: tokio::runtime::Handle,
     startup_barrier: Arc<std::sync::Barrier>,
 ) {
-    // Per-queue io_uring ring
-    let mut ring: IoUring<squeue::Entry128> = match IoUring::builder()
-        .build(queue_depth as u32)
-    {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let serial = std::env::var("STORMBLOCK_UBLK_SERIAL").is_ok_and(|v| v == "1");
+
+    // Room for a commit per tag and the wake read at once.
+    let entries = (queue_depth as u32 + 1).next_power_of_two();
+    let mut ring: IoUring<squeue::Entry128> = match IoUring::builder().build(entries) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("ublk queue {}: io_uring create failed: {e}", queue_id);
@@ -1434,7 +1570,29 @@ fn queue_worker(
         }
     };
 
-    // Pre-allocate I/O buffers (one per tag)
+    let efd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+    if efd < 0 {
+        tracing::error!(
+            "ublk queue {}: eventfd failed: {}",
+            queue_id, std::io::Error::last_os_error()
+        );
+        startup_barrier.wait();
+        return;
+    }
+    let completions = Arc::new(Completions {
+        list: std::sync::Mutex::new(Vec::new()),
+        efd: unsafe { OwnedFd::from_raw_fd(efd) },
+        in_flight: std::sync::atomic::AtomicUsize::new(0),
+    });
+    // The kernel writes into this when the eventfd is read. Leaked, eight
+    // bytes per queue: an armed read can outlive the ring's drop by a moment
+    // (the kernel cancels it asynchronously), and must never land in memory
+    // that has been handed to something else.
+    let wake_buf: *mut u8 = Box::leak(Box::new([0u8; 8])).as_mut_ptr();
+
+    // Pre-allocate I/O buffers (one per tag). A tag's buffer moves into the
+    // task serving it and comes back with the result; its heap allocation,
+    // the address the kernel was given, never changes.
     let mut bufs: Vec<Vec<u8>> = (0..queue_depth)
         .map(|_| vec![0u8; max_io_bytes])
         .collect();
@@ -1446,6 +1604,11 @@ fn queue_worker(
             startup_barrier.wait();
             return;
         }
+    }
+    if !arm_wake(&mut ring, completions.efd.as_raw_fd(), wake_buf) {
+        tracing::error!("ublk queue {}: could not arm the completion eventfd", queue_id);
+        startup_barrier.wait();
+        return;
     }
 
     if let Err(e) = ring.submit() {
@@ -1497,11 +1660,26 @@ fn queue_worker(
         }
 
         // Collect completions first (avoids double mutable borrow of ring)
-        let cqes: Vec<(u16, i32)> = ring.completion()
-            .map(|cqe| (cqe.user_data() as u16, cqe.result()))
+        let cqes: Vec<(u64, i32)> = ring.completion()
+            .map(|cqe| (cqe.user_data(), cqe.result()))
             .collect();
 
-        for (tag, res) in cqes {
+        for (user_data, res) in cqes {
+            if user_data == WAKE {
+                if res < 0 && res != -libc::EINTR && res != -libc::EAGAIN {
+                    tracing::warn!("ublk queue {}: completion eventfd read: {}", queue_id, res);
+                }
+                let done = std::mem::take(&mut *completions.list.lock().unwrap());
+                for d in done {
+                    bufs[d.tag as usize] = d.buf;
+                    push_commit(&mut ring, char_fd, queue_id, d.tag, d.result, &bufs[d.tag as usize]);
+                }
+                if !arm_wake(&mut ring, completions.efd.as_raw_fd(), wake_buf) {
+                    tracing::error!("ublk queue {}: SQ full re-arming the eventfd", queue_id);
+                }
+                continue;
+            }
+            let tag = user_data as u16;
             // Negative = device stopping or error
             if res < 0 {
                 if res != -(libc::ENODEV) {
@@ -1518,96 +1696,38 @@ fn queue_worker(
             let op = (desc.op_flags & 0xFF) as u8;
             let offset = desc.start_sector * 512;
             let length = desc.nr_sectors as usize * 512;
+            let buf = std::mem::take(&mut bufs[tag as usize]);
 
-            // Dispatch the I/O operation
-            let io_result: i32 = match op {
-                UBLK_IO_OP_READ => {
-                    let buf = &mut bufs[tag as usize][..length];
-                    match rt_handle.block_on(device.read(offset, buf)) {
-                        Ok(_) => length as i32,
-                        Err(e) => {
-                            tracing::error!("ublk read @{}+{}: {e}", offset, length);
-                            -(libc::EIO)
-                        }
-                    }
-                }
-                UBLK_IO_OP_WRITE => {
-                    let buf = &bufs[tag as usize][..length];
-                    match rt_handle.block_on(device.write(offset, buf)) {
-                        Ok(_) => length as i32,
-                        Err(e) => {
-                            tracing::error!("ublk write @{}+{}: {e}", offset, length);
-                            -(libc::EIO)
-                        }
-                    }
-                }
-                UBLK_IO_OP_FLUSH => {
-                    match rt_handle.block_on(device.flush()) {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            tracing::error!("ublk flush: {e}");
-                            -(libc::EIO)
-                        }
-                    }
-                }
-                UBLK_IO_OP_DISCARD => {
-                    match rt_handle.block_on(device.discard(offset, length as u64)) {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            tracing::error!("ublk discard @{}+{}: {e}", offset, length);
-                            -(libc::EIO)
-                        }
-                    }
-                }
-                UBLK_IO_OP_WRITE_ZEROES => {
-                    // A promise, not a hint (#171): the range must read back
-                    // as zeros, and a failure is reported, never swallowed.
-                    // This used to be a discard, which reclaims whole slots
-                    // only and so left any partial range as it was, and
-                    // answered success even when it failed.
-                    match rt_handle.block_on(device.write_zeroes(offset, length as u64)) {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            tracing::error!("ublk write-zeroes @{}+{}: {e}", offset, length);
-                            -(libc::EIO)
-                        }
-                    }
-                }
-                _ => {
-                    tracing::warn!(
-                        "ublk queue {} tag {}: unknown op {}",
-                        queue_id, tag, op,
-                    );
-                    -(libc::ENOTSUP)
-                }
-            };
-
-            // Submit COMMIT_AND_FETCH_REQ (completes current + fetches next)
-            let io_cmd = UblkIoCmd {
-                q_id: queue_id,
-                tag,
-                result: io_result,
-                addr: bufs[tag as usize].as_ptr() as u64,
-            };
-
-            let mut cmd_bytes = [0u8; 80];
-            let src = io_cmd.as_bytes();
-            cmd_bytes[..src.len()].copy_from_slice(src);
-
-            let sqe = opcode::UringCmd80::new(
-                types::Fd(char_fd),
-                UBLK_U_IO_COMMIT_AND_FETCH_REQ,
-            )
-            .cmd(cmd_bytes)
-            .build()
-            .user_data(tag as u64);
-
-            unsafe {
-                if ring.submission().push(&sqe).is_err() {
-                    tracing::error!("ublk queue {}: SQ full on commit", queue_id);
-                }
+            if serial {
+                let (result, buf) = rt_handle.block_on(serve(&*device, op, offset, length, buf));
+                bufs[tag as usize] = buf;
+                push_commit(&mut ring, char_fd, queue_id, tag, result, &bufs[tag as usize]);
+                continue;
             }
+            completions.in_flight.fetch_add(1, Ordering::SeqCst);
+            let device = device.clone();
+            let completions = completions.clone();
+            rt_handle.spawn(async move {
+                let (result, buf) = serve(&*device, op, offset, length, buf).await;
+                completions.post(Done { tag, result, buf });
+            });
         }
+    }
+
+    // A stand-down must not leave requests running on the device behind it:
+    // a successor restores the slabs once this process has gone (#171), and a
+    // write still landing then would be one it never saw. Bounded, inside the
+    // stop budget (#105).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while completions.in_flight.load(Ordering::SeqCst) > 0 {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                "ublk queue {}: {} request(s) still running at exit",
+                queue_id, completions.in_flight.load(Ordering::SeqCst)
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
     tracing::info!("ublk queue {} worker exiting", queue_id);
