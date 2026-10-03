@@ -172,6 +172,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The mount list leaves the kernel command line (2026-10-03, #262, P1) — IN PROGRESS
+
+x86's command line is 2048 bytes; the EFI stub truncates and boots anyway,
+and `rd.stormblock.mount=` (one ~1.8 KB word) went whole: 11.68 mounted
+nothing (stormcos#236). The issue's option 1: the list lives in the root
+volume, `/etc/stormblock/mounts`, one `<vol>:<path>` per line, written by
+stormcos at build time.
+- [ ] `stormblock slab cat <slab>... --volume <name> <path>`: a file out of
+      a volume's filesystem, read-only, no attach (userspace ext4 reader);
+      exit 0 read, 1 no such file, 2 cannot read the volume
+- [ ] `/init`: with no `rd.stormblock.mount=` on the line, read the list
+      from the root volume of the slab it boots (local probe and claimed
+      clone alike) before `boot-local` exports anything; the cmdline still
+      works for old images (it wins when present)
+- [ ] tests: Rust (cat from a slab), initramfs (list from the file, from the
+      cmdline, comments/blank lines, neither); docs (README, boot-hooks),
+      CHANGELOG
+
 ### Forge mode turned on per node, kept by the engine (2026-10-03, #272, P1) — DONE
 
 For stormcos#187: one image, the forge role chosen at install, no argv or
