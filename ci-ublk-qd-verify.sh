@@ -144,10 +144,13 @@ EOT
 
     step parallel-reads
     t0=$(now)
+    # `wait` with no pid would wait for the engine too: name the jobs.
+    jobs=
     for j in $(seq 1 16); do
         ( for k in $(seq 1 32); do dd if=$dev of=/dev/null bs=4096 count=1 skip=$(rnd) iflag=direct 2>/dev/null; done ) &
+        jobs="$jobs $!"
     done
-    wait
+    wait $jobs
     t1=$(now)
     echo "TIME $mode parallel-reads $(ms $t0 $t1)"
 
@@ -164,11 +167,13 @@ EOT
     echo "TIME $mode reads-under-fsync $(ms $t0 $t1)"
 
     step round-trip
+    jobs=
     dd if=/dev/urandom of=/tmp/pat bs=1M count=16 2>/dev/null
     for j in 0 1 2 3 4 5 6 7; do
         dd if=/tmp/pat of=$dev bs=64k skip=$((j * 32)) seek=$((2048 + j * 32)) count=32 oflag=direct 2>/dev/null &
+        jobs="$jobs $!"
     done
-    wait
+    wait $jobs
     dd if=$dev of=/tmp/back bs=64k skip=2048 count=256 iflag=direct 2>/dev/null
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
