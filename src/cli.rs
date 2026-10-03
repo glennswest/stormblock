@@ -1474,39 +1474,10 @@ pub async fn run() -> anyhow::Result<()> {
                     nvmeof.add_namespace(nsid, drive.clone());
                 }
             }
-            let nvmeof = Arc::new(nvmeof);
-
-            // Store in AppState so the export API can add namespaces at
-            // runtime instead of parking them until the next restart (#26).
-            {
-                let mut guard = state.nvmeof_target.write().await;
-                *guard = Some(nvmeof.clone());
-            }
-
-            // Re-wire exports created through the API in a previous run. An
-            // export is an address something out there has written down —
-            // firmware booting over NVMe/TCP has the subsystem and namespace
-            // in its configuration — so losing the table on restart stops
-            // answering at an address a machine is still dialling.
             // Before the exports, because a template is a fact about a
             // volume and an export is a decision about one.
             mgmt::api::fstemplates::adopt_slab_templates(&state).await;
-            // Who may connect, before anything is served (#210): the shared
-            // subsystem admits no host unless the config opens it, and each
-            // host subsystem admits its own hosts.
-            mgmt::nvme_hosts::apply_shared_policy(&state, &nvmeof);
-            mgmt::nvme_hosts::restore(&state).await;
-            mgmt::api::exports::restore_exports(&state).await;
-            mgmt::api::v1::restore_nvme_nsids(&state).await;
-            let reactor_for_nvmeof = reactor.clone();
-            tokio::spawn({
-                let nvmeof = nvmeof.clone();
-                async move {
-                    if let Err(e) = nvmeof.run(&reactor_for_nvmeof).await {
-                        tracing::error!("NVMe-oF target error: {e}");
-                    }
-                }
-            });
+            serve_shared_nvmeof(&state, &reactor, Arc::new(nvmeof)).await;
         }
     }
 
@@ -4964,6 +4935,68 @@ pub(crate) async fn quarantine_flow_sources(
     }
 }
 
+/// Put the shared NVMe-oF target in service: the daemon's, and a stormcos
+/// node's when its config asks for one (#206).
+///
+/// Stored in the AppState so the export API can add namespaces at runtime
+/// instead of parking them until the next restart (#26), and so a boothost
+/// claim can answer with an NVMe/TCP attach. Then who may connect, before
+/// anything is served (#210): the shared subsystem admits no host unless the
+/// config opens it, and each host subsystem admits its own hosts. Then the
+/// exports made through the API in an earlier run: an export is an address
+/// something out there has written down (firmware booting over NVMe/TCP has
+/// the subsystem and namespace in its configuration), so losing the table on
+/// restart stops answering at an address a machine is still dialling.
+#[cfg(feature = "nvmeof")]
+async fn serve_shared_nvmeof(
+    state: &Arc<AppState>,
+    reactor: &Arc<target::reactor::ReactorPool>,
+    nvmeof: Arc<target::nvmeof::NvmeofTarget>,
+) {
+    *state.nvmeof_target.write().await = Some(nvmeof.clone());
+    mgmt::nvme_hosts::apply_shared_policy(state, &nvmeof);
+    mgmt::nvme_hosts::restore(state).await;
+    mgmt::api::exports::restore_exports(state).await;
+    mgmt::api::v1::restore_nvme_nsids(state).await;
+    let reactor = reactor.clone();
+    tokio::spawn(async move {
+        if let Err(e) = nvmeof.run(&reactor).await {
+            tracing::error!("NVMe-oF target error: {e}");
+        }
+    });
+}
+
+/// The shared NVMe-oF target an adopting engine serves when its config has
+/// an `[nvmeof]` section (#206): a stormcos node that is also forge (a
+/// bastion, stormcos#90) exports goldens and host clones and answers boot
+/// claims with something to attach. A node whose config has no `[nvmeof]`
+/// opens no NVMe/TCP port, as before. No raw drive namespaces: the slab is
+/// the engine's pool, served only through volume exports.
+#[cfg(feature = "nvmeof")]
+fn adopted_nvmeof_target(config: &mgmt::config::StormBlockConfig) -> anyhow::Result<Option<target::nvmeof::NvmeofTarget>> {
+    let Some(section) = config.nvmeof.as_ref() else { return Ok(None) };
+    let listen_addr: std::net::SocketAddr = section
+        .listen_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("[nvmeof] listen_addr {:?}: {e}", section.listen_addr))?;
+    if section.export_drives {
+        tracing::info!(
+            "NVMe-oF: [nvmeof] export_drives is ignored here — an adopting engine serves volumes, \
+             never its slab's drive"
+        );
+    }
+    let advertised_addr = config
+        .management
+        .advertised_host()
+        .and_then(|h| format!("{h}:{}", listen_addr.port()).parse().ok());
+    Ok(Some(target::nvmeof::NvmeofTarget::new(target::nvmeof::NvmeofConfig {
+        listen_addr,
+        nqn: section.nqn.clone(),
+        advertised_addr,
+        ..Default::default()
+    })))
+}
+
 /// The longest a flow-over waits between two moves for foreground I/O
 /// (#269): a move is a slot read from the appliance and a write and read back
 /// on the local disk, tens of milliseconds on a spinning one.
@@ -5586,6 +5619,22 @@ async fn handle_adopt_ublk(
         // reported "0 of 5 blank size(s) sealed", and the difference was
         // which of the two ways of becoming this node's engine it had taken.
         mgmt::api::fstemplates::adopt_slab_templates(&state).await;
+        // Forge mode (#206): the shared NVMe/TCP target, when the config
+        // asks for one. Before `/serve/v1`, as in the daemon.
+        #[cfg(feature = "nvmeof")]
+        match adopted_nvmeof_target(&config) {
+            Ok(Some(nvmeof)) => {
+                if let Some(n) = config.nvmeof.as_ref() {
+                    println!("  NVMe-oF target on {} ({}), from [nvmeof] in {config_path}", n.listen_addr, n.nqn);
+                }
+                serve_shared_nvmeof(&state, &reactor, Arc::new(nvmeof)).await;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                println!("  NVMe-oF target not started: {e}");
+                tracing::error!("NVMe-oF target not started: {e}");
+            }
+        }
         start_serving(&config, &state, "0.0.0.0:3260", "0.0.0.0:4420", &reactor).await;
 
         // Finish the flow-over the boot started.
