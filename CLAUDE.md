@@ -172,6 +172,30 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### ublk serves one request at a time: QD1 on a spinning disk (2026-10-03, #264, P1) — IN PROGRESS
+
+#264 (server3, 7200 rpm disk): pod `sandbox` 265–621 ms, first pod 2.3 s,
+vs 72–84 ms on SSD. The issue reads it as a clone + attach + journal sync per
+pod. **Not so, by reading:** rustkube-node's `sandbox` step is stormpump
+`SandboxAcquire` + Cilium CNI ADD + status (`pod_manager.rs` start_pod); a
+busybox pod's root is the boot-mounted golden `/p/busybox`, so a pod start
+makes no stormblock clone or attach at all. What is stormblock's: every
+volume the node runs on (cni-bin, kubelet-data, pod-logs, fastetcd-data…) is
+a ublk device, and `queue_worker` (`drive/ublk.rs`) handles each request with
+`block_on` before taking the next: one queue, depth 128 advertised, **QD1
+served**. Every FLUSH (a drive-cache flush, tens of ms on an HDD) stalls every
+read and write on that volume behind it; cold reads (the first pod exec'ing
+cilium-cni from /opt/cni/bin) go one at a time.
+- [ ] queue worker: every request runs as a task; completions return through
+      an eventfd armed in the queue's ring; the tag's buffer moves with it
+- [ ] flush group commit on a device: a flush waits for one in flight, then
+      one device flush covers every caller who asked before it began
+- [ ] QEMU check on dev (`ci-ublk-qd-verify.sh`): engine as root in a guest,
+      a ublk volume on a virtio disk; parallel reads and fsync latency under
+      reads, before (env switch) and after
+- [ ] docs, CHANGELOG; comment on #264 (premise, what changed, numbers);
+      file rustkube-node: split `sandbox` into acquire / CNI ADD / status
+
 ### Install = wipe at boot (2026-10-02, #261 reopened, P0) — DONE
 
 Owner: "We should not be updating at boot time like that, it should be a
