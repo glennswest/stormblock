@@ -80,7 +80,7 @@ cat > "$I/init" <<'EOF'
 export PATH=/bin
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
 mount -t tmpfs run /run; mount -t tmpfs tmp /tmp
-for m in $(cat /lib/mods/order); do insmod /lib/mods/$m 2>/dev/null; done
+for m in $(cat /lib/mods/order); do insmod /lib/mods/$m 2>&1 | sed "s/^/LOG insmod $m: /"; done
 ip link set lo up
 r() { echo "RESULT $1 $2"; }
 echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
@@ -95,13 +95,20 @@ run() {
     mode=$1; disk=$2; port=$3
     S=$(cat /sys/block/$disk/size)
     dmsetup create --noudevsync slow$disk --table "0 $S delay /dev/$disk 0 8 /dev/$disk 0 8 /dev/$disk 0 20" \
-        || { r $mode-dm FAIL; return; }
+        > /tmp/dm.out 2>&1 || { r $mode-dm "FAIL ($(cat /tmp/dm.out))"; return; }
+    sed 's/^/LOG dmsetup: /' /tmp/dm.out
     # No udev here, so no /dev/mapper node: devtmpfs names it dm-N.
     slow=
     for d in /sys/block/dm-*; do
         [ "$(cat $d/dm/name)" = slow$disk ] && slow=/dev/$(basename $d)
     done
-    [ -b "$slow" ] || { r $mode-dm "FAIL (no node for slow$disk)"; return; }
+    if [ ! -b "$slow" ]; then
+        r $mode-dm "FAIL (no node for slow$disk)"
+        echo "LOG sys/block: $(ls /sys/block)"; echo "LOG dev/mapper: $(ls /dev/mapper 2>&1)"
+        echo "LOG modules: $(cut -d' ' -f1 /proc/modules | tr '\n' ' ')"
+        dmsetup ls 2>&1 | sed 's/^/LOG dmsetup ls: /'; dmesg | tail -8 | sed 's/^/LOG /'
+        return
+    fi
     mkdir -p /run/sb$disk
     cat > /run/sb$disk.toml <<EOT
 [management]
