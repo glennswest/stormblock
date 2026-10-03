@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A mounted image clone is deleted under its containers (2026-10-03, #267, P0) — IN PROGRESS
+### A mounted image clone is deleted under its containers (2026-10-03, #267, P0) — DONE
 
 pvetest1 11.73 (engine 953cba6): a running container's executable changes
 on its image clone and the process SIGSEGVs, 19–60 min into stormcos_qa's
@@ -187,15 +187,21 @@ turbomode load test. Not a CoW miscount — by reading all three components:
    slots are freed and reused by the new PVCs
 Only the API's DELETE asked `what_is_serving`; ~20 internal paths call
 `VolumeManager::delete_volume` directly.
-- [ ] `ServeHolds` shared by the volume manager and the ublk export manager:
+- [x] `ServeHolds` shared by the volume manager and the ublk export manager:
       a ublk device (created or adopted) holds its volume; `delete_volume`
-      refuses a held volume (`VolumeError::InUse`) — every path at once
-- [ ] reconciler: an ephemeral volume whose delete is refused keeps its
+      refuses a held volume (`VolumeError::InUse`) — every path at once;
+      DELETE answers 409 (18ddf69)
+- [x] reconciler: an ephemeral volume whose delete is refused keeps its
       withdrawn row and is deleted on a later pass, once detached
-- [ ] tests: delete refused while held, allowed after release; the serve
-      GC keeps the row and deletes after detach; docs, CHANGELOG
-- [ ] file rustkube-node (bind the pulled clone), sbregistry (reap of a
-      Claimed clone the node has attached)
+- [x] tests: `integration_serve_in_use` (2), ublk_export and holds units;
+      full nextest on dev: 867/867, `--features cluster` checks;
+      `ci-ublk-qd-verify.sh` on a real kernel in QEMU: attach over ublk,
+      ephemeral export withdrawn → volume kept with its data, DELETE 409,
+      deleted ~3 s after detach. Docs (README attachments), CHANGELOG
+- [x] filed rustkube-node#143 (bind the pulled clone), stormblock-registry#63
+      (ask `in_use` before reaping a Claimed clone)
+- Not on metal: needs a stormcos release with this engine; then
+  stormcos_qa's turbomode run (stormcos_qa#26) again
 
 ### Health reports the flow-over still running (2026-10-03, #260) — DONE
 
