@@ -741,9 +741,13 @@ async fn delete_volume(
     }
 
     let mut vm = ctx.state.volume_manager.lock().await;
-    vm.delete_volume(VolumeId(id))
-        .await
-        .map_err(|e| MkError::not_found(format!("deleting volume {id}: {e}")))?;
+    vm.delete_volume(VolumeId(id)).await.map_err(|e| match e {
+        // Even with force: the node has it as a device (#267).
+        crate::volume::thin::VolumeError::InUse { .. } => {
+            MkError::conflict(format!("deleting volume {id}: {e}"))
+        }
+        e => MkError::not_found(format!("deleting volume {id}: {e}")),
+    })?;
     drop(vm);
 
     // The volume is gone, so any export naming it must go too. Leaving the

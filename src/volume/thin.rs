@@ -116,6 +116,9 @@ pub enum VolumeError {
     /// The volume's access is read-only right now. Unlike sealing this is a
     /// setting, and an operator can put it back.
     ReadOnly(VolumeId),
+    /// Something serves the volume as a device right now; it is not deleted
+    /// under it (#267).
+    InUse { id: VolumeId, by: Vec<String> },
 }
 
 impl fmt::Display for VolumeError {
@@ -149,6 +152,11 @@ impl fmt::Display for VolumeError {
             VolumeError::ReadOnly(id) => write!(
                 f,
                 "volume {id} is read-only: set its access to rw to write to it"
+            ),
+            VolumeError::InUse { id, by } => write!(
+                f,
+                "volume {id} is in use by {}: detach it first",
+                by.join(", ")
             ),
         }
     }

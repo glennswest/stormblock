@@ -83,6 +83,9 @@ struct Export {
     /// `join` cannot be given a deadline, and the one thing a stop must not do
     /// is wait forever (#105).
     done: Arc<std::sync::atomic::AtomicBool>,
+    /// The hold this device keeps on its volume (#267): the engine's id of
+    /// the volume behind it, and the words it was taken with.
+    held: Option<(uuid::Uuid, String)>,
 }
 
 /// Teardowns in flight: what was signalled, and how to wait for it.
@@ -178,6 +181,9 @@ pub struct UblkExportManager {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     next_id: u32,
     available: bool,
+    /// Shared with the volume manager: a volume served here is held, and is
+    /// not deleted under its device (#267).
+    holds: crate::volume::holds::ServeHolds,
 }
 
 impl Default for UblkExportManager {
@@ -188,7 +194,26 @@ impl Default for UblkExportManager {
 
 impl UblkExportManager {
     pub fn new() -> Self {
-        UblkExportManager { exports: HashMap::new(), adopted: HashMap::new(), next_id: 0, available: ublk_available() }
+        UblkExportManager {
+            exports: HashMap::new(),
+            adopted: HashMap::new(),
+            next_id: 0,
+            available: ublk_available(),
+            holds: Default::default(),
+        }
+    }
+
+    /// Hold every volume served here in the volume manager's `holds`, so it
+    /// refuses to delete one under its device (#267).
+    pub fn with_holds(mut self, holds: crate::volume::holds::ServeHolds) -> Self {
+        self.holds = holds;
+        self
+    }
+
+    fn release(&self, export: &Export) {
+        if let Some((volume, what)) = &export.held {
+            self.holds.release(*volume, what);
+        }
     }
 
     /// Whether ublk exports can actually be created on this host.
@@ -215,6 +240,11 @@ impl UblkExportManager {
 
     /// Record a boot device an adopting engine is serving (#138).
     pub fn record_adopted(&mut self, volume_id: &str, device_path: String) {
+        // Served for as long as this engine runs: the root, the mounted
+        // volumes. Never released.
+        if let Ok(v) = uuid::Uuid::parse_str(volume_id) {
+            self.holds.hold(v, format!("ublk device {device_path} (adopted)"));
+        }
         self.adopted.insert(volume_id.to_string(), device_path);
     }
 
@@ -266,11 +296,12 @@ impl UblkExportManager {
     /// Signals, and returns; the caller waits with a deadline of its own.
     #[cfg(target_os = "linux")]
     pub fn shutdown_all(&mut self) -> ShutdownWait {
-        let devices = self
-            .exports
-            .drain()
-            .map(|(_volume, export)| {
+        let exports: Vec<Export> = self.exports.drain().map(|(_, e)| e).collect();
+        let devices = exports
+            .into_iter()
+            .map(|export| {
                 let _ = export.shutdown.send(true);
+                self.release(&export);
                 (export.device_path, export.done)
             })
             .collect();
@@ -279,13 +310,17 @@ impl UblkExportManager {
 
     #[cfg(not(target_os = "linux"))]
     pub fn shutdown_all(&mut self) -> ShutdownWait {
-        self.exports.clear();
+        let exports: Vec<Export> = self.exports.drain().map(|(_, e)| e).collect();
+        for e in &exports {
+            self.release(e);
+        }
         ShutdownWait::none()
     }
 
     /// Tear down the export for `volume_id`, if any (detach / delete).
     pub fn remove(&mut self, volume_id: &str) {
         if let Some(_e) = self.exports.remove(volume_id) {
+            self.release(&_e);
             #[cfg(target_os = "linux")]
             {
                 // Best effort: the server removes the kernel device on exit.
@@ -321,6 +356,9 @@ impl UblkExportManager {
         // the export took that number". A list here answers it in the log the
         // next time, at the cost of one readdir per attach.
         let before = existing_devices();
+        // The engine's id of the volume behind the device: the key is the
+        // /v1 id on that surface, which is not always the engine's.
+        let volume_uuid = device.id().uuid;
         let seq = self.next_id;
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         let server = Arc::new(UblkServer::new(device));
@@ -428,9 +466,17 @@ impl UblkExportManager {
         // Only a counter for thread names now — the identity comes from the
         // kernel.
         self.next_id += 1;
+        let what = format!("ublk device {device_path}");
+        self.holds.hold(volume_uuid, what.clone());
         self.exports.insert(
             volume_id.to_string(),
-            Export { device_path: device_path.clone(), shutdown, server: Some(server), done },
+            Export {
+                device_path: device_path.clone(),
+                shutdown,
+                server: Some(server),
+                done,
+                held: Some((volume_uuid, what)),
+            },
         );
         tracing::info!(
             volume = volume_id,
@@ -508,6 +554,12 @@ fn ublk_available() -> bool {
 #[cfg(test)]
 impl UblkExportManager {
     pub(crate) fn insert_fake(&mut self, volume_id: &str, path: &str) {
+        // Held like a real one when the key is an engine volume id.
+        let held = uuid::Uuid::parse_str(volume_id).ok().map(|v| {
+            let what = format!("ublk device {path}");
+            self.holds.hold(v, what.clone());
+            (v, what)
+        });
         self.exports.insert(
             volume_id.to_string(),
             Export {
@@ -517,6 +569,7 @@ impl UblkExportManager {
                 #[cfg(target_os = "linux")]
                 server: None,
                 done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                held,
             },
         );
     }
@@ -609,9 +662,32 @@ mod tests {
         assert!(wait.is_empty());
     }
 
+    /// A device holds its volume in the volume manager's holds from the
+    /// moment it serves it until it is torn down, and an adopted boot device
+    /// for as long as the engine runs (#267).
+    #[test]
+    fn a_served_volume_is_held_until_its_device_goes() {
+        let holds = crate::volume::holds::ServeHolds::default();
+        let mut mgr = UblkExportManager::new().with_holds(holds.clone());
+        let (a, b, root) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        mgr.insert_fake(&a.to_string(), "/dev/ublkb7");
+        mgr.insert_fake(&b.to_string(), "/dev/ublkb8");
+        mgr.record_adopted(&root.to_string(), "/dev/ublkb0".to_string());
+        assert_eq!(holds.held_by(a), vec!["ublk device /dev/ublkb7".to_string()]);
+        assert_eq!(holds.held_by(root), vec!["ublk device /dev/ublkb0 (adopted)".to_string()]);
+
+        mgr.remove(&a.to_string());
+        assert!(holds.held_by(a).is_empty(), "detached: released");
+        assert!(!holds.held_by(b).is_empty());
+
+        let _ = mgr.shutdown_all();
+        assert!(holds.held_by(b).is_empty(), "a stop releases what it tore down");
+        assert!(!holds.held_by(root).is_empty(), "the adopted root is held for the engine's life");
+    }
+
     #[test]
     fn unavailable_host_declines_so_caller_uses_nvme_tcp() {
-        let mut mgr = UblkExportManager { exports: HashMap::new(), adopted: HashMap::new(), next_id: 0, available: false };
+        let mut mgr = UblkExportManager { available: false, ..UblkExportManager::new() };
         // No panic, just None — nvme-tcp fallback. (device is never touched.)
         assert!(mgr.device_path("vol-x").is_none());
     }

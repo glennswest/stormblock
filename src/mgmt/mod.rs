@@ -374,6 +374,7 @@ impl AppState {
                 Err(_) => tracing::warn!("slab registry busy at startup; node topology labels not applied"),
             }
         }
+        let holds = volume_manager.holds();
         let volume_manager = Arc::new(tokio::sync::Mutex::new(volume_manager));
         let rebuilds = crate::rebuild::Rebuilds::new(volume_manager.clone(), &config.rebuild);
         AppState {
@@ -414,7 +415,7 @@ impl AppState {
                 // name: something would resolve it once and never again.
                 None => crate::volume::SynonymStore::in_memory(),
             }),
-            ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new()),
+            ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new().with_holds(holds)),
             moves: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::moves::load(std::path::Path::new(dir)),
                 None => HashMap::new(),

@@ -467,6 +467,25 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
                     ctx.status.bump(&ctx.status.volumes_gc);
                     tracing::info!("gc: ephemeral volume {} deleted", row.volume_id);
                 }
+                // Withdrawn from the network, but the node itself still has
+                // it as a device (#267: an image clone attached over ublk and
+                // mounted under running containers, whose portal never saw a
+                // session). The row stays, withdrawn, and a later pass
+                // deletes the volume once it is detached — dropping the row
+                // here would leak it, deleting it took the containers' files.
+                Err(crate::volume::thin::VolumeError::InUse { by, .. }) => {
+                    drop(vm);
+                    if ctx.blocked_reported.lock().await.insert(row.export_id.clone()) {
+                        tracing::warn!(
+                            "gc: ephemeral volume {} of withdrawn export {} is still in use by {} — \
+                             kept until it is detached",
+                            row.volume_id,
+                            row.export_id,
+                            by.join(", ")
+                        );
+                    }
+                    continue;
+                }
                 Err(e) => tracing::warn!("gc: deleting volume {}: {e}", row.volume_id),
             }
         }

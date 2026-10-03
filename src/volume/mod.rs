@@ -20,6 +20,7 @@ pub mod stripelog;
 #[cfg(feature = "stormfs-data")]
 pub mod versioned;
 pub mod gc;
+pub mod holds;
 pub mod pressure;
 pub mod relocate;
 pub mod synonym;
@@ -195,6 +196,9 @@ pub struct VolumeManager {
     /// flow-over from a fresh clone (#171) instead of finding volumes missing
     /// and re-installing.
     flowing_into: std::sync::Mutex<Option<(SlabId, Vec<SlabId>)>>,
+    /// What serves each volume as a device right now (#267): a held volume
+    /// is not deleted, whichever path asks.
+    holds: holds::ServeHolds,
 }
 
 impl VolumeManager {
@@ -219,6 +223,7 @@ impl VolumeManager {
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(None),
+            holds: Default::default(),
         }
     }
 
@@ -241,7 +246,14 @@ impl VolumeManager {
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(None),
+            holds: Default::default(),
         })
+    }
+
+    /// The holds that keep a served volume from being deleted (#267). Give
+    /// a clone to whatever serves volumes as devices.
+    pub fn holds(&self) -> holds::ServeHolds {
+        self.holds.clone()
     }
 
     // ── Lineage, sealing, filesystem identity (#76) ────────────────────
@@ -1380,6 +1392,13 @@ impl VolumeManager {
 
     /// Delete a volume, freeing all slab slots.
     pub async fn delete_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
+        // Never under something serving it (#267): a ublk device mounted
+        // under running containers read zeros and other volumes' data once
+        // its volume was deleted and its slots reused.
+        let by = self.holds.held_by(id.0);
+        if !by.is_empty() {
+            return Err(VolumeError::InUse { id, by });
+        }
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
         self.parents.remove(&id);

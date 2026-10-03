@@ -1615,6 +1615,9 @@ async fn delete_volume(
             stop_volume_subsystem(&state, uuid).await;
             axum::http::StatusCode::NO_CONTENT.into_response()
         }
+        Err(e @ crate::volume::thin::VolumeError::InUse { .. }) => {
+            ApiError::conflict(format!("cannot delete volume {uuid}: {e}"))
+        }
         Err(e) => ApiError::not_found(format!("volume {uuid}: {e}")),
     }
 }
