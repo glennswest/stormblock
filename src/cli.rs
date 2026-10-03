@@ -507,6 +507,30 @@ enum SlabAction {
         /// The image: a device path, a file or an nvme-tcp:// URI
         image: String,
     },
+    /// Copy a file out of a volume's filesystem, read-only, with nothing
+    /// attached (#262)
+    ///
+    /// Opens the slabs, finds the volume by name or id, and reads `path` out
+    /// of its filesystem in userspace (ext4). This is how the initramfs reads
+    /// the root volume's `/etc/stormblock/mounts` before anything is exported:
+    /// a mount list on the kernel command line does not fit in its 2048 bytes.
+    ///
+    /// Exit 0: written to `--out`. Exit 1: the volume has no such file, or it
+    /// cannot be read as a file. Exit 2: the slabs or the volume cannot be read.
+    Cat {
+        /// A slab: a device, a partition, a disk whose partitions are slabs,
+        /// a file or an nvme-tcp:// URI. Repeat for several.
+        #[arg(long = "slab", required = true)]
+        slabs: Vec<String>,
+        /// The volume, by name or id
+        #[arg(long)]
+        volume: String,
+        /// Where the file goes (stdout carries the engine's own messages)
+        #[arg(long)]
+        out: String,
+        /// The file's path in the volume's filesystem
+        path: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -1827,6 +1851,21 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             println!("  free: {}", crate::mgmt::config::human_size(
                 slab.free_slots() * slab.slot_size()));
         }
+        SlabAction::Cat { slabs, volume, out, path } => {
+            match volume_file_on_slabs(&slabs, &volume, &path).await {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(&out, &bytes) {
+                        println!("cannot write {out}: {e}");
+                        std::process::exit(2);
+                    }
+                    println!("{path} of {volume}: {} byte(s) to {out}", bytes.len());
+                }
+                Err((code, why)) => {
+                    println!("{why}");
+                    std::process::exit(code);
+                }
+            }
+        }
         SlabAction::Holds { local, image } => {
             use crate::image::local::{release_held, ReleaseHeld};
             let open = |p: String| async move {
@@ -2848,6 +2887,20 @@ async fn open_slabs_and_restore(
     meta: Option<&str>,
 ) -> anyhow::Result<VolumeManager> {
     Ok(open_slabs_resuming(slab_paths, meta, false).await?.0)
+}
+
+/// A file out of a volume's filesystem on `slabs`, read-only (#262). The
+/// error carries `slab cat`'s exit code: 1 for the file, 2 for the volume.
+async fn volume_file_on_slabs(slabs: &[String], volume: &str, path: &str) -> Result<Vec<u8>, (i32, String)> {
+    let mgr = open_slabs_resuming(slabs, None, false)
+        .await
+        .map_err(|e| (2, format!("cannot read the slabs: {e}")))?;
+    let id = mgr
+        .find_volume(volume)
+        .await
+        .ok_or_else(|| (2, format!("no volume {volume} on these slabs")))?;
+    let dev = mgr.get_volume(&id).ok_or_else(|| (2, format!("volume {volume} has no handle")))?;
+    crate::fs::files::read_file(&dev, path).await.map_err(|e| (1, format!("{volume}: {e}")))
 }
 
 /// What `open_slabs_resuming` had to fetch from the appliance (#171).
@@ -7574,5 +7627,56 @@ mod forge_mode_tests {
         let mut back = vec![0u8; MIB as usize];
         dev.read(0, &mut back).await.unwrap();
         assert_eq!(back, image, "the clone reads as the release it was claimed from");
+    }
+}
+
+/// `slab cat` (#262): the initramfs reads the root volume's mount list this
+/// way, before anything is exported.
+#[cfg(test)]
+mod slab_cat_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::SlabFormat;
+
+    #[tokio::test]
+    async fn a_file_comes_out_of_a_volume_on_a_slab_with_nothing_attached() {
+        const SLOT: u64 = 64 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system.slab").display().to_string();
+        let list = "# volumes /init mounts\nfastetcd:/p/fastetcd\n\nfastetcd-data:/d/fastetcd\n";
+        {
+            let dev = Arc::new(FileDevice::open_with_capacity(&path, 128 * 1024 * 1024).await.unwrap())
+                as Arc<dyn BlockDevice>;
+            let slab = Slab::format_with(
+                dev,
+                SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System).with_metadata(4 * 1024 * 1024),
+            )
+            .await
+            .unwrap();
+            let id = slab.slab_id();
+            let mut mgr = VolumeManager::new(SLOT);
+            mgr.add_slab(slab).await;
+            mgr.keep_metadata_in_first(&[id]);
+            let root = mgr.create_volume_any("stormpump", 32 * 1024 * 1024).await.unwrap();
+            let h = mgr.get_volume(&root).unwrap();
+            crate::fs::ext4::format(&h, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+            crate::fs::files::write_files(&h, &[crate::fs::files::SeedFile::new("/etc/stormblock/mounts", list)])
+                .await
+                .unwrap();
+            h.flush().await.unwrap();
+            mgr.persist().await;
+        }
+
+        let paths = vec![path];
+        let got = volume_file_on_slabs(&paths, "stormpump", "/etc/stormblock/mounts").await.unwrap();
+        assert_eq!(got, list.as_bytes());
+        match volume_file_on_slabs(&paths, "stormpump", "/etc/stormblock/nothing").await {
+            Err((1, _)) => {}
+            other => panic!("no such file is exit 1: {other:?}"),
+        }
+        match volume_file_on_slabs(&paths, "no-such-volume", "/etc/stormblock/mounts").await {
+            Err((2, _)) => {}
+            other => panic!("no such volume is exit 2: {other:?}"),
+        }
     }
 }
