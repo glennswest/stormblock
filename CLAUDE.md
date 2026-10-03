@@ -172,6 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Forge mode turned on per node, kept by the engine (2026-10-03, #272, P1) — IN PROGRESS
+
+For stormcos#187: one image, the forge role chosen at install, no argv or
+mount change on the stormcos side. Owner's preferred shape (option 1):
+- [ ] `GET/PUT/DELETE /api/v1/forge` (admin for PUT/DELETE): PUT takes the
+      `[nvmeof]` settings, starts the shared target live, keeps them in
+      `<data_dir>/forge.json` (mirrored to `stormblock-state` like the rest
+      of the data dir); DELETE stops accepting and forgets them; GET says
+      what runs and where it came from
+- [ ] `adopt-ublk` (and the daemon with no target of its own) serves
+      `forge.json` at start when `--config` has no `[nvmeof]`
+- [ ] the live `[nvmeof]` is one `AppState` value (policy, claim attach,
+      `/v1` attach, usage read it) instead of `state.config.nvmeof`
+- [ ] a target the command line configured is not the API's to change (409)
+- [ ] tests (PUT → claim attach + connect; restart from forge.json; DELETE;
+      409), docs (README, auth.md), CHANGELOG
+
 ### Forge mode on a stormcos node: adopt-ublk serves NVMe/TCP (2026-10-03, #206, P1) — DONE
 
 A bastion (stormcos#90) is a stormcos node that is also forge: `adopt-ublk`
