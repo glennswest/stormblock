@@ -111,14 +111,15 @@ EOT
     pid=$!
     api() { curl -sf -m 120 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' "$@"; }
     for i in $(seq 1 100); do api http://127.0.0.1:$port/api/v1/health >/dev/null 2>&1 && break; sleep 0.2; done
-    api -X POST http://127.0.0.1:$port/api/v1/slabs \
-        -d "{\"device_path\":\"/dev/mapper/slow$disk\",\"role\":\"data\"}" >/dev/null \
-        || { r $mode-slab FAIL; tail -5 /run/engine-$mode.log; kill $pid; return; }
+    out=$(curl -s -m 120 -w ' HTTP%{http_code}' -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
+        -X POST http://127.0.0.1:$port/api/v1/slabs \
+        -d "{\"device_path\":\"/dev/mapper/slow$disk\",\"role\":\"data\"}")
+    case "$out" in *HTTP2??) ;; *) r $mode-slab "FAIL ($out)"; sed 's/^/LOG /' /run/engine-$mode.log | tail -8; kill $pid; return ;; esac
     id=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d '{"name":"qd","size":"256M"}' \
         | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     dev=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$id/attach -d '{"transport":"ublk"}' \
         | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
-    [ -b "$dev" ] || { r $mode-attach "FAIL ($id '$dev')"; tail -5 /run/engine-$mode.log; kill $pid; return; }
+    [ -b "$dev" ] || { r $mode-attach "FAIL ($id '$dev')"; sed 's/^/LOG /' /run/engine-$mode.log | tail -8; kill $pid; return; }
     echo "GUEST $mode: volume $id on $dev over /dev/mapper/slow$disk"
 
     # Allocate the first 64 MiB so reads reach the disk.
@@ -173,7 +174,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/a.img",if=virtio,format=raw \
     -drive file="$W/b.img",if=virtio,format=raw > "$W/guest.log" 2>&1
-tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME)|ublk|ERROR|panick' | tail -40
+tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG)|ublk|ERROR|panick' | tail -60
 
 t() { tr -d '\r' < "$W/guest.log" | awk -v m="$1" -v w="$2" '$1=="TIME" && $2==m && $3==w {print $4}'; }
 SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
