@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The node API stalls during flow-over (2026-10-03, #269, P0) — IN PROGRESS
+### The node API stalls during flow-over (2026-10-03, #269, P0) — DONE
 
 11.78 on C2NR0Q2 (engine 507750d), the first real install onto its 2 TB
 spinning sda: while the flow-over moves 7528 extents from forge, template
@@ -183,15 +183,20 @@ registry write locks**; every volume's I/O lookup and every API operation
 waits behind each copy. The slot fence (#239) already keeps I/O off the
 slot being moved, so the global locks are needed only to allocate and to
 publish.
-- [ ] `flow_system_half`: copy with only the fence held (registry write to
-      allocate, then no locks for read/write/read-back, then GEM+registry
-      write to publish, re-checked: old slot still mapped, carry its slab
-      ref count). The per-extent persist (map, then owed slots) unchanged
-- [ ] foreground first: the flow-over pauses between extents while volume
-      I/O has run since the last one (paced by the last move's time, capped)
-- [ ] item 3 is #260 (`flow_over_remaining`, in 507750d)
-- [ ] tests: a move stuck in its source read leaves the GEM, the registry
-      and a clone + persist free; pacing; flow-over tests still pass; docs
+- [x] `flow_system_half` → `PlacementEngine::migrate_leg_unlocked`: copy
+      with only the fence held (registry write to allocate, reserved; no
+      locks for read/write/read-back; GEM+registry write to publish,
+      re-checked, slab share count carried). Per-extent persist unchanged
+      (bc825e7)
+- [x] foreground first: the flow-over waits between moves (the last move's
+      time, ≤ 250 ms) when volume I/O has run since (`thin::FOREGROUND_IO`)
+- [x] item 3 is #260 (`flow_over_remaining`, already in 507750d)
+- [x] test `a_flow_over_copy_holds_no_lock_the_node_needs`; full nextest on
+      dev: 868/868 (the #239 live-clone, cut-short and power-cut flow-over
+      tests included); `--features cluster` checks. Docs (README, durability
+      rule 10), CHANGELOG
+- Not on metal: the Dell's next install with this engine — claims and VMs
+  during the flow-over, `flow_over_remaining` falling to 0
 
 ### The Dell never installs: a guessed name takes no slab drive (2026-10-03, #268, P0) — DONE here, proof on metal pending
 
