@@ -1418,8 +1418,10 @@ async fn clone_volume_impl(
             info.label = l.clone();
         }
         let _ = m.set_fs_info_deferred(id, Some(info));
-        m.persist().await;
     }
+    // Detached (#269): the manager is held only to take the records, so the
+    // rest of the API does not wait behind this mint's flushes.
+    crate::volume::VolumeManager::persist_detached(vm).await;
 
     Ok(CloneResult {
         volume_id: id,

@@ -203,6 +203,11 @@ pub struct VolumeManager {
     /// written (#269): two persists may snapshot in one order and finish in
     /// the other, and an older snapshot must never be written over a newer.
     records_written: Arc<tokio::sync::Mutex<u64>>,
+    /// What each metadata slab's copy last held (a hash of the encoded
+    /// records), so an unchanged copy is not written and flushed again
+    /// (#269): the flow-over persists after every extent, and most of its
+    /// persists change one slab's records, not both.
+    records_on_slab: Arc<std::sync::Mutex<HashMap<SlabId, u64>>>,
 }
 
 /// What a persist writes: taken from the manager in memory, written with no
@@ -240,6 +245,7 @@ impl VolumeManager {
             flowing_into: std::sync::Mutex::new(None),
             holds: Default::default(),
             records_written: Default::default(),
+            records_on_slab: Default::default(),
         }
     }
 
@@ -264,6 +270,7 @@ impl VolumeManager {
             flowing_into: std::sync::Mutex::new(None),
             holds: Default::default(),
             records_written: Default::default(),
+            records_on_slab: Default::default(),
         })
     }
 
@@ -1773,11 +1780,15 @@ impl VolumeManager {
     }
 
     pub async fn persist(&self) {
+        // A persist made for the API or a consumer is foreground work: a
+        // flow-over gives the disk back while there is any (#269). Its own
+        // persists are `persist_detached` and do not count.
+        crate::volume::thin::FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let result = match self.records(generation).await {
             None => Ok(()),
             Some(records) => {
-                Self::sync_then_write(&self.registry, &self.records_written, records).await
+                Self::sync_then_write(&self.registry, &self.records_written, &self.records_on_slab, records).await
             }
         };
         Self::persisted(&self.durability, result);
@@ -1790,14 +1801,20 @@ impl VolumeManager {
     /// after every extent it moves, and on server3's spinning disk each
     /// persist was several flushes of seconds each.
     pub async fn persist_detached(vm: &tokio::sync::Mutex<VolumeManager>) {
-        let (registry, written, durability, records) = {
+        let (registry, written, on_slab, durability, records) = {
             let g = vm.lock().await;
             let generation = g.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            (g.registry.clone(), g.records_written.clone(), g.durability.clone(), g.records(generation).await)
+            (
+                g.registry.clone(),
+                g.records_written.clone(),
+                g.records_on_slab.clone(),
+                g.durability.clone(),
+                g.records(generation).await,
+            )
         };
         let result = match records {
             None => Ok(()),
-            Some(r) => Self::sync_then_write(&registry, &written, r).await,
+            Some(r) => Self::sync_then_write(&registry, &written, &on_slab, r).await,
         };
         Self::persisted(&durability, result);
     }
@@ -1946,6 +1963,7 @@ impl VolumeManager {
     async fn sync_then_write(
         registry: &Arc<tokio::sync::RwLock<SlabRegistry>>,
         written: &tokio::sync::Mutex<u64>,
+        on_slab: &std::sync::Mutex<HashMap<SlabId, u64>>,
         records: Records,
     ) -> anyhow::Result<()> {
         let ids: Vec<SlabId> = registry.read().await.iter().map(|(id, _)| *id).collect();
@@ -1975,13 +1993,27 @@ impl VolumeManager {
                     continue;
                 }
             };
+            let hash = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut h);
+                h.finish()
+            };
+            if on_slab.lock().unwrap().get(&slab_id) == Some(&hash) {
+                // This slab's copy already says exactly this.
+                continue;
+            }
             let writer = registry.read().await.get(&slab_id).map(|s| s.metadata_writer());
             match writer {
-                Some(w) => {
-                    if let Err(e) = w.write(&bytes).await {
+                Some(w) => match w.write(&bytes).await {
+                    Ok(()) => {
+                        on_slab.lock().unwrap().insert(slab_id, hash);
+                    }
+                    Err(e) => {
+                        on_slab.lock().unwrap().remove(&slab_id);
                         failed.push(format!("slab {}: {e}", slab_id.0));
                     }
-                }
+                },
                 None => failed.push(format!("slab {} is not attached", slab_id.0)),
             }
         }
@@ -2195,7 +2227,9 @@ impl VolumeManager {
         let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         match self.records(generation).await {
             None => Ok(()),
-            Some(records) => Self::sync_then_write(&self.registry, &self.records_written, records).await,
+            Some(records) => {
+                Self::sync_then_write(&self.registry, &self.records_written, &self.records_on_slab, records).await
+            }
         }
     }
 
