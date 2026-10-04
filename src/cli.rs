@@ -7681,3 +7681,296 @@ mod slab_cat_tests {
         }
     }
 }
+
+/// #269 on server3: the node's API during a flow-over onto one spinning disk.
+///
+/// A model of the node, run through the code `adopt-ublk` runs: the
+/// appliance's slab (slow: forge reads at ~2.5 MB/s), the local system and
+/// data slabs on one 7200 rpm disk (one actuator, a seek per I/O, slow cache
+/// flushes), the node's own I/O (a volume written and fsync'd, a golden
+/// read), the flow-over `spawn_flow_over` starts, and the API through the
+/// real router: listing volumes and cloning a PVC template, timed. A request
+/// still waiting at 5 s prints where everything is parked (task dump, locks).
+///
+/// Ignored in the routine check (minutes, and it measures): run it with
+/// `cargo nextest run --run-ignored only server3_api_during_flow_over`.
+#[cfg(all(test, target_os = "linux"))]
+mod flow_over_api_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::SlabFormat;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// One spinning disk: every I/O of every partition on it goes through
+    /// one actuator.
+    struct Disk {
+        actuator: tokio::sync::Mutex<()>,
+        on: AtomicBool,
+        seek: Duration,
+        bytes_per_sec: f64,
+        flush: Duration,
+    }
+
+    impl Disk {
+        async fn io(&self, len: usize) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+            if !self.on.load(Ordering::Relaxed) {
+                return None;
+            }
+            let g = self.actuator.lock().await;
+            tokio::time::sleep(self.seek + Duration::from_secs_f64(len as f64 / self.bytes_per_sec)).await;
+            Some(g)
+        }
+    }
+
+    struct OnDisk(Arc<dyn BlockDevice>, Arc<Disk>);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for OnDisk {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.0.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.0.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.0.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.0.optimal_io_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.0.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            let _g = self.1.io(buf.len()).await;
+            self.0.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            let _g = self.1.io(buf.len()).await;
+            self.0.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            if self.1.on.load(Ordering::Relaxed) {
+                let _g = self.1.actuator.lock().await;
+                tokio::time::sleep(self.1.flush).await;
+            }
+            self.0.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.0.discard(offset, len).await
+        }
+        fn discard_granularity(&self) -> u32 {
+            self.0.discard_granularity()
+        }
+        fn smart_status(&self) -> crate::drive::DriveResult<crate::drive::SmartData> {
+            self.0.smart_status()
+        }
+    }
+
+    fn pct(v: &mut Vec<f64>, p: f64) -> f64 {
+        if v.is_empty() {
+            return 0.0;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[((v.len() as f64 - 1.0) * p).round() as usize]
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn server3_api_during_flow_over() {
+        const SLOT: u64 = 1024 * 1024;
+        const MIB: u64 = 1024 * 1024;
+        let run_for = Duration::from_secs(
+            std::env::var("FLOW_API_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(90),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        // The node's one disk, and forge's (spinning too, ~2.5 MB/s to a node).
+        let local = Arc::new(Disk {
+            actuator: tokio::sync::Mutex::new(()),
+            on: AtomicBool::new(false),
+            seek: Duration::from_millis(8),
+            bytes_per_sec: 150e6,
+            flush: Duration::from_millis(25),
+        });
+        let forge = Arc::new(Disk {
+            actuator: tokio::sync::Mutex::new(()),
+            on: AtomicBool::new(false),
+            seek: Duration::from_millis(4),
+            bytes_per_sec: 2.5e6,
+            flush: Duration::from_millis(10),
+        });
+        let open = |name: &str, size: u64, disk: Arc<Disk>| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                let f = Arc::new(FileDevice::open_with_capacity(&path, size).await.unwrap()) as Arc<dyn BlockDevice>;
+                Arc::new(OnDisk(f, disk)) as Arc<dyn BlockDevice>
+            }
+        };
+        let fmt = |role: SlabRole| SlabFormat::new(SLOT, StorageTier::Hot).with_role(role).with_metadata(8 * MIB);
+
+        let mut mgr = VolumeManager::new(SLOT);
+        // The appliance clone's system slab: goldens, still to move.
+        let src = Slab::format_with(open("forge-system.slab", 1024 * MIB, forge.clone()).await, fmt(SlabRole::System))
+            .await
+            .unwrap();
+        let src_id = src.slab_id();
+        mgr.add_slab(src).await;
+        let mut goldens = Vec::new();
+        for i in 0..6 {
+            let v = mgr.create_volume_any(&format!("golden-{i}"), 64 * MIB, ).await.unwrap();
+            let h = mgr.get_volume(&v).unwrap();
+            h.write(0, &vec![(i as u8) + 1; (64 * MIB) as usize]).await.unwrap();
+            h.flush().await.unwrap();
+            mgr.seal_volume(v, None).await.unwrap();
+            goldens.push(v);
+        }
+        // The node's own disk: system slab (where the goldens go) and data.
+        let sys = Slab::format_with(open("sda-system.slab", 1024 * MIB, local.clone()).await, fmt(SlabRole::System))
+            .await
+            .unwrap();
+        let sys_id = sys.slab_id();
+        mgr.add_slab(sys).await;
+        let data = Slab::format_with(open("sda-data.slab", 1024 * MIB, local.clone()).await, fmt(SlabRole::Data))
+            .await
+            .unwrap();
+        let data_id = data.slab_id();
+        mgr.add_slab(data).await;
+        mgr.keep_metadata_in_first(&[data_id, sys_id]);
+
+        let mut config = StormBlockConfig::default();
+        config.management.data_dir = Some(dir.path().join("engine").display().to_string());
+        std::fs::create_dir_all(dir.path().join("engine")).unwrap();
+        let (reg, gem) = (mgr.registry().clone(), mgr.gem().clone());
+        let state = Arc::new(AppState::new(config, mgr, reg, gem));
+        crate::mgmt::debug::start(state.clone());
+
+        // The PVC blank every claim clones, and a volume the node writes.
+        let tpl = crate::fs::template::create(
+            &state.volume_manager,
+            &state.fstemplates,
+            &crate::fs::template::TemplateSpec::new("pvc-ext4j-64m", 64 * MIB),
+        )
+        .await
+        .unwrap();
+        let app = {
+            let mut vm = state.volume_manager.lock().await;
+            let id = vm.create_volume_any("fastetcd-data", 256 * MIB).await.unwrap();
+            vm.get_volume(&id).unwrap()
+        };
+
+        // The flow-over, as adopt-ublk starts it: sources quarantined and
+        // recorded, then moved with a persist after each extent.
+        {
+            let vm = state.volume_manager.lock().await;
+            vm.registry().write().await.set_quarantined(src_id, true);
+            vm.record_flow_over(sys_id, vec![src_id]);
+            vm.persist().await;
+        }
+        local.on.store(true, Ordering::Relaxed);
+        forge.on.store(true, Ordering::Relaxed);
+        let flow = {
+            let st = state.clone();
+            let (gem, reg) = (state.gem.clone(), state.slab_registry.clone());
+            tokio::spawn(async move {
+                let persist = move || {
+                    let st = st.clone();
+                    async move { st.volume_manager.lock().await.persist().await }
+                };
+                super::flow_system_half(&gem, &reg, &[src_id], sys_id, persist, None).await
+            })
+        };
+
+        // The node's own I/O: fsync'd writes (fastetcd), and reads of a golden
+        // (a container's executable).
+        let stop = Arc::new(AtomicBool::new(false));
+        let fg = {
+            let (stop, app) = (stop.clone(), app.clone());
+            tokio::spawn(async move {
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    app.write((n % 64) * 4096, &[n as u8; 4096]).await.unwrap();
+                    app.flush().await.unwrap();
+                    n += 1;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+        };
+        let rd = {
+            let stop = stop.clone();
+            let g = state.volume_manager.lock().await.get_volume(&goldens[0]).unwrap();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = g.read((n * 7919 % 1000) * 65536, &mut buf).await;
+                    n += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+        };
+
+        // The API, as the kubelet asks it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = listener.local_addr().unwrap();
+        let router = crate::mgmt::api::router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let c = reqwest::Client::builder().timeout(Duration::from_secs(120)).build().unwrap();
+        let mut lat: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
+        let mut dumped = 0;
+        let began = Instant::now();
+        let mut i = 0;
+        while began.elapsed() < run_for {
+            for (what, method, url, body) in [
+                ("list", reqwest::Method::GET, format!("http://{api}/api/v1/volumes"), None),
+                (
+                    "clone",
+                    reqwest::Method::POST,
+                    format!("http://{api}/api/v1/fstemplates/{}/clone", tpl.id),
+                    Some(serde_json::json!({"name": format!("pvc-perf-{i}")})),
+                ),
+            ] {
+                let mut req = c.request(method, &url);
+                if let Some(b) = body {
+                    req = req.json(&b);
+                }
+                let t = Instant::now();
+                let send = req.send();
+                tokio::pin!(send);
+                let res = loop {
+                    tokio::select! {
+                        r = &mut send => break r,
+                        _ = tokio::time::sleep(Duration::from_secs(5)), if dumped < 2 && t.elapsed() < Duration::from_secs(6) => {
+                            dumped += 1;
+                            eprintln!("=== {what} waiting 5 s ===\n{}\n{}",
+                                crate::mgmt::debug::locks(&state),
+                                crate::mgmt::debug::task_dump(Duration::from_secs(5)).await);
+                        }
+                    }
+                };
+                let secs = t.elapsed().as_secs_f64();
+                lat.entry(what).or_default().push(secs);
+                match res {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => eprintln!("{what}: {}", r.status()),
+                    Err(e) => eprintln!("{what}: {e}"),
+                }
+            }
+            i += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        let left = state.gem.read().await.slab_extents(src_id).len();
+        flow.abort();
+        fg.abort();
+        rd.abort();
+        let mut worst = 0.0f64;
+        for (what, v) in lat.iter_mut() {
+            let n = v.len();
+            let (p50, p99, max) = (pct(v, 0.5), pct(v, 0.99), pct(v, 1.0));
+            worst = worst.max(p99);
+            eprintln!("{what:>6}: n={n} p50={p50:.3}s p99={p99:.3}s max={max:.3}s");
+        }
+        eprintln!("flow-over: {left} extent(s) still on the appliance after {:.0}s", began.elapsed().as_secs_f64());
+        assert!(worst < 1.0, "API p99 {worst:.3}s during the flow-over (#269): over 1 s");
+    }
+}
