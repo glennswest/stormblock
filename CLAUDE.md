@@ -172,6 +172,27 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### An install never takes a shelf drive (2026-10-03, #273, P1) — DONE
+
+The owner puts a NetApp shelf on C2NR0Q2 for stormraid (stormraid#1); the
+Dell's line is `rd.stormblock.slab=/dev/sda rd.stormblock.assimilate=any`
+and every install wipes. `any` took any non-slab drive (a stormraid member,
+a foreign table); `force` and the install's data-slab scan took whatever the
+bus listed. In `/init`'s survey block (`named_disk`, `drive_external`,
+`drive_signature`, `may_take`):
+- [x] the drive `rd.stormblock.slab=` names, when present, is the only one
+      (survey loop and `local_data_slab`)
+- [x] never a drive behind a SAS expander or in an SES enclosure
+      (`rd.stormblock.allow-external=1` overrides)
+- [x] "nobody's" = first and last MiB zeros; stormraid's `STORMRD1` named;
+      `force` clears only the named drive when it carries a signature
+- [x] 15 cases in `tests/initramfs-boot-hook.sh` (named + shelf + stormraid,
+      expander path, tail signature, install over the layout, no intent with
+      a data slab only in the shelf, allow-external); all initramfs tests
+      under sh and busybox sh on dev, /init parses. Engine: nothing scans
+      drives on its own (adopt-ublk/boot-local open only what /init names)
+- Not on metal: the Dell with the shelf attached, next install
+
 ### The mount list leaves the kernel command line (2026-10-03, #262, P1) — DONE
 
 x86's command line is 2048 bytes; the EFI stub truncates and boots anyway,

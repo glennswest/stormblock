@@ -1288,7 +1288,8 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.tag=<name>` | the firmware's `StormBootTag`, else this, else SMBIOS serial/UUID | the name claimed as (`boothost/<name>`); a firmware name that differs wins, with a warning (#249) |
 | `rd.stormblock.hostnqn=<nqn>` | the firmware's `StormBootHostNqn` | the NQN presented on every NVMe/TCP connect |
 | `rd.stormblock.trust-smbios=1` | off | let a name guessed from SMBIOS install over a disk (#249) |
-| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any`, `blank`, `off`, `force` (`docs/boot-hooks.md`) |
+| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any` (a blank drive, or this node's own layout), `blank`, `off`, `force`; only the drive `rd.stormblock.slab=` names when it is present, never a drive in an external enclosure (#273, `docs/boot-hooks.md`) |
+| `rd.stormblock.allow-external=1` | off | let the survey take a drive behind a SAS expander or in an SES enclosure, for a server whose own bays sit behind one (#273) |
 | `rd.stormblock.wipe=<dev>` | — | clear that disk's partition table and slab headers once, before the survey |
 | `rd.stormblock.slab=<dev\|file\|nvme-tcp://…>` | — | boot from a local (or named) slab instead of claiming |
 | `rd.stormblock.meta=<dir>` | — | where the volume records are, for a slab that keeps none |

@@ -54,10 +54,29 @@ background, after root is up. `/init` picks that drive today from
 
 | policy | takes |
 |---|---|
-| `any` (default) | any drive that is not already a stormblock slab; also this node's own layout (updated in place, below) and a drive carrying only system slabs, which holds no identity (#118) |
+| `any` (default) | a **blank** drive (first and last MiB all zeros: no partition table, no stormraid/md/LVM/ZFS/filesystem signature, #273); also this node's own layout (updated in place, below) and a drive carrying only system slabs, which holds no identity (#118) |
 | `blank` | a drive with no slab and no partition table |
 | `off` | nothing |
-| `force` | a drive even when it is one of ours, destroying the identity on it |
+| `force` | a drive even when it is one of ours, destroying the identity on it; a drive with a foreign signature only when it is the named one (below) |
+
+Whatever the policy, three rules decide which drives are candidates at all
+(#273: a NetApp shelf on the Dell, for stormraid):
+
+1. **The named drive only.** When the drive `rd.stormblock.slab=` names (its
+   disk, for a partition) is on this machine, it is the only drive the survey
+   or an install may take; every other drive is left alone and the console
+   says so. A machine without it (NVMe-only, while the line names
+   `/dev/sda`) falls back to the scan under the next two rules.
+2. **Never a shelf.** A drive behind a SAS expander, or attached to an SES
+   enclosure (`/sys/block/X/device/enclosure_device:*`), is never taken by
+   the scan, and the install's search for this node's data slab skips it.
+   `rd.stormblock.allow-external=1` allows them, for a server whose own bays
+   sit behind an expander or a SES backplane.
+3. **Somebody else's is not blank.** A drive that is not a stormblock slab
+   is taken only when its first and last MiB are zeros; a stormraid
+   superblock is named on the console. `force` may still clear the named
+   drive whatever it carries (an abandoned partition table, #236), never
+   another.
 
 An install the appliance asked for (the host's boot intent is `install`, #148;
 `boot-claim` leaves `/run/stormblock/install.json`) makes the policy `force`,
