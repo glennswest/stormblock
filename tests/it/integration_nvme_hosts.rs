@@ -550,6 +550,7 @@ async fn an_export_holds_its_namespace_until_it_is_deleted() {
 /// closes, with the reason (#276).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connections_are_counted_open_and_closed() {
+    stormblock::mgmt::metrics::init_metrics();
     let dir = TempDir::new().unwrap();
     let n = node(&dir, false).await;
     let (_, a) = attach(&n, n.clone_a, serde_json::json!({"transport": "nvme-tcp", "host_nqn": H1})).await;
