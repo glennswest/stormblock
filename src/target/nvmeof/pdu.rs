@@ -189,6 +189,11 @@ pub struct NvmeCqe {
 }
 
 impl NvmeCqe {
+    /// Status Code and Status Code Type (DW3 bits 17–27): 0 is success.
+    pub fn status(&self) -> u16 {
+        (u16::from_le_bytes([self.raw[14], self.raw[15]]) >> 1) & 0x07FF
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

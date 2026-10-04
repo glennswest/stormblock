@@ -271,6 +271,68 @@ struct Session {
     /// The queue's DH-HMAC-CHAP exchange, when its host has a key. Until it
     /// has authenticated, nothing but Authentication Send/Receive runs.
     auth: Option<auth::ControllerAuth>,
+    /// What the queue did, for the line a closed connection leaves (#276).
+    commands: u64,
+    last: Option<LastCommand>,
+}
+
+/// The last command a queue received, and when.
+#[derive(Clone, Copy)]
+struct LastCommand {
+    opcode: u8,
+    cid: u16,
+    at: std::time::Instant,
+}
+
+impl Session {
+    fn note(&mut self, opcode: u8, cid: u16) {
+        self.commands += 1;
+        self.last = Some(LastCommand { opcode, cid, at: std::time::Instant::now() });
+    }
+}
+
+/// Why a connection ended, for its log line and `stormblock_nvmeof_
+/// connections_closed_total{reason}` (#276).
+fn close_reason(r: &std::io::Result<()>) -> &'static str {
+    use std::io::ErrorKind::*;
+    match r {
+        Ok(()) => "closed",
+        Err(e) => match e.kind() {
+            UnexpectedEof => "host_closed",
+            ConnectionReset | ConnectionAborted | BrokenPipe => "reset",
+            TimedOut => "timeout",
+            InvalidData | InvalidInput => "protocol_error",
+            PermissionDenied => "refused",
+            _ => "io_error",
+        },
+    }
+}
+
+/// The name of an opcode, for a log line.
+fn opcode_name(admin: bool, opcode: u8) -> String {
+    let name = if opcode == NVME_FABRIC_OPC {
+        "fabrics"
+    } else if admin {
+        match opcode {
+            0x02 => "get_log_page",
+            0x06 => "identify",
+            0x09 => "set_features",
+            0x0A => "get_features",
+            0x0C => "async_event_request",
+            0x18 => "keep_alive",
+            _ => "",
+        }
+    } else {
+        match opcode {
+            io::IO_FLUSH => "flush",
+            io::IO_WRITE => "write",
+            io::IO_READ => "read",
+            io::IO_WRITE_ZEROES => "write_zeroes",
+            io::IO_DATASET_MGMT => "dataset_management",
+            _ => "",
+        }
+    };
+    if name.is_empty() { format!("opcode 0x{opcode:02x}") } else { name.to_string() }
 }
 
 impl Session {
@@ -497,14 +559,34 @@ impl NvmeofTarget {
         let (reader, writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
+        let opened = std::time::Instant::now();
 
         // Step 1: ICReq/ICResp handshake
-        let (hdgst, ddgst) = self.handle_ic_handshake(&mut reader, &mut writer).await?;
+        let (hdgst, ddgst) = match self.handle_ic_handshake(&mut reader, &mut writer).await {
+            Ok(d) => d,
+            Err(e) => {
+                metrics::counter!("stormblock_nvmeof_connections_closed_total", "reason" => "handshake").increment(1);
+                tracing::info!("NVMe-oF connection from {peer} ended in its handshake: {e}");
+                return Err(e);
+            }
+        };
 
         // Step 2: Fabric Connect → which subsystem, which queue, and whether
         // this host is let in at all.
         let (cntlid, qid, mut session) =
-            self.handle_fabric_connect(&mut reader, &mut writer, hdgst, peer).await?;
+            match self.handle_fabric_connect(&mut reader, &mut writer, hdgst, peer).await {
+                Ok(c) => c,
+                Err(e) => {
+                    metrics::counter!("stormblock_nvmeof_connections_closed_total", "reason" => "connect").increment(1);
+                    tracing::info!("NVMe-oF connection from {peer} ended at Connect: {e}");
+                    return Err(e);
+                }
+            };
+        metrics::counter!(
+            "stormblock_nvmeof_connections_opened_total",
+            "queue" => if qid == 0 { "admin" } else { "io" }
+        )
+        .increment(1);
         tracing::info!(
             "NVMe-oF controller {cntlid} connected from {peer} ({}), QID={qid}{}{}",
             session.hostnqn,
@@ -516,11 +598,41 @@ impl NvmeofTarget {
         // must be able to complete a held Asynchronous Event Request the
         // moment a namespace changes, not just when the next command arrives.
         let mut props = ControllerProperties::new();
-        if qid == 0 {
+        let result = if qid == 0 {
             self.admin_loop(reader, &mut writer, cntlid, &mut session, &mut props, hdgst, ddgst).await
         } else {
             self.command_loop(&mut reader, &mut writer, qid, cntlid, &mut session, &mut props, hdgst, ddgst).await
+        };
+
+        // Every connection that ends says so, and why (#276): a build box's
+        // "Link has been severed" had nothing on this side to compare with.
+        let reason = close_reason(&result);
+        metrics::counter!("stormblock_nvmeof_connections_closed_total", "reason" => reason).increment(1);
+        let last = match session.last {
+            Some(l) => format!(
+                "{} (cid {}) {:.1}s before",
+                opcode_name(qid == 0, l.opcode),
+                l.cid,
+                l.at.elapsed().as_secs_f64()
+            ),
+            None => "none".to_string(),
+        };
+        let line = format!(
+            "NVMe-oF controller {cntlid} QID={qid} from {peer} ({}) closed: {reason}{} — up {:.1}s, {} command(s), last {last}",
+            session.hostnqn,
+            match &result {
+                Err(e) => format!(" ({e})"),
+                Ok(()) => String::new(),
+            },
+            opened.elapsed().as_secs_f64(),
+            session.commands,
+        );
+        if reason == "host_closed" || reason == "closed" {
+            tracing::info!("{line}");
+        } else {
+            tracing::warn!("{line}");
         }
+        result
     }
 
     /// Admin-queue command loop with async event delivery.
@@ -792,6 +904,7 @@ impl NvmeofTarget {
 
             let opcode = sqe.opcode();
             let cid = sqe.cid();
+            session.note(opcode, cid);
 
             if opcode == NVME_FABRIC_OPC {
                 self.handle_fabric_cmd(&sqe, &data, writer, props, session, hdgst, ddgst).await?;
@@ -802,9 +915,12 @@ impl NvmeofTarget {
                 // Admin queue
                 self.handle_admin_cmd(&sqe, writer, cntlid, session, hdgst, ddgst).await?;
             } else {
-                // I/O queue
+                // I/O queue, timed by operation (#276).
+                let began = std::time::Instant::now();
                 self.handle_io_cmd(&sqe, &data, reader, writer, cid, session, &mut pending, hdgst, ddgst)
                     .await?;
+                metrics::histogram!("stormblock_nvmeof_io_seconds", "op" => opcode_name(false, opcode))
+                    .record(began.elapsed().as_secs_f64());
             }
         }
     }
@@ -1163,6 +1279,10 @@ impl NvmeofTarget {
         }
 
         let result = io::handle_io_command(sqe, device, data).await;
+        if result.cqe.status() != 0 {
+            metrics::counter!("stormblock_nvmeof_io_errors_total", "op" => opcode_name(false, sqe.opcode()))
+                .increment(1);
+        }
 
         if !result.data.is_empty() {
             // Send read data via C2HData PDU(s)
