@@ -699,6 +699,7 @@ impl NvmeofTarget {
                     };
                     let opcode = sqe.opcode();
                     let cid = sqe.cid();
+                    session.note(opcode, cid);
 
                     if opcode == NVME_FABRIC_OPC {
                         self.handle_fabric_cmd(&sqe, &data, writer, props, session, hdgst, ddgst).await?;
@@ -825,7 +826,8 @@ impl NvmeofTarget {
         let qid = fab.connect_qid();
         let is_discovery = connect.subnqn == discovery::DISCOVERY_NQN;
 
-        let mut session = Session { sub: None, hostnqn: connect.hostnqn.clone(), auth: None };
+        let mut session =
+            Session { sub: None, hostnqn: connect.hostnqn.clone(), auth: None, commands: 0, last: None };
         if !is_discovery {
             // A subsystem this target has, or nothing.
             let Some(sub) = self.subsystem(&connect.subnqn) else {
@@ -1188,6 +1190,7 @@ impl NvmeofTarget {
                 Ok(())
             }
             admin::ADMIN_KEEP_ALIVE => {
+                metrics::counter!("stormblock_nvmeof_keepalives_total").increment(1);
                 // Fabrics keep-alive heartbeat — always succeed.
                 let cqe = NvmeCqe::success(cid, 0, 0);
                 pdu::write_capsule_resp(writer, &cqe, hdgst).await
