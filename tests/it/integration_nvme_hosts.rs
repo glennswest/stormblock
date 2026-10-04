@@ -458,3 +458,109 @@ async fn a_boot_claim_is_served_to_that_machine_alone() {
     let t = n.state.nvmeof_target.read().await.clone().unwrap();
     assert_eq!(t.namespace_count().await, 0, "nothing on the shared subsystem");
 }
+
+/// The namespace a host's subsystem serves `vol` at, if it does.
+async fn served_at(n: &Node, nqn: &str, vol: Uuid) -> Option<u32> {
+    let t = n.state.nvmeof_target.read().await.clone().unwrap();
+    match t.subsystem(nqn) {
+        Some(s) => s.nsid_of(vol).await,
+        None => None,
+    }
+}
+
+async fn detach(n: &Node, vol: Uuid, query: &str) -> serde_json::Value {
+    reqwest::Client::new()
+        .delete(format!("{}/api/v1/volumes/{vol}/attach?{query}", n.api))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// Two builds on one build box read the same input golden (#276): one
+/// volume is one namespace of the host's subsystem, and the first job to
+/// finish must not take it from the second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_job_detaching_leaves_the_namespace_to_the_other() {
+    let dir = TempDir::new().unwrap();
+    let n = node(&dir, false).await;
+    let body = |holder: &str| serde_json::json!({"transport": "nvme-tcp", "host_nqn": H1, "mode": "ro", "holder": holder});
+    let (s, a) = attach(&n, n.golden, body("job-a")).await;
+    assert_eq!(s, 200, "{a}");
+    let (s, b) = attach(&n, n.golden, body("job-b")).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(a["nsid"], b["nsid"], "one volume, one namespace, one NSID");
+    let nqn = a["nqn"].as_str().unwrap().to_string();
+    let nsid = a["nsid"].as_u64().unwrap() as u32;
+
+    // Job A is done.
+    let r = detach(&n, n.golden, &format!("host_nqn={H1}&holder=job-a")).await;
+    assert_eq!(r["namespace_removed"], false, "{r}");
+    assert_eq!(served_at(&n, &nqn, n.golden).await, Some(nsid), "job B still has it");
+    let dev = NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H1, None)).await.unwrap();
+    let mut buf = vec![0u8; 4096];
+    dev.read(0, &mut buf).await.expect("job B reads its input after job A detached");
+    drop(dev);
+
+    // Job B is done too: now it goes.
+    let r = detach(&n, n.golden, &format!("host_nqn={H1}&holder=job-b")).await;
+    assert_eq!(r["namespace_removed"], true, "{r}");
+    assert_eq!(served_at(&n, &nqn, n.golden).await, None);
+
+    // No holder named: the anonymous one, as before — attach, detach, gone.
+    let (_, c) = attach(&n, n.golden, serde_json::json!({"transport": "nvme-tcp", "host_nqn": H1, "mode": "ro"})).await;
+    let nqn = c["nqn"].as_str().unwrap().to_string();
+    assert!(served_at(&n, &nqn, n.golden).await.is_some());
+    let r = detach(&n, n.golden, &format!("host_nqn={H1}")).await;
+    assert_eq!(r["namespace_removed"], true, "{r}");
+}
+
+/// Two exports of one volume to one host hold it each (#276): deleting one
+/// leaves the other's namespace served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_export_holds_its_namespace_until_it_is_deleted() {
+    let dir = TempDir::new().unwrap();
+    let n = node(&dir, false).await;
+    let c = reqwest::Client::new();
+    let mut ids = Vec::new();
+    let mut nqn = String::new();
+    for _ in 0..2 {
+        let r = c
+            .post(format!("{}/api/v1/exports", n.api))
+            .json(&serde_json::json!({"volume_id": n.golden, "protocol": "nvmeof", "host_nqn": H1}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201);
+        let e: serde_json::Value = r.json().await.unwrap();
+        nqn = e["nqn"].as_str().unwrap().to_string();
+        ids.push(e["id"].as_str().unwrap().to_string());
+    }
+    let r = c.delete(format!("{}/api/v1/exports/{}", n.api, ids[0])).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    assert!(served_at(&n, &nqn, n.golden).await.is_some(), "the other export still has it");
+    let r = c.delete(format!("{}/api/v1/exports/{}", n.api, ids[1])).send().await.unwrap();
+    assert!(r.status().is_success());
+    assert_eq!(served_at(&n, &nqn, n.golden).await, None);
+}
+
+/// A connection the target serves is counted when it opens and when it
+/// closes, with the reason (#276).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connections_are_counted_open_and_closed() {
+    let dir = TempDir::new().unwrap();
+    let n = node(&dir, false).await;
+    let (_, a) = attach(&n, n.clone_a, serde_json::json!({"transport": "nvme-tcp", "host_nqn": H1})).await;
+    let nqn = a["nqn"].as_str().unwrap().to_string();
+    let nsid = a["nsid"].as_u64().unwrap() as u32;
+    let dev = NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H1, None)).await.unwrap();
+    dev.write(0, &vec![7u8; 4096]).await.unwrap();
+    drop(dev);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let m = reqwest::Client::new().get(format!("{}/metrics", n.api)).send().await.unwrap().text().await.unwrap();
+    assert!(m.contains("stormblock_nvmeof_connections_opened_total"), "{m}");
+    assert!(m.contains("stormblock_nvmeof_connections_closed_total"), "{m}");
+    assert!(m.contains("stormblock_nvmeof_io_seconds"), "{m}");
+}
