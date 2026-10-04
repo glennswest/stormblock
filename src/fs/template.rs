@@ -1321,7 +1321,11 @@ async fn clone_volume_impl(
             .ok_or_else(|| TemplateError::Internal("clone volume vanished".to_string()))?;
         if spec.stamp_uuid {
             let fresh = Uuid::new_v4();
-            match stamp_fs_uuid(&fs.kind, &dev, fresh, spec.stamp_backups).await {
+            // No flush of its own on ext4: the persist at the end of the mint
+            // flushes the slab before the records that make this clone exist
+            // (#269). A crash before then leaves no clone, never one with its
+            // blank's UUID (#137).
+            match stamp_fs_uuid_unflushed(&fs.kind, &dev, fresh, spec.stamp_backups).await {
                 Ok(_) => fs_uuid = Some(fresh),
                 Err(e) => {
                     // Roll the clone back: handing out a volume that silently
@@ -1491,6 +1495,19 @@ async fn stamp_fs_uuid(kind: &str, dev: &Arc<dyn crate::drive::BlockDevice>, uui
         xfs::stamp_uuid(dev, uuid).await
     } else {
         ext4::stamp_uuid(dev, uuid, backups).await.map(|_| ())
+    }
+}
+
+async fn stamp_fs_uuid_unflushed(
+    kind: &str,
+    dev: &Arc<dyn crate::drive::BlockDevice>,
+    uuid: Uuid,
+    backups: bool,
+) -> anyhow::Result<()> {
+    if kind == "xfs" {
+        xfs::stamp_uuid(dev, uuid).await
+    } else {
+        ext4::stamp_uuid_unflushed(dev, uuid, backups).await.map(|_| ())
     }
 }
 

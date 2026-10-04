@@ -570,6 +570,28 @@ pub async fn stamp_uuid(
     uuid: Uuid,
     backups: bool,
 ) -> anyhow::Result<Ext4Layout> {
+    stamp_uuid_with(dev, uuid, backups, true).await
+}
+
+/// [`stamp_uuid`] with no flush of its own, for a caller whose next step
+/// makes the volume durable before anything names it: a mint, whose persist
+/// flushes the slab before the records that make the clone exist are written
+/// (#269). On a spinning disk the stamp's own flush was two more cache
+/// flushes per claim.
+pub async fn stamp_uuid_unflushed(
+    dev: &Arc<dyn BlockDevice>,
+    uuid: Uuid,
+    backups: bool,
+) -> anyhow::Result<Ext4Layout> {
+    stamp_uuid_with(dev, uuid, backups, false).await
+}
+
+async fn stamp_uuid_with(
+    dev: &Arc<dyn BlockDevice>,
+    uuid: Uuid,
+    backups: bool,
+    flush: bool,
+) -> anyhow::Result<Ext4Layout> {
     let target = VolumeDevice::opaque(dev.clone());
     let mut fs = Filesystem::open(target)
         .await
@@ -607,9 +629,11 @@ pub async fn stamp_uuid(
 
     let layout = layout_of(fs.superblock());
     drop(fs);
-    dev.flush()
-        .await
-        .map_err(|e| anyhow::anyhow!("flushing after stamp: {e}"))?;
+    if flush {
+        dev.flush()
+            .await
+            .map_err(|e| anyhow::anyhow!("flushing after stamp: {e}"))?;
+    }
     Ok(layout)
 }
 

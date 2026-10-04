@@ -1966,9 +1966,17 @@ impl VolumeManager {
         on_slab: &std::sync::Mutex<HashMap<SlabId, u64>>,
         records: Records,
     ) -> anyhow::Result<()> {
+        // Every slab at once: slabs on one disk are partitions of one
+        // device, and its flushes are shared by everyone who asked before
+        // each began (#269) — two slabs' syncs cost two cache flushes, not
+        // four, where one after the other cost each in full.
         let ids: Vec<SlabId> = registry.read().await.iter().map(|(id, _)| *id).collect();
-        for id in ids {
-            if let Err(e) = crate::drive::slab::sync_registered(registry, id).await {
+        let synced = futures_util::future::join_all(
+            ids.iter().map(|id| crate::drive::slab::sync_registered(registry, *id)),
+        )
+        .await;
+        for (id, r) in ids.iter().zip(synced) {
+            if let Err(e) = r {
                 anyhow::bail!("slab {}: flush before writing volume records: {e}", id.0);
             }
         }
@@ -1985,6 +1993,9 @@ impl VolumeManager {
         // slabs where one is short of room still has to say so about that one
         // while the other is written.
         let mut failed: Vec<String> = Vec::new();
+        // The copies that changed, written at once (their flushes are shared,
+        // as above).
+        let mut writes = Vec::new();
         for (slab_id, bytes) in records.slabs {
             let bytes = match bytes {
                 Ok(b) => b,
@@ -2003,18 +2014,21 @@ impl VolumeManager {
                 // This slab's copy already says exactly this.
                 continue;
             }
-            let writer = registry.read().await.get(&slab_id).map(|s| s.metadata_writer());
-            match writer {
-                Some(w) => match w.write(&bytes).await {
-                    Ok(()) => {
-                        on_slab.lock().unwrap().insert(slab_id, hash);
-                    }
-                    Err(e) => {
-                        on_slab.lock().unwrap().remove(&slab_id);
-                        failed.push(format!("slab {}: {e}", slab_id.0));
-                    }
-                },
+            match registry.read().await.get(&slab_id).map(|s| s.metadata_writer()) {
+                Some(w) => writes.push((slab_id, hash, w, bytes)),
                 None => failed.push(format!("slab {} is not attached", slab_id.0)),
+            }
+        }
+        let results = futures_util::future::join_all(writes.iter().map(|(_, _, w, b)| w.write(b))).await;
+        for ((slab_id, hash, _, _), r) in writes.iter().zip(results) {
+            match r {
+                Ok(()) => {
+                    on_slab.lock().unwrap().insert(*slab_id, *hash);
+                }
+                Err(e) => {
+                    on_slab.lock().unwrap().remove(slab_id);
+                    failed.push(format!("slab {}: {e}", slab_id.0));
+                }
             }
         }
         *last = records.generation;
