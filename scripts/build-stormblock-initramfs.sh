@@ -676,6 +676,10 @@ for param in $(cat /proc/cmdline); do
         # an image whose machines are named by serial and booted without
         # stormbootx (#249).
         rd.stormblock.trust-smbios=*) TRUST_SMBIOS="${param#*=}" ;;
+        # A drive behind a SAS expander or in an SES enclosure is never taken
+        # by the survey (#273): a disk shelf. `1` for a server whose own bays
+        # sit behind one.
+        rd.stormblock.allow-external=*) ALLOW_EXTERNAL="${param#*=}" ;;
         rd.stormblock.bond=*)        BOND_MODE="${param#*=}" ;;
         # `off`: no NTP step in the initramfs (#251); the build-date floor
         # still applies.
@@ -698,6 +702,10 @@ for param in $(cat /proc/cmdline); do
         ip=*)                        IP_CONF="${param#*=}" ;;
     esac
 done
+
+# The drive the command line names, before any probe replaces SLAB with a
+# claimed image: the one local drive an install may take (#273).
+SLAB_NAMED="$SLAB"
 
 # --- BEGIN boot identity (covered by tests/initramfs-boot-hook.sh)
 # Who this machine is, as the firmware that loaded this kernel claimed it
@@ -2432,10 +2440,80 @@ if [ "$BOOT_MODE" = "local" ]; then
     # ticket) wipes whatever is there; `off` on this machine still means no.
     SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
     SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
+    SURVEY_DEV="${STORM_DEV:-/dev}"
+    # Which drives an install may take (#273: a NetApp shelf on the Dell, for
+    # stormraid). Three rules, in order:
+    #
+    #   1. The drive rd.stormblock.slab= names, when it is on this machine,
+    #      is the only one. Every other drive is left alone and said so.
+    #   2. A drive behind a SAS expander or in an SES enclosure - a disk
+    #      shelf - is never taken by the scan (rd.stormblock.allow-external=1
+    #      for a server whose own bays sit behind one).
+    #   3. "Nobody's" means blank: its first and last MiB are zeros. Anything
+    #      else - a partition table, a stormraid member, md, LVM, ZFS, a
+    #      filesystem - is somebody's, and left.
+    named_disk() { # -> the named slab's disk, as a /sys/block name
+        case "${SLAB_NAMED:-}" in
+        /dev/nvme*p[0-9]*) _nd="${SLAB_NAMED%p[0-9]*}" ;;
+        /dev/sd*[0-9])     _nd="${SLAB_NAMED%%[0-9]*}" ;;
+        /dev/*)            _nd="$SLAB_NAMED" ;;
+        *)                 return 0 ;;
+        esac
+        _nd="${_nd##*/}"
+        [ -e "$SURVEY_SYS/$_nd" ] && echo "$_nd"
+        return 0
+    }
+    NAMED_DISK=$(named_disk)
+    drive_external() { # /sys/block/X -> 0 when the drive is in a shelf
+        [ "${ALLOW_EXTERNAL:-}" = 1 ] && return 1
+        case "$(readlink -f "$1" 2>/dev/null)" in */expander-*) return 0 ;; esac
+        for _e in "$1"/device/enclosure_device:*; do
+            [ -e "$_e" ] && return 0
+        done
+        return 1
+    }
+    drive_signature() { # dev /sys/block/X -> what it carries; nothing when blank
+        _got=$(dd if="$1" bs=1048576 count=1 2>/dev/null | wc -c)
+        if [ "${_got:-0}" -eq 0 ]; then
+            echo "nothing that can be read"
+            return 0
+        fi
+        case "$(dd if="$1" bs=8 count=1 2>/dev/null)" in
+        STORMRD1*) echo "a stormraid superblock"; return 0 ;;
+        esac
+        if [ "$(dd if="$1" bs=1048576 count=1 2>/dev/null | tr -d '\000' | wc -c)" -ne 0 ]; then
+            echo "data in its first MiB"
+            return 0
+        fi
+        _sec=$(cat "$2/size" 2>/dev/null || echo 0)
+        if [ "$_sec" -ge 4096 ] && [ "$(dd if="$1" bs=1048576 skip=$((_sec / 2048 - 1)) count=1 2>/dev/null \
+                | tr -d '\000' | wc -c)" -ne 0 ]; then
+            echo "data in its last MiB"
+        fi
+        return 0
+    }
+    may_take() { # /sys/block/X dev -> 0 when rules 1 and 2 allow the drive
+        if [ -n "$NAMED_DISK" ] && [ "${1##*/}" != "$NAMED_DISK" ]; then
+            echo "  $2 is not the drive rd.stormblock.slab= names (/dev/$NAMED_DISK) - leaving it (#273)"
+            return 1
+        fi
+        if drive_external "$1"; then
+            echo "  $2 is in an external enclosure (a disk shelf) - leaving it (#273;"
+            echo "  rd.stormblock.allow-external=1 if this machine's own bays are)"
+            return 1
+        fi
+        return 0
+    }
     local_data_slab() { # -> the first local drive that carries a data slab
         for d in "$SURVEY_SYS"/sd? "$SURVEY_SYS"/nvme?n?; do
             [ -e "$d" ] || continue
             [ "$(cat "$d/removable" 2>/dev/null)" = "1" ] && continue
+            # The named drive, or (none named) an internal one (#273).
+            if [ -n "$NAMED_DISK" ]; then
+                [ "${d##*/}" = "$NAMED_DISK" ] || continue
+            else
+                drive_external "$d" && continue
+            fi
             if "$SURVEY_SB" slab list "/dev/$(basename "$d")" 2>/dev/null | grep -q "role=data"; then
                 echo "/dev/$(basename "$d")"
                 return 0
@@ -2518,6 +2596,7 @@ if [ "$BOOT_MODE" = "local" ]; then
             [ "$(cat "$d/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
             # Do not eat the disk this boot is running from.
             case "$SLAB" in *"$(basename "$d")"*) continue ;; esac
+            may_take "$d" "$dev" || continue
             probe=$("$SURVEY_SB" slab list "$dev" 2>&1)
             case "$probe" in
                 *": slab "*|*"data slab"*)
@@ -2581,7 +2660,13 @@ if [ "$BOOT_MODE" = "local" ]; then
                     fi
                     echo "  $dev is already a stormblock slab - leaving it" ;;
                 *)
-                    if [ "$ASSIMILATE" = blank ] && \
+                    # Not a stormblock slab: taken only when blank (#273).
+                    # `force` may still clear the drive the command line
+                    # names, whatever it carries; never another.
+                    sig=$(drive_signature "$SURVEY_DEV/${d##*/}" "$d")
+                    if [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ]; }; then
+                        echo "  $dev carries $sig - not ours and not blank, leaving it (#273)"
+                    elif [ "$ASSIMILATE" = blank ] && \
                        "$SURVEY_SB" slab list "$dev" 2>&1 | grep -q "partition"; then
                         echo "  $dev carries partitions and the policy is 'blank' - leaving it"
                     else

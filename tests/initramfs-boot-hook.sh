@@ -492,9 +492,13 @@ survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behi
         echo 0 > "$sys/sda/removable"; echo 3907029168 > "$sys/sda/size"
         ASSIMILATE="$1"; shift
         printf '%s\n' "$@" > "$WORK/survey/sda"
+        # The drive itself, for the blank check (#273): zeros.
+        mkdir -p "$WORK/dev"; dd if=/dev/zero of="$WORK/dev/sda" bs=1048576 count=2 2>/dev/null
         STORM_STORMBLOCK="$SVSTUB"; STORM_SYS_BLOCK="$sys"; SURVEY_ANSWERS="$WORK/survey"
-        export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS
+        STORM_DEV="$WORK/dev"
+        export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS STORM_DEV
         STORM_NO_INTENT="${NOINTENT:-$WORK/no-marker}"; export STORM_NO_INTENT
+        SLAB_NAMED="${NAMED:-}"
         SLAB="${BOOTING:-nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1}"
         CLAIMED="${CLAIMED_T:-}"
         INSTALL_OVER="${OVER:-}"
@@ -607,6 +611,92 @@ check "an intent was stated, the probe ruled an install: wiped (#261)" "$over fo
     "$(CLAIMED_T="$CLAIM_URI" OVER="$over" survey any "$SYS_ONLY")"
 check "an intent was stated, no data slab anywhere: taken, not forced" "/dev/sda" \
     "$(CLAIMED_T="$CLAIM_URI" survey any "$SYS_ONLY")"
+
+echo "drives this install may take (#273):"
+
+# Several drives: name|kind, kind one of
+#   blank       an internal drive, all zeros, no slab
+#   shelf       a blank drive in an SES enclosure (a NetApp shelf)
+#   expander    a blank drive behind a SAS expander
+#   stormraid   an internal drive with a stormraid superblock
+#   foreign     an internal drive with a partition table (bytes in its first MiB)
+#   tail        an internal drive with data in its last MiB only (md 1.0, ZFS)
+#   layout      this node's own layout (data and system slab)
+#   datashelf   a stormblock data slab, in a shelf
+survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
+    (
+        set +e
+        STORM_INSTALL_TICKET="${TICKET:-$WORK/no-ticket}"; export STORM_INSTALL_TICKET
+        sys="$WORK/msys"; dev="$WORK/mdev"; ans="$WORK/msurvey"; real="$WORK/mreal"
+        rm -rf "$sys" "$dev" "$ans" "$real"; mkdir -p "$sys" "$dev" "$ans" "$real"
+        ASSIMILATE="$1"; shift
+        for spec in "$@"; do
+            n="${spec%%|*}"; kind="${spec#*|}"
+            case "$kind" in
+            expander) mkdir -p "$real/port-0:0/expander-0:0/$n"; ln -s "$real/port-0:0/expander-0:0/$n" "$sys/$n" ;;
+            *) mkdir -p "$sys/$n" ;;
+            esac
+            echo 0 > "$sys/$n/removable"; echo 8192 > "$sys/$n/size"
+            dd if=/dev/zero of="$dev/$n" bs=1048576 count=4 2>/dev/null
+            echo "/dev/$n: not a slab (bad slab magic)" > "$ans/$n"
+            case "$kind" in
+            shelf|datashelf) mkdir -p "$sys/$n/device/enclosure_device:Slot 03" ;;
+            esac
+            case "$kind" in
+            stormraid) printf 'STORMRD1' | dd of="$dev/$n" conv=notrunc 2>/dev/null ;;
+            foreign) printf '\125\252' | dd of="$dev/$n" bs=1 seek=510 conv=notrunc 2>/dev/null ;;
+            tail) printf 'a92b4efc' | dd of="$dev/$n" bs=1 seek=$((4 * 1048576 - 4096)) conv=notrunc 2>/dev/null ;;
+            layout) printf '%s\n' "$DATA_ONLY" "$SYS_HALF" > "$ans/$n" ;;
+            datashelf) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
+            esac
+        done
+        STORM_STORMBLOCK="$SVSTUB"; STORM_SYS_BLOCK="$sys"; SURVEY_ANSWERS="$ans"; STORM_DEV="$dev"
+        export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS STORM_DEV
+        STORM_NO_INTENT="${NOINTENT:-$WORK/no-marker}"; export STORM_NO_INTENT
+        SLAB_NAMED="${NAMED:-}"; ALLOW_EXTERNAL="${EXTERNAL:-}"
+        SLAB="${BOOTING:-nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1}"
+        CLAIMED="${CLAIMED_T:-}"
+        INSTALL_OVER="${OVER:-}"
+        BOOTTAG="TESTTAG"; BOOTTAG_FROM=firmware; TRUST_SMBIOS=""
+        STORM_EFIVARS="$NOVARS"
+        . "$WORK/identity.sh" >/dev/null 2>&1
+        BOOTTAG_FROM=firmware
+        . "$WORK/survey.sh" > "$WORK/msurvey.log" 2>&1
+        echo "$LOCAL_DISK${FORCE_LOCAL:+ force}"
+    )
+}
+
+# The Dell with the NetApp shelf: rd.stormblock.slab=/dev/sda, a blank shelf
+# beside it, a stormraid set on part of it.
+check "the named drive is taken; the shelf is not" "/dev/sda" \
+    "$(NAMED=/dev/sda survey_m any sda\|blank sdb\|shelf sdc\|stormraid)"
+check "the named drive is spent: no other drive is taken instead" "" \
+    "$(NAMED=/dev/sda survey_m any sda\|foreign sdb\|blank sdc\|shelf)"
+grep -q "not the drive rd.stormblock.slab= names" "$WORK/msurvey.log" \
+    && check "and the console says why" yes yes || check "and the console says why" yes no
+check "an install over the node's layout lands on the named drive, with force" "/dev/sda force" \
+    "$(NAMED=/dev/sda STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|datashelf)"
+check "'force' clears the named drive whatever it carries (#236)" "/dev/sda force" \
+    "$(NAMED=/dev/sda survey_m force sda\|foreign sdb\|shelf)"
+NOINTENT="$WORK/no-intent"
+check "no intent, a data slab only in the shelf: the shelf is not wiped" "" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sdb\|datashelf sdc\|shelf)"
+NOINTENT=""
+# No drive named here (an NVMe-only machine whose line names /dev/sda).
+check "none named: the internal blank drive, past the shelf and stormraid" "/dev/sdd" \
+    "$(NAMED=/dev/sda survey_m any sdb\|shelf sdc\|stormraid sdd\|blank)"
+check "none named: a drive behind a SAS expander is a shelf too" "" \
+    "$(survey_m any sdb\|expander)"
+check "none named: a stormraid member is not blank" "" "$(survey_m any sdc\|stormraid)"
+grep -q "a stormraid superblock" "$WORK/msurvey.log" \
+    && check "and the console names it" yes yes || check "and the console names it" yes no
+check "none named: a partition table is not blank" "" "$(survey_m any sdc\|foreign)"
+check "none named: data in the last MiB is not blank" "" "$(survey_m any sdc\|tail)"
+check "none named, 'force': a stormraid member is still left" "" "$(survey_m force sdc\|stormraid)"
+check "none named, 'force': a shelf drive with a data slab is still left" "" \
+    "$(survey_m force sdb\|datashelf)"
+check "rd.stormblock.allow-external=1: a blank drive in an enclosure is taken" "/dev/sdb" \
+    "$(EXTERNAL=1 survey_m any sdb\|shelf)"
 
 [ "$fail" -eq 0 ] && echo "all boot hook, probe, identity, takeable and survey checks passed"
 exit "$fail"
