@@ -73,6 +73,25 @@ curl -X POST http://node:9090/api/v1/synonyms/<ns>/<name>/claim -d '{"host_nqn":
   plain `DELETE` from every host.
 - A volume served to a host is busy: deleting it is refused while it is
   (`what_is_serving` names the subsystem).
+- **Holders** (#276). One volume attached to one host is one namespace (one
+  NSID per volume, the NGUID is the volume's id). When several users of that
+  host attach it — two builds on one build box reading the same input golden
+  — each names itself as `holder` on the attach
+  (`{"transport":"nvme-tcp","host_nqn":"…","holder":"job-1234"}`) and on the
+  detach (`DELETE …/attach?host_nqn=…&holder=job-1234`); the namespace stays
+  until the last holder releases it, and the detach's reply says whether it
+  went (`namespace_removed`). An export holds its namespace as
+  `export:<id>`. An attach that names no holder is the anonymous holder, so
+  callers that send none behave as before — but then one detach takes the
+  namespace from every one of them. A plain `DELETE …/attach` (every host),
+  a volume being deleted and a released boot clone take it from every
+  holder.
+- **No lease, no idle timeout.** An export, and the connection a host makes
+  to it, last until they are deleted or the host disconnects; the target
+  answers keep-alives and enforces no keep-alive timeout of its own. A
+  connection that ends is logged with its reason (`host_closed`, `reset`,
+  `protocol_error`, `io_error`, …), its host, controller, queue, how long it
+  lived, how many commands it served and its last command (#276).
 
 ## Boot claims
 

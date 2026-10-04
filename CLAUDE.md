@@ -172,24 +172,29 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### NVMe/TCP: dropped connections said, shared namespaces held, target metrics (2026-10-04, #276, P0) — IN PROGRESS
+### NVMe/TCP: dropped connections said, shared namespaces held, target metrics (2026-10-04, #276, P0) — DONE
 
 The build box's "Link has been severed" (~2.5 min into a 527 MB golden on
 forge 13.7) turned out to be dev's own kernel (`Bad page state`, the
 nvme-tcp sender failing). Still the engine's:
-- [ ] `duplicate IDs in subsystem`: on 13.7 one golden attached by two
+- [x] `duplicate IDs in subsystem`: on 13.7 one golden attached by two
       parallel builds got two NSIDs. The current engine gives it one NSID,
-      but **one detach removes it for every job using it** (`nvme_hosts::
-      detach`): a namespace attached to a host now has holders (attach
-      `holder`, detach releases that one; none named = one anonymous holder,
-      as before); removed when none is left
-- [ ] every connection the target closes is logged at info/warn with its
-      reason, host, controller, queue, lifetime, commands and last command
-      (was debug); the target enforces no KATO and exports have no lease
-- [ ] `/metrics`: connections opened/closed by reason, live, keep-alives,
-      I/O errors, I/O latency by op
-- [ ] tests; docs (nvme-access.md, README metrics), CHANGELOG; file
-      stormcentral: send the job as `holder`
+      but one detach removed it for every job using it: `NsRecord.holders`
+      (attach `holder`, detach `&holder=`; an export holds as `export:<id>`;
+      none named = the anonymous holder, as before; a pre-holder record is
+      released as before; whole-volume detaches release all)
+- [x] every connection the target closes is logged (info, warn unless the
+      host closed it) with reason, host, controller, queue, lifetime,
+      commands and last command; the target enforces no KATO and exports
+      have no lease (documented)
+- [x] `/metrics`: `stormblock_nvmeof_connections_{opened,closed}_total`,
+      `_keepalives_total`, `_io_errors_total{op}`, `_io_seconds{op}`
+- [x] tests (`integration_nvme_hosts`: holders, export holders, metrics);
+      full nextest on dev 879/879 (one run; the pressure test flaked twice
+      in full runs, never alone: #279). Docs (nvme-access.md, README),
+      CHANGELOG
+- Not on forge: forge is 13.7 until the new forge; stormcentral to send
+  its job as `holder` (filed)
 
 ### #269 reopened: the API still stalls during flow-over on server3 (2026-10-04, P0 — THE most critical) — FIXED here, proof on server3 pending
 

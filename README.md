@@ -434,6 +434,10 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   plus `stormblock_api_requests_total{endpoint,method}`, `stormblock_volumes_total`,
   `stormblock_{drives,arrays,slabs,exports,luns}_total`, `stormblock_capacity_bytes`,
   `stormblock_raid_{state,failed_members,rebuild_percent}{array,name}`,
+  the NVMe/TCP target's `stormblock_nvmeof_connections_opened_total{queue}`,
+  `stormblock_nvmeof_connections_closed_total{reason}`,
+  `stormblock_nvmeof_keepalives_total`, `stormblock_nvmeof_io_errors_total{op}`
+  and the histogram `stormblock_nvmeof_io_seconds{op}` (#276),
   `stormblock_fstemplate_claims_total`,
   `stormblock_pool_*`, `stormblock_iscsi_sessions_*`, `stormblock_cluster_*`,
   `stormblock_replication_*`, and the serving layer's `stormblockmk_*` gauges.
