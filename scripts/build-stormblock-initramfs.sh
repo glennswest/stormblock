@@ -782,6 +782,82 @@ identity_guessed() {
 }
 # --- END boot identity
 
+# --- BEGIN install config read (covered by tests/initramfs-install-config.sh)
+# The node's install-config.yaml, from the boot media (#275, stormbootx#79,
+# stormcos#82). storminstall writes it on the ISO's ESP; stormbootx hands it
+# down in volatile EFI variables under STORMBOOT_GUID:
+#
+#   StormBootInstallConfig          v1:<length>:<chunks>:<sha256, hex>
+#   StormBootInstallConfig0..N-1    the bytes, 768 per chunk
+#
+# The header is set last, so no header means nothing was handed down. The
+# file is used only when its length and digest match the header, staged in
+# RAM (0600) until /state is mounted (below), and every variable is deleted
+# now whatever came of it: efivarfs files are world-readable, and this one
+# carries pullSecret and apiToken. Its content is never printed.
+INSTALL_CONFIG_STAGED=""
+install_config_forget() { # delete every StormBootInstallConfig variable
+    for _icf in "$EFIVARS"/StormBootInstallConfig*-"$STORMBOOT_GUID"; do
+        [ -e "$_icf" ] || continue
+        chattr -i "$_icf" 2>/dev/null
+        rm -f "$_icf" 2>/dev/null
+    done
+}
+install_config_read() {
+    _ich=$(efi_value StormBootInstallConfig 2>/dev/null)
+    if [ -z "$_ich" ]; then
+        # Set but not a header this reads (efi_value refused it): its chunks
+        # still carry secrets.
+        if [ -e "$EFIVARS/StormBootInstallConfig-$STORMBOOT_GUID" ]; then
+            echo "install-config: the firmware's header is not one this initramfs reads - ignored"
+            install_config_forget
+        fi
+        return 0
+    fi
+    _icv=$(printf '%s' "$_ich" | cut -d: -f1)
+    _icl=$(printf '%s' "$_ich" | cut -d: -f2)
+    _icn=$(printf '%s' "$_ich" | cut -d: -f3)
+    _ics=$(printf '%s' "$_ich" | cut -d: -f4)
+    case "$_icl" in ''|*[!0-9]*) _icv=bad ;; esac
+    case "$_icn" in ''|*[!0-9]*) _icv=bad ;; esac
+    case "$_ics" in *[!0-9a-f]*) _icv=bad ;; esac
+    if [ "$_icv" != v1 ] || [ "${#_ics}" -ne 64 ] || [ "$_icn" -lt 1 ] || [ "$_icn" -gt 1024 ] \
+       || [ "$(printf '%s' "$_ich" | tr -cd ':' | wc -c)" -ne 3 ]; then
+        echo "install-config: the firmware's header is not one this initramfs reads - ignored"
+        install_config_forget
+        return 0
+    fi
+    _ico="${STORM_RUN:-/run/stormblock}/install-config.yaml"
+    mkdir -p "${_ico%/*}"
+    rm -f "$_ico"
+    ( umask 077; : > "$_ico" )
+    _ici=0
+    while [ "$_ici" -lt "$_icn" ]; do
+        _icc="$EFIVARS/StormBootInstallConfig$_ici-$STORMBOOT_GUID"
+        if [ ! -r "$_icc" ]; then
+            echo "install-config: chunk $_ici of $_icn is missing - not used"
+            rm -f "$_ico"
+            install_config_forget
+            return 0
+        fi
+        tail -c +5 "$_icc" >> "$_ico"
+        _ici=$((_ici + 1))
+    done
+    _icg=$(wc -c < "$_ico" | tr -d ' ')
+    _icd=$(sha256sum "$_ico" | cut -d' ' -f1)
+    if [ "$_icg" != "$_icl" ] || [ "$_icd" != "$_ics" ]; then
+        echo "install-config: $_icg byte(s) with sha256 $_icd, but the firmware said $_icl and $_ics - not used"
+        rm -f "$_ico"
+        install_config_forget
+        return 0
+    fi
+    INSTALL_CONFIG_STAGED="$_ico"
+    echo "install-config: $_icl bytes from the boot media, sha256 $_ics (verified)"
+    install_config_forget
+}
+install_config_read
+# --- END install config read
+
 # --- BEGIN mount list (covered by tests/initramfs-mounts.sh)
 # Which volumes this init mounts, and where (#262).
 #
@@ -2970,6 +3046,29 @@ if [ ! -x /sysroot/sbin/init ] && [ ! -x /sysroot/usr/lib/systemd/systemd ]; the
     echo "FATAL: No init found in /sysroot"
     rescue_shell
 fi
+
+# --- BEGIN install config write (covered by tests/initramfs-install-config.sh)
+# The staged install-config.yaml goes to /state on a first boot only: when
+# /state is mounted and holds none yet, so booting old media again never
+# overwrites a node's applied config (#275). stormpump applies it from there
+# (stormpump#78). The staged copy is removed either way: /run moves into the
+# real root at switch_root.
+if [ -n "${INSTALL_CONFIG_STAGED:-}" ] && [ -f "$INSTALL_CONFIG_STAGED" ]; then
+    _icst="${STORM_SYSROOT:-/sysroot}/state"
+    if ! awk -v m="$_icst" '$2 == m { f = 1 } END { exit !f }' "${STORM_MOUNTS_FILE:-/proc/mounts}"; then
+        echo "install-config: /state is not mounted - not written (the boot media still has it)"
+    elif [ -e "$_icst/config/install-config.yaml" ]; then
+        echo "install-config: /state already has one - kept, the media's is not applied again"
+    elif mkdir -p "$_icst/config" && ( umask 077; cp "$INSTALL_CONFIG_STAGED" "$_icst/config/install-config.yaml" ) \
+         && chmod 600 "$_icst/config/install-config.yaml"; then
+        echo "install-config: written to /state/config/install-config.yaml (first boot)"
+    else
+        echo "install-config: could not write /state/config/install-config.yaml"
+        rm -f "$_icst/config/install-config.yaml"
+    fi
+    rm -f "$INSTALL_CONFIG_STAGED"
+fi
+# --- END install config write
 
 stamp "root ready"
 echo "Switching to real root..."
