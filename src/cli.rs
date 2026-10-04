@@ -4996,9 +4996,11 @@ pub(crate) async fn quarantine_flow_sources(
 }
 
 /// The longest a flow-over waits between two moves for foreground I/O
-/// (#269): a move is a slot read from the appliance and a write and read back
-/// on the local disk, tens of milliseconds on a spinning one.
-const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_millis(250);
+/// (#269). It waits as long as the last move took — the copy and the persist
+/// after it — so a node doing its own I/O gets about half its disk; on a disk
+/// whose flushes take seconds (server3), the move does too, and so the cap is
+/// seconds as well.
+const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(crate) async fn flow_system_half<P, F>(
     gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
@@ -5089,7 +5091,6 @@ where
                 .migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence)
                 .await;
             drop(fence);
-            last_move = started.elapsed();
             match res {
                 Ok(_) => {
                     moved += 1;
@@ -5125,6 +5126,10 @@ where
             persist().await;
             let mut r = registry.write().await;
             engine.release_owed(&mut r).await;
+            drop(r);
+            // The whole move: the copy, and the flushes of the persist after
+            // it, which on a spinning disk are most of it (#269).
+            last_move = started.elapsed();
         }
     }
     report(0);
