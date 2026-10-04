@@ -172,6 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### #269 reopened: the API still stalls during flow-over on server3 (2026-10-04, P0 — THE most critical) — IN PROGRESS
+
+11.79 (golden-stormblock-4d755f69799e @71785d4, with bc825e7): the Dell's API
+answers throughout its flow-over (claim 1.57 s, durability 301/300), but on
+server3 (X9 blade, one 7200 rpm ST2000DM008) a template clone gets no answer
+in 60 s and `GET /api/v1/volumes` fails. Owner: understand WHY, not patch.
+- [ ] instrument: API request watchdog (OS thread: works with the runtime
+      starved) logging any request > 10 s with a diagnostic capture; open
+      read-only `/debug/stalls`, `/debug/tasks` (tokio task dump, needs
+      `--cfg tokio_unstable`), `/debug/threads` (kernel stacks of every
+      thread), `/debug/locks` (vm/GEM/registry held or free)
+- [ ] reproduce on dev: the HDD as a model (one I/O at a time, seek
+      latency, flush cost), a large flow-over with the real
+      `flow_system_half` + persist, the API driven (template clone, volume
+      list) — the same code `adopt-ublk` runs; find the exact path
+- [ ] fix; a test: API p99 < 1 s during the flow-over on the slow device
+- Note: adopted ublk devices run their I/O on per-device current-thread
+  runtimes (cli.rs `ublk-adopt-N`); the API runs on the main runtime
+
 ### An install never takes a shelf drive (2026-10-03, #273, P1) — DONE
 
 The owner puts a NetApp shelf on C2NR0Q2 for stormraid (stormraid#1); the
