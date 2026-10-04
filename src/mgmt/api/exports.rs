@@ -273,6 +273,7 @@ async fn create_export(
     Json(req): Json<CreateExportRequest>,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "exports", "method" => "create").increment(1);
+    let export_id = Uuid::new_v4();
 
     // Verify volume exists
     let vol_id = VolumeId(req.volume_id);
@@ -332,7 +333,10 @@ async fn create_export(
             let target = state.nvmeof_target.read().await.as_ref().cloned();
             match (target, req.host_nqn.as_deref().filter(|h| !h.trim().is_empty())) {
                 (Some(target), Some(host)) => {
-                    match crate::mgmt::nvme_hosts::attach_for_host(&state, req.volume_id, host, sealed, req.dhchap).await {
+                    // The export holds the namespace (#276): two exports of one
+                    // volume to one host are one namespace, kept until both go.
+                    let holder = format!("export:{export_id}");
+                    match crate::mgmt::nvme_hosts::attach_for_host(&state, req.volume_id, host, sealed, req.dhchap, Some(&holder)).await {
                         Ok(a) => {
                             nsid = Some(a.nsid);
                             nqn_port = Some((a.nqn.clone(), target.advertised().port()));
@@ -377,7 +381,7 @@ async fn create_export(
     }
 
     let entry = ExportEntry {
-        id: Uuid::new_v4(),
+        id: export_id,
         volume_id: req.volume_id,
         protocol: req.protocol,
         target_id,
@@ -452,7 +456,14 @@ pub(crate) async fn drop_export(state: &Arc<AppState>, id: Uuid) -> bool {
     }
     #[cfg(feature = "nvmeof")]
     if entry.subsystem.is_some() {
-        crate::mgmt::nvme_hosts::detach(state, entry.volume_id, entry.host_nqn.as_deref()).await;
+        let holder = format!("export:{}", entry.id);
+        crate::mgmt::nvme_hosts::detach(
+            state,
+            entry.volume_id,
+            entry.host_nqn.as_deref(),
+            crate::mgmt::nvme_hosts::Release::Holder(Some(&holder)),
+        )
+        .await;
     } else if let Some(nsid) = entry.nsid {
         // A /v1 attach of the same volume shares the NSID: it keeps it.
         let used = state.v1.lock().await.nvme_nsids.get(&entry.volume_id.to_string()) == Some(&nsid);

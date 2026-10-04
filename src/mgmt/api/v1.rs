@@ -1560,7 +1560,7 @@ async fn attach_volume(
             }
             return Ok(Json(attach_info_for(&state, None)));
         };
-        match nvme_attach(&state, &id, local, req.host_nqn.as_deref(), req.dhchap, false).await {
+        match nvme_attach(&state, &id, local, req.host_nqn.as_deref(), req.dhchap, false, None).await {
             Ok(info) => Ok(Json(info)),
             Err(NvmeAttachError::BadRequest(m)) => {
                 forget_attachment(&state, &id, &req.node).await;
@@ -1609,6 +1609,7 @@ pub(crate) async fn nvme_attach(
     host_nqn: Option<&str>,
     dhchap: bool,
     read_only: bool,
+    holder: Option<&str>,
 ) -> Result<AttachInfo, NvmeAttachError> {
     // No listener: nothing is served, and the answer says so by carrying no
     // NSID — what every caller got before #210.
@@ -1618,7 +1619,7 @@ pub(crate) async fn nvme_attach(
     let sealed = state.volume_manager.lock().await.is_sealed(&EngineVolumeId(local));
     let read_only = read_only || sealed;
     if let Some(host) = host_nqn.filter(|h| !h.trim().is_empty()) {
-        let a = crate::mgmt::nvme_hosts::attach_for_host(state, local, host, read_only, dhchap)
+        let a = crate::mgmt::nvme_hosts::attach_for_host(state, local, host, read_only, dhchap, holder)
             .await
             .map_err(NvmeAttachError::BadRequest)?;
         return Ok(AttachInfo::NvmeTcp {
@@ -1721,7 +1722,7 @@ async fn detach_volume(
         release_nvme_namespace(&state, &id).await;
         let local = state.v1.lock().await.volumes.get(&id).and_then(|r| r.local_id);
         if let Some(local) = local {
-            crate::mgmt::nvme_hosts::detach(&state, local, None).await;
+            crate::mgmt::nvme_hosts::detach(&state, local, None, crate::mgmt::nvme_hosts::Release::All).await;
         }
     }
     #[cfg(not(feature = "nvmeof"))]

@@ -566,7 +566,7 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
     {
         // Out of its host's subsystem too (#210): the host keeps the
         // subsystem, and finds its new clone there.
-        crate::mgmt::nvme_hosts::detach(state, old.0, None).await;
+        crate::mgmt::nvme_hosts::detach(state, old.0, None, crate::mgmt::nvme_hosts::Release::All).await;
         let ids: Vec<uuid::Uuid> = state
             .exports
             .read()
@@ -639,7 +639,7 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
                 };
             }
             (AttachFor::Host { nqn, dhchap }, Some(t)) => {
-                return match crate::mgmt::nvme_hosts::attach_for_host(state, volume.0, nqn, false, *dhchap).await {
+                return match crate::mgmt::nvme_hosts::attach_for_host(state, volume.0, nqn, false, *dhchap, None).await {
                     Ok(a) => {
                         let mut v = tuple(&a.nqn, t.advertised().port(), a.nsid);
                         v["host_nqn"] = json!(a.host_nqn);

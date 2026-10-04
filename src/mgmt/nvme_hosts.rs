@@ -47,6 +47,32 @@ pub struct NsRecord {
     pub nsid: u32,
     #[serde(default)]
     pub read_only: bool,
+    /// Who holds this namespace (#276): an attach names a holder (a build
+    /// job, `export:<id>`), or none (`""`, the anonymous holder). The
+    /// namespace goes when its last holder releases it. Two jobs on one
+    /// build box attach the same input golden: it is one namespace (one NSID
+    /// per volume, #210), and one job's detach must not take it from the
+    /// other. Empty in a record from before holders: one anonymous holder.
+    #[serde(default)]
+    pub holders: Vec<String>,
+}
+
+impl NsRecord {
+    fn holders_mut(&mut self) -> &mut Vec<String> {
+        if self.holders.is_empty() {
+            self.holders.push(String::new());
+        }
+        &mut self.holders
+    }
+}
+
+/// What a detach releases (#276).
+#[derive(Debug, Clone, Copy)]
+pub enum Release<'a> {
+    /// Every holder: the volume is going, or is no longer served at all.
+    All,
+    /// One holder; `None` is the anonymous one.
+    Holder(Option<&'a str>),
 }
 
 /// A subsystem of this node's own, and who may connect to it.
@@ -254,6 +280,7 @@ pub async fn attach_for_host(
     host_nqn: &str,
     read_only: bool,
     dhchap: bool,
+    holder: Option<&str>,
 ) -> Result<HostAttach, String> {
     let host_nqn = host_nqn.trim();
     if host_nqn.is_empty() || host_nqn.len() > 223 || !host_nqn.starts_with("nqn.") {
@@ -262,7 +289,7 @@ pub async fn attach_for_host(
     let target = target(state).await?;
     let nqn = host_subsystem_nqn(target.default_subsystem().nqn(), host_nqn);
     let pol = policy(state);
-    attach_into(state, &target, &nqn, &[host_nqn.to_string()], None, volume, read_only, dhchap || pol.require_dhchap)
+    attach_into(state, &target, &nqn, &[host_nqn.to_string()], None, volume, read_only, dhchap || pol.require_dhchap, holder)
         .await
         .map(|(nsid, secrets)| HostAttach {
             nqn,
@@ -289,7 +316,7 @@ pub async fn attach_for_boothost(
     // and firmware has nowhere to be handed one, so a secret here would
     // stop every machine booting. The NQN binding is what a boot has until
     // a claim can carry a host key (stormcos#35).
-    let (nsid, _) = attach_into(state, &target, &nqn, &hosts, Some(name), volume, false, false).await?;
+    let (nsid, _) = attach_into(state, &target, &nqn, &hosts, Some(name), volume, false, false, None).await?;
     Ok((nqn, nsid, hosts))
 }
 
@@ -303,7 +330,9 @@ async fn attach_into(
     volume: Uuid,
     read_only: bool,
     dhchap: bool,
+    holder: Option<&str>,
 ) -> Result<(u32, Vec<Option<String>>), String> {
+    let holder = holder.unwrap_or("").to_string();
     let device = state
         .volume_manager
         .lock()
@@ -328,17 +357,21 @@ async fn attach_into(
         secrets.push(entry.dhchap_secret.clone());
     }
     let sub = target.ensure_subsystem(nqn, rec.access());
-    let nsid = match rec.namespaces.iter().find(|n| n.volume == volume) {
+    let nsid = match rec.namespaces.iter_mut().find(|n| n.volume == volume) {
         Some(n) => {
             // Recorded; make sure the target has it (a restart, a replay).
             if sub.nsid_of(volume).await.is_none() && !sub.add_namespace_at(n.nsid, device.clone(), n.read_only).await {
                 return Err(format!("{nqn}: NSID {} is taken by another volume", n.nsid));
             }
+            let held = n.holders_mut();
+            if !held.contains(&holder) {
+                held.push(holder.clone());
+            }
             n.nsid
         }
         None => {
             let nsid = sub.add_namespace_next(device, read_only).await;
-            rec.namespaces.push(NsRecord { volume, nsid, read_only });
+            rec.namespaces.push(NsRecord { volume, nsid, read_only, holders: vec![holder.clone()] });
             nsid
         }
     };
@@ -352,7 +385,7 @@ async fn attach_into(
 /// Stop serving `volume` to `host_nqn` (or, with `None`, to every host).
 /// A host subsystem left with no namespaces is taken off the listener.
 /// Returns how many namespaces went.
-pub async fn detach(state: &AppState, volume: Uuid, host_nqn: Option<&str>) -> usize {
+pub async fn detach(state: &AppState, volume: Uuid, host_nqn: Option<&str>, release: Release<'_>) -> usize {
     let target = state.nvmeof_target.read().await.as_ref().cloned();
     let mut hosts = state.nvme_hosts.lock().await;
     let mut removed = 0;
@@ -364,8 +397,35 @@ pub async fn detach(state: &AppState, volume: Uuid, host_nqn: Option<&str>) -> u
             }
         }
         let before = rec.namespaces.len();
-        let gone: Vec<NsRecord> = rec.namespaces.iter().filter(|n| n.volume == volume).cloned().collect();
-        rec.namespaces.retain(|n| n.volume != volume);
+        // One holder released: the namespace stays while another holds it.
+        if let Release::Holder(h) = release {
+            let key = h.unwrap_or("");
+            for n in rec.namespaces.iter_mut().filter(|n| n.volume == volume) {
+                // A record from before holders names none: released as it
+                // always was, by whoever detaches.
+                if n.holders.is_empty() {
+                    continue;
+                }
+                let held = n.holders_mut();
+                held.retain(|x| x != key);
+                if !held.is_empty() {
+                    tracing::info!(
+                        %volume, nsid = n.nsid,
+                        "{nqn}: {} released; still held by {}",
+                        if key.is_empty() { "the anonymous holder" } else { key },
+                        held.iter().map(|x| if x.is_empty() { "(anonymous)" } else { x.as_str() }).collect::<Vec<_>>().join(", ")
+                    );
+                }
+            }
+        }
+        let gone: Vec<NsRecord> = rec
+            .namespaces
+            .iter()
+            .filter(|n| n.volume == volume && (matches!(release, Release::All) || n.holders.is_empty()))
+            .cloned()
+            .collect();
+        rec.namespaces
+            .retain(|n| !(n.volume == volume && (matches!(release, Release::All) || n.holders.is_empty())));
         if let Some(t) = target.as_ref() {
             if let Some(sub) = t.subsystem(nqn) {
                 for n in &gone {

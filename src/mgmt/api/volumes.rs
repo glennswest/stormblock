@@ -1154,6 +1154,11 @@ pub struct AttachRequest {
     /// Give that host a DH-HMAC-CHAP secret (returned as `dhchap_secret`).
     #[serde(default)]
     pub dhchap: bool,
+    /// Who holds this attach (a build job's id), with `host_nqn` (#276): one
+    /// volume attached to one host by several holders is one namespace, kept
+    /// until the last of them detaches (`DELETE …/attach?host_nqn=&holder=`).
+    #[serde(default)]
+    pub holder: Option<String>,
 }
 
 /// `POST /api/v1/volumes/{id}/attach` — a block device for any engine
@@ -1246,7 +1251,7 @@ async fn attach_volume(
     #[cfg(feature = "nvmeof")]
     {
         let ro = mode != crate::volume::Access::ReadWrite;
-        match super::v1::nvme_attach(&state, &key, uuid, req.host_nqn.as_deref(), req.dhchap, ro).await {
+        match super::v1::nvme_attach(&state, &key, uuid, req.host_nqn.as_deref(), req.dhchap, ro, req.holder.as_deref()).await {
             Ok(info) => Json(info).into_response(),
             Err(super::v1::NvmeAttachError::BadRequest(m)) => ApiError::bad_request(m),
             Err(super::v1::NvmeAttachError::Conflict(m)) => ApiError::conflict(m),
@@ -1307,6 +1312,10 @@ pub struct DetachQuery {
     /// Stop serving it to this host only; absent = to every host.
     #[serde(default)]
     pub host_nqn: Option<String>,
+    /// With `host_nqn`: release this holder only (what the attach named,
+    /// #276); the namespace stays while another holder has it.
+    #[serde(default)]
+    pub holder: Option<String>,
 }
 
 /// `DELETE /api/v1/volumes/{id}/attach` — stop serving it: the ublk device
@@ -1335,8 +1344,23 @@ async fn detach_volume(
     #[cfg(feature = "nvmeof")]
     if let Some(host) = q.host_nqn.as_deref() {
         // One host's view goes; the volume stays served to anyone else.
-        crate::mgmt::nvme_hosts::detach(&state, uuid, Some(host)).await;
-        return Json(serde_json::json!({ "id": uuid, "host_nqn": host, "attached": false })).into_response();
+        let gone = crate::mgmt::nvme_hosts::detach(
+            &state,
+            uuid,
+            Some(host),
+            crate::mgmt::nvme_hosts::Release::Holder(q.holder.as_deref()),
+        )
+        .await;
+        return Json(serde_json::json!({
+            "id": uuid,
+            "host_nqn": host,
+            "holder": q.holder,
+            "attached": false,
+            // Whether the namespace itself went: another holder may still
+            // have it (#276).
+            "namespace_removed": gone > 0,
+        }))
+        .into_response();
     }
     #[cfg(not(feature = "nvmeof"))]
     let _ = q;
@@ -1344,7 +1368,7 @@ async fn detach_volume(
     #[cfg(feature = "nvmeof")]
     {
         super::v1::release_nvme_namespace(&state, &key).await;
-        crate::mgmt::nvme_hosts::detach(&state, uuid, None).await;
+        crate::mgmt::nvme_hosts::detach(&state, uuid, None, crate::mgmt::nvme_hosts::Release::All).await;
     }
     Json(serde_json::json!({ "id": uuid, "attached": false })).into_response()
 }
