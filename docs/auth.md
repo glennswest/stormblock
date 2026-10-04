@@ -71,6 +71,10 @@ either token.
   node from one still busy.
 * `/serve/v1/health`, `/serve/v1/ready` — supervisor probes, and the same two
   under the deprecated `/mk/v1` prefix.
+* `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
+  what the engine is doing when its API stops answering (#269). Read-only,
+  no volume data (function names, lock states, kernel stacks); a node has no
+  ssh and the supervisor asking holds no node token.
 * `POST /api/v1/synonyms/boothost/<tag>/claim` — the boot claim, matched
   exactly (one method, that namespace, one path segment). The re-point beside
   it, `PUT /api/v1/synonyms/boothost/<tag>`, is what decides what a machine

@@ -415,6 +415,16 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   as it goes, so it is never missing for being busy; an abandoned flow-over
   leaves it above 0 (the node still runs from the appliance).
   A booting node asks this of every candidate address before it has a token.
+- `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
+  public, read-only, no volume data (#269): what the engine is doing when its
+  API stops answering. `stalls`: requests in flight and the last watchdog
+  reports (a request waiting over 10 s is logged with a capture, from an OS
+  thread that works when the async runtime is stuck); `tasks`: every async
+  task of every runtime the engine runs (the API's, each adopted ublk
+  device's) with the `.await` it is parked on (a tokio task dump: the build
+  sets `--cfg tokio_unstable` in `.cargo/config.toml`); `threads`: every OS
+  thread, its state and kernel stack; `locks`: whether the volume manager,
+  the extent map and the slab registry are held.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.
