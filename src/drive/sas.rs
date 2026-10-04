@@ -42,6 +42,9 @@ pub struct SasDevice {
     /// Held across a read-modify-write, so two partial-block writes to the
     /// same block cannot each keep the other's bytes out.
     rmw: tokio::sync::Mutex<()>,
+    /// One cache flush for every caller that asked before it began (#269):
+    /// a node's slabs are partitions over this one device.
+    flushes: super::flushgate::FlushGate,
 }
 
 impl SasDevice {
@@ -119,6 +122,7 @@ impl SasDevice {
             block_size,
             device_type,
             rmw: tokio::sync::Mutex::new(()),
+            flushes: Default::default(),
         })
     }
 
@@ -200,7 +204,7 @@ impl BlockDevice for SasDevice {
     }
 
     async fn flush(&self) -> DriveResult<()> {
-        self.io.sync().await
+        self.flushes.flush(&self.id.path, || self.io.sync()).await
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {

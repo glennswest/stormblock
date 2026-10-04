@@ -128,6 +128,7 @@ fn text(body: String) -> Response {
 
 async fn stalls() -> Response {
     let mut out = in_flight_report(Duration::ZERO);
+    out.push_str(&crate::drive::flushgate::summary(Duration::from_secs(300)));
     let r = reports().lock().unwrap_or_else(|e| e.into_inner());
     out.push_str(&format!("\n{} watchdog report(s) kept, newest last\n", r.len()));
     for rep in r.iter() {
@@ -312,6 +313,7 @@ pub fn start(state: Arc<AppState>) {
             }
             rep.push_str(&in_flight_report(STALL_AFTER));
             rep.push_str(&locks(&state));
+            rep.push_str(&crate::drive::flushgate::summary(Duration::from_secs(60)));
             let capture = last_capture.map(|t| t.elapsed() >= CAPTURE_EVERY).unwrap_or(true);
             if capture {
                 last_capture = Some(Instant::now());

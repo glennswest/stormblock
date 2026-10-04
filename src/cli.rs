@@ -7713,6 +7713,8 @@ mod flow_over_api_tests {
     /// One spinning disk: every I/O of every partition on it goes through
     /// one actuator.
     struct Disk {
+        /// The device's flush coalescing, as SasDevice has it (#269).
+        flushes: crate::drive::flushgate::FlushGate,
         actuator: tokio::sync::Mutex<()>,
         on: AtomicBool,
         seek: Duration,
@@ -7759,11 +7761,18 @@ mod flow_over_api_tests {
             self.0.write(offset, buf).await
         }
         async fn flush(&self) -> crate::drive::DriveResult<()> {
-            if self.1.on.load(Ordering::Relaxed) {
-                let _g = self.1.actuator.lock().await;
-                tokio::time::sleep(self.1.flush).await;
-            }
-            self.0.flush().await
+            let disk = self.1.clone();
+            let inner = self.0.clone();
+            self.1
+                .flushes
+                .flush("model-disk", || async move {
+                    if disk.on.load(Ordering::Relaxed) {
+                        let _g = disk.actuator.lock().await;
+                        tokio::time::sleep(disk.flush).await;
+                    }
+                    inner.flush().await
+                })
+                .await
         }
         async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
             self.0.discard(offset, len).await
@@ -7795,6 +7804,7 @@ mod flow_over_api_tests {
         let dir = tempfile::tempdir().unwrap();
         // The node's one disk, and forge's (spinning too, ~2.5 MB/s to a node).
         let local = Arc::new(Disk {
+            flushes: Default::default(),
             actuator: tokio::sync::Mutex::new(()),
             on: AtomicBool::new(false),
             seek: Duration::from_millis(8),
@@ -7806,6 +7816,7 @@ mod flow_over_api_tests {
             ),
         });
         let forge = Arc::new(Disk {
+            flushes: Default::default(),
             actuator: tokio::sync::Mutex::new(()),
             on: AtomicBool::new(false),
             seek: Duration::from_millis(4),
@@ -7984,6 +7995,7 @@ mod flow_over_api_tests {
             eprintln!("{what:>6}: n={n} p50={p50:.3}s p99={p99:.3}s max={max:.3}s");
         }
         eprintln!("flow-over: {left} extent(s) still on the appliance after {:.0}s", began.elapsed().as_secs_f64());
+        eprint!("{}", crate::drive::flushgate::summary(Duration::from_secs(600)));
         assert!(worst < 1.0, "API p99 {worst:.3}s during the flow-over (#269): over 1 s");
     }
 }
