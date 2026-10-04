@@ -172,6 +172,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### install-config.yaml from stormbootx onto /state (2026-10-04, #275, P1) — IN PROGRESS
+
+stormbootx#79 hands the boot media's `install-config.yaml` to Linux in
+volatile EFI variables (`StormBootInstallConfig` = `v1:<len>:<N>:<sha256>`,
+chunks `StormBootInstallConfig0..N-1`, 768 bytes each). `/init`:
+- [ ] read and verify (length, sha256) right after the boot identity,
+      stage it 0600 in RAM, delete every variable (world-readable, it
+      carries `pullSecret`/`apiToken`); never print the content
+- [ ] after the mounts: `/state/config/install-config.yaml` (0600) only
+      when `/state` is mounted and has none; the staged copy removed before
+      switch_root (/run moves into the real root)
+- [ ] `tests/initramfs-install-config.sh`; docs (README, boot-hooks), CHANGELOG
+
 ### NVMe/TCP: dropped connections said, shared namespaces held, target metrics (2026-10-04, #276, P0) — DONE
 
 The build box's "Link has been severed" (~2.5 min into a 527 MB golden on
