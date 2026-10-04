@@ -126,6 +126,13 @@ fn is_public(path: &str) -> bool {
             | "/mk/v1/ready"
             | "/mk/v1/health"
             | "/api/v1/health"
+            // What the engine is doing when its API stops answering (#269):
+            // read-only, no volume data, asked by a supervisor that holds
+            // no node token.
+            | "/debug/stalls"
+            | "/debug/tasks"
+            | "/debug/threads"
+            | "/debug/locks"
     )
 }
 

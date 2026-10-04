@@ -187,10 +187,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     // What it enforces is whatever the node resolved at startup
     // (`mgmt::auth::resolve`). A router built in-process with no resolution
     // enforces the config's own token, or nothing.
+    let r = r.merge(crate::mgmt::debug::router(state.clone()));
     r.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         crate::mgmt::auth::require_token,
     ))
+    // Outermost: every request is registered for the stall watchdog (#269),
+    // from the moment it arrives, the credential check included.
+    .layer(axum::middleware::from_fn(crate::mgmt::debug::track))
 }
 
 /// Standard error response.

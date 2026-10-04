@@ -373,7 +373,10 @@ impl UblkExportManager {
             .name(format!("ublk-csi-{id}"))
             .spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
+                    Ok(rt) => {
+                        crate::mgmt::debug::register_runtime(format!("ublk-export-{id}"), rt.handle().clone());
+                        rt
+                    }
                     Err(e) => {
                         tracing::error!("ublk-csi {id}: runtime init failed: {e}");
                         return;

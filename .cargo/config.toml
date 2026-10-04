@@ -1,0 +1,5 @@
+# Task dumps for /debug/tasks (#269): tokio's `taskdump` feature needs this
+# cfg. It enables tokio's unstable API surface only; nothing changes at
+# runtime until a dump is asked for.
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

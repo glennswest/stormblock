@@ -6,6 +6,7 @@ pub mod config;
 pub mod metrics;
 pub mod discovery;
 pub mod ublk_export;
+pub mod debug;
 pub mod raid_sets;
 #[cfg(feature = "nvmeof")]
 pub mod nvme_hosts;
@@ -526,6 +527,9 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
     }
 
     let listen_addr = &state.config.management.listen_addr;
+
+    // The stall watchdog and its heartbeat (#269).
+    debug::start(state.clone());
 
     // Who may call this, decided before anything can be called (#107). A
     // failure here — `require_auth` set with nowhere to keep a token — stops

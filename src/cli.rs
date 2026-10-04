@@ -5448,6 +5448,7 @@ async fn handle_adopt_ublk(
                     .enable_all()
                     .build()
                     .expect("runtime");
+                crate::mgmt::debug::register_runtime(format!("ublk-adopt-{dev_id} ({name})"), rt.handle().clone());
                 let server = UblkServer::new(dev).adopting(dev_id);
                 if let Err(e) = rt.block_on(server.run(rx)) {
                     tracing::error!("ublk adopt {dev_id} ({name}): {e}");
