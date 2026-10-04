@@ -23,6 +23,16 @@ tests run on.
    writes the entries of slots confirmed since, and flushes again. A volume
    FLUSH calls `sync` on every slab the volume maps; writing the volume
    records (`VolumeManager::persist`) syncs every slab first.
+   **No lock is held across a device flush** (#269): `slab::sync_registered`
+   takes the registry's read lock only to publish the confirmed entries
+   between its two flushes, and a persist takes its records in memory, then
+   syncs every slab (all at once), then writes the records under a lock that
+   never puts an older generation over a newer. Holding the registry across a
+   flush let the first allocation queue for its write lock, after which every
+   read of every volume queued behind it — on server3's spinning disk the
+   whole node's I/O and API stopped for as long as the flow-over flushed.
+   Device flushes are themselves shared (`drive::flushgate`): a flush covers
+   every caller that asked before it began.
    `sync` is a group commit (#264): one runs at a time per slab, and it
    covers every caller that asked before it began, so concurrent FLUSHes on
    one slab cost one round of device flushes. Unserialised, a second caller

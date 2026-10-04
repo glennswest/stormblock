@@ -172,24 +172,38 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### #269 reopened: the API still stalls during flow-over on server3 (2026-10-04, P0 — THE most critical) — IN PROGRESS
+### #269 reopened: the API still stalls during flow-over on server3 (2026-10-04, P0 — THE most critical) — FIXED here, proof on server3 pending
 
-11.79 (golden-stormblock-4d755f69799e @71785d4, with bc825e7): the Dell's API
-answers throughout its flow-over (claim 1.57 s, durability 301/300), but on
-server3 (X9 blade, one 7200 rpm ST2000DM008) a template clone gets no answer
-in 60 s and `GET /api/v1/volumes` fails. Owner: understand WHY, not patch.
-- [ ] instrument: API request watchdog (OS thread: works with the runtime
-      starved) logging any request > 10 s with a diagnostic capture; open
-      read-only `/debug/stalls`, `/debug/tasks` (tokio task dump, needs
-      `--cfg tokio_unstable`), `/debug/threads` (kernel stacks of every
-      thread), `/debug/locks` (vm/GEM/registry held or free)
-- [ ] reproduce on dev: the HDD as a model (one I/O at a time, seek
-      latency, flush cost), a large flow-over with the real
-      `flow_system_half` + persist, the API driven (template clone, volume
-      list) — the same code `adopt-ublk` runs; find the exact path
-- [ ] fix; a test: API p99 < 1 s during the flow-over on the slow device
-- Note: adopted ublk devices run their I/O on per-device current-thread
-  runtimes (cli.rs `ublk-adopt-N`); the API runs on the main runtime
+11.79 (with bc825e7): the Dell's API answers through its flow-over, server3's
+(one 7200 rpm ST2000DM008) does not. **Why, found with a task dump** of a
+model (`cli::flow_over_api_tests::server3_api_during_flow_over`, ignored:
+one actuator, seek per I/O, flush cost `FLOW_API_FLUSH_MS`, a slow appliance,
+the node's own I/O, the real flow-over and router):
+- `persist` and every volume `flush` held the **slab registry read lock
+  across device flushes**; the first allocation (a clone's copy-on-write)
+  queued for the write lock, and tokio's RwLock then queued every reader of
+  every volume behind it. `persist` also held the **volume manager** across
+  its flushes, and the flow-over persists after every extent. A flush of
+  seconds (server3's disk) = the node's I/O and API stopped for seconds,
+  chained. With 1.5 s flushes: clone 41 s, `GET /api/v1/volumes` 17 s.
+- [x] instrument: `/debug/stalls|tasks|threads|locks` (open, read-only) and
+      the stall watchdog (OS thread; > 10 s request → capture); tokio task
+      dumps (`.cargo/config.toml` `--cfg tokio_unstable`, `taskdump`); every
+      device flush timed (`drive::flushgate::summary`)
+- [x] fix: `slab::sync_registered` (no registry lock across a flush),
+      `MetadataWriter`, persist = records → sync (all slabs at once) → write
+      (generation-checked), `persist_detached` (flow-over, mint); device
+      flushes shared (`FlushGate`); unchanged metadata copies not rewritten;
+      a mint's stamp leaves its flush to the persist; the flow-over yields
+      its whole last move (≤ 2 s) to foreground I/O (API persists count)
+- [x] model, after: 25 ms flushes clone p99 0.80 s, list 4 ms (target met);
+      300 ms clone p50 3.4–4.8 s, list ≤ 0.1 s; 1.5 s clone ~20 s (6 durable
+      round trips on one actuator: the disk itself, no engine lock held —
+      both dumps show every lock free). Full nextest on dev 876/876
+- Found and filed: #277 (a write to a just-moved extent can be lost on a
+  cut before the next persist: equal generations, the record wins)
+- Not on metal: server3 on a release with this engine; `/debug/stalls`
+  then reports its real flush times
 
 ### An install never takes a shelf drive (2026-10-03, #273, P1) — DONE
 
