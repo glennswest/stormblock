@@ -172,6 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### NVMe/TCP: dropped connections said, shared namespaces held, target metrics (2026-10-04, #276, P0) — IN PROGRESS
+
+The build box's "Link has been severed" (~2.5 min into a 527 MB golden on
+forge 13.7) turned out to be dev's own kernel (`Bad page state`, the
+nvme-tcp sender failing). Still the engine's:
+- [ ] `duplicate IDs in subsystem`: on 13.7 one golden attached by two
+      parallel builds got two NSIDs. The current engine gives it one NSID,
+      but **one detach removes it for every job using it** (`nvme_hosts::
+      detach`): a namespace attached to a host now has holders (attach
+      `holder`, detach releases that one; none named = one anonymous holder,
+      as before); removed when none is left
+- [ ] every connection the target closes is logged at info/warn with its
+      reason, host, controller, queue, lifetime, commands and last command
+      (was debug); the target enforces no KATO and exports have no lease
+- [ ] `/metrics`: connections opened/closed by reason, live, keep-alives,
+      I/O errors, I/O latency by op
+- [ ] tests; docs (nvme-access.md, README metrics), CHANGELOG; file
+      stormcentral: send the job as `holder`
+
 ### #269 reopened: the API still stalls during flow-over on server3 (2026-10-04, P0 — THE most critical) — FIXED here, proof on server3 pending
 
 11.79 (with bc825e7): the Dell's API answers through its flow-over, server3's
