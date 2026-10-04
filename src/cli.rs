@@ -7791,7 +7791,11 @@ mod flow_over_api_tests {
             on: AtomicBool::new(false),
             seek: Duration::from_millis(8),
             bytes_per_sec: 150e6,
-            flush: Duration::from_millis(25),
+            // 25 ms for a CMR disk; a drive-managed SMR disk (server3's
+            // ST2000DM008) drains its media cache on a flush: seconds.
+            flush: Duration::from_millis(
+                std::env::var("FLOW_API_FLUSH_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(25),
+            ),
         });
         let forge = Arc::new(Disk {
             actuator: tokio::sync::Mutex::new(()),
