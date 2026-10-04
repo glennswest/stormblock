@@ -858,6 +858,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
 }
 
 /// Handles reading/writing volume metadata to disk.
+#[derive(Clone)]
 pub struct MetadataStore {
     data_dir: PathBuf,
 }

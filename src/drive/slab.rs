@@ -499,9 +499,88 @@ pub struct Slab {
     extent_index: HashMap<(VolumeId, u64), u32>,
     free_count: u64,
     /// Slots allocated whose table entry is not on the device yet (#171).
-    pending: std::sync::Mutex<Pending>,
+    pending: Arc<std::sync::Mutex<Pending>>,
     /// Group commit for [`sync`](Self::sync) (#264).
-    syncs: SyncGate,
+    syncs: Arc<SyncGate>,
+}
+
+/// What a sync of one slab needs, apart from the slab (#269): taken from the
+/// slab under the registry lock, used with no lock held across a device
+/// flush. See [`sync_registered`].
+#[derive(Clone)]
+pub struct SlabSyncHandle {
+    device: Arc<dyn BlockDevice>,
+    pending: Arc<std::sync::Mutex<Pending>>,
+    syncs: Arc<SyncGate>,
+}
+
+impl SlabSyncHandle {
+    /// One sync at a time, one for many callers (#264): see [`SyncGate`].
+    /// `publish` takes the confirmed slots and writes their entries, and says
+    /// whether it wrote any.
+    async fn run<P, F>(&self, publish: P) -> DriveResult<()>
+    where
+        P: FnOnce() -> F,
+        F: std::future::Future<Output = DriveResult<bool>>,
+    {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ticket = self.syncs.asked.fetch_add(1, SeqCst) + 1;
+        let _running = self.syncs.running.lock().await;
+        if self.syncs.done.load(SeqCst) >= ticket {
+            return Ok(());
+        }
+        let covers = self.syncs.asked.load(SeqCst);
+        // Free entries written before this flush are durable after it.
+        let freeing = std::mem::take(&mut self.pending.lock().unwrap().freeing);
+        if let Err(e) = self.device.flush().await {
+            self.pending.lock().unwrap().freeing.extend(freeing);
+            return Err(e);
+        }
+        self.pending.lock().unwrap().released.extend(freeing);
+        if publish().await? {
+            self.device.flush().await?;
+        }
+        self.syncs.done.fetch_max(covers, SeqCst);
+        Ok(())
+    }
+}
+
+/// [`Slab::sync`] for a slab in a registry, never holding the registry
+/// across a device flush (#269).
+///
+/// The registry's read lock is taken only to publish the confirmed slots'
+/// table entries (a few sector writes, ordered against allocations as
+/// before); the two flushes around it hold nothing. On server3's spinning
+/// disk a flush took seconds, and a reader held across it let the first
+/// allocation queue for the write lock, after which every read of every
+/// volume queued behind that: the node's I/O and its API stopped for as long
+/// as the flow-over kept flushing.
+pub async fn sync_registered(
+    registry: &tokio::sync::RwLock<super::slab_registry::SlabRegistry>,
+    id: SlabId,
+) -> DriveResult<()> {
+    let handle = match registry.read().await.get(&id) {
+        Some(slab) => slab.sync_handle(),
+        None => return Ok(()),
+    };
+    handle
+        .run(|| async move {
+            let r = registry.read().await;
+            match r.get(&id) {
+                Some(slab) => slab.publish_ready().await,
+                None => Ok(false),
+            }
+        })
+        .await
+}
+
+/// Where a slab's own `volumes.dat` copies are, to write one with no lock
+/// held (#269). See [`Slab::write_metadata`].
+pub struct MetadataWriter {
+    id: SlabId,
+    device: Arc<dyn BlockDevice>,
+    meta_offset: u64,
+    meta_size: u64,
 }
 
 /// One [`Slab::sync`] at a time, and one for many callers (#264).
@@ -785,35 +864,25 @@ impl Slab {
     /// on the media), write the confirmed slots' table entries, flush again.
     /// With nothing waiting, one flush.
     pub async fn sync(&self) -> DriveResult<()> {
-        use std::sync::atomic::Ordering::SeqCst;
-        let ticket = self.syncs.asked.fetch_add(1, SeqCst) + 1;
-        let _running = self.syncs.running.lock().await;
-        if self.syncs.done.load(SeqCst) >= ticket {
-            return Ok(());
-        }
-        let covers = self.syncs.asked.load(SeqCst);
-        self.sync_now().await?;
-        self.syncs.done.fetch_max(covers, SeqCst);
-        Ok(())
+        self.sync_handle().run(|| self.publish_ready()).await
     }
 
-    /// The sync itself; [`sync`](Self::sync) decides who runs it.
-    async fn sync_now(&self) -> DriveResult<()> {
-        // Free entries written before this flush are durable after it.
-        let freeing = std::mem::take(&mut self.pending.lock().unwrap().freeing);
-        if let Err(e) = self.device.flush().await {
-            self.pending.lock().unwrap().freeing.extend(freeing);
-            return Err(e);
-        }
+    /// What a sync needs, to run it with no lock on this slab (#269).
+    pub fn sync_handle(&self) -> SlabSyncHandle {
+        SlabSyncHandle { device: self.device.clone(), pending: self.pending.clone(), syncs: self.syncs.clone() }
+    }
+
+    /// Write the entries of the slots confirmed since the last sync (their
+    /// data is durable: the sync flushed first). Whether any were written.
+    async fn publish_ready(&self) -> DriveResult<bool> {
         let (ready, newly): (Vec<u32>, Vec<u32>) = {
             let mut p = self.pending.lock().unwrap();
-            p.released.extend(freeing);
             let ready: Vec<u32> = std::mem::take(&mut p.ready).into_iter().collect();
             let newly = ready.iter().copied().filter(|r| p.unpublished.remove(r)).collect();
             (ready, newly)
         };
         if ready.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         if let Err(e) = self.persist_slots(&ready).await {
             // Not on the device: they wait for the next sync.
@@ -822,7 +891,7 @@ impl Slab {
             p.ready.extend(ready);
             return Err(e);
         }
-        self.device.flush().await
+        Ok(true)
     }
 
     /// Put slots whose free is durable back in the bitmap.
@@ -1480,6 +1549,58 @@ impl Slab {
     /// says whether it decodes — but the copy header carries a second one, so
     /// a torn write is caught before the payload is ever parsed.
     pub async fn write_metadata(&self, payload: &[u8]) -> DriveResult<()> {
+        self.metadata_writer().write(payload).await
+    }
+
+    /// What [`write_metadata`](Self::write_metadata) needs, to write with no
+    /// lock on this slab held (#269).
+    pub fn metadata_writer(&self) -> MetadataWriter {
+        MetadataWriter {
+            id: self.id,
+            device: self.device.clone(),
+            meta_offset: self.header.meta_offset,
+            meta_size: self.header.meta_size,
+        }
+    }
+}
+
+impl MetadataWriter {
+    fn has_metadata_region(&self) -> bool {
+        self.meta_size >= 2 * META_ALIGN && self.meta_offset > 0
+    }
+
+    fn metadata_capacity(&self) -> u64 {
+        if !self.has_metadata_region() {
+            return 0;
+        }
+        self.meta_size / 2 - META_COPY_HEADER
+    }
+
+    fn meta_copy_offset(&self, copy: u8) -> u64 {
+        self.meta_offset + (copy as u64) * (self.meta_size / 2)
+    }
+
+    /// The generation and payload length of one copy, if its header is valid.
+    async fn meta_copy(&self, copy: u8) -> Option<(u64, u64)> {
+        let bs = self.device.block_size().max(1) as usize;
+        let mut buf = vec![0u8; (META_COPY_HEADER as usize).max(bs)];
+        self.device.read(self.meta_copy_offset(copy), &mut buf).await.ok()?;
+        if buf[0..8] != SLAB_META_MAGIC {
+            return None;
+        }
+        if u32::from_le_bytes(buf[8..12].try_into().unwrap()) != SLAB_META_VERSION {
+            return None;
+        }
+        let gen = u64::from_le_bytes(buf[12..20].try_into().unwrap());
+        let len = u64::from_le_bytes(buf[20..28].try_into().unwrap());
+        if len > self.metadata_capacity() {
+            return None;
+        }
+        Some((gen, len))
+    }
+
+    /// See [`Slab::write_metadata`].
+    pub async fn write(&self, payload: &[u8]) -> DriveResult<()> {
         if !self.has_metadata_region() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "slab {} has no metadata region; format it with one to keep \
@@ -1529,7 +1650,9 @@ impl Slab {
         self.device.flush().await?;
         Ok(())
     }
+}
 
+impl Slab {
     /// Read back the newest valid copy of the slab's volume metadata.
     ///
     /// `None` means there is nothing to read — no region, or neither copy has

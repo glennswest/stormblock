@@ -199,6 +199,21 @@ pub struct VolumeManager {
     /// What serves each volume as a device right now (#267): a held volume
     /// is not deleted, whichever path asks.
     holds: holds::ServeHolds,
+    /// The generation of the newest records written, held while they are
+    /// written (#269): two persists may snapshot in one order and finish in
+    /// the other, and an older snapshot must never be written over a newer.
+    records_written: Arc<tokio::sync::Mutex<u64>>,
+}
+
+/// What a persist writes: taken from the manager in memory, written with no
+/// manager lock held (#269).
+struct Records {
+    generation: u64,
+    /// `volumes.dat` in the data directory, unless writing it would replace a
+    /// record of real storage with an empty one.
+    store: Option<(MetadataStore, metadata::VolumeMetadata)>,
+    /// Each metadata slab's own copy, encoded.
+    slabs: Vec<(SlabId, Result<Vec<u8>, String>)>,
 }
 
 impl VolumeManager {
@@ -224,6 +239,7 @@ impl VolumeManager {
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(None),
             holds: Default::default(),
+            records_written: Default::default(),
         }
     }
 
@@ -247,6 +263,7 @@ impl VolumeManager {
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(None),
             holds: Default::default(),
+            records_written: Default::default(),
         })
     }
 
@@ -1756,10 +1773,39 @@ impl VolumeManager {
     }
 
     pub async fn persist(&self) {
-        self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match self.persist_inner().await {
+        let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let result = match self.records(generation).await {
+            None => Ok(()),
+            Some(records) => {
+                Self::sync_then_write(&self.registry, &self.records_written, records).await
+            }
+        };
+        Self::persisted(&self.durability, result);
+    }
+
+    /// [`persist`](Self::persist) holding the manager only to take the
+    /// records (#269). The flushes and the writes run with no lock, so the
+    /// API (which takes the manager for nearly everything) does not wait
+    /// behind a caller that persists over and over: the flow-over persists
+    /// after every extent it moves, and on server3's spinning disk each
+    /// persist was several flushes of seconds each.
+    pub async fn persist_detached(vm: &tokio::sync::Mutex<VolumeManager>) {
+        let (registry, written, durability, records) = {
+            let g = vm.lock().await;
+            let generation = g.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            (g.registry.clone(), g.records_written.clone(), g.durability.clone(), g.records(generation).await)
+        };
+        let result = match records {
+            None => Ok(()),
+            Some(r) => Self::sync_then_write(&registry, &written, r).await,
+        };
+        Self::persisted(&durability, result);
+    }
+
+    fn persisted(durability: &std::sync::Mutex<Option<String>>, result: anyhow::Result<()>) {
+        match result {
             Ok(()) => {
-                if let Some(prev) = self.durability.lock().unwrap().take() {
+                if let Some(prev) = durability.lock().unwrap().take() {
                     tracing::info!("volume metadata is being written again (was: {prev})");
                 }
             }
@@ -1771,7 +1817,7 @@ impl VolumeManager {
                     "DURABILITY: volume metadata was not written: {e}. Volumes created or \
                      changed from now on will not survive a restart"
                 );
-                *self.durability.lock().unwrap() = Some(e.to_string());
+                *durability.lock().unwrap() = Some(e.to_string());
             }
         }
     }
@@ -1849,24 +1895,14 @@ impl VolumeManager {
         out
     }
 
-    async fn persist_inner(&self) -> anyhow::Result<()> {
+    /// The records a persist writes, taken in memory. `None` when this
+    /// manager keeps no records anywhere.
+    async fn records(&self, generation: u64) -> Option<Records> {
         if self.metadata_store.is_none() && self.metadata_slabs.is_empty() {
-            return Ok(());
+            return None;
         }
-
-        // Nothing durable may name a slot before its data is on the device
-        // (#171): flush every slab, publishing the entries of slots written
-        // since the last flush, before a record that maps them is written.
-        {
-            let reg = self.registry.read().await;
-            for (id, slab) in reg.iter() {
-                if let Err(e) = slab.sync().await {
-                    anyhow::bail!("slab {}: flush before writing volume records: {e}", id.0);
-                }
-            }
-        }
-
-        if let Some(store) = &self.metadata_store {
+        let mut store = None;
+        if let Some(st) = &self.metadata_store {
             // Knowing about no volumes is not the same as there being none.
             // A manager whose slabs have not been attached yet holds nothing,
             // and writing that over a record describing real storage destroys
@@ -1876,41 +1912,80 @@ impl VolumeManager {
             //
             // This happened: a restart came up with no slabs attached, and the
             // next persist replaced a two-volume record with an empty one.
-            if self.volumes.is_empty() && store.exists() {
-                let had = store.load().map(|m| m.volumes.len()).unwrap_or(0);
-                if had > 0 {
-                    tracing::warn!(
-                        "not overwriting a record of {had} volume(s) with an empty one —                          this manager has no volumes, which usually means its slabs are                          not attached rather than that the storage is empty"
-                    );
-                    return Ok(());
-                }
+            let had = if self.volumes.is_empty() && st.exists() {
+                st.load().map(|m| m.volumes.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            if had > 0 {
+                tracing::warn!(
+                    "not overwriting a record of {had} volume(s) with an empty one — \
+                     this manager has no volumes, which usually means its slabs are \
+                     not attached rather than that the storage is empty"
+                );
+                return None;
             }
-            let meta = self.snapshot_metadata().await;
-            store.save(&meta)?;
+            store = Some((st.clone(), self.snapshot_metadata().await));
+        }
+        let slabs = self
+            .per_slab_metadata()
+            .await
+            .into_iter()
+            .map(|(id, meta)| (id, MetadataStore::encode(&meta).map_err(|e| format!("encode failed: {e}"))))
+            .collect();
+        Some(Records { generation, store, slabs })
+    }
+
+    /// Make durable what the records name, then write them — holding no lock
+    /// across a device flush (#269).
+    ///
+    /// Nothing durable may name a slot before its data is on the device
+    /// (#171): every slab is flushed, publishing the entries of slots written
+    /// since the last flush, after the records were taken and before they are
+    /// written, so every slot they name that had been written is durable.
+    async fn sync_then_write(
+        registry: &Arc<tokio::sync::RwLock<SlabRegistry>>,
+        written: &tokio::sync::Mutex<u64>,
+        records: Records,
+    ) -> anyhow::Result<()> {
+        let ids: Vec<SlabId> = registry.read().await.iter().map(|(id, _)| *id).collect();
+        for id in ids {
+            if let Err(e) = crate::drive::slab::sync_registered(registry, id).await {
+                anyhow::bail!("slab {}: flush before writing volume records: {e}", id.0);
+            }
         }
 
+        let mut last = written.lock().await;
+        if *last > records.generation {
+            // A newer snapshot is already on disk, and it holds all of this.
+            return Ok(());
+        }
+        if let Some((store, meta)) = &records.store {
+            store.save(meta)?;
+        }
         // Report every copy that failed, not the first. A node with two data
         // slabs where one is short of room still has to say so about that one
         // while the other is written.
         let mut failed: Vec<String> = Vec::new();
-        for (slab_id, meta) in self.per_slab_metadata().await {
-            let bytes = match MetadataStore::encode(&meta) {
+        for (slab_id, bytes) in records.slabs {
+            let bytes = match bytes {
                 Ok(b) => b,
                 Err(e) => {
-                    failed.push(format!("slab {}: encode failed: {e}", slab_id.0));
+                    failed.push(format!("slab {}: {e}", slab_id.0));
                     continue;
                 }
             };
-            let reg = self.registry.read().await;
-            match reg.get(&slab_id) {
-                Some(slab) => {
-                    if let Err(e) = slab.write_metadata(&bytes).await {
+            let writer = registry.read().await.get(&slab_id).map(|s| s.metadata_writer());
+            match writer {
+                Some(w) => {
+                    if let Err(e) = w.write(&bytes).await {
                         failed.push(format!("slab {}: {e}", slab_id.0));
                     }
                 }
                 None => failed.push(format!("slab {} is not attached", slab_id.0)),
             }
         }
+        *last = records.generation;
         if !failed.is_empty() {
             anyhow::bail!("{}", failed.join("; "));
         }
@@ -2117,7 +2192,11 @@ impl VolumeManager {
     /// there produces an image that cannot boot, so it has to fail the build
     /// rather than warn into a log nobody reads.
     pub async fn persist_checked(&self) -> anyhow::Result<()> {
-        self.persist_inner().await
+        let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        match self.records(generation).await {
+            None => Ok(()),
+            Some(records) => Self::sync_then_write(&self.registry, &self.records_written, records).await,
+        }
     }
 
     /// Restore volumes from persisted metadata. No-op if no data_dir or no metadata file.

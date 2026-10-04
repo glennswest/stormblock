@@ -2763,18 +2763,14 @@ impl BlockDevice for ThinVolumeHandle {
                 .unwrap_or_default()
         };
 
-        {
-            let reg = self.registry.read().await;
-            for slab_id in slab_ids {
-                if self.is_failed(slab_id) {
-                    continue;
-                }
-                if let Some(slab) = reg.get(&slab_id) {
-                    // Data first, then the entries of slots allocated since
-                    // the last flush, then flushed again (#171).
-                    slab.sync().await?;
-                }
+        for slab_id in slab_ids {
+            if self.is_failed(slab_id) {
+                continue;
             }
+            // Data first, then the entries of slots allocated since the last
+            // flush, then flushed again (#171) — with no registry lock held
+            // across a flush (#269).
+            crate::drive::slab::sync_registered(&self.registry, slab_id).await?;
         }
         // Everything written so far is on the media, parity included: no
         // stripe is mid-write from the consumer's point of view.

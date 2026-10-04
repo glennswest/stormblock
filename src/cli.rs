@@ -5220,9 +5220,12 @@ fn spawn_flow_over(
             sources.len(),
             flow.disk
         );
+        // Detached (#269): the manager is held only to take the records, so
+        // the API does not wait behind the flushes of a persist that runs
+        // after every extent moved.
         let persist = || async {
             if let Some(state) = state_for_persist.upgrade() {
-                state.volume_manager.lock().await.persist().await;
+                crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
             }
         };
         let Some((moved, failed)) =
@@ -7877,9 +7880,10 @@ mod flow_over_api_tests {
             let st = state.clone();
             let (gem, reg) = (state.gem.clone(), state.slab_registry.clone());
             tokio::spawn(async move {
+                // As spawn_flow_over persists (#269).
                 let persist = move || {
                     let st = st.clone();
-                    async move { st.volume_manager.lock().await.persist().await }
+                    async move { crate::volume::VolumeManager::persist_detached(&st.volume_manager).await }
                 };
                 super::flow_system_half(&gem, &reg, &[src_id], sys_id, persist, None).await
             })
