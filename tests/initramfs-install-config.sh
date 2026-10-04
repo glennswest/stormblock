@@ -44,8 +44,6 @@ CONF="$WORK/install-config.yaml"
     echo "apiVersion: v1"
     echo "pullSecret: SECRET-PULL-MARKER"
     echo "apiToken: SECRET-TOKEN-MARKER"
-    i=0
-    while [ "$(wc -c < "$WORK/pad" 2>/dev/null || echo 0)" -lt 1 ]; do :; break; done
 } > "$CONF"
 while [ "$(wc -c < "$CONF")" -lt 2053 ]; do printf 'x' >> "$CONF"; done
 SHA=$(sha256sum "$CONF" | cut -d' ' -f1)

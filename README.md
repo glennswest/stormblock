@@ -493,7 +493,15 @@ the clock's floor, #251), `/run/stormblock/install.json` (written by
 `boot-claim` when the appliance says `install`, #148) and
 `/run/stormblock/no-intent` (the appliance stated no intent, #236), and the
 EFI variables `StormBootTag` and `StormBootHostNqn` (vendor GUID
-`ab361f54-0166-44a4-a088-1ac22e98ab76`) that stormbootx leaves for it (#249).
+`ab361f54-0166-44a4-a088-1ac22e98ab76`) that stormbootx leaves for it (#249),
+and `StormBootInstallConfig` (`v1:<length>:<chunks>:<sha256>`) with its chunks
+`StormBootInstallConfig0..N-1`: the boot media's `install-config.yaml`
+(stormbootx#79). `/init` uses it only when its length and sha256 match, deletes
+every one of those variables as soon as it has read them (they are
+world-readable and carry `pullSecret` and `apiToken`), never prints it, and
+writes it to `/state/config/install-config.yaml` (0600) on a first boot only:
+when `/state` is mounted and holds none (#275; stormpump applies it,
+stormpump#78).
 
 ## How it ships
 

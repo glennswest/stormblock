@@ -146,6 +146,7 @@ the claim reply gives one) and, before it starts the loader, sets two
 |---|---|
 | `StormBootTag` | the name it claimed `boothost/<name>` on |
 | `StormBootHostNqn` | the host NQN it attached as |
+| `StormBootInstallConfig` | the boot media's `install-config.yaml`: `v1:<length>:<chunks>:<sha256>`, the bytes in `StormBootInstallConfig0..N-1` (768 each). Used only when length and digest match, every variable deleted once read, written to `/state/config/install-config.yaml` (0600) only when `/state` has none (#275, stormbootx#79) |
 
 Linux reads them from efivarfs (`/sys/firmware/efi/efivars/<Name>-<guid>`,
 four attribute bytes then the value; `/init` mounts efivarfs if nothing has).
