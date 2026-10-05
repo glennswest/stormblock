@@ -775,6 +775,15 @@ impl Slab {
                 "device too small for even one slot"
             )));
         }
+        // Format v1 keeps slot indexes in 32 bits on disk (#158): a slab past
+        // 4 Gi slots needs format v2 (larger slots until then).
+        if table_capacity > u32::MAX as u64 {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "{total_slots} slots ({} reserved for growth) is more than slab format v1 \
+                 holds (4 Gi): use larger slots",
+                table_capacity
+            )));
+        }
 
         let slab_uuid = Uuid::new_v4();
         let device_uuid = device.id().uuid;

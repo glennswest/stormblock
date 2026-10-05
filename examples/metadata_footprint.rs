@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let mut gem = GlobalExtentMap::new();
     let sid = slab.slab_id();
     for v in 0..i {
-        gem.insert(vol, v, ExtentLocation::new(sid, v as u32));
+        gem.insert(vol, v, ExtentLocation::new(sid, v));
     }
     let r3 = rss();
     println!("GEM, one extent per slot:          {:>8.1} B/extent (heap)", per(heap() - h2, i));
@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
         let vols: Vec<VolumeId> = (0..64).map(|_| VolumeId(uuid::Uuid::new_v4())).collect();
         let mut keys: Vec<(usize, u64)> = (0..i).map(|k| ((k % 64) as usize, (k / 64) * 3)).collect();
         keys.shuffle(&mut rng);
-        let mut slots_perm: Vec<u32> = (0..i as u32).collect();
+        let mut slots_perm: Vec<u64> = (0..i).collect();
         slots_perm.shuffle(&mut rng);
         let ra = heap();
         for (n, (v, vext)) in keys.iter().enumerate() {

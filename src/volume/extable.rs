@@ -5,11 +5,11 @@
 //! absent) plus a B-tree node's share. At 1 MiB extents that is ~100 GB per
 //! PB written, in memory, on every node.
 //!
-//! Here an extent is 24 bytes: its offset in a chunk, the slab as an ordinal
+//! Here an extent is 28 bytes (the slot a u64, #158): its offset in a chunk, the slab as an ordinal
 //! into a process-wide table of slab ids, the slot, the share count and the
 //! generation. Extents live in chunks of 64 consecutive virtual extents, one
 //! B-tree entry per chunk, sorted inside it, so a volume written densely pays
-//! ~25 B an extent and a sparse one pays the chunk's overhead only where it
+//! ~29 B an extent and a sparse one pays the chunk's overhead only where it
 //! has extents. Mirror legs are kept out of line, by extent, since most
 //! extents have none.
 //!
@@ -63,7 +63,7 @@ pub fn slab_of(ord: u32) -> SlabId {
     interner().read().unwrap_or_else(|e| e.into_inner()).ids[ord as usize]
 }
 
-/// One extent: 24 bytes.
+/// One extent: 28 bytes.
 #[derive(Clone, Copy)]
 #[repr(C, packed(4))]
 struct Packed {
@@ -315,8 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_is_24_bytes() {
-        assert_eq!(std::mem::size_of::<Packed>(), 24);
+    fn an_entry_is_28_bytes() {
+        assert_eq!(std::mem::size_of::<Packed>(), 28);
     }
 
     /// The table answers exactly what a B-tree would, under a random mix of
