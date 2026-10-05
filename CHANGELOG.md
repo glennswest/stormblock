@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **BREAKING (security):** Destructive verbs need the admin token or a Kubernetes bearer a SubjectAccessReview allows; the node token keeps the ordinary verbs, and every destructive call is audited (#274, owner's B, stormcos#250).
+  - **The split** is `serve::api::classify`. Destructive:
+    - slabs (format, delete, GC), arrays and their members, spares, forge on/off;
+    - the pallet table writers, and an emulated drive's fault;
+    - deleting a sealed volume or a template; seal; file and tar writes; `trim?apply`; `fsck?repair`; boot intents; other DELETEs.
+
+    Ordinary: create, clone, attach, detach-like DELETEs, and deleting an unsealed volume.
+  - **The admin token** always exists. It is configured, or read from or minted into `admin_token_file`, which defaults to `/run/stormblock-admin/admin_token` (0600, never under `/run/stormblock`, which every service mounts).
+  - **A Kubernetes bearer** is checked with TokenReview, then a SubjectAccessReview against `[management.kubernetes]` (`storage.storm.io`, resource from the path, verb delete/create/update), cached for a minute. A user who is not allowed gets 403.
+  - **`admin_gate = "audit"`** (or `$STORMBLOCK_ADMIN_GATE`) lets the node token through destructive verbs and logs each one, for the rollout.
+  - **Audit log:** `<data_dir>/audit.log`, one JSON line per destructive call (who, what, target, decision, status).
+  - **Callers that break until they move** to the admin token or a storage-admin service account: stormcluster (forge on/off), stormstorage (arrays), stormdrive (slab format, drive close). Issues filed
+- **test:** `integration_destructive` covers the node token's verbs and every destructive one refused to it and accepted from the admin token; audit mode; a fake apiserver's TokenReview and SubjectAccessReview (alice allowed, bob 403, a bad bearer 401, cached); and the minted admin token (0600, its own 0700 directory, kept). `integration_auth` moved to a slab delete
 - **docs:** #5–#7 (RAID1 prestage, fencing, dual-attach) are re-scoped onto stormstorage's RAID heads by owner decision (#179, b). #5 and #7 go to stormstorage#33; #6 keeps the engine's epoch fencing on leg attaches. The README's "Not built" now says `/v1` replication is control-plane only, and why
 - **feat:** Emulated drives for scale tests (#208, stormcos#92).
   - `emulated://<name>?size=256T|1P[&backing=<dir>][&lbs=512]`, or `[[drives]] kind = "emulated"` with `size`, `backing` and `name`, is a drive (`drive/emulated.rs`) that reports any capacity and stores only what is written: in memory in 64 KiB pages, or in 1 GiB sparse chunk files. Zeros and discards store nothing.

@@ -463,9 +463,16 @@ token file if there is none. Open without a token: `/api/v1/health`, the
 `/serve/v1` (and legacy `/mk/v1`) `health` and `ready` probes, and
 `POST /api/v1/synonyms/boothost/<tag>/claim`, and beside it the boot intent's
 `GET …/<tag>/intent` and `POST …/<tag>/installed` (#148). With an
-`admin_token`, destructive requests (any `DELETE`, `…/seal`, writing files or a
-tar into a volume, a non-dry-run GC, `trim?apply`, `fsck?repair`, setting a boot
-intent) need it.
+`admin_token`, destructive requests need it. Since #274 there is always one
+(minted into `/run/stormblock-admin/admin_token` when none is configured). A
+destructive request takes the admin token or a Kubernetes bearer that a
+SubjectAccessReview allows for `storage.storm.io`. Destructive means slabs,
+arrays, spares, forge, sealed goldens and templates, seal, file/tar writes,
+GC, `trim?apply`, `fsck?repair`, boot intents and other DELETEs. The node
+token keeps the ordinary verbs: reads, create, clone, attach and detach, and
+deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
+`admin_gate = "audit"` lets the node token through and logs it. See
+`docs/auth.md`.
 
 | surface | for |
 |---|---|

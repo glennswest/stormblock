@@ -272,7 +272,7 @@ microdns#14; with no DNS server in the lease the PTR step was silent).
 - Not on metal: needs a stormcos release built after this; C2NR0Q2 then
   registers `stormblock1` once microdns#14 sends option 12 or 6
 
-### Destructive verbs need the admin token or a storage-admin SAR (2026-10-05, #274, P1) — IN PROGRESS
+### Destructive verbs need the admin token or a storage-admin SAR (2026-10-05, #274, P1) — DONE
 
 Owner, 2026-10-05: **B**. The node token keeps the ordinary verbs (clone,
 attach, detach, create, and delete an unsealed volume that is no template or
@@ -280,23 +280,27 @@ golden). Destructive: slabs (format, delete, gc), arrays and their members,
 spares, forge on/off, sealed goldens and templates, pallets' table-writing
 verbs, an emulated drive's fault, and today's `is_destructive` list (with
 detach-like DELETEs carved out).
-- [ ] classification (`serve::api::classify`): Public / Ordinary /
+- [x] classification (`serve::api::classify`): Public / Ordinary /
       Destructive / VolumeDelete(id) (destructive when sealed, a template
       or a golden)
-- [ ] an admin token always: config/env, else read or minted into
+- [x] an admin token always: config/env, else read or minted into
       `admin_token_file` (default `/run/stormblock-admin/admin_token`, 0600:
       never under `/run/stormblock`, which every service mounts)
-- [ ] a Kubernetes bearer for a destructive verb: TokenReview, then
+- [x] a Kubernetes bearer for a destructive verb: TokenReview, then
       SubjectAccessReview (`storage.storm.io`, resource = path segment, verb
       delete/create/update), cached briefly; `[management.kubernetes]`
       api_url, ca_file, token_file (stormcos provides)
-- [ ] `admin_gate = "enforce"` (default) | `"audit"` (allows the node token
+- [x] `admin_gate = "enforce"` (default) | `"audit"` (allows the node token
       and logs who would be refused, for a rollout); `STORMBLOCK_ADMIN_GATE`
-- [ ] audit log: every destructive call (who, what, target, decision,
+- [x] audit log: every destructive call (who, what, target, decision,
       status) to `<data_dir>/audit.log` and the log
-- [ ] tests; docs (auth.md, README), CHANGELOG; issues for the callers that
+- [x] tests; docs (auth.md, README), CHANGELOG; issues for the callers that
       break (stormcluster forge, stormstorage arrays, stormdrive slabs and
       drives) and stormcos (admin token mount, kube credentials, the gate)
+- [x] verified on dev: `integration_destructive` (4), `integration_auth`;
+      full nextest 901/902 (the one a 2 s timing test under load, 6/6 alone,
+      filed). Callers that break under enforce are filed; stormcos is asked to
+      set `STORMBLOCK_ADMIN_GATE=audit` until they move
 
 ### Decide: #5–#7 in the engine or on stormstorage's heads (2026-10-05, #179, P1) — DECIDED (b)
 

@@ -48,18 +48,80 @@ neither may do.
 `/etc/stormblock/api_token`, then `/var/lib/stormblock/api_token`, and only
 ever presents a minted token to an engine on its own machine.
 
-### Destructive verbs
+### Destructive verbs (#274, stormcos#250)
 
-`admin_token` splits the surface in two. What counts as destructive is decided
-in `serve::api::is_destructive`: every `DELETE`, any path ending in `/seal`
-(a volume's or a template's, whatever the method), writing
-files or a tar into a volume's filesystem, `PUT /api/v1/forge` (making the
-node a forge serves goldens and boot clones to other machines, #272; a node
-is one by default since #287, and `DELETE /api/v1/forge` — admin, as every
-`DELETE` — turns it off and keeps it off),
-`?repair=true` on an fsck,
-`?apply` on a trim, and a slab GC that is not a dry run. Everything else takes
-either token.
+On a stormcos node the node token is mounted read-only into every engine
+caller, so it cannot be what decides whether a drive is formatted. Since #274
+(owner's choice **B**), the node token covers the **ordinary** verbs, and a
+**destructive** one needs the **admin token** or a **Kubernetes bearer** that
+a SubjectAccessReview allows. `serve::api::classify` decides which is which.
+
+**Ordinary**, on the node token:
+- reads;
+- creating, cloning and attaching volumes;
+- deleting a volume that is unsealed and is no template;
+- detach-like DELETEs: a volume's attach, an export, a LUN, a rebuild, a
+  drain, a scrub, a StormFS pin, and `/v1`'s volumes, snapshots and group
+  snapshots, which a CSI controller deletes as Kubernetes objects go.
+
+**Destructive:**
+- slabs: `POST /api/v1/slabs` (format), `DELETE`, and a GC that is not a dry
+  run;
+- arrays: create, delete, and members added, failed or replaced;
+- spares;
+- forge on and off (`PUT`/`DELETE /api/v1/forge`);
+- the pallet verbs that write a partition table (`gpt`, `convert`, `prune`,
+  `adopt`);
+- an emulated drive's fault (`/emulate`);
+- deleting a sealed volume (a golden, a blank, a snapshot) or a template;
+- sealing or unsealing;
+- writing files or a tar into a filesystem;
+- `?repair=true` on an fsck and `?apply` on a trim;
+- a boot intent;
+- every other `DELETE`.
+
+**The admin token** is never under `/run/stormblock`, which every service
+mounts. It comes from `management.admin_token` or `$STORMBLOCK_ADMIN_TOKEN`.
+Without either, it is read from, or minted at boot into,
+`management.admin_token_file` (default `/run/stormblock-admin/admin_token`,
+mode 0600, in a directory of mode 0700). With nowhere to write it, it is
+held in memory, and the node says so.
+
+**A Kubernetes bearer** (what stormconsole sends for a destructive request,
+stormconsole#82) is checked against the apiserver in `[management.kubernetes]`
+(`api_url`, `ca_file`, and `token_file` for the engine's own credential, which
+may create `tokenreviews` and `subjectaccessreviews`, as
+`system:auth-delegator` may):
+
+1. **TokenReview:** who is it?
+2. **SubjectAccessReview** for that user. The group is `storage.storm.io`;
+   the resource is the path's first segment after `api/v1/` (`volumes`,
+   `slabs`, `arrays`, `forge`, …); the verb is `delete` for DELETE, `create`
+   for a POST to a collection, `update` otherwise; and the name is the next
+   segment.
+
+The release's `storage-admin` ClusterRole allows these; `storage-viewer`
+does not. The outcomes:
+- a valid bearer that is not allowed: **403** with the apiserver's reason;
+- an invalid bearer: **401**;
+- the apiserver unreachable: **503**;
+- no apiserver configured: **401**.
+
+Answers are cached for a minute per bearer, resource and verb. A Kubernetes
+bearer is not an ordinary credential: reads stay the node token's.
+
+**`admin_gate = "audit"`** (or `$STORMBLOCK_ADMIN_GATE=audit`) is for rolling
+this out. The node token still gets through destructive verbs, and each such
+call is logged as one `enforce` (the default) would refuse.
+
+**Audit.** Every destructive call, refusals included, is one JSON line in
+`management.audit_log` (default `<data_dir>/audit.log`) and in the log:
+
+- `who`: `admin-token`, `node-token`, `kubernetes:<user>`, `unknown-bearer`
+  or `none`;
+- `method`, `path`, `resource`, `verb`, `target`;
+- `decision`: `allowed`, `allowed-audit-only` or `refused`, with the reason;
+- `status`: the response's status code.
 
 ### What stays open
 
