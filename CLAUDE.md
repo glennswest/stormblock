@@ -228,6 +228,19 @@ docs/metadata-scale.md §3.2, no on-disk format change. Measured with
 - Restore still holds every allocated slot's entry for its duration
   (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
+### Stage the next release on a running node (2026-10-05, #122, P1) — WAITING ON THE OWNER
+
+The boot-time "adopt the kept data half" path is ruled out (#261: another
+release at boot = wipe). What is left is staging N+1 on a running node for
+stormupdate#1 (`POST /api/v1/releases/{v}/stage`), with #265 (the boot after
+it must read as the same release). Proposed on #122: stage lays N+1's boot
+pallet (below the active one), its system goldens and clones under
+`<name>@<version>`, and the data volumes N+1 adds; `activate` renames
+(N → `<name>@<N>`, N+1 → plain names) and raises the pallet; rollback renames
+back. Asked (needs-owner): (1) a data volume N+1 also carries: always keep
+the node's (a, rec.) or allow "replace" (b); (2) the boot after activate:
+stormupdate re-points `boothost/<tag>` first (A, rec.) or the disk wins (B).
+
 ### The initramfs names the node and says why (2026-10-05, #238, P1) — DONE
 
 stormcos#191: C2NR0Q2 registers as `storm-06f96d` with a reservation and a
