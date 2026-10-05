@@ -23,6 +23,23 @@ pub async fn allocated_slots(e: &Engine) -> Result<u64, String> {
         .sum())
 }
 
+/// Slots allocated once the eraser has overwritten what deletes freed: a
+/// freed slot stays allocated (`Erasing`) until it has been (#286). Waits
+/// for `GET /erasures` to have nothing pending, up to 60 s.
+pub async fn settled_slots(e: &Engine) -> Result<u64, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let st = e.ok("GET", "/erasures", None).await?;
+        if st["pending_slots"].as_u64().unwrap_or(0) == 0 {
+            return allocated_slots(e).await;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!("the eraser still has {} slot(s) after 60 s", st["pending_slots"]));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 pub async fn create_volume(e: &Engine, name: &str, size: &str, redundancy: Option<&str>) -> Result<String, String> {
     let mut body = json!({ "name": name, "size": size });
     if let Some(r) = redundancy {

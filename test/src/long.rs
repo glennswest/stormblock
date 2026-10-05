@@ -113,7 +113,7 @@ pub async fn run(env: &Env, r: &mut Report) -> Result<(), String> {
         }
         let wave_ms = t.elapsed().as_millis() as u64;
         let vols = volume_count(&e).await?;
-        let slots = allocated_slots(&e).await?;
+        let slots = settled_slots(&e).await?;
         let (kib, fd) = e.footprint();
         if vols != base_vols || slots != base_slots {
             residue.push(format!("wave {n}: {vols} volume(s) (was {base_vols}), {slots} slot(s) (was {base_slots})"));

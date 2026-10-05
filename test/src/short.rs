@@ -65,7 +65,7 @@ pub async fn run(env: &Env, r: &mut Report) -> Result<(), String> {
             e.ok("DELETE", &format!("/fstemplates/{t}"), None).await?;
         }
         let vols = volume_count(&e).await?;
-        let slots = allocated_slots(&e).await?;
+        let slots = settled_slots(&e).await?;
         ensure(vols == base_vols, format!("{vols} volume(s) left, {base_vols} before"))?;
         ensure(slots == base_slots, format!("{slots} slot(s) allocated, {base_slots} before"))?;
         Ok::<_, Why>(format!("{vols} volume(s), {slots} slot(s): as before"))

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **fix:** The test container (`stormblock-test`) works again. Its attaches name the host NQN its initiator connects as: since #210 the shared subsystem admits no host, and every attach-based check in `short` and `medium` failed with 400. Its "nothing left" checks also wait for the eraser, because a deleted volume's slots stay allocated until they are overwritten (#286)
 - **perf:** Resident compaction (#155, `docs/metadata-scale.md`). The engine no longer keeps a record of every slot in memory:
   - **The slab** keeps its free map and the entries that differ from the device. The slot table is read through a bounded cache of 4 KiB pages (`STORMBLOCK_SLOT_CACHE_MB`, default 16 per slab).
   - **The GEM** stores an extent in 24 bytes (slab ordinal, slot, share count, generation), in chunks of 64 virtual extents.
