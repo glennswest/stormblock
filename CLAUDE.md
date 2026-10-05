@@ -196,6 +196,22 @@ off above `FATAL: root device /dev/ublkb0 not found`.
 - Not on metal: needs a stormcos release with this initramfs; then server8
   installing over its older disk (a named boothost answering late)
 
+### Metadata format v2: paged index, u64, log, extent classes (2026-10-05, #158 + #157 + #156, P1) — IN PROGRESS
+
+The one format change (owner: #158 2026-10-01, #157 B, #156 1 MiB hot /
+8 MiB bulk). Design and stages: `docs/metadata-v2.md`. Written behind a gate:
+the engine writes v1 until stage E.
+- [ ] A. u64 slot/extent indexes in memory; v1 encodes u32 (refuses a slab
+      past 4 Gi slots)
+- [ ] B. v2 reader/writer: slab header v2; metadata region = superblocks +
+      COW B-tree + log + checkpoint + recovery; `metadata.v2` in the data
+      dir; persist appends changes (#157); gate `[metadata] format = 2`
+- [ ] C. extent map in memory as a cache of the tree (load on open, evict
+      idle clean maps, `cache_mb`)
+- [ ] D. extent size per volume/pool (#156); the install's 8 MiB bulk slab
+- [ ] E. `slab upgrade` (in place, header last), gate default v2 for new
+      slabs, emulated 1 PiB runs (#208), docs; close #158, #157, #156
+
 ### Resident compaction (2026-10-05, #155, P1) — DONE
 
 docs/metadata-scale.md §3.2, no on-disk format change. Measured with
