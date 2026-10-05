@@ -20,6 +20,7 @@ pub mod stripelog;
 #[cfg(feature = "stormfs-data")]
 pub mod versioned;
 pub mod gc;
+pub mod extable;
 pub mod erase;
 pub mod holds;
 pub mod pressure;
