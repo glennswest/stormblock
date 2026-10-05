@@ -1385,7 +1385,7 @@ impl Slab {
     /// Find the slot a volume's virtual extent was allocated in, by reading
     /// the table (#155: there is no resident index of it; for tests and
     /// diagnostics).
-    pub async fn find_slot(&self, volume_id: VolumeId, vext_idx: u64).await -> Option<u32> {
+    pub async fn find_slot(&self, volume_id: VolumeId, vext_idx: u64) -> Option<u32> {
         self.slots_in_use()
             .await
             .ok()?
@@ -1476,7 +1476,7 @@ impl Slab {
 
     /// The entry of a slot as the engine has it now (read from the table
     /// when it has not changed in memory).
-    pub async fn get_slot(&self, slot_idx: u32).await -> Option<Slot> {
+    pub async fn get_slot(&self, slot_idx: u32) -> Option<Slot> {
         self.in_range(slot_idx).ok()?;
         self.slot_now(slot_idx).await.ok()
     }
