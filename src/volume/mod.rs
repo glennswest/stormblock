@@ -1844,6 +1844,9 @@ impl VolumeManager {
             }
         };
         Self::persisted(&self.durability, result);
+        if let Some(mb) = Self::forced_cache() {
+            self.evict_idle(mb << 20).await;
+        }
     }
 
     /// [`persist`](Self::persist) holding the manager only to take the
@@ -2009,6 +2012,12 @@ impl VolumeManager {
             return None;
         }
         let dir_v2 = self.dir_v2();
+        if !self.gem.read().await.cold_ids().is_empty() && (self.v1_sinks().await || (self.metadata_store.is_some() && !dir_v2)) {
+            // A v1 record is every map, whole.
+            if let Err(e) = gem::ensure_all_resident(&self.gem).await {
+                tracing::error!("loading extent maps for a v1 record: {e}");
+            }
+        }
         let mut store = None;
         if let Some(st) = self.metadata_store.as_ref().filter(|_| !dir_v2) {
             // Knowing about no volumes is not the same as there being none.
@@ -2057,6 +2066,74 @@ impl VolumeManager {
         Some(Records { generation, store, slabs, v2 })
     }
 
+    /// Whether any metadata slab is in format v1.
+    async fn v1_sinks(&self) -> bool {
+        let reg = self.registry.read().await;
+        self.metadata_slabs
+            .iter()
+            .any(|id| reg.get(id).is_none_or(|s| s.format_version() != crate::drive::slab::SLAB_VERSION_2))
+    }
+
+    /// Take least recently used maps out of memory until what stays is under
+    /// `budget` bytes (#158 stage C). Only a map no one outside the manager
+    /// holds a handle to (nothing attached, served, mid-I/O), nothing holds,
+    /// that a format v2 store holds as it is now: every sink v2, every record
+    /// taken written, no change since. Checked under the GEM's write lock,
+    /// which a persist needs to take its records, so none is taken between.
+    /// A map is loaded again by the first use of its volume.
+    pub async fn evict_idle(&self, budget: u64) -> usize {
+        if self.metadata_slabs.is_empty() && self.metadata_store.is_none() {
+            return 0;
+        }
+        if (self.metadata_store.is_some() && !self.dir_v2()) || self.v1_sinks().await {
+            return 0;
+        }
+        let mut idle: Vec<(u64, VolumeId)> = self
+            .volumes
+            .iter()
+            .filter(|(id, h)| Arc::strong_count(h) == 1 && self.holds.held_by(id.0).is_empty())
+            .map(|(id, h)| (h.last_use(), *id))
+            .collect();
+        idle.sort();
+        let mut gem = self.gem.write().await;
+        if gem.pager().is_none() {
+            return 0;
+        }
+        let st = self.v2.lock().unwrap_or_else(|e| e.into_inner());
+        if st.sink_count() == 0 || !st.quiet() {
+            return 0;
+        }
+        const BYTES_PER_EXTENT: u64 = 32;
+        let mut resident: u64 = gem
+            .resident_ids()
+            .iter()
+            .filter_map(|id| gem.get_volume_map(id))
+            .map(|m| (m.len() + m.parity.len()) as u64 * BYTES_PER_EXTENT)
+            .sum();
+        let mut evicted = 0;
+        for (_, id) in idle {
+            if resident <= budget {
+                break;
+            }
+            let Some(size) = gem.get_volume_map(&id).map(|m| (m.len() + m.parity.len()) as u64 * BYTES_PER_EXTENT)
+            else {
+                continue;
+            };
+            if st.held(&id) && gem.evict(id) {
+                resident -= size;
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
+    /// `$STORMBLOCK_METADATA_CACHE_MB` (tests): evict at the end of every
+    /// persist, so a path that touches a map without loading it panics.
+    fn forced_cache() -> Option<u64> {
+        static V: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var("STORMBLOCK_METADATA_CACHE_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()))
+    }
+
     /// Whether the data directory keeps `metadata.v2` rather than
     /// `volumes.dat`: the gate is on, or it already does (#158).
     fn dir_v2(&self) -> bool {
@@ -2087,14 +2164,31 @@ impl VolumeManager {
         }
         if sinks.is_empty() {
             if self.gem.read().await.tracking() {
-                self.gem.write().await.track_changes(false);
+                // No store to load a map from from now on: every map back in
+                // memory first.
+                if let Err(e) = gem::ensure_all_resident(&self.gem).await {
+                    tracing::error!("metadata v2: loading extent maps: {e}");
+                }
+                let mut g = self.gem.write().await;
+                g.track_changes(false);
+                g.set_pager(None);
             }
             return None;
         }
         if !self.gem.read().await.tracking() {
             // What changed before now was not recorded: every store whole.
-            self.gem.write().await.track_changes(true);
+            let mut g = self.gem.write().await;
+            g.track_changes(true);
+            g.set_pager(Some(Arc::new(persist_v2::StorePager { state: self.v2.clone() })));
+            drop(g);
             self.v2.lock().unwrap_or_else(|e| e.into_inner()).forget();
+        }
+        let names: Vec<Sink> = sinks.iter().map(|(s, _)| *s).collect();
+        if self.v2.lock().unwrap_or_else(|e| e.into_inner()).rewrites(&names) {
+            // A store written whole reads every map it carries.
+            if let Err(e) = gem::ensure_all_resident(&self.gem).await {
+                tracing::error!("metadata v2: loading extent maps before a whole write: {e}");
+            }
         }
         let headers = self.header_records().await;
         let pins: HashMap<VolumeId, SlabId> =

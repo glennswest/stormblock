@@ -440,6 +440,14 @@ pub struct ThinVolumeHandle {
     /// the volume says otherwise. Firmware reads boot media at 512; the
     /// kernel reads everything else at 4096. See [`Lba`].
     lba: std::sync::atomic::AtomicU32,
+    /// When this volume was last used, for the map cache (#158).
+    last_use: AtomicU64,
+}
+
+/// A clock for least-recently-used order: a counter, not a time.
+pub fn next_use() -> u64 {
+    static USE: AtomicU64 = AtomicU64::new(1);
+    USE.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The logical block sizes a volume can be presented at (#228).
@@ -499,6 +507,7 @@ impl ThinVolumeHandle {
             sealed: std::sync::atomic::AtomicBool::new(false),
             read_only: std::sync::atomic::AtomicBool::new(false),
             lba: std::sync::atomic::AtomicU32::new(Lba::DEFAULT),
+            last_use: AtomicU64::new(next_use()),
         }
     }
 
@@ -596,6 +605,9 @@ impl ThinVolumeHandle {
     /// Recompute and rewrite the parity of the given stripes — what a restart
     /// does with the stripes the log says were mid-write.
     pub async fn verify_stripes(&self, stripes: &[u64]) -> ResyncReport {
+        if let Err(e) = self.resident().await {
+            tracing::error!("{e}");
+        }
         let mut report = ResyncReport::default();
         let policy = self.redundancy();
         let Redundancy::Parity { data, parity } = policy.scheme else { return report };
@@ -737,6 +749,7 @@ impl ThinVolumeHandle {
     /// Growing is instant — allocate-on-write handles new space.
     /// Shrinking frees slab slots beyond the new boundary.
     pub async fn resize(&self, new_size: u64) -> Result<(), VolumeError> {
+        self.resident().await.map_err(VolumeError::Drive)?;
         if new_size == 0 {
             return Err(VolumeError::InvalidSize("size must be > 0".to_string()));
         }
@@ -789,6 +802,9 @@ impl ThinVolumeHandle {
     /// of an 11 GB golden as 11 GB of disk.
     pub async fn allocated(&self) -> u64 {
         let gem = self.gem.read().await;
+        if let Some(c) = gem.cold(&self.id) {
+            return c.exclusive as u64 * self.slot_size;
+        }
         gem.get_volume_map(&self.id)
             .map(|m| m.exclusive() as u64 * self.slot_size)
             .unwrap_or(0)
@@ -798,6 +814,9 @@ impl ThinVolumeHandle {
     /// shared. Real on the drive, not this volume's to free.
     pub async fn shared(&self) -> u64 {
         let gem = self.gem.read().await;
+        if let Some(c) = gem.cold(&self.id) {
+            return c.shared as u64 * self.slot_size;
+        }
         gem.get_volume_map(&self.id)
             .map(|m| m.shared() as u64 * self.slot_size)
             .unwrap_or(0)
@@ -807,6 +826,9 @@ impl ThinVolumeHandle {
     /// content, which is what a filesystem inside it sees.
     pub async fn mapped(&self) -> u64 {
         let gem = self.gem.read().await;
+        if let Some(c) = gem.cold(&self.id) {
+            return c.extents as u64 * self.slot_size;
+        }
         gem.get_volume_map(&self.id)
             .map(|m| m.len() as u64 * self.slot_size)
             .unwrap_or(0)
@@ -816,6 +838,9 @@ impl ThinVolumeHandle {
     /// included — what the policy actually costs.
     pub async fn physical(&self) -> u64 {
         let gem = self.gem.read().await;
+        if let Some(c) = gem.cold(&self.id) {
+            return c.exclusive_legs as u64 * self.slot_size;
+        }
         gem.get_volume_map(&self.id)
             .map(|m| m.exclusive_legs() as u64 * self.slot_size)
             .unwrap_or(0)
@@ -823,7 +848,25 @@ impl ThinVolumeHandle {
 
     pub async fn extent_count(&self) -> usize {
         let gem = self.gem.read().await;
+        if let Some(c) = gem.cold(&self.id) {
+            return c.extents;
+        }
         gem.get_volume_map(&self.id).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Load this volume's map if it is not in memory (#158 stage C), and
+    /// count the use for the cache's least-recently-used order. Every entry
+    /// point that reads or changes the map calls this first.
+    pub async fn resident(&self) -> DriveResult<()> {
+        self.last_use.store(next_use(), Ordering::Relaxed);
+        super::gem::ensure_resident(&self.gem, self.id)
+            .await
+            .map_err(|e| DriveError::Other(anyhow::anyhow!("volume {}: loading its extent map: {e}", self.id.0)))
+    }
+
+    /// When this volume was last used, in [`next_use`] ticks.
+    pub fn last_use(&self) -> u64 {
+        self.last_use.load(Ordering::Relaxed)
     }
 
     /// Access the inner ThinVolume.
@@ -1234,6 +1277,7 @@ impl ThinVolumeHandle {
     /// tier, and what it no longer shares with the new one stops occupying the
     /// fast one.
     pub async fn relocate_extent(&self, vext_idx: u64, dest: SlabId) -> DriveResult<Relocated> {
+        self.resident().await?;
         let loc = {
             let gem = self.gem.read().await;
             gem.lookup(self.id, vext_idx)
@@ -1884,6 +1928,9 @@ impl ThinVolumeHandle {
 
     /// What the policy asks for versus what is on trusted slabs.
     pub async fn health(&self) -> VolumeHealth {
+        if let Err(e) = self.resident().await {
+            tracing::error!("{e}");
+        }
         let policy = self.redundancy();
         let gem = self.gem.read().await;
         let reg = self.registry.read().await;
@@ -1967,6 +2014,9 @@ impl ThinVolumeHandle {
     /// persist the map in between use [`Self::resync_with`] and free them
     /// after the map is durable.
     pub async fn resync(&self, verify: bool) -> ResyncReport {
+        if let Err(e) = self.resident().await {
+            tracing::error!("{e}");
+        }
         let mut report = self.resync_with(&ResyncOptions { verify, ..Default::default() }).await;
         let owed = std::mem::take(&mut report.owed);
         self.release_slots(&owed).await;
@@ -1976,6 +2026,9 @@ impl ThinVolumeHandle {
     /// Free slots this volume no longer names — the owed half of a resync,
     /// once the map that stopped naming them is durable.
     pub async fn release_slots(&self, legs: &[Leg]) {
+        if let Err(e) = self.resident().await {
+            tracing::error!("{e}");
+        }
         if legs.is_empty() {
             return;
         }
@@ -1998,6 +2051,9 @@ impl ThinVolumeHandle {
     /// written in place, so its legs are published together at the end, in
     /// one sweep of every map that names them.
     pub async fn resync_with(&self, opts: &ResyncOptions) -> ResyncReport {
+        if let Err(e) = self.resident().await {
+            tracing::error!("{e}");
+        }
         let policy = self.redundancy();
         let mut report = ResyncReport::default();
         match policy.scheme {
@@ -2743,6 +2799,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        self.resident().await?;
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bs = u64::from(self.block_size());
         if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
@@ -2767,6 +2824,7 @@ impl BlockDevice for ThinVolumeHandle {
     /// write of parity is the thing that must not interleave, and two
     /// writers in different stripes never touch the same parity slot.
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        self.resident().await?;
         self.refuse_if_sealed()?;
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bs = u64::from(self.block_size());
@@ -2777,6 +2835,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn flush(&self) -> DriveResult<()> {
+        self.resident().await?;
         // Collect unique slab IDs for this volume, then flush their devices
         let slab_ids: Vec<SlabId> = {
             let gem = self.gem.read().await;
@@ -2803,6 +2862,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.resident().await?;
         self.refuse_if_sealed()?;
         let policy = self.redundancy();
         // An unreplicated volume serialises against its own allocations with
@@ -2850,6 +2910,7 @@ impl BlockDevice for ThinVolumeHandle {
     /// zeros through the ordinary path (copy-on-write if it is shared), so
     /// the zeros are as durable as any other write once flushed.
     async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.resident().await?;
         self.refuse_if_sealed()?;
         let zeros = vec![0u8; self.slot_size as usize];
         let mut pos = offset;

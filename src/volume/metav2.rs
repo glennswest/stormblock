@@ -1252,6 +1252,31 @@ pub fn volume_entries(rec: &VolumeRecord, extent_size: u64) -> Vec<(Key, Vec<u8>
     out
 }
 
+/// One volume's map from its entries ([`MetaV2::scan_volume`]); `None` when
+/// they hold no header (the store does not hold the volume).
+pub fn map_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<Option<super::gem::VolumeExtentMap>> {
+    let cfg = bincode::config::standard();
+    let mut map = super::gem::VolumeExtentMap::new();
+    let mut header = false;
+    for (k, v) in entries {
+        match k.kind() {
+            kind::HEADER => header = true,
+            kind::EXTENT => {
+                let (l, _): (super::gem::ExtentLocation, _) =
+                    bincode::serde::decode_from_slice(&v, cfg).map_err(|e| err(format!("extent {}: {e}", k.idx())))?;
+                map.extents.insert(k.idx(), l);
+            }
+            kind::PARITY => {
+                let (g, _) =
+                    bincode::serde::decode_from_slice(&v, cfg).map_err(|e| err(format!("stripe {}: {e}", k.idx())))?;
+                map.parity.insert(k.idx(), g);
+            }
+            _ => {}
+        }
+    }
+    Ok(header.then_some(map))
+}
+
 /// Every entry of a document, in key order.
 pub fn document_entries(doc: &VolumeMetadata) -> Vec<(Key, Vec<u8>)> {
     let mut out = vec![doc_entry(doc.extent_size, &doc.arrays)];

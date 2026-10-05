@@ -67,6 +67,8 @@ impl Opener {
 
 pub(super) struct SinkState {
     store: Arc<tokio::sync::Mutex<Option<MetaV2>>>,
+    /// How to open the store, for a load before the first persist opened it.
+    opener: Option<Opener>,
     /// The volumes the store holds: their header's hash and chunk count.
     held: HashMap<VolumeId, (u64, u64)>,
     /// The hash of the document entry it holds.
@@ -78,7 +80,7 @@ pub(super) struct SinkState {
 
 impl SinkState {
     fn new() -> SinkState {
-        SinkState { store: Default::default(), held: HashMap::new(), doc: None, need_full: true, epoch: 0 }
+        SinkState { store: Default::default(), opener: None, held: HashMap::new(), doc: None, need_full: true, epoch: 0 }
     }
 }
 
@@ -106,6 +108,80 @@ impl V2State {
         let s = self.sinks.get(&sink)?;
         let g = s.store.try_lock().ok()?;
         g.as_ref().map(|m| m.usage())
+    }
+}
+
+impl V2State {
+    /// Whether a persist with these sinks writes a store whole (which reads
+    /// every map it carries) or drops one (whose maps only it may hold).
+    pub(super) fn rewrites(&self, sinks: &[Sink]) -> bool {
+        sinks.len() != self.sinks.len()
+            || sinks.iter().any(|s| self.sinks.get(s).is_none_or(|x| x.need_full))
+    }
+
+    /// Whether every record taken has been written, and every store holds
+    /// what it was last given: the state in which a map may leave memory.
+    pub(super) fn quiet(&self) -> bool {
+        let next = self.order.state.lock().unwrap_or_else(|e| e.into_inner()).0;
+        next == self.next_ticket && self.sinks.values().all(|s| !s.need_full)
+    }
+
+    /// Whether some store holds `id`.
+    pub(super) fn held(&self, id: &VolumeId) -> bool {
+        self.sinks.values().any(|s| s.held.contains_key(id))
+    }
+
+    /// The sinks whose stores hold every volume they carry.
+    pub(super) fn sink_count(&self) -> usize {
+        self.sinks.len()
+    }
+}
+
+/// Loads a map that is not in memory from a store that holds it (#158
+/// stage C). A map is taken out of memory only when every record taken has
+/// been written ([`V2State::quiet`]) and nothing has changed in it since, so
+/// any store that holds it holds its last state.
+pub(super) struct StorePager {
+    pub(super) state: Arc<std::sync::Mutex<V2State>>,
+}
+
+#[async_trait::async_trait]
+impl super::gem::Pager for StorePager {
+    async fn load(&self, id: VolumeId) -> std::io::Result<super::gem::VolumeExtentMap> {
+        let candidates: Vec<(Arc<tokio::sync::Mutex<Option<MetaV2>>>, Option<Opener>)> = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut c: Vec<(bool, Arc<tokio::sync::Mutex<Option<MetaV2>>>, Option<Opener>)> = st
+                .sinks
+                .values()
+                .filter(|s| s.held.contains_key(&id))
+                .map(|s| (s.need_full, s.store.clone(), s.opener.clone()))
+                .collect();
+            // A store that took every write first.
+            c.sort_by_key(|(full, _, _)| *full);
+            c.into_iter().map(|(_, s, o)| (s, o)).collect()
+        };
+        let mut last = std::io::Error::other(format!("volume {}: no metadata store holds its map", id.0));
+        for (store, opener) in candidates {
+            let mut g = store.lock().await;
+            if g.is_none() {
+                match opener {
+                    Some(o) => match o.open().await {
+                        Ok(s) => *g = Some(s),
+                        Err(e) => {
+                            last = e;
+                            continue;
+                        }
+                    },
+                    None => continue,
+                }
+            }
+            match g.as_mut().unwrap().scan_volume(*id.0.as_bytes()).await.and_then(metav2::map_of) {
+                Ok(Some(map)) => return Ok(map),
+                Ok(None) => last = std::io::Error::other(format!("volume {}: not in this store", id.0)),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
     }
 }
 
@@ -222,8 +298,8 @@ pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, input: Inputs<'_>) ->
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     let configured: HashSet<Sink> = input.sinks.iter().map(|(s, _)| *s).collect();
     st.sinks.retain(|s, _| configured.contains(s));
-    for (s, _) in &input.sinks {
-        st.sinks.entry(*s).or_insert_with(SinkState::new);
+    for (s, o) in &input.sinks {
+        st.sinks.entry(*s).or_insert_with(SinkState::new).opener = Some(o.clone());
     }
 
     // Each volume's slabs: again for what changed or is new.
@@ -232,11 +308,14 @@ pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, input: Inputs<'_>) ->
     st.vol_slabs.retain(|id, _| live.contains(id));
     for id in &live {
         if changed.contains(id) || !st.vol_slabs.contains_key(id) {
-            let slabs = input
-                .gem
-                .get_volume_map(id)
-                .map(|m| m.all_legs().map(|l| l.slab_id).collect())
-                .unwrap_or_default();
+            let slabs = match input.gem.cold(id) {
+                Some(c) => c.slabs.iter().copied().collect(),
+                None => input
+                    .gem
+                    .get_volume_map(id)
+                    .map(|m| m.all_legs().map(|l| l.slab_id).collect())
+                    .unwrap_or_default(),
+            };
             st.vol_slabs.insert(*id, slabs);
         }
     }

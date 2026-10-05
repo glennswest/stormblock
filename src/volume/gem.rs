@@ -240,6 +240,11 @@ pub trait Pager: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ColdMap {
     pub extents: usize,
+    /// What a listing reports without loading it: `exclusive()`,
+    /// `shared()`, `exclusive_legs()` as they were.
+    pub exclusive: usize,
+    pub shared: usize,
+    pub exclusive_legs: usize,
     /// The slabs it has legs on.
     pub slabs: Vec<SlabId>,
 }
@@ -368,7 +373,16 @@ impl GlobalExtentMap {
         let mut slabs: Vec<SlabId> = map.all_legs().map(|l| l.slab_id).collect();
         slabs.sort_by_key(|s| s.0);
         slabs.dedup();
-        self.cold.insert(id, ColdMap { extents: map.extents.len(), slabs });
+        self.cold.insert(
+            id,
+            ColdMap {
+                extents: map.extents.len(),
+                exclusive: map.exclusive(),
+                shared: map.shared(),
+                exclusive_legs: map.exclusive_legs(),
+                slabs,
+            },
+        );
         true
     }
 
