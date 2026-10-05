@@ -177,7 +177,7 @@ check "with an appliance a short disk still goes to it" "|" "$r"
 
 # ---------------------------------------------------------------------------
 echo "the release a disk holds:"
-release() ( set +e; STORM_STORMBLOCK="$STUB"; STORM_RUN="$WORK"; STUB_OS_RELEASE="$1"; export STUB_OS_RELEASE
+release() ( set +e; MOUNTS=""; VOLUME=""; STORM_STORMBLOCK="$STUB"; STORM_RUN="$WORK"; STUB_OS_RELEASE="$1"; export STUB_OS_RELEASE
             . "$WORK/mounts.sh" >/dev/null 2>&1; disk_release "$old" )
 check "PRETTY_NAME" "stormcos 11.79" "$(release 'NAME=stormcos
 PRETTY_NAME="stormcos 11.79"
