@@ -172,6 +172,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Secure delete: freed data overwritten before reuse (2026-10-05, #286, P1) — IN PROGRESS
+
+Owner: overwrite deleted data so it cannot be recovered; default one pass,
+optionally DoD-style multi-pass; crypto-erase designed now, built later.
+- [ ] `SlotState::Erasing` (3; an older engine reads it as Free): a freed
+      slot is marked, its entry written (level in the share-count field, owner
+      kept), never in the free bitmap until erased; `retire` is the one hook
+      (deletes, CoW, discard, GC, owed sources); restart re-queues it
+- [ ] `EraseLevel` none|once|dod3|dod7 (zeros; 0x00/0xFF/random+verify;
+      7-pass ECE); node default `[erase] default` = once; per delete
+      `DELETE …?erase=`; off on fabric slabs (an appliance clone is not ours
+      to overwrite)
+- [ ] background eraser: passes, flush each, verify (dod), discard on SSD,
+      then the ordinary durable free; foreground first; per-volume audit
+      (`GET /api/v1/erasures`, log, metrics)
+- [ ] ownership checks treat Erasing as not owned (GC, rebuild, restore,
+      inc/dec_ref…)
+- [ ] tests; docs/erase.md (SSD honesty, crypto-erase design); README,
+      CHANGELOG
+
 ### Install: the data half moves in the background (2026-10-05, #285, P1) — DONE
 
 Dell 11.79 install boot: the data seed is 166 s of a 352 s boot (47%),
