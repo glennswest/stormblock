@@ -172,6 +172,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Incremental metadata persistence: change log + checkpoints (2026-10-05, #157, P1) — WAITING ON THE OWNER
+
+Read, not built. The log must live where the record is read at boot: each
+metadata slab's region (the initramfs restores from it; `STRMVMET` copy
+header v1, two alternating full copies). A log there is a new region format,
+and the owner decided on #158 (2026-10-01) that the paged index, u64 indexes
+and a format version ship as **one** format change. Asked on #157: A (own
+region format now), B (inside #158's one format change), or C (data-dir log
+only, no slab format change). Recommended B, with the in-memory change
+tracking (GEM dirty sets) first, since every option needs it.
+
 ### Forge mode on by default on every node (2026-10-05, #287, P1) — DONE
 
 Owner (stormcos#273): "a sno node should have it by default." #272 left it
