@@ -307,7 +307,7 @@ impl Retention {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LegacyLocation {
     pub slab_id: SlabId,
-    pub slot_idx: u32,
+    pub slot_idx: u64,
     pub ref_count: u32,
     pub generation: u64,
 }

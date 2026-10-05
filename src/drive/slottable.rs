@@ -94,7 +94,7 @@ impl SlotTable {
         }
     }
 
-    fn page_of(idx: u32) -> (u64, usize) {
+    fn page_of(idx: u64) -> (u64, usize) {
         let idx = idx as u64;
         (idx / ENTRIES_PER_PAGE, ((idx % ENTRIES_PER_PAGE) * SLOT_ENTRY_BYTES) as usize)
     }
@@ -121,7 +121,7 @@ impl SlotTable {
 
     /// The entry of slot `idx` as the device has it. An entry that does not
     /// check is free, as at open.
-    pub async fn read(&self, idx: u32) -> DriveResult<Slot> {
+    pub async fn read(&self, idx: u64) -> DriveResult<Slot> {
         let (page, off) = Self::page_of(idx);
         let bytes = match self.cached(page) {
             Some(b) => b,
@@ -139,7 +139,7 @@ impl SlotTable {
 
     /// Put the pages of `idxs` in the cache, with no lock of the caller's
     /// held: what a change under the registry lock will read.
-    pub async fn prefetch(&self, idxs: impl IntoIterator<Item = u32>) {
+    pub async fn prefetch(&self, idxs: impl IntoIterator<Item = u64>) {
         let mut pages: Vec<u64> = idxs.into_iter().map(|i| Self::page_of(i).0).collect();
         pages.sort_unstable();
         pages.dedup();
@@ -157,7 +157,7 @@ impl SlotTable {
 
     /// Write entries, each into its page: the page as the device has it,
     /// with these entries replaced.
-    pub async fn write(&self, entries: &[(u32, [u8; SLOT_ENTRY_BYTES as usize])]) -> DriveResult<()> {
+    pub async fn write(&self, entries: &[(u64, [u8; SLOT_ENTRY_BYTES as usize])]) -> DriveResult<()> {
         let mut by_page: std::collections::BTreeMap<u64, Vec<(usize, &[u8; SLOT_ENTRY_BYTES as usize])>> =
             Default::default();
         for (idx, bytes) in entries {
@@ -182,7 +182,7 @@ impl SlotTable {
     /// Every entry of the first `total` slots that is not free, read from the
     /// device in large pieces (not through the cache). For restore and the
     /// collector, which want the whole table once.
-    pub async fn scan(&self, total: u64) -> DriveResult<Vec<(u32, Slot)>> {
+    pub async fn scan(&self, total: u64) -> DriveResult<Vec<(u64, Slot)>> {
         const PIECE: u64 = 4 << 20;
         let want = (total * SLOT_ENTRY_BYTES).min(self.limit);
         let mut out = Vec::new();
@@ -197,7 +197,7 @@ impl SlotTable {
                 }
                 if let Some(slot) = Slot::from_bytes(e) {
                     if slot.state != super::slab::SlotState::Free {
-                        out.push(((at / SLOT_ENTRY_BYTES) as u32 + i as u32, slot));
+                        out.push(((at / SLOT_ENTRY_BYTES) + i as u64, slot));
                     }
                 }
             }

@@ -41,7 +41,7 @@ use crate::volume::gem::GlobalExtentMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Orphan {
     pub slab_id: SlabId,
-    pub slot_idx: u32,
+    pub slot_idx: u64,
     /// Owner recorded in the slot table — a volume that usually no longer
     /// exists. Kept for the log line, not used to decide liveness.
     pub volume_id: VolumeId,

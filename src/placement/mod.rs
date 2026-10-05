@@ -70,13 +70,13 @@ pub enum PlacementError {
     ExtentNotFound { volume_id: VolumeId, vext_idx: u64 },
     SlabNotFound(SlabId),
     NoDestination,
-    ReadFailed { slab_id: SlabId, slot_idx: u32, error: String },
-    WriteFailed { slab_id: SlabId, slot_idx: u32, error: String },
+    ReadFailed { slab_id: SlabId, slot_idx: u64, error: String },
+    WriteFailed { slab_id: SlabId, slot_idx: u64, error: String },
     Other(String),
     /// The destination would put two legs of one extent on one domain.
     DomainCollision(SlabId),
     /// An I/O is using the slot right now (#239). Nothing moved; try again.
-    Busy { slab_id: SlabId, slot_idx: u32 },
+    Busy { slab_id: SlabId, slot_idx: u64 },
 }
 
 impl fmt::Display for PlacementError {

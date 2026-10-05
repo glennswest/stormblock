@@ -65,7 +65,7 @@ impl DriveRef {
 
 #[derive(Debug, Serialize)]
 pub struct SlotResponse {
-    pub slot_idx: u32,
+    pub slot_idx: u64,
     pub volume_id: String,
     pub virtual_extent_idx: u64,
     pub ref_count: u32,
@@ -420,7 +420,7 @@ pub struct GcQuery {
 #[derive(Debug, Serialize)]
 pub struct OrphanResponse {
     pub slab_id: String,
-    pub slot_idx: u32,
+    pub slot_idx: u64,
     /// Owner recorded in the slot table — usually a volume that no longer
     /// exists. Informational; liveness is decided by the extent map.
     pub stale_owner: String,

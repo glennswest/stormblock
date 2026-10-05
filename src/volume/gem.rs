@@ -26,11 +26,11 @@ use crate::volume::extent::VolumeId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Leg {
     pub slab_id: SlabId,
-    pub slot_idx: u32,
+    pub slot_idx: u64,
 }
 
 impl Leg {
-    pub fn new(slab_id: SlabId, slot_idx: u32) -> Self {
+    pub fn new(slab_id: SlabId, slot_idx: u64) -> Self {
         Leg { slab_id, slot_idx }
     }
 }
@@ -40,7 +40,7 @@ impl Leg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtentLocation {
     pub slab_id: SlabId,
-    pub slot_idx: u32,
+    pub slot_idx: u64,
     pub ref_count: u32,
     pub generation: u64,
     /// Additional full copies, each on its own failure domain. Empty for
@@ -50,7 +50,7 @@ pub struct ExtentLocation {
 
 impl ExtentLocation {
     /// A fresh, exclusively owned, unreplicated location.
-    pub fn new(slab_id: SlabId, slot_idx: u32) -> Self {
+    pub fn new(slab_id: SlabId, slot_idx: u64) -> Self {
         ExtentLocation { slab_id, slot_idx, ref_count: 1, generation: 1, mirrors: Vec::new() }
     }
 
@@ -516,7 +516,7 @@ impl GlobalExtentMap {
     /// Some extent that references a slot, by walking the maps: the first
     /// found. A parity slot answers with a `parity_vext`-tagged index. For
     /// tests and diagnostics; who *owns* a slot is the slot table's to say.
-    pub fn reverse_lookup(&self, slab_id: SlabId, slot_idx: u32) -> Option<(VolumeId, u64)> {
+    pub fn reverse_lookup(&self, slab_id: SlabId, slot_idx: u64) -> Option<(VolumeId, u64)> {
         let leg = Leg::new(slab_id, slot_idx);
         for (vol, vmap) in &self.volumes {
             for (vext, loc) in &vmap.extents {
@@ -801,7 +801,7 @@ mod tests {
         SlabId(Uuid::new_v4())
     }
 
-    fn loc(slab_id: SlabId, slot_idx: u32) -> ExtentLocation {
+    fn loc(slab_id: SlabId, slot_idx: u64) -> ExtentLocation {
         ExtentLocation::new(slab_id, slot_idx)
     }
 

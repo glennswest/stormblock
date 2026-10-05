@@ -218,18 +218,18 @@ impl SlabRegistry {
 
     /// Mark a freshly allocated slot as in flight, protecting it from
     /// collection until the caller records it in the GEM.
-    pub fn reserve(&mut self, slab_id: SlabId, slot_idx: u32) {
+    pub fn reserve(&mut self, slab_id: SlabId, slot_idx: u64) {
         self.in_flight.insert((slab_id, slot_idx));
     }
 
     /// Release a reservation once the mapping exists (or the write failed and
     /// the slot was given back).
-    pub fn commit(&mut self, slab_id: SlabId, slot_idx: u32) {
+    pub fn commit(&mut self, slab_id: SlabId, slot_idx: u64) {
         self.in_flight.remove(&(slab_id, slot_idx));
     }
 
     /// Whether a slot is allocated-but-not-yet-mapped.
-    pub fn is_reserved(&self, slab_id: SlabId, slot_idx: u32) -> bool {
+    pub fn is_reserved(&self, slab_id: SlabId, slot_idx: u64) -> bool {
         self.in_flight.contains(&(slab_id, slot_idx))
     }
 

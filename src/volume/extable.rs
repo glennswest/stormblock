@@ -71,7 +71,7 @@ struct Packed {
     off: u8,
     _pad: [u8; 3],
     slab: u32,
-    slot: u32,
+    slot: u64,
     refs: u32,
     generation: u64,
 }
