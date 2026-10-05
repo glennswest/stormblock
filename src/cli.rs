@@ -6620,14 +6620,51 @@ file = "{state}"
             .await
             .unwrap()
             .expect("a fresh disk is laid");
-        let mut bad = compare("after the seed", &before, &digests(&mgr).await);
+        // The data half is not seeded before the boot goes on (#285): it
+        // moves in the background, after the system half.
+        assert!(flow.data_flow, "a fresh lay hands the data half to the successor");
+        // What boot-local does before it writes the handover record.
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        let mut bad = compare("after the lay", &before, &digests(&mgr).await);
         drop(mgr);
 
-        // The engine that adopts the boot opens the image and the disk.
+        // The engine that adopts the boot opens the image and the disk,
+        // quarantines the sources, and moves the system half and then the
+        // data half while the volumes are in use.
         let (succ, _) = super::open_slabs_resuming(&[image.clone(), flow.disk.clone()], None, true)
             .await
             .unwrap();
+        super::quarantine_flow_sources(&succ, &flow).await;
         bad.extend(compare("after a fresh open", &before, &digests(&succ).await));
+        let (sys_dest, data_dest) = (
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
+        );
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        assert!(!data_src.is_empty(), "the image's data slab is a source");
+        let data_left = super::extents_on(succ.gem(), &data_src).await;
+        assert!(data_left > 0, "the data half is still on the image");
+        let remaining = std::sync::atomic::AtomicI64::new(-1);
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), Some(&remaining), data_left)
+            .await
+            .expect("the system half moves");
+        assert_eq!(
+            remaining.load(std::sync::atomic::Ordering::Relaxed),
+            data_left as i64,
+            "between the halves, flow_over_remaining counts the data half (never 0 early)"
+        );
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), Some(&remaining), 0)
+            .await
+            .expect("the data half moves");
+        assert_eq!(remaining.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(super::extents_on(succ.gem(), &data_src).await, 0, "nothing left on the image's data slab");
+        bad.extend(compare("after both halves moved", &before, &digests(&succ).await));
         drop(succ);
 
         // And the disk alone: what the node boots from next time.
@@ -6645,6 +6682,138 @@ file = "{state}"
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// #285: the data half moves while it is written, and a boot cut short in
+    /// the middle of it resumes from a fresh clone with every write kept. The
+    /// writes land while their extents are still on the image (quarantined:
+    /// they go to the disk), the move is cut part-way, the next boot opens the
+    /// disk, fetches what it misses from the image and finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_data_half_moves_while_written_and_a_cut_resumes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let mut seed = 0x285u64;
+        let mut noise = |len: u64| {
+            let mut v = vec![0u8; len as usize];
+            for c in v.chunks_mut(8) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                c.copy_from_slice(&seed.to_le_bytes()[..c.len()]);
+            }
+            v
+        };
+        let (root, state, logs) = (p("root.img"), p("state.img"), p("logs.img"));
+        std::fs::write(&root, noise(16 * MIB)).unwrap();
+        std::fs::write(&state, noise(32 * MIB)).unwrap();
+        std::fs::write(&logs, noise(16 * MIB)).unwrap();
+        let spec = format!(
+            r#"
+name = "install-285"
+size = "1G"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "root"
+file = "{root}"
+[data_slab]
+size = "512M"
+[[data_slab.golden]]
+name = "state"
+file = "{state}"
+[[data_slab.golden]]
+name = "logs"
+file = "{logs}"
+"#
+        );
+        let image = p("image.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&image))
+            .await
+            .unwrap();
+
+        // The install boot lays the disk and hands both halves on.
+        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let disk = p("disk.raw");
+        std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
+        let flow = super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
+        assert!(flow.data_flow);
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+
+        // The successor: writes to the data half while it moves.
+        let (succ, _) = super::open_slabs_resuming(&[image.clone(), flow.disk.clone()], None, true).await.unwrap();
+        super::quarantine_flow_sources(&succ, &flow).await;
+        let data_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let data_src: Vec<_> = {
+            let reg = succ.registry().read().await;
+            reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect()
+        };
+        let total = super::extents_on(succ.gem(), &data_src).await;
+        assert!(total >= 8, "enough of the data half to cut in the middle: {total}");
+        let id = succ.find_volume("state").await.expect("the state volume");
+        let vol = succ.get_volume(&id).unwrap();
+        // Written before the move reaches them, and flushed: a consumer's
+        // fsync. Every fourth MiB, so some extents are moved after being
+        // written and some are written after being moved.
+        for k in (0..32u64).step_by(4) {
+            vol.write(k * MIB + 4096, &vec![0xA0 + k as u8; 8192]).await.unwrap();
+        }
+        vol.flush().await.unwrap();
+        // Cut the move about half way: the persist after the Nth extent
+        // never comes back, and the move is dropped there.
+        let n = (total / 2) as u64;
+        let persists = std::sync::atomic::AtomicU64::new(0);
+        let cut = tokio::sync::Notify::new();
+        let persist = || {
+            let c = persists.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let (succ, cut) = (&succ, &cut);
+            async move {
+                if c > n {
+                    cut.notify_one();
+                    std::future::pending::<()>().await
+                }
+                succ.persist().await
+            }
+        };
+        tokio::select! {
+            r = super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, persist, None, 0) => {
+                panic!("the move was meant to be cut: {r:?}")
+            }
+            _ = cut.notified() => {}
+        }
+        let left = super::extents_on(succ.gem(), &data_src).await;
+        assert!(left > 0 && left < total, "cut part-way: {left} of {total} left");
+        let mut expect = vec![0u8; (32 * MIB) as usize];
+        vol.read(0, &mut expect).await.unwrap();
+        drop(vol);
+        drop(succ);
+
+        // The next boot: the disk, and the extents it misses from a fresh
+        // clone (here, the image itself).
+        std::env::set_var("STORMBLOCK_RESUME_SOURCE", &image);
+        let (next, resumed) = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await.unwrap();
+        std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
+        assert!(resumed.is_some(), "the boot resumes the flow-over");
+        let id = next.find_volume("state").await.expect("the disk names the state volume");
+        let vol = next.get_volume(&id).unwrap();
+        let mut got = vec![0u8; (32 * MIB) as usize];
+        vol.read(0, &mut got).await.unwrap();
+        assert!(got == expect, "every write made while the data half moved is there after the cut");
+        // And the rest moves.
+        super::quarantine_flow_sources(&next, &flow).await;
+        let data_src: Vec<_> = {
+            let reg = next.registry().read().await;
+            reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect()
+        };
+        super::flow_slabs(next.gem(), next.registry(), &data_src, data_dest, || next.persist(), None, 0)
+            .await
+            .expect("the rest of the data half moves");
+        assert_eq!(super::extents_on(next.gem(), &data_src).await, 0);
+        let mut after = vec![0u8; (32 * MIB) as usize];
+        vol.read(0, &mut after).await.unwrap();
+        assert!(after == expect, "and reads the same once it is all on the disk");
     }
 
     /// The appliance, as the node sees it: a device a network round trip
