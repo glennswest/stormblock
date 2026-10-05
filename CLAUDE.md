@@ -228,6 +228,19 @@ docs/metadata-scale.md §3.2, no on-disk format change. Measured with
 - Restore still holds every allocated slot's entry for its duration
   (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
+### Destructive verbs need the admin token or a storage-admin SAR (2026-10-05, #274, P1) — WAITING ON THE OWNER
+
+stormcos#250: the node token is in every engine caller, so any service can
+destroy a slab or delete any volume. The ask splits ordinary (clone, attach,
+detach, create/delete a volume the caller owns) from destructive (slabs,
+others' volumes, forge, wipes), the latter needing the admin token or a
+Kubernetes bearer a SubjectAccessReview allows (`storage.storm.io`), with an
+audit log. Read, not built: with one shared token "the caller owns" has no
+meaning (`owner` names a k8s object, not a caller). Asked on #274
+(needs-owner): A per-service tokens, B node token deletes unsealed volumes,
+C every volume delete needs a k8s bearer + SAR (recommended). rustkube's
+apiserver has TokenReview, SubjectAccessReview and SelfSubjectAccessReview.
+
 ### Decide: #5–#7 in the engine or on stormstorage's heads (2026-10-05, #179, P1) — WAITING ON THE OWNER
 
 A decision issue: the `/v1` prestage/fence/dual-attach API is control-plane
