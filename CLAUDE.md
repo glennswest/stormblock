@@ -172,6 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Resident compaction (2026-10-05, #155, P1) — IN PROGRESS
+
+docs/metadata-scale.md §3.2, no on-disk format change. Baseline (#145):
+~41 B per free slot, ~70 B more per allocated slot, ~215 B per extent in the
+GEM. Target ~30 B per extent, 0 B per free slot. Three steps, each tested:
+- [ ] measure first: `metadata_footprint` gains a scattered (CoW-like) map,
+      clones, and a slab whose slots are not sequential
+- [ ] 1. GEM without a reverse index: `slab_extents`/`slab_parity` walk the
+      forward maps (one entry per referenced slot); callers that asked per
+      extent in a loop (flow-over, drain) take one list per pass
+- [ ] 2. compact GEM entries: slab ordinal (process-wide interner), slot,
+      share count, generation packed; mirrors out of line; extents in chunks
+      of 64 virtual extents instead of a B-tree node each. `lookup` returns
+      an owned `ExtentLocation`; `VolumeRecord.extents` (on disk) unchanged
+- [ ] 3. slab: no `Vec<Slot>` for every slot and no `extent_index`. The
+      slot table on disk is the record, read through a bounded cache of
+      table sectors; pending entries (#171) stay in memory until published
+- [ ] tests (full nextest), measurements, docs (metadata-scale.md), CHANGELOG
+
 ### Incremental metadata persistence: change log + checkpoints (2026-10-05, #157, P1) — WAITING ON THE OWNER
 
 Read, not built. The log must live where the record is read at boot: each
