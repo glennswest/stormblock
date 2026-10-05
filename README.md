@@ -225,7 +225,8 @@ it does not parse), then, in order:
 
 1. starts the volume manager (with `--data-dir` or `[management] data_dir`,
    metadata survives a restart);
-2. starts node discovery (unless `discovery_disabled`), the extent GC (`[gc]`)
+2. starts node discovery (unless `discovery_disabled`), the extent GC (`[gc]`),
+   the eraser (`[erase]`, #286; `adopt-ublk` starts it too)
    and the pool-pressure watcher (`[pressure]`, off by default);
 3. opens the drives (`-d` or `[[drives]]`) and **adopts the slabs already on
    them**, their volumes included; with `--raid`, builds an array from them,
@@ -376,6 +377,11 @@ namespace; set `false` where the drives are the engine's pool) is used;
 (`true`), `max_reclaim_per_pass` (`4096`), `dry_run` (`false`): the collector
 for slab slots no volume maps.
 
+**`[erase]`** — `default` (`once`; `none`, `dod3`, `dod7`): what a freed slot
+is overwritten with before it is reused (#286, `docs/erase.md`). A delete may
+ask for more with `DELETE /api/v1/volumes/{id}?erase=`. Slabs reached over a
+fabric are never erased.
+
 **`[pressure]`** — `enabled` (`false`), `high_water_pct` (`80.0`),
 `check_interval_secs` (`60`), `min_slab_bytes` (1 GiB), `max_slabs` (`64`), and
 `[[pressure.sources]]` of `kind = "device"` (`path`; adopted if it holds a
@@ -435,6 +441,8 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   plus `stormblock_api_requests_total{endpoint,method}`, `stormblock_volumes_total`,
   `stormblock_{drives,arrays,slabs,exports,luns}_total`, `stormblock_capacity_bytes`,
   `stormblock_raid_{state,failed_members,rebuild_percent}{array,name}`,
+  `stormblock_erase_pending_slots`, `stormblock_erased_slots_total{level}`,
+  `stormblock_erased_bytes_total` (#286),
   the NVMe/TCP target's `stormblock_nvmeof_connections_opened_total{queue}`,
   `stormblock_nvmeof_connections_closed_total{reason}`,
   `stormblock_nvmeof_keepalives_total`, `stormblock_nvmeof_io_errors_total{op}`
@@ -460,6 +468,7 @@ intent) need it.
 |---|---|
 | `/api/v1/drives`, `/arrays`, `/shelves`, `/spares`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID sets (create, `assemble`, members `{slot}/fail` and `/replace`, `scrub`, `rebuild` rate), shelf layout, hot spares, slabs and the pool (`durability`, `{id}/slots`), GC, rebuild queue |
 | `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
+| `/api/v1/erasures` | secure delete (#286): the node's level, slots waiting, volumes being erased, and the audit record of every finished erase (`erasures.json`). `DELETE /api/v1/volumes/{id}?erase=once\|dod3\|dod7` asks for more than the default |
 | `/api/v1/forge` | this node as its site's forge (#272): `PUT` the `[nvmeof]` settings (`listen_addr`, `nqn`, `allowed_hosts`, `allow_any_host`, `require_dhchap`, `boothost_host_nqn`; admin token) starts the shared NVMe/TCP target live and keeps them in `forge.json`, served again at every start; `DELETE` (admin) stops accepting and forgets them; `GET` says what runs and who set it up (`source`: `api` or `config`). A target the command line or `--config` set up answers `409` |
 | `/api/v1/boothost` | boot hosts by DNS name: list (`?unnamed=1`: booted the default, not named yet, #200), find by name or alias, `PUT {aliases}`, `POST …/rename` (#199) |
 | `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks (`{id}/clone`, `{id}/claim`), offline moves, names and boot claims, published releases (`index.html`, `manifest`, `notes`, `changes`) |
@@ -1473,6 +1482,7 @@ What earlier docs described and the code does not do, each with its issue:
 |---|---|
 | `docs/auth.md` | who may call a node's API; the boot claim; host goldens |
 | `docs/nvme-access.md` | who may connect over NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP, goldens write-protected (#210) |
+| `docs/erase.md` | secure delete: freed slots overwritten before reuse, levels, the audit record, what it does not do on flash, crypto-erase (design) (#286) |
 | `docs/durability.md` | what survives a power cut: slot entries after their data, frees made durable before reuse, recovery from stale records, the handover order, a flow-over cut short |
 | `docs/redundancy.md` | per-volume redundancy, failure domains, health, resync, automatic rebuild, drain, whole-disk goldens and import |
 | `docs/multi-drive.md` | pools, placement, a drive's life, dedicated arrays, what a claim should ask for (part design) |

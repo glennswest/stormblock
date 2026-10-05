@@ -172,25 +172,28 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Secure delete: freed data overwritten before reuse (2026-10-05, #286, P1) — IN PROGRESS
+### Secure delete: freed data overwritten before reuse (2026-10-05, #286, P1) — DONE
 
-Owner: overwrite deleted data so it cannot be recovered; default one pass,
-optionally DoD-style multi-pass; crypto-erase designed now, built later.
-- [ ] `SlotState::Erasing` (3; an older engine reads it as Free): a freed
-      slot is marked, its entry written (level in the share-count field, owner
-      kept), never in the free bitmap until erased; `retire` is the one hook
-      (deletes, CoW, discard, GC, owed sources); restart re-queues it
-- [ ] `EraseLevel` none|once|dod3|dod7 (zeros; 0x00/0xFF/random+verify;
-      7-pass ECE); node default `[erase] default` = once; per delete
-      `DELETE …?erase=`; off on fabric slabs (an appliance clone is not ours
-      to overwrite)
-- [ ] background eraser: passes, flush each, verify (dod), discard on SSD,
-      then the ordinary durable free; foreground first; per-volume audit
-      (`GET /api/v1/erasures`, log, metrics)
-- [ ] ownership checks treat Erasing as not owned (GC, rebuild, restore,
-      inc/dec_ref…)
-- [ ] tests; docs/erase.md (SSD honesty, crypto-erase design); README,
-      CHANGELOG
+Owner's request: overwrite deleted data so it cannot be recovered. One pass by
+default, DoD-style multi-pass as an option; crypto-erase designed now and built
+later. `docs/erase.md`.
+- [x] `SlotState::Erasing` (3; an older engine reads it as Free). `retire` is
+      the one hook: a freed slot is marked, its entry written (the level in the
+      share-count field, the owner kept), and it stays out of the bitmap.
+      `Slab::open` re-queues it. `is_owned()` is used by GC, the GEM rebuild,
+      restore, inc/dec_ref, reassign and `shares()`
+- [x] `drive::erase::EraseLevel`: none | once | dod3 | dod7. Set by
+      `[erase] default` (once) through `SlabRegistry::set_erase_default`; a
+      delete may raise it with `?erase=` (`delete_volume_erasing`). Not set on
+      fabric slabs
+- [x] `volume::erase::Eraser`: batches, a flush after each pass, the last pass
+      read back for dod, discard unless HDD, then `finish_erase` (a durable
+      free); foreground first. Audit in `erasures.json` and
+      `GET /api/v1/erasures`; metrics. Started by the daemon and `adopt-ublk`
+      (`AppState::start_eraser`)
+- [x] tests (slab, eraser, HTTP); full nextest on dev: 888/888
+- [x] docs/erase.md, README, CHANGELOG
+- Not built: a per-volume or per-class stored level; crypto-erase (design only)
 
 ### Install: the data half moves in the background (2026-10-05, #285, P1) — DONE
 
