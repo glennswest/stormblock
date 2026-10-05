@@ -201,8 +201,11 @@ off above `FATAL: root device /dev/ublkb0 not found`.
 The one format change (owner: #158 2026-10-01, #157 B, #156 1 MiB hot /
 8 MiB bulk). Design and stages: `docs/metadata-v2.md`. Written behind a gate:
 the engine writes v1 until stage E.
-- [ ] A. u64 slot/extent indexes in memory; v1 encodes u32 (refuses a slab
-      past 4 Gi slots)
+- [x] A. u64 slot/extent indexes in memory; v1 encodes u32 (refuses a slab
+      past 4 Gi slots). Nothing on disk changed: bincode's varints make a
+      u64 below 2^32 the same bytes (`metadata::u64_slot_compat`). Extent
+      entry 28 B; GEM 29.0 B/extent (33.9 scattered). nextest 902/902,
+      `--features cluster` checks (b0a2323)
 - [ ] B. v2 reader/writer: slab header v2; metadata region = superblocks +
       COW B-tree + log + checkpoint + recovery; `metadata.v2` in the data
       dir; persist appends changes (#157); gate `[metadata] format = 2`

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **feat:** #158 stage A: slot and extent indexes are u64 in memory (legs, the GEM, slabs, slot table, chunks). No on-disk change: v1 metadata writes the same bytes for every index below 2^32, and formatting a slab past 4 Gi slots is refused (use larger slots) until format v2. A GEM extent is 29 B resident (was 25 B)
 - **BREAKING (security):** Destructive verbs need the admin token or a Kubernetes bearer a SubjectAccessReview allows; the node token keeps the ordinary verbs, and every destructive call is audited (#274, owner's B, stormcos#250).
   - **The split** is `serve::api::classify`. Destructive:
     - slabs (format, delete, GC), arrays and their members, spares, forge on/off;
