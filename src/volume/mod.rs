@@ -2094,7 +2094,7 @@ impl VolumeManager {
             .filter(|(id, h)| Arc::strong_count(h) == 1 && self.holds.held_by(id.0).is_empty())
             .map(|(id, h)| (h.last_use(), *id))
             .collect();
-        idle.sort();
+        idle.sort_by_key(|(t, _)| *t);
         let mut gem = self.gem.write().await;
         if gem.pager().is_none() {
             return 0;
