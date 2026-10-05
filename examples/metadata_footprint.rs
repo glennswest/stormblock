@@ -25,6 +25,31 @@ use stormblock::placement::topology::StorageTier;
 use stormblock::volume::extent::VolumeId;
 use stormblock::volume::gem::{ExtentLocation, GlobalExtentMap};
 
+/// Heap bytes in use, counted by the allocator: exact, where RSS lags
+/// frees and reuse (a map built after another is dropped reuses its pages).
+struct Counting;
+static HEAP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        HEAP.fetch_add(l.size() as i64, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        HEAP.fetch_sub(l.size() as i64, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+        HEAP.fetch_add(n as i64 - l.size() as i64, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.realloc(p, l, n) }
+    }
+}
+#[global_allocator]
+static A: Counting = Counting;
+
+fn heap() -> u64 {
+    HEAP.load(std::sync::atomic::Ordering::Relaxed).max(0) as u64
+}
+
 fn rss() -> u64 {
     let s = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
     let pages: u64 = s.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -52,10 +77,12 @@ async fn main() -> anyhow::Result<()> {
     println!("size_of::<ExtentLocation>() = {} B", std::mem::size_of::<ExtentLocation>());
 
     let r0 = rss();
+    let h0 = heap();
     let mut slab = Slab::format(Arc::new(dev), slot, StorageTier::Hot).await?;
     let slots = slab.total_slots();
     let r1 = rss();
-    println!("\nslab of {slots} slots, all free:        {:>8.1} B/slot", per(r1 - r0, slots));
+    let h1 = heap();
+    println!("\nslab of {slots} slots, all free:        {:>8.1} B/slot (heap {:.1})", per(r1 - r0, slots), per(h1 - h0, slots));
 
     // Allocate every slot, timing each tenth of the fill.
     let vol = VolumeId(uuid::Uuid::new_v4());
@@ -71,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         times.push(t.elapsed().as_secs_f64() * 1e6 / tenth as f64);
     }
     let r2 = rss();
-    println!("…every slot allocated (slab side): {:>8.1} B/slot more", per(r2 - r1, i));
+    println!("…every slot allocated (slab side): {:>8.1} B/slot more (heap {:.1})", per(r2 - r1, i), per(heap().saturating_sub(h1), i));
     print!("allocation µs/slot by tenth of fill:");
     for t in &times {
         print!(" {t:.1}");
@@ -79,13 +106,14 @@ async fn main() -> anyhow::Result<()> {
     println!();
 
     // The volume side: one extent per allocated slot, forward and reverse.
+    let h2 = heap();
     let mut gem = GlobalExtentMap::new();
     let sid = slab.slab_id();
     for v in 0..i {
         gem.insert(vol, v, ExtentLocation::new(sid, v as u32));
     }
     let r3 = rss();
-    println!("GEM, one extent per slot:          {:>8.1} B/extent", per(r3 - r2, i));
+    println!("GEM, one extent per slot:          {:>8.1} B/extent (heap)", per(heap() - h2, i));
 
     // What a node really holds is not one volume written front to back: a
     // thin volume is written where its filesystem writes, and copy-on-write
@@ -96,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
         let mut g2 = GlobalExtentMap::new();
-        let ra = rss();
+        let ra = heap();
         let vols: Vec<VolumeId> = (0..64).map(|_| VolumeId(uuid::Uuid::new_v4())).collect();
         let mut keys: Vec<(usize, u64)> = (0..i).map(|k| ((k % 64) as usize, (k / 64) * 3)).collect();
         keys.shuffle(&mut rng);
@@ -105,8 +133,8 @@ async fn main() -> anyhow::Result<()> {
         for (n, (v, vext)) in keys.iter().enumerate() {
             g2.insert(vols[*v], *vext, ExtentLocation::new(sid, slots_perm[n]));
         }
-        let rb = rss();
-        println!("GEM, scattered (64 vols, random):  {:>8.1} B/extent", per(rb.saturating_sub(ra), i));
+        let rb = heap();
+        println!("GEM, scattered (64 vols, random):  {:>8.1} B/extent (heap)", per(rb.saturating_sub(ra), i));
         drop(g2);
 
         let mut g3 = GlobalExtentMap::new();
@@ -115,12 +143,12 @@ async fn main() -> anyhow::Result<()> {
         for v in 0..per_golden {
             g3.insert(golden, v, ExtentLocation::new(sid, slots_perm[v as usize]));
         }
-        let rc = rss();
+        let rc = heap();
         for _ in 0..16 {
             g3.clone_volume_map(golden, VolumeId(uuid::Uuid::new_v4()));
         }
-        let rd = rss();
-        println!("GEM, clone maps (16 of a golden):  {:>8.1} B/extent", per(rd.saturating_sub(rc), per_golden * 16));
+        let rd = heap();
+        println!("GEM, clone maps (16 of a golden):  {:>8.1} B/extent (heap)", per(rd.saturating_sub(rc), per_golden * 16));
         drop(g3);
     }
 
