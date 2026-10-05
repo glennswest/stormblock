@@ -1,8 +1,9 @@
 # Metadata format v2: the one format change (#158, with #157 and #156)
 
-**Status:** design and work plan (2026-10-05). Built in stages behind a format
-gate: the engine keeps writing v1 until v2 is complete, so nothing half-done
-ships, and the format changes **once**.
+**Status (2026-10-05):** stages A and B built; C, D, E to come. Built in
+stages behind a format gate (`[metadata] format = 2`,
+`$STORMBLOCK_METADATA_FORMAT=2`): the engine writes v1 until v2 is complete, so
+nothing half-done ships, and the format changes **once**.
 
 Owner decisions:
 - #158 (2026-10-01): one format change, bundling the paged extent index with
@@ -111,6 +112,58 @@ already bounded since #155: a page cache plus the free map.
   stays readable by an older engine, which is the rollback.
 - A stormcos install lays fresh v2 slabs (install = wipe, #261), so nodes come
   to v2 by installing. The forge and long-lived nodes migrate explicitly.
+
+## As built (stages A and B)
+
+- **Slab header v2** (`drive/slab.rs`): version 2 at byte 8 (an engine before
+  #158 refuses the slab, rather than reading the v2 region as an empty v1 one
+  and writing over it); `table_capacity` u64 at 128..136; the checksum at
+  124..128 covers 0..124 and 128..256. v1 is unchanged and refuses a table
+  past 4 Gi slots.
+- **The store** (`volume/metav2.rs`), over a region of `size` bytes: two 4 KiB
+  superblocks, a log of `size/8` (16 pages to 64 MiB), the rest pages.
+  - Superblock: magic `SMV2SUPR`, generation, root page, log start and its
+    first sequence, the layout, a random nonce, CRC.
+  - Pages: leaves `(key, value)`; internal nodes of up to 124 children, each
+    with the lowest key it may hold, and a level (1: children are leaves). Keys
+    are 25 bytes, `volume (16) | kind (1) | index (8, big-endian)`; kinds are
+    0 the document (extent size, arrays), 1 a volume header in chunks of at
+    most 1536 bytes (the last shorter, so a reader knows where it ends), 2 an
+    extent, 3 a parity group. A header is the volume's record without extents
+    or parity, prefixed with its record version (9).
+  - Log record: magic, the store's nonce, sequence, length, kind (ops or
+    wrap), CRC, then the ops (`Put`, `Del`, `DropVolume`), padded to pages. A
+    record that does not fit before the end of the ring is preceded by a wrap
+    record. Replay stops at the first record with the wrong nonce or
+    sequence, or a CRC that fails.
+  - Checkpoint: when the log passes half, or 256 Ki entries wait. Pages are
+    allocated from a bitmap built at open by walking the internal pages (the
+    leaves are named by their parents); pages a checkpoint stops naming are
+    freed only after its superblock is flushed.
+- **Persist** (`volume/persist_v2.rs`): the GEM records what changed
+  (`gem::Changes`: extents, parity groups, whole volumes) while a v2 store
+  takes them. Each sink (a v2 metadata slab, `metadata.v2` in the data
+  directory) is handed: the document entry if it changed, the headers whose
+  bytes changed, the changed extents and stripes, whole volumes for those
+  new to it or changed as a whole (a clone's source: every share count moved),
+  `DropVolume` for those that left it. Which volumes a sink carries is
+  `per_slab_metadata`'s rule, with each volume's slabs kept between persists.
+  The first persist after a start, after a failed write, or after the GEM was
+  not recording writes the sink whole (one checkpoint).
+- **Order.** Batches are applied in the order their records were taken (a
+  ticket per persist), never skipped for a newer one; a batch taken before a
+  failure is dropped (the failure makes the next one whole), and a persist
+  that stops before writing marks its sinks the same way.
+- **Read.** `metav2::read_slab` reads either format; every reader of a slab's
+  record goes through it. `Slab::read_metadata` on a v2 slab is an error,
+  never "nothing here".
+
+Measured (`examples/persist_cost`, dev, release, 4 KiB slots, 100 000
+extents in one volume): one extent changed costs **4 096 bytes and 2.7 ms**
+per persist in v2, against **2 738 435 bytes and 9.4 ms** in v1. The first
+persist (the whole store) is 83 ms in v2 against 16 ms in v1. The full test
+suite passes with the gate on (every slab and the data directory in v2) as
+well as off; the power-cut test runs its 300 cuts in both formats.
 
 ## Stages
 

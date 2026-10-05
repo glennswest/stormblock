@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **feat:** #158 stage B (with #157): metadata format v2 behind a gate (`[metadata] format = 2`, `$STORMBLOCK_METADATA_FORMAT`; default stays 1). Slab header v2 (64-bit table capacity; refused by older engines). The metadata region is a superblock pair, a change log and a copy-on-write B-tree (`volume/metav2.rs`), and a persist appends what changed: the GEM records changed extents, parity groups and whole volumes (`gem::Changes`), applied per store in the order the records were taken (`volume/persist_v2.rs`). The data directory keeps `metadata.v2` in format 2. `metav2::read_slab` reads either format. Slabs report `format`. Measured: one changed extent of 100 000 is 4 KiB and 2.7 ms per persist, against 2.7 MB and 9.4 ms in v1 (`examples/persist_cost`)
+- **test:** #158: the store against a model three levels deep (no page leaked or named twice across reopens), torn log tails and superblocks; v2 through the volume manager (restarts, incremental persists, concurrent persists in order, v1 and v2 slabs together, the data directory); the power-cut test's 300 cuts in both formats
 - **feat:** #158 stage A: slot and extent indexes are u64 in memory (legs, the GEM, slabs, slot table, chunks). No on-disk change: v1 metadata writes the same bytes for every index below 2^32, and formatting a slab past 4 Gi slots is refused (use larger slots) until format v2. A GEM extent is 29 B resident (was 25 B)
 - **BREAKING (security):** Destructive verbs need the admin token or a Kubernetes bearer a SubjectAccessReview allows; the node token keeps the ordinary verbs, and every destructive call is audited (#274, owner's B, stormcos#250).
   - **The split** is `serve::api::classify`. Destructive:

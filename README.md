@@ -301,6 +301,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_API_TOKEN` | the API token, after `[management] api_token`; also `boot-claim --token` | token file, else minted |
 | `STORMBLOCK_ADMIN_TOKEN` | the admin token, after `[management] admin_token` | no admin tier |
 | `STORMBLOCK_TOKEN_FILE` | where CLI tools look for a local engine's token, before `/etc/stormblock/api_token` and `/var/lib/stormblock/api_token` | those two |
+| `STORMBLOCK_METADATA_FORMAT` | `2`: new slabs in metadata format v2 (#158), where no `[metadata] format` is read | `1` |
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
@@ -384,6 +385,14 @@ for slab slots no volume maps.
 is overwritten with before it is reused (#286, `docs/erase.md`). A delete may
 ask for more with `DELETE /api/v1/volumes/{id}?erase=`. Slabs reached over a
 fabric are never erased.
+
+**`[metadata]`** — `format` (`1`; or `2`): the format new slabs, and the data
+directory's record, are written in (#158, `docs/metadata-v2.md`). Format 2: a
+slab header with 64-bit slot counts, and volume records kept as a
+copy-on-write tree plus a log, so a persist writes what changed (one 4 KiB
+record for one extent, where format 1 rewrites every volume's record). An
+engine before #158 refuses a format 2 slab. Existing slabs keep their format;
+migration is #158's last stage, not yet built.
 
 **`[pressure]`** — `enabled` (`false`), `high_water_pct` (`80.0`),
 `check_interval_secs` (`60`), `min_slab_bytes` (1 GiB), `max_slabs` (`64`), and
@@ -494,13 +503,15 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 ## Files
 
 In the data directory (`[management] data_dir`; `adopt-ublk --data-dir`):
-`volumes.dat` (+ `.bak`), `luns.json`, `exports.json`, `v1_state.json` (+
+`volumes.dat` (+ `.bak`; or `metadata.v2`, a sparse 16 GiB file, in format 2,
+#158), `luns.json`, `exports.json`, `v1_state.json` (+
 journal), `fstemplates.json`, `synonyms.json`, `releases.json`, `moves.json`,
 `pallet_mirrors.json`, `stormfs.json`, `cluster_identity.json`, `api_token`
 (0600), `nvme_hosts.json` (0600: per-host NVMe subsystems and their
 DH-HMAC-CHAP secrets, #210), `forge.json` (this node's forge settings,
 `PUT /api/v1/forge`, #272, or `{"enabled": false}` after a `DELETE`, #287) and `serve/wiring.json`. Each slab with a metadata region also carries
-its own volumes' records. On stormcos, `adopt-ublk` restores these from, and
+its own volumes' records: two alternating whole copies in format 1, a
+superblock pair, a log and a copy-on-write tree in format 2. On stormcos, `adopt-ublk` restores these from, and
 captures them back into, the `stormblock-state` volume.
 
 Elsewhere: `/etc/stormblock/stormblock.toml`, `/etc/stormblock/boot.toml`

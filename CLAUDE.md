@@ -206,9 +206,15 @@ the engine writes v1 until stage E.
       u64 below 2^32 the same bytes (`metadata::u64_slot_compat`). Extent
       entry 28 B; GEM 29.0 B/extent (33.9 scattered). nextest 902/902,
       `--features cluster` checks (b0a2323)
-- [ ] B. v2 reader/writer: slab header v2; metadata region = superblocks +
+- [x] B. v2 reader/writer: slab header v2; metadata region = superblocks +
       COW B-tree + log + checkpoint + recovery; `metadata.v2` in the data
-      dir; persist appends changes (#157); gate `[metadata] format = 2`
+      dir; persist appends changes (#157); gate `[metadata] format = 2`.
+      `volume/metav2.rs` (store), `volume/persist_v2.rs` (sinks, ordered
+      batches), `gem::Changes`; `metav2::read_slab` for every reader. On
+      dev: nextest 920/920 with the gate off AND on (every slab v2), power
+      cuts 300/300 in both formats, `--features cluster` checks;
+      `examples/persist_cost` 100k extents: 4 KiB / 2.7 ms per persist (v1:
+      2.7 MB / 9.4 ms)
 - [ ] C. extent map in memory as a cache of the tree (load on open, evict
       idle clean maps, `cache_mb`)
 - [ ] D. extent size per volume/pool (#156); the install's 8 MiB bulk slab
