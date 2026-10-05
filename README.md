@@ -1406,6 +1406,40 @@ the later name first.
 `tests/initramfs-netdev.sh` and `tests/initramfs-nic-selection.sh` pin both.
 The running system loading `mlx4_en` itself is stormcos#211.
 
+### The initramfs node name: the network's, and why when it is not (#238)
+
+The node takes its name in this order:
+
+1. **From the lease:** DHCP option 12, the reservation's hostname. An FQDN
+   there gives the domain too.
+2. **From DNS:** the PTR of the address it was leased, but only if that name
+   resolves back to the address (forward-confirmed).
+3. **Made up:** `storm-<last 6 hex of the uplink MAC>`.
+
+Each step that gives no name says why on the console:
+
+- `the lease names no host (no option 12)`;
+- `no DNS server in the lease: cannot ask DNS what <ip> is called`;
+- `DNS has no name for <ip> (no PTR record from <dns>)`;
+- `DNS calls <ip> '<name>', which resolves to '…' - ignoring`.
+
+The short name is the kernel hostname, and `/etc/hostname` in the root. The
+lease's domain (option 15, else the first of 119, else the name's own) becomes
+the kernel's `domainname`, and the console prints the FQDN.
+
+**What the node asks DHCP under.** The node asks for its lease as a name, with
+`udhcpc -x hostname:<name>`, so the server's lease table says who holds each
+lease. The name comes from what the machine already knows before the lease:
+
+- its declared `[node] hostname` in `/config/stormcos.toml` on the local
+  disk's `stormcos-state` volume;
+- otherwise the name its firmware booted as (`StormBootTag`, #249).
+
+An SMBIOS guess or a `mac-` placeholder is never sent.
+
+`tests/initramfs-node-name.sh` pins both blocks. `ci-node-name-verify.sh` boots
+them in QEMU and finds option 12 in the DHCP request the guest sends.
+
 ### The initramfs clock: stepped once, before anything checks a certificate
 
 The X9 blades have no RTC battery, so after a power cut the kernel starts in

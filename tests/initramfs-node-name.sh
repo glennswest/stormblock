@@ -100,7 +100,7 @@ contains "and that the name was made up" "nothing named this node: storm-06f96d"
 
 r=$(DOMAIN=g16.lo DNS=192.168.31.252 name)
 check "no PTR: the MAC" "storm-06f96d|storm-06f96d|g16.lo" "$r"
-contains "and the missing PTR is said" "DNS has no name for 192.168.30.2 (no PTR record from 192.168.31.252" \
+contains "and the missing PTR is said" "DNS has no name for 192.168.30.2 (no PTR record from 192.168.31.252)" \
     "$(cat "$WORK/name.out")"
 
 # The stale PTR this pool had: a Windows box's name, whose A is another address.

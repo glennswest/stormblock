@@ -1668,7 +1668,7 @@ if [ -n "$NETADDR" ]; then
             # resolve back to the address asking. A stale record fails that,
             # and the node falls through to naming itself.
             if [ -z "$PTRNAME" ]; then
-                echo "  DNS has no name for $MYIP (no PTR record from $(awk '/^nameserver/ { printf "%s ", $2 }' "$_resolv" 2>/dev/null))"
+                echo "  DNS has no name for $MYIP (no PTR record from $(awk '/^nameserver/ { printf "%s%s", sep, $2; sep = " " }' "$_resolv" 2>/dev/null))"
             else
                 # Among its addresses, not equal to the last of them.
                 #

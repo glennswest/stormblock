@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **feat:** The initramfs says why it could not name the node from the network, sets the domain, and sends its name in its DHCP requests (#238, stormcos#191). C2NR0Q2 registered as `storm-06f96d` with a reservation and a confirmed PTR naming it `stormblock1`. microdns sends no option 12 (microdns#14), and with no DNS server in the lease the PTR step was skipped without a word. Now:
+  - each step that gives no name is said: no option 12, no DNS server in the lease, no PTR, or a PTR that does not resolve back;
+  - the domain (option 15/119, else the name's own) is set as `/proc/sys/kernel/domainname`, and the FQDN printed;
+  - `udhcpc` is given `-x hostname:<name>`: the declared `[node] hostname` from `stormcos-state:/config/stormcos.toml` on the local disk, else the firmware's boot name (#249), never an SMBIOS guess
+- **test:** `tests/initramfs-node-name.sh` (24 checks, sh and busybox sh). `ci-node-name-verify.sh` boots the shipped blocks in QEMU with QEMU's packet dump: the guest's DHCP request carries option 12 = `stormblock1`, the lease applies, and with no option 12 back and no PTR the console says so and the node takes `storm-06f96d`
 - **docs:** #157 (incremental metadata persistence) is built as part of #158's single format change, by owner decision (B, 2026-10-05). The change log lives in each metadata slab's region and is checkpointed into the paged extent index. Recorded in `docs/metadata-scale.md` §3.4 and the work plan
 - **fix:** An install over an older release no longer boots the old disk when the appliance misses its first health check (#294, server8 on 11.82). Forge missed the one 3 s health check right after the mlx4 link came up, so no boothost was known, and the local-slab probe and the release check (both guarded on one) were skipped without a word. `boot-local` then died on `volume 'kubelet-data' not found`, scrolled off above `FATAL: root device /dev/ublkb0 not found`. `/init` now:
   - asks a boothost the network names (`/run/stormblock-boothost`) again for up to `STORM_BOOTHOST_WAIT` (90 s);

@@ -228,19 +228,22 @@ docs/metadata-scale.md §3.2, no on-disk format change. Measured with
 - Restore still holds every allocated slot's entry for its duration
   (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
-### The initramfs names the node and says why (2026-10-05, #238, P1) — IN PROGRESS
+### The initramfs names the node and says why (2026-10-05, #238, P1) — DONE
 
 stormcos#191: C2NR0Q2 registers as `storm-06f96d` with a reservation and a
 confirmed PTR naming it `stormblock1` (microdns sends no option 12,
 microdns#14; with no DNS server in the lease the PTR step was silent).
-- [ ] `# --- BEGIN node name`: option 12 > forward-confirmed PTR > storm-<mac>,
+- [x] `# --- BEGIN node name`: option 12 > forward-confirmed PTR > storm-<mac>,
       each step saying why it gave none; the domain (option 15/119, else the
       name's own) set as `/proc/sys/kernel/domainname`, the FQDN printed
-- [ ] `# --- BEGIN dhcp name hint`: udhcpc `-x hostname:<name>` from the
+- [x] `# --- BEGIN dhcp name hint`: udhcpc `-x hostname:<name>` from the
       declared `[node] hostname` (stormcos-state `/config/stormcos.toml` on
       the local disk), else the firmware's boot name (#249); never a guess
-- [ ] `tests/initramfs-node-name.sh`; every initramfs test under sh and
-      busybox sh; docs (README), CHANGELOG
+- [x] `tests/initramfs-node-name.sh`; every initramfs test under sh and
+      busybox sh; `ci-node-name-verify.sh` (QEMU, filter-dump: option 12 =
+      stormblock1 in the guest's DHCP request); docs (README), CHANGELOG
+- Not on metal: needs a stormcos release built after this; C2NR0Q2 then
+  registers `stormblock1` once microdns#14 sends option 12 or 6
 
 ### Destructive verbs need the admin token or a storage-admin SAR (2026-10-05, #274, P1) — WAITING ON THE OWNER
 
