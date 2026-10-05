@@ -272,18 +272,31 @@ microdns#14; with no DNS server in the lease the PTR step was silent).
 - Not on metal: needs a stormcos release built after this; C2NR0Q2 then
   registers `stormblock1` once microdns#14 sends option 12 or 6
 
-### Destructive verbs need the admin token or a storage-admin SAR (2026-10-05, #274, P1) — WAITING ON THE OWNER
+### Destructive verbs need the admin token or a storage-admin SAR (2026-10-05, #274, P1) — IN PROGRESS
 
-stormcos#250: the node token is in every engine caller, so any service can
-destroy a slab or delete any volume. The ask splits ordinary (clone, attach,
-detach, create/delete a volume the caller owns) from destructive (slabs,
-others' volumes, forge, wipes), the latter needing the admin token or a
-Kubernetes bearer a SubjectAccessReview allows (`storage.storm.io`), with an
-audit log. Read, not built: with one shared token "the caller owns" has no
-meaning (`owner` names a k8s object, not a caller). Asked on #274
-(needs-owner): A per-service tokens, B node token deletes unsealed volumes,
-C every volume delete needs a k8s bearer + SAR (recommended). rustkube's
-apiserver has TokenReview, SubjectAccessReview and SelfSubjectAccessReview.
+Owner, 2026-10-05: **B**. The node token keeps the ordinary verbs (clone,
+attach, detach, create, and delete an unsealed volume that is no template or
+golden). Destructive: slabs (format, delete, gc), arrays and their members,
+spares, forge on/off, sealed goldens and templates, pallets' table-writing
+verbs, an emulated drive's fault, and today's `is_destructive` list (with
+detach-like DELETEs carved out).
+- [ ] classification (`serve::api::classify`): Public / Ordinary /
+      Destructive / VolumeDelete(id) (destructive when sealed, a template
+      or a golden)
+- [ ] an admin token always: config/env, else read or minted into
+      `admin_token_file` (default `/run/stormblock-admin/admin_token`, 0600:
+      never under `/run/stormblock`, which every service mounts)
+- [ ] a Kubernetes bearer for a destructive verb: TokenReview, then
+      SubjectAccessReview (`storage.storm.io`, resource = path segment, verb
+      delete/create/update), cached briefly; `[management.kubernetes]`
+      api_url, ca_file, token_file (stormcos provides)
+- [ ] `admin_gate = "enforce"` (default) | `"audit"` (allows the node token
+      and logs who would be refused, for a rollout); `STORMBLOCK_ADMIN_GATE`
+- [ ] audit log: every destructive call (who, what, target, decision,
+      status) to `<data_dir>/audit.log` and the log
+- [ ] tests; docs (auth.md, README), CHANGELOG; issues for the callers that
+      break (stormcluster forge, stormstorage arrays, stormdrive slabs and
+      drives) and stormcos (admin token mount, kube credentials, the gate)
 
 ### Decide: #5–#7 in the engine or on stormstorage's heads (2026-10-05, #179, P1) — DECIDED (b)
 
