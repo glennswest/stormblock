@@ -71,7 +71,7 @@ async fn a_mirror_on_256_tib_drives_survives_one_failing_and_rebuilds() {
     assert_eq!(h.state, HealthState::Degraded, "{h:?}; failed slabs {failed:?}; leg slab {leg_slab:?}");
 
     let report = mgr.resync_volume(id, false).await.unwrap();
-    assert!(report.legs_added > 0, "{report:?}");
+    assert!(report.legs_rebuilt > 0 && report.errors.is_empty(), "{report:?}");
     assert_eq!(mgr.health(&id).await.unwrap().state, HealthState::Healthy);
     // Every byte from the rebuilt pair, the failed drive still failed.
     let mut back = vec![0u8; data.len()];
