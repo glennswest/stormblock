@@ -172,6 +172,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Forge mode on by default on every node (2026-10-05, #287, P1) — IN PROGRESS
+
+Owner (stormcos#273): "a sno node should have it by default." #272 left it
+off until an admin `PUT`, and nothing off the node holds that token.
+- [ ] `forge.json` is the persisted state: settings (on) or
+      `{"enabled": false}` (off); a file from #272 reads as on
+- [ ] `adopt-ublk`: nothing persisted = on with defaults (`0.0.0.0:4420`,
+      `nqn.2026-08.lo.storm:<node>`, the #210 closed policy), not written
+      to disk; persisted off = off. The daemon keeps #272's (off unless kept)
+- [ ] `PUT` persists on with settings; `DELETE` persists off (also from the
+      default). `GET`: `state` on|off, `from` default|persisted|config
+- [ ] tests, docs (README, auth.md?), CHANGELOG
+
 ### Secure delete: freed data overwritten before reuse (2026-10-05, #286, P1) — DONE
 
 Owner's request: overwrite deleted data so it cannot be recovered. One pass by
