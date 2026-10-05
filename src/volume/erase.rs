@@ -208,7 +208,17 @@ impl Eraser {
             *last = started.elapsed();
             done.push((job, res));
         }
-        // Free what was overwritten; put back what failed.
+        // Free what was overwritten; put back what failed. Their table pages
+        // read first, with no lock held (#155).
+        {
+            let tables: Vec<_> = {
+                let reg = self.registry.read().await;
+                done.iter().filter_map(|(j, _)| reg.get(&j.slab).map(|s| (s.table(), j.slot))).collect()
+            };
+            for (t, idx) in tables {
+                t.prefetch([idx]).await;
+            }
+        }
         let mut results: Vec<(EraseJob, Option<Outcome>)> = Vec::with_capacity(done.len());
         let still: HashMap<VolumeId, u64>;
         {

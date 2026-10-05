@@ -1291,6 +1291,7 @@ impl ThinVolumeHandle {
 
         // Let go of the original. Shared, it stays for the other holder;
         // exclusive, this was the last reference and the slot is freed.
+        self.prefetch(loc.legs()).await;
         let mut synced = Vec::new();
         {
             let mut reg = self.registry.write().await;
@@ -1382,6 +1383,7 @@ impl ThinVolumeHandle {
         }
 
         // Dec ref on old slot(s)
+        self.prefetch(old_loc.legs()).await;
         let mut synced = Vec::new();
         {
             let mut reg = self.registry.write().await;
@@ -1410,6 +1412,24 @@ impl ThinVolumeHandle {
     /// so a source whose last clone diverged writes in place again rather
     /// than copying for nobody. Takes the GEM lock; the caller must not hold
     /// the registry.
+    /// Read the slot table pages of `legs` into their slabs' caches, with
+    /// no lock held (#155): the share-count change that follows, under the
+    /// registry lock, then finds them there instead of reading the device
+    /// while every volume's I/O waits (#269).
+    async fn prefetch(&self, legs: impl IntoIterator<Item = Leg>) {
+        let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
+        for l in legs {
+            by_slab.entry(l.slab_id).or_default().push(l.slot_idx);
+        }
+        let tables: Vec<_> = {
+            let reg = self.registry.read().await;
+            by_slab.into_iter().filter_map(|(s, idx)| reg.get(&s).map(|slab| (slab.table(), idx))).collect()
+        };
+        for (t, idx) in tables {
+            t.prefetch(idx).await;
+        }
+    }
+
     async fn sync_refs(&self, counts: &[(Leg, u32, Option<(VolumeId, u64)>)]) {
         if counts.is_empty() {
             return;
@@ -1441,6 +1461,7 @@ impl ThinVolumeHandle {
             let mut gem = self.gem.write().await;
             gem.remove(self.id, vext_idx);
         }
+        self.prefetch(loc.legs()).await;
         let mut reg = self.registry.write().await;
         for leg in loc.legs() {
             if let Some(slab) = reg.get_mut(&leg.slab_id) {
@@ -1780,6 +1801,7 @@ impl ThinVolumeHandle {
             let mut gem = self.gem.write().await;
             gem.insert(self.id, vext, loc.clone());
         }
+        self.prefetch(old.legs()).await;
         let mut synced = Vec::new();
         {
             let mut reg = self.registry.write().await;
@@ -1816,6 +1838,7 @@ impl ThinVolumeHandle {
             let mut gem = self.gem.write().await;
             gem.remove(self.id, vext);
         }
+        self.prefetch(loc.legs()).await;
         {
             let mut reg = self.registry.write().await;
             for leg in loc.legs() {

@@ -1452,7 +1452,9 @@ impl VolumeManager {
         self.owners.remove(&id);
         self.retentions.remove(&id);
 
-        // Remove all extents from GEM and dec_ref on slabs
+        // Remove all extents from GEM and dec_ref on slabs: their table pages
+        // read first, with no lock held (#155).
+        self.prefetch_volume(id).await;
         let mut gem = self.gem.write().await;
         let mut reg = self.registry.write().await;
         reg.set_erase_override(erase);
@@ -1573,6 +1575,7 @@ impl VolumeManager {
         let slot_size = source_vol.slot_size;
         drop(source_vol);
 
+        self.prefetch_volume(source_id).await;
         let snap = {
             let mut gem = self.gem.write().await;
             let mut reg = self.registry.write().await;
@@ -1781,6 +1784,29 @@ impl VolumeManager {
     /// Get the shared GEM.
     pub fn gem(&self) -> &Arc<tokio::sync::RwLock<GlobalExtentMap>> {
         &self.gem
+    }
+
+    /// Read the slot table pages of every slot a volume maps into their
+    /// slabs' caches, holding no lock while the device is read (#155): what
+    /// a delete or a clone changes next under the registry lock.
+    pub async fn prefetch_volume(&self, id: VolumeId) {
+        let by_slab: HashMap<SlabId, Vec<u32>> = {
+            let gem = self.gem.read().await;
+            let mut m: HashMap<SlabId, Vec<u32>> = HashMap::new();
+            if let Some(map) = gem.get_volume_map(&id) {
+                for leg in map.all_legs() {
+                    m.entry(leg.slab_id).or_default().push(leg.slot_idx);
+                }
+            }
+            m
+        };
+        let tables: Vec<_> = {
+            let reg = self.registry.read().await;
+            by_slab.into_iter().filter_map(|(s, idx)| reg.get(&s).map(|slab| (slab.table(), idx))).collect()
+        };
+        for (t, idx) in tables {
+            t.prefetch(idx).await;
+        }
     }
 
     /// Get the shared SlabRegistry.
