@@ -349,9 +349,12 @@ impl Eraser {
     }
 }
 
-struct Outcome {
-    verified: bool,
-    discarded: bool,
+/// What one slot's erase did.
+pub struct Outcome {
+    /// Its last pass was read back as written.
+    pub verified: bool,
+    /// It was discarded after the passes.
+    pub discarded: bool,
 }
 
 /// Write `job`'s passes over its slot, flush after each, read the last back
