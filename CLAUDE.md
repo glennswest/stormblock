@@ -228,6 +228,17 @@ docs/metadata-scale.md §3.2, no on-disk format change. Measured with
 - Restore still holds every allocated slot's entry for its duration
   (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
+### Extent size by pool class (2026-10-05, #156, P1) — AFTER #158, two questions asked
+
+Decided (owner, 2026-10-01): extent size is a per-pool property fixed at
+creation, 1 MiB for hot pools, 64 MiB for bulk. Read, not built: the volumes
+document has one `extent_size` for the node (`VolumeMetadata.extent_size`),
+and `VolumeManager` refuses a slab of another slot size (`mod.rs:653`, `:903`).
+A per-volume extent size is a new record field, a format change, so it ships
+in #158's one format change (as noted on #156 on 2026-10-02). Asked on #156
+(needs-owner): (1) which volumes are bulk, (2) where 64 MiB slabs live on a
+node disk.
+
 ### Incremental metadata persistence: change log + checkpoints (2026-10-05, #157, P1) — AFTER #158
 
 Owner, 2026-10-05, on #157: **B**. The change log lives in each metadata
