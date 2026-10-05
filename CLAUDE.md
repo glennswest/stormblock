@@ -177,12 +177,14 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 docs/metadata-scale.md §3.2, no on-disk format change. Baseline (#145):
 ~41 B per free slot, ~70 B more per allocated slot, ~215 B per extent in the
 GEM. Target ~30 B per extent, 0 B per free slot. Three steps, each tested:
-- [ ] measure first: `metadata_footprint` gains a scattered (CoW-like) map,
-      clones, and a slab whose slots are not sequential
-- [ ] 1. GEM without a reverse index: `slab_extents`/`slab_parity` walk the
+- [x] measure first: `metadata_footprint` gains a scattered map and clones,
+      and counts heap bytes. Baseline on dev (4 M slots): 40.6 B per free
+      slot, +65.8 per allocated, GEM 220.5 B per extent
+- [x] 1. GEM without a reverse index: `slab_extents`/`slab_parity` walk the
       forward maps (one entry per referenced slot); callers that asked per
       extent in a loop (flow-over, drain) take one list per pass
-- [ ] 2. compact GEM entries: slab ordinal (process-wide interner), slot,
+- [x] 2. compact GEM entries (`volume/extable.rs`; 25 B per extent dense
+      and for clone maps, measured; full nextest 891/891): slab ordinal (process-wide interner), slot,
       share count, generation packed; mirrors out of line; extents in chunks
       of 64 virtual extents instead of a B-tree node each. `lookup` returns
       an owned `ExtentLocation`; `VolumeRecord.extents` (on disk) unchanged
