@@ -125,6 +125,34 @@ is true of a reboot as much as an install. Until intents can be used:
   (forced): there is nothing to keep. Updating a running node to a new release
   is stormupdate's (stormupdate#1), which stages the new volumes and reboots
   into a same-release boot; no release change is decided in the initramfs.
+- **With no appliance there is no release check, and it is said (#294).**
+  server8 installed 11.82 over an older disk and came up on nothing:
+  - Forge missed the one 3-second health check made right after its mlx4
+    link came up, so no boothost was known.
+  - Both the release check and the probe were guarded by a known boothost,
+    so both were skipped without a word.
+  - `boot-local` then died on `volume 'kubelet-data' not found`. That error
+    scrolled off above `FATAL: root device /dev/ublkb0 not found`.
+
+  What `/init` does now:
+  - **A named boothost is waited for.** A boothost the network names
+    (`/run/stormblock-boothost`, from the DHCP root path) is asked again for
+    up to `STORM_BOOTHOST_WAIT` seconds (90; on the kernel command line it
+    reaches `/init` as an environment variable). With no named boothost, the
+    candidates are asked once as before. Why there is none is kept and said
+    wherever it matters.
+  - **The local-slab probe runs with or without an appliance.** A disk it
+    would have sent to the appliance — not a slab, no root volume, missing a
+    volume the release's mount list names — stops the boot when there is no
+    appliance. The message is a FATAL naming what is missing and the release
+    on the disk (its root volume's `/etc/os-release`), and the disk is never
+    handed to `boot-local`.
+  - **A disk that can boot, with no appliance, boots.** The console says
+    `RELEASE CHECK SKIPPED` and why: if this boot was meant to install
+    another release, it has not.
+  - **The engine's output goes to `/run/stormblock/engine.log`**, followed
+    onto the console. Its last 25 lines are repeated after
+    `FATAL: root device … not found`.
 - `rd.stormblock.assimilate=off` still means no, to both.
 - Not covered: reinstalling the **same** release fresh. Assign another
   release first, or use the `install` intent once the appliance serves them.

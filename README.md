@@ -1349,8 +1349,20 @@ from DHCP and the name from the firmware.
 | `console=` | — | every one that exists gets the boot messages (#237) |
 
 Bounded waits, overridable in the environment (for tests): `STORM_NETDEV_WAIT`
-(15 s, late netdevs, #250), `STORM_LINK_WAIT` (10 s, carrier on the uplinks)
-and `STORM_NTP_WAIT` (3 s per NTP attempt, #251).
+(15 s, late netdevs, #250), `STORM_LINK_WAIT` (10 s, carrier on the uplinks),
+`STORM_NTP_WAIT` (3 s per NTP attempt, #251), and `STORM_BOOTHOST_WAIT`. That
+last one is 90 s: how long a boothost the network names is asked again before
+the boot goes on without an appliance (#294). The kernel passes an unknown
+`KEY=value` on its command line to `/init` as an environment variable.
+
+**With no appliance** (#294) the boot says so and why. A local disk missing
+a volume the release mounts stops the boot with a FATAL naming the volume and
+the release on the disk (its root volume's os-release). A disk that can boot
+does, with `RELEASE CHECK SKIPPED` on the console. The engine's output is
+kept in `/run/stormblock/engine.log`, and its last 25 lines follow a
+`FATAL: root device … not found`. `tests/initramfs-no-appliance.sh` pins the
+blocks; `ci-no-appliance-verify.sh` boots the shipped initramfs in QEMU with
+no network.
 
 ### The initramfs console: every `console=`
 

@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **fix:** An install over an older release no longer boots the old disk when the appliance misses its first health check (#294, server8 on 11.82). Forge missed the one 3 s health check right after the mlx4 link came up, so no boothost was known, and the local-slab probe and the release check (both guarded on one) were skipped without a word. `boot-local` then died on `volume 'kubelet-data' not found`, scrolled off above `FATAL: root device /dev/ublkb0 not found`. `/init` now:
+  - asks a boothost the network names (`/run/stormblock-boothost`) again for up to `STORM_BOOTHOST_WAIT` (90 s);
+  - keeps why there is no appliance and says it;
+  - runs the probe without one: a disk it would have sent to the appliance stops the boot with a FATAL naming what is missing and the release on the disk (`disk_release`: its root volume's os-release), and a disk that can boot boots with `RELEASE CHECK SKIPPED` on the console;
+  - writes the engine's output to `/run/stormblock/engine.log`, followed onto the console, and repeats its last 25 lines after the root FATAL. The engine writing a file can also no longer meet a broken pipe
+- **test:** `tests/initramfs-no-appliance.sh` covers a named boothost asked again until it answers, one that never does, and none named (no wait); the probe with no appliance on a disk missing `kubelet-data`, a disk that boots, and a device that is not a slab, plus the same with an appliance; the disk's release; and the engine report. It passes under sh and busybox sh, as does every other initramfs test. `ci-no-appliance-verify.sh` builds the shipped initramfs and boots it in QEMU with a laid node disk and no network, in three cases, all passing on dev:
+  - the disk lacks `kubelet-data`: the boot stops naming it and "stormcos 11.79-test", and no engine is started;
+  - the engine fails after the probe: the skipped release check is said, and the engine's error is repeated after the FATAL;
+  - a disk that boots: the root device appears
 - **fix:** The test container (`stormblock-test`) works again. Its attaches name the host NQN its initiator connects as: since #210 the shared subsystem admits no host, and every attach-based check in `short` and `medium` failed with 400. Its "nothing left" checks also wait for the eraser, because a deleted volume's slots stay allocated until they are overwritten (#286)
 - **perf:** Resident compaction (#155, `docs/metadata-scale.md`). The engine no longer keeps a record of every slot in memory:
   - **The slab** keeps its free map and the entries that differ from the device. The slot table is read through a bounded cache of 4 KiB pages (`STORMBLOCK_SLOT_CACHE_MB`, default 16 per slab).
