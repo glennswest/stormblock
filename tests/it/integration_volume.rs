@@ -499,7 +499,7 @@ async fn a_metadata_region_too_small_is_a_reported_fault_not_a_warning() {
     // was sized by a constant rather than by the drive.
     let cramped = Slab::format_with(
         dev.clone(),
-        SlabFormat::new(slot, StorageTier::Hot).with_metadata(8192),
+        SlabFormat::new(slot, StorageTier::Hot).with_version(stormblock::drive::slab::SLAB_VERSION).with_metadata(8192),
     )
     .await
     .unwrap();

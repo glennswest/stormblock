@@ -827,8 +827,15 @@ impl Slab {
         let tier = opts.tier;
         let capacity = device.capacity_bytes();
 
-        // Two copies, each starting on a 4 KiB boundary.
-        let meta_size = align_up(opts.metadata_bytes, 2 * META_ALIGN);
+        // Two copies, each starting on a 4 KiB boundary. A v2 region (#158)
+        // is never smaller than its own auto size: callers size regions by
+        // v1's rule, and a tree of every extent needs room in proportion.
+        let wanted = if opts.version == SLAB_VERSION_2 && opts.metadata_bytes > 0 {
+            opts.metadata_bytes.max(auto_metadata_bytes_v2(capacity, slot_size))
+        } else {
+            opts.metadata_bytes
+        };
+        let meta_size = align_up(wanted, 2 * META_ALIGN);
         let meta_offset = if meta_size > 0 { HEADER_SIZE } else { 0 };
         let table_offset = HEADER_SIZE + meta_size;
 
@@ -2924,7 +2931,7 @@ mod tests {
         let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
         let slab = Slab::format_with(
             dev.clone(),
-            SlabFormat::new(64 * 1024, StorageTier::Hot).with_metadata(64 * 1024),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_version(SLAB_VERSION).with_metadata(64 * 1024),
         )
         .await
         .unwrap();
@@ -2953,7 +2960,7 @@ mod tests {
         let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
         let slab = Slab::format_with(
             dev.clone(),
-            SlabFormat::new(64 * 1024, StorageTier::Hot).with_metadata(64 * 1024),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_version(SLAB_VERSION).with_metadata(64 * 1024),
         )
         .await
         .unwrap();
@@ -2976,7 +2983,7 @@ mod tests {
         let (dev, path) = create_slab_device(8 * 1024 * 1024).await;
         let slab = Slab::format_with(
             dev.clone(),
-            SlabFormat::new(64 * 1024, StorageTier::Hot).with_metadata(16 * 1024),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_version(SLAB_VERSION).with_metadata(16 * 1024),
         )
         .await
         .unwrap();
