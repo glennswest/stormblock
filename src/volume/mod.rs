@@ -11,6 +11,7 @@ pub mod fence;
 pub mod gem;
 pub mod metadata;
 pub mod metav2;
+mod persist_v2;
 pub mod redundancy;
 pub mod thin;
 pub mod snapshot;
@@ -211,6 +212,8 @@ pub struct VolumeManager {
     /// (#269): the flow-over persists after every extent, and most of its
     /// persists change one slab's records, not both.
     records_on_slab: Arc<std::sync::Mutex<HashMap<SlabId, u64>>>,
+    /// The format v2 stores this manager writes, and what each holds (#158).
+    v2: Arc<std::sync::Mutex<persist_v2::V2State>>,
 }
 
 /// What a persist writes: taken from the manager in memory, written with no
@@ -220,8 +223,10 @@ struct Records {
     /// `volumes.dat` in the data directory, unless writing it would replace a
     /// record of real storage with an empty one.
     store: Option<(MetadataStore, metadata::VolumeMetadata)>,
-    /// Each metadata slab's own copy, encoded.
+    /// Each v1 metadata slab's own copy, encoded.
     slabs: Vec<(SlabId, Result<Vec<u8>, String>)>,
+    /// What changed, for each format v2 store (#158).
+    v2: Option<persist_v2::V2Records>,
 }
 
 impl VolumeManager {
@@ -249,6 +254,7 @@ impl VolumeManager {
             holds: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
+            v2: Default::default(),
         }
     }
 
@@ -274,6 +280,7 @@ impl VolumeManager {
             holds: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
+            v2: Default::default(),
         })
     }
 
@@ -936,18 +943,11 @@ impl VolumeManager {
             for slab_id in &metadata_slabs {
                 let Some(slab) = reg.get(slab_id) else { continue };
                 let home = slab.role();
-                let bytes = match slab.read_metadata().await {
-                    Ok(Some(b)) => b,
+                let doc = match metav2::read_slab(slab).await {
+                    Ok(Some(d)) => d,
                     Ok(None) => continue,
                     Err(e) => {
                         tracing::warn!(slab = %slab_id, "adopt: metadata unreadable: {e}");
-                        continue;
-                    }
-                };
-                let doc = match MetadataStore::decode(&bytes) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::warn!(slab = %slab_id, "adopt: metadata undecodable: {e}");
                         continue;
                     }
                 };
@@ -1951,6 +1951,24 @@ impl VolumeManager {
         let mut out = Vec::new();
         let reg = self.registry.read().await;
         for (slab_id, meta) in self.per_slab_metadata().await {
+            if reg.get(&slab_id).is_some_and(|s| s.format_version() == crate::drive::slab::SLAB_VERSION_2) {
+                // Format v2 (#158): pages in use of the region's pages. A
+                // store not opened yet (nothing persisted since the start)
+                // reports what the record would need as nothing.
+                let usage = self.v2.lock().unwrap_or_else(|e| e.into_inner()).usage(persist_v2::Sink::Slab(slab_id));
+                let (needed, capacity) = match usage {
+                    Some(u) => (u.pages_used * metav2::PAGE, u.pages_total * metav2::PAGE),
+                    None => (0, reg.get(&slab_id).map(|s| s.metadata_capacity()).unwrap_or(0)),
+                };
+                out.push(MetadataPressure {
+                    slab_id: slab_id.0.to_string(),
+                    volumes: meta.volumes.len(),
+                    needed_bytes: needed,
+                    capacity_bytes: capacity,
+                    fits: capacity > 0 && needed * 10 <= capacity * 9,
+                });
+                continue;
+            }
             let needed = MetadataStore::encode(&meta).map(|b| b.len() as u64).unwrap_or(0);
             let capacity = reg.get(&slab_id).map(|s| s.metadata_capacity()).unwrap_or(0);
             out.push(MetadataPressure {
@@ -1970,8 +1988,9 @@ impl VolumeManager {
         if self.metadata_store.is_none() && self.metadata_slabs.is_empty() {
             return None;
         }
+        let dir_v2 = self.dir_v2();
         let mut store = None;
-        if let Some(st) = &self.metadata_store {
+        if let Some(st) = self.metadata_store.as_ref().filter(|_| !dir_v2) {
             // Knowing about no volumes is not the same as there being none.
             // A manager whose slabs have not been attached yet holds nothing,
             // and writing that over a record describing real storage destroys
@@ -1996,13 +2015,135 @@ impl VolumeManager {
             }
             store = Some((st.clone(), self.snapshot_metadata().await));
         }
-        let slabs = self
-            .per_slab_metadata()
-            .await
-            .into_iter()
-            .map(|(id, meta)| (id, MetadataStore::encode(&meta).map_err(|e| format!("encode failed: {e}"))))
+        let v1_slabs: Vec<SlabId> = {
+            let reg = self.registry.read().await;
+            self.metadata_slabs
+                .iter()
+                .filter(|id| reg.get(id).is_none_or(|s| s.format_version() != crate::drive::slab::SLAB_VERSION_2))
+                .copied()
+                .collect()
+        };
+        let slabs = if v1_slabs.is_empty() {
+            Vec::new()
+        } else {
+            self.per_slab_metadata()
+                .await
+                .into_iter()
+                .filter(|(id, _)| v1_slabs.contains(id))
+                .map(|(id, meta)| (id, MetadataStore::encode(&meta).map_err(|e| format!("encode failed: {e}"))))
+                .collect()
+        };
+        let v2 = self.records_v2(dir_v2).await;
+        Some(Records { generation, store, slabs, v2 })
+    }
+
+    /// Whether the data directory keeps `metadata.v2` rather than
+    /// `volumes.dat`: the gate is on, or it already does (#158).
+    fn dir_v2(&self) -> bool {
+        self.metadata_store.as_ref().is_some_and(|s| {
+            crate::drive::slab::default_format() == crate::drive::slab::SLAB_VERSION_2
+                || s.dir().join(persist_v2::DIR_FILE).exists()
+        })
+    }
+
+    /// What each format v2 store gets from this persist (#158).
+    async fn records_v2(&self, dir_v2: bool) -> Option<persist_v2::V2Records> {
+        use persist_v2::{Opener, Sink};
+        let mut sinks = Vec::new();
+        {
+            let reg = self.registry.read().await;
+            for id in &self.metadata_slabs {
+                if let Some(s) = reg.get(id) {
+                    if s.format_version() == crate::drive::slab::SLAB_VERSION_2 {
+                        if let Some((d, o, z)) = s.metadata_region() {
+                            sinks.push((Sink::Slab(*id), Opener::Region(d, o, z)));
+                        }
+                    }
+                }
+            }
+        }
+        if let (true, Some(st)) = (dir_v2, &self.metadata_store) {
+            sinks.push((Sink::Dir, Opener::Dir(st.dir().join(persist_v2::DIR_FILE))));
+        }
+        if sinks.is_empty() {
+            if self.gem.read().await.tracking() {
+                self.gem.write().await.track_changes(false);
+            }
+            return None;
+        }
+        if !self.gem.read().await.tracking() {
+            // What changed before now was not recorded: every store whole.
+            self.gem.write().await.track_changes(true);
+            self.v2.lock().unwrap_or_else(|e| e.into_inner()).forget();
+        }
+        let headers = self.header_records().await;
+        let pins: HashMap<VolumeId, SlabId> =
+            self.volumes.iter().filter_map(|(id, h)| h.pinned_slab().map(|p| (*id, p))).collect();
+        let roles: HashMap<VolumeId, SlabRole> =
+            self.volumes.iter().map(|(id, h)| (*id, h.placement_role())).collect();
+        let flowing = self.flowing_into.lock().unwrap().clone();
+
+        let gem = self.gem.read().await;
+        let reg = self.registry.read().await;
+        let single = self.metadata_slabs.len() == 1 && !reg.is_dedicated(&self.metadata_slabs[0]);
+        let home = |vid: &VolumeId| -> Option<SlabId> {
+            if let Some(p) = pins.get(vid) {
+                return self.metadata_slabs.contains(p).then_some(*p);
+            }
+            let want = roles.get(vid).copied().unwrap_or_default();
+            self.metadata_slabs.iter().copied().find(|s| reg.role_of(s) == want && !reg.is_dedicated(s))
+        };
+        let carries = |sink: Sink, vid: &VolumeId, on: &HashSet<SlabId>| -> bool {
+            match sink {
+                Sink::Dir => true,
+                Sink::Slab(s) if single => s == self.metadata_slabs[0],
+                Sink::Slab(s) => {
+                    if on.is_empty() {
+                        home(vid) == Some(s)
+                    } else {
+                        on.contains(&s)
+                            || flowing.iter().any(|(dest, sources)| *dest == s && sources.iter().any(|x| on.contains(x)))
+                    }
+                }
+            }
+        };
+        let all_arrays: Vec<(SlabId, metadata::ArrayRecord)> = self
+            .array_slabs
+            .iter()
+            .map(|(array_id, slab_id)| {
+                (
+                    *slab_id,
+                    metadata::ArrayRecord {
+                        array_id: *array_id,
+                        total_capacity: reg.get(slab_id).map(|s| s.total_slots() * s.slot_size()).unwrap_or(0),
+                    },
+                )
+            })
             .collect();
-        Some(Records { generation, store, slabs })
+        let arrays: HashMap<Sink, Vec<metadata::ArrayRecord>> = sinks
+            .iter()
+            .map(|(sink, _)| {
+                let a = all_arrays
+                    .iter()
+                    .filter(|(slab, _)| matches!(sink, Sink::Dir) || *sink == Sink::Slab(*slab))
+                    .map(|(_, a)| a.clone())
+                    .collect();
+                (*sink, a)
+            })
+            .collect();
+        let changes = gem.take_changes();
+        persist_v2::take(
+            &self.v2,
+            persist_v2::Inputs {
+                sinks,
+                headers,
+                arrays,
+                extent_size: self.slot_size,
+                gem: &gem,
+                changes,
+                carries: &carries,
+            },
+        )
     }
 
     /// Make durable what the records name, then write them — holding no lock
@@ -2016,7 +2157,7 @@ impl VolumeManager {
         registry: &Arc<tokio::sync::RwLock<SlabRegistry>>,
         written: &tokio::sync::Mutex<u64>,
         on_slab: &std::sync::Mutex<HashMap<SlabId, u64>>,
-        records: Records,
+        mut records: Records,
     ) -> anyhow::Result<()> {
         // Every slab at once: slabs on one disk are partitions of one
         // device, and its flushes are shared by everyone who asked before
@@ -2033,9 +2174,20 @@ impl VolumeManager {
             }
         }
 
+        // Format v2 stores: changes, applied in the order they were taken
+        // (never skipped for a newer generation: a change list is not a
+        // snapshot).
+        let v2_failed = match records.v2.take() {
+            Some(v2) => persist_v2::apply(v2).await,
+            None => Vec::new(),
+        };
+
         let mut last = written.lock().await;
         if *last > records.generation {
             // A newer snapshot is already on disk, and it holds all of this.
+            if !v2_failed.is_empty() {
+                anyhow::bail!("{}", v2_failed.join("; "));
+            }
             return Ok(());
         }
         if let Some((store, meta)) = &records.store {
@@ -2044,7 +2196,7 @@ impl VolumeManager {
         // Report every copy that failed, not the first. A node with two data
         // slabs where one is short of room still has to say so about that one
         // while the other is written.
-        let mut failed: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = v2_failed;
         // The copies that changed, written at once (their flushes are shared,
         // as above).
         let mut writes = Vec::new();
@@ -2198,9 +2350,8 @@ impl VolumeManager {
             let slab = reg
                 .get(slab_id)
                 .ok_or_else(|| anyhow::anyhow!("metadata slab {} is not attached", slab_id.0))?;
-            let Some(bytes) = slab.read_metadata().await? else { continue };
+            let Some(doc) = metav2::read_slab(slab).await? else { continue };
             found = true;
-            let doc = MetadataStore::decode(&bytes)?;
             let role = slab.role();
             for v in doc.volumes {
                 if seen.insert(v.id) {
@@ -2212,6 +2363,34 @@ impl VolumeManager {
             return Ok(None);
         }
         Ok(Some(out))
+    }
+
+    /// Every volume's record without its extents and parity: what a format
+    /// v2 store keeps as the volume's header (#158).
+    async fn header_records(&self) -> Vec<metadata::VolumeRecord> {
+        let mut out = Vec::with_capacity(self.volumes.len());
+        for (id, handle) in &self.volumes {
+            out.push(metadata::VolumeRecord {
+                id: *id,
+                name: handle.name().await,
+                virtual_size: handle.capacity_bytes(),
+                // A pin travels as the array the slab is (#150).
+                array_id: handle.pinned_slab().and_then(|p| self.array_of_slab(&p)),
+                retention: self.retentions.get(id).copied().unwrap_or_default(),
+                parent: self.parents.get(id).copied(),
+                sealed: handle.is_sealed(),
+                template: self.templates.contains(id),
+                access: handle.access(),
+                fs: self.fs_info.get(id).cloned(),
+                owner: self.owners.get(id).cloned(),
+                lba: handle.lba(),
+                extents: Default::default(),
+                redundancy: handle.redundancy(),
+                parity: Default::default(),
+                failed_slabs: handle.failed_slabs(),
+            });
+        }
+        out
     }
 
     /// The record every persist path writes: volumes, their sizes, and the
@@ -2304,6 +2483,7 @@ impl VolumeManager {
         // node has been updating. The slab's own copy is the fallback for a
         // node that has no filesystem to keep one in.
         let from_dir = match &self.metadata_store {
+            Some(s) if s.dir().join(persist_v2::DIR_FILE).exists() => persist_v2::load_dir(s.dir()).await?,
             Some(s) if s.exists() => Some(s.load()?),
             _ => None,
         };

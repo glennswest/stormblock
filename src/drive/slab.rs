@@ -18,8 +18,37 @@ use crate::volume::extent::VolumeId;
 /// Slab header magic: "STRMSLAB"
 pub const SLAB_MAGIC: [u8; 8] = *b"STRMSLAB";
 
-/// Current slab header version.
+/// Slab header version 1: what every engine before #158 writes and reads.
 pub const SLAB_VERSION: u32 = 1;
+/// Slab header version 2 (#158): `table_capacity` in 64 bits, slot indexes
+/// past 4 Gi, and a metadata region in format v2 (`volume::metav2`). An
+/// engine before #158 refuses the slab rather than misread it.
+pub const SLAB_VERSION_2: u32 = 2;
+
+static DEFAULT_FORMAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The format new slabs are written in: `[metadata] format`, else
+/// `$STORMBLOCK_METADATA_FORMAT`, else 1 (until #158's stage E).
+pub fn default_format() -> u32 {
+    use std::sync::atomic::Ordering;
+    match DEFAULT_FORMAT.load(Ordering::Relaxed) {
+        0 => {
+            let f = match std::env::var("STORMBLOCK_METADATA_FORMAT").ok().as_deref().map(str::trim) {
+                Some("2") => SLAB_VERSION_2,
+                _ => SLAB_VERSION,
+            };
+            DEFAULT_FORMAT.store(f, Ordering::Relaxed);
+            f
+        }
+        f => f,
+    }
+}
+
+/// Set the format new slabs are written in (1 or 2).
+pub fn set_default_format(f: u32) {
+    let f = if f == SLAB_VERSION_2 { SLAB_VERSION_2 } else { SLAB_VERSION };
+    DEFAULT_FORMAT.store(f, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Default slot size: 1 MB.
 pub const DEFAULT_SLOT_SIZE: u64 = 1024 * 1024;
@@ -299,13 +328,15 @@ struct SlabHeader {
     table_capacity: u64,
     #[allow(dead_code)]
     checksum: u32,
+    /// [`SLAB_VERSION`] or [`SLAB_VERSION_2`].
+    version: u32,
 }
 
 impl SlabHeader {
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; HEADER_SIZE as usize];
         buf[0..8].copy_from_slice(&SLAB_MAGIC);
-        buf[8..12].copy_from_slice(&SLAB_VERSION.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.version.to_le_bytes());
         buf[12..28].copy_from_slice(self.slab_uuid.as_bytes());
         buf[28..44].copy_from_slice(self.device_uuid.as_bytes());
         buf[44..52].copy_from_slice(&self.slot_size.to_le_bytes());
@@ -324,10 +355,24 @@ impl SlabHeader {
         // Zero when the table has no room beyond `total_slots`, which keeps a
         // slab that cannot grow byte-identical to one written before this.
         let cap = if self.table_capacity > self.total_slots { self.table_capacity } else { 0 };
+        if self.version == SLAB_VERSION_2 {
+            // v2: the capacity in 64 bits at 128, and the checksum over
+            // everything but itself up to 256.
+            buf[128..136].copy_from_slice(&cap.to_le_bytes());
+            let crc = Self::crc_v2(&buf);
+            buf[124..128].copy_from_slice(&crc.to_le_bytes());
+            return buf;
+        }
         buf[120..124].copy_from_slice(&(cap.min(u32::MAX as u64) as u32).to_le_bytes());
         let crc = crc32c::crc32c(&buf[..124]);
         buf[124..128].copy_from_slice(&crc.to_le_bytes());
         buf
+    }
+
+    fn crc_v2(buf: &[u8]) -> u32 {
+        let mut c = buf[..124].to_vec();
+        c.extend_from_slice(&buf[128..256]);
+        crc32c::crc32c(&c)
     }
 
     fn from_bytes(data: &[u8]) -> Result<Self, DriveError> {
@@ -338,14 +383,17 @@ impl SlabHeader {
             return Err(DriveError::Other(anyhow::anyhow!("bad slab magic")));
         }
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != SLAB_VERSION {
+        if version != SLAB_VERSION && version != SLAB_VERSION_2 {
             return Err(DriveError::Other(anyhow::anyhow!(
-                "slab version {version}, expected {SLAB_VERSION}"
+                "slab version {version}, expected {SLAB_VERSION} or {SLAB_VERSION_2}"
             )));
+        }
+        if version == SLAB_VERSION_2 && data.len() < 256 {
+            return Err(DriveError::Other(anyhow::anyhow!("slab header too short")));
         }
 
         let stored_crc = u32::from_le_bytes(data[124..128].try_into().unwrap());
-        let computed = crc32c::crc32c(&data[..124]);
+        let computed = if version == SLAB_VERSION_2 { Self::crc_v2(data) } else { crc32c::crc32c(&data[..124]) };
         if stored_crc != computed {
             return Err(DriveError::Other(anyhow::anyhow!("slab header CRC mismatch")));
         }
@@ -378,8 +426,11 @@ impl SlabHeader {
         };
         let meta_offset = u64::from_le_bytes(data[104..112].try_into().unwrap());
         let meta_size = u64::from_le_bytes(data[112..120].try_into().unwrap());
-        let table_capacity =
-            (u32::from_le_bytes(data[120..124].try_into().unwrap()) as u64).max(total_slots);
+        let table_capacity = if version == SLAB_VERSION_2 {
+            u64::from_le_bytes(data[128..136].try_into().unwrap()).max(total_slots)
+        } else {
+            (u32::from_le_bytes(data[120..124].try_into().unwrap()) as u64).max(total_slots)
+        };
 
         Ok(SlabHeader {
             slab_uuid,
@@ -398,6 +449,7 @@ impl SlabHeader {
             meta_size,
             table_capacity,
             checksum: stored_crc,
+            version,
         })
     }
 }
@@ -426,11 +478,28 @@ pub struct SlabFormat {
     pub grow_to: u64,
     /// Only volumes pinned to this slab allocate on it (#150).
     pub dedicated: bool,
+    /// [`SLAB_VERSION`] or [`SLAB_VERSION_2`]: [`default_format`] unless
+    /// said otherwise.
+    pub version: u32,
 }
 
 impl SlabFormat {
     pub fn new(slot_size: u64, tier: StorageTier) -> Self {
-        SlabFormat { slot_size, tier, metadata_bytes: 0, role: SlabRole::System, grow_to: 0, dedicated: false }
+        SlabFormat {
+            slot_size,
+            tier,
+            metadata_bytes: 0,
+            role: SlabRole::System,
+            grow_to: 0,
+            dedicated: false,
+            version: default_format(),
+        }
+    }
+
+    /// Write the slab in this format (1 or 2) whatever the default.
+    pub fn with_version(mut self, version: u32) -> Self {
+        self.version = version;
+        self
     }
 
     /// Take allocations only for volumes pinned to this slab (#150).
@@ -467,7 +536,11 @@ impl SlabFormat {
 
     /// Reserve a region sized from what the slab can hold.
     pub fn with_auto_metadata(mut self, capacity: u64) -> Self {
-        self.metadata_bytes = auto_metadata_bytes(capacity, self.slot_size);
+        self.metadata_bytes = if self.version == SLAB_VERSION_2 {
+            auto_metadata_bytes_v2(capacity, self.slot_size)
+        } else {
+            auto_metadata_bytes(capacity, self.slot_size)
+        };
         self
     }
 }
@@ -484,6 +557,19 @@ pub fn auto_metadata_bytes(capacity: u64, slot_size: u64) -> u64 {
     // Never more than an eighth of the device, so a small slab stays a slab.
     let ceiling = (capacity / 8).clamp(2 * META_ALIGN, META_MAX);
     align_up(want.clamp(META_MIN.min(ceiling), ceiling), 2 * META_ALIGN)
+}
+
+/// How large an auto-sized v2 metadata region is (#158): ~48 bytes of tree
+/// per slot (an extent is ~35 in a page), the log (an eighth of the region,
+/// at most 64 MiB), never under 1 MiB nor over an eighth of the device. No
+/// 256 MiB ceiling: a persist writes what changed, not the region.
+pub fn auto_metadata_bytes_v2(capacity: u64, slot_size: u64) -> u64 {
+    let per_slot = SLOT_ENTRY_SIZE + slot_size.max(1);
+    let slots = capacity.saturating_sub(HEADER_SIZE) / per_slot;
+    let tree = slots.saturating_mul(48);
+    let want = tree.saturating_add((tree / 7).min(64 << 20)).saturating_add(1 << 20);
+    let ceiling = (capacity / 8).max(2 * META_ALIGN);
+    align_up(want.min(ceiling), 2 * META_ALIGN)
 }
 
 /// Write `len` zero bytes at `offset`, a chunk at a time.
@@ -615,6 +701,7 @@ pub struct MetadataWriter {
     device: Arc<dyn BlockDevice>,
     meta_offset: u64,
     meta_size: u64,
+    version: u32,
 }
 
 /// A slab's table, to read with no lock held: [`Slab::view_source`].
@@ -777,7 +864,7 @@ impl Slab {
         }
         // Format v1 keeps slot indexes in 32 bits on disk (#158): a slab past
         // 4 Gi slots needs format v2 (larger slots until then).
-        if table_capacity > u32::MAX as u64 {
+        if opts.version != SLAB_VERSION_2 && table_capacity > u32::MAX as u64 {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "{total_slots} slots ({} reserved for growth) is more than slab format v1 \
                  holds (4 Gi): use larger slots",
@@ -809,6 +896,7 @@ impl Slab {
             meta_size,
             table_capacity: table_capacity.max(total_slots),
             checksum: 0,
+            version: if opts.version == SLAB_VERSION_2 { SLAB_VERSION_2 } else { SLAB_VERSION },
         };
 
         // Write header
@@ -817,7 +905,12 @@ impl Slab {
 
         // Invalidate both metadata copies before anything can read them: a
         // reused device could otherwise hand back a previous slab's volumes.
-        if meta_size > 0 {
+        if meta_size > 0 && header.version == SLAB_VERSION_2 {
+            // An empty v2 store (#158).
+            crate::volume::metav2::MetaV2::format(device.clone(), meta_offset, meta_size)
+                .await
+                .map_err(|e| DriveError::Other(anyhow::anyhow!("metadata region: {e}")))?;
+        } else if meta_size > 0 {
             let zero = vec![0u8; META_ALIGN as usize];
             device.write(meta_offset, &zero).await?;
             device.write(meta_offset + meta_size / 2, &zero).await?;
@@ -1741,6 +1834,16 @@ impl Slab {
 
     // ------------------------------------------------- embedded metadata
 
+    /// The slab's format: [`SLAB_VERSION`] or [`SLAB_VERSION_2`] (#158).
+    pub fn format_version(&self) -> u32 {
+        self.header.version
+    }
+
+    /// The device, offset and size of the metadata region, when there is one.
+    pub fn metadata_region(&self) -> Option<(Arc<dyn BlockDevice>, u64, u64)> {
+        self.has_metadata_region().then(|| (self.device.clone(), self.header.meta_offset, self.header.meta_size))
+    }
+
     /// Whether this slab reserves room for its own volume metadata.
     pub fn has_metadata_region(&self) -> bool {
         self.header.meta_size >= 2 * META_ALIGN && self.header.meta_offset > 0
@@ -1774,6 +1877,7 @@ impl Slab {
             device: self.device.clone(),
             meta_offset: self.header.meta_offset,
             meta_size: self.header.meta_size,
+            version: self.header.version,
         }
     }
 }
@@ -1815,6 +1919,12 @@ impl MetadataWriter {
 
     /// See [`Slab::write_metadata`].
     pub async fn write(&self, payload: &[u8]) -> DriveResult<()> {
+        if self.version == SLAB_VERSION_2 {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "slab {} keeps its metadata in format v2: written through volume::metav2",
+                self.id.0
+            )));
+        }
         if !self.has_metadata_region() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "slab {} has no metadata region; format it with one to keep \
@@ -1876,6 +1986,13 @@ impl Slab {
     pub async fn read_metadata(&self) -> DriveResult<Option<Vec<u8>>> {
         if !self.has_metadata_region() {
             return Ok(None);
+        }
+        if self.header.version == SLAB_VERSION_2 {
+            // Never "nothing here": a v2 region read as v1 would look empty.
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "slab {} keeps its metadata in format v2: read it with volume::metav2",
+                self.id.0
+            )));
         }
         // Newest first, then the other one: a copy that fails its checksum is
         // a write that did not finish, and the previous generation is exactly
@@ -2022,7 +2139,7 @@ mod tests {
             slab_uuid: Uuid::new_v4(), device_uuid: Uuid::new_v4(), slot_size: 1 << 20,
             total_slots: 100, free_slots: 100, data_offset: 1 << 20, table_offset: 4096,
             create_time: 1, update_time: 1, tier: StorageTier::Hot, flags: 0,
-            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, checksum: 0,
+            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, checksum: 0, version: 1,
         };
         let b = h.to_bytes();
         assert_eq!(&b[120..124], &[0, 0, 0, 0], "no room beyond total_slots writes zero");
@@ -2668,6 +2785,47 @@ mod tests {
         assert!(Slot::from_bytes(&bytes).is_none());
     }
 
+    /// v2 (#158): the table's capacity past 4 Gi, a checksum over the
+    /// extended header; v1 code would refuse the version.
+    #[test]
+    fn a_v2_header_keeps_a_capacity_past_four_gi() {
+        let h = SlabHeader {
+            slab_uuid: Uuid::new_v4(), device_uuid: Uuid::new_v4(), slot_size: 4096,
+            total_slots: 5_000_000_000, free_slots: 5_000_000_000, data_offset: 1 << 40, table_offset: 4096,
+            create_time: 1, update_time: 1, tier: StorageTier::Cold, flags: 0,
+            role: SlabRole::Data, meta_offset: 4096, meta_size: 1 << 30, table_capacity: 9_000_000_000,
+            checksum: 0, version: SLAB_VERSION_2,
+        };
+        let mut b = h.to_bytes();
+        assert_eq!(u32::from_le_bytes(b[8..12].try_into().unwrap()), 2);
+        let back = SlabHeader::from_bytes(&b).unwrap();
+        assert_eq!(back.version, SLAB_VERSION_2);
+        assert_eq!(back.table_capacity, 9_000_000_000);
+        assert_eq!(back.total_slots, 5_000_000_000);
+        b[130] ^= 1;
+        assert!(SlabHeader::from_bytes(&b).is_err(), "the extended header is checksummed");
+    }
+
+    #[tokio::test]
+    async fn a_v2_slab_formats_an_empty_store_and_refuses_v1_metadata() {
+        let dev = crate::drive::open_path(&format!("emulated://v2slab-{}?size=1G", Uuid::new_v4()), false).await.unwrap();
+        let slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(1 << 20, StorageTier::Hot).with_version(SLAB_VERSION_2).with_auto_metadata(1 << 30),
+        )
+        .await
+        .unwrap();
+        assert_eq!(slab.format_version(), SLAB_VERSION_2);
+        assert!(slab.read_metadata().await.is_err());
+        assert!(slab.metadata_writer().write(b"x").await.is_err());
+        let (d, off, size) = slab.metadata_region().unwrap();
+        assert!(size >= 1 << 20);
+        let mut store = crate::volume::metav2::MetaV2::open(d, off, size).await.unwrap().unwrap();
+        assert!(store.scan().await.unwrap().is_empty());
+        let reopened = Slab::open(dev).await.unwrap();
+        assert_eq!(reopened.format_version(), SLAB_VERSION_2);
+    }
+
     #[test]
     fn header_roundtrip() {
         let header = SlabHeader {
@@ -2687,6 +2845,7 @@ mod tests {
             meta_size: 128 * 1024,
             table_capacity: 0,
             checksum: 0,
+            version: 1,
         };
         let bytes = header.to_bytes();
         let decoded = SlabHeader::from_bytes(&bytes).unwrap();
@@ -2722,6 +2881,7 @@ mod tests {
             meta_size: 0,
             table_capacity: 0,
             checksum: 0,
+            version: 1,
         };
         let bytes = header.to_bytes();
         assert_eq!(bytes[102], 0, "system is the zero value, so v1 padding decodes to it");

@@ -1341,9 +1341,10 @@ pub async fn slabs_in(image: &Path) -> Result<Vec<SlabContents>> {
         let part = Arc::new(PartitionDevice::new(dev.clone(), start, size)?);
         let slab = Slab::open(part).await?;
         let mut volumes = Vec::new();
-        if let Some(bytes) = slab.read_metadata().await? {
-            let meta = crate::volume::MetadataStore::decode(&bytes)
-                .map_err(|e| ImageError::Other(format!("slab volume metadata: {e}")))?;
+        if let Some(meta) = crate::volume::metav2::read_slab(&slab)
+            .await
+            .map_err(|e| ImageError::Other(format!("slab volume metadata: {e}")))?
+        {
             for v in meta.volumes {
                 volumes.push(VolumeReport {
                     id: v.id.0,

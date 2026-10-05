@@ -1957,8 +1957,8 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                     println!("{device}: slab {} keeps no volume metadata", slab.slab_id());
                     continue;
                 }
-                let bytes = match slab.read_metadata().await {
-                    Ok(Some(b)) => b,
+                let meta = match crate::volume::metav2::read_slab(&slab).await {
+                    Ok(Some(m)) => m,
                     Ok(None) => {
                         // The region is there and no copy has ever been
                         // written: this slab is *empty*, which is a different
@@ -1971,13 +1971,6 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         println!("{device}: slab {} metadata unreadable ({e})", slab.slab_id());
-                        continue;
-                    }
-                };
-                let meta = match crate::volume::MetadataStore::decode(&bytes) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        println!("{device}: slab {} metadata will not decode ({e})", slab.slab_id());
                         continue;
                     }
                 };
@@ -3135,14 +3128,9 @@ async fn open_slabs_resuming(
         Vec::with_capacity(slabs.len());
     if meta.is_none() {
         for (path, slab) in slab_sources.iter().zip(&slabs) {
-            let doc = match slab
-                .read_metadata()
+            let doc = crate::volume::metav2::read_slab(slab)
                 .await
-                .map_err(|e| anyhow::anyhow!("read slab metadata from {path}: {e}"))?
-            {
-                Some(bytes) => Some(MetadataStore::decode(&bytes)?),
-                None => None,
-            };
+                .map_err(|e| anyhow::anyhow!("read slab metadata from {path}: {e}"))?;
             embedded.push(doc);
         }
     } else {
@@ -7467,8 +7455,8 @@ size = "64M"
         let dev = super::open_storage(disk).await.unwrap();
         let mut names = std::collections::BTreeSet::new();
         for f in crate::drive::discover::slabs_in_partitions(&dev).await {
-            if let Ok(Some(bytes)) = f.slab.read_metadata().await {
-                for v in crate::volume::MetadataStore::decode(&bytes).unwrap().volumes {
+            if let Ok(Some(doc)) = crate::volume::metav2::read_slab(&f.slab).await {
+                for v in doc.volumes {
                     names.insert(v.name);
                 }
             }

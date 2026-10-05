@@ -384,6 +384,8 @@ pub struct MetaV2 {
     overlay: Overlay,
     /// Internal pages, decoded (about one in a hundred of the tree's).
     internal: HashMap<u64, Arc<Node>>,
+    /// The first word of `used` that may have a free page.
+    hint: usize,
 }
 
 impl MetaV2 {
@@ -414,6 +416,7 @@ impl MetaV2 {
             log_used: 0,
             overlay: Overlay::default(),
             internal: HashMap::new(),
+            hint: 0,
         })
     }
 
@@ -457,6 +460,7 @@ impl MetaV2 {
             log_used: 0,
             overlay: Overlay::default(),
             internal: HashMap::new(),
+            hint: 0,
         };
         if s.root != EMPTY {
             s.mark_reachable().await?;
@@ -486,12 +490,14 @@ impl MetaV2 {
             self.used[w] |= b;
         } else {
             self.used[w] &= !b;
+            self.hint = self.hint.min(w);
         }
     }
 
     fn alloc_page(&mut self) -> io::Result<u64> {
-        for (w, word) in self.used.iter().enumerate() {
+        for (w, word) in self.used.iter().enumerate().skip(self.hint) {
             if *word != u64::MAX {
+                self.hint = w;
                 let p = w as u64 * 64 + (!word).trailing_zeros() as u64;
                 if p >= self.layout.page_count {
                     break;
@@ -1090,6 +1096,27 @@ impl MetaV2 {
 }
 
 // ----------------------------------------------------- the volume document
+
+/// The volume document a slab keeps, in either format. `None`: the slab keeps
+/// none (no region), or keeps one that was never written.
+pub async fn read_slab(slab: &crate::drive::slab::Slab) -> io::Result<Option<VolumeMetadata>> {
+    if slab.format_version() != crate::drive::slab::SLAB_VERSION_2 {
+        return match slab.read_metadata().await {
+            Ok(Some(bytes)) => super::metadata::MetadataStore::decode(&bytes).map(Some),
+            Ok(None) => Ok(None),
+            Err(e) => Err(io::Error::other(e.to_string())),
+        };
+    }
+    let Some((dev, off, size)) = slab.metadata_region() else { return Ok(None) };
+    let Some(mut store) = MetaV2::open(dev, off, size).await? else {
+        return Err(err(format!("slab {}: no metadata v2 superblock checks", slab.slab_id())));
+    };
+    let entries = store.scan().await?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    document_of(entries).map(Some)
+}
 
 use super::metadata::{ArrayRecord, VolumeMetadata, VolumeRecord};
 use super::extent::VolumeId;

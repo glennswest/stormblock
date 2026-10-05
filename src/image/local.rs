@@ -264,12 +264,11 @@ pub async fn system_slab_volumes(
     if !slab.has_metadata_region() {
         return Ok(None);
     }
-    let bytes = match slab.read_metadata().await {
-        Ok(Some(b)) => b,
+    let meta = match crate::volume::metav2::read_slab(&slab).await {
+        Ok(Some(m)) => m,
         Ok(None) => return Ok(Some(std::collections::HashSet::new())),
         Err(_) => return Ok(None),
     };
-    let Ok(meta) = crate::volume::MetadataStore::decode(&bytes) else { return Ok(None) };
     Ok(Some(meta.volumes.into_iter().map(|v| v.id.0).collect()))
 }
 
@@ -333,12 +332,10 @@ async fn recorded_volumes_and_slabs(
         if !slab.has_metadata_region() {
             continue;
         }
-        match slab.read_metadata().await {
-            Ok(Some(bytes)) => {
-                if let Ok(meta) = crate::volume::MetadataStore::decode(&bytes) {
-                    answered = true;
-                    out.extend(meta.volumes);
-                }
+        match crate::volume::metav2::read_slab(&slab).await {
+            Ok(Some(meta)) => {
+                answered = true;
+                out.extend(meta.volumes);
             }
             Ok(None) => answered = true,
             Err(_) => {}
@@ -413,12 +410,11 @@ pub async fn data_slab_volumes(
     if !slab.has_metadata_region() {
         return Ok(None);
     }
-    let bytes = match slab.read_metadata().await {
-        Ok(Some(b)) => b,
+    let meta = match crate::volume::metav2::read_slab(&slab).await {
+        Ok(Some(m)) => m,
         Ok(None) => return Ok(Some(std::collections::HashSet::new())),
         Err(_) => return Ok(None),
     };
-    let Ok(meta) = crate::volume::MetadataStore::decode(&bytes) else { return Ok(None) };
     Ok(Some(meta.volumes.into_iter().map(|v| v.id.0).collect()))
 }
 
