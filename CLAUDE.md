@@ -254,6 +254,7 @@ pallet (below the active one), its system goldens and clones under
 back. Asked (needs-owner): (1) a data volume N+1 also carries: always keep
 the node's (a, rec.) or allow "replace" (b); (2) the boot after activate:
 stormupdate re-points `boothost/<tag>` first (A, rec.) or the disk wins (B).
+Answered "b" (2026-10-05); which question it answers is asked back (needs-owner).
 
 ### The initramfs names the node and says why (2026-10-05, #238, P1) — DONE
 
