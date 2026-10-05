@@ -1734,7 +1734,7 @@ mod tests {
         }
         // A fifth extent whose slot does not exist on the source: reading it
         // fails, which is what a bad sector looks like from here.
-        let bogus_slot = slab_a.total_slots() as u32 + 7;
+        let bogus_slot = slab_a.total_slots() + 7;
         gem.insert(vol, 99, ExtentLocation::new(slab_a_id, bogus_slot));
 
         let mut registry = SlabRegistry::new();

@@ -461,7 +461,7 @@ async fn take_slot_on_tier(
 }
 
 /// Give back slots taken by an allocation that then failed.
-async fn rollback(reg: &mut SlabRegistry, taken: &[(u64, SlabId, u32)]) {
+async fn rollback(reg: &mut SlabRegistry, taken: &[(u64, SlabId, u64)]) {
     for (_, slab_id, slot_idx) in taken {
         if let Some(slab) = reg.get_mut(slab_id) {
             if let Err(e) = slab.free(*slot_idx) .await {
