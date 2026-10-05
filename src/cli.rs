@@ -7151,7 +7151,19 @@ file = "{logs}"
         let (moved, failed) = flowed.expect("the flow-over finished");
         assert_eq!(failed, 0);
         assert!(moved >= EXTENTS, "moved {moved}");
-        assert!(mgr.gem().read().await.slab_extents(source_id).is_empty(), "all moved");
+        {
+            let g = mgr.gem().read().await;
+            let left: Vec<String> = g
+                .slab_extents(source_id)
+                .into_iter()
+                .map(|(v, x, l)| {
+                    let who = if v == golden { "golden" } else if v == clone { "clone" } else { "other" };
+                    format!("{who}/{x} {:?} refs {} gen {} (golden maps {:?}, clone maps {:?})", l.legs().collect::<Vec<_>>(), l.ref_count, l.generation,
+                        g.lookup(golden, x).map(|l| l.primary()), g.lookup(clone, x).map(|l| l.primary()))
+                })
+                .collect();
+            assert!(left.is_empty(), "all moved; left on the source: {left:#?}");
+        }
 
         // The clone: the golden, with every write on top.
         let mut want = (*content).clone();
