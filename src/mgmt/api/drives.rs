@@ -49,6 +49,35 @@ pub struct DriveResponse {
     /// Failure-domain labels the drive was registered with (#70), as a
     /// chain: `shelf=S/bay=3`. Empty when nobody said where it is.
     pub labels: String,
+    /// Set for an emulated drive (#208): never media.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emulated: Option<EmulatedState>,
+}
+
+/// What an emulated drive holds and whether it is failed (#208).
+#[derive(Debug, Serialize)]
+pub struct EmulatedState {
+    pub name: String,
+    /// Bytes it actually stores: what was written and is not zero.
+    pub stored_bytes: u64,
+    /// In memory, or under this directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backing: Option<String>,
+    pub failed: bool,
+}
+
+fn emulated_state(dev: &dyn crate::drive::BlockDevice) -> Option<EmulatedState> {
+    if dev.device_type() != crate::drive::DriveType::Emulated {
+        return None;
+    }
+    let spec = crate::drive::emulated::EmulatedSpec::parse(&dev.id().path)?.ok()?;
+    let d = crate::drive::emulated::get(&spec.name)?;
+    Some(EmulatedState {
+        name: spec.name,
+        stored_bytes: d.stored_bytes(),
+        backing: spec.backing.map(|b| b.display().to_string()),
+        failed: d.is_failed(),
+    })
 }
 
 async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -70,6 +99,7 @@ async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 capacity_human: human_size(d.device.capacity_bytes()),
                 block_size: d.device.block_size(),
                 labels: d.labels.to_string(),
+                emulated: emulated_state(d.device.as_ref()),
             }
         })
         .collect();
@@ -100,6 +130,7 @@ async fn get_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
                 capacity_human: human_size(d.device.capacity_bytes()),
                 block_size: d.device.block_size(),
                 labels: d.labels.to_string(),
+                emulated: emulated_state(d.device.as_ref()),
             };
             Json(resp).into_response()
         }
@@ -237,6 +268,7 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
             capacity_human: human_size(dev.capacity_bytes()),
             block_size: dev.block_size(),
             labels: labels.to_string(),
+            emulated: emulated_state(dev.as_ref()),
         }),
     )
         .into_response()
@@ -325,6 +357,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/labels", axum::routing::put(set_labels))
         .route("/{id}/drain", get(drain_status).post(start_drain).delete(cancel_drain))
         .route("/{id}/health", axum::routing::post(drive_health))
+        .route("/{id}/emulate", axum::routing::post(emulate))
         .with_state(state)
 }
 
@@ -693,4 +726,29 @@ async fn drive_health(
         "rebuild": rebuild_job,
     }))
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EmulateRequest {
+    /// Fail the emulated drive (every I/O answers EIO), or recover it.
+    pub failed: bool,
+}
+
+/// `POST /api/v1/drives/{id}/emulate {"failed": true|false}` — fail an
+/// emulated drive on command, or recover it (#208): the rebuild test. Only
+/// an emulated drive; a real one is answered 409.
+async fn emulate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<EmulateRequest>,
+) -> Response {
+    let Some((dev, path)) = find_drive(&state, &id).await else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+    if dev.device_type() != crate::drive::DriveType::Emulated
+        || !crate::drive::emulated::set_failed(&dev.id().path, req.failed)
+    {
+        return ApiError::conflict(format!("{path} is not an emulated drive"));
+    }
+    Json(serde_json::json!({ "drive": path, "emulated": emulated_state(dev.as_ref()) })).into_response()
 }

@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(d.capacity_bytes(), PIB);
         assert_eq!(d.device_type(), DriveType::Emulated);
         // Far apart: the first and last MiB, and one in the middle.
-        for at in [0, PIB / 2 + 12345 * 4096, PIB - (1 << 20)] {
+        for at in [0, PIB / 2 + 12345 * PAGE, PIB - (1 << 20)] {
             let data: Vec<u8> = (0..(1 << 20)).map(|i| (i % 251) as u8 ^ (at >> 20) as u8).collect();
             d.write(at, &data).await.unwrap();
             let mut back = vec![0u8; 1 << 20];
