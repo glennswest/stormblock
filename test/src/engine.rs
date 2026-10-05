@@ -208,14 +208,23 @@ impl Engine {
     /// Attach a volume over NVMe/TCP and open it with the userspace
     /// initiator: a block device the test reads and writes as a consumer
     /// would.
+    ///
+    /// The attach names the host NQN the initiator connects as: since #210
+    /// the shared subsystem admits no host, and a volume is served to the
+    /// host an attach names, from a subsystem of its own.
     pub async fn attach(&self, id: &str) -> Result<Arc<dyn BlockDevice>, String> {
-        self.attach_at(&format!("/volumes/{id}/attach"), json!({ "transport": "nvme-tcp" })).await
+        let host = stormblock::drive::nvmeof_dev::default_host_nqn();
+        self.attach_at(&format!("/volumes/{id}/attach"), json!({ "transport": "nvme-tcp", "host_nqn": host })).await
     }
 
     /// A `/v1` volume, attached for this node over NVMe/TCP.
     pub async fn attach_v1(&self, id: &str) -> Result<Arc<dyn BlockDevice>, String> {
         let me = self.node.clone();
-        self.attach_at(&format!("{}/volumes/{id}/attach", self.v1()), json!({ "node": me, "mode": "read_write", "transport": "nvme_tcp" }))
+        let host = stormblock::drive::nvmeof_dev::default_host_nqn();
+        self.attach_at(
+            &format!("{}/volumes/{id}/attach", self.v1()),
+            json!({ "node": me, "mode": "read_write", "transport": "nvme_tcp", "host_nqn": host }),
+        )
             .await
     }
 
