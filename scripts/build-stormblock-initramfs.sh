@@ -646,6 +646,7 @@ PORT="3260"
 IP_CONF=""
 SLAB=""
 BOOTHOST=""
+ENGINE_LOG="${STORM_ENGINE_LOG:-/run/stormblock/engine.log}"
 BOOTTAG=""
 BOOTTAG_FROM=""
 TRUST_SMBIOS=""
@@ -891,6 +892,22 @@ mounts_from() { # slab -> MOUNTS (comma-separated) and MOUNTS_FROM
         MOUNTS_FROM="/etc/stormblock/mounts in ${VOLUME:-stormpump}"
     fi
     return 0
+}
+
+# What release a disk holds, for a message (#294): its root volume's
+# os-release, read with nothing attached. "unknown" when it does not say.
+disk_release() { # slab
+    _dr="${STORM_RUN:-/run}/stormblock-disk-os-release"
+    if "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$1" \
+           --volume "${VOLUME:-stormpump}" --out "$_dr" /etc/os-release >/dev/null 2>&1 \
+       && [ -s "$_dr" ]; then
+        _rel=$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$_dr" | head -1)
+        [ -n "$_rel" ] || _rel=$(sed -n 's/^VERSION_ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$_dr" | head -1)
+        rm -f "$_dr"
+        printf '%s\n' "${_rel:-unknown (its os-release names none)}"
+    else
+        echo "unknown (no /etc/os-release in its '${VOLUME:-stormpump}' volume)"
+    fi
 }
 # --- END mount list
 
@@ -1753,10 +1770,20 @@ if [ "$BOOT_MODE" = "local" ]; then
     # seconds. That is what makes this work on a network nobody prepared:
     # with no record and no option 17, the DHCP server is tried, and on a
     # small network it is very often the appliance.
+    # --- BEGIN appliance discovery (covered by tests/initramfs-no-appliance.sh)
+    # Why there is no appliance, when there is none: said again wherever it
+    # matters (the release check it skips, a disk that cannot boot, #294).
+    BOOTHOST_WHY=""
     if [ -z "$BOOTHOST" ]; then
         BOOTPORT="${BOOTPORT:-9090}"
         CANDIDATE_HOSTS=""
-        [ -s /run/stormblock-boothost ] && CANDIDATE_HOSTS="$(cat /run/stormblock-boothost)"
+        [ -s "${STORM_BOOTHOST_FILE:-/run/stormblock-boothost}" ] \
+            && CANDIDATE_HOSTS="$(cat "${STORM_BOOTHOST_FILE:-/run/stormblock-boothost}")"
+        # The network named its boothost: it is there to be asked, so a
+        # silence is a link that has just come up (server8's ConnectX-3:
+        # carrier, then ARP, then forge), not an answer. Ask again for a
+        # while before going on without it (#294).
+        NAMED_HOST="$CANDIDATE_HOSTS"
         # Qualified from the lease's own search domain rather than left to the
         # resolver: a short name that fails to resolve looks exactly like an
         # appliance that is down, and the two want different answers.
@@ -1788,31 +1815,51 @@ if [ "$BOOT_MODE" = "local" ]; then
         for f in /run/dhcp-siaddr /run/dhcp-serverid; do
             [ -s "$f" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://$(cat "$f"):$BOOTPORT"
         done
-        for c in $CANDIDATE_HOSTS; do
-            case "$c" in
-            nvme-tcp://*) BOOTHOST="$c"; break ;;
-            esac
-            # Two paths, because an appliance that predates the health
-            # endpoint answers 404 to it and would be passed over. `slabs` is
-            # not a health check — it reads state — but it is engine-specific
-            # and it exists everywhere, so it settles the question for an
-            # appliance that has not been updated yet.
-            if wget -q -T 3 -O /dev/null "$c/api/v1/health" 2>/dev/null \
-               || wget -q -T 3 -O /dev/null "$c/api/v1/slabs" 2>/dev/null; then
-                BOOTHOST="$c"
-                break
-            fi
-            echo "  no engine at $c"
+        BH_WAIT=0
+        [ -n "$NAMED_HOST" ] && BH_WAIT="${STORM_BOOTHOST_WAIT:-90}"
+        BH_START=$(date +%s)
+        BH_PASS=0
+        while :; do
+            BH_PASS=$((BH_PASS + 1))
+            for c in $CANDIDATE_HOSTS; do
+                case "$c" in
+                nvme-tcp://*) BOOTHOST="$c"; break ;;
+                esac
+                # Two paths, because an appliance that predates the health
+                # endpoint answers 404 to it and would be passed over. `slabs`
+                # is not a health check — it reads state — but it is
+                # engine-specific and it exists everywhere, so it settles the
+                # question for an appliance that has not been updated yet.
+                if wget -q -T 3 -O /dev/null "$c/api/v1/health" 2>/dev/null \
+                   || wget -q -T 3 -O /dev/null "$c/api/v1/slabs" 2>/dev/null; then
+                    BOOTHOST="$c"
+                    break
+                fi
+                [ "$BH_PASS" = 1 ] && echo "  no engine at $c"
+            done
+            [ -n "$BOOTHOST" ] && break
+            BH_ELAPSED=$(( $(date +%s) - BH_START ))
+            [ "$BH_ELAPSED" -ge "$BH_WAIT" ] && break
+            [ "$BH_PASS" = 1 ] && echo "  the network names $NAMED_HOST as its boothost and it did not answer;" \
+                                     "asking again for up to ${BH_WAIT}s"
+            sleep "${STORM_BOOTHOST_RETRY:-3}"
         done
         if [ -n "$BOOTHOST" ]; then
+            [ "$BH_PASS" -gt 1 ] && echo "  $BOOTHOST answered after $(( $(date +%s) - BH_START ))s ($BH_PASS tries)"
             echo "Appliance: $BOOTHOST"
             # boot-local claims a fresh clone from it when this disk's
             # records name extents a cut-short flow-over never moved (#171).
             export STORMBLOCK_BOOTHOST="$BOOTHOST"
         else
-            echo "No appliance answered. Tried:$CANDIDATE_HOSTS"
+            if [ -n "$NAMED_HOST" ]; then
+                BOOTHOST_WHY="the boothost the network names ($NAMED_HOST) did not answer in $(( $(date +%s) - BH_START ))s ($BH_PASS tries)"
+            else
+                BOOTHOST_WHY="no appliance answered (tried:$CANDIDATE_HOSTS)"
+            fi
+            echo "No appliance: $BOOTHOST_WHY"
         fi
     fi
+    # --- END appliance discovery
 
     # An explicit, one-shot wipe.
     #
@@ -2106,7 +2153,21 @@ if [ "$BOOT_MODE" = "local" ]; then
     # would overrule a better answer with a worse one.
     # --- BEGIN local-slab probe (covered by tests/initramfs-boot-hook.sh)
     SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
-    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ] && [ -n "$BOOTHOST" ]; then
+    # A disk this node cannot boot: with an appliance, ask it instead; with
+    # none, stop here and say why (#294) — handing it to `boot-local` ended
+    # in an engine exit whose error scrolled off the screen.
+    PROBE_STOP=""
+    probe_fallback() { # what is wrong with the disk
+        if [ -n "$BOOTHOST" ]; then
+            echo "$1 - asking $BOOTHOST instead"
+            SLAB=""
+        else
+            PROBE_STOP="$1"
+        fi
+    }
+    # Run with or without an appliance (#294): without one, the checks are
+    # what stops a disk that cannot boot this node before it is handed over.
+    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ]; then
         case "$SLAB" in
         *://*) ;;
         *)
@@ -2123,12 +2184,10 @@ if [ "$BOOT_MODE" = "local" ]; then
             # than "not a slab", so the probe passed and the boot died on
             # "No medium found". A device path is not a stable identity.
             if [ ! -e "$SLAB" ]; then
-                echo "No $SLAB on this machine - asking $BOOTHOST instead"
-                SLAB=""
+                probe_fallback "No $SLAB on this machine"
             elif ! $SB slab list "$SLAB" 2>/dev/null \
                  | grep -qE ": slab [0-9a-f-]{36}"; then
-                echo "$SLAB is not a slab - asking $BOOTHOST instead"
-                SLAB=""
+                probe_fallback "$SLAB is not a slab"
             else
                 # A slab is not the same thing as a slab this node can boot.
                 #
@@ -2167,8 +2226,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                     if [ -n "$META" ]; then
                         echo "$SLAB keeps no volume metadata - trusting rd.stormblock.meta=$META"
                     else
-                        echo "$SLAB keeps no volume metadata and no rd.stormblock.meta= - asking $BOOTHOST instead"
-                        SLAB=""
+                        probe_fallback "$SLAB keeps no volume metadata and no rd.stormblock.meta="
                     fi
                     ;;
                 *)
@@ -2176,8 +2234,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                     # either and the line carries both — the name after
                     # ": volume " and the uuid at the end.
                     if ! printf '%s\n' "$VOLS" | grep -qE ": volume $VOL | $VOL\$"; then
-                        echo "$SLAB has no '$VOL' volume - asking $BOOTHOST instead"
-                        SLAB=""
+                        probe_fallback "$SLAB has no '$VOL' volume"
                     else
                         # The root is not the whole boot.
                         #
@@ -2211,10 +2268,9 @@ if [ "$BOOT_MODE" = "local" ]; then
                         done
                         if [ -n "$MISSING" ]; then
                             set -- $MISSING
-                            echo "$SLAB has '$VOL' but is missing $# mounted volume(s) -" \
-                                 "asking $BOOTHOST instead"
-                            echo "  first few:$(printf '%s' "$MISSING" | cut -c1-60)"
-                            SLAB=""
+                            PROBE_MISSING="$MISSING"
+                            echo "  ${MOUNTS_FROM:+the mount list ($MOUNTS_FROM) names }$# volume(s) $SLAB does not have:$(printf '%s' "$MISSING" | cut -c1-120)"
+                            probe_fallback "$SLAB has '$VOL' but is missing $# mounted volume(s)"
                         fi
                     fi
                     ;;
@@ -2297,7 +2353,33 @@ if [ "$BOOT_MODE" = "local" ]; then
             ;;
         esac
     fi
+    # Never skipped without a word (#294): with no appliance there is nobody
+    # to say which release this machine is assigned, so a disk that holds an
+    # older one boots as it is.
+    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ] && [ -z "$BOOTHOST" ] && [ -z "$PROBE_STOP" ] \
+       && [ "${ASSIMILATE:-}" != off ]; then
+        case "$SLAB" in
+        *://*) ;;
+        *)
+            echo "RELEASE CHECK SKIPPED: ${BOOTHOST_WHY:-no appliance}."
+            echo "  Booting $SLAB as it is, without asking which release is assigned to this machine:"
+            echo "  if this boot was meant to install another release, it has not."
+            ;;
+        esac
+    fi
     # --- END local-slab probe
+
+    # The disk cannot boot this node and there is no appliance to boot from
+    # instead (#294): say so, with what the disk holds, rather than handing
+    # it to `boot-local` to fail on the first missing volume.
+    if [ -n "$PROBE_STOP" ]; then
+        echo "FATAL: $PROBE_STOP."
+        echo "  ${SLAB} holds: $(disk_release "$SLAB")"
+        [ -n "${PROBE_MISSING:-}" ] && echo "  missing:$PROBE_MISSING"
+        echo "  No appliance to boot from instead: ${BOOTHOST_WHY:-none was found}."
+        echo "  This boot may have been meant to install another release; nothing was installed."
+        rescue_shell
+    fi
 
     # Diskless: this machine's slab is a namespace on the appliance, and which
     # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
@@ -2832,6 +2914,13 @@ if [ "$BOOT_MODE" = "local" ]; then
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
     # Volume comes from --volume if given, else /etc/stormblock/boot.toml.
     # shellcheck disable=SC2086
+    #
+    # Its output goes to a log and is followed onto the console (#294): when
+    # it exits, the root wait below repeats the end of it, which had scrolled
+    # off the screen. The engine writing a file also cannot meet a broken
+    # pipe, which its own messages panic on.
+    mkdir -p /run/stormblock
+    : > "$ENGINE_LOG"
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
         ${LOCAL_DISK:+--local-disk "$LOCAL_DISK"} \
@@ -2839,15 +2928,19 @@ if [ "$BOOT_MODE" = "local" ]; then
         ${META:+--meta "$META"} \
         ${IMAGE_STORE:+--image-store "$IMAGE_STORE"} \
         ${VOLUME:+--volume "$VOLUME"} \
-        $WR_ARGS &
+        $WR_ARGS >> "$ENGINE_LOG" 2>&1 &
     ROOTDEV=/dev/ublkb0
 else
+    mkdir -p /run/stormblock
+    : > "$ENGINE_LOG"
     /usr/sbin/stormblock boot-iscsi \
         --portal "$PORTAL" --port "$PORT" \
-        --iqn "$IQN" --layout "$LAYOUT" --ublk &
+        --iqn "$IQN" --layout "$LAYOUT" --ublk >> "$ENGINE_LOG" 2>&1 &
     ROOTDEV=/dev/ublkb2   # partition index 2 = root
 fi
 STORMBLOCK_PID=$!
+# The engine's output on the console as it comes (and kept in the log).
+tail -n +1 -f "$ENGINE_LOG" 2>/dev/null &
 
 # Long enough for a first boot that is also doing work.
 #
@@ -2894,11 +2987,26 @@ while [ ! -b "$ROOTDEV" ] && [ $TIMEOUT -gt 0 ]; do
     esac
 done
 
+# --- BEGIN engine report (covered by tests/initramfs-no-appliance.sh)
+# What the engine said last, repeated where it is read: after the FATAL, not
+# a screen above it (#294).
+engine_report() { # lines
+    echo "The storage engine's last ${1:-25} line(s) ($ENGINE_LOG):"
+    if [ -s "$ENGINE_LOG" ]; then
+        tail -n "${1:-25}" "$ENGINE_LOG" | sed 's/^/  | /'
+    else
+        echo "  (it wrote nothing)"
+    fi
+}
+# --- END engine report
+
 if [ ! -b "$ROOTDEV" ]; then
+    sleep 1   # the follower's last lines first
     echo "FATAL: root device $ROOTDEV not found after ${WAITED}s"
     echo "StormBlock PID: $STORMBLOCK_PID"
     echo "Available block devices:"
     ls -la /dev/ublk* 2>/dev/null || echo "  (none)"
+    engine_report 25
     rescue_shell
 fi
 

@@ -172,6 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### An install booted the old disk: no appliance, no check (2026-10-05, #294, P0) — IN PROGRESS
+
+server8, 11.82 over an older disk: forge missed the one 3 s health check
+right after the mlx4 link came up, BOOTHOST stayed empty, the local-slab
+probe and the release check (`[ -n "$BOOTHOST" ]`) were skipped without a
+word, and `boot-local` died on `volume 'kubelet-data' not found`, scrolled
+off above `FATAL: root device /dev/ublkb0 not found`.
+- [ ] `# --- BEGIN appliance discovery`: a boothost the network names
+      (`/run/stormblock-boothost`) is asked again for `STORM_BOOTHOST_WAIT`
+      (90 s); why there is none is kept (`BOOTHOST_WHY`)
+- [ ] the probe runs with no appliance: a disk it would have sent to the
+      appliance stops the boot (FATAL naming what is missing and the disk's
+      release from its os-release); one that can boot says
+      `RELEASE CHECK SKIPPED` and why
+- [ ] engine output to `/run/stormblock/engine.log`, followed onto the
+      console; its last 25 lines repeated after the root FATAL
+- [ ] `tests/initramfs-no-appliance.sh`; every initramfs test under sh and
+      busybox sh; /init parses; docs (boot-hooks.md, README), CHANGELOG
+
 ### Resident compaction (2026-10-05, #155, P1) — DONE
 
 docs/metadata-scale.md §3.2, no on-disk format change. Measured with
