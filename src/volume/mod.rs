@@ -3323,8 +3323,7 @@ mod redundancy_tests {
         mgr.persist().await;
         {
             let reg = mgr.registry().read().await;
-            let bytes = reg.get(&aslab).unwrap().read_metadata().await.unwrap().unwrap();
-            let doc = MetadataStore::decode(&bytes).unwrap();
+            let doc = metav2::read_slab(reg.get(&aslab).unwrap()).await.unwrap().unwrap();
             let mut names: Vec<String> = doc.volumes.iter().map(|v| v.name.clone()).collect();
             names.sort();
             assert_eq!(names, vec!["big", "clone", "mirror-vol"]);
