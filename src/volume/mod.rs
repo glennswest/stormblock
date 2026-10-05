@@ -971,10 +971,15 @@ impl VolumeManager {
         // only now and then; every allocation since is in a slot table, and
         // mapping from the records alone lost it — a volume came back holding
         // what it held at its last record, not what was flushed since.
-        let mut rebuilt = {
-            let reg = self.registry.read().await;
-            GlobalExtentMap::rebuild_from_slabs(reg.iter().filter(|(id, _)| adopted_meta.contains(id)))
+        // Each adopted slab's table read once, with no lock held (#155).
+        let view = {
+            let sources = {
+                let reg = self.registry.read().await;
+                reg.iter().filter(|(id, _)| adopted_meta.contains(id)).map(|(_, s)| s.view_source()).collect()
+            };
+            gem::SlotView::read(sources).await.map_err(VolumeError::Drive)?
         };
+        let mut rebuilt = GlobalExtentMap::rebuild_from_view(&view);
         let parent_of: HashMap<VolumeId, VolumeId> =
             records.iter().filter_map(|(v, _)| v.parent.map(|p| (v.id, p))).collect();
         let live: HashSet<VolumeId> =
@@ -1001,7 +1006,7 @@ impl VolumeManager {
             // attached is dropped (and said so) by the reconciliation.
             {
                 let reg = self.registry.read().await;
-                reconcile_record(&reg, &mut rebuilt, &vrec, &lineage(vrec.id), &live);
+                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live);
                 for (stripe, g) in &vrec.parity {
                     rebuilt.insert_parity(vrec.id, *stripe, g.clone());
                 }
@@ -1058,7 +1063,7 @@ impl VolumeManager {
             let mut gem = self.gem.write().await;
             gem.absorb(rebuilt, &absorbed);
             let mut reg = self.registry.write().await;
-            raise_shares(&mut reg, &mut gem);
+            raise_shares(&mut reg, &view, &mut gem).await;
         }
 
         // An adopted slab keeps its own record from here on. Storage that
@@ -2323,10 +2328,16 @@ impl VolumeManager {
         // Rebuild GEM from slab slot tables — authoritative for owned and
         // COW'd slots (written at allocation time, so always at least as new
         // as the metadata file after a crash).
-        let mut rebuilt = {
-            let reg = self.registry.read().await;
-            GlobalExtentMap::rebuild_from_slabs(reg.iter())
+        // Every slab's table read once (#155): no per-slot record is kept in
+        // memory, so this is where restore reads what the tables say.
+        let view = {
+            let sources = {
+                let reg = self.registry.read().await;
+                reg.iter().map(|(_, s)| s.view_source()).collect()
+            };
+            gem::SlotView::read(sources).await?
         };
+        let mut rebuilt = GlobalExtentMap::rebuild_from_view(&view);
 
         // Which volumes a record may legitimately share a slot with: its
         // ancestors (#171). Every live volume, to tell a slot another volume
@@ -2372,7 +2383,7 @@ impl VolumeManager {
             // snapshot's shared slots (#13).
             {
                 let reg = self.registry.read().await;
-                reconcile_record(&reg, &mut rebuilt, &vrec, &lineage(vrec.id), &live);
+                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live);
             }
 
             // Parity groups: the record is authoritative — it knows the
@@ -2439,7 +2450,7 @@ impl VolumeManager {
         // Share counts from the mappings restored (#171): see `raise_shares`.
         {
             let mut reg = self.registry.write().await;
-            raise_shares(&mut reg, &mut rebuilt);
+            raise_shares(&mut reg, &view, &mut rebuilt).await;
         }
 
         *self.gem.write().await = rebuilt;
@@ -2472,16 +2483,14 @@ impl VolumeManager {
 /// door it comes through.
 fn reconcile_record(
     reg: &SlabRegistry,
+    view: &gem::SlotView,
     rebuilt: &mut GlobalExtentMap,
     vrec: &metadata::VolumeRecord,
     lineage: &HashSet<VolumeId>,
     live: &HashSet<VolumeId>,
 ) {
     let slot_gen = |leg: gem::Leg| -> Option<u64> {
-        reg.get(&leg.slab_id)
-            .and_then(|s| s.get_slot(leg.slot_idx))
-            .filter(|s| s.state.is_owned())
-            .map(|s| s.generation)
+        view.get(leg).filter(|s| s.state.is_owned()).map(|s| s.generation)
     };
     for (vext, loc) in &vrec.extents {
         match rebuilt.lookup(vrec.id, *vext) {
@@ -2495,9 +2504,12 @@ fn reconcile_record(
                     // written and that may have been taken again.
                     // Mapping the second is handing the consumer
                     // another volume's bytes (#171).
-                    let slot = reg.get(&loc.slab_id).and_then(|s| s.get_slot(loc.slot_idx));
+                    let in_range =
+                        reg.get(&loc.slab_id).map(|s| (loc.slot_idx as u64) < s.total_slots()).unwrap_or(false);
+                    let slot = view.get(loc.primary());
                     let why = match slot {
-                        None => Some("is out of range".to_string()),
+                        _ if !in_range => Some("is out of range".to_string()),
+                        None => Some("has been freed".to_string()),
                         Some(s) if !s.state.is_owned() => {
                             Some("has been freed".to_string())
                         }
@@ -2558,7 +2570,7 @@ fn reconcile_record(
 /// that replaced it not — and a count too low lets a write land in place in a
 /// slot another volume still reads. Only ever raised: one too high costs a
 /// needless copy, never data.
-fn raise_shares(reg: &mut SlabRegistry, rebuilt: &mut GlobalExtentMap) {
+async fn raise_shares(reg: &mut SlabRegistry, view: &gem::SlotView, rebuilt: &mut GlobalExtentMap) {
     let mut maps: HashMap<gem::Leg, u32> = HashMap::new();
     for vol in rebuilt.volume_ids() {
         if let Some(it) = rebuilt.volume_extents(&vol) {
@@ -2585,8 +2597,14 @@ fn raise_shares(reg: &mut SlabRegistry, rebuilt: &mut GlobalExtentMap) {
     }
     let mut raised = 0usize;
     for (leg, n) in maps {
+        // Only what the tables, as read, have below the maps: a slot the
+        // view has not (free, or on a slab not read now) is left alone.
+        match view.get(leg) {
+            Some(s) if s.state.is_owned() && s.ref_count < n => {}
+            _ => continue,
+        }
         if let Some(slab) = reg.get_mut(&leg.slab_id) {
-            if slab.raise_ref(leg.slot_idx, n) {
+            if slab.raise_ref(leg.slot_idx, n).await {
                 raised += 1;
             }
         }

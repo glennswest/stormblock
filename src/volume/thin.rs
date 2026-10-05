@@ -1299,7 +1299,7 @@ impl ThinVolumeHandle {
                     match slab.dec_ref(leg.slot_idx).await {
                         Ok(_) => synced.push((
                             leg,
-                            slab.shares(leg.slot_idx), slab.owner(leg.slot_idx),
+                            slab.shares(leg.slot_idx).await, slab.owner(leg.slot_idx).await,
                         )),
                         Err(e) => tracing::warn!(
                             volume = %self.id, slot = leg.slot_idx,
@@ -1392,7 +1392,7 @@ impl ThinVolumeHandle {
             for leg in old_loc.legs() {
                 if let Some(slab) = reg.get_mut(&leg.slab_id) {
                     match slab.dec_ref(leg.slot_idx).await {
-                        Ok(_) => synced.push((leg, slab.shares(leg.slot_idx), slab.owner(leg.slot_idx))),
+                        Ok(_) => synced.push((leg, slab.shares(leg.slot_idx).await, slab.owner(leg.slot_idx).await)),
                         Err(e) => tracing::warn!(
                             volume = %self.id, slot = leg.slot_idx,
                             "copy-on-write could not release the shared extent: {e}"
@@ -1598,7 +1598,7 @@ impl ThinVolumeHandle {
                 for leg in &old.legs {
                     if let Some(slab) = reg.get_mut(&leg.slab_id) {
                         match slab.dec_ref(leg.slot_idx).await {
-                            Ok(_) => synced.push((*leg, slab.shares(leg.slot_idx), slab.owner(leg.slot_idx))),
+                            Ok(_) => synced.push((*leg, slab.shares(leg.slot_idx).await, slab.owner(leg.slot_idx).await)),
                             Err(e) => tracing::warn!(volume = %self.id, slot = leg.slot_idx, "could not release shared parity: {e}"),
                         }
                     }
@@ -1787,7 +1787,7 @@ impl ThinVolumeHandle {
             for l in old.legs() {
                 if let Some(slab) = reg.get_mut(&l.slab_id) {
                     match slab.dec_ref(l.slot_idx).await {
-                        Ok(_) => synced.push((l, slab.shares(l.slot_idx), slab.owner(l.slot_idx))),
+                        Ok(_) => synced.push((l, slab.shares(l.slot_idx).await, slab.owner(l.slot_idx).await)),
                         Err(e) => tracing::warn!(volume = %self.id, slot = l.slot_idx, "could not release replaced member: {e}"),
                     }
                 }

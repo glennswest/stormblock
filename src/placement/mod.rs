@@ -809,16 +809,20 @@ impl PlacementEngine {
             Err(e) => return give_back(write_err(format!("reading the copy back: {e}"))).await,
         }
 
-        // 2. Publish, briefly — if the extent still names the source.
+        // 2. Publish, briefly — if the extent still names the source. Its
+        // table page read first, with no lock held (#155, #269).
+        let table = registry.read().await.get(&old.slab_id).map(|s| s.table());
+        if let Some(t) = table {
+            t.prefetch([old.slot_idx]).await;
+        }
         let mut g = gem.write().await;
         let mut r = registry.write().await;
         r.commit(dest_id, dest_slot);
         let still = g.lookup(volume_id, vext_idx).and_then(|l| l.leg_on(old.slab_id)) == Some(old);
-        let shares = r
-            .get(&old.slab_id)
-            .and_then(|s| s.get_slot(old.slot_idx))
-            .filter(|s| s.state.is_owned())
-            .map(|s| s.ref_count);
+        let shares = match r.get(&old.slab_id) {
+            Some(s) => s.get_slot(old.slot_idx).await.filter(|s| s.state.is_owned()).map(|s| s.ref_count),
+            None => None,
+        };
         let Some(shares) = shares.filter(|_| still) else {
             if let Some(slab) = r.get_mut(&dest_id) {
                 let _ = slab.free(dest_slot).await;

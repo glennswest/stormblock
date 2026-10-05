@@ -6424,7 +6424,7 @@ async fn handle_migrate_boot(
     let mut registry = crate::drive::slab_registry::SlabRegistry::new();
     let gem = crate::volume::gem::GlobalExtentMap::rebuild_from_slabs(
         std::iter::once((&source_slab_id, &source_slab))
-    );
+    ).await?;
     registry.add(source_slab);
 
     println!("GEM rebuilt: {} extents across {} volumes",

@@ -679,16 +679,22 @@ impl GlobalExtentMap {
     }
 
     /// Rebuild the GEM from slab slot tables. This is the recovery path:
-    /// scan all slabs, reconstruct the full extent map.
+    /// read every slab's table (once, #155), reconstruct the full extent map.
     ///
     /// The same (volume, extent) recorded in several slabs is a mirrored
     /// extent: the slot with the highest generation is the primary and the
     /// rest, at that generation, are its mirrors — a stale slot from an
     /// earlier copy-on-write carries a lower one. Parity slots are told
     /// apart by their tag.
-    pub fn rebuild_from_slabs<'a>(
+    pub async fn rebuild_from_slabs<'a>(
         slabs: impl Iterator<Item = (&'a SlabId, &'a super::super::drive::slab::Slab)>,
-    ) -> Self {
+    ) -> super::super::drive::DriveResult<Self> {
+        let view = SlotView::read(slabs.map(|(_, s)| s.view_source()).collect()).await?;
+        Ok(Self::rebuild_from_view(&view))
+    }
+
+    /// [`rebuild_from_slabs`](Self::rebuild_from_slabs) from tables already read.
+    pub fn rebuild_from_view(view: &SlotView) -> Self {
         let mut gem = GlobalExtentMap::new();
         // (volume, vext) → [(generation, leg, ref_count)]
         type Seen = HashMap<(VolumeId, u64), Vec<(u64, Leg, u32)>>;
@@ -697,29 +703,23 @@ impl GlobalExtentMap {
         let mut seen: Seen = HashMap::new();
         let mut parity: SeenParity = HashMap::new();
 
-        for (_, slab) in slabs {
-            let cid = slab.slab_id();
-            for slot_idx in 0..slab.total_slots() as u32 {
-                if let Some(slot) = slab.get_slot(slot_idx) {
-                    if slot.state.is_owned() {
-                        let leg = Leg::new(cid, slot_idx);
-                        match parse_parity_vext(slot.virtual_extent_idx) {
-                            Some((pleg, stripe)) => parity
-                                .entry((slot.volume_id, stripe))
-                                .or_default()
-                                .push((pleg, leg, slot.ref_count, slot.generation)),
-                            None => seen
-                                .entry((slot.volume_id, slot.virtual_extent_idx))
-                                .or_default()
-                                .push((slot.generation, leg, slot.ref_count)),
-                        }
-                    }
+        for (leg, slot) in view.iter() {
+            if slot.state.is_owned() {
+                match parse_parity_vext(slot.virtual_extent_idx) {
+                    Some((pleg, stripe)) => parity
+                        .entry((slot.volume_id, stripe))
+                        .or_default()
+                        .push((pleg, *leg, slot.ref_count, slot.generation)),
+                    None => seen
+                        .entry((slot.volume_id, slot.virtual_extent_idx))
+                        .or_default()
+                        .push((slot.generation, *leg, slot.ref_count)),
                 }
             }
         }
 
         for ((vol, vext), mut legs) in seen {
-            legs.sort_by_key(|l| std::cmp::Reverse(l.0));
+            legs.sort_by_key(|l| (std::cmp::Reverse(l.0), l.1.slab_id, l.1.slot_idx));
             let (gen, primary, ref_count) = legs[0];
             let mirrors = legs[1..]
                 .iter()
@@ -745,6 +745,44 @@ impl GlobalExtentMap {
         }
 
         gem
+    }
+}
+
+/// Every slot in use on some slabs, each slab's table read once (#155):
+/// what restore rebuilds and reconciles against, held for the restore and
+/// dropped. The engine keeps no per-slot record otherwise.
+#[derive(Default)]
+pub struct SlotView {
+    slots: HashMap<Leg, super::super::drive::slab::Slot>,
+}
+
+impl SlotView {
+    /// Read the tables `sources` name, with no lock held.
+    pub async fn read(sources: Vec<super::super::drive::slab::ViewSource>) -> super::super::drive::DriveResult<SlotView> {
+        let mut slots = HashMap::new();
+        for src in sources {
+            for (idx, slot) in src.read().await? {
+                slots.insert(Leg::new(src.slab, idx), slot);
+            }
+        }
+        Ok(SlotView { slots })
+    }
+
+    /// The entry of an allocated (or erasing) slot; `None` for a free one.
+    pub fn get(&self, leg: Leg) -> Option<&super::super::drive::slab::Slot> {
+        self.slots.get(&leg)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Leg, &super::super::drive::slab::Slot)> {
+        self.slots.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
 }
 

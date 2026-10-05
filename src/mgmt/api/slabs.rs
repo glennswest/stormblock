@@ -374,12 +374,17 @@ async fn list_slots(
     };
     let slab_id = SlabId(uuid);
 
-    let reg = state.slab_registry.read().await;
-    match reg.get(&slab_id) {
-        Some(slab) => {
+    // The table read with the registry let go (#155, #269).
+    let source = state.slab_registry.read().await.get(&slab_id).map(|s| s.view_source());
+    match source {
+        Some(source) => {
+            let slots = match source.read().await {
+                Ok(s) => s,
+                Err(e) => return ApiError::internal(format!("reading slab {uuid}'s slot table: {e}")),
+            };
             let mut items = Vec::new();
-            for idx in 0..slab.total_slots() as u32 {
-                if let Some(slot) = slab.get_slot(idx) {
+            for (idx, slot) in slots {
+                {
                     if !slot.state.is_owned() {
                         continue;
                     }

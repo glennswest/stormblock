@@ -25,6 +25,7 @@ pub mod iscsi_dev;
 pub mod nvmeof_dev;
 pub mod slab;
 pub mod slab_registry;
+pub mod slottable;
 #[cfg(target_os = "linux")]
 pub mod ublk;
 pub mod uring_channel;

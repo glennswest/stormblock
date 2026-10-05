@@ -29,6 +29,8 @@ const HEADER_SIZE: u64 = 4096;
 
 /// Slot entry size on disk (64 bytes).
 const SLOT_ENTRY_SIZE: u64 = 64;
+/// Bytes of one slot table entry on the device.
+pub const SLOT_ENTRY_BYTES: u64 = SLOT_ENTRY_SIZE;
 
 /// Magic for a copy of the slab's embedded volume metadata: "STRMVMET".
 pub const SLAB_META_MAGIC: [u8; 8] = *b"STRMVMET";
@@ -159,7 +161,7 @@ pub struct Slot {
 }
 
 impl Slot {
-    fn free() -> Self {
+    pub(crate) fn free() -> Self {
         Slot {
             state: SlotState::Free,
             volume_id: VolumeId(Uuid::nil()),
@@ -169,7 +171,7 @@ impl Slot {
         }
     }
 
-    fn to_bytes(&self) -> [u8; SLOT_ENTRY_SIZE as usize] {
+    pub(crate) fn to_bytes(&self) -> [u8; SLOT_ENTRY_SIZE as usize] {
         let mut buf = [0u8; SLOT_ENTRY_SIZE as usize];
         buf[0] = self.state as u8;
         // bytes 1..4 pad
@@ -183,7 +185,7 @@ impl Slot {
         buf
     }
 
-    fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < SLOT_ENTRY_SIZE as usize {
             return None;
         }
@@ -509,8 +511,9 @@ pub struct Slab {
     /// Free slots, with a per-chunk summary so first-fit does not scan
     /// every bit (#145).
     free_bitmap: super::freemap::FreeMap,
-    slots: Vec<Slot>,
-    extent_index: HashMap<(VolumeId, u64), u32>,
+    /// The slot table, on the device, through a bounded page cache (#155):
+    /// no per-slot record in memory beyond the free map and `pending`.
+    table: Arc<super::slottable::SlotTable>,
     free_count: u64,
     /// Slots allocated whose table entry is not on the device yet (#171).
     pending: Arc<std::sync::Mutex<Pending>>,
@@ -532,6 +535,7 @@ pub struct SlabSyncHandle {
     device: Arc<dyn BlockDevice>,
     pending: Arc<std::sync::Mutex<Pending>>,
     syncs: Arc<SyncGate>,
+    table: Arc<super::slottable::SlotTable>,
 }
 
 impl SlabSyncHandle {
@@ -583,6 +587,10 @@ pub async fn sync_registered(
         Some(slab) => slab.sync_handle(),
         None => return Ok(()),
     };
+    // The pages the publish will write, read now with no lock held (#155,
+    // #269): a page read under the registry would hold every volume's I/O.
+    let ready: Vec<u32> = handle.pending.lock().unwrap().ready.iter().copied().collect();
+    handle.table.prefetch(ready).await;
     handle
         .run(|| async move {
             let r = registry.read().await;
@@ -601,6 +609,32 @@ pub struct MetadataWriter {
     device: Arc<dyn BlockDevice>,
     meta_offset: u64,
     meta_size: u64,
+}
+
+/// A slab's table, to read with no lock held: [`Slab::view_source`].
+pub struct ViewSource {
+    pub slab: SlabId,
+    table: Arc<super::slottable::SlotTable>,
+    total: u64,
+    pending: Arc<std::sync::Mutex<Pending>>,
+}
+
+impl ViewSource {
+    /// Every slot not free, as the engine has it now: the device's table
+    /// with the entries changed in memory applied.
+    pub async fn read(&self) -> DriveResult<Vec<(u32, Slot)>> {
+        let mut map: std::collections::BTreeMap<u32, Slot> =
+            self.table.scan(self.total).await?.into_iter().collect();
+        let p = self.pending.lock().unwrap();
+        for (idx, slot) in &p.entries {
+            if p.unpublished.contains(idx) || slot.state != SlotState::Free {
+                map.insert(*idx, slot.clone());
+            } else {
+                map.remove(idx);
+            }
+        }
+        Ok(map.into_iter().collect())
+    }
 }
 
 /// A slot to overwrite (#286), taken from a slab with
@@ -664,10 +698,16 @@ struct Pending {
     freeing: Vec<u32>,
     /// Freed and flushed: reusable, not yet back in the bitmap.
     released: Vec<u32>,
-    /// Marked `Erasing`, waiting for the eraser (#286).
-    erasing: std::collections::BTreeSet<u32>,
+    /// Marked `Erasing`, waiting for the eraser (#286): the level asked for
+    /// and the volume the slot was allocated for.
+    erasing: std::collections::BTreeMap<u32, (super::erase::EraseLevel, VolumeId)>,
     /// Taken by the eraser, being overwritten.
-    erasing_now: HashSet<u32>,
+    erasing_now: HashMap<u32, (super::erase::EraseLevel, VolumeId)>,
+    /// Entries that differ from the device (#155): allocated and not yet
+    /// published (the device says free), and changes written at the next
+    /// sync or the next write of their page. Everything else is read from
+    /// the device.
+    entries: HashMap<u32, Slot>,
     /// Erasing slots (waiting or taken) by the volume they belonged to.
     erasing_by_volume: HashMap<VolumeId, u64>,
 }
@@ -785,7 +825,7 @@ impl Slab {
 
         let id = SlabId(slab_uuid);
         let free_bitmap = super::freemap::FreeMap::new(total_slots as usize, true);
-        let slots = vec![Slot::free(); total_slots as usize];
+        let table = Arc::new(super::slottable::SlotTable::new(device.clone(), table_offset, data_offset));
 
         Ok(Slab {
             id,
@@ -793,8 +833,7 @@ impl Slab {
             device,
             tier,
             free_bitmap,
-            slots,
-            extent_index: HashMap::new(),
+            table,
             free_count: total_slots,
             pending: Default::default(),
             syncs: Default::default(),
@@ -811,45 +850,31 @@ impl Slab {
         let header = SlabHeader::from_bytes(&header_buf)?;
 
         let total_slots = header.total_slots as usize;
-        let table_size = total_slots * SLOT_ENTRY_SIZE as usize;
+        let table = Arc::new(super::slottable::SlotTable::new(
+            device.clone(),
+            header.table_offset,
+            header.data_offset,
+        ));
 
-        // Read slot table (padded to block_size for alignment)
-        let bs = device.block_size() as usize;
-        let read_size = if bs > 1 && table_size % bs != 0 {
-            table_size.div_ceil(bs) * bs
-        } else {
-            table_size
-        };
-        let mut table_buf = vec![0u8; read_size];
-        device.read(header.table_offset, &mut table_buf).await?;
-
+        // The table in one pass, kept nowhere but in the free map (#155).
         let mut free_bitmap = super::freemap::FreeMap::new(total_slots, true);
-        let mut slots = Vec::with_capacity(total_slots);
-        let mut extent_index = HashMap::new();
-        let mut free_count = 0u64;
         let mut pending = Pending::default();
-
-        for i in 0..total_slots {
-            let offset = i * SLOT_ENTRY_SIZE as usize;
-            let slot_data = &table_buf[offset..offset + SLOT_ENTRY_SIZE as usize];
-            let slot = Slot::from_bytes(slot_data).unwrap_or_else(Slot::free);
-
+        let mut used = 0u64;
+        for (i, slot) in table.scan(total_slots as u64).await? {
+            let i = i as usize;
+            if i >= total_slots {
+                continue;
+            }
+            free_bitmap.set(i, false);
+            used += 1;
             if slot.state == SlotState::Erasing {
                 // An erase a stop or a power cut interrupted: resumed (#286).
-                free_bitmap.set(i, false);
-                pending.erasing.insert(i as u32);
+                let level = super::erase::EraseLevel::from_code(slot.ref_count);
+                pending.erasing.insert(i as u32, (level, slot.volume_id));
                 *pending.erasing_by_volume.entry(slot.volume_id).or_default() += 1;
-            } else if slot.state != SlotState::Free {
-                free_bitmap.set(i, false);
-                extent_index.insert(
-                    (slot.volume_id, slot.virtual_extent_idx),
-                    i as u32,
-                );
-            } else {
-                free_count += 1;
             }
-            slots.push(slot);
         }
+        let free_count = total_slots as u64 - used;
 
         let id = SlabId(header.slab_uuid);
         let tier = header.tier;
@@ -860,8 +885,7 @@ impl Slab {
             device,
             tier,
             free_bitmap,
-            slots,
-            extent_index,
+            table,
             free_count,
             pending: Arc::new(std::sync::Mutex::new(pending)),
             syncs: Default::default(),
@@ -919,7 +943,12 @@ impl Slab {
 
     /// What a sync needs, to run it with no lock on this slab (#269).
     pub fn sync_handle(&self) -> SlabSyncHandle {
-        SlabSyncHandle { device: self.device.clone(), pending: self.pending.clone(), syncs: self.syncs.clone() }
+        SlabSyncHandle {
+            device: self.device.clone(),
+            pending: self.pending.clone(),
+            syncs: self.syncs.clone(),
+            table: self.table.clone(),
+        }
     }
 
     /// Write the entries of the slots confirmed since the last sync (their
@@ -948,7 +977,9 @@ impl Slab {
     fn absorb_released(&mut self) {
         let released = std::mem::take(&mut self.pending.lock().unwrap().released);
         for idx in released {
-            if self.slots[idx as usize].state == SlotState::Free && !self.free_bitmap.is_free(idx as usize) {
+            // Freed and the free on the device: nothing can have taken it,
+            // since it was in no free map.
+            if !self.free_bitmap.is_free(idx as usize) {
                 self.free_bitmap.set(idx as usize, true);
                 self.free_count += 1;
             }
@@ -982,48 +1013,66 @@ impl Slab {
     /// kept out of the bitmap, and queued for the eraser, which frees it
     /// the same way once it is overwritten; its entry is written either way,
     /// so an erase a power cut interrupts is resumed.
-    fn retire(&mut self, idx: usize) -> bool {
+    async fn retire(&mut self, idx: usize) -> DriveResult<bool> {
         let level = self.erase_now.unwrap_or(self.erase).max(self.erase);
         if level != super::erase::EraseLevel::None {
-            let old = &self.slots[idx];
-            self.slots[idx] = Slot {
-                state: SlotState::Erasing,
-                volume_id: old.volume_id,
-                virtual_extent_idx: old.virtual_extent_idx,
-                ref_count: level.code(),
-                generation: old.generation,
-            };
+            let old = self.slot_now(idx as u32).await?;
             let mut p = self.pending.lock().unwrap();
+            p.entries.insert(
+                idx as u32,
+                Slot {
+                    state: SlotState::Erasing,
+                    volume_id: old.volume_id,
+                    virtual_extent_idx: old.virtual_extent_idx,
+                    ref_count: level.code(),
+                    generation: old.generation,
+                },
+            );
             p.ready.remove(&(idx as u32));
             // Never published or not, its bytes may be on the media.
             p.unpublished.remove(&(idx as u32));
-            if p.erasing.insert(idx as u32) {
-                *p.erasing_by_volume.entry(self.slots[idx].volume_id).or_default() += 1;
+            if p.erasing.insert(idx as u32, (level, old.volume_id)).is_none() {
+                *p.erasing_by_volume.entry(old.volume_id).or_default() += 1;
             }
-            return true;
+            return Ok(true);
         }
-        self.slots[idx] = Slot::free();
         let mut p = self.pending.lock().unwrap();
         p.ready.remove(&(idx as u32));
         if p.unpublished.remove(&(idx as u32)) {
+            // The device already says free.
+            p.entries.remove(&(idx as u32));
             drop(p);
             self.free_bitmap.set(idx, true);
             self.free_count += 1;
-            false
+            Ok(false)
         } else {
+            p.entries.insert(idx as u32, Slot::free());
             p.freeing.push(idx as u32);
-            true
+            Ok(true)
         }
+    }
+
+    /// A slot's entry as the engine has it now: changed in memory, else as
+    /// the device has it.
+    async fn slot_now(&self, slot_idx: u32) -> DriveResult<Slot> {
+        if let Some(s) = self.pending.lock().unwrap().entries.get(&slot_idx) {
+            return Ok(s.clone());
+        }
+        self.table.read(slot_idx).await
+    }
+
+    /// Change an entry in memory; written by the next write of it.
+    fn set_slot(&self, slot_idx: u32, slot: Slot) {
+        self.pending.lock().unwrap().entries.insert(slot_idx, slot);
     }
 
     /// The bytes the device should hold for a slot's entry: a slot not yet
     /// published is free there, whatever memory says.
-    fn entry_bytes(&self, slot_idx: u32) -> [u8; SLOT_ENTRY_SIZE as usize] {
+    async fn entry_bytes(&self, slot_idx: u32) -> DriveResult<[u8; SLOT_ENTRY_SIZE as usize]> {
         if self.pending.lock().unwrap().unpublished.contains(&slot_idx) {
-            Slot::free().to_bytes()
-        } else {
-            self.slots[slot_idx as usize].to_bytes()
+            return Ok(Slot::free().to_bytes());
         }
+        Ok(self.slot_now(slot_idx).await?.to_bytes())
     }
 
     /// Allocate a slot recording `generation` — a copy-on-write allocates
@@ -1054,49 +1103,41 @@ impl Slab {
             .ok_or_else(|| DriveError::Other(anyhow::anyhow!("bitmap inconsistency")))?;
         self.free_bitmap.set(slot_idx, false);
         self.free_count -= 1;
-        self.slots[slot_idx] = Slot {
-            state: SlotState::Allocated,
-            volume_id,
-            virtual_extent_idx: vext_idx,
-            ref_count: 1,
-            generation,
-        };
-        self.extent_index.insert((volume_id, vext_idx), slot_idx as u32);
+        self.set_slot(
+            slot_idx as u32,
+            Slot { state: SlotState::Allocated, volume_id, virtual_extent_idx: vext_idx, ref_count: 1, generation },
+        );
         Ok(slot_idx as u32)
     }
 
     /// Free a slot, returning it to the free pool.
     pub async fn free(&mut self, slot_idx: u32) -> DriveResult<()> {
         let idx = slot_idx as usize;
-        if idx >= self.slots.len() {
-            return Err(DriveError::Other(anyhow::anyhow!(
-                "slot index {slot_idx} out of range"
-            )));
-        }
-
-        let slot = &self.slots[idx];
-        if !slot.state.is_owned() {
+        self.in_range(slot_idx)?;
+        if !self.slot_now(slot_idx).await?.state.is_owned() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "double free of slot {slot_idx}"
             )));
         }
-
-        // Only remove from extent index if it still points to this slot.
-        // After COW, a new slot may have been allocated for the same (vol, vext)
-        // in this slab, so the index may already point elsewhere.
-        let key = (slot.volume_id, slot.virtual_extent_idx);
-        if self.extent_index.get(&key) == Some(&slot_idx) {
-            self.extent_index.remove(&key);
-        }
-
-        if self.retire(idx) {
+        if self.retire(idx).await? {
             self.persist_slot(slot_idx).await?;
         }
-        if self.slots[idx].state == SlotState::Free {
+        if !self.is_erasing(slot_idx) {
             self.discard_slots(&[slot_idx]).await;
         }
-
         Ok(())
+    }
+
+    fn in_range(&self, slot_idx: u32) -> DriveResult<()> {
+        if slot_idx as u64 >= self.header.total_slots {
+            return Err(DriveError::Other(anyhow::anyhow!("slot index {slot_idx} out of range")));
+        }
+        Ok(())
+    }
+
+    fn is_erasing(&self, slot_idx: u32) -> bool {
+        let p = self.pending.lock().unwrap();
+        p.erasing.contains_key(&slot_idx) || p.erasing_now.contains_key(&slot_idx)
     }
 
     /// Hand freed slots back to the underlying device.
@@ -1150,12 +1191,7 @@ impl Slab {
         offset_in_slot: u64,
         buf: &mut [u8],
     ) -> DriveResult<usize> {
-        let idx = slot_idx as usize;
-        if idx >= self.slots.len() {
-            return Err(DriveError::Other(anyhow::anyhow!(
-                "slot index {slot_idx} out of range"
-            )));
-        }
+        self.in_range(slot_idx)?;
         let phys_offset = self.header.data_offset
             + (slot_idx as u64) * self.header.slot_size
             + offset_in_slot;
@@ -1169,12 +1205,7 @@ impl Slab {
         offset_in_slot: u64,
         buf: &[u8],
     ) -> DriveResult<usize> {
-        let idx = slot_idx as usize;
-        if idx >= self.slots.len() {
-            return Err(DriveError::Other(anyhow::anyhow!(
-                "slot index {slot_idx} out of range"
-            )));
-        }
+        self.in_range(slot_idx)?;
         let phys_offset = self.header.data_offset
             + (slot_idx as u64) * self.header.slot_size
             + offset_in_slot;
@@ -1183,18 +1214,15 @@ impl Slab {
 
     /// Increment the reference count on a slot (for COW snapshots).
     pub async fn inc_ref(&mut self, slot_idx: u32) -> DriveResult<()> {
-        let idx = slot_idx as usize;
-        if idx >= self.slots.len() {
-            return Err(DriveError::Other(anyhow::anyhow!(
-                "slot index {slot_idx} out of range"
-            )));
-        }
-        if !self.slots[idx].state.is_owned() {
+        self.in_range(slot_idx)?;
+        let mut slot = self.slot_now(slot_idx).await?;
+        if !slot.state.is_owned() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "cannot inc_ref on free slot {slot_idx}"
             )));
         }
-        self.slots[idx].ref_count += 1;
+        slot.ref_count += 1;
+        self.set_slot(slot_idx, slot);
         self.persist_slot(slot_idx).await
     }
 
@@ -1207,22 +1235,26 @@ impl Slab {
     pub async fn inc_ref_batch(&mut self, slot_indices: &[u32]) -> DriveResult<()> {
         // Validate everything before mutating, so a bad index cannot leave the
         // batch half-applied.
+        self.table.prefetch(slot_indices.iter().copied()).await;
+        let mut now: Vec<(u32, Slot)> = Vec::with_capacity(slot_indices.len());
         for &slot_idx in slot_indices {
-            let idx = slot_idx as usize;
-            if idx >= self.slots.len() {
-                return Err(DriveError::Other(anyhow::anyhow!(
-                    "slot index {slot_idx} out of range"
-                )));
-            }
-            if !self.slots[idx].state.is_owned() {
+            self.in_range(slot_idx)?;
+            let slot = self.slot_now(slot_idx).await?;
+            if !slot.state.is_owned() {
                 return Err(DriveError::Other(anyhow::anyhow!(
                     "cannot inc_ref on free slot {slot_idx}"
                 )));
             }
+            now.push((slot_idx, slot));
         }
 
-        for &slot_idx in slot_indices {
-            self.slots[slot_idx as usize].ref_count += 1;
+        // A slot named twice is bumped twice.
+        let mut bumped: HashMap<u32, Slot> = HashMap::new();
+        for (idx, slot) in now {
+            bumped.entry(idx).or_insert(slot).ref_count += 1;
+        }
+        for (idx, slot) in bumped {
+            self.set_slot(idx, slot);
         }
         self.persist_slots(slot_indices).await
     }
@@ -1232,6 +1264,7 @@ impl Slab {
     ///
     /// The header is written once at the end rather than once per freed slot.
     pub async fn dec_ref_batch(&mut self, slot_indices: &[u32]) -> DriveResult<DecRefOutcome> {
+        self.table.prefetch(slot_indices.iter().copied()).await;
         let mut out = DecRefOutcome::default();
         let mut seen: HashSet<u32> = HashSet::with_capacity(slot_indices.len());
         let mut touched: Vec<u32> = Vec::with_capacity(slot_indices.len());
@@ -1246,30 +1279,27 @@ impl Slab {
                 out.rejected.push((slot_idx, DecRefReject::Duplicate));
                 continue;
             }
-            if idx >= self.slots.len() {
+            if slot_idx as u64 >= self.header.total_slots {
                 out.rejected.push((slot_idx, DecRefReject::OutOfRange));
                 continue;
             }
-            if !self.slots[idx].state.is_owned() || self.slots[idx].ref_count == 0 {
+            let mut slot = self.slot_now(slot_idx).await?;
+            if !slot.state.is_owned() || slot.ref_count == 0 {
                 out.rejected.push((slot_idx, DecRefReject::AlreadyFree));
                 continue;
             }
 
-            self.slots[idx].ref_count -= 1;
+            slot.ref_count -= 1;
             touched.push(slot_idx);
-            if self.slots[idx].ref_count > 0 {
+            if slot.ref_count > 0 {
+                self.set_slot(slot_idx, slot);
                 out.retained += 1;
                 continue;
             }
 
             // Last reference: same bookkeeping as `free`, but the write is
             // deferred to the coalesced flush below.
-            let slot = &self.slots[idx];
-            let key = (slot.volume_id, slot.virtual_extent_idx);
-            if self.extent_index.get(&key) == Some(&slot_idx) {
-                self.extent_index.remove(&key);
-            }
-            if !self.retire(idx) {
+            if !self.retire(idx).await? {
                 // Never published: nothing to write for it.
                 touched.retain(|&t| t != slot_idx);
             }
@@ -1299,7 +1329,7 @@ impl Slab {
             self.persist_slots(&touched).await?;
         }
         // An erasing slot is discarded by the eraser, after its passes.
-        freed_slots.retain(|&s| self.slots[s as usize].state == SlotState::Free);
+        freed_slots.retain(|&s| !self.is_erasing(s));
         if !freed_slots.is_empty() {
             // Give the space back to the device, not just to the slab —
             // otherwise reclaim happens on the single-slot route only and a
@@ -1311,22 +1341,20 @@ impl Slab {
 
     /// Decrement the reference count on a slot. Returns true if freed (hit 0).
     pub async fn dec_ref(&mut self, slot_idx: u32) -> DriveResult<bool> {
-        let idx = slot_idx as usize;
-        if idx >= self.slots.len() {
-            return Err(DriveError::Other(anyhow::anyhow!(
-                "slot index {slot_idx} out of range"
-            )));
-        }
-        if !self.slots[idx].state.is_owned() || self.slots[idx].ref_count == 0 {
+        self.in_range(slot_idx)?;
+        let mut slot = self.slot_now(slot_idx).await?;
+        if !slot.state.is_owned() || slot.ref_count == 0 {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "cannot dec_ref on free/zero-ref slot {slot_idx}"
             )));
         }
-        self.slots[idx].ref_count -= 1;
-        if self.slots[idx].ref_count == 0 {
+        slot.ref_count -= 1;
+        if slot.ref_count == 0 {
+            self.set_slot(slot_idx, slot);
             self.free(slot_idx).await?;
             Ok(true)
         } else {
+            self.set_slot(slot_idx, slot);
             // Written at the next `sync`, after the entry of whatever took
             // this share's place (#171): a count on disk that is too high
             // leaks a share until restore recounts; one that is too low lets
@@ -1339,10 +1367,14 @@ impl Slab {
     /// Raise a slot's share count to at least `count`, in memory, written at
     /// the next `sync`. Restore uses it to make the count agree with the
     /// mappings it restored (#171); it never lowers one.
-    pub fn raise_ref(&mut self, slot_idx: u32, count: u32) -> bool {
-        match self.slots.get_mut(slot_idx as usize) {
-            Some(slot) if slot.state.is_owned() && slot.ref_count < count => {
+    pub async fn raise_ref(&mut self, slot_idx: u32, count: u32) -> bool {
+        if self.in_range(slot_idx).is_err() {
+            return false;
+        }
+        match self.slot_now(slot_idx).await {
+            Ok(mut slot) if slot.state.is_owned() && slot.ref_count < count => {
                 slot.ref_count = count;
+                self.set_slot(slot_idx, slot);
                 self.pending.lock().unwrap().ready.insert(slot_idx);
                 true
             }
@@ -1350,9 +1382,41 @@ impl Slab {
         }
     }
 
-    /// Find the slot index for a given volume + virtual extent.
-    pub fn find_slot(&self, volume_id: VolumeId, vext_idx: u64) -> Option<u32> {
-        self.extent_index.get(&(volume_id, vext_idx)).copied()
+    /// Find the slot a volume's virtual extent was allocated in, by reading
+    /// the table (#155: there is no resident index of it; for tests and
+    /// diagnostics).
+    pub async fn find_slot(&self, volume_id: VolumeId, vext_idx: u64) -> Option<u32> {
+        self.slots_in_use()
+            .await
+            .ok()?
+            .into_iter()
+            .filter(|(_, s)| s.state.is_owned() && s.volume_id == volume_id && s.virtual_extent_idx == vext_idx)
+            .max_by_key(|(_, s)| s.generation)
+            .map(|(i, _)| i)
+    }
+
+    /// Every slot that is not free, with its entry as the engine has it now:
+    /// the table read in one pass, with the entries changed in memory
+    /// applied (#155).
+    pub async fn slots_in_use(&self) -> DriveResult<Vec<(u32, Slot)>> {
+        self.view_source().read().await
+    }
+
+    /// What reading this slab's table needs, to read it with no lock held
+    /// (#155, #269): see [`ViewSource::read`].
+    pub fn view_source(&self) -> ViewSource {
+        ViewSource {
+            slab: self.id,
+            table: self.table.clone(),
+            total: self.header.total_slots,
+            pending: self.pending.clone(),
+        }
+    }
+
+    /// The table pages of `slots` read into the cache, holding nothing:
+    /// call before taking the registry to change them (#155, #269).
+    pub fn table(&self) -> Arc<super::slottable::SlotTable> {
+        self.table.clone()
     }
 
     /// Re-point a slot at a different volume and virtual extent, without
@@ -1374,51 +1438,47 @@ impl Slab {
         volume_id: VolumeId,
         vext_idx: u64,
     ) -> DriveResult<()> {
-        let idx = slot_idx as usize;
-        if idx >= self.slots.len() {
-            return Err(DriveError::Other(anyhow::anyhow!(
-                "slot index {slot_idx} out of range"
-            )));
-        }
-        if !self.slots[idx].state.is_owned() {
+        self.in_range(slot_idx)?;
+        let mut slot = self.slot_now(slot_idx).await?;
+        if !slot.state.is_owned() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "cannot reassign free slot {slot_idx}"
             )));
         }
-
-        let old_key = (self.slots[idx].volume_id, self.slots[idx].virtual_extent_idx);
-        if self.extent_index.get(&old_key) == Some(&slot_idx) {
-            self.extent_index.remove(&old_key);
-        }
-        self.slots[idx].volume_id = volume_id;
-        self.slots[idx].virtual_extent_idx = vext_idx;
-        self.slots[idx].generation += 1;
-        self.extent_index.insert((volume_id, vext_idx), slot_idx);
-
+        slot.volume_id = volume_id;
+        slot.virtual_extent_idx = vext_idx;
+        slot.generation += 1;
+        self.set_slot(slot_idx, slot);
         self.persist_slot(slot_idx).await
     }
 
     /// The (volume, recorded virtual extent) that owns an allocated slot,
     /// as its slot entry says: the owner a share count belongs to (#155).
-    pub fn owner(&self, slot_idx: u32) -> Option<(VolumeId, u64)> {
-        match self.slots.get(slot_idx as usize) {
-            Some(s) if s.state.is_owned() => Some((s.volume_id, s.virtual_extent_idx)),
+    pub async fn owner(&self, slot_idx: u32) -> Option<(VolumeId, u64)> {
+        self.in_range(slot_idx).ok()?;
+        match self.slot_now(slot_idx).await {
+            Ok(s) if s.state.is_owned() => Some((s.volume_id, s.virtual_extent_idx)),
             _ => None,
         }
     }
 
     /// How many references a slot has: 0 for one that is free or being
     /// erased (whose share-count field holds its erase level, #286).
-    pub fn shares(&self, slot_idx: u32) -> u32 {
-        match self.slots.get(slot_idx as usize) {
-            Some(s) if s.state.is_owned() => s.ref_count,
+    pub async fn shares(&self, slot_idx: u32) -> u32 {
+        if self.in_range(slot_idx).is_err() {
+            return 0;
+        }
+        match self.slot_now(slot_idx).await {
+            Ok(s) if s.state.is_owned() => s.ref_count,
             _ => 0,
         }
     }
 
-    /// Get the slot at a given index.
-    pub fn get_slot(&self, slot_idx: u32) -> Option<&Slot> {
-        self.slots.get(slot_idx as usize)
+    /// The entry of a slot as the engine has it now (read from the table
+    /// when it has not changed in memory).
+    pub async fn get_slot(&self, slot_idx: u32) -> Option<Slot> {
+        self.in_range(slot_idx).ok()?;
+        self.slot_now(slot_idx).await.ok()
     }
 
     /// Slab UUID.
@@ -1492,7 +1552,6 @@ impl Slab {
         self.device.flush().await?;
 
         self.free_bitmap.resize(new_total as usize, true);
-        self.slots.resize(new_total as usize, Slot::free());
         self.free_count += added;
         Ok(added)
     }
@@ -1526,23 +1585,19 @@ impl Slab {
     /// [`finish_erase`](Self::finish_erase) or [`return_erase`](Self::return_erase).
     pub fn take_erasing(&self, max: usize) -> Vec<EraseJob> {
         let mut p = self.pending.lock().unwrap();
-        let picked: Vec<u32> = p.erasing.iter().copied().take(max).collect();
+        let picked: Vec<u32> = p.erasing.keys().copied().take(max).collect();
         let mut out = Vec::with_capacity(picked.len());
         for idx in picked {
-            p.erasing.remove(&idx);
-            let slot = &self.slots[idx as usize];
-            if slot.state != SlotState::Erasing {
-                continue;
-            }
-            p.erasing_now.insert(idx);
+            let Some((level, volume)) = p.erasing.remove(&idx) else { continue };
+            p.erasing_now.insert(idx, (level, volume));
             out.push(EraseJob {
                 slab: self.id,
                 slot: idx,
                 device: self.device.clone(),
                 offset: self.header.data_offset + idx as u64 * self.header.slot_size,
                 len: self.header.slot_size,
-                level: super::erase::EraseLevel::from_code(slot.ref_count),
-                volume: slot.volume_id,
+                level,
+                volume,
             });
         }
         out
@@ -1556,35 +1611,29 @@ impl Slab {
     /// An erase that did not finish goes back in the queue.
     pub fn return_erase(&self, slot_idx: u32) {
         let mut p = self.pending.lock().unwrap();
-        if p.erasing_now.remove(&slot_idx) {
-            p.erasing.insert(slot_idx);
+        if let Some(job) = p.erasing_now.remove(&slot_idx) {
+            p.erasing.insert(slot_idx, job);
         }
     }
 
     /// The slot is overwritten: free it the ordinary way (its free entry
     /// written now, reusable once that is durable).
     pub async fn finish_erase(&mut self, slot_idx: u32) -> DriveResult<()> {
-        let idx = slot_idx as usize;
+        // An erasing slot is nobody's and nothing changes it but this, so
+        // the queue's record of it is the entry (no table read, #155).
         {
             let mut p = self.pending.lock().unwrap();
-            p.erasing_now.remove(&slot_idx);
-            p.erasing.remove(&slot_idx);
-        }
-        if self.slots.get(idx).map(|s| s.state) != Some(SlotState::Erasing) {
-            return Ok(());
-        }
-        {
-            let mut p = self.pending.lock().unwrap();
-            let vol = self.slots[idx].volume_id;
+            let job = p.erasing_now.remove(&slot_idx).or_else(|| p.erasing.remove(&slot_idx));
+            let Some((_, vol)) = job else { return Ok(()) };
             if let Some(n) = p.erasing_by_volume.get_mut(&vol) {
                 *n -= 1;
                 if *n == 0 {
                     p.erasing_by_volume.remove(&vol);
                 }
             }
+            p.entries.insert(slot_idx, Slot::free());
+            p.freeing.push(slot_idx);
         }
-        self.slots[idx] = Slot::free();
-        self.pending.lock().unwrap().freeing.push(slot_idx);
         self.persist_slot(slot_idx).await
     }
 
@@ -1619,12 +1668,7 @@ impl Slab {
         slot_idx: u32,
         offset_in_slot: u64,
     ) -> DriveResult<(Arc<dyn BlockDevice>, u64)> {
-        let idx = slot_idx as usize;
-        if idx >= self.slots.len() {
-            return Err(DriveError::Other(anyhow::anyhow!(
-                "slot index {slot_idx} out of range"
-            )));
-        }
+        self.in_range(slot_idx)?;
         // An offset at or past the end of the slot would resolve into the
         // *next* slot, which belongs to a different extent and very likely a
         // different volume. Silently returning that address is how a volume
@@ -1661,54 +1705,22 @@ impl Slab {
         if slot_indices.is_empty() {
             return Ok(());
         }
-        let bs = self.device.block_size() as u64;
-
-        // Sectors at or below entry size gain nothing from grouping.
-        if bs <= SLOT_ENTRY_SIZE {
-            for &slot_idx in slot_indices {
-                self.persist_slot(slot_idx).await?;
+        let mut idxs: Vec<u32> = slot_indices.to_vec();
+        idxs.sort_unstable();
+        idxs.dedup();
+        let mut entries = Vec::with_capacity(idxs.len());
+        for &idx in &idxs {
+            entries.push((idx, self.entry_bytes(idx).await?));
+        }
+        self.table.write(&entries).await?;
+        // On the device now: what memory held for them is what the table
+        // says, except a slot still unpublished (the device says free).
+        let mut p = self.pending.lock().unwrap();
+        for idx in idxs {
+            if !p.unpublished.contains(&idx) {
+                p.entries.remove(&idx);
             }
-            return Ok(());
         }
-
-        let entries_per_sector = (bs / SLOT_ENTRY_SIZE) as usize;
-
-        let mut by_sector: HashMap<u64, Vec<u32>> = HashMap::new();
-        for &slot_idx in slot_indices {
-            let entry_offset = self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
-            by_sector
-                .entry((entry_offset / bs) * bs)
-                .or_default()
-                .push(slot_idx);
-        }
-
-        for (sector_start, mut idxs) in by_sector {
-            idxs.sort_unstable();
-            idxs.dedup();
-
-            // Holding one distinct valid slot per entry means the batch
-            // overwrites every byte of this sector, so the read can be
-            // skipped. Any partial sector — including a final one that runs
-            // past the table into the data region — is read first.
-            let mut sector = if idxs.len() == entries_per_sector {
-                vec![0u8; bs as usize]
-            } else {
-                let mut buf = vec![0u8; bs as usize];
-                self.device.read(sector_start, &mut buf).await?;
-                buf
-            };
-
-            for &slot_idx in &idxs {
-                let entry_offset =
-                    self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
-                let off = (entry_offset - sector_start) as usize;
-                sector[off..off + SLOT_ENTRY_SIZE as usize]
-                    .copy_from_slice(&self.entry_bytes(slot_idx));
-            }
-
-            self.device.write(sector_start, &sector).await?;
-        }
-
         Ok(())
     }
 
@@ -1923,43 +1935,8 @@ impl Slab {
     }
 
     async fn persist_slot(&self, slot_idx: u32) -> DriveResult<()> {
-        let entry_bytes = self.entry_bytes(slot_idx);
-        let entry_offset = self.header.table_offset + (slot_idx as u64) * SLOT_ENTRY_SIZE;
-        let bs = self.device.block_size() as u64;
-
-        if bs <= SLOT_ENTRY_SIZE {
-            // Block size <= entry size — direct write is fine
-            self.device.write(entry_offset, &entry_bytes).await?;
-            return Ok(());
-        }
-
-        let sector_start = (entry_offset / bs) * bs;
-        let entries_per_sector = (bs / SLOT_ENTRY_SIZE) as usize;
-        let first_entry = ((sector_start - self.header.table_offset) / SLOT_ENTRY_SIZE) as usize;
-
-        // `self.slots` is the authoritative copy of the table, so a sector that
-        // lies wholly inside it can be rebuilt from memory — no read needed.
-        // A trailing partial sector overlaps the data region and must still be
-        // read first so those bytes are preserved.
-        if first_entry + entries_per_sector <= self.slots.len() {
-            let mut sector = vec![0u8; bs as usize];
-            for i in 0..entries_per_sector {
-                let off = i * SLOT_ENTRY_SIZE as usize;
-                sector[off..off + SLOT_ENTRY_SIZE as usize]
-                    .copy_from_slice(&self.entry_bytes((first_entry + i) as u32));
-            }
-            self.device.write(sector_start, &sector).await?;
-        } else {
-            let offset_in_sector = (entry_offset - sector_start) as usize;
-            let mut sector = vec![0u8; bs as usize];
-            self.device.read(sector_start, &mut sector).await?;
-            sector[offset_in_sector..offset_in_sector + SLOT_ENTRY_SIZE as usize]
-                .copy_from_slice(&entry_bytes);
-            self.device.write(sector_start, &sector).await?;
-        }
-        Ok(())
+        self.persist_slots(&[slot_idx]).await
     }
-
 }
 
 /// Align a value up to the given alignment.

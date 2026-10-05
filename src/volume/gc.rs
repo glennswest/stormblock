@@ -107,6 +107,25 @@ pub async fn collect(
     registry: &mut SlabRegistry,
     opts: GcOptions,
 ) -> GcReport {
+    let sources = registry.iter().map(|(_, s)| s.view_source()).collect();
+    match crate::volume::gem::SlotView::read(sources).await {
+        Ok(view) => collect_with(gem, registry, &view, opts).await,
+        Err(e) => {
+            tracing::warn!("extent gc: reading the slot tables: {e}; nothing collected");
+            GcReport { dry_run: opts.dry_run, ..Default::default() }
+        }
+    }
+}
+
+/// [`collect`] against slot tables already read (#155): the tables are read
+/// with no lock held ([`run_once`]), and every orphan found is checked again
+/// against its entry as it is now before it is freed.
+pub async fn collect_with(
+    gem: &GlobalExtentMap,
+    registry: &mut SlabRegistry,
+    view: &crate::volume::gem::SlotView,
+    opts: GcOptions,
+) -> GcReport {
     let mut report = GcReport {
         dry_run: opts.dry_run,
         in_flight: registry.in_flight_count(),
@@ -125,15 +144,18 @@ pub async fn collect(
     }
 
     // Pass 1: find, without mutating.
-    for (&slab_id, slab) in registry.iter() {
+    for (_, slab) in registry.iter() {
         report.slabs_scanned += 1;
-        let total = slab.total_slots();
-        report.slots_scanned += total;
-
-        for slot_idx in 0..total as u32 {
-            let Some(slot) = slab.get_slot(slot_idx) else {
+        report.slots_scanned += slab.total_slots();
+    }
+    let mut in_view: Vec<(&crate::volume::gem::Leg, &crate::drive::slab::Slot)> = view.iter().collect();
+    in_view.sort_by_key(|(l, _)| (l.slab_id.0, l.slot_idx));
+    for (leg, slot) in in_view {
+        let (slab_id, slot_idx) = (leg.slab_id, leg.slot_idx);
+        {
+            if registry.get(&slab_id).is_none() {
                 continue;
-            };
+            }
             if !slot.state.is_owned() {
                 continue;
             }
@@ -186,6 +208,22 @@ pub async fn collect(
     for orphan in eligible {
         if report.reclaimed >= limit {
             report.deferred += 1;
+            continue;
+        }
+        let Some(slab) = registry.get_mut(&orphan.slab_id) else {
+            continue;
+        };
+        // The tables were read before the locks were taken: the slot may
+        // have been freed (or freed and taken again) since. Only the same
+        // owner, still allocated, is the orphan that was found.
+        match slab.get_slot(orphan.slot_idx).await {
+            Some(now)
+                if now.state.is_owned()
+                    && now.volume_id == orphan.volume_id
+                    && now.virtual_extent_idx == orphan.virtual_extent_idx => {}
+            _ => continue,
+        }
+        if registry.is_reserved(orphan.slab_id, orphan.slot_idx) {
             continue;
         }
         let Some(slab) = registry.get_mut(&orphan.slab_id) else {
@@ -265,9 +303,19 @@ pub async fn run_once(
     registry: &std::sync::Arc<tokio::sync::RwLock<SlabRegistry>>,
     opts: GcOptions,
 ) -> GcReport {
+    // The tables first, holding nothing (#155, #269): reading every slab's
+    // table under the registry lock would hold every volume's I/O for it.
+    let sources = registry.read().await.iter().map(|(_, s)| s.view_source()).collect();
+    let view = match crate::volume::gem::SlotView::read(sources).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("extent gc: reading the slot tables: {e}; nothing collected");
+            return GcReport { dry_run: opts.dry_run, ..Default::default() };
+        }
+    };
     let gem_guard = gem.read().await;
     let mut reg_guard = registry.write().await;
-    collect(&gem_guard, &mut reg_guard, opts).await
+    collect_with(&gem_guard, &mut reg_guard, &view, opts).await
 }
 
 /// Start the background collector.
