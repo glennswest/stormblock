@@ -2826,3 +2826,106 @@ mod tests {
         cleanup(&path);
     }
 }
+
+/// Secure delete (#286): a freed slot is `Erasing` until it is overwritten.
+#[cfg(test)]
+mod erase_tests {
+    use super::*;
+    use crate::drive::erase::EraseLevel;
+    use crate::drive::filedev::FileDevice;
+
+    const SLOT: u64 = 64 * 1024;
+
+    async fn device(dir: &tempfile::TempDir) -> Arc<dyn BlockDevice> {
+        let p = dir.path().join("slab.bin");
+        Arc::new(FileDevice::open_with_capacity(p.to_str().unwrap(), 1024 * 1024).await.unwrap())
+    }
+
+    async fn raw(dev: &Arc<dyn BlockDevice>, slab: &Slab, idx: u32) -> Vec<u8> {
+        let mut b = vec![0u8; SLOT as usize];
+        dev.read(slab.data_offset() + idx as u64 * SLOT, &mut b).await.unwrap();
+        b
+    }
+
+    #[tokio::test]
+    async fn a_freed_slot_is_never_handed_out_until_it_is_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = device(&dir).await;
+        let mut slab = Slab::format(dev.clone(), SLOT, StorageTier::Hot).await.unwrap();
+        slab.set_erase_level(EraseLevel::Once);
+        let vol = VolumeId::new();
+        let mut slots = Vec::new();
+        while let Ok(s) = slab.allocate(vol, slots.len() as u64).await {
+            slots.push(s);
+        }
+        let secret = slots[0];
+        slab.write_slot(secret, 0, &vec![0xAB; SLOT as usize]).await.unwrap();
+        slab.free(secret).await.unwrap();
+
+        assert_eq!(slab.get_slot(secret).unwrap().state, SlotState::Erasing);
+        assert_eq!(slab.shares(secret), 0);
+        assert_eq!(slab.erasing_slots(), 1);
+        assert_eq!(slab.erasing_for(vol), 1);
+        assert!(slab.allocate(vol, 999).await.is_err(), "an erasing slot was handed out");
+        assert!(slab.free(secret).await.is_err(), "an erasing slot freed twice");
+
+        // A stop before the eraser ran: the erase is still owed after it.
+        slab.sync().await.unwrap();
+        drop(slab);
+        let mut slab = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(slab.get_slot(secret).unwrap().state, SlotState::Erasing);
+        assert_eq!(slab.erasing_for(vol), 1);
+        assert!(slab.allocate(vol, 999).await.is_err());
+        assert!(raw(&dev, &slab, secret).await.iter().all(|&b| b == 0xAB));
+
+        let jobs = slab.take_erasing(8);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!((jobs[0].slot, jobs[0].level, jobs[0].volume), (secret, EraseLevel::Once, vol));
+        assert!(slab.take_erasing(8).is_empty(), "a slot taken by the eraser was taken twice");
+        crate::volume::erase::erase_one(&jobs[0]).await.unwrap();
+        slab.finish_erase(secret).await.unwrap();
+
+        assert!(raw(&dev, &slab, secret).await.iter().all(|&b| b == 0), "not overwritten");
+        assert_eq!(slab.erasing_slots(), 0);
+        assert_eq!(slab.erasing_for(vol), 0);
+        assert_eq!(slab.allocate(vol, 999).await.unwrap(), secret);
+    }
+
+    #[tokio::test]
+    async fn a_delete_asking_for_more_gets_dod3_with_its_last_pass_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = device(&dir).await;
+        let mut slab = Slab::format(dev.clone(), SLOT, StorageTier::Hot).await.unwrap();
+        let vol = VolumeId::new();
+        let a = slab.allocate(vol, 0).await.unwrap();
+        let b = slab.allocate(vol, 1).await.unwrap();
+        slab.write_slot(a, 0, &vec![0xAB; SLOT as usize]).await.unwrap();
+
+        slab.set_erase_override(Some(EraseLevel::Dod3));
+        let out = slab.dec_ref_batch(&[a]).await.unwrap();
+        slab.set_erase_override(None);
+        assert_eq!(out.freed, 1);
+        assert_eq!(slab.get_slot(a).unwrap().state, SlotState::Erasing);
+        let job = slab.take_erasing(8).pop().unwrap();
+        assert_eq!(job.level, EraseLevel::Dod3);
+        crate::volume::erase::erase_one(&job).await.unwrap();
+        slab.finish_erase(a).await.unwrap();
+        let after = raw(&dev, &slab, a).await;
+        assert!(!after.windows(16).any(|w| w.iter().all(|&x| x == 0xAB)), "dod3 left the data");
+
+        // No level, no override: freed as before #286.
+        slab.free(b).await.unwrap();
+        assert_eq!(slab.get_slot(b).unwrap().state, SlotState::Free);
+        assert_eq!(slab.erasing_slots(), 0);
+    }
+
+    #[test]
+    fn an_erasing_entry_round_trips_and_is_not_owned() {
+        let s = Slot { state: SlotState::Erasing, volume_id: VolumeId::new(), virtual_extent_idx: 7, ref_count: 7, generation: 3 };
+        let back = Slot::from_bytes(&s.to_bytes()).unwrap();
+        assert_eq!(back.state, SlotState::Erasing);
+        assert_eq!(EraseLevel::from_code(back.ref_count), EraseLevel::Dod7);
+        assert!(!SlotState::Erasing.is_owned() && !SlotState::Free.is_owned());
+        assert!(SlotState::Allocated.is_owned() && SlotState::Moving.is_owned());
+    }
+}

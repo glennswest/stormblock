@@ -208,11 +208,41 @@ impl Eraser {
             *last = started.elapsed();
             done.push((job, res));
         }
-        let mut finished_vols = Vec::new();
+        // Free what was overwritten; put back what failed.
+        let mut results: Vec<(EraseJob, Option<Outcome>)> = Vec::with_capacity(done.len());
+        let still: HashMap<VolumeId, u64>;
         {
             let mut reg = self.registry.write().await;
-            let mut running = self.running.lock().unwrap();
             for (job, res) in done {
+                let Some(slab) = reg.get_mut(&job.slab) else { continue };
+                let ok = match res {
+                    Ok(o) => match slab.finish_erase(job.slot).await {
+                        Ok(()) => Some(o),
+                        Err(e) => {
+                            tracing::warn!(slab = %job.slab.0, slot = job.slot, "erased slot not freed: {e}");
+                            slab.return_erase(job.slot);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(slab = %job.slab.0, slot = job.slot, level = %job.level, "erase failed, retrying later: {e}");
+                        slab.return_erase(job.slot);
+                        None
+                    }
+                };
+                results.push((job, ok));
+            }
+            let vols: Vec<VolumeId> = {
+                let running = self.running.lock().unwrap();
+                running.keys().copied().chain(results.iter().map(|(j, _)| j.volume)).collect()
+            };
+            still = vols.into_iter().map(|v| (v, reg.erasing_for(v))).collect();
+            metrics::gauge!("stormblock_erase_pending_slots").set(reg.erasing_slots() as f64);
+        }
+        let mut finished_vols = Vec::new();
+        {
+            let mut running = self.running.lock().unwrap();
+            for (job, ok) in results {
                 let r = running.entry(job.volume).or_insert_with(|| Running {
                     level: job.level,
                     slots: 0,
@@ -224,35 +254,23 @@ impl Eraser {
                     retries: 0,
                 });
                 r.level = r.level.max(job.level);
-                let Some(slab) = reg.get_mut(&job.slab) else { continue };
-                match res {
-                    Ok(o) => {
-                        if let Err(e) = slab.finish_erase(job.slot).await {
-                            tracing::warn!(slab = %job.slab.0, slot = job.slot, "erased slot not freed: {e}");
-                            slab.return_erase(job.slot);
-                            r.retries += 1;
-                            continue;
-                        }
+                match ok {
+                    Some(o) => {
                         r.slots += 1;
                         r.bytes += job.len;
-                        r.verified &= o.verified || !job.level.verifies();
+                        r.verified &= o.verified;
                         r.discarded &= o.discarded;
                         metrics::counter!("stormblock_erased_slots_total", "level" => job.level.as_str()).increment(1);
                         metrics::counter!("stormblock_erased_bytes_total").increment(job.len);
                     }
-                    Err(e) => {
-                        tracing::warn!(slab = %job.slab.0, slot = job.slot, level = %job.level, "erase failed, retrying later: {e}");
-                        slab.return_erase(job.slot);
-                        r.retries += 1;
-                    }
+                    None => r.retries += 1,
                 }
             }
-            for (vol, _) in running.iter() {
-                if reg.erasing_for(*vol) == 0 {
+            for vol in running.keys() {
+                if still.get(vol).copied().unwrap_or(0) == 0 {
                     finished_vols.push(*vol);
                 }
             }
-            metrics::gauge!("stormblock_erase_pending_slots").set(reg.erasing_slots() as f64);
         }
         if !finished_vols.is_empty() {
             self.finish(finished_vols).await;
@@ -386,4 +404,106 @@ pub async fn erase_one(job: &EraseJob) -> DriveResult<Outcome> {
     let discarded = job.device.device_type() != DriveType::SasHdd
         && job.device.discard(job.offset, job.len).await.is_ok();
     Ok(Outcome { verified: job.level.verifies(), discarded })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::BlockDevice;
+    use crate::raid::RaidArrayId;
+    use crate::volume::VolumeManager;
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn holds(raw: &[u8], pat: &[u8]) -> bool {
+        raw.windows(pat.len()).any(|w| w == pat)
+    }
+
+    /// A deleted volume's data is on the media until the eraser runs, then
+    /// gone; the collector never takes an erasing slot; the audit says what
+    /// was done.
+    #[tokio::test]
+    async fn a_deleted_volumes_data_is_overwritten_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(
+            FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 32 * MIB)
+                .await
+                .unwrap(),
+        );
+        let mut vm = VolumeManager::new(MIB);
+        vm.add_backing_device(RaidArrayId(uuid::Uuid::new_v4()), dev.clone()).await;
+        vm.registry().write().await.set_erase_default(EraseLevel::Once);
+
+        let id = vm.create_volume_any("secret", 4 * MIB).await.unwrap();
+        let pat = b"SECRET-286-DO-NOT-KEEP-";
+        let data: Vec<u8> = pat.iter().copied().cycle().take(2 * MIB as usize).collect();
+        let h = vm.get_volume(&id).unwrap();
+        h.write(0, &data).await.unwrap();
+        h.flush().await.unwrap();
+        drop(h);
+
+        let mut all = vec![0u8; dev.capacity_bytes() as usize];
+        dev.read(0, &mut all).await.unwrap();
+        assert!(holds(&all, pat));
+
+        vm.delete_volume(id).await.unwrap();
+        let reg = vm.registry().clone();
+        assert_eq!(reg.read().await.erasing_slots(), 2);
+        assert_eq!(reg.read().await.erasing_for(id), 2);
+
+        // The collector sees nobody's slots, and frees none of them.
+        let report = {
+            let gem = vm.gem().read().await;
+            let mut r = reg.write().await;
+            crate::volume::gc::collect(&gem, &mut r, crate::volume::gc::GcOptions::default()).await
+        };
+        assert_eq!(report.reclaimed, 0);
+        assert_eq!(reg.read().await.erasing_slots(), 2);
+
+        let eraser = Eraser::new(reg.clone(), Some(dir.path().to_path_buf()));
+        assert_eq!(eraser.drain().await, 2);
+        assert_eq!(reg.read().await.erasing_slots(), 0);
+        dev.read(0, &mut all).await.unwrap();
+        assert!(!holds(&all, pat), "the deleted volume's data is still on the device");
+
+        let st = eraser.status().await;
+        assert_eq!(st.pending_slots, 0);
+        assert!(st.running.is_empty());
+        assert_eq!(st.finished.len(), 1);
+        let e = &st.finished[0];
+        assert_eq!(e.volume, id.0.to_string());
+        assert_eq!((e.level, e.passes, e.slots, e.bytes), (EraseLevel::Once, 1, 2, 2 * MIB));
+        assert!(!e.verified);
+        let kept: Vec<Erasure> =
+            serde_json::from_slice(&std::fs::read(dir.path().join("erasures.json")).unwrap()).unwrap();
+        assert_eq!(kept, st.finished);
+        // Kept across a restart.
+        let again = Eraser::new(reg.clone(), Some(dir.path().to_path_buf()));
+        assert_eq!(again.status().await.finished, st.finished);
+    }
+
+    /// `delete_volume_erasing` asks for more than the node's default.
+    #[tokio::test]
+    async fn a_delete_may_ask_for_more_passes_than_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(
+            FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 32 * MIB)
+                .await
+                .unwrap(),
+        );
+        let mut vm = VolumeManager::new(MIB);
+        vm.add_backing_device(RaidArrayId(uuid::Uuid::new_v4()), dev.clone()).await;
+        vm.registry().write().await.set_erase_default(EraseLevel::Once);
+        let id = vm.create_volume_any("v", 2 * MIB).await.unwrap();
+        let h = vm.get_volume(&id).unwrap();
+        h.write(0, &vec![0x5A; MIB as usize]).await.unwrap();
+        h.flush().await.unwrap();
+        drop(h);
+        vm.delete_volume_erasing(id, Some(EraseLevel::Dod7)).await.unwrap();
+        let eraser = Eraser::new(vm.registry().clone(), None);
+        assert_eq!(eraser.drain().await, 1);
+        let e = &eraser.status().await.finished[0];
+        assert_eq!((e.level, e.passes, e.verified), (EraseLevel::Dod7, 7, true));
+    }
 }

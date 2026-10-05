@@ -32,7 +32,7 @@
 
 use std::collections::HashSet;
 
-use crate::drive::slab::{SlabId, SlotState};
+use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
 use crate::volume::extent::VolumeId;
 use crate::volume::gem::GlobalExtentMap;
@@ -324,7 +324,7 @@ pub fn spawn(
 mod tests {
     use super::*;
     use crate::drive::filedev::FileDevice;
-    use crate::drive::slab::Slab;
+    use crate::drive::slab::{Slab, SlotState};
     use crate::drive::BlockDevice;
     use crate::placement::topology::StorageTier;
     use crate::volume::gem::ExtentLocation;
