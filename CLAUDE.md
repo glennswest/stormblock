@@ -285,15 +285,20 @@ meaning (`owner` names a k8s object, not a caller). Asked on #274
 C every volume delete needs a k8s bearer + SAR (recommended). rustkube's
 apiserver has TokenReview, SubjectAccessReview and SelfSubjectAccessReview.
 
-### Decide: #5–#7 in the engine or on stormstorage's heads (2026-10-05, #179, P1) — WAITING ON THE OWNER
+### Decide: #5–#7 in the engine or on stormstorage's heads (2026-10-05, #179, P1) — DECIDED (b)
 
-A decision issue: the `/v1` prestage/fence/dual-attach API is control-plane
-only (`prestage` records `Resyncing{0%}` and nothing copies), so
-stormblock-csi#29 never converges. Asked on #179 (needs-owner): (a) build the
-data path in the engine, (b) re-scope onto stormstorage's RAID heads
-(recommended: single-node first; stormstorage#33/#44 already orchestrate),
-(c) withdraw the surface. Nothing built until answered; #6's epoch
-enforcement on writes follows the answer's design.
+Owner, 2026-10-05: **(b)**. Cross-node RAID1 (partner prestage, promotion,
+bounded dual-attach) is built on stormstorage's RAID heads, over NVMe/TCP legs
+from the engines' dedicated arrays (#149, #150), not in the engine.
+- #5 (prestage) and #7 (dual-attach): stormstorage's, via stormstorage#33,
+  re-scoped there; closed here with a pointer.
+- #6 keeps the engine's part: epoch fencing on leg attaches (a fenced head's
+  leg attach refuses its writes). Built when stormstorage#33 settles the
+  head ↔ engine contract.
+- The `/v1` replica surface stays as it is, control plane only (README "Not
+  built"). Whether stormblock-csi reads sync state from the head through the
+  engine's `/v1` or from stormstorage directly is settled on stormstorage#33
+  and stormblock-csi#29, not changed here first.
 
 ### Extent size by pool class (2026-10-05, #156, P1) — AFTER #158, two questions asked
 

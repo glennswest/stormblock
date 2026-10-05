@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **docs:** #5–#7 (RAID1 prestage, fencing, dual-attach) are re-scoped onto stormstorage's RAID heads by owner decision (#179, b). #5 and #7 go to stormstorage#33; #6 keeps the engine's epoch fencing on leg attaches. The README's "Not built" now says `/v1` replication is control-plane only, and why
 - **feat:** Emulated drives for scale tests (#208, stormcos#92).
   - `emulated://<name>?size=256T|1P[&backing=<dir>][&lbs=512]`, or `[[drives]] kind = "emulated"` with `size`, `backing` and `name`, is a drive (`drive/emulated.rs`) that reports any capacity and stores only what is written: in memory in 64 KiB pages, or in 1 GiB sparse chunk files. Zeros and discards store nothing.
   - It is accepted wherever a device path is. One name is one drive for the process. It reports `DriveType::Emulated`, and `GET /api/v1/drives` adds `emulated {name, stored_bytes, backing, failed}`.

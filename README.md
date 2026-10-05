@@ -1548,6 +1548,13 @@ What earlier docs described and the code does not do, each with its issue:
   (#240).
 - **`/v1` `encrypted: true`** is stored and reported; nothing is encrypted
   (#232).
+- **`/v1` replication (`prestage`, `fence`/`promote`, `dual-attach`)** is
+  control-plane state only. `prestage` records `Resyncing{0%}`, and nothing
+  copies to the peer, so a slave never reaches `in_sync`
+  (stormblock-csi#29). By the owner's decision (#179, b), cross-node mirroring
+  is stormstorage's RAID heads': the head builds the mirror over NVMe/TCP legs
+  from the engines' dedicated arrays, and keeps the slave in sync (#5, #7 →
+  stormstorage#33). The engine's part is epoch fencing on leg attaches (#6).
 - **Per-volume 512-byte LBA** (#228) is built and verified, but no release uses
   it yet: whether a release is one disk at 512 or two volumes is the owner's
   call (#233), and whether to keep the capability at all is #248.
