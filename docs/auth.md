@@ -54,7 +54,9 @@ ever presents a minted token to an engine on its own machine.
 in `serve::api::is_destructive`: every `DELETE`, any path ending in `/seal`
 (a volume's or a template's, whatever the method), writing
 files or a tar into a volume's filesystem, `PUT /api/v1/forge` (making the
-node a forge serves goldens and boot clones to other machines, #272),
+node a forge serves goldens and boot clones to other machines, #272; a node
+is one by default since #287, and `DELETE /api/v1/forge` — admin, as every
+`DELETE` — turns it off and keeps it off),
 `?repair=true` on an fsck,
 `?apply` on a trim, and a slab GC that is not a dry run. Everything else takes
 either token.

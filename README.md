@@ -31,7 +31,7 @@ drives / files / nvme-tcp:// / iscsi://          (the drive layer)
 
 | where | how it is started | what it does there |
 |---|---|---|
-| **a stormcos node** | the stormpump boot unit `00-stormblock` runs `stormblock adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the ublk devices the initramfs engine created (root and the mounted volumes) without them disappearing: it stands that engine down, waits for it to exit, and only then reads the slabs, while ublk recovery holds the I/O in between (#171). It restores its state from the `stormblock-state` volume, serves the API and the per-export portals (`/serve/v1`). No shared :3260 target, no discovery beacon, no cluster in this mode; the shared NVMe/TCP target only in forge mode: an `[nvmeof]` section in `--config` (#206), or set per node with `PUT /api/v1/forge` and kept in its state (#272). |
+| **a stormcos node** | the stormpump boot unit `00-stormblock` runs `stormblock adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the ublk devices the initramfs engine created (root and the mounted volumes) without them disappearing: it stands that engine down, waits for it to exit, and only then reads the slabs, while ublk recovery holds the I/O in between (#171). It restores its state from the `stormblock-state` volume, serves the API and the per-export portals (`/serve/v1`). No shared :3260 target, no discovery beacon, no cluster in this mode. **Forge mode is on by default** (#287): the shared NVMe/TCP target on `0.0.0.0:4420` (NQN `nqn.2026-08.lo.storm:<node name>`, #210's closed policy) answers boot claims, unless the node's state says off (`DELETE /api/v1/forge`, kept in `forge.json`). An `[nvmeof]` section in `--config` (#206) or a `PUT /api/v1/forge` (#272) sets other settings. |
 | **the stormcos initramfs** | `/init` (built by `scripts/build-stormblock-initramfs.sh`) runs `boot-claim` then `boot-local`, or `boot-local` on a local slab | claims the machine's image from an appliance (`boothost/<tag>`), attaches it, exports root as `/dev/ublkb0`, and flows it over onto a local disk in the background (`--local-disk`). Boot hooks decide local vs appliance (`docs/boot-hooks.md`). |
 | **an appliance (forge)** | `stormblock --config …` (the daemon) | serves goldens and host clones over NVMe-oF/TCP, answers boot claims, builds images and pallets. |
 | **anywhere else** | the daemon, or a subcommand | a standalone storage node; `image`, `pallet`, `slab`, `golden`, `attach`, `must-gather` work offline on files and drives. |
@@ -259,7 +259,7 @@ to stderr.
 | `attach` | attach a slab offline and export (and optionally mount) volumes in it; with no `--volume`, list them |
 | `boot-claim` | ask an appliance which image this machine boots (`--boothost URL --tag <host name or alias>`; the SMBIOS serial by default), print the attach URI |
 | `boot-local` | attach local slabs non-destructively, export the boot volume as `/dev/ublkb0` (plus `--image-store`, `--writable`), optionally flow over to `--local-disk`; `--check` validates and exits |
-| `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs. With an `[nvmeof]` section in `--config` (`listen_addr`, `nqn`, the #210 host policy) it also serves the shared NVMe/TCP target, so boot claims get an attach (forge mode, #206); without one, the forge settings the node keeps (`PUT /api/v1/forge`, `forge.json`, #272); never the slab's drive raw |
+| `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs. With an `[nvmeof]` section in `--config` (`listen_addr`, `nqn`, the #210 host policy) it also serves the shared NVMe/TCP target, so boot claims get an attach (forge mode, #206); without one, what the node was told (`forge.json`: the settings of a `PUT /api/v1/forge`, #272, or off after a `DELETE`); with nothing kept, forge mode **on with the node's defaults** (`0.0.0.0:4420`, `nqn.2026-08.lo.storm:<node name>`, the #210 closed policy, #287). Never the slab's drive raw |
 | `must-gather` | collect what is needed to debug a node into one directory, read-only |
 | `boot-iscsi` | provision a partitioned disk on a remote iSCSI target and export it over ublk. **It formats the target every run** (#162): a first-install tool, not a boot path |
 | `migrate-boot` | copy boot volumes from an iSCSI slab onto a local disk |
@@ -406,7 +406,7 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
 | port | what | when |
 |---|---|---|
 | TCP 9090 | management API, `/metrics`, cluster and Raft RPCs | always (daemon, and `adopt-ublk --api`) |
-| TCP 4420 | NVMe-oF/TCP: the shared subsystem, every host's own subsystem, and discovery (each host is shown only its own, [docs/nvme-access.md](docs/nvme-access.md)) | daemon, with something to export at startup |
+| TCP 4420 | NVMe-oF/TCP: the shared subsystem, every host's own subsystem, and discovery (each host is shown only its own, [docs/nvme-access.md](docs/nvme-access.md)) | daemon, with something to export at startup; `adopt-ublk` in forge mode, on by default (#287) |
 | TCP 3260 | iSCSI shared target | daemon, unless `--no-iscsi` |
 | TCP 3261–3388 | per-export portals and per-volume NVMe subsystems (`[serve] portal_base/span`) | when `/serve/v1` is mounted |
 | UDP 7447, group 239.255.42.99 | node discovery beacon | daemon, unless `discovery_disabled` |
@@ -469,7 +469,7 @@ intent) need it.
 | `/api/v1/drives`, `/arrays`, `/shelves`, `/spares`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID sets (create, `assemble`, members `{slot}/fail` and `/replace`, `scrub`, `rebuild` rate), shelf layout, hot spares, slabs and the pool (`durability`, `{id}/slots`), GC, rebuild queue |
 | `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
 | `/api/v1/erasures` | secure delete (#286): the node's level, slots waiting, volumes being erased, and the audit record of every finished erase (`erasures.json`). `DELETE /api/v1/volumes/{id}?erase=once\|dod3\|dod7` asks for more than the default |
-| `/api/v1/forge` | this node as its site's forge (#272): `PUT` the `[nvmeof]` settings (`listen_addr`, `nqn`, `allowed_hosts`, `allow_any_host`, `require_dhchap`, `boothost_host_nqn`; admin token) starts the shared NVMe/TCP target live and keeps them in `forge.json`, served again at every start; `DELETE` (admin) stops accepting and forgets them; `GET` says what runs and who set it up (`source`: `api` or `config`). A target the command line or `--config` set up answers `409` |
+| `/api/v1/forge` | this node as its site's forge (#272): `PUT` the `[nvmeof]` settings (`listen_addr`, `nqn`, `allowed_hosts`, `allow_any_host`, `require_dhchap`, `boothost_host_nqn`; admin token) starts the shared NVMe/TCP target live and keeps them in `forge.json`, served again at every start; `DELETE` (admin) stops accepting and keeps the node off (`forge.json` = `{"enabled": false}`), so its default does not turn it back on at the next start (#287); `GET` says `state` (`on`/`off`) and `from` (`default`, `persisted` or `config`), plus `source` (`default`, `api` or `config`). On a node (`adopt-ublk`) forge mode is on by default; on the daemon it is off unless kept. A target the command line or `--config` set up answers `409` |
 | `/api/v1/boothost` | boot hosts by DNS name: list (`?unnamed=1`: booted the default, not named yet, #200), find by name or alias, `PUT {aliases}`, `POST …/rename` (#199) |
 | `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks (`{id}/clone`, `{id}/claim`), offline moves, names and boot claims, published releases (`index.html`, `manifest`, `notes`, `changes`) |
 | `/api/v1/pallets`, `/images` | pallets on drives, image build/convert/inspect |
@@ -489,7 +489,7 @@ journal), `fstemplates.json`, `synonyms.json`, `releases.json`, `moves.json`,
 `pallet_mirrors.json`, `stormfs.json`, `cluster_identity.json`, `api_token`
 (0600), `nvme_hosts.json` (0600: per-host NVMe subsystems and their
 DH-HMAC-CHAP secrets, #210), `forge.json` (this node's forge settings,
-`PUT /api/v1/forge`, #272) and `serve/wiring.json`. Each slab with a metadata region also carries
+`PUT /api/v1/forge`, #272, or `{"enabled": false}` after a `DELETE`, #287) and `serve/wiring.json`. Each slab with a metadata region also carries
 its own volumes' records. On stormcos, `adopt-ublk` restores these from, and
 captures them back into, the `stormblock-state` volume.
 

@@ -101,7 +101,7 @@ of its own. TLS is rustls (no OpenSSL) on `ring` only since #209 — not C-free:
 
 | where | started as | notes |
 |---|---|---|
-| stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260, no discovery, no cluster in this mode; the shared :4420 target only in forge mode: `[nvmeof]` in `--config` (#206) or `PUT /api/v1/forge`, kept in `forge.json` (#272) |
+| stormcos node | stormpump boot unit `00-stormblock`: `adopt-ublk --api 0.0.0.0:9090 --data-dir /run/stormblock/engine` | takes over the initramfs engine's ublk devices; state restored from and captured to the `stormblock-state` volume; no shared :3260, no discovery, no cluster in this mode; forge mode (the shared :4420 target, boot claims) on by default unless `forge.json` says off (#287); `[nvmeof]` in `--config` (#206) or `PUT /api/v1/forge` (#272) set other settings |
 | stormcos initramfs | `/init` → `boot-claim` + `boot-local` (`scripts/build-stormblock-initramfs.sh`) | boot hooks decide local vs appliance (`docs/boot-hooks.md`) |
 | appliance / forge | the daemon | serves goldens, host clones and boot claims |
 | RouterOS container | not shipping (owner, 2026-09-28); was the daemon, `mikrotik,nvmeof` profile | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable; never file I/O (#140) |
@@ -172,18 +172,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Forge mode on by default on every node (2026-10-05, #287, P1) — IN PROGRESS
+### Forge mode on by default on every node (2026-10-05, #287, P1) — DONE
 
 Owner (stormcos#273): "a sno node should have it by default." #272 left it
 off until an admin `PUT`, and nothing off the node holds that token.
-- [ ] `forge.json` is the persisted state: settings (on) or
-      `{"enabled": false}` (off); a file from #272 reads as on
-- [ ] `adopt-ublk`: nothing persisted = on with defaults (`0.0.0.0:4420`,
-      `nqn.2026-08.lo.storm:<node>`, the #210 closed policy), not written
-      to disk; persisted off = off. The daemon keeps #272's (off unless kept)
-- [ ] `PUT` persists on with settings; `DELETE` persists off (also from the
-      default). `GET`: `state` on|off, `from` default|persisted|config
-- [ ] tests, docs (README, auth.md?), CHANGELOG
+- [x] `forge.json` is the persisted state: settings (on) or
+      `{"enabled": false}` (off); a file from #272 reads as on, an unreadable
+      one as off (loudly)
+- [x] `adopt-ublk`: nothing persisted = on with `forge::default_settings`
+      (`0.0.0.0:4420`, `nqn.2026-08.lo.storm:<node>`, the #210 closed
+      policy), never written down; persisted off = off. The daemon keeps
+      #272's rule (`restore(state, None)`: off unless kept)
+- [x] `PUT` persists on with settings; `DELETE` persists off (from the
+      default too). `GET`: `state` on|off, `from` default|persisted|config
+- [x] tests (`integration_forge`, 4); docs (README, auth.md), CHANGELOG
+- Not on metal: needs a stormcos release with this engine; then server8
+  (fresh SNO) answers a boot claim with no PUT (stormcos#273 step 3)
 
 ### Secure delete: freed data overwritten before reuse (2026-10-05, #286, P1) — DONE
 
