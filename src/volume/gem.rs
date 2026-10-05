@@ -7,8 +7,8 @@
 //! An extent has one or more **legs**: the primary slot and, for a mirrored
 //! volume, its mirrors — each on a distinct failure domain. A parity volume
 //! keeps one leg per data extent and a **parity group** per stripe with the
-//! P (and Q) legs. The reverse index covers every leg, so a slab's slot is
-//! always traceable to what owns it.
+//! P (and Q) legs. Who owns a slot is the slab's slot table's to say; what
+//! is on a slab is found by walking the maps (#155).
 //!
 //! Recovery invariant: the GEM is reconstructable from slab slot tables.
 //! Each slab's extent table is authoritative for its slots. The durable
@@ -207,118 +207,49 @@ impl VolumeExtentMap {
 }
 
 /// Global Extent Map — tracks all extent locations across all volumes.
+///
+/// Forward maps only (#155): "what is on this slab" is answered by walking
+/// the maps when it is asked (drain, evacuation, flow-over), and "who owns
+/// this slot" by the slab's slot table, which records the owner of every
+/// slot. A resident reverse index cost ~120 B an extent for questions asked
+/// a few times a day.
 pub struct GlobalExtentMap {
     volumes: HashMap<VolumeId, VolumeExtentMap>,
-    /// Every leg → the (volume, virtual extent) that owns it. Parity legs map
-    /// to a `parity_vext`-tagged index.
-    reverse: HashMap<(SlabId, u32), (VolumeId, u64)>,
 }
 
 impl GlobalExtentMap {
     pub fn new() -> Self {
-        GlobalExtentMap {
-            volumes: HashMap::new(),
-            reverse: HashMap::new(),
-        }
+        GlobalExtentMap { volumes: HashMap::new() }
     }
 
     /// Insert or update an extent mapping.
-    pub fn insert(
-        &mut self,
-        volume_id: VolumeId,
-        vext_idx: u64,
-        location: ExtentLocation,
-    ) {
-        // Remove old reverse entries if this virtual extent was already
-        // mapped — but only the ones this extent owns: a clone re-mapping an
-        // extent it shared must not take the source's slot out of the index.
-        if let Some(vmap) = self.volumes.get(&volume_id) {
-            if let Some(old_loc) = vmap.extents.get(&vext_idx) {
-                for leg in old_loc.legs() {
-                    let key = (leg.slab_id, leg.slot_idx);
-                    if self.reverse.get(&key) == Some(&(volume_id, vext_idx)) {
-                        self.reverse.remove(&key);
-                    }
-                }
-            }
-        }
-
-        for leg in location.legs() {
-            self.reverse.insert((leg.slab_id, leg.slot_idx), (volume_id, vext_idx));
-        }
-
-        self.volumes
-            .entry(volume_id)
-            .or_default()
-            .extents
-            .insert(vext_idx, location);
+    pub fn insert(&mut self, volume_id: VolumeId, vext_idx: u64, location: ExtentLocation) {
+        self.volumes.entry(volume_id).or_default().extents.insert(vext_idx, location);
     }
 
     /// Insert a mapping recovered from persisted metadata.
-    ///
-    /// Unlike `insert`, this never displaces an existing reverse-index claim:
-    /// shared COW slots map several (volume, vext) pairs onto one slot, and
-    /// the reverse index keeps the slot-table owner (same convention as
-    /// `clone_volume_map`).
-    pub fn restore_mapping(
-        &mut self,
-        volume_id: VolumeId,
-        vext_idx: u64,
-        location: ExtentLocation,
-    ) {
-        for leg in location.legs() {
-            self.reverse.entry((leg.slab_id, leg.slot_idx)).or_insert((volume_id, vext_idx));
-        }
-        self.volumes
-            .entry(volume_id)
-            .or_default()
-            .extents
-            .insert(vext_idx, location);
+    pub fn restore_mapping(&mut self, volume_id: VolumeId, vext_idx: u64, location: ExtentLocation) {
+        self.insert(volume_id, vext_idx, location);
     }
 
-    /// Record a stripe's parity legs.
     /// Take the maps of `ids` out of `other` — a map rebuilt from slabs just
-    /// adopted — with the reverse entries those volumes own. Anything already
-    /// here for those volumes is replaced.
+    /// adopted. Anything already here for those volumes is replaced.
     pub fn absorb(&mut self, mut other: GlobalExtentMap, ids: &std::collections::HashSet<VolumeId>) {
         for id in ids {
             if let Some(m) = other.volumes.remove(id) {
                 self.volumes.insert(*id, m);
             }
         }
-        for (key, owner) in other.reverse {
-            if ids.contains(&owner.0) {
-                self.reverse.insert(key, owner);
-            }
-        }
     }
 
+    /// Record a stripe's parity legs.
     pub fn insert_parity(&mut self, volume_id: VolumeId, stripe: u64, group: ParityGroup) {
-        if let Some(vmap) = self.volumes.get(&volume_id) {
-            if let Some(old) = vmap.parity.get(&stripe) {
-                for (i, leg) in old.legs.iter().enumerate() {
-                    let key = (leg.slab_id, leg.slot_idx);
-                    if self.reverse.get(&key) == Some(&(volume_id, parity_vext(i as u8, stripe))) {
-                        self.reverse.remove(&key);
-                    }
-                }
-            }
-        }
-        for (i, leg) in group.legs.iter().enumerate() {
-            self.reverse
-                .insert((leg.slab_id, leg.slot_idx), (volume_id, parity_vext(i as u8, stripe)));
-        }
         self.volumes.entry(volume_id).or_default().parity.insert(stripe, group);
     }
 
-    /// Restore a stripe's parity legs without displacing a reverse claim.
+    /// Restore a stripe's parity legs.
     pub fn restore_parity(&mut self, volume_id: VolumeId, stripe: u64, group: ParityGroup) {
-        for (i, leg) in group.legs.iter().enumerate() {
-            self.reverse
-                .entry((leg.slab_id, leg.slot_idx))
-                .or_insert((volume_id, parity_vext(i as u8, stripe)));
-        }
-        self.volumes.entry(volume_id).or_default().parity.insert(stripe, group);
+        self.insert_parity(volume_id, stripe, group);
     }
 
     pub fn lookup_parity(&self, volume_id: VolumeId, stripe: u64) -> Option<&ParityGroup> {
@@ -328,12 +259,6 @@ impl GlobalExtentMap {
     pub fn remove_parity(&mut self, volume_id: VolumeId, stripe: u64) -> Option<ParityGroup> {
         let vmap = self.volumes.get_mut(&volume_id)?;
         let g = vmap.parity.remove(&stripe)?;
-        for leg in &g.legs {
-            let key = (leg.slab_id, leg.slot_idx);
-            if self.reverse.get(&key).map(|(v, _)| *v) == Some(volume_id) {
-                self.reverse.remove(&key);
-            }
-        }
         if vmap.extents.is_empty() && vmap.parity.is_empty() {
             self.volumes.remove(&volume_id);
         }
@@ -352,10 +277,8 @@ impl GlobalExtentMap {
     /// landing in place, so re-sharing one extent must bump it on both sides
     /// exactly as cloning a whole map does.
     pub fn inc_extent_ref(&mut self, volume_id: VolumeId, vext_idx: u64) {
-        if let Some(vmap) = self.volumes.get_mut(&volume_id) {
-            if let Some(loc) = vmap.extents.get_mut(&vext_idx) {
-                loc.ref_count += 1;
-            }
+        if let Some(loc) = self.volumes.get_mut(&volume_id).and_then(|m| m.extents.get_mut(&vext_idx)) {
+            loc.ref_count += 1;
         }
     }
 
@@ -373,28 +296,38 @@ impl GlobalExtentMap {
         }
     }
 
+    /// Set the share count the slot table's owner of `leg` records, when the
+    /// owner's map still names that leg (#155: the slot table says who owns a
+    /// slot; the maps say what they reference). `tagged` is the owner's
+    /// extent as the slot records it: a parity slot's is `parity_vext`.
+    pub fn set_owner_ref(&mut self, owner: VolumeId, tagged: u64, leg: Leg, ref_count: u32) {
+        match parse_parity_vext(tagged) {
+            Some((_, stripe)) => {
+                if let Some(g) = self.volumes.get_mut(&owner).and_then(|m| m.parity.get_mut(&stripe)) {
+                    if g.legs.contains(&leg) {
+                        g.ref_count = ref_count;
+                    }
+                }
+            }
+            None => {
+                if let Some(loc) = self.volumes.get_mut(&owner).and_then(|m| m.extents.get_mut(&tagged)) {
+                    if loc.legs().any(|l| l == leg) {
+                        loc.ref_count = ref_count;
+                    }
+                }
+            }
+        }
+    }
+
     /// Look up where a volume's virtual extent lives.
     pub fn lookup(&self, volume_id: VolumeId, vext_idx: u64) -> Option<&ExtentLocation> {
-        self.volumes
-            .get(&volume_id)?
-            .extents
-            .get(&vext_idx)
+        self.volumes.get(&volume_id)?.extents.get(&vext_idx)
     }
 
     /// Replace one leg of an extent with another slot (a leg moved or
     /// rebuilt), keeping the rest of the location as it is.
-    pub fn replace_leg(
-        &mut self,
-        volume_id: VolumeId,
-        vext_idx: u64,
-        old: Leg,
-        new: Leg,
-    ) -> bool {
-        let Some(loc) = self
-            .volumes
-            .get_mut(&volume_id)
-            .and_then(|m| m.extents.get_mut(&vext_idx))
-        else {
+    pub fn replace_leg(&mut self, volume_id: VolumeId, vext_idx: u64, old: Leg, new: Leg) -> bool {
+        let Some(loc) = self.volumes.get_mut(&volume_id).and_then(|m| m.extents.get_mut(&vext_idx)) else {
             return false;
         };
         if loc.primary() == old {
@@ -406,38 +339,24 @@ impl GlobalExtentMap {
             return false;
         }
         loc.generation += 1;
-        if self.reverse.get(&(old.slab_id, old.slot_idx)) == Some(&(volume_id, vext_idx)) {
-            self.reverse.remove(&(old.slab_id, old.slot_idx));
-        }
-        self.reverse.insert((new.slab_id, new.slot_idx), (volume_id, vext_idx));
         true
     }
 
     /// Add a mirror leg to an extent (a resync filling in a missing copy).
     pub fn add_leg(&mut self, volume_id: VolumeId, vext_idx: u64, leg: Leg) -> bool {
-        let Some(loc) = self
-            .volumes
-            .get_mut(&volume_id)
-            .and_then(|m| m.extents.get_mut(&vext_idx))
-        else {
+        let Some(loc) = self.volumes.get_mut(&volume_id).and_then(|m| m.extents.get_mut(&vext_idx)) else {
             return false;
         };
-        if loc.legs().any(|l| l == leg) {
-            return true;
+        if !loc.legs().any(|l| l == leg) {
+            loc.mirrors.push(leg);
         }
-        loc.mirrors.push(leg);
-        self.reverse.insert((leg.slab_id, leg.slot_idx), (volume_id, vext_idx));
         true
     }
 
     /// Drop a leg from an extent without touching the slot (the caller frees
     /// it, or it is already gone with its slab). Refuses to drop the last leg.
     pub fn drop_leg(&mut self, volume_id: VolumeId, vext_idx: u64, leg: Leg) -> bool {
-        let Some(loc) = self
-            .volumes
-            .get_mut(&volume_id)
-            .and_then(|m| m.extents.get_mut(&vext_idx))
-        else {
+        let Some(loc) = self.volumes.get_mut(&volume_id).and_then(|m| m.extents.get_mut(&vext_idx)) else {
             return false;
         };
         if loc.primary() == leg {
@@ -452,37 +371,17 @@ impl GlobalExtentMap {
                 return false;
             }
         }
-        if self.reverse.get(&(leg.slab_id, leg.slot_idx)) == Some(&(volume_id, vext_idx)) {
-            self.reverse.remove(&(leg.slab_id, leg.slot_idx));
-        }
         true
     }
 
     /// Replace one parity leg of a stripe.
-    pub fn replace_parity_leg(
-        &mut self,
-        volume_id: VolumeId,
-        stripe: u64,
-        old: Leg,
-        new: Leg,
-    ) -> bool {
-        let Some(g) = self
-            .volumes
-            .get_mut(&volume_id)
-            .and_then(|m| m.parity.get_mut(&stripe))
-        else {
+    pub fn replace_parity_leg(&mut self, volume_id: VolumeId, stripe: u64, old: Leg, new: Leg) -> bool {
+        let Some(g) = self.volumes.get_mut(&volume_id).and_then(|m| m.parity.get_mut(&stripe)) else {
             return false;
         };
         let Some(i) = g.legs.iter().position(|l| *l == old) else { return false };
         g.legs[i] = new;
         g.generation += 1;
-        if self.reverse.get(&(old.slab_id, old.slot_idx))
-            == Some(&(volume_id, parity_vext(i as u8, stripe)))
-        {
-            self.reverse.remove(&(old.slab_id, old.slot_idx));
-        }
-        self.reverse
-            .insert((new.slab_id, new.slot_idx), (volume_id, parity_vext(i as u8, stripe)));
         true
     }
 
@@ -499,43 +398,29 @@ impl GlobalExtentMap {
             return 0;
         }
         let mut rewritten = 0usize;
-        let mut reverse_updates: Vec<(Leg, Leg, VolumeId, u64)> = Vec::new();
-        for (vol, vmap) in self.volumes.iter_mut() {
-            for (vext, loc) in vmap.extents.iter_mut() {
-                let primary = loc.primary();
-                if let Some(new) = moves.get(&primary) {
+        for vmap in self.volumes.values_mut() {
+            for loc in vmap.extents.values_mut() {
+                if let Some(new) = moves.get(&loc.primary()) {
                     loc.slab_id = new.slab_id;
                     loc.slot_idx = new.slot_idx;
                     loc.generation += 1;
                     rewritten += 1;
-                    reverse_updates.push((primary, *new, *vol, *vext));
                 }
                 for m in loc.mirrors.iter_mut() {
                     if let Some(new) = moves.get(m) {
-                        reverse_updates.push((*m, *new, *vol, *vext));
                         *m = *new;
                         rewritten += 1;
                     }
                 }
             }
-            for (stripe, g) in vmap.parity.iter_mut() {
-                for (i, leg) in g.legs.iter_mut().enumerate() {
+            for g in vmap.parity.values_mut() {
+                for leg in g.legs.iter_mut() {
                     if let Some(new) = moves.get(leg) {
-                        reverse_updates.push((*leg, *new, *vol, parity_vext(i as u8, *stripe)));
                         *leg = *new;
                         g.generation += 1;
                         rewritten += 1;
                     }
                 }
-            }
-        }
-        for (old, new, vol, vext) in reverse_updates {
-            let owner = self.reverse.get(&(old.slab_id, old.slot_idx)).copied();
-            if owner == Some((vol, vext)) {
-                self.reverse.remove(&(old.slab_id, old.slot_idx));
-                self.reverse.insert((new.slab_id, new.slot_idx), (vol, vext));
-            } else {
-                self.reverse.entry((new.slab_id, new.slot_idx)).or_insert((vol, vext));
             }
         }
         rewritten
@@ -546,20 +431,13 @@ impl GlobalExtentMap {
     /// many maps gained the leg.
     pub fn add_leg_beside(&mut self, existing: Leg, new: Leg) -> usize {
         let mut added = 0usize;
-        let mut owner: Option<(VolumeId, u64)> = None;
-        for (vol, vmap) in self.volumes.iter_mut() {
-            for (vext, loc) in vmap.extents.iter_mut() {
+        for vmap in self.volumes.values_mut() {
+            for loc in vmap.extents.values_mut() {
                 if loc.legs().any(|l| l == existing) && !loc.legs().any(|l| l == new) {
                     loc.mirrors.push(new);
                     added += 1;
-                    if owner.is_none() {
-                        owner = Some((*vol, *vext));
-                    }
                 }
             }
-        }
-        if let Some(o) = self.reverse.get(&(existing.slab_id, existing.slot_idx)).copied().or(owner) {
-            self.reverse.entry((new.slab_id, new.slot_idx)).or_insert(o);
         }
         added
     }
@@ -587,26 +465,13 @@ impl GlobalExtentMap {
                 }
             }
         }
-        if dropped > 0 {
-            self.reverse.remove(&(leg.slab_id, leg.slot_idx));
-        }
         dropped
     }
 
-    /// Remove an extent mapping. A reverse entry is dropped only when this
-    /// volume owns it — a slot shared with a clone stays traceable to whoever
-    /// allocated it.
+    /// Remove an extent mapping.
     pub fn remove(&mut self, volume_id: VolumeId, vext_idx: u64) -> Option<ExtentLocation> {
         let vmap = self.volumes.get_mut(&volume_id)?;
         let loc = vmap.extents.remove(&vext_idx)?;
-        for leg in loc.legs() {
-            let key = (leg.slab_id, leg.slot_idx);
-            if self.reverse.get(&key) == Some(&(volume_id, vext_idx)) {
-                self.reverse.remove(&key);
-            }
-        }
-
-        // Clean up empty volume map
         if vmap.extents.is_empty() && vmap.parity.is_empty() {
             self.volumes.remove(&volume_id);
         }
@@ -614,51 +479,18 @@ impl GlobalExtentMap {
     }
 
     /// Give one volume's whole map to another id — a restripe built the new
-    /// placement under a scratch id and the real volume now takes it. The
-    /// reverse entries follow. Whatever `to` had is returned to the caller
-    /// to release.
+    /// placement under a scratch id and the real volume now takes it.
+    /// Whatever `to` had is returned to the caller to release.
     pub fn rename_volume(&mut self, from: VolumeId, to: VolumeId) -> Option<VolumeExtentMap> {
         let map = self.volumes.remove(&from)?;
         let old = self.volumes.remove(&to);
-        if let Some(old) = &old {
-            for leg in old.all_legs() {
-                let key = (leg.slab_id, leg.slot_idx);
-                if self.reverse.get(&key).map(|(v, _)| *v) == Some(to) {
-                    self.reverse.remove(&key);
-                }
-            }
-        }
-        for (vext, loc) in &map.extents {
-            for leg in loc.legs() {
-                let key = (leg.slab_id, leg.slot_idx);
-                if self.reverse.get(&key) == Some(&(from, *vext)) || !self.reverse.contains_key(&key) {
-                    self.reverse.insert(key, (to, *vext));
-                }
-            }
-        }
-        for (stripe, g) in &map.parity {
-            for (i, leg) in g.legs.iter().enumerate() {
-                let key = (leg.slab_id, leg.slot_idx);
-                let tagged = parity_vext(i as u8, *stripe);
-                if self.reverse.get(&key) == Some(&(from, tagged)) || !self.reverse.contains_key(&key) {
-                    self.reverse.insert(key, (to, tagged));
-                }
-            }
-        }
         self.volumes.insert(to, map);
         old
     }
 
     /// Remove all extents for a volume. Returns the removed extent map.
     pub fn remove_volume(&mut self, volume_id: VolumeId) -> Option<VolumeExtentMap> {
-        let vmap = self.volumes.remove(&volume_id)?;
-        for leg in vmap.all_legs() {
-            let key = (leg.slab_id, leg.slot_idx);
-            if self.reverse.get(&key).map(|(v, _)| *v) == Some(volume_id) {
-                self.reverse.remove(&key);
-            }
-        }
-        Some(vmap)
+        self.volumes.remove(&volume_id)
     }
 
     /// Get the volume extent map for a given volume.
@@ -666,22 +498,28 @@ impl GlobalExtentMap {
         self.volumes.get(volume_id)
     }
 
-    /// Reverse lookup: given a slab+slot, find which volume+extent owns it.
-    /// A parity slot answers with a `parity_vext`-tagged index.
-    pub fn reverse_lookup(
-        &self,
-        slab_id: SlabId,
-        slot_idx: u32,
-    ) -> Option<(VolumeId, u64)> {
-        self.reverse.get(&(slab_id, slot_idx)).copied()
+    /// Some extent that references a slot, by walking the maps: the first
+    /// found. A parity slot answers with a `parity_vext`-tagged index. For
+    /// tests and diagnostics; who *owns* a slot is the slot table's to say.
+    pub fn reverse_lookup(&self, slab_id: SlabId, slot_idx: u32) -> Option<(VolumeId, u64)> {
+        let leg = Leg::new(slab_id, slot_idx);
+        for (vol, vmap) in &self.volumes {
+            for (vext, loc) in &vmap.extents {
+                if loc.legs().any(|l| l == leg) {
+                    return Some((*vol, *vext));
+                }
+            }
+            for (stripe, g) in &vmap.parity {
+                if let Some(i) = g.legs.iter().position(|l| *l == leg) {
+                    return Some((*vol, parity_vext(i as u8, *stripe)));
+                }
+            }
+        }
+        None
     }
 
     /// Clone a volume's extent map for snapshot (bumps ref_count in the clone).
-    pub fn clone_volume_map(
-        &mut self,
-        source_id: VolumeId,
-        dest_id: VolumeId,
-    ) -> Option<VolumeExtentMap> {
+    pub fn clone_volume_map(&mut self, source_id: VolumeId, dest_id: VolumeId) -> Option<VolumeExtentMap> {
         let source_map = self.volumes.get(&source_id)?.clone();
 
         // Insert cloned mappings for the destination volume.
@@ -691,10 +529,6 @@ impl GlobalExtentMap {
             let mut new_loc = loc.clone();
             new_loc.ref_count += 1;
             dest_map.extents.insert(vext_idx, new_loc);
-
-            // Note: reverse map still points to source — that's correct because
-            // the slab slot is shared. The reverse map tracks the primary
-            // owner. For COW, we track sharing via ref_count.
         }
         for (&stripe, g) in &source_map.parity {
             let mut ng = g.clone();
@@ -726,16 +560,7 @@ impl GlobalExtentMap {
     /// Returns the legs whose slab ref counts the caller must raise. The GEM's
     /// own counts are raised here, on both sides: the destination's copy
     /// because it now shares, and the source's because it is now shared.
-    ///
-    /// The reverse index is left pointing at whoever held it — a shared slot
-    /// has several (volume, extent) pairs and one owner, the same convention
-    /// `restore_mapping` and `clone_volume_map` keep.
-    pub fn gather_into(
-        &mut self,
-        source_id: VolumeId,
-        dest_id: VolumeId,
-        dest_base_vext: u64,
-    ) -> Vec<Leg> {
+    pub fn gather_into(&mut self, source_id: VolumeId, dest_id: VolumeId, dest_base_vext: u64) -> Vec<Leg> {
         let Some(source_map) = self.volumes.get(&source_id).cloned() else {
             // A golden nothing has written yet contributes no extents, and a
             // volume made of it is legitimately empty there. Not an error.
@@ -756,12 +581,6 @@ impl GlobalExtentMap {
                 shared.ref_count += 1;
                 dest_map.parity.insert(dest_base_vext + stripe, shared);
             }
-        }
-
-        for leg in &legs {
-            self.reverse
-                .entry((leg.slab_id, leg.slot_idx))
-                .or_insert((source_id, 0));
         }
 
         if let Some(src_map) = self.volumes.get_mut(&source_id) {
@@ -786,9 +605,15 @@ impl GlobalExtentMap {
         self.volumes.values().map(|v| v.extents.len()).sum()
     }
 
-    /// Number of reverse index entries.
+    /// Number of distinct slots the maps reference (a walk).
     pub fn reverse_entries(&self) -> usize {
-        self.reverse.len()
+        let mut seen = std::collections::HashSet::new();
+        for vmap in self.volumes.values() {
+            for leg in vmap.all_legs() {
+                seen.insert(leg);
+            }
+        }
+        seen.len()
     }
 
     /// List all volume IDs.
@@ -796,41 +621,52 @@ impl GlobalExtentMap {
         self.volumes.keys().copied().collect()
     }
 
-    /// Collect all data extents with a leg on a given slab (needed by
-    /// evacuate_slab). Parity legs are listed by `slab_parity`.
+    /// Every data extent with a leg on a given slab, one per slot: a slot
+    /// several maps share (a golden and its clones) is listed once, under
+    /// whichever map was walked first. Moving it with `move_slot` rewrites
+    /// every map that names it. Parity legs are listed by `slab_parity`.
     ///
-    /// Iterates the reverse index, filters by `slab_id`, returns
-    /// `(volume_id, vext_idx, location)` tuples.
+    /// A walk of every map (#155): callers take the list once per pass, not
+    /// once per extent they move.
     pub fn slab_extents(&self, slab_id: SlabId) -> Vec<(VolumeId, u64, ExtentLocation)> {
-        self.reverse
-            .iter()
-            .filter(|((sid, _), (_, vext))| *sid == slab_id && vext & PARITY_TAG == 0)
-            .filter_map(|((_, _), &(volume_id, vext_idx))| {
-                let loc = self.volumes.get(&volume_id)?.extents.get(&vext_idx)?.clone();
-                Some((volume_id, vext_idx, loc))
-            })
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (vol, vmap) in &self.volumes {
+            for (vext, loc) in &vmap.extents {
+                if let Some(leg) = loc.leg_on(slab_id) {
+                    if seen.insert(leg.slot_idx) {
+                        out.push((*vol, *vext, loc.clone()));
+                    }
+                }
+            }
+        }
+        out
     }
 
-    /// Every parity group with a leg on a given slab:
+    /// Every parity group with a leg on a given slab, one per slot:
     /// `(volume_id, stripe, group)`.
     pub fn slab_parity(&self, slab_id: SlabId) -> Vec<(VolumeId, u64, ParityGroup)> {
-        self.reverse
-            .iter()
-            .filter(|((sid, _), (_, vext))| *sid == slab_id && vext & PARITY_TAG != 0)
-            .filter_map(|((_, _), &(volume_id, tagged))| {
-                let (_, stripe) = parse_parity_vext(tagged)?;
-                let g = self.volumes.get(&volume_id)?.parity.get(&stripe)?.clone();
-                Some((volume_id, stripe, g))
-            })
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (vol, vmap) in &self.volumes {
+            for (stripe, g) in &vmap.parity {
+                if let Some(leg) = g.legs.iter().find(|l| l.slab_id == slab_id) {
+                    if seen.insert(leg.slot_idx) {
+                        out.push((*vol, *stripe, g.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any map references a leg on `slab_id` (stops at the first).
+    pub fn slab_in_use(&self, slab_id: SlabId) -> bool {
+        self.volumes.values().any(|m| m.all_legs().any(|l| l.slab_id == slab_id))
     }
 
     /// Iterate over all extent locations for a volume.
-    pub fn volume_extents(
-        &self,
-        volume_id: &VolumeId,
-    ) -> Option<impl Iterator<Item = (&u64, &ExtentLocation)>> {
+    pub fn volume_extents(&self, volume_id: &VolumeId) -> Option<impl Iterator<Item = (&u64, &ExtentLocation)>> {
         self.volumes.get(volume_id).map(|v| v.extents.iter())
     }
 

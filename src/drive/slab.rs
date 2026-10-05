@@ -1398,6 +1398,15 @@ impl Slab {
         self.persist_slot(slot_idx).await
     }
 
+    /// The (volume, recorded virtual extent) that owns an allocated slot,
+    /// as its slot entry says: the owner a share count belongs to (#155).
+    pub fn owner(&self, slot_idx: u32) -> Option<(VolumeId, u64)> {
+        match self.slots.get(slot_idx as usize) {
+            Some(s) if s.state.is_owned() => Some((s.volume_id, s.virtual_extent_idx)),
+            _ => None,
+        }
+    }
+
     /// How many references a slot has: 0 for one that is free or being
     /// erased (whose share-count field holds its erase level, #286).
     pub fn shares(&self, slot_idx: u32) -> u32 {

@@ -1299,7 +1299,7 @@ impl ThinVolumeHandle {
                     match slab.dec_ref(leg.slot_idx).await {
                         Ok(_) => synced.push((
                             leg,
-                            slab.shares(leg.slot_idx),
+                            slab.shares(leg.slot_idx), slab.owner(leg.slot_idx),
                         )),
                         Err(e) => tracing::warn!(
                             volume = %self.id, slot = leg.slot_idx,
@@ -1392,7 +1392,7 @@ impl ThinVolumeHandle {
             for leg in old_loc.legs() {
                 if let Some(slab) = reg.get_mut(&leg.slab_id) {
                     match slab.dec_ref(leg.slot_idx).await {
-                        Ok(_) => synced.push((leg, slab.shares(leg.slot_idx))),
+                        Ok(_) => synced.push((leg, slab.shares(leg.slot_idx), slab.owner(leg.slot_idx))),
                         Err(e) => tracing::warn!(
                             volume = %self.id, slot = leg.slot_idx,
                             "copy-on-write could not release the shared extent: {e}"
@@ -1410,20 +1410,19 @@ impl ThinVolumeHandle {
     /// so a source whose last clone diverged writes in place again rather
     /// than copying for nobody. Takes the GEM lock; the caller must not hold
     /// the registry.
-    async fn sync_refs(&self, counts: &[(Leg, u32)]) {
+    async fn sync_refs(&self, counts: &[(Leg, u32, Option<(VolumeId, u64)>)]) {
         if counts.is_empty() {
             return;
         }
         let mut gem = self.gem.write().await;
-        for (leg, count) in counts {
+        for (leg, count, owner) in counts {
             if *count == 0 {
                 continue;
             }
-            if let Some((vol, tagged)) = gem.reverse_lookup(leg.slab_id, leg.slot_idx) {
-                match super::gem::parse_parity_vext(tagged) {
-                    Some((_, stripe)) => gem.set_parity_ref(vol, stripe, *count),
-                    None => gem.set_extent_ref(vol, tagged, *count),
-                }
+            // The owner the slot table records (#155); its map is updated
+            // only while it still names this leg.
+            if let Some((vol, tagged)) = owner {
+                gem.set_owner_ref(*vol, *tagged, *leg, *count);
             }
         }
     }
@@ -1599,7 +1598,7 @@ impl ThinVolumeHandle {
                 for leg in &old.legs {
                     if let Some(slab) = reg.get_mut(&leg.slab_id) {
                         match slab.dec_ref(leg.slot_idx).await {
-                            Ok(_) => synced.push((*leg, slab.shares(leg.slot_idx))),
+                            Ok(_) => synced.push((*leg, slab.shares(leg.slot_idx), slab.owner(leg.slot_idx))),
                             Err(e) => tracing::warn!(volume = %self.id, slot = leg.slot_idx, "could not release shared parity: {e}"),
                         }
                     }
@@ -1788,7 +1787,7 @@ impl ThinVolumeHandle {
             for l in old.legs() {
                 if let Some(slab) = reg.get_mut(&l.slab_id) {
                     match slab.dec_ref(l.slot_idx).await {
-                        Ok(_) => synced.push((l, slab.shares(l.slot_idx))),
+                        Ok(_) => synced.push((l, slab.shares(l.slot_idx), slab.owner(l.slot_idx))),
                         Err(e) => tracing::warn!(volume = %self.id, slot = l.slot_idx, "could not release replaced member: {e}"),
                     }
                 }

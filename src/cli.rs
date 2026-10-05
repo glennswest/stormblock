@@ -5127,21 +5127,25 @@ where
     for (i, &source) in sources.iter().enumerate() {
         later[i] = 0;
         let after: usize = later.iter().sum();
+        // What is on the source, taken once per pass (#155: finding it walks
+        // every map) and worked through; a pass that leaves anything behind
+        // (an extent that changed under it) is followed by another.
+        let mut batch: std::collections::VecDeque<(crate::volume::VolumeId, u64, crate::volume::gem::Leg)> =
+            Default::default();
         loop {
             // Which slot, under the map's read lock only: the fence is waited
             // for with no lock held, since an I/O holding it may be waiting
             // for the map.
-            let pick = {
+            if batch.is_empty() {
                 let g = gem.read().await;
-                let on_source: Vec<_> = g
+                batch = g
                     .slab_extents(source)
                     .into_iter()
                     .filter_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
                     .collect();
-                report(on_source.len() + after);
-                on_source.into_iter().next()
-            };
-            let Some((vol, vext, leg)) = pick else { break };
+            }
+            report(batch.len() + after);
+            let Some((vol, vext, leg)) = batch.pop_front() else { break };
             // Foreground first (#269): when a volume has been read or written
             // since the last move, give the disk back for as long as that move
             // took (capped) before the next. An idle node moves at full speed.
