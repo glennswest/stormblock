@@ -124,12 +124,12 @@ async fn main() -> anyhow::Result<()> {
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
         let mut g2 = GlobalExtentMap::new();
-        let ra = heap();
         let vols: Vec<VolumeId> = (0..64).map(|_| VolumeId(uuid::Uuid::new_v4())).collect();
         let mut keys: Vec<(usize, u64)> = (0..i).map(|k| ((k % 64) as usize, (k / 64) * 3)).collect();
         keys.shuffle(&mut rng);
         let mut slots_perm: Vec<u32> = (0..i as u32).collect();
         slots_perm.shuffle(&mut rng);
+        let ra = heap();
         for (n, (v, vext)) in keys.iter().enumerate() {
             g2.insert(vols[*v], *vext, ExtentLocation::new(sid, slots_perm[n]));
         }
