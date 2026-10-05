@@ -63,17 +63,25 @@ async fn a_mirror_on_256_tib_drives_survives_one_failing_and_rebuilds() {
     let mut back = vec![0u8; data.len()];
     v.read(0, &mut back).await.unwrap();
     assert_eq!(back, data, "the other leg answers");
-    v.write(8 * MIB, &data[..MIB as usize]).await.unwrap();
+    // A write in place reaches both legs: the failed one is found out.
+    v.write(0, &data[..MIB as usize]).await.unwrap();
     v.flush().await.unwrap();
     assert_eq!(mgr.health(&id).await.unwrap().state, HealthState::Degraded);
 
     let report = mgr.resync_volume(id, false).await.unwrap();
     assert!(report.legs_added > 0, "{report:?}");
     assert_eq!(mgr.health(&id).await.unwrap().state, HealthState::Healthy);
-    let mut back = vec![0u8; 9 * MIB as usize];
+    // Every byte from the rebuilt pair, the failed drive still failed.
+    let mut back = vec![0u8; data.len()];
     v.read(0, &mut back).await.unwrap();
-    assert_eq!(&back[..data.len()], &data[..]);
-    assert_eq!(&back[data.len()..], &data[..MIB as usize]);
+    assert_eq!(back, data);
+    let gem = mgr.gem().read().await;
+    for vext in 0..8u64 {
+        let loc = gem.lookup(id, vext).unwrap();
+        assert_eq!(loc.leg_count(), 2);
+        assert!(loc.legs().all(|l| l.slab_id != leg_slab), "extent {vext} still on the failed drive");
+    }
+    drop(gem);
 
     // 768 TiB of drives; what they hold is the data, its copies and the
     // slabs' records - megabytes.
