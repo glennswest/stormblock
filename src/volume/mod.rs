@@ -1952,6 +1952,30 @@ impl VolumeManager {
     /// today stops fitting silently as it fills.
     pub async fn metadata_pressure(&self) -> Vec<MetadataPressure> {
         let mut out = Vec::new();
+        if !self.v1_sinks().await {
+            // Every metadata slab in format v2 (#158): what each store holds,
+            // with no map read.
+            let reg = self.registry.read().await;
+            let st = self.v2.lock().unwrap_or_else(|e| e.into_inner());
+            for slab_id in &self.metadata_slabs {
+                let sink = persist_v2::Sink::Slab(*slab_id);
+                let (needed, capacity) = match st.usage(sink) {
+                    Some(u) => (u.pages_used * metav2::PAGE, u.pages_total * metav2::PAGE),
+                    None => (0, reg.get(slab_id).map(|s| s.metadata_capacity()).unwrap_or(0)),
+                };
+                out.push(MetadataPressure {
+                    slab_id: slab_id.0.to_string(),
+                    volumes: st.held_count(sink),
+                    needed_bytes: needed,
+                    capacity_bytes: capacity,
+                    fits: capacity > 0 && needed * 10 <= capacity * 9,
+                });
+            }
+            return out;
+        }
+        if let Err(e) = gem::ensure_all_resident(&self.gem).await {
+            tracing::error!("metadata pressure: loading extent maps: {e}");
+        }
         let reg = self.registry.read().await;
         for (slab_id, meta) in self.per_slab_metadata().await {
             if reg.get(&slab_id).is_some_and(|s| s.format_version() == crate::drive::slab::SLAB_VERSION_2) {
@@ -2114,6 +2138,9 @@ impl VolumeManager {
         for (_, id) in idle {
             if resident <= budget {
                 break;
+            }
+            if gem.is_cold(&id) {
+                continue;
             }
             let Some(size) = gem.get_volume_map(&id).map(|m| (m.len() + m.parity.len()) as u64 * BYTES_PER_EXTENT)
             else {

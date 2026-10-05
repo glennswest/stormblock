@@ -430,6 +430,7 @@ impl GlobalExtentMap {
     }
 
     /// Insert or update an extent mapping.
+    #[track_caller]
     pub fn insert(&mut self, volume_id: VolumeId, vext_idx: u64, location: ExtentLocation) {
         self.check(&volume_id);
         self.volumes.entry(volume_id).or_default().extents.insert(vext_idx, location);
@@ -454,6 +455,7 @@ impl GlobalExtentMap {
     }
 
     /// Record a stripe's parity legs.
+    #[track_caller]
     pub fn insert_parity(&mut self, volume_id: VolumeId, stripe: u64, group: ParityGroup) {
         self.check(&volume_id);
         self.volumes.entry(volume_id).or_default().parity.insert(stripe, group);
@@ -465,11 +467,13 @@ impl GlobalExtentMap {
         self.insert_parity(volume_id, stripe, group);
     }
 
+    #[track_caller]
     pub fn lookup_parity(&self, volume_id: VolumeId, stripe: u64) -> Option<&ParityGroup> {
         self.check(&volume_id);
         self.volumes.get(&volume_id)?.parity.get(&stripe)
     }
 
+    #[track_caller]
     pub fn remove_parity(&mut self, volume_id: VolumeId, stripe: u64) -> Option<ParityGroup> {
         self.check(&volume_id);
         let vmap = self.volumes.get_mut(&volume_id)?;
@@ -481,6 +485,7 @@ impl GlobalExtentMap {
         Some(g)
     }
 
+    #[track_caller]
     pub fn inc_parity_ref(&mut self, volume_id: VolumeId, stripe: u64) {
         self.check(&volume_id);
         if let Some(g) = self.volumes.get_mut(&volume_id).and_then(|m| m.parity.get_mut(&stripe)) {
@@ -494,6 +499,7 @@ impl GlobalExtentMap {
     /// The recorded count is what makes a write copy-on-write instead of
     /// landing in place, so re-sharing one extent must bump it on both sides
     /// exactly as cloning a whole map does.
+    #[track_caller]
     pub fn inc_extent_ref(&mut self, volume_id: VolumeId, vext_idx: u64) {
         self.check(&volume_id);
         if let Some(m) = self.volumes.get_mut(&volume_id) {
@@ -505,6 +511,7 @@ impl GlobalExtentMap {
 
     /// Set the recorded share count of an extent — after a slot's count
     /// moved on disk, so the map agrees on whether a write must copy.
+    #[track_caller]
     pub fn set_extent_ref(&mut self, volume_id: VolumeId, vext_idx: u64, ref_count: u32) {
         self.check(&volume_id);
         if let Some(m) = self.volumes.get_mut(&volume_id) {
@@ -514,6 +521,7 @@ impl GlobalExtentMap {
         }
     }
 
+    #[track_caller]
     pub fn set_parity_ref(&mut self, volume_id: VolumeId, stripe: u64, ref_count: u32) {
         self.check(&volume_id);
         if let Some(g) = self.volumes.get_mut(&volume_id).and_then(|m| m.parity.get_mut(&stripe)) {
@@ -527,7 +535,13 @@ impl GlobalExtentMap {
     /// slot; the maps say what they reference). `tagged` is the owner's
     /// extent as the slot records it: a parity slot's is `parity_vext`.
     pub fn set_owner_ref(&mut self, owner: VolumeId, tagged: u64, leg: Leg, ref_count: u32) {
-        self.check(&owner);
+        if self.cold.contains_key(&owner) {
+            // A map not in memory keeps the count it had (#158). This only
+            // ever lowers a count (after a copy-on-write gave a share back),
+            // and a count too high costs a needless copy, never data — the
+            // same reason `raise_shares` only raises.
+            return;
+        }
         match parse_parity_vext(tagged) {
             Some((_, stripe)) => {
                 if let Some(g) = self.volumes.get_mut(&owner).and_then(|m| m.parity.get_mut(&stripe)) {
@@ -555,6 +569,7 @@ impl GlobalExtentMap {
     }
 
     /// Look up where a volume's virtual extent lives.
+    #[track_caller]
     pub fn lookup(&self, volume_id: VolumeId, vext_idx: u64) -> Option<ExtentLocation> {
         self.check(&volume_id);
         self.volumes.get(&volume_id)?.extents.get(&vext_idx)
@@ -562,6 +577,7 @@ impl GlobalExtentMap {
 
     /// Replace one leg of an extent with another slot (a leg moved or
     /// rebuilt), keeping the rest of the location as it is.
+    #[track_caller]
     pub fn replace_leg(&mut self, volume_id: VolumeId, vext_idx: u64, old: Leg, new: Leg) -> bool {
         self.check(&volume_id);
         let Some(m) = self.volumes.get_mut(&volume_id) else { return false };
@@ -587,6 +603,7 @@ impl GlobalExtentMap {
     }
 
     /// Add a mirror leg to an extent (a resync filling in a missing copy).
+    #[track_caller]
     pub fn add_leg(&mut self, volume_id: VolumeId, vext_idx: u64, leg: Leg) -> bool {
         self.check(&volume_id);
         let Some(m) = self.volumes.get_mut(&volume_id) else { return false };
@@ -606,6 +623,7 @@ impl GlobalExtentMap {
 
     /// Drop a leg from an extent without touching the slot (the caller frees
     /// it, or it is already gone with its slab). Refuses to drop the last leg.
+    #[track_caller]
     pub fn drop_leg(&mut self, volume_id: VolumeId, vext_idx: u64, leg: Leg) -> bool {
         self.check(&volume_id);
         let Some(m) = self.volumes.get_mut(&volume_id) else { return false };
@@ -634,6 +652,7 @@ impl GlobalExtentMap {
     }
 
     /// Replace one parity leg of a stripe.
+    #[track_caller]
     pub fn replace_parity_leg(&mut self, volume_id: VolumeId, stripe: u64, old: Leg, new: Leg) -> bool {
         self.check(&volume_id);
         let Some(g) = self.volumes.get_mut(&volume_id).and_then(|m| m.parity.get_mut(&stripe)) else {
@@ -654,6 +673,7 @@ impl GlobalExtentMap {
     /// every map that named the old slot must name the new one, or the clones
     /// keep pointing at a slab that is gone. One sweep, however many legs
     /// moved. Returns how many references were rewritten.
+    #[track_caller]
     pub fn rewrite_legs(&mut self, moves: &HashMap<Leg, Leg>) -> usize {
         self.check_all();
         if moves.is_empty() {
@@ -708,6 +728,7 @@ impl GlobalExtentMap {
     /// Add `new` as a mirror leg beside `existing` in every map that names
     /// `existing` — the golden and every clone sharing the slot. Returns how
     /// many maps gained the leg.
+    #[track_caller]
     pub fn add_leg_beside(&mut self, existing: Leg, new: Leg) -> usize {
         self.check_all();
         let mut added = 0usize;
@@ -731,6 +752,7 @@ impl GlobalExtentMap {
 
     /// Drop `leg` from every map that names it, never leaving a location
     /// with no legs. Returns how many maps lost it.
+    #[track_caller]
     pub fn drop_leg_everywhere(&mut self, leg: Leg) -> usize {
         self.check_all();
         let mut dropped = 0usize;
@@ -766,6 +788,7 @@ impl GlobalExtentMap {
     }
 
     /// Remove an extent mapping.
+    #[track_caller]
     pub fn remove(&mut self, volume_id: VolumeId, vext_idx: u64) -> Option<ExtentLocation> {
         self.check(&volume_id);
         let vmap = self.volumes.get_mut(&volume_id)?;
@@ -780,6 +803,7 @@ impl GlobalExtentMap {
     /// Give one volume's whole map to another id — a restripe built the new
     /// placement under a scratch id and the real volume now takes it.
     /// Whatever `to` had is returned to the caller to release.
+    #[track_caller]
     pub fn rename_volume(&mut self, from: VolumeId, to: VolumeId) -> Option<VolumeExtentMap> {
         self.check(&to);
         self.check(&from);
@@ -792,6 +816,7 @@ impl GlobalExtentMap {
     }
 
     /// Remove all extents for a volume. Returns the removed extent map.
+    #[track_caller]
     pub fn remove_volume(&mut self, volume_id: VolumeId) -> Option<VolumeExtentMap> {
         self.check(&volume_id);
         self.touch_whole(volume_id);
@@ -799,6 +824,7 @@ impl GlobalExtentMap {
     }
 
     /// Get the volume extent map for a given volume.
+    #[track_caller]
     pub fn get_volume_map(&self, volume_id: &VolumeId) -> Option<&VolumeExtentMap> {
         self.check(volume_id);
         self.volumes.get(volume_id)
@@ -807,6 +833,7 @@ impl GlobalExtentMap {
     /// Some extent that references a slot, by walking the maps: the first
     /// found. A parity slot answers with a `parity_vext`-tagged index. For
     /// tests and diagnostics; who *owns* a slot is the slot table's to say.
+    #[track_caller]
     pub fn reverse_lookup(&self, slab_id: SlabId, slot_idx: u64) -> Option<(VolumeId, u64)> {
         self.check_all();
         let leg = Leg::new(slab_id, slot_idx);
@@ -826,6 +853,7 @@ impl GlobalExtentMap {
     }
 
     /// Clone a volume's extent map for snapshot (bumps ref_count in the clone).
+    #[track_caller]
     pub fn clone_volume_map(&mut self, source_id: VolumeId, dest_id: VolumeId) -> Option<VolumeExtentMap> {
         self.check(&dest_id);
         self.check(&source_id);
@@ -866,6 +894,7 @@ impl GlobalExtentMap {
     /// Returns the legs whose slab ref counts the caller must raise. The GEM's
     /// own counts are raised here, on both sides: the destination's copy
     /// because it now shares, and the source's because it is now shared.
+    #[track_caller]
     pub fn gather_into(&mut self, source_id: VolumeId, dest_id: VolumeId, dest_base_vext: u64) -> Vec<Leg> {
         self.check(&dest_id);
         self.check(&source_id);
@@ -914,6 +943,7 @@ impl GlobalExtentMap {
     }
 
     /// Number of distinct slots the maps reference (a walk).
+    #[track_caller]
     pub fn reverse_entries(&self) -> usize {
         self.check_all();
         let mut seen = std::collections::HashSet::new();
@@ -926,6 +956,7 @@ impl GlobalExtentMap {
     }
 
     /// List all volume IDs.
+    #[track_caller]
     pub fn volume_ids(&self) -> Vec<VolumeId> {
         self.check_all();
         self.volumes.keys().copied().collect()
@@ -938,6 +969,7 @@ impl GlobalExtentMap {
     ///
     /// A walk of every map (#155): callers take the list once per pass, not
     /// once per extent they move.
+    #[track_caller]
     pub fn slab_extents(&self, slab_id: SlabId) -> Vec<(VolumeId, u64, ExtentLocation)> {
         self.check_all();
         let mut seen = std::collections::HashSet::new();
@@ -956,6 +988,7 @@ impl GlobalExtentMap {
 
     /// Every parity group with a leg on a given slab, one per slot:
     /// `(volume_id, stripe, group)`.
+    #[track_caller]
     pub fn slab_parity(&self, slab_id: SlabId) -> Vec<(VolumeId, u64, ParityGroup)> {
         self.check_all();
         let mut seen = std::collections::HashSet::new();
@@ -981,6 +1014,7 @@ impl GlobalExtentMap {
     }
 
     /// Iterate over all extent locations for a volume.
+    #[track_caller]
     pub fn volume_extents(&self, volume_id: &VolumeId) -> Option<impl Iterator<Item = (u64, ExtentLocation)> + '_> {
         self.check(volume_id);
         self.volumes.get(volume_id).map(|v| v.extents.iter())

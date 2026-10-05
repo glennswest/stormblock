@@ -126,6 +126,11 @@ impl V2State {
         next == self.next_ticket && self.sinks.values().all(|s| !s.need_full)
     }
 
+    /// How many volumes a sink's store holds.
+    pub(super) fn held_count(&self, sink: Sink) -> usize {
+        self.sinks.get(&sink).map(|s| s.held.len()).unwrap_or(0)
+    }
+
     /// Whether some store holds `id`.
     pub(super) fn held(&self, id: &VolumeId) -> bool {
         self.sinks.values().any(|s| s.held.contains_key(id))
