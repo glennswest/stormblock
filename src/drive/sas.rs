@@ -483,7 +483,7 @@ mod direct_tests {
         };
         let dev = SasDevice::open_file_direct(&path, 4096).await.unwrap();
         let slab = Slab::open(Arc::new(dev)).await.unwrap();
-        assert_eq!(slab.find_slot(vol, 3), Some(slot));
+        assert_eq!(slab.find_slot(vol, 3).await, Some(slot));
         let mut back = vec![0u8; 1 << 20];
         slab.read_slot(slot, 0, &mut back).await.unwrap();
         assert_eq!(back, pattern(1 << 20, 42));

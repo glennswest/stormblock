@@ -3742,7 +3742,7 @@ mod redundancy_tests {
         p.write(0, &pattern(2, slot as usize)).await.unwrap();
         p.write(slot, &pattern(3, slot as usize)).await.unwrap();
 
-        let rebuilt = GlobalExtentMap::rebuild_from_slabs(reg.read().await.iter());
+        let rebuilt = { let r = reg.read().await; GlobalExtentMap::rebuild_from_slabs(r.iter()).await.unwrap() };
         let ml = rebuilt.lookup(m.volume_id(), 0).unwrap();
         assert_eq!(ml.leg_count(), 2);
         assert!(ml.same_slots(&loc(&gem, m.volume_id(), 0).await));

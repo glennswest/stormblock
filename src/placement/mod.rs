@@ -1703,7 +1703,7 @@ mod tests {
         assert_eq!(engine.owed_count(), 1);
         engine.release_owed(&mut registry).await;
         let src_slab = registry.get(&slab_a_id).unwrap();
-        assert_eq!(src_slab.find_slot(vol, 0), None);
+        assert_eq!(src_slab.find_slot(vol, 0).await, None);
 
         // Reverse index should point to new location
         assert!(gem.reverse_lookup(slab_a_id, slot).is_none());

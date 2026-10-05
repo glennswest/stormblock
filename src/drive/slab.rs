@@ -1385,7 +1385,7 @@ impl Slab {
     /// Find the slot a volume's virtual extent was allocated in, by reading
     /// the table (#155: there is no resident index of it; for tests and
     /// diagnostics).
-    pub async fn find_slot(&self, volume_id: VolumeId, vext_idx: u64) -> Option<u32> {
+    pub async fn find_slot(&self, volume_id: VolumeId, vext_idx: u64).await -> Option<u32> {
         self.slots_in_use()
             .await
             .ok()?
@@ -1476,7 +1476,7 @@ impl Slab {
 
     /// The entry of a slot as the engine has it now (read from the table
     /// when it has not changed in memory).
-    pub async fn get_slot(&self, slot_idx: u32) -> Option<Slot> {
+    pub async fn get_slot(&self, slot_idx: u32).await -> Option<Slot> {
         self.in_range(slot_idx).ok()?;
         self.slot_now(slot_idx).await.ok()
     }
@@ -2068,13 +2068,13 @@ mod tests {
         for (i, &s) in slots.iter().enumerate() {
             let expected = if bumped.contains(&s) || i == 99 { 2 } else { 1 };
             assert_eq!(
-                reopened.get_slot(s).unwrap().ref_count,
+                reopened.get_slot(s).await.unwrap().ref_count,
                 expected,
                 "slot {s} (index {i}) refcount"
             );
             // Neighbours in a rewritten sector must keep their identity.
-            assert_eq!(reopened.get_slot(s).unwrap().volume_id, vol);
-            assert_eq!(reopened.get_slot(s).unwrap().virtual_extent_idx, i as u64);
+            assert_eq!(reopened.get_slot(s).await.unwrap().volume_id, vol);
+            assert_eq!(reopened.get_slot(s).await.unwrap().virtual_extent_idx, i as u64);
         }
 
         cleanup(&path);
@@ -2118,7 +2118,7 @@ mod tests {
         let reopened = Slab::open(dev.clone()).await.unwrap();
         assert_eq!(reopened.free_slots(), free_after_alloc + slots.len() as u64);
         for &s in &slots {
-            assert_eq!(reopened.get_slot(s).unwrap().state, SlotState::Free);
+            assert_eq!(reopened.get_slot(s).await.unwrap().state, SlotState::Free);
         }
 
         cleanup(&path);
@@ -2151,13 +2151,13 @@ mod tests {
 
         let reopened = Slab::open(dev.clone()).await.unwrap();
         for (i, &s) in b_slots.iter().enumerate() {
-            let slot = reopened.get_slot(s).unwrap();
+            let slot = reopened.get_slot(s).await.unwrap();
             assert_eq!(slot.ref_count, 1, "untouched neighbour {s} refcount");
             assert_eq!(slot.volume_id, vol_b, "untouched neighbour {s} volume");
             assert_eq!(slot.virtual_extent_idx, i as u64);
         }
         for &s in &a_slots {
-            assert_eq!(reopened.get_slot(s).unwrap().ref_count, 2);
+            assert_eq!(reopened.get_slot(s).await.unwrap().ref_count, 2);
         }
 
         cleanup(&path);
@@ -2178,20 +2178,20 @@ mod tests {
         // An out-of-range index anywhere in the batch fails it whole, leaving
         // the valid entries alone rather than half-applied.
         assert!(slab.inc_ref_batch(&[good, u32::MAX]).await.is_err());
-        assert_eq!(slab.get_slot(good).unwrap().ref_count, 1);
+        assert_eq!(slab.get_slot(good).await.unwrap().ref_count, 1);
 
         // Same for a free slot.
         let free_idx = slab.allocate(vol, 1).await.unwrap();
         slab.free(free_idx).await.unwrap();
         assert!(slab.inc_ref_batch(&[good, free_idx]).await.is_err());
-        assert_eq!(slab.get_slot(good).unwrap().ref_count, 1);
+        assert_eq!(slab.get_slot(good).await.unwrap().ref_count, 1);
 
         // Release is deliberately *not* all-or-nothing: the stale entry costs
         // itself, and the healthy slot is still released.
         let out = slab.dec_ref_batch(&[good, free_idx]).await.unwrap();
         assert_eq!(out.freed, 1);
         assert_eq!(out.rejected, vec![(free_idx, DecRefReject::AlreadyFree)]);
-        assert_eq!(slab.get_slot(good).unwrap().state, SlotState::Free);
+        assert_eq!(slab.get_slot(good).await.unwrap().state, SlotState::Free);
 
         cleanup(&path);
     }
@@ -2232,7 +2232,7 @@ mod tests {
             "all 12 slots are back, not zero of them"
         );
         for &s in &slots {
-            assert_eq!(slab.get_slot(s).unwrap().state, SlotState::Free);
+            assert_eq!(slab.get_slot(s).await.unwrap().state, SlotState::Free);
         }
 
         cleanup(&path);
@@ -2262,7 +2262,7 @@ mod tests {
                 (slot, DecRefReject::Duplicate)
             ]
         );
-        assert_eq!(slab.get_slot(slot).unwrap().ref_count, 0);
+        assert_eq!(slab.get_slot(slot).await.unwrap().ref_count, 0);
         assert_eq!(slab.free_slots(), free_before + 1);
 
         cleanup(&path);
@@ -2460,14 +2460,14 @@ mod tests {
         assert_eq!(cont.free_slots(), total - 2);
 
         // Find
-        assert_eq!(cont.find_slot(vol, 0), Some(slot0));
-        assert_eq!(cont.find_slot(vol, 1), Some(slot1));
-        assert_eq!(cont.find_slot(vol, 999), None);
+        assert_eq!(cont.find_slot(vol, 0).await, Some(slot0));
+        assert_eq!(cont.find_slot(vol, 1).await, Some(slot1));
+        assert_eq!(cont.find_slot(vol, 999).await, None);
 
         // Free
         cont.free(slot0).await.unwrap();
         assert_eq!(cont.free_slots(), total - 1);
-        assert_eq!(cont.find_slot(vol, 0), None);
+        assert_eq!(cont.find_slot(vol, 0).await, None);
 
         cleanup(&path);
     }
@@ -2511,22 +2511,22 @@ mod tests {
         let total = cont.total_slots();
 
         let slot = cont.allocate(vol, 0).await.unwrap();
-        assert_eq!(cont.get_slot(slot).unwrap().ref_count, 1);
+        assert_eq!(cont.get_slot(slot).await.unwrap().ref_count, 1);
 
         cont.inc_ref(slot).await.unwrap();
-        assert_eq!(cont.get_slot(slot).unwrap().ref_count, 2);
+        assert_eq!(cont.get_slot(slot).await.unwrap().ref_count, 2);
 
         cont.inc_ref(slot).await.unwrap();
-        assert_eq!(cont.get_slot(slot).unwrap().ref_count, 3);
+        assert_eq!(cont.get_slot(slot).await.unwrap().ref_count, 3);
 
         // dec_ref doesn't free until 0
         let freed = cont.dec_ref(slot).await.unwrap();
         assert!(!freed);
-        assert_eq!(cont.get_slot(slot).unwrap().ref_count, 2);
+        assert_eq!(cont.get_slot(slot).await.unwrap().ref_count, 2);
 
         let freed = cont.dec_ref(slot).await.unwrap();
         assert!(!freed);
-        assert_eq!(cont.get_slot(slot).unwrap().ref_count, 1);
+        assert_eq!(cont.get_slot(slot).await.unwrap().ref_count, 1);
 
         // Final dec_ref frees the slot
         let freed = cont.dec_ref(slot).await.unwrap();
@@ -2577,14 +2577,14 @@ mod tests {
 
         assert_ne!(slot_a0, slot_b0);
         assert_ne!(slot_a0, slot_a1);
-        assert_eq!(cont.find_slot(vol_a, 0), Some(slot_a0));
-        assert_eq!(cont.find_slot(vol_b, 0), Some(slot_b0));
-        assert_eq!(cont.find_slot(vol_a, 1), Some(slot_a1));
+        assert_eq!(cont.find_slot(vol_a, 0).await, Some(slot_a0));
+        assert_eq!(cont.find_slot(vol_b, 0).await, Some(slot_b0));
+        assert_eq!(cont.find_slot(vol_a, 1).await, Some(slot_a1));
 
         // Free vol_a slot 0, vol_b slot 0 should still be there
         cont.free(slot_a0).await.unwrap();
-        assert_eq!(cont.find_slot(vol_a, 0), None);
-        assert_eq!(cont.find_slot(vol_b, 0), Some(slot_b0));
+        assert_eq!(cont.find_slot(vol_a, 0).await, None);
+        assert_eq!(cont.find_slot(vol_b, 0).await, Some(slot_b0));
 
         cleanup(&path);
     }
@@ -2607,8 +2607,8 @@ mod tests {
 
         // Re-open and verify
         let cont2 = Slab::open(dev).await.unwrap();
-        assert_eq!(cont2.find_slot(vol, 42), Some(slot_idx));
-        let slot = cont2.get_slot(slot_idx).unwrap();
+        assert_eq!(cont2.find_slot(vol, 42).await, Some(slot_idx));
+        let slot = cont2.get_slot(slot_idx).await.unwrap();
         assert_eq!(slot.state, SlotState::Allocated);
         assert_eq!(slot.volume_id, vol);
         assert_eq!(slot.virtual_extent_idx, 42);
@@ -2848,8 +2848,8 @@ mod erase_tests {
         slab.write_slot(secret, 0, &vec![0xAB; SLOT as usize]).await.unwrap();
         slab.free(secret).await.unwrap();
 
-        assert_eq!(slab.get_slot(secret).unwrap().state, SlotState::Erasing);
-        assert_eq!(slab.shares(secret), 0);
+        assert_eq!(slab.get_slot(secret).await.unwrap().state, SlotState::Erasing);
+        assert_eq!(slab.shares(secret).await, 0);
         assert_eq!(slab.erasing_slots(), 1);
         assert_eq!(slab.erasing_for(vol), 1);
         assert!(slab.allocate(vol, 999).await.is_err(), "an erasing slot was handed out");
@@ -2859,7 +2859,7 @@ mod erase_tests {
         slab.sync().await.unwrap();
         drop(slab);
         let mut slab = Slab::open(dev.clone()).await.unwrap();
-        assert_eq!(slab.get_slot(secret).unwrap().state, SlotState::Erasing);
+        assert_eq!(slab.get_slot(secret).await.unwrap().state, SlotState::Erasing);
         assert_eq!(slab.erasing_for(vol), 1);
         assert!(slab.allocate(vol, 999).await.is_err());
         assert!(raw(&dev, &slab, secret).await.iter().all(|&b| b == 0xAB));
@@ -2891,7 +2891,7 @@ mod erase_tests {
         let out = slab.dec_ref_batch(&[a]).await.unwrap();
         slab.set_erase_override(None);
         assert_eq!(out.freed, 1);
-        assert_eq!(slab.get_slot(a).unwrap().state, SlotState::Erasing);
+        assert_eq!(slab.get_slot(a).await.unwrap().state, SlotState::Erasing);
         let job = slab.take_erasing(8).pop().unwrap();
         assert_eq!(job.level, EraseLevel::Dod3);
         crate::volume::erase::erase_one(&job).await.unwrap();
@@ -2901,7 +2901,7 @@ mod erase_tests {
 
         // No level, no override: freed as before #286.
         slab.free(b).await.unwrap();
-        assert_eq!(slab.get_slot(b).unwrap().state, SlotState::Free);
+        assert_eq!(slab.get_slot(b).await.unwrap().state, SlotState::Free);
         assert_eq!(slab.erasing_slots(), 0);
     }
 

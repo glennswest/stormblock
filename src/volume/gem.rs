@@ -719,7 +719,7 @@ impl GlobalExtentMap {
         }
 
         for ((vol, vext), mut legs) in seen {
-            legs.sort_by_key(|l| (std::cmp::Reverse(l.0), l.1.slab_id, l.1.slot_idx));
+            legs.sort_by_key(|l| (std::cmp::Reverse(l.0), l.1.slab_id.0, l.1.slot_idx));
             let (gen, primary, ref_count) = legs[0];
             let mirrors = legs[1..]
                 .iter()

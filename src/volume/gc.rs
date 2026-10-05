@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(report.live, 1);
         assert!(report.orphans.is_empty());
         assert_eq!(
-            reg.get(&slab_id).unwrap().get_slot(slot).unwrap().state,
+            reg.get(&slab_id).unwrap().get_slot(slot).await.unwrap().state,
             SlotState::Allocated
         );
         cleanup(&path);

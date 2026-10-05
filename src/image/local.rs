@@ -1121,7 +1121,7 @@ mod tests {
         let data = Slab::open(Arc::new(part)).await.unwrap();
         assert_eq!(data.total_slots(), now);
         assert!(data.is_data());
-        assert_eq!(data.find_slot(vol, 7), Some(slot), "ownership survived the grow");
+        assert_eq!(data.find_slot(vol, 7).await, Some(slot), "ownership survived the grow");
         let mut buf = vec![0u8; 4096];
         data.read_slot(slot, 0, &mut buf).await.unwrap();
         assert!(buf.iter().all(|&b| b == 0x5A), "the data survived the grow");
