@@ -5132,17 +5132,37 @@ where
         // (an extent that changed under it) is followed by another.
         let mut batch: std::collections::VecDeque<(crate::volume::VolumeId, u64, crate::volume::gem::Leg)> =
             Default::default();
+        // Moves made by the pass under way, and whether it had anything.
+        let (mut pass_moved, mut pass_had) = (0u64, false);
         loop {
             // Which slot, under the map's read lock only: the fence is waited
             // for with no lock held, since an I/O holding it may be waiting
             // for the map.
             if batch.is_empty() {
+                // A pass that found extents and moved none: they all changed
+                // under it. Past 64 such passes in a row, that counts as one
+                // that would not move.
+                if pass_had && pass_moved == 0 {
+                    again += 1;
+                    if again >= 64 {
+                        again = 0;
+                        failed += 1;
+                        tracing::error!("flow-over: extents on {source:?} keep changing under the move");
+                        if failed > 16 {
+                            give_up().await;
+                            return None;
+                        }
+                    }
+                } else {
+                    again = 0;
+                }
                 let g = gem.read().await;
                 batch = g
                     .slab_extents(source)
                     .into_iter()
                     .filter_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
                     .collect();
+                (pass_moved, pass_had) = (0, !batch.is_empty());
             }
             report(batch.len() + after);
             let Some((vol, vext, leg)) = batch.pop_front() else { break };
@@ -5166,18 +5186,16 @@ where
             match res {
                 Ok(_) => {
                     moved += 1;
-                    again = 0;
+                    pass_moved += 1;
                 }
-                // The extent changed while the fence was awaited (a
-                // copy-on-write took it, a discard freed it): look again.
-                Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. })
-                    if again < 64 =>
-                {
-                    again += 1;
+                // The extent changed since the pass listed it (a
+                // copy-on-write took it, a discard freed it, another map's
+                // move took the slot): the next pass lists it again if it
+                // is still on the source.
+                Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. }) => {
                     continue;
                 }
                 Err(e) => {
-                    again = 0;
                     failed += 1;
                     tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
                     // A handful of bad extents is a disk worth giving up
