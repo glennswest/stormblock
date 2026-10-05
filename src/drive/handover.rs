@@ -65,6 +65,12 @@ pub struct FlowOver {
     /// it — that is the whole point of taking the drive — and it is named here
     /// so the successor does not have to guess which of the two it is.
     pub data_slab: String,
+    /// The data half moves in the background too (#285): the successor
+    /// empties the appliance's data slabs into `data_slab` after the system
+    /// half, as the volumes on them are written. Set by an initramfs that did
+    /// not seed it before exporting; absent (an older record) means it did.
+    #[serde(default)]
+    pub data_flow: bool,
 }
 
 /// Where `boot-claim` leaves the install it was asked for (#148): written
@@ -271,6 +277,7 @@ mod tests {
             disk: "/dev/sda".into(),
             system_slab: "8aa6b985-3f4d-4130-99cb-154b56dcb68b".into(),
             data_slab: "f86ee673-57da-4aa5-961c-168c263de265".into(),
+            data_flow: false,
         });
         let bytes = serde_json::to_vec(&rec).expect("encodes");
         assert_eq!(serde_json::from_slice::<Record>(&bytes).expect("decodes"), rec);

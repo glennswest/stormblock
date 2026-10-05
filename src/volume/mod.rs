@@ -195,7 +195,7 @@ pub struct VolumeManager {
     /// still names everything the node boots — and the next boot finishes the
     /// flow-over from a fresh clone (#171) instead of finding volumes missing
     /// and re-installing.
-    flowing_into: std::sync::Mutex<Option<(SlabId, Vec<SlabId>)>>,
+    flowing_into: std::sync::Mutex<Vec<(SlabId, Vec<SlabId>)>>,
     /// What serves each volume as a device right now (#267): a held volume
     /// is not deleted, whichever path asks.
     holds: holds::ServeHolds,
@@ -242,7 +242,7 @@ impl VolumeManager {
             owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
-            flowing_into: std::sync::Mutex::new(None),
+            flowing_into: std::sync::Mutex::new(Vec::new()),
             holds: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
@@ -267,7 +267,7 @@ impl VolumeManager {
             owners: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
-            flowing_into: std::sync::Mutex::new(None),
+            flowing_into: std::sync::Mutex::new(Vec::new()),
             holds: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
@@ -564,7 +564,11 @@ impl VolumeManager {
         if std::env::var_os("RECORD_FLOW_OFF_258").is_some() {
             return;
         }
-        *self.flowing_into.lock().unwrap() = Some((dest, sources));
+        // One entry per destination: the system half and, since #285, the
+        // data half flow at once, each into its own local slab.
+        let mut f = self.flowing_into.lock().unwrap();
+        f.retain(|(d, _)| *d != dest);
+        f.push((dest, sources));
     }
 
     /// Which slab, if any, this manager writes its metadata into. The first
@@ -2096,9 +2100,8 @@ impl VolumeManager {
             .collect();
 
         let flowing = self.flowing_into.lock().unwrap().clone();
-        let flows_into = |slab_id: &SlabId, on: &HashSet<SlabId>| match &flowing {
-            Some((dest, sources)) => dest == slab_id && sources.iter().any(|s| on.contains(s)),
-            None => false,
+        let flows_into = |slab_id: &SlabId, on: &HashSet<SlabId>| {
+            flowing.iter().any(|(dest, sources)| dest == slab_id && sources.iter().any(|s| on.contains(s)))
         };
 
         self.metadata_slabs

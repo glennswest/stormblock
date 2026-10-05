@@ -4572,6 +4572,8 @@ pub(crate) async fn take_local_disk(
             disk: disk.to_string(),
             system_slab: system_id.0.to_string(),
             data_slab: data_id.0.to_string(),
+            // The kept data half is not moved here at all (below).
+            data_flow: false,
         };
         {
             let mut reg = mgr.registry().write().await;
@@ -4677,10 +4679,11 @@ pub(crate) async fn take_local_disk(
     // the structure, which is fast and bounded, and writes down what
     // it laid; the engine that adopts the devices moves the extents
     // at its leisure and is still there when they land.
-    let flow = crate::drive::handover::FlowOver {
+    let mut flow = crate::drive::handover::FlowOver {
         disk: disk.to_string(),
         system_slab: system_id.0.to_string(),
         data_slab: data_id.0.to_string(),
+        data_flow: false,
     };
     {
         let mut reg = mgr.registry().write().await;
@@ -4701,7 +4704,24 @@ pub(crate) async fn take_local_disk(
     // above keeps a data slab that holds this node's records, and
     // writing this manager's view of it would replace them.
     mgr.keep_metadata_in_first(&[data_id, system_id]);
-    seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
+    // **The data half moves in the background** (#285), like the system
+    // half: the engine that adopts this boot empties the appliance's data
+    // slabs into this one after the goldens, while the volumes on them are
+    // mounted and written. Seeding it here, before anything is exported,
+    // held the whole boot: 166 s of the Dell's 352 s install (11.79). It was
+    // done here because moving a written slab corrupted it — the race the
+    // slot fence closed (#239) — and the sources are quarantined from the
+    // handover on, so a write to an extent still on the appliance goes to
+    // this disk and the flow-over leaves it be. `STORMBLOCK_SEED_DATA_SYNC`
+    // seeds it here, as before.
+    if std::env::var_os("STORMBLOCK_SEED_DATA_SYNC").is_some() {
+        seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
+    } else {
+        flow.data_flow = true;
+        println!(
+            "Flow-over: the data half moves onto {disk} in the background, after the system half (#285)"
+        );
+    }
     println!(
         "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
     );
@@ -4972,25 +4992,40 @@ pub(crate) async fn quarantine_flow_sources(
     let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(crate::drive::slab::SlabId) else {
         return;
     };
-    let sources: Vec<_> = {
+    // The data half too, when it moves in the background (#285).
+    let data_dest = if flow.data_flow {
+        uuid::Uuid::parse_str(&flow.data_slab).ok().map(crate::drive::slab::SlabId)
+    } else {
+        None
+    };
+    let (sources, data_sources): (Vec<_>, Vec<_>) = {
         let mut reg = mgr.registry().write().await;
         let sources: Vec<_> =
             reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect();
-        for s in &sources {
+        let data_sources: Vec<_> = match data_dest {
+            Some(dd) => reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect(),
+            None => Vec::new(),
+        };
+        for s in sources.iter().chain(&data_sources) {
             reg.set_quarantined(*s, true);
         }
-        sources
+        (sources, data_sources)
     };
-    if !sources.is_empty() {
+    if !sources.is_empty() || !data_sources.is_empty() {
         println!(
             "Flow-over: {} appliance slab(s) quarantined — writes to what is still on them go to {}",
-            sources.len(),
+            sources.len() + data_sources.len(),
             flow.disk
         );
         // And the disk names what is still to come (#258), written now: a
         // power cut before the first extent moves must leave a disk that
         // says what it is missing, not one that looks like somebody else's.
-        mgr.record_flow_over(dest, sources);
+        if !sources.is_empty() {
+            mgr.record_flow_over(dest, sources);
+        }
+        if let (Some(dd), false) = (data_dest, data_sources.is_empty()) {
+            mgr.record_flow_over(dd, data_sources);
+        }
         mgr.persist().await;
     }
 }
@@ -5009,6 +5044,38 @@ pub(crate) async fn flow_system_half<P, F>(
     dest: crate::drive::slab::SlabId,
     persist: P,
     remaining: Option<&std::sync::atomic::AtomicI64>,
+) -> Option<(u64, u64)>
+where
+    P: Fn() -> F,
+    F: std::future::Future<Output = ()>,
+{
+    flow_slabs(gem, registry, sources, dest, persist, remaining, 0).await
+}
+
+/// Extents with a leg on any of `sources`: what a flow-over of them has left.
+pub(crate) async fn extents_on(
+    gem: &tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>,
+    sources: &[crate::drive::slab::SlabId],
+) -> usize {
+    let g = gem.read().await;
+    sources
+        .iter()
+        .map(|s| g.slab_extents(*s).iter().filter(|(_, _, loc)| loc.leg_on(*s).is_some()).count())
+        .sum()
+}
+
+/// [`flow_system_half`] for any half: `sources` into `dest`, with `extra`
+/// extents still to come after this run counted in `remaining` (#285: the
+/// data half after the system half, so the count never dips to 0 between).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn flow_slabs<P, F>(
+    gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
+    registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
+    sources: &[crate::drive::slab::SlabId],
+    dest: crate::drive::slab::SlabId,
+    persist: P,
+    remaining: Option<&std::sync::atomic::AtomicI64>,
+    extra: usize,
 ) -> Option<(u64, u64)>
 where
     P: Fn() -> F,
@@ -5050,7 +5117,7 @@ where
     };
     let report = |n: usize| {
         if let Some(r) = remaining {
-            r.store(n as i64, std::sync::atomic::Ordering::Relaxed);
+            r.store((n + extra) as i64, std::sync::atomic::Ordering::Relaxed);
         }
     };
     report(later.iter().sum());
@@ -5214,16 +5281,32 @@ fn spawn_flow_over(
                 None => {}
             }
         };
-        if sources.is_empty() {
+        // And the data half, after the goldens, when this boot did not seed
+        // it before exporting (#285): the appliance's data slabs into the
+        // local data slab, while the volumes on them are written.
+        let data_dest = if flow.data_flow { uuid::Uuid::parse_str(&flow.data_slab).ok().map(SlabId) } else { None };
+        let data: Option<(SlabId, Vec<SlabId>)> = match data_dest {
+            Some(dd) => {
+                let reg = reg_arc.read().await;
+                Some((dd, reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect()))
+            }
+            None => None,
+        };
+        let data_left = match &data {
+            Some((_, ds)) if !ds.is_empty() => extents_on(&gem_arc, ds).await,
+            _ => 0,
+        };
+        if sources.is_empty() && data_left == 0 {
             flow_remaining.store(0, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("flow-over: nothing left to move onto {}", flow.disk);
             local_boot(then_local_boot).await;
             return;
         }
         println!(
-            "Flow-over: moving {} slab(s) onto {} in the background",
-            sources.len(),
-            flow.disk
+            "Flow-over: moving {} slab(s) onto {} in the background{}",
+            sources.len() + data.as_ref().map(|(_, d)| d.len()).unwrap_or(0),
+            flow.disk,
+            if data_left > 0 { format!(" (the data half, {data_left} extent(s), after the system half)") } else { String::new() }
         );
         // Detached (#269): the manager is held only to take the records, so
         // the API does not wait behind the flushes of a persist that runs
@@ -5233,16 +5316,41 @@ fn spawn_flow_over(
                 crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
             }
         };
-        let Some((moved, failed)) =
-            flow_system_half(&gem_arc, &reg_arc, &sources, dest, persist, Some(&*flow_remaining)).await
-        else {
-            tracing::error!(
-                "flow-over: too many failures — abandoning {}; the node keeps running from \
-                 the appliance",
-                flow.disk
+        let (mut moved, mut failed) = (0u64, 0u64);
+        if !sources.is_empty() {
+            let Some((m, f)) =
+                flow_slabs(&gem_arc, &reg_arc, &sources, dest, persist, Some(&*flow_remaining), data_left).await
+            else {
+                tracing::error!(
+                    "flow-over: too many failures — abandoning {}; the node keeps running from \
+                     the appliance",
+                    flow.disk
+                );
+                return;
+            };
+            moved += m;
+            failed += f;
+        }
+        if let Some((data_dest, data_sources)) = data.filter(|(_, d)| !d.is_empty()) {
+            let started = std::time::Instant::now();
+            let Some((m, f)) =
+                flow_slabs(&gem_arc, &reg_arc, &data_sources, data_dest, persist, Some(&*flow_remaining), 0).await
+            else {
+                tracing::error!(
+                    "flow-over: too many failures in the data half — abandoning {}; its writes \
+                     go on landing on it, and the rest stays on the appliance",
+                    flow.disk
+                );
+                return;
+            };
+            println!(
+                "Flow-over: data half moved - {m} extent(s) onto {} in {:.1}s, in the background (#285)",
+                flow.disk,
+                started.elapsed().as_secs_f64()
             );
-            return;
-        };
+            moved += m;
+            failed += f;
+        }
         tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
         println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
         if failed == 0 {
@@ -6110,6 +6218,8 @@ async fn handle_boot_local(
                         disk: slab_paths.first().cloned().unwrap_or_default(),
                         system_slab: sys.0.to_string(),
                         data_slab: data.0.to_string(),
+                        // What is left of either half (#285).
+                        data_flow: true,
                     });
                 }
             }
