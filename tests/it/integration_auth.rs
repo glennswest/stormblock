@@ -186,8 +186,10 @@ async fn admin_token_guards_destructive_verbs() {
         .as_u16();
     assert_eq!(s, 200);
 
+    // A slab is destructive (#274): the ordinary token is not enough. (An
+    // unsealed volume's delete is the ordinary token's since #274.)
     let resp = c
-        .delete(format!("{base}/api/v1/volumes/{id}"))
+        .delete(format!("{base}/api/v1/slabs/{id}"))
         .bearer_auth("read")
         .send()
         .await
@@ -202,7 +204,7 @@ async fn admin_token_guards_destructive_verbs() {
     // The admin token is accepted — 404 for a volume that does not exist is
     // the point: it got through.
     let s = c
-        .delete(format!("{base}/api/v1/volumes/{id}"))
+        .delete(format!("{base}/api/v1/slabs/{id}"))
         .bearer_auth("root")
         .send()
         .await
