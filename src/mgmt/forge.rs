@@ -10,6 +10,15 @@
 //! goes (on stormcos, the `stormblock-state` volume). Every later start
 //! serves it again. `DELETE` turns it off.
 //!
+//! **On by default on a node (#287).** A single-node cluster is its own
+//! forge, and nothing off the node holds the admin token to turn it on. So
+//! `adopt-ublk` serves the target with [`default_settings`] whenever
+//! `forge.json` is missing, and `forge.json` says what the node was *told*:
+//! the settings a `PUT` gave (on), or `{"enabled": false}` from a `DELETE`
+//! (off, kept: stormcluster turns a node that joins as a plain worker off).
+//! The default is never written down, so a later engine with another default
+//! applies it. The daemon (an appliance) keeps #272's rule: off unless kept.
+//!
 //! A target the command line or `--config` set up (the daemon's flags, an
 //! `[nvmeof]` section) is the configuration's, not this API's: the API
 //! reports it and refuses to change it.
@@ -36,12 +45,25 @@ pub enum Source {
     Config,
     /// `PUT /api/v1/forge`, kept in `forge.json`.
     Api,
+    /// Nothing kept: a node's default (#287).
+    Default,
+}
+
+/// What `forge.json` says (#287).
+#[derive(Debug, Clone)]
+pub enum Persisted {
+    /// Serve these settings.
+    On(NvmeofExportConfig),
+    /// Told off, and kept off.
+    Off,
 }
 
 /// The forge state an engine keeps.
 #[derive(Default)]
 pub struct Forge {
     pub source: Option<Source>,
+    /// Off because `forge.json` says so (#287).
+    pub off: bool,
     /// A reactor for a target started when the node has none of its own to
     /// lend (no serving layer).
     reactor: Option<Arc<ReactorPool>>,
@@ -152,30 +174,70 @@ fn path(state: &AppState) -> Option<PathBuf> {
     state.config.management.data_dir.as_ref().map(|d| PathBuf::from(d).join(FORGE_FILE))
 }
 
-/// The forge settings this node keeps, if it is a forge.
-pub fn load(state: &AppState) -> Option<NvmeofExportConfig> {
+/// What this node was told about forge mode, if anything. A file that does
+/// not read is taken as off, loudly: someone wrote it, and serving defaults
+/// over it would be guessing what they meant.
+pub fn load(state: &AppState) -> Option<Persisted> {
     let p = path(state)?;
     let raw = std::fs::read_to_string(&p).ok()?;
-    match serde_json::from_str(&raw) {
-        Ok(s) => Some(s),
+    let parsed = serde_json::from_str::<Value>(&raw).and_then(|v| {
+        if v.get("enabled") == Some(&Value::Bool(false)) {
+            Ok(Persisted::Off)
+        } else {
+            serde_json::from_value(v).map(Persisted::On)
+        }
+    });
+    match parsed {
+        Ok(p) => Some(p),
         Err(e) => {
-            tracing::error!("{}: {e} — not serving it", p.display());
-            None
+            tracing::error!("{}: {e} — forge mode stays off", p.display());
+            Some(Persisted::Off)
         }
     }
 }
 
-fn keep(state: &AppState, settings: &NvmeofExportConfig) -> Result<(), ForgeError> {
+/// A node's forge when nothing is kept (#287): every address on 4420, an NQN
+/// of the node's name, and #210's closed policy (the shared subsystem admits
+/// no host; boot claims and attaches get subsystems of their own for the host
+/// they name).
+pub fn default_settings(state: &AppState) -> NvmeofExportConfig {
+    NvmeofExportConfig {
+        listen_addr: "0.0.0.0:4420".into(),
+        nqn: format!("nqn.2026-08.lo.storm:{}", nqn_word(&state.local_node_name())),
+        export_drives: false,
+        allow_any_host: false,
+        allowed_hosts: Vec::new(),
+        require_dhchap: false,
+        boothost_host_nqn: None,
+    }
+}
+
+/// A node name as it may appear in an NQN: lower case, `[a-z0-9.-]`.
+fn nqn_word(name: &str) -> String {
+    let w: String = name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' })
+        .collect();
+    let w = w.trim_matches('-').to_string();
+    if w.is_empty() { "node".into() } else { w }
+}
+
+fn write(state: &AppState, body: &[u8]) -> Result<(), ForgeError> {
     use std::io::Write;
     let Some(p) = path(state) else {
         return Err(ForgeError::Io("this engine has no data directory to keep them in".into()));
     };
     let tmp = p.with_extension("json.tmp");
-    let body = serde_json::to_vec_pretty(settings).map_err(|e| ForgeError::Io(e.to_string()))?;
     let mut f = std::fs::File::create(&tmp).map_err(|e| ForgeError::Io(e.to_string()))?;
-    f.write_all(&body).map_err(|e| ForgeError::Io(e.to_string()))?;
+    f.write_all(body).map_err(|e| ForgeError::Io(e.to_string()))?;
     f.sync_all().map_err(|e| ForgeError::Io(e.to_string()))?;
     std::fs::rename(&tmp, &p).map_err(|e| ForgeError::Io(e.to_string()))
+}
+
+fn keep(state: &AppState, settings: &NvmeofExportConfig) -> Result<(), ForgeError> {
+    let body = serde_json::to_vec_pretty(settings).map_err(|e| ForgeError::Io(e.to_string()))?;
+    write(state, &body)
 }
 
 async fn reactor(state: &AppState, forge: &mut Forge) -> Arc<ReactorPool> {
@@ -191,6 +253,15 @@ async fn reactor(state: &AppState, forge: &mut Forge) -> Arc<ReactorPool> {
 /// Serve `settings` as this node's forge, and keep them (`keep`: not when
 /// restoring them from the file they came from).
 pub async fn start(state: &Arc<AppState>, settings: NvmeofExportConfig, keep_it: bool) -> Result<(), ForgeError> {
+    start_as(state, settings, keep_it, Source::Api).await
+}
+
+async fn start_as(
+    state: &Arc<AppState>,
+    settings: NvmeofExportConfig,
+    keep_it: bool,
+    source: Source,
+) -> Result<(), ForgeError> {
     let mut forge = state.forge.lock().await;
     if forge.source == Some(Source::Config)
         || (forge.source.is_none() && state.nvmeof_target.read().await.is_some())
@@ -210,22 +281,33 @@ pub async fn start(state: &Arc<AppState>, settings: NvmeofExportConfig, keep_it:
         forge.source = None;
         return Err(ForgeError::Invalid(format!("serving on {}: {e}", settings.listen_addr)));
     }
-    forge.source = Some(Source::Api);
+    forge.source = Some(source);
     if keep_it {
         keep(state, &settings)?;
     }
+    forge.off = false;
     tracing::info!("forge mode: NVMe/TCP target on {} ({})", settings.listen_addr, settings.nqn);
     Ok(())
 }
 
-/// Turn forge mode off: no new connections, the settings forgotten. Returns
-/// how many connections are still being served (they finish on their own).
+/// Turn forge mode off, and keep it off (#287): `forge.json` says so, so a
+/// node's default does not turn it back on at the next start. No new
+/// connections; returns how many are still being served (they finish on
+/// their own).
 pub async fn stop(state: &Arc<AppState>) -> Result<usize, ForgeError> {
     let mut forge = state.forge.lock().await;
-    match forge.source {
-        Some(Source::Config) => return Err(ForgeError::Configured),
-        None => return Ok(0),
-        Some(Source::Api) => {}
+    if forge.source == Some(Source::Config) {
+        return Err(ForgeError::Configured);
+    }
+    // Written first: an off that is not kept is not the off asked for.
+    // Nothing running and nowhere to keep it (an appliance's daemon with no
+    // data directory) is off already.
+    if path(state).is_some() || forge.source.is_some() {
+        write(state, b"{\"enabled\": false}\n")?;
+    }
+    forge.off = true;
+    if forge.source.is_none() {
+        return Ok(0);
     }
     let live = match state.nvmeof_target.write().await.take() {
         Some(t) => {
@@ -236,36 +318,61 @@ pub async fn stop(state: &Arc<AppState>) -> Result<usize, ForgeError> {
     };
     *state.nvmeof_settings.write().unwrap() = state.config.nvmeof.clone();
     forge.source = None;
-    if let Some(p) = path(state) {
-        if let Err(e) = std::fs::remove_file(&p) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(ForgeError::Io(e.to_string()));
-            }
-        }
-    }
     tracing::info!("forge mode off ({live} connection(s) left to finish)");
     Ok(live)
 }
 
-/// At start: serve the forge this node keeps, when nothing configured a
-/// target of its own.
-pub async fn restore(state: &Arc<AppState>) {
-    let Some(settings) = load(state) else { return };
-    match start(state, settings, false).await {
-        Ok(()) => println!("  forge mode: serving the NVMe/TCP target this node keeps ({FORGE_FILE})"),
+/// At start, when nothing configured a target of its own: serve the forge
+/// this node keeps; with nothing kept, serve `default` (a node's, #287;
+/// `None` for the daemon, which stays off).
+pub async fn restore(state: &Arc<AppState>, default: Option<NvmeofExportConfig>) {
+    let (settings, source) = match load(state) {
+        Some(Persisted::On(s)) => (s, Source::Api),
+        Some(Persisted::Off) => {
+            state.forge.lock().await.off = true;
+            println!("  forge mode: off ({FORGE_FILE} says so)");
+            tracing::info!("forge mode: off ({FORGE_FILE} says so)");
+            return;
+        }
+        None => match default {
+            Some(d) => (d, Source::Default),
+            None => return,
+        },
+    };
+    let what = match source {
+        Source::Default => "this node's default",
+        _ => FORGE_FILE,
+    };
+    let (addr, nqn) = (settings.listen_addr.clone(), settings.nqn.clone());
+    match start_as(state, settings, false, source).await {
+        Ok(()) => println!("  forge mode: NVMe/TCP target on {addr} ({nqn}), from {what}"),
         Err(e) => {
-            println!("  forge mode: not serving {FORGE_FILE}: {e}");
-            tracing::error!("forge mode: not serving {FORGE_FILE}: {e}");
+            println!("  forge mode: not serving {what}: {e}");
+            tracing::error!("forge mode: not serving {what}: {e}");
         }
     }
 }
 
 /// What `GET /api/v1/forge` says.
 pub async fn status(state: &AppState) -> Value {
-    let source = state.forge.lock().await.source;
+    let (source, off) = {
+        let f = state.forge.lock().await;
+        (f.source, f.off)
+    };
     let target = state.nvmeof_target.read().await.clone();
     let settings = state.nvmeof_settings();
+    // Where the state came from: the configuration, what this node was told
+    // and kept, or its default (on for a node, off for an appliance's daemon).
+    let from = match source {
+        Some(Source::Config) => "config",
+        Some(Source::Api) => "persisted",
+        Some(Source::Default) => "default",
+        None if off => "persisted",
+        None => "default",
+    };
     json!({
+        "state": if target.is_some() { "on" } else { "off" },
+        "from": from,
         "enabled": target.is_some(),
         "source": source,
         "listen_addr": settings.as_ref().map(|s| s.listen_addr.clone()),

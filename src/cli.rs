@@ -1508,8 +1508,8 @@ pub async fn run() -> anyhow::Result<()> {
             }
         } else {
             // No device of its own to export: the forge this node keeps, if
-            // it is one (#272).
-            mgmt::forge::restore(&state).await;
+            // it is one (#272). The daemon is an appliance's: off unless kept.
+            mgmt::forge::restore(&state, None).await;
         }
     }
 
@@ -5736,9 +5736,10 @@ async fn handle_adopt_ublk(
         // reported "0 of 5 blank size(s) sealed", and the difference was
         // which of the two ways of becoming this node's engine it had taken.
         mgmt::api::fstemplates::adopt_slab_templates(&state).await;
-        // Forge mode (#206, #272): the shared NVMe/TCP target, when `--config`
-        // has an `[nvmeof]` section, else the forge settings this node keeps.
-        // Before `/serve/v1`, as in the daemon.
+        // Forge mode (#206, #272, #287): the shared NVMe/TCP target, when
+        // `--config` has an `[nvmeof]` section, else what this node was told
+        // (`forge.json`), else on with the node's defaults: a single-node
+        // cluster is its own forge. Before `/serve/v1`, as in the daemon.
         #[cfg(feature = "nvmeof")]
         match config.nvmeof.as_ref() {
             Some(section) => match mgmt::forge::target_from(section, &config.management) {
@@ -5760,7 +5761,7 @@ async fn handle_adopt_ublk(
                     tracing::error!("NVMe-oF target not started: {e}");
                 }
             },
-            None => mgmt::forge::restore(&state).await,
+            None => mgmt::forge::restore(&state, Some(mgmt::forge::default_settings(&state))).await,
         }
         start_serving(&config, &state, "0.0.0.0:3260", "0.0.0.0:4420", &reactor).await;
 
@@ -7834,7 +7835,8 @@ mod forge_mode_tests {
         }
     }
 
-    /// A stormcos node's own config has no `[nvmeof]`: no target, no port.
+    /// A stormcos node's own config has no `[nvmeof]`: its forge is the
+    /// persisted state's, or the node's default (#287), never the config's.
     #[test]
     fn no_section_no_target() {
         let c = StormBlockConfig::default();

@@ -1,5 +1,6 @@
 //! Forge mode turned on per node through the API and kept by the engine
-//! (#272): one stormcos image, the forge role chosen at install.
+//! (#272): one stormcos image, the forge role chosen at install; and on by
+//! default on a node, the API the day-2 switch (#287).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -120,10 +121,14 @@ async fn a_node_becomes_a_forge_keeps_it_and_stops_being_one() {
     assert_eq!(back, image);
     drop(dev);
 
-    // Off: no new connections, nothing kept.
+    // Off: no new connections, and kept off (#287).
     let off: serde_json::Value = c.delete(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap();
     assert_eq!(off["enabled"], false, "{off}");
-    assert!(!dir.path().join("engine/forge.json").exists());
+    assert_eq!(off["state"], "off");
+    assert_eq!(off["from"], "persisted");
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("engine/forge.json")).unwrap()).unwrap();
+    assert_eq!(kept, serde_json::json!({"enabled": false}));
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(tokio::net::TcpStream::connect(addr).await.is_err(), "no longer accepting");
     // Twice is fine.
@@ -155,7 +160,7 @@ async fn the_next_start_serves_the_forge_this_node_keeps() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let (state, base, _) = engine(&dir, None).await;
-    stormblock::mgmt::forge::restore(&state).await;
+    stormblock::mgmt::forge::restore(&state, None).await;
     let s: serde_json::Value = reqwest::Client::new().get(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap();
     assert_eq!(s["enabled"], true, "{s}");
     assert_eq!(s["source"], "api");
@@ -191,4 +196,102 @@ async fn a_configured_target_is_not_the_apis_to_change() {
     assert_eq!(r.status(), 409);
     assert_eq!(c.delete(format!("{base}/api/v1/forge")).send().await.unwrap().status(), 409);
     assert!(state.nvmeof_target.read().await.is_some(), "still serving");
+}
+
+/// A node (#287): with nothing kept it serves its default forge and answers
+/// boot claims; told off, it stays off across a restart; told on again, it
+/// serves what it was told. The daemon's default stays off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_is_a_forge_by_default_until_told_off_and_stays_off() {
+    use stormblock::mgmt::forge;
+    let dir = TempDir::new().unwrap();
+    let image: Vec<u8> = (0..MIB as usize).map(|i| (i % 239) as u8).collect();
+    let c = reqwest::Client::new();
+    let port = free_port();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let (state, base, golden) = engine(&dir, Some(&image)).await;
+    // The daemon: nothing kept, no default → off, and says why.
+    forge::restore(&state, None).await;
+    let s: serde_json::Value = c.get(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((s["state"].as_str(), s["from"].as_str()), (Some("off"), Some("default")), "{s}");
+
+    // adopt-ublk: the node's default.
+    let mut d = forge::default_settings(&state);
+    assert_eq!(d.listen_addr, "0.0.0.0:4420");
+    assert!(d.nqn.starts_with("nqn.2026-08.lo.storm:") && d.nqn.len() > "nqn.2026-08.lo.storm:".len(), "{}", d.nqn);
+    assert!(!d.allow_any_host && d.allowed_hosts.is_empty(), "#210's closed policy");
+    d.listen_addr = addr.to_string();
+    forge::restore(&state, Some(d.clone())).await;
+    let s: serde_json::Value = c.get(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((s["state"].as_str(), s["from"].as_str()), (Some("on"), Some("default")), "{s}");
+    assert_eq!(s["nqn"], d.nqn.as_str());
+    assert!(listening(addr).await);
+    assert!(!dir.path().join("engine/forge.json").exists(), "a default is not written down");
+
+    // A boot claim is answered with something to attach, out of the box.
+    c.post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "server3", "volume": golden.unwrap().0.to_string()}))
+        .send()
+        .await
+        .unwrap();
+    let claim: serde_json::Value = c
+        .post(format!("{base}/api/v1/synonyms/boothost/server3/claim"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = &claim["attach"];
+    assert_eq!(a["protocol"], "nvme-tcp", "{claim}");
+    let spec = NvmeTcpSpec {
+        addr: addr.to_string(),
+        nqn: a["nqn"].as_str().unwrap().into(),
+        nsid: a["nsid"].as_u64().unwrap() as u32,
+        host_nqn: Some(a["host_nqns"][0].as_str().unwrap().into()),
+        dhchap: None,
+    };
+    let dev = NvmeofDevice::connect(&spec).await.expect("the booting machine connects");
+    let mut back = vec![0u8; MIB as usize];
+    dev.read(0, &mut back).await.unwrap();
+    assert_eq!(back, image);
+    drop(dev);
+    // An anonymous host is not let in to the shared subsystem.
+    let anon = NvmeTcpSpec { addr: addr.to_string(), nqn: d.nqn.clone(), nsid: 1, host_nqn: None, dhchap: None };
+    assert!(NvmeofDevice::connect(&anon).await.is_err(), "the shared subsystem admits nobody");
+
+    // Day 2: stormcluster turns a plain worker off.
+    let off: serde_json::Value = c.delete(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((off["state"].as_str(), off["from"].as_str()), (Some("off"), Some("persisted")), "{off}");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(tokio::net::TcpStream::connect(addr).await.is_err(), "no longer accepting");
+    drop(state);
+
+    // The next start: the default does not turn it back on.
+    let (state, base, _) = engine(&dir, None).await;
+    forge::restore(&state, Some(d.clone())).await;
+    let s: serde_json::Value = c.get(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((s["state"].as_str(), s["from"].as_str()), (Some("off"), Some("persisted")), "{s}");
+    assert!(state.nvmeof_target.read().await.is_none());
+
+    // Told on again, with settings: served now, and at the next start.
+    let r = c
+        .put(format!("{base}/api/v1/forge"))
+        .json(&serde_json::json!({"listen_addr": addr.to_string(), "nqn": "nqn.2026-10.test:again"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let on: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((on["state"].as_str(), on["from"].as_str()), (Some("on"), Some("persisted")), "{on}");
+    state.nvmeof_target.write().await.take().unwrap().stop_accepting();
+    drop(state);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let (state, base, _) = engine(&dir, None).await;
+    forge::restore(&state, Some(d)).await;
+    let s: serde_json::Value = c.get(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((s["state"].as_str(), s["from"].as_str(), s["nqn"].as_str()), (Some("on"), Some("persisted"), Some("nqn.2026-10.test:again")), "{s}");
+    assert!(listening(addr).await);
 }
