@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::drive::slab::SlabId;
 
-    fn leg(slot: u32) -> Leg {
+    fn leg(slot: u64) -> Leg {
         Leg { slab_id: SlabId(uuid::Uuid::from_u128(0x239)), slot_idx: slot }
     }
 

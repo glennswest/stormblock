@@ -2183,7 +2183,7 @@ mod tests {
 
         // An out-of-range index anywhere in the batch fails it whole, leaving
         // the valid entries alone rather than half-applied.
-        assert!(slab.inc_ref_batch(&[good, u32::MAX]).await.is_err());
+        assert!(slab.inc_ref_batch(&[good, u64::MAX]).await.is_err());
         assert_eq!(slab.get_slot(good).await.unwrap().ref_count, 1);
 
         // Same for a free slot.

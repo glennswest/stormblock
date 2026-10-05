@@ -816,7 +816,7 @@ pub struct ComposedSlabVolume {
     pub name: String,
     pub size_bytes: u64,
     /// First slot of the slab this volume occupies, and how many.
-    pub first_slot: u32,
+    pub first_slot: u64,
     pub slots: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clone_of: Option<Uuid>,
@@ -979,7 +979,7 @@ impl VolumeManager {
 
                 // Take the golden's slots explicitly — a thin volume maps
                 // nothing until written, and nothing is going to be written.
-                let run: Vec<u32> = {
+                let run: Vec<u64> = {
                     let mut reg = nested.registry.write().await;
                     let s = reg
                         .get_mut(&slab_id)

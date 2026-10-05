@@ -356,7 +356,7 @@ pub async fn allocate(
     // allocating in two steps would race another allocator into the same
     // slots; this way the tier either has room for the whole request or the
     // request never started.
-    let mut taken: Vec<(u64, SlabId, u32)> = Vec::with_capacity(slots_needed as usize);
+    let mut taken: Vec<(u64, SlabId, u64)> = Vec::with_capacity(slots_needed as usize);
     {
         let mut reg = registry.write().await;
         for &offset in &offsets {
@@ -606,7 +606,7 @@ pub struct MappedExtent {
     pub offset: u64,
     pub len: u64,
     pub slab: String,
-    pub slot: u32,
+    pub slot: u64,
     pub ref_count: u32,
     pub generation: u64,
     /// Whether this extent sits inside a range StormFS was given.

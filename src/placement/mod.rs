@@ -113,7 +113,7 @@ pub struct MigrateExtentResult {
     pub vext_idx: u64,
     pub source_slab: SlabId,
     pub dest_slab: SlabId,
-    pub dest_slot: u32,
+    pub dest_slot: u64,
 }
 
 /// Result of evacuating all extents from a slab.
