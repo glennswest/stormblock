@@ -1759,6 +1759,7 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             let slab = Slab::format_with(dev, opts).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Slab formatted: {}", slab.slab_id());
+            println!("  format: {}", slab.format_version());
             println!("  role: {}", slab.role());
             println!("  tier: {}", slab.tier());
             // Said out loud, because "keeps no volume metadata" from
@@ -1846,6 +1847,7 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             let slab = Slab::open(dev).await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("Slab {}", slab.slab_id());
+            println!("  format: {}", slab.format_version());
             println!("  role: {}", slab.role());
             println!("  tier: {}", slab.tier());
             println!("  slot size: {} bytes", slab.slot_size());

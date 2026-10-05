@@ -23,6 +23,8 @@ pub struct SlabResponse {
     pub tier: String,
     /// `system` or `data` — whether an install may reformat this slab (#88).
     pub role: String,
+    /// The slab's format: 1, or 2 (#158: metadata v2, slot indexes past 4 Gi).
+    pub format: u32,
     /// What fails together with this slab: `drive=…`, or the wider chain a
     /// labelled drive gave it. Redundancy policies spread across these.
     pub domain: String,
@@ -139,6 +141,7 @@ async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 id: id.0.to_string(),
                 tier: format!("{}", slab.tier()),
                 role: slab.role().to_string(),
+                format: slab.format_version(),
                 domain: reg.domain_of(id).to_string(),
                 drive: DriveRef::of(slab.device()),
                 slot_size,
@@ -180,6 +183,7 @@ async fn get_slab(
                 id: slab_id.0.to_string(),
                 tier: format!("{}", slab.tier()),
                 role: slab.role().to_string(),
+                format: slab.format_version(),
                 domain: reg.domain_of(&slab_id).to_string(),
                 drive: DriveRef::of(slab.device()),
                 slot_size,
@@ -287,6 +291,7 @@ async fn format_slab(
             // storage that arrives as a drive is nowhere, so its contents did
             // not survive a restart.
             let carries_metadata = slab.has_metadata_region();
+            let slab_format = slab.format_version();
             let free = slab.free_slots();
             let allocated = slab.allocated_slots();
             let slab_domain = {
@@ -315,6 +320,7 @@ async fn format_slab(
                 id: slab_id.0.to_string(),
                 tier: format!("{}", tier),
                 role: role.to_string(),
+                format: slab_format,
                 domain: slab_domain,
                 drive: drive.unwrap_or(DriveRef {
                     serial: String::new(),

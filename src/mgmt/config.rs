@@ -46,6 +46,19 @@ pub struct StormBlockConfig {
     /// Secure delete: what freed data is overwritten with (#286).
     #[serde(default)]
     pub erase: EraseConfig,
+    /// The metadata format new slabs are written in (#158).
+    #[serde(default)]
+    pub metadata: MetadataSection,
+}
+
+/// `[metadata]` (#158): `format = 2` writes new slabs, and the data
+/// directory's record, in metadata format v2 (`docs/metadata-v2.md`); 1 is
+/// the default until the format's last stage. Existing slabs keep theirs.
+/// `$STORMBLOCK_METADATA_FORMAT` does the same where no config is read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetadataSection {
+    pub format: Option<u32>,
 }
 
 /// `[erase]` (#286): a freed slot is overwritten before it is reused.
@@ -285,6 +298,7 @@ impl Default for StormBlockConfig {
             rebuild: crate::rebuild::RebuildConfig::default(),
             serve: ServeSection::default(),
             erase: EraseConfig::default(),
+            metadata: MetadataSection::default(),
         }
     }
 }
@@ -746,6 +760,11 @@ impl StormBlockConfig {
         }
         let contents = std::fs::read_to_string(path)?;
         let config: StormBlockConfig = toml::from_str(&contents)?;
+        if let Some(f) = config.metadata.format {
+            anyhow::ensure!(f == 1 || f == 2, "[metadata] format = {f}: 1 or 2");
+            crate::drive::slab::set_default_format(f);
+            tracing::info!("new slabs are written in metadata format {f}");
+        }
         Ok(config)
     }
 
