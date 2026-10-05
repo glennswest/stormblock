@@ -965,7 +965,7 @@ async fn with_a_token_only_the_boot_claim_is_open() {
         .post(format!("{base}/api/v1/synonyms"))
         .json(&serde_json::json!({"namespace": "boothost", "name": "HOST5", "volume": v1.to_string()}))
         .send().await.unwrap();
-    state.set_auth(stormblock::serve::api::AuthConfig { api_token: Some("tok".into()), admin_token: None });
+    state.set_auth(stormblock::serve::api::AuthConfig { api_token: Some("tok".into()), admin_token: None, audit_only: false });
 
     boot_claim(&client, &base, "HOST5").await;
     for req in [
@@ -1318,6 +1318,7 @@ async fn a_boot_intent_is_read_open_set_by_the_admin_and_install_is_one_shot() {
     state.set_auth(stormblock::serve::api::AuthConfig {
         api_token: Some("tok".into()),
         admin_token: Some("adm".into()),
+        audit_only: false,
     });
 
     // A MAC nobody has seen: 404, which firmware reads as auto.
