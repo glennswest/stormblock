@@ -39,7 +39,9 @@ ok()   { echo "  ok    $*"; }
 
 say "build the engine (musl) and the initramfs"
 cargo build --release --locked --target x86_64-unknown-linux-musl --bin stormblock 2>&1 | tail -2
-BIN="$ROOT/target/x86_64-unknown-linux-musl/release/stormblock"
+TDIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | sed 's/.*"target_directory":"\([^"]*\)".*/\1/')
+BIN="${TDIR:-$ROOT/target}/x86_64-unknown-linux-musl/release/stormblock"
 [ -x "$BIN" ] || { echo "FAIL: no engine at $BIN"; exit 1; }
 bash scripts/build-stormblock-initramfs.sh "$BIN" "$KVER" "$W/initrd.img" > "$W/initrd.log" 2>&1 \
     || { tail -20 "$W/initrd.log"; echo "FAIL: the initramfs did not build"; exit 1; }
