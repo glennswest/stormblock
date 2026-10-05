@@ -34,7 +34,7 @@ pub async fn create_snapshot(
         // Increment ref_count on all slab slots (on-disk). Grouped per slab so
         // each one coalesces its slot-table writes by sector — a clone of an
         // N-extent image costs sectors touched, not N round trips.
-        let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
+        let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
         for leg in cloned.all_legs() {
             by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
         }
@@ -78,7 +78,7 @@ pub async fn delete_snapshot(
         // Grouped per slab so the slot table is written by sector and the
         // header once, rather than twice per extent. Deleting a clone is on
         // the container restart path, so this is the hot direction too.
-        let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
+        let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
         for leg in vmap.all_legs() {
             by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
         }
@@ -154,8 +154,8 @@ pub async fn reset_to_source(
         .map(|m| m.extents.len())
         .unwrap_or(0);
 
-    let mut to_free: HashMap<SlabId, Vec<u32>> = HashMap::new();
-    let mut to_share: HashMap<SlabId, Vec<u32>> = HashMap::new();
+    let mut to_free: HashMap<SlabId, Vec<u64>> = HashMap::new();
+    let mut to_share: HashMap<SlabId, Vec<u64>> = HashMap::new();
     let mut freed = 0usize;
     let mut restored = 0usize;
 

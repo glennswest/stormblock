@@ -1348,7 +1348,7 @@ impl VolumeManager {
         let mut released = 0usize;
         if let Some(old) = old {
             let mut reg = self.registry.write().await;
-            let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
+            let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
             for leg in old.all_legs() {
                 by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
             }
@@ -1790,9 +1790,9 @@ impl VolumeManager {
     /// slabs' caches, holding no lock while the device is read (#155): what
     /// a delete or a clone changes next under the registry lock.
     pub async fn prefetch_volume(&self, id: VolumeId) {
-        let by_slab: HashMap<SlabId, Vec<u32>> = {
+        let by_slab: HashMap<SlabId, Vec<u64>> = {
             let gem = self.gem.read().await;
-            let mut m: HashMap<SlabId, Vec<u32>> = HashMap::new();
+            let mut m: HashMap<SlabId, Vec<u64>> = HashMap::new();
             if let Some(map) = gem.get_volume_map(&id) {
                 for leg in map.all_legs() {
                     m.entry(leg.slab_id).or_default().push(leg.slot_idx);

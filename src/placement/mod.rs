@@ -177,7 +177,7 @@ pub struct PlacementEngine {
     /// See `move_slot`: the free is owed until the map that no longer names
     /// the slot is on disk, because a slot table and a map that disagree
     /// across a crash is a volume with a hole in it. `release_owed` pays them.
-    owed: std::sync::Mutex<Vec<(SlabId, u32)>>,
+    owed: std::sync::Mutex<Vec<(SlabId, u64)>>,
 }
 
 impl PlacementEngine {
@@ -201,7 +201,7 @@ impl PlacementEngine {
     /// and dropped from the list — it is leaked capacity, which is the mild
     /// half of this trade and never a reason to stop.
     pub async fn release_owed(&self, registry: &mut SlabRegistry) -> usize {
-        let owed: Vec<(SlabId, u32)> = {
+        let owed: Vec<(SlabId, u64)> = {
             let mut held = self.owed.lock().unwrap();
             std::mem::take(&mut *held)
         };

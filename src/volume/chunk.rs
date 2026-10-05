@@ -435,7 +435,7 @@ async fn take_slot_on_tier(
     tier: StorageTier,
     volume: VolumeId,
     vext: u64,
-) -> Result<(SlabId, u32), ChunkError> {
+) -> Result<(SlabId, u64), ChunkError> {
     // `best_slab_for_tier` already skips slabs with no free slots, so one
     // attempt is the whole story: a slab that reports room and then refuses
     // to give any is inconsistent with itself, and retrying would spin.
@@ -564,7 +564,7 @@ pub async fn free(
 
         // Group by slab so a run of slots costs one batch rather than one
         // read-modify-write of the slot table each.
-        let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
+        let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
         for (_, loc) in &to_free {
             for leg in loc.legs() {
                 by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);

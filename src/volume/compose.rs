@@ -63,7 +63,7 @@ pub(crate) async fn share_into(
     gem: &mut GlobalExtentMap,
     registry: &mut SlabRegistry,
 ) -> Result<usize, VolumeError> {
-    let mut shared: HashMap<SlabId, Vec<u32>> = HashMap::new();
+    let mut shared: HashMap<SlabId, Vec<u64>> = HashMap::new();
     let mut count = 0usize;
 
     for c in components {

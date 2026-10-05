@@ -147,7 +147,7 @@ pub struct DecRefOutcome {
     /// Slots decremented but still referenced by someone else.
     pub retained: usize,
     /// Slots that could not be decremented, and why.
-    pub rejected: Vec<(u32, DecRefReject)>,
+    pub rejected: Vec<(u64, DecRefReject)>,
 }
 
 /// In-memory representation of a slot.

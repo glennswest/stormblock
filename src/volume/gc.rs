@@ -50,7 +50,7 @@ pub struct Orphan {
 }
 
 impl Orphan {
-    fn key(&self) -> (SlabId, u32) {
+    fn key(&self) -> (SlabId, u64) {
         (self.slab_id, self.slot_idx)
     }
 }
@@ -64,7 +64,7 @@ pub struct GcOptions {
     ///
     /// Defence in depth: an orphan has to be unreferenced twice, with the
     /// locks dropped in between, before its data is thrown away.
-    pub confirm_against: Option<HashSet<(SlabId, u32)>>,
+    pub confirm_against: Option<HashSet<(SlabId, u64)>>,
     /// Stop after reclaiming this many slots, so one pass cannot monopolise
     /// the registry lock on a badly leaked slab.
     pub max_reclaim: Option<usize>,
@@ -92,7 +92,7 @@ pub struct GcReport {
 
 impl GcReport {
     /// Candidate set to feed the next pass's `confirm_against`.
-    pub fn candidates(&self) -> HashSet<(SlabId, u32)> {
+    pub fn candidates(&self) -> HashSet<(SlabId, u64)> {
         self.orphans.iter().map(|o| o.key()).collect()
     }
 }
@@ -134,7 +134,7 @@ pub async fn collect_with(
 
     // Live set from the forward maps — see the module note on why the reverse
     // index is not usable here.
-    let mut live: HashSet<(SlabId, u32)> = HashSet::new();
+    let mut live: HashSet<(SlabId, u64)> = HashSet::new();
     for vid in gem.volume_ids() {
         if let Some(map) = gem.get_volume_map(&vid) {
             for leg in map.all_legs() {
@@ -339,7 +339,7 @@ pub fn spawn(
         // look unreferenced.
         ticker.tick().await;
 
-        let mut prev: Option<HashSet<(SlabId, u32)>> = None;
+        let mut prev: Option<HashSet<(SlabId, u64)>> = None;
         loop {
             ticker.tick().await;
 

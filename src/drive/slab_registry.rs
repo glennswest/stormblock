@@ -27,7 +27,7 @@ pub struct SlabRegistry {
     /// In-memory only, and deliberately so: after a restart nothing is
     /// in flight, and any slot left stranded by a crash mid-write is a real
     /// orphan that the collector should reclaim.
-    in_flight: HashSet<(SlabId, u32)>,
+    in_flight: HashSet<(SlabId, u64)>,
     /// What fails together with each slab. Defaults to the identity of the
     /// device the slab lives on; widened by drive labels when a drive was
     /// registered with them (#70) or set outright.

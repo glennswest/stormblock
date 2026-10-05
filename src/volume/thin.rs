@@ -926,7 +926,7 @@ impl ThinVolumeHandle {
         registry: &mut SlabRegistry,
         vext_idx: u64,
         generation: u64,
-    ) -> DriveResult<(SlabId, u32)> {
+    ) -> DriveResult<(SlabId, u64)> {
         let leg = self.allocate_apart(registry, vext_idx, &[], "drive", generation).await?;
         Ok((leg.slab_id, leg.slot_idx))
     }
@@ -1417,7 +1417,7 @@ impl ThinVolumeHandle {
     /// registry lock, then finds them there instead of reading the device
     /// while every volume's I/O waits (#269).
     async fn prefetch(&self, legs: impl IntoIterator<Item = Leg>) {
-        let mut by_slab: HashMap<SlabId, Vec<u32>> = HashMap::new();
+        let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
         for l in legs {
             by_slab.entry(l.slab_id).or_default().push(l.slot_idx);
         }
