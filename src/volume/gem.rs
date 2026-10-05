@@ -857,7 +857,7 @@ impl GlobalExtentMap {
             let cid = slab.slab_id();
             for slot_idx in 0..slab.total_slots() as u32 {
                 if let Some(slot) = slab.get_slot(slot_idx) {
-                    if slot.state != super::super::drive::slab::SlotState::Free {
+                    if slot.state.is_owned() {
                         let leg = Leg::new(cid, slot_idx);
                         match parse_parity_vext(slot.virtual_extent_idx) {
                             Some((pleg, stripe)) => parity

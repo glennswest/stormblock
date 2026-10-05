@@ -30,6 +30,11 @@ pub struct SlabResponse {
     pub total_slots: u64,
     pub free_slots: u64,
     pub allocated_slots: u64,
+    /// Freed slots waiting to be overwritten before they are free (#286);
+    /// counted in `allocated_slots` until they are.
+    pub erasing_slots: u64,
+    /// What a slot freed here is overwritten with.
+    pub erase: crate::drive::erase::EraseLevel,
     pub total_bytes: u64,
     pub total_bytes_human: String,
     pub free_bytes: u64,
@@ -140,6 +145,8 @@ async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 total_slots: total,
                 free_slots: free,
                 allocated_slots: allocated,
+                erasing_slots: slab.erasing_slots(),
+                erase: slab.erase_level(),
                 total_bytes: total * slot_size,
                 total_bytes_human: human_size(total * slot_size),
                 free_bytes: free * slot_size,
@@ -179,6 +186,8 @@ async fn get_slab(
                 total_slots: total,
                 free_slots: free,
                 allocated_slots: allocated,
+                erasing_slots: slab.erasing_slots(),
+                erase: slab.erase_level(),
                 total_bytes: total * slot_size,
                 total_bytes_human: human_size(total * slot_size),
                 free_bytes: free * slot_size,
@@ -288,10 +297,12 @@ async fn format_slab(
                 }
                 (
                     reg.domain_of(&slab_id).to_string(),
-                    reg.get(&slab_id).map(|s| DriveRef::of(s.device())),
+                    reg.get(&slab_id).map(|s| (DriveRef::of(s.device()), s.erase_level())),
                 )
             };
             let (slab_domain, drive) = slab_domain;
+            let reg_erase = drive.as_ref().map(|d| d.1).unwrap_or_default();
+            let drive = drive.map(|d| d.0);
             if carries_metadata {
                 let mut vm = state.volume_manager.lock().await;
                 let mut slabs = vm.metadata_slabs().to_vec();
@@ -315,6 +326,8 @@ async fn format_slab(
                 total_slots: total,
                 free_slots: free,
                 allocated_slots: allocated,
+                erasing_slots: 0,
+                erase: reg_erase,
                 total_bytes: total * slot_size,
                 total_bytes_human: human_size(total * slot_size),
                 free_bytes: free * slot_size,
@@ -367,7 +380,7 @@ async fn list_slots(
             let mut items = Vec::new();
             for idx in 0..slab.total_slots() as u32 {
                 if let Some(slot) = slab.get_slot(idx) {
-                    if slot.state == crate::drive::slab::SlotState::Free {
+                    if !slot.state.is_owned() {
                         continue;
                     }
                     items.push(SlotResponse {

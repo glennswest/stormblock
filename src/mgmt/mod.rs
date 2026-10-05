@@ -309,6 +309,9 @@ pub struct AppState {
     /// example a network without multicast) — the node still serves its own
     /// volumes, it just cannot see peers.
     pub discovery: Option<Arc<discovery::Discovery>>,
+    /// The background eraser (#286): overwrites freed slots before they are
+    /// reused. Started by [`AppState::start_eraser`].
+    pub eraser: Arc<crate::volume::erase::Eraser>,
     /// Most recent extent-GC pass, when the background collector is running.
     pub last_gc: Option<Arc<tokio::sync::RwLock<Option<crate::volume::gc::GcSummary>>>>,
     #[cfg(feature = "iscsi")]
@@ -368,6 +371,18 @@ impl AppState {
         }
     }
 
+    /// Secure delete (#286): put the node's erase level (`[erase] default`)
+    /// on every local slab and start the eraser. The daemon and `adopt-ublk`
+    /// call it; a node that never does frees as before #286, and a slot
+    /// already marked waits on its slab until an engine that does opens it.
+    pub async fn start_eraser(&self) {
+        let level = self.config.erase.default;
+        self.slab_registry.write().await.set_erase_default(level);
+        let pending = self.slab_registry.read().await.erasing_slots();
+        tracing::info!("secure delete: freed slots are overwritten ({level}); {pending} waiting");
+        self.eraser.spawn();
+    }
+
     /// Whether this node requires a credential — reported by `/api/v1/health`
     /// so a fleet can be asked which of its nodes are open (#107).
     pub fn auth_enforced(&self) -> bool {
@@ -396,6 +411,7 @@ impl AppState {
         let nvmeof_settings = config.nvmeof.clone();
         let volume_manager = Arc::new(tokio::sync::Mutex::new(volume_manager));
         let rebuilds = crate::rebuild::Rebuilds::new(volume_manager.clone(), &config.rebuild);
+        let slab_registry_for_eraser = slab_registry.clone();
         AppState {
             drives: tokio::sync::RwLock::new(Vec::new()),
             arrays: tokio::sync::RwLock::new(HashMap::new()),
@@ -453,6 +469,10 @@ impl AppState {
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             serve: std::sync::OnceLock::new(),
             pool_pressure: None,
+            eraser: crate::volume::erase::Eraser::new(
+                slab_registry_for_eraser,
+                config.management.data_dir.as_ref().map(std::path::PathBuf::from),
+            ),
             config,
             discovery: None,
             last_gc: None,

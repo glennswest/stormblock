@@ -219,6 +219,10 @@ pub struct DeleteQuery {
     /// dangling.
     #[serde(default)]
     pub force: bool,
+    /// Overwrite what the delete frees with at least this (#286): `once`,
+    /// `dod3`, `dod7`. Never less than the node's `[erase] default`.
+    #[serde(default)]
+    pub erase: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1592,6 +1596,11 @@ async fn delete_volume(
     };
 
     let vol_id = VolumeId(uuid);
+    let erase = match q.erase.as_deref().map(str::parse::<crate::drive::erase::EraseLevel>) {
+        None => None,
+        Some(Ok(l)) => Some(l),
+        Some(Err(e)) => return ApiError::bad_request(e),
+    };
 
     // A synonym pointing here is a reference held by something that knows
     // this volume only by name. Deleting under it leaves a name that
@@ -1628,10 +1637,11 @@ async fn delete_volume(
     }
 
     let mut vm = state.volume_manager.lock().await;
-    match vm.delete_volume(vol_id).await {
+    match vm.delete_volume_erasing(vol_id, erase).await {
         Ok(()) => {
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             drop(vm);
+            state.eraser.kick();
             // Stop serving it. An address that outlives what it names is the
             // whole failure this addressing was meant to end: the NQN would
             // keep answering, on a bound port, for a volume that is gone

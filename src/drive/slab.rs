@@ -86,6 +86,19 @@ pub enum SlotState {
     Free = 0,
     Allocated = 1,
     Moving = 2,
+    /// Freed, waiting to be overwritten before it is free (#286): owned by
+    /// nobody, never handed out. The entry keeps the volume it belonged to
+    /// and, in its share-count field, the erase level. An engine older than
+    /// #286 reads it as free.
+    Erasing = 3,
+}
+
+impl SlotState {
+    /// Whether the slot holds a volume's data: allocated or moving. Free and
+    /// erasing slots are nobody's.
+    pub fn is_owned(self) -> bool {
+        matches!(self, SlotState::Allocated | SlotState::Moving)
+    }
 }
 
 impl From<u8> for SlotState {
@@ -93,6 +106,7 @@ impl From<u8> for SlotState {
         match v {
             1 => SlotState::Allocated,
             2 => SlotState::Moving,
+            3 => SlotState::Erasing,
             _ => SlotState::Free,
         }
     }
@@ -502,6 +516,12 @@ pub struct Slab {
     pending: Arc<std::sync::Mutex<Pending>>,
     /// Group commit for [`sync`](Self::sync) (#264).
     syncs: Arc<SyncGate>,
+    /// What a slot freed here is overwritten with (#286). Set by the
+    /// registry from the node's default; `None` on a fresh slab.
+    erase: super::erase::EraseLevel,
+    /// For the frees of one delete that asked for more (#286), set and
+    /// cleared around it under the registry's write lock.
+    erase_now: Option<super::erase::EraseLevel>,
 }
 
 /// What a sync of one slab needs, apart from the slab (#269): taken from the
@@ -583,6 +603,20 @@ pub struct MetadataWriter {
     meta_size: u64,
 }
 
+/// A slot to overwrite (#286), taken from a slab with
+/// [`Slab::take_erasing`]: the device and range, written with no lock held.
+#[derive(Clone)]
+pub struct EraseJob {
+    pub slab: SlabId,
+    pub slot: u32,
+    pub device: Arc<dyn BlockDevice>,
+    pub offset: u64,
+    pub len: u64,
+    pub level: super::erase::EraseLevel,
+    /// The volume the slot belonged to (its owner when it was shared).
+    pub volume: VolumeId,
+}
+
 /// One [`Slab::sync`] at a time, and one for many callers (#264).
 ///
 /// Every caller is numbered when it asks. A sync covers every caller numbered
@@ -630,6 +664,12 @@ struct Pending {
     freeing: Vec<u32>,
     /// Freed and flushed: reusable, not yet back in the bitmap.
     released: Vec<u32>,
+    /// Marked `Erasing`, waiting for the eraser (#286).
+    erasing: std::collections::BTreeSet<u32>,
+    /// Taken by the eraser, being overwritten.
+    erasing_now: HashSet<u32>,
+    /// Erasing slots (waiting or taken) by the volume they belonged to.
+    erasing_by_volume: HashMap<VolumeId, u64>,
 }
 
 impl Slab {
@@ -758,6 +798,8 @@ impl Slab {
             free_count: total_slots,
             pending: Default::default(),
             syncs: Default::default(),
+            erase: Default::default(),
+            erase_now: None,
         })
     }
 
@@ -785,13 +827,19 @@ impl Slab {
         let mut slots = Vec::with_capacity(total_slots);
         let mut extent_index = HashMap::new();
         let mut free_count = 0u64;
+        let mut pending = Pending::default();
 
         for i in 0..total_slots {
             let offset = i * SLOT_ENTRY_SIZE as usize;
             let slot_data = &table_buf[offset..offset + SLOT_ENTRY_SIZE as usize];
             let slot = Slot::from_bytes(slot_data).unwrap_or_else(Slot::free);
 
-            if slot.state != SlotState::Free {
+            if slot.state == SlotState::Erasing {
+                // An erase a stop or a power cut interrupted: resumed (#286).
+                free_bitmap.set(i, false);
+                pending.erasing.insert(i as u32);
+                *pending.erasing_by_volume.entry(slot.volume_id).or_default() += 1;
+            } else if slot.state != SlotState::Free {
                 free_bitmap.set(i, false);
                 extent_index.insert(
                     (slot.volume_id, slot.virtual_extent_idx),
@@ -815,8 +863,10 @@ impl Slab {
             slots,
             extent_index,
             free_count,
-            pending: Default::default(),
+            pending: Arc::new(std::sync::Mutex::new(pending)),
             syncs: Default::default(),
+            erase: Default::default(),
+            erase_now: None,
         })
     }
 
@@ -927,7 +977,31 @@ impl Slab {
     /// to the bitmap (the device already says free); one that was is held
     /// until its free entry is durable. Returns whether the entry must be
     /// written.
+    ///
+    /// With an erase level set (#286) the slot is marked `Erasing` instead,
+    /// kept out of the bitmap, and queued for the eraser, which frees it
+    /// the same way once it is overwritten; its entry is written either way,
+    /// so an erase a power cut interrupts is resumed.
     fn retire(&mut self, idx: usize) -> bool {
+        let level = self.erase_now.unwrap_or(self.erase).max(self.erase);
+        if level != super::erase::EraseLevel::None {
+            let old = &self.slots[idx];
+            self.slots[idx] = Slot {
+                state: SlotState::Erasing,
+                volume_id: old.volume_id,
+                virtual_extent_idx: old.virtual_extent_idx,
+                ref_count: level.code(),
+                generation: old.generation,
+            };
+            let mut p = self.pending.lock().unwrap();
+            p.ready.remove(&(idx as u32));
+            // Never published or not, its bytes may be on the media.
+            p.unpublished.remove(&(idx as u32));
+            if p.erasing.insert(idx as u32) {
+                *p.erasing_by_volume.entry(self.slots[idx].volume_id).or_default() += 1;
+            }
+            return true;
+        }
         self.slots[idx] = Slot::free();
         let mut p = self.pending.lock().unwrap();
         p.ready.remove(&(idx as u32));
@@ -1001,7 +1075,7 @@ impl Slab {
         }
 
         let slot = &self.slots[idx];
-        if slot.state == SlotState::Free {
+        if !slot.state.is_owned() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "double free of slot {slot_idx}"
             )));
@@ -1018,7 +1092,9 @@ impl Slab {
         if self.retire(idx) {
             self.persist_slot(slot_idx).await?;
         }
-        self.discard_slots(&[slot_idx]).await;
+        if self.slots[idx].state == SlotState::Free {
+            self.discard_slots(&[slot_idx]).await;
+        }
 
         Ok(())
     }
@@ -1113,7 +1189,7 @@ impl Slab {
                 "slot index {slot_idx} out of range"
             )));
         }
-        if self.slots[idx].state == SlotState::Free {
+        if !self.slots[idx].state.is_owned() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "cannot inc_ref on free slot {slot_idx}"
             )));
@@ -1138,7 +1214,7 @@ impl Slab {
                     "slot index {slot_idx} out of range"
                 )));
             }
-            if self.slots[idx].state == SlotState::Free {
+            if !self.slots[idx].state.is_owned() {
                 return Err(DriveError::Other(anyhow::anyhow!(
                     "cannot inc_ref on free slot {slot_idx}"
                 )));
@@ -1174,7 +1250,7 @@ impl Slab {
                 out.rejected.push((slot_idx, DecRefReject::OutOfRange));
                 continue;
             }
-            if self.slots[idx].state == SlotState::Free || self.slots[idx].ref_count == 0 {
+            if !self.slots[idx].state.is_owned() || self.slots[idx].ref_count == 0 {
                 out.rejected.push((slot_idx, DecRefReject::AlreadyFree));
                 continue;
             }
@@ -1222,6 +1298,8 @@ impl Slab {
         if !touched.is_empty() {
             self.persist_slots(&touched).await?;
         }
+        // An erasing slot is discarded by the eraser, after its passes.
+        freed_slots.retain(|&s| self.slots[s as usize].state == SlotState::Free);
         if !freed_slots.is_empty() {
             // Give the space back to the device, not just to the slab —
             // otherwise reclaim happens on the single-slot route only and a
@@ -1239,7 +1317,7 @@ impl Slab {
                 "slot index {slot_idx} out of range"
             )));
         }
-        if self.slots[idx].state == SlotState::Free || self.slots[idx].ref_count == 0 {
+        if !self.slots[idx].state.is_owned() || self.slots[idx].ref_count == 0 {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "cannot dec_ref on free/zero-ref slot {slot_idx}"
             )));
@@ -1263,7 +1341,7 @@ impl Slab {
     /// mappings it restored (#171); it never lowers one.
     pub fn raise_ref(&mut self, slot_idx: u32, count: u32) -> bool {
         match self.slots.get_mut(slot_idx as usize) {
-            Some(slot) if slot.state != SlotState::Free && slot.ref_count < count => {
+            Some(slot) if slot.state.is_owned() && slot.ref_count < count => {
                 slot.ref_count = count;
                 self.pending.lock().unwrap().ready.insert(slot_idx);
                 true
@@ -1302,7 +1380,7 @@ impl Slab {
                 "slot index {slot_idx} out of range"
             )));
         }
-        if self.slots[idx].state == SlotState::Free {
+        if !self.slots[idx].state.is_owned() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "cannot reassign free slot {slot_idx}"
             )));
@@ -1318,6 +1396,15 @@ impl Slab {
         self.extent_index.insert((volume_id, vext_idx), slot_idx);
 
         self.persist_slot(slot_idx).await
+    }
+
+    /// How many references a slot has: 0 for one that is free or being
+    /// erased (whose share-count field holds its erase level, #286).
+    pub fn shares(&self, slot_idx: u32) -> u32 {
+        match self.slots.get(slot_idx as usize) {
+            Some(s) if s.state.is_owned() => s.ref_count,
+            _ => 0,
+        }
     }
 
     /// Get the slot at a given index.
@@ -1399,6 +1486,97 @@ impl Slab {
         self.slots.resize(new_total as usize, Slot::free());
         self.free_count += added;
         Ok(added)
+    }
+
+    /// What a slot freed here is overwritten with (#286).
+    pub fn erase_level(&self) -> super::erase::EraseLevel {
+        self.erase
+    }
+
+    /// Set what a slot freed here is overwritten with. Slots already
+    /// waiting keep the level they were marked with.
+    pub fn set_erase_level(&mut self, level: super::erase::EraseLevel) {
+        self.erase = level;
+    }
+
+    /// For the frees until it is cleared, overwrite with at least `level`
+    /// (a delete that asked for more than the node's default, #286). The
+    /// caller holds the registry's write lock across the frees and clears it.
+    pub fn set_erase_override(&mut self, level: Option<super::erase::EraseLevel>) {
+        self.erase_now = level;
+    }
+
+    /// Slots waiting to be overwritten or being overwritten.
+    pub fn erasing_slots(&self) -> u64 {
+        let p = self.pending.lock().unwrap();
+        (p.erasing.len() + p.erasing_now.len()) as u64
+    }
+
+    /// Up to `max` slots waiting to be overwritten, handed to the eraser:
+    /// what to overwrite, where, and with what. Each is the eraser's until
+    /// [`finish_erase`](Self::finish_erase) or [`return_erase`](Self::return_erase).
+    pub fn take_erasing(&self, max: usize) -> Vec<EraseJob> {
+        let mut p = self.pending.lock().unwrap();
+        let picked: Vec<u32> = p.erasing.iter().copied().take(max).collect();
+        let mut out = Vec::with_capacity(picked.len());
+        for idx in picked {
+            p.erasing.remove(&idx);
+            let slot = &self.slots[idx as usize];
+            if slot.state != SlotState::Erasing {
+                continue;
+            }
+            p.erasing_now.insert(idx);
+            out.push(EraseJob {
+                slab: self.id,
+                slot: idx,
+                device: self.device.clone(),
+                offset: self.header.data_offset + idx as u64 * self.header.slot_size,
+                len: self.header.slot_size,
+                level: super::erase::EraseLevel::from_code(slot.ref_count),
+                volume: slot.volume_id,
+            });
+        }
+        out
+    }
+
+    /// Slots of `volume` waiting to be overwritten or being overwritten.
+    pub fn erasing_for(&self, volume: VolumeId) -> u64 {
+        self.pending.lock().unwrap().erasing_by_volume.get(&volume).copied().unwrap_or(0)
+    }
+
+    /// An erase that did not finish goes back in the queue.
+    pub fn return_erase(&self, slot_idx: u32) {
+        let mut p = self.pending.lock().unwrap();
+        if p.erasing_now.remove(&slot_idx) {
+            p.erasing.insert(slot_idx);
+        }
+    }
+
+    /// The slot is overwritten: free it the ordinary way (its free entry
+    /// written now, reusable once that is durable).
+    pub async fn finish_erase(&mut self, slot_idx: u32) -> DriveResult<()> {
+        let idx = slot_idx as usize;
+        {
+            let mut p = self.pending.lock().unwrap();
+            p.erasing_now.remove(&slot_idx);
+            p.erasing.remove(&slot_idx);
+        }
+        if self.slots.get(idx).map(|s| s.state) != Some(SlotState::Erasing) {
+            return Ok(());
+        }
+        {
+            let mut p = self.pending.lock().unwrap();
+            let vol = self.slots[idx].volume_id;
+            if let Some(n) = p.erasing_by_volume.get_mut(&vol) {
+                *n -= 1;
+                if *n == 0 {
+                    p.erasing_by_volume.remove(&vol);
+                }
+            }
+        }
+        self.slots[idx] = Slot::free();
+        self.pending.lock().unwrap().freeing.push(slot_idx);
+        self.persist_slot(slot_idx).await
     }
 
     /// Where the slots begin, in bytes from the start of the device. Slot

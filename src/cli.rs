@@ -979,6 +979,7 @@ pub async fn run() -> anyhow::Result<()> {
     let slab_registry = volume_manager.registry().clone();
     let gem = volume_manager.gem().clone();
     let mut state = Arc::new(AppState::new(config.clone(), volume_manager, slab_registry, gem));
+    state.start_eraser().await;
 
     // What consumers will be told to dial, said once, before anything can be
     // attached — a derived address is a guess on a multi-homed node.
@@ -5710,6 +5711,7 @@ async fn handle_adopt_ublk(
         let slab_registry = mgr.registry().clone();
         let gem = mgr.gem().clone();
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
+        state.start_eraser().await;
         // The boot devices this process now serves are in use, and a volume
         // listing must say so — they were recorded nowhere (#138).
         {

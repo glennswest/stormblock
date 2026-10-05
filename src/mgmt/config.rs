@@ -43,6 +43,24 @@ pub struct StormBlockConfig {
     /// The serving surface — `/serve/v1` (#60).
     #[serde(default)]
     pub serve: ServeSection,
+    /// Secure delete: what freed data is overwritten with (#286).
+    #[serde(default)]
+    pub erase: EraseConfig,
+}
+
+/// `[erase]` (#286): a freed slot is overwritten before it is reused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EraseConfig {
+    /// `none`, `once` (one pass of zeros, the default), `dod3` or `dod7`.
+    /// A delete may ask for more with `?erase=`, never less.
+    pub default: crate::drive::erase::EraseLevel,
+}
+
+impl Default for EraseConfig {
+    fn default() -> Self {
+        EraseConfig { default: crate::drive::erase::EraseLevel::Once }
+    }
 }
 
 /// Where the stock binary gets its serving parameters from.
@@ -266,6 +284,7 @@ impl Default for StormBlockConfig {
             pressure: crate::volume::pressure::PressureConfig::default(),
             rebuild: crate::rebuild::RebuildConfig::default(),
             serve: ServeSection::default(),
+            erase: EraseConfig::default(),
         }
     }
 }

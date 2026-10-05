@@ -134,7 +134,7 @@ pub async fn collect(
             let Some(slot) = slab.get_slot(slot_idx) else {
                 continue;
             };
-            if slot.state == SlotState::Free {
+            if !slot.state.is_owned() {
                 continue;
             }
             if live.contains(&(slab_id, slot_idx)) {

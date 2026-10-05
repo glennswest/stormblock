@@ -11,6 +11,7 @@ pub mod pallets;
 pub mod slabs;
 pub mod placement;
 pub mod rebuilds;
+pub mod erasures;
 pub mod usage;
 #[cfg(feature = "stormfs-data")]
 pub mod stormfs;
@@ -122,6 +123,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/fstemplates", fstemplates::router(state.clone()))
         .nest("/api/v1/moves", moves::router(state.clone()))
         .nest("/api/v1/rebuilds", rebuilds::router(state.clone()))
+        .nest("/api/v1/erasures", erasures::router(state.clone()))
         .nest("/api/v1/synonyms", synonyms::router(state.clone()))
         .nest("/api/v1/boothost", boothost::router(state.clone()))
         .nest("/api/v1/releases", releases::router(state.clone()))

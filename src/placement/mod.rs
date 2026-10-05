@@ -817,7 +817,7 @@ impl PlacementEngine {
         let shares = r
             .get(&old.slab_id)
             .and_then(|s| s.get_slot(old.slot_idx))
-            .filter(|s| s.state != crate::drive::slab::SlotState::Free)
+            .filter(|s| s.state.is_owned())
             .map(|s| s.ref_count);
         let Some(shares) = shares.filter(|_| still) else {
             if let Some(slab) = r.get_mut(&dest_id) {

@@ -8,6 +8,7 @@ pub mod sas;
 pub mod crashdev;
 pub mod direct;
 pub mod dma;
+pub mod erase;
 pub mod filedev;
 pub mod freemap;
 pub mod flushgate;

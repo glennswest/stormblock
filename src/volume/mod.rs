@@ -20,6 +20,7 @@ pub mod stripelog;
 #[cfg(feature = "stormfs-data")]
 pub mod versioned;
 pub mod gc;
+pub mod erase;
 pub mod holds;
 pub mod pressure;
 pub mod relocate;
@@ -1420,6 +1421,17 @@ impl VolumeManager {
 
     /// Delete a volume, freeing all slab slots.
     pub async fn delete_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
+        self.delete_volume_erasing(id, None).await
+    }
+
+    /// Delete a volume, overwriting the slots it frees with at least `erase`
+    /// (#286) — more than the node's default, never less. Slots it still
+    /// shares with another volume are not freed, so not erased.
+    pub async fn delete_volume_erasing(
+        &mut self,
+        id: VolumeId,
+        erase: Option<crate::drive::erase::EraseLevel>,
+    ) -> Result<(), VolumeError> {
         // Never under something serving it (#267): a ublk device mounted
         // under running containers read zeros and other volumes' data once
         // its volume was deleted and its slots reused.
@@ -1437,7 +1449,10 @@ impl VolumeManager {
         // Remove all extents from GEM and dec_ref on slabs
         let mut gem = self.gem.write().await;
         let mut reg = self.registry.write().await;
-        snapshot::delete_snapshot(id, &mut gem, &mut reg).await?;
+        reg.set_erase_override(erase);
+        let res = snapshot::delete_snapshot(id, &mut gem, &mut reg).await;
+        reg.set_erase_override(None);
+        res?;
         drop(gem);
         drop(reg);
 
@@ -2464,7 +2479,7 @@ fn reconcile_record(
     let slot_gen = |leg: gem::Leg| -> Option<u64> {
         reg.get(&leg.slab_id)
             .and_then(|s| s.get_slot(leg.slot_idx))
-            .filter(|s| s.state != crate::drive::slab::SlotState::Free)
+            .filter(|s| s.state.is_owned())
             .map(|s| s.generation)
     };
     for (vext, loc) in &vrec.extents {
@@ -2482,7 +2497,7 @@ fn reconcile_record(
                     let slot = reg.get(&loc.slab_id).and_then(|s| s.get_slot(loc.slot_idx));
                     let why = match slot {
                         None => Some("is out of range".to_string()),
-                        Some(s) if s.state == crate::drive::slab::SlotState::Free => {
+                        Some(s) if !s.state.is_owned() => {
                             Some("has been freed".to_string())
                         }
                         Some(s) if s.volume_id == vrec.id => {

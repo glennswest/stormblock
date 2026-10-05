@@ -40,6 +40,15 @@ pub struct SlabRegistry {
     /// Slabs that take no new allocations: being drained, or reported
     /// failing by whoever watches the drives (#70).
     quarantined: HashSet<SlabId>,
+    /// What a slot freed on a local slab is overwritten with (#286).
+    erase: super::erase::EraseLevel,
+}
+
+/// Whether slots freed on this device are overwritten (#286). Not a slab
+/// reached over a fabric: that is another engine's volume (the appliance's
+/// per-boot clone during a flow-over), whose own engine erases what it frees.
+fn erasable(device: &dyn super::BlockDevice) -> bool {
+    !matches!(device.device_type(), super::DriveType::Iscsi | super::DriveType::NvmeTcp)
 }
 
 impl SlabRegistry {
@@ -53,7 +62,45 @@ impl SlabRegistry {
             device_labels: HashMap::new(),
             node_labels: FailureDomain::new(),
             quarantined: HashSet::new(),
+            erase: Default::default(),
         }
+    }
+
+    /// The node's erase level (#286): set on every local slab, present and
+    /// future. Slots already waiting keep the level they were marked with.
+    pub fn set_erase_default(&mut self, level: super::erase::EraseLevel) {
+        self.erase = level;
+        for slab in self.slabs.values_mut() {
+            if erasable(slab.device().as_ref()) {
+                slab.set_erase_level(level);
+            }
+        }
+    }
+
+    /// The node's erase level.
+    pub fn erase_default(&self) -> super::erase::EraseLevel {
+        self.erase
+    }
+
+    /// For the frees until it is cleared, every local slab overwrites with
+    /// at least `level` (one delete asking for more, #286). Hold the write
+    /// lock from setting it to clearing it.
+    pub fn set_erase_override(&mut self, level: Option<super::erase::EraseLevel>) {
+        for slab in self.slabs.values_mut() {
+            if erasable(slab.device().as_ref()) {
+                slab.set_erase_override(level);
+            }
+        }
+    }
+
+    /// Slots of `volume` waiting to be overwritten, over every slab.
+    pub fn erasing_for(&self, volume: crate::volume::extent::VolumeId) -> u64 {
+        self.slabs.values().map(|s| s.erasing_for(volume)).sum()
+    }
+
+    /// Slots waiting to be overwritten, over every slab.
+    pub fn erasing_slots(&self) -> u64 {
+        self.slabs.values().map(|s| s.erasing_slots()).sum()
     }
 
     /// The chain a slab sits in: its device's identity, under the device's
@@ -193,7 +240,10 @@ impl SlabRegistry {
 
     /// Register a slab. Its failure domain is its device's identity until
     /// something says more.
-    pub fn add(&mut self, slab: Slab) {
+    pub fn add(&mut self, mut slab: Slab) {
+        if erasable(slab.device().as_ref()) {
+            slab.set_erase_level(self.erase);
+        }
         let id = slab.slab_id();
         let tier = slab.tier();
         let domain = self.derive_domain(&slab);
