@@ -73,11 +73,12 @@ enum Allowed {
     Any,
 }
 
-async fn trial(seed: u64) -> Result<(), String> {
+async fn trial(seed: u64, version: u32) -> Result<(), String> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024));
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
         .with_role(SlabRole::Data)
+        .with_version(version)
         .with_auto_metadata(dev.capacity_bytes());
     let slab = Slab::format_with(dev.clone() as Arc<dyn BlockDevice>, fmt).await.map_err(|e| e.to_string())?;
     let sid = slab.slab_id();
@@ -182,9 +183,20 @@ async fn trial(seed: u64) -> Result<(), String> {
 
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_at_any_point() {
+    power_cuts(1).await;
+}
+
+/// The same 300 cuts over a slab in format v2 (#158): the volume records are
+/// a log of changes and a copy-on-write tree, not two whole copies.
+#[tokio::test]
+async fn fsynced_writes_survive_a_power_cut_at_any_point_in_format_v2() {
+    power_cuts(2).await;
+}
+
+async fn power_cuts(version: u32) {
     let mut failures = Vec::new();
     for seed in 0..300u64 {
-        if let Err(e) = trial(seed).await {
+        if let Err(e) = trial(seed, version).await {
             failures.push(e);
         }
     }
@@ -210,9 +222,19 @@ async fn fsynced_writes_survive_a_power_cut_at_any_point() {
 /// volume's bytes.
 #[tokio::test]
 async fn a_stale_record_and_several_cow_generations_recover() {
+    stale_record(1).await;
+}
+
+#[tokio::test]
+async fn a_stale_record_and_several_cow_generations_recover_in_format_v2() {
+    stale_record(2).await;
+}
+
+async fn stale_record(version: u32) {
     let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024));
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
         .with_role(SlabRole::Data)
+        .with_version(version)
         .with_auto_metadata(dev.capacity_bytes());
     let slab = Slab::format_with(dev.clone() as Arc<dyn BlockDevice>, fmt).await.unwrap();
     let sid = slab.slab_id();

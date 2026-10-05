@@ -1982,6 +1982,26 @@ impl VolumeManager {
         out
     }
 
+    /// Each format v2 store this manager has open (#158): a metadata slab's
+    /// id, or `metadata.v2`; pages in use, the log, what is not yet in the
+    /// tree.
+    pub fn metadata_v2_usage(&self) -> Vec<(String, metav2::Usage)> {
+        let st = self.v2.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(String, metav2::Usage)> = st
+            .sinks
+            .keys()
+            .filter_map(|k| {
+                let name = match k {
+                    persist_v2::Sink::Slab(id) => id.0.to_string(),
+                    persist_v2::Sink::Dir => persist_v2::DIR_FILE.to_string(),
+                };
+                st.usage(*k).map(|u| (name, u))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// The records a persist writes, taken in memory. `None` when this
     /// manager keeps no records anywhere.
     async fn records(&self, generation: u64) -> Option<Records> {

@@ -24,6 +24,7 @@ mod integration_forge;
 mod integration_fstemplates;
 mod integration_handover_order;
 mod integration_iscsi;
+mod integration_metadata_v2;
 mod integration_mgmt_api;
 mod integration_moves;
 mod integration_multidrive;
