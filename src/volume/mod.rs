@@ -702,10 +702,14 @@ impl VolumeManager {
     pub async fn volumes_on_slab(&self, slab: SlabId) -> Vec<(VolumeId, String, bool)> {
         let on: HashSet<VolumeId> = {
             let gem = self.gem.read().await;
-            gem.volume_ids()
+            let mut on: HashSet<VolumeId> = gem
+                .resident_ids()
                 .into_iter()
                 .filter(|v| gem.get_volume_map(v).map(|m| m.all_legs().any(|l| l.slab_id == slab)).unwrap_or(false))
-                .collect()
+                .collect();
+            // A map not in memory says which slabs it is on (#158).
+            on.extend(gem.cold_ids().into_iter().filter(|v| gem.cold(v).is_some_and(|c| c.slabs.contains(&slab))));
+            on
         };
         let mut out = Vec::new();
         for (id, h) in &self.volumes {
@@ -1791,6 +1795,10 @@ impl VolumeManager {
     /// slabs' caches, holding no lock while the device is read (#155): what
     /// a delete or a clone changes next under the registry lock.
     pub async fn prefetch_volume(&self, id: VolumeId) {
+        // What follows a prefetch (a delete, a clone) needs the map.
+        if let Err(e) = gem::ensure_resident(&self.gem, id).await {
+            tracing::error!("volume {}: loading its extent map: {e}", id.0);
+        }
         let by_slab: HashMap<SlabId, Vec<u64>> = {
             let gem = self.gem.read().await;
             let mut m: HashMap<SlabId, Vec<u64>> = HashMap::new();

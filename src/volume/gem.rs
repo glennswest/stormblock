@@ -224,6 +224,9 @@ pub struct GlobalExtentMap {
     /// lets GC free its slots.
     cold: HashMap<VolumeId, ColdMap>,
     pager: Option<Arc<dyn Pager>>,
+    /// Walks in progress that hold no manager lock ([`pin_resident`]):
+    /// nothing leaves memory while one runs.
+    pins: Arc<std::sync::atomic::AtomicUsize>,
     /// Whether changes are recorded (#158): on while a format v2 metadata
     /// store takes them, off otherwise so nothing accumulates.
     track: bool,
@@ -267,6 +270,24 @@ pub async fn ensure_resident(gem: &tokio::sync::RwLock<GlobalExtentMap>, id: Vol
     Ok(())
 }
 
+/// While held, no map leaves memory (#158 stage C).
+pub struct Pin(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Pin {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Every map in memory, kept there while the pin is held: what a walk of
+/// every map that holds no manager lock takes first (a flow-over, GC, a
+/// drain, a rebuild). Pinned before loading, so nothing leaves between.
+pub async fn pin_resident(gem: &tokio::sync::RwLock<GlobalExtentMap>) -> std::io::Result<Pin> {
+    let pin = gem.read().await.pin();
+    ensure_all_resident(gem).await?;
+    Ok(pin)
+}
+
 /// Load every map not in memory: what a walk of every map needs.
 pub async fn ensure_all_resident(gem: &tokio::sync::RwLock<GlobalExtentMap>) -> std::io::Result<()> {
     let ids = gem.read().await.cold_ids();
@@ -303,6 +324,7 @@ impl GlobalExtentMap {
             volumes: HashMap::new(),
             cold: HashMap::new(),
             pager: None,
+            pins: Default::default(),
             track: false,
             changes: Default::default(),
         }
@@ -330,6 +352,12 @@ impl GlobalExtentMap {
                 id.0
             );
         }
+    }
+
+    /// See [`pin_resident`].
+    pub fn pin(&self) -> Pin {
+        self.pins.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Pin(self.pins.clone())
     }
 
     pub fn set_pager(&mut self, pager: Option<Arc<dyn Pager>>) {
@@ -366,7 +394,7 @@ impl GlobalExtentMap {
     /// Take `id`'s map out of memory. Refused (false) while it has changes no
     /// persist has taken; the caller makes sure what was taken is written.
     pub fn evict(&mut self, id: VolumeId) -> bool {
-        if self.has_changes(&id) || self.cold.contains_key(&id) {
+        if self.pins.load(std::sync::atomic::Ordering::SeqCst) > 0 || self.has_changes(&id) || self.cold.contains_key(&id) {
             return false;
         }
         let Some(map) = self.volumes.remove(&id) else { return false };

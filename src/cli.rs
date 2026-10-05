@@ -5053,6 +5053,13 @@ pub(crate) async fn extents_on(
     gem: &tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>,
     sources: &[crate::drive::slab::SlabId],
 ) -> usize {
+    let _pin = match crate::volume::gem::pin_resident(gem).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("flow-over: loading extent maps: {e}");
+            return usize::MAX;
+        }
+    };
     let g = gem.read().await;
     sources
         .iter()
@@ -5078,6 +5085,14 @@ where
     F: std::future::Future<Output = ()>,
 {
     use crate::placement::PlacementError;
+    // Every map in memory for the whole flow (#158): it walks them all.
+    let _pin = match crate::volume::gem::pin_resident(gem).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("flow-over: loading extent maps: {e}");
+            return None;
+        }
+    };
     let engine = crate::placement::PlacementEngine::new();
     let (mut moved, mut failed) = (0u64, 0u64);
     // Looks that found the extent changed under them, in a row. An extent
