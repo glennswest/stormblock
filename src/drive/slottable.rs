@@ -100,7 +100,7 @@ impl SlotTable {
     }
 
     fn page_len(&self, page: u64) -> usize {
-        (self.limit.saturating_sub(page * PAGE)).min(PAGE) as usize
+        (self.limit.saturating_sub(page.saturating_mul(PAGE))).min(PAGE) as usize
     }
 
     fn cached(&self, page: u64) -> Option<Arc<[u8]>> {
@@ -144,7 +144,8 @@ impl SlotTable {
         pages.sort_unstable();
         pages.dedup();
         for page in pages {
-            if self.cached(page).is_some() {
+            // An index past the table (a caller's bad slot) has no page.
+            if self.page_len(page) == 0 || self.cached(page).is_some() {
                 continue;
             }
             let _io = self.page_io.lock().await;
