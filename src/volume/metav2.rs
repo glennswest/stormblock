@@ -1370,6 +1370,103 @@ mod tests {
         assert_eq!(s.usage().pages_used, after);
     }
 
+    /// Random puts, deletes and volume drops over a tree three levels deep,
+    /// checked against a model; after every checkpoint the pages in use are
+    /// exactly the pages a reopen finds named (nothing leaked, nothing named
+    /// twice).
+    #[tokio::test]
+    async fn a_deep_tree_matches_a_model_and_leaks_no_page() {
+        use rand::{Rng, SeedableRng};
+        let size = 256 << 20;
+        let dev = mem(size).await;
+        let mut s = MetaV2::format(dev.clone(), 0, size).await.unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(158);
+        let mut want: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
+        // ~20k entries a volume at ~60 B: ~300 leaves each, two internal levels.
+        let mut bulk = Vec::new();
+        for v in 1..=8u8 {
+            for i in 0..20_000u64 {
+                let val = vec![v ^ (i as u8); 30 + (i as usize % 7)];
+                bulk.push((k(v, i * 3), val.clone()));
+                want.insert(k(v, i * 3), val);
+            }
+        }
+        s.replace_all(bulk).await.unwrap();
+        for round in 0..30u32 {
+            let mut ops = Vec::new();
+            for _ in 0..rng.gen_range(1..3000) {
+                let key = k(rng.gen_range(1..=9u8), rng.gen_range(0..70_000u64));
+                if rng.gen_bool(0.3) {
+                    ops.push(Op::Del(key));
+                    want.remove(&key);
+                } else {
+                    let val = vec![rng.gen(); rng.gen_range(0..200)];
+                    ops.push(Op::Put(key, val.clone()));
+                    want.insert(key, val);
+                }
+            }
+            if rng.gen_bool(0.2) {
+                let v = rng.gen_range(1..=9u8);
+                ops.push(Op::DropVolume([v; 16]));
+                want.retain(|key, _| key.vol() != [v; 16]);
+                // And some of it written again after the drop.
+                for i in 0..rng.gen_range(0..500u64) {
+                    let val = vec![7; 9];
+                    ops.push(Op::Put(k(v, i), val.clone()));
+                    want.insert(k(v, i), val);
+                }
+            }
+            s.append(ops).await.unwrap();
+            if rng.gen_bool(0.5) {
+                s.checkpoint().await.unwrap();
+                let used = s.usage().pages_used;
+                let mut again = MetaV2::open(dev.clone(), 0, size).await.unwrap().unwrap();
+                assert_eq!(again.usage().pages_used, used, "round {round}: pages in use vs named");
+                assert_eq!(again.usage().pending, 0);
+                let got: BTreeMap<Key, Vec<u8>> = again.scan().await.unwrap().into_iter().collect();
+                assert_eq!(got.len(), want.len(), "round {round}");
+                assert!(got == want, "round {round}: contents differ");
+            }
+            if rng.gen_bool(0.3) {
+                s = MetaV2::open(dev.clone(), 0, size).await.unwrap().unwrap();
+            }
+            let got: BTreeMap<Key, Vec<u8>> = s.scan().await.unwrap().into_iter().collect();
+            assert!(got == want, "round {round}: contents differ ({} vs {})", got.len(), want.len());
+        }
+    }
+
+    #[test]
+    fn a_header_that_shrank_ignores_the_chunk_left_behind() {
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let rec = |name: &str| VolumeRecord {
+            id,
+            name: name.into(),
+            virtual_size: 1,
+            array_id: None,
+            extents: BTreeMap::new(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: BTreeMap::new(),
+            failed_slabs: vec![],
+            parent: None,
+            sealed: false,
+            template: false,
+            access: Default::default(),
+            fs: None,
+            owner: None,
+            lba: 4096,
+        };
+        let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000))));
+        let short = header_entries(id, &header_bytes(&rec("b")));
+        assert_eq!(long.len(), 4);
+        assert_eq!(short.len(), 1);
+        let mut store: BTreeMap<Key, Vec<u8>> = long.into_iter().collect();
+        store.extend(short);
+        let doc = document_of(store.into_iter().collect()).unwrap();
+        assert_eq!(doc.volumes[0].name, "b");
+        assert_eq!(header_chunks(MAX_VALUE * 2), 3);
+    }
+
     #[test]
     fn a_document_round_trips_through_its_entries() {
         let sid = SlabId(uuid::Uuid::new_v4());
