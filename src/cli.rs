@@ -1054,9 +1054,14 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     // Collect device paths from config
-    let device_paths: Vec<String> = config.drives.iter()
-        .map(|d| d.path.clone())
-        .collect();
+    // An emulated drive's entry is spelled as its `emulated://` URI (#208).
+    let device_paths: Vec<String> = config
+        .drives
+        .iter()
+        .enumerate()
+        .map(|(i, d)| d.device_path(i))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Collect the first volume device for target export
     let mut export_device: Option<Arc<dyn BlockDevice>> = None;
@@ -1493,7 +1498,7 @@ pub async fn run() -> anyhow::Result<()> {
                     let nsid = i as u32 + 1;
                     tracing::info!(
                         "NVMe-oF namespace {nsid}: {} ({} bytes)",
-                        config.drives.get(i).map(|d| d.path.as_str()).unwrap_or("?"),
+                        device_paths.get(i).map(|d| d.as_str()).unwrap_or("?"),
                         drive.capacity_bytes(),
                     );
                     nvmeof.add_namespace(nsid, drive.clone());

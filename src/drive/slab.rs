@@ -488,7 +488,13 @@ pub fn auto_metadata_bytes(capacity: u64, slot_size: u64) -> u64 {
 
 /// Write `len` zero bytes at `offset`, a chunk at a time.
 async fn write_zeros(device: &Arc<dyn BlockDevice>, offset: u64, len: u64) -> DriveResult<()> {
+    // In 8 MiB steps through the device's own `write_zeroes`: a device that
+    // can promise zeros without writing them (an emulated 1 PiB drive, whose
+    // table is 64 GiB of zeros, #208) does, and the rest write them.
     const CHUNK: u64 = 8 * 1024 * 1024;
+    if device.device_type() == super::DriveType::Emulated {
+        return device.write_zeroes(offset, len).await;
+    }
     let zero = vec![0u8; CHUNK.min(len) as usize];
     let mut done = 0u64;
     while done < len {

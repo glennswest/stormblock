@@ -530,9 +530,52 @@ pub fn log_advertised_host(cfg: &ManagementConfig, listen_host: &str) {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DriveConfig {
+    /// A device, a file or a URI. Unused with `kind = "emulated"`.
+    #[serde(default)]
     pub path: String,
+    /// `"emulated"`: a drive for scale tests that reports `size` and stores
+    /// only what is written, in memory or under `backing` (#208).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The emulated drive's capacity: `256T`, `1P` (powers of 1024).
+    #[serde(default)]
+    pub size: Option<String>,
+    /// A directory for the emulated drive's data; memory when unset.
+    #[serde(default)]
+    pub backing: Option<String>,
+    /// The emulated drive's name; `emu<index>` when unset.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl DriveConfig {
+    /// What to open for the `index`th `[[drives]]` entry: its `path`, or for
+    /// an emulated drive the `emulated://` URI its fields spell.
+    pub fn device_path(&self, index: usize) -> Result<String, String> {
+        match self.kind.as_deref() {
+            None | Some("") | Some("device") => {
+                if self.path.is_empty() {
+                    return Err(format!("[[drives]] #{index}: no path"));
+                }
+                Ok(self.path.clone())
+            }
+            Some("emulated") => {
+                let size = self.size.as_deref().ok_or_else(|| format!("[[drives]] #{index}: an emulated drive needs size"))?;
+                if crate::drive::emulated::parse_size(size).is_none() {
+                    return Err(format!("[[drives]] #{index}: size {size:?} is not a size (256T, 1P)"));
+                }
+                let name = self.name.clone().unwrap_or_else(|| format!("emu{index}"));
+                let mut uri = format!("emulated://{name}?size={size}");
+                if let Some(b) = self.backing.as_deref().filter(|b| !b.is_empty()) {
+                    uri.push_str(&format!("&backing={b}"));
+                }
+                Ok(uri)
+            }
+            Some(k) => Err(format!("[[drives]] #{index}: unknown kind {k:?} (device, emulated)")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -688,14 +731,15 @@ impl StormBlockConfig {
         // CLI devices override config drives
         if !devices.is_empty() {
             self.drives = devices.iter()
-                .map(|p| DriveConfig { path: p.clone() })
+                .map(|p| DriveConfig { path: p.clone(), ..Default::default() })
                 .collect();
         }
 
         // CLI RAID overrides config arrays
         if let Some(level) = raid_level {
             let drive_paths: Vec<String> = self.drives.iter()
-                .map(|d| d.path.clone())
+                .enumerate()
+                .map(|(i, d)| d.device_path(i).unwrap_or_else(|_| d.path.clone()))
                 .collect();
             self.arrays = vec![ArrayConfig {
                 name: "cli-array".to_string(),

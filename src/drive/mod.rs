@@ -8,6 +8,7 @@ pub mod sas;
 pub mod crashdev;
 pub mod direct;
 pub mod dma;
+pub mod emulated;
 pub mod erase;
 pub mod filedev;
 pub mod freemap;
@@ -71,6 +72,9 @@ pub enum DriveType {
     /// Remote NVMe-TCP namespace attached as a drive — the cross-node
     /// RAID-leg transport (#73).
     NvmeTcp,
+    /// A drive that reports any capacity and stores only what is written,
+    /// for scale tests (#208): never media.
+    Emulated,
 }
 
 impl fmt::Display for DriveType {
@@ -82,6 +86,7 @@ impl fmt::Display for DriveType {
             DriveType::File => write!(f, "File"),
             DriveType::Iscsi => write!(f, "iSCSI"),
             DriveType::NvmeTcp => write!(f, "NVMe-TCP"),
+            DriveType::Emulated => write!(f, "Emulated"),
         }
     }
 }
@@ -289,6 +294,11 @@ pub async fn open_drives(paths: &[String]) -> Vec<(String, DriveResult<Box<dyn B
 }
 
 pub async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
+    // An emulated drive for scale tests (#208): any capacity, nothing stored
+    // but what is written; one name is one drive for the process.
+    if let Some(spec) = emulated::EmulatedSpec::parse(path) {
+        return Ok(Box::new(emulated::open(&spec?)?));
+    }
     // Fabric URIs first — a remote namespace attached as a drive
     // (stormblock#73). The same string works everywhere a device path
     // does: config `[[drives]]`, POST /api/v1/drives, RAID members.
@@ -377,7 +387,7 @@ pub async fn open_path(path: &str, read_only: bool) -> DriveResult<std::sync::Ar
 
 fn supported_uri_schemes() -> &'static str {
     #[cfg(all(feature = "nvmeof", feature = "iscsi"))]
-    return "nvme-tcp://host:port/nqn?nsid=N, iscsi://host:port/iqn";
+    return "nvme-tcp://host:port/nqn?nsid=N, iscsi://host:port/iqn, emulated://name?size=1P";
     #[cfg(all(feature = "nvmeof", not(feature = "iscsi")))]
     return "nvme-tcp://host:port/nqn?nsid=N";
     #[cfg(all(not(feature = "nvmeof"), feature = "iscsi"))]
