@@ -2,10 +2,11 @@
 //!
 //! `PUT` takes the `[nvmeof]` settings (`listen_addr`, `nqn`, and the #210
 //! host policy), starts the shared NVMe/TCP target live and keeps them, so
-//! every later start of the engine serves it again. `DELETE` turns it off:
-//! no new connections, the ones being served finish. `GET` reports what runs
-//! and who set it up. Not for a target the command line or `--config` set up:
-//! that is answered `409`.
+//! every later start of the engine serves it again. `DELETE` turns it off and
+//! keeps it off (a node is a forge by default, #287): no new connections, the
+//! ones being served finish. `GET` reports `state` (on/off) and `from`
+//! (default/persisted/config). Not for a target the command line or
+//! `--config` set up: that is answered `409`.
 
 use std::sync::Arc;
 
