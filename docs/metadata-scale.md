@@ -114,6 +114,9 @@ Together with 64 MiB bulk extents that is ~0.5 GiB per PiB, under budget.
 
 ### 3.3 Paged, incremental metadata
 
+*Being built in #158 (`docs/metadata-v2.md`): the log and the on-disk tree
+are stage B; the bounded cache is stage C.*
+
 For 1 MiB classes at scale, and for persistence at any scale:
 * **An extent map on disk** per volume, as a B-tree in the metadata region of
   the slab (or a metadata slab), read through a **bounded cache**. What is

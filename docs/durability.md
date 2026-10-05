@@ -131,6 +131,18 @@ tests run on.
    freeing the old slot. Only with no room anywhere else does it fall back to
    writing in place.
 
+12. **A change list is applied in the order it was taken** (#158, metadata
+   format v2). A v2 persist writes what changed, not a snapshot, so the v1
+   rule "never write an older record over a newer one" becomes: batches are
+   applied in the order their records were taken, a batch taken before a
+   failed write is dropped and the store is written whole next time, and a
+   persist that stops before writing does the same. Rule 1 holds as before:
+   the slabs are flushed after the records are taken and before the log
+   record is written, and a log record is durable at its flush. A checkpoint
+   writes new pages, flushes, then the other superblock; the pages it stops
+   naming are reused only after that superblock is flushed, so the previous
+   superblock's tree is whole until the new one is.
+
 ## How it is checked
 
 * `tests/integration_power_cut.rs`:
