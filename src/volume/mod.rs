@@ -10,6 +10,7 @@ pub mod extent;
 pub mod fence;
 pub mod gem;
 pub mod metadata;
+pub mod metav2;
 pub mod redundancy;
 pub mod thin;
 pub mod snapshot;
