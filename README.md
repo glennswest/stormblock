@@ -338,7 +338,9 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 | `beacon_secs`, `peer_stale_secs` | `5`, `30` | discovery timing |
 | `ublk_transport` | `true` | offer ublk for a local attach; per request, `"transport": "nvme_tcp"` asks for the network instead |
 
-**`[[drives]]`** `path` — a device, partition, file or `nvme-tcp://`/`iscsi://` URI.
+**`[[drives]]`** `path` — a device, partition, file or `nvme-tcp://`/`iscsi://` URI;
+or `kind = "emulated"`, `size = "1P"`, `backing = "<dir>"` (optional), `name`
+(optional) for an emulated drive (#208, below).
 
 **`[iscsi]`** (`iscsi`) — `max_connections` (`4`, MC/S per session) is used;
 `listen_addr`, `target_name`, `chap_user`, `chap_secret` are not (see above).
@@ -1100,6 +1102,37 @@ A move is **offline by contract**: an exported or attached volume is refused,
 because anything written during the copy would not be in the target. It is
 *restartable* rather than resumable — an interrupted move is discarded and
 re-run, which costs time and never data.
+
+### Emulated drives for scale tests (#208)
+
+`emulated://<name>?size=256T|1P[&backing=<dir>][&lbs=512]` is a drive that
+reports the size it is given and stores only what is written:
+
+- **Where the data lives:** in memory, in 64 KiB pages, or under `backing`,
+  in 1 GiB sparse chunk files that outlive the process.
+- **What it does not store:** a range never written, written with zeros, or
+  discarded holds nothing and reads as zeros. So formatting a 1 PiB slab
+  (64 GiB of slot table) takes 0.1 s and stores nothing.
+- **Where it is accepted:** wherever a device path is, including `[[drives]]`
+  (or `kind = "emulated"`), `POST /api/v1/drives`, `POST /api/v1/slabs` and
+  `slab format`.
+- **Identity:** one name is one drive for the life of the process. It reports
+  `device_type` `Emulated`, and `GET /api/v1/drives` adds `emulated
+  {name, stored_bytes, backing, failed}`.
+- **Failing it:** `POST /api/v1/drives/{id}/emulate {"failed": true}` makes
+  every I/O answer EIO until `{"failed": false}`. That is the rebuild test;
+  a real drive answers 409.
+
+`examples/emulated_scale` formats and reopens N of them. On dev, at 1 MiB
+slots:
+
+- **Memory:** about 130 MiB resident per PiB with the slabs open. That is the
+  free map, 1 bit a slot (#155), so 160 drives of 1 PiB need about 20 GiB.
+- **Reopening a slab:** 3.3 s per 1 PiB drive, which is reading its slot
+  table.
+
+`tests/it/integration_emulated.rs` runs a mirror on three 256 TiB drives
+through a drive failure and a rebuild.
 
 ### Growing the pool on disk pressure
 

@@ -228,6 +228,20 @@ docs/metadata-scale.md §3.2, no on-disk format change. Measured with
 - Restore still holds every allocated slot's entry for its duration
   (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
+### Emulated drives for scale tests (2026-10-05, #208, P1) — DONE
+
+stormcos#92 / #204 (owner: a simulator first). `drive/emulated.rs`:
+`emulated://<name>?size=…[&backing=<dir>]` reports any capacity and stores
+only what is written (memory pages or 1 GiB sparse chunk files; zeros and
+discards store nothing); one name = one drive per process; `DriveType::
+Emulated`; `[[drives]] kind = "emulated"`; `POST /api/v1/drives/{id}/emulate
+{failed}` (EIO). Slab format zeroes its table through `write_zeroes`.
+- [x] tests: unit (4), `integration_emulated` (mirror on 3 × 256 TiB rebuilds
+      after one fails; 1 PiB over the API; config); full nextest 898/898
+- [x] `examples/emulated_scale` on dev: ~130 MiB/PiB resident (the free map),
+      reopen 3.3 s per 1 PiB; docs (README, metadata-scale.md), CHANGELOG
+- Left to stormcos#92: the node-level `long` suite on 160 of them
+
 ### Stage the next release on a running node (2026-10-05, #122, P1) — WAITING ON THE OWNER
 
 The boot-time "adopt the kept data half" path is ruled out (#261: another

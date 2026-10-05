@@ -188,6 +188,24 @@ dev, which now counts heap bytes (4 M slots):
   duration (`SlotView`), a transient spike the paged index removes; the
   cache is per slab rather than one budget for the node.
 
+### Measured on emulated drives (#208)
+
+`examples/emulated_scale` formats N emulated drives as slabs: they report 256
+TiB or 1 PiB and store only what is written. It then opens each slab again,
+as a restart would. On dev, at 1 MiB slots:
+
+| | 4 × 256 TiB | 2 × 1 PiB |
+|---|---|---|
+| format, per drive | 0.03 s | 0.10 s |
+| open (reads the slot table), per drive | 0.82 s | 3.30 s |
+| resident, slabs open | 132 MiB / PiB | 130 MiB / PiB |
+| what the drives hold | 16 MiB | 8 MiB |
+
+What is left resident per PiB is the free map: 1 bit a slot, 128 MiB at
+1 MiB slots. 160 drives of 1 PiB need about 20 GiB, which is over the
+1 GiB/PiB budget of §2. Bulk extents of 64 MiB (#156) bring it to 2 MiB/PiB,
+and a free-extent tree (§3.3) brings it below that.
+
 ## 5. Work
 
 | | issue |

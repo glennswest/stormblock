@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **feat:** Emulated drives for scale tests (#208, stormcos#92).
+  - `emulated://<name>?size=256T|1P[&backing=<dir>][&lbs=512]`, or `[[drives]] kind = "emulated"` with `size`, `backing` and `name`, is a drive (`drive/emulated.rs`) that reports any capacity and stores only what is written: in memory in 64 KiB pages, or in 1 GiB sparse chunk files. Zeros and discards store nothing.
+  - It is accepted wherever a device path is. One name is one drive for the process. It reports `DriveType::Emulated`, and `GET /api/v1/drives` adds `emulated {name, stored_bytes, backing, failed}`.
+  - `POST /api/v1/drives/{id}/emulate {"failed": true|false}` fails it (EIO on every I/O) or recovers it. A real drive answers 409.
+  - Formatting a slab writes its zeroed table through the device's `write_zeroes`, so a 1 PiB slab formats in 0.1 s on an emulated drive.
+- **test:** `drive::emulated` tests (1 PiB stores only what is written, one name one drive, fail and recover, directory backing across a reopen). `integration_emulated` covers:
+  - a mirror on three 256 TiB drives: one fails, the volume degrades, a resync rebuilds every extent off it, every byte is intact, and the drives hold under 256 MiB;
+  - a 1 PiB drive over the API: enrol, format a slab, fail, recover, and 409 for a real drive;
+  - `[[drives]]` emulated config.
+
+  `examples/emulated_scale` measured about 130 MiB resident per PiB (the free map) and 3.3 s to reopen a 1 PiB slab
 - **feat:** The initramfs says why it could not name the node from the network, sets the domain, and sends its name in its DHCP requests (#238, stormcos#191). C2NR0Q2 registered as `storm-06f96d` with a reservation and a confirmed PTR naming it `stormblock1`. microdns sends no option 12 (microdns#14), and with no DNS server in the lease the PTR step was skipped without a word. Now:
   - each step that gives no name is said: no option 12, no DNS server in the lease, no PTR, or a PTR that does not resolve back;
   - the domain (option 15/119, else the name's own) is set as `/proc/sys/kernel/domainname`, and the FQDN printed;
