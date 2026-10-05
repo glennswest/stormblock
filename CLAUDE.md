@@ -118,9 +118,9 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 (stormblock-csi, `/v1`) is for third-party drivers only.
 
 ## Architecture (bottom-up)
-- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
+- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slottable.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171; the table read through a bounded page cache, no per-slot record in memory, #155), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
 - `src/raid/` — drive-level RAID 1/5/6/10 sets (#252): `layout.rs` (P/Q rotation, RAID-10 pairs), `superblock.rs` (v2: slot table, events, name, pool), `bitmap.rs` (on-disk write-intent bitmap), `spares.rs` (hot spares by pool), `rebuild.rs` (progress, rates); `mod.rs`: stripe locks, degraded I/O, assembly, rebuild onto a spare, scrub. `src/mgmt/raid_sets.rs` joins them to slabs and the API (`docs/raid-sets.md`)
-- `src/volume/` — thin volumes (`thin.rs`), the slot fence (`fence.rs`: I/O shared, a move exclusive, #239), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V9; V8 written when every volume is 4096), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
+- `src/volume/` — thin volumes (`thin.rs`), the compact extent table (`extable.rs`, #155), the slot fence (`fence.rs`: I/O shared, a move exclusive, #239), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V9; V8 written when every volume is 4096), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
 - `src/fs/` — templates (`template.rs`), ext4 (`ext4.rs`) and XFS (`xfs.rs`) seams, disk identity (`disk.rs`), files, image survey (`survey.rs`)
 - `src/image/` — image build (GPT, FAT, ISO, qcow2/VHD/VMDK), import (`import.rs`, `decode/`), node layout (`local.rs`), local boot
 - `src/pallet/` — pallet writer, GPT, store, manager, selection; the reader is `crates/pallet-format`
@@ -172,26 +172,37 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Resident compaction (2026-10-05, #155, P1) — IN PROGRESS
+### Resident compaction (2026-10-05, #155, P1) — DONE
 
-docs/metadata-scale.md §3.2, no on-disk format change. Baseline (#145):
-~41 B per free slot, ~70 B more per allocated slot, ~215 B per extent in the
-GEM. Target ~30 B per extent, 0 B per free slot. Three steps, each tested:
-- [x] measure first: `metadata_footprint` gains a scattered map and clones,
-      and counts heap bytes. Baseline on dev (4 M slots): 40.6 B per free
-      slot, +65.8 per allocated, GEM 220.5 B per extent
+docs/metadata-scale.md §3.2, no on-disk format change. Measured with
+`examples/metadata_footprint` on dev (4 M slots, heap bytes counted):
+
+| | before | after |
+|---|---|---|
+| a free slot | 40.6 B | 0.6 B (the free map) |
+| an allocated slot, slab side | +65.8 B | +4.1 B (the bounded page cache) |
+| an extent in the GEM | 220.5 B | 25.0 B (29.4 scattered, 25.0 clone maps) |
+| per PB written, extrapolated | 313.7 GB | 28.7 GB |
+
 - [x] 1. GEM without a reverse index: `slab_extents`/`slab_parity` walk the
-      forward maps (one entry per referenced slot); callers that asked per
-      extent in a loop (flow-over, drain) take one list per pass
-- [x] 2. compact GEM entries (`volume/extable.rs`; 25 B per extent dense
-      and for clone maps, measured; full nextest 891/891): slab ordinal (process-wide interner), slot,
-      share count, generation packed; mirrors out of line; extents in chunks
-      of 64 virtual extents instead of a B-tree node each. `lookup` returns
-      an owned `ExtentLocation`; `VolumeRecord.extents` (on disk) unchanged
-- [ ] 3. slab: no `Vec<Slot>` for every slot and no `extent_index`. The
-      slot table on disk is the record, read through a bounded cache of
-      table sectors; pending entries (#171) stay in memory until published
-- [ ] tests (full nextest), measurements, docs (metadata-scale.md), CHANGELOG
+      maps (one entry per slot); a slot's owner (share counts after a
+      copy-on-write, `sync_refs`) is its slot table's. The flow-over takes one
+      list per pass; a pass skips what changed under it (64 passes that move
+      nothing count as one failure). Found by the live-clone flow-over test:
+      counting each stale item against the per-extent retry limit failed it
+- [x] 2. `volume/extable.rs`: 24-byte entries (slab ordinal from a
+      process-wide interner, slot, share count, generation), chunks of 64
+      virtual extents, mirrors out of line; `lookup` returns a location by
+      value; the record on disk unchanged (`to_btree`)
+- [x] 3. `drive/slottable.rs`: the slab keeps its free map and `pending`
+      (entries that differ from the device) only; entries read through a
+      page cache (`STORMBLOCK_SLOT_CACHE_MB`, 16); open, restore (`SlotView`,
+      transient) and GC read the table in one pass; GC scans with no lock and
+      re-checks each orphan under it; hot paths prefetch pages before taking
+      the registry (#269)
+- [x] full nextest on dev: 891/891; `--features cluster` checks
+- Restore still holds every allocated slot's entry for its duration
+  (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
 ### Incremental metadata persistence: change log + checkpoints (2026-10-05, #157, P1) — WAITING ON THE OWNER
 

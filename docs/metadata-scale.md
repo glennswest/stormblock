@@ -1,11 +1,12 @@
 # Allocation metadata at 40 PB a node
 
-**Status:** design (#145, 2026-09-25), with measurements and the first fix.
+**Status:** design (#145, 2026-09-25), with measurements and the first fix;
+§3.2 built (#155, 2026-10-05): see §4.
 Scale target (the owner): 160 × 256 TB drives per 4U node (Supermicro
 ASG-4116S-NU160R class), ~41 PB a node, ~400 PB a rack, and 1 PB drives
 coming (stormcos#93). Companion: [multi-drive.md](multi-drive.md).
 
-## 1. What it costs today, measured
+## 1. What it cost before #155, measured
 
 `examples/metadata_footprint.rs` formats a slab, allocates every slot, fills
 the global extent map (GEM) with one extent per slot, and reads resident memory
@@ -145,6 +146,40 @@ gives the same answer as before (a randomised test compares it with a scan), wit
 change. Measured on 4 M slots: allocation is **flat at ~27 µs a slot from
 empty to 90% full**, where it had grown from 25 to 168 µs. The remaining
 27 µs is the slot-table write.
+
+### Resident compaction, built (#155)
+
+§3.2 as designed, no on-disk format change. Measured with the same example on
+dev, which now counts heap bytes (4 M slots):
+
+| | before | after |
+|---|---|---|
+| a free slot | 40.6 B | **0.6 B** (the free map and its summary) |
+| an allocated slot, slab side | +65.8 B | **+4.1 B** (the page cache, bounded) |
+| an extent in the GEM | 220.5 B | **25.0 B** dense, 29.4 B scattered, 25.0 B for clone maps |
+| a 256 TB drive, full | 80.3 GB | **7.3 GB** |
+| per PB written | 313.7 GB | **28.7 GB** |
+
+* **The slab** (`drive/slottable.rs`) keeps its free map and the entries that
+  differ from the device (`pending`: allocated and not yet published,
+  #171; share counts waiting for a sync). Every other entry is read from the
+  slot table through a cache of 4 KiB pages, 16 MiB a slab by default
+  (`STORMBLOCK_SLOT_CACHE_MB`). Opening a slab, restore and the collector
+  read the table in one sequential pass. Paths that change entries under the
+  registry lock (copy-on-write, release, discard, delete, clone, the eraser,
+  a move's publish, a sync's publish) read the pages first with no lock held,
+  so a page read never holds every volume's I/O (#269).
+* **The GEM** (`volume/extable.rs`) holds 24 bytes an extent: a slab ordinal
+  into a process-wide table, the slot, the share count and the generation,
+  in chunks of 64 consecutive virtual extents; mirror legs out of line. The
+  record on disk is the same B-tree as before.
+* **No reverse index.** "What is on this slab" walks the maps (one entry per
+  slot; drain, evacuation and flow-over take one list per pass); "who owns
+  this slot" is the slot table's (the share count a copy-on-write leaves is
+  set on the owner's map).
+* **Left for #158:** restore holds every allocated slot's entry for its
+  duration (`SlotView`), a transient spike the paged index removes; the
+  cache is per slab rather than one budget for the node.
 
 ## 5. Work
 
