@@ -1503,6 +1503,50 @@ else
     DHCP_TRIES=5
     [ "$(echo $CANDIDATES | wc -w)" -le 1 ] && DHCP_TRIES=10
 
+    # --- BEGIN dhcp name hint (covered by tests/initramfs-node-name.sh)
+    # The name this node asks for its lease under (option 12, #238), so the
+    # server's lease table says who holds each lease. Before the lease the
+    # network has not said what the node is called, so the hint comes from
+    # what this machine already knows:
+    #   1. its declared name, `[node] hostname` in /config/stormcos.toml on
+    #      the local disk's `stormcos-state` volume (a node installed before);
+    #   2. the name its firmware claimed its boot image on (`StormBootTag`,
+    #      #249), which stormbootx took from DHCP and reverse DNS a stage
+    #      earlier. Never an SMBIOS guess, and never a `mac-` placeholder.
+    # Without one, nothing is sent and the server names the lease as before.
+    DHCP_NAME=""
+    DHCP_NAME_FROM=""
+    DHCP_HOST_ARGS=""
+    _hint_toml="${STORM_RUN:-/run}/stormcos-state.toml"
+    case "$SLAB" in
+    /*)
+        if [ -e "$SLAB" ] && "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$SLAB" \
+               --volume stormcos-state --out "$_hint_toml" /config/stormcos.toml >/dev/null 2>&1 \
+           && [ -s "$_hint_toml" ]; then
+            DHCP_NAME=$(awk '
+                /^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[node\][[:space:]]*(#.*)?$/) ; next }
+                s && /^[[:space:]]*hostname[[:space:]]*=/ {
+                    sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*#.*$/, ""); gsub(/"/, ""); print; exit
+                }' "$_hint_toml")
+            [ -n "$DHCP_NAME" ] && DHCP_NAME_FROM="its declared name (stormcos.toml on $SLAB)"
+        fi
+        rm -f "$_hint_toml"
+        ;;
+    esac
+    if [ -z "$DHCP_NAME" ] && [ "${BOOTTAG_FROM:-}" = firmware ]; then
+        case "$BOOTTAG" in
+        ""|mac-*) ;;
+        *) DHCP_NAME="$BOOTTAG"; DHCP_NAME_FROM="the name its firmware booted as" ;;
+        esac
+    fi
+    # A hostname, short: letters, digits and dashes (RFC 1123), or nothing.
+    DHCP_NAME=$(printf '%s' "${DHCP_NAME%%.*}" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//')
+    if [ -n "$DHCP_NAME" ]; then
+        DHCP_HOST_ARGS="-x hostname:$DHCP_NAME"
+        echo "  asking DHCP as '$DHCP_NAME', $DHCP_NAME_FROM"
+    fi
+    # --- END dhcp name hint
+
     # The bond first, when there is one to make.
     #
     # Tried ahead of the single ports and falls back to them: a bond that
@@ -1525,7 +1569,7 @@ else
         fi
         if [ -n "$BONDED" ]; then
             net_bring_up "$BONDED"
-            if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES"; then
+            if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
                 LEASED="$BONDED"
             else
                 echo "  no lease on $BONDED - falling back to single ports"
@@ -1538,7 +1582,7 @@ else
     [ -n "$LEASED" ] || for UPLINK in $CANDIDATES; do
         netsay "  trying $UPLINK (speed $(net_speed "$UPLINK"), carrier $(net_carrier "$UPLINK"))"
         net_bring_up "$UPLINK"
-        if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES"; then
+        if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
             LEASED="$UPLINK"
             break
         fi
@@ -1571,7 +1615,23 @@ if [ -n "$NETADDR" ]; then
     # decision in the other direction. Only then the MAC — the one identifier
     # a machine has before anyone has told it anything, and a name nobody
     # chose.
-    NODE_NAME="$(cat /run/dhcp-hostname 2>/dev/null || true)"
+    # --- BEGIN node name (covered by tests/initramfs-node-name.sh)
+    # Every step says why it gave no name (#238): C2NR0Q2 registered as
+    # `storm-06f96d` with a reservation and a confirmed PTR naming it
+    # `stormblock1`, and nothing on the console said which step had failed.
+    _nr="${STORM_NAME_RUN:-/run}"
+    _resolv="${STORM_RESOLV:-/etc/resolv.conf}"
+    NODE_NAME=""
+    NODE_DOMAIN="$(cat "$_nr/dhcp-domain" 2>/dev/null || true)"
+    _opt12="$(cat "$_nr/dhcp-hostname" 2>/dev/null || true)"
+    if [ -n "$_opt12" ]; then
+        NODE_NAME="${_opt12%%.*}"
+        # A server that sends the FQDN in option 12 has said the domain too.
+        case "$_opt12" in *.*) [ -n "$NODE_DOMAIN" ] || NODE_DOMAIN="${_opt12#*.}" ;; esac
+        echo "  name from DHCP: $NODE_NAME (option 12)"
+    else
+        echo "  the lease names no host (no option 12)"
+    fi
 
     # Then ask DNS what this address is called.
     #
@@ -1584,10 +1644,15 @@ if [ -n "$NETADDR" ]; then
     # The short form, not the FQDN: the domain travels separately, and a
     # hostname carrying it turns up doubled in every certificate subject and
     # log line that appends one.
-    if [ -z "$NODE_NAME" ] && [ -s /etc/resolv.conf ]; then
+    if [ -z "$NODE_NAME" ]; then
         MYIP=$(ip -4 -o addr show dev "$IFACE" 2>/dev/null \
                | awk '{ print $4 }' | cut -d/ -f1 | head -1)
-        if [ -n "$MYIP" ]; then
+        if [ -z "$MYIP" ]; then
+            echo "  no IPv4 address on $IFACE: cannot ask DNS what this node is called"
+        elif ! grep -q '^nameserver' "$_resolv" 2>/dev/null; then
+            # The lease carried no option 6 (microdns#14 on the g16 pool).
+            echo "  no DNS server in the lease: cannot ask DNS what $MYIP is called"
+        else
             PTRNAME=$(nslookup "$MYIP" 2>/dev/null \
                       | sed -n 's/.*name = \(.*\)\.$/\1/p' | head -1)
             # Forward-confirmed, or not at all.
@@ -1602,23 +1667,22 @@ if [ -n "$NETADDR" ]; then
             # So the name has to round-trip: whatever the PTR says must
             # resolve back to the address asking. A stale record fails that,
             # and the node falls through to naming itself.
-            if [ -n "$PTRNAME" ]; then
+            if [ -z "$PTRNAME" ]; then
+                echo "  DNS has no name for $MYIP (no PTR record from $(awk '/^nameserver/ { printf "%s ", $2 }' "$_resolv" 2>/dev/null))"
+            else
                 # Among its addresses, not equal to the last of them.
                 #
                 # A node with two NICs on one network has one name and two A
                 # records, which is the ordinary arrangement and not a
                 # mistake: `stormblock1.g16.lo` answers 192.168.30.1 and
-                # 192.168.30.2. Taking the *last* address the resolver
-                # happened to list and demanding it equal this interface's
-                # made the check a coin toss — the same node, the same DNS,
-                # confirmed or rejected depending on the order of an answer
-                # nobody controls. Membership is the question forward-confirmed
+                # 192.168.30.2. Membership is the question forward-confirmed
                 # reverse DNS actually asks: does the name the PTR gave resolve
                 # back to the address that asked.
                 BACK=$(nslookup "$PTRNAME" 2>/dev/null \
                        | awk '/^Address: /{ print $2 }')
                 if printf '%s\n' "$BACK" | grep -qxF "$MYIP"; then
                     NODE_NAME=${PTRNAME%%.*}
+                    case "$PTRNAME" in *.*) [ -n "$NODE_DOMAIN" ] || NODE_DOMAIN="${PTRNAME#*.}" ;; esac
                     echo "  name from DNS: $NODE_NAME ($MYIP, confirmed)"
                 else
                     echo "  DNS calls $MYIP '$PTRNAME', which resolves to '$(printf '%s' "${BACK:-nothing}" | tr '\n' ' ')' - ignoring"
@@ -1631,13 +1695,23 @@ if [ -n "$NETADDR" ]; then
         # The *uplink's* MAC, not the bridge's: a bridge takes a random
         # address until it has a port, so naming a node after it would give
         # the same machine a different name every boot.
-        MAC="$(cat "/sys/class/net/${UPLINK:-$IFACE}/address" 2>/dev/null | tr -d ':')"
-        [ -n "$MAC" ] && NODE_NAME="storm-$(echo "$MAC" | tail -c 7)"
+        MAC="$(cat "${STORM_SYSNET:-/sys/class/net}/${UPLINK:-$IFACE}/address" 2>/dev/null | tr -d ':')"
+        if [ -n "$MAC" ]; then
+            NODE_NAME="storm-$(echo "$MAC" | tail -c 7)"
+            echo "  nothing named this node: $NODE_NAME, made up from the MAC"
+        fi
     fi
     if [ -n "$NODE_NAME" ]; then
-        echo "$NODE_NAME" > /proc/sys/kernel/hostname 2>/dev/null || true
+        echo "$NODE_NAME" > "${STORM_PROC_SYS:-/proc/sys}/kernel/hostname" 2>/dev/null || true
         echo "  hostname: $NODE_NAME"
+        if [ -n "$NODE_DOMAIN" ]; then
+            # The node can state its FQDN: the kernel keeps the domain across
+            # switch_root, and the running node reads it from there (#238).
+            echo "$NODE_DOMAIN" > "${STORM_PROC_SYS:-/proc/sys}/kernel/domainname" 2>/dev/null || true
+            echo "  fqdn: $NODE_NAME.$NODE_DOMAIN"
+        fi
     fi
+    # --- END node name
 else
     # An empty summary is the symptom that hid a broken DHCP script for as
     # long as it did; say what it means instead of printing a blank.
@@ -3226,7 +3300,7 @@ if [ -z "$(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ')" ] \
     for dev in /sys/class/net/*; do
         n=$(basename "$dev"); [ "$n" = "lo" ] && continue
         ip link set "$n" up 2>/dev/null
-        udhcpc -i "$n" -s /usr/share/udhcpc/default.script -q -n -t 5 >/dev/null 2>&1 && break
+        udhcpc -i "$n" -s /usr/share/udhcpc/default.script -q -n -t 5 ${DHCP_HOST_ARGS:-} >/dev/null 2>&1 && break
     done
     stamp "network retried: $(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ' | awk '{print $2}')"
 fi
