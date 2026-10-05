@@ -228,16 +228,19 @@ docs/metadata-scale.md §3.2, no on-disk format change. Measured with
 - Restore still holds every allocated slot's entry for its duration
   (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
-### Incremental metadata persistence: change log + checkpoints (2026-10-05, #157, P1) — WAITING ON THE OWNER
+### Incremental metadata persistence: change log + checkpoints (2026-10-05, #157, P1) — AFTER #158
 
-Read, not built. The log must live where the record is read at boot: each
-metadata slab's region (the initramfs restores from it; `STRMVMET` copy
-header v1, two alternating full copies). A log there is a new region format,
-and the owner decided on #158 (2026-10-01) that the paged index, u64 indexes
-and a format version ship as **one** format change. Asked on #157: A (own
-region format now), B (inside #158's one format change), or C (data-dir log
-only, no slab format change). Recommended B, with the in-memory change
-tracking (GEM dirty sets) first, since every option needs it.
+Owner, 2026-10-05, on #157: **B**. The change log lives in each metadata
+slab's region (where the initramfs and `boot-local` read the record), which
+is a new region format. It ships inside #158's one format change: paged
+extent index, u64 indexes, format version, in-place migration (owner on
+#158, 2026-10-01). No separate region format. #157 is proposed after #158.
+- The in-memory change tracking (what changed since the last persist,
+  per volume and extent; GEM dirty sets) is built with #158: on its own it
+  has no consumer.
+- Design: docs/metadata-scale.md §3.3–3.4 (the log is checkpointed into the
+  paged B-tree; recovery replays it; the versions-before-map order of
+  `volume/versioned.rs` holds through it).
 
 ### Forge mode on by default on every node (2026-10-05, #287, P1) — DONE
 

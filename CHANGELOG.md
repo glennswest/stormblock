@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-05
+- **docs:** #157 (incremental metadata persistence) is built as part of #158's single format change, by owner decision (B, 2026-10-05). The change log lives in each metadata slab's region and is checkpointed into the paged extent index. Recorded in `docs/metadata-scale.md` §3.4 and the work plan
 - **fix:** An install over an older release no longer boots the old disk when the appliance misses its first health check (#294, server8 on 11.82). Forge missed the one 3 s health check right after the mlx4 link came up, so no boothost was known, and the local-slab probe and the release check (both guarded on one) were skipped without a word. `boot-local` then died on `volume 'kubelet-data' not found`, scrolled off above `FATAL: root device /dev/ublkb0 not found`. `/init` now:
   - asks a boothost the network names (`/run/stormblock-boothost`) again for up to `STORM_BOOTHOST_WAIT` (90 s);
   - keeps why there is no appliance and says it;

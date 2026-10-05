@@ -137,6 +137,13 @@ the paged index rewrites the same records anyway.
 *(Owner decision B: bundle the 64-bit change with the paged-index format
 change, rather than ship it first on its own.)*
 
+**Decided.** On #158 (2026-10-01) the owner chose one format change: the
+paged index, u64 indexes, a format version and in-place migration. On #157
+(2026-10-05) the owner chose to put the change log (§3.3, incremental
+persistence) in that same format change, not a region format of its own.
+The log lives in each metadata slab's region, which is where the initramfs and
+`boot-local` read the record, and it is checkpointed into the paged index.
+
 ## 4. What was done now
 
 **First-fit through a per-chunk free summary** (`drive/freemap.rs`). The
