@@ -74,7 +74,9 @@ tests run on.
    stands the incumbent down, waits for its process to exit, then restores
    (`handover::take_over`). Reading first left the incumbent's last
    allocations out of the successor's map, with their slots looking free.
-9. **A flow-over cut short is finished, not lost.** When the local records
+9. **A flow-over cut short is finished, not lost** — either half (#285: the
+   data half moves in the background too, quarantined and recorded on the
+   local data slab like the system half on the system slab). When the local records
    name a slab that is not on the machine (the appliance clone a flow-over
    was moving from), `boot-local` claims a fresh clone of the same image,
    which carries the same slabs with the same bytes. It maps the unmoved

@@ -306,7 +306,8 @@ only in the file is **not applied**.
 | `STORMBLOCK_DHCHAP_SECRET` | the DH-HMAC-CHAP secret (`DHHC-1:…`) the engine's NVMe/TCP initiator answers with when a target asks and the drive's spec carries none (#210) | no secret: a target that requires one refuses |
 | `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator`; when `boot-local` claims a fresh clone to resume a flow-over, `nqn.2026-09.lo.storm:host-<tag>` |
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
-| `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds the data half | policy decides |
+| `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds a **kept** data half (the update path) | policy decides |
+| `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
 | `STORMBLOCK_BOOT_TAG` | this machine's name for that claim; the initramfs exports the name it resolved (#259) | the firmware's `StormBootTag` EFI variable, else SMBIOS serial, else SMBIOS UUID (#249) |
 | `STORMBLOCK_RESUME_SOURCE` | the clone to finish a cut-short flow-over from, instead of a claim; the initramfs exports the clone its probe claimed when `slab holds` exits 3 (#259) | a claim from `STORMBLOCK_BOOTHOST` |
@@ -1249,7 +1250,18 @@ result under OVMF.
 
 **The flow-over moves volumes that are in use.** The system half goes on
 moving after the node is up, while its clones (`cni-bin`, the `-logs`
-volumes) are mounted and written. Each slot is moved under a fence: the move
+volumes) are mounted and written — and so, since #285, does the data half:
+an install no longer seeds it before exporting the root (166 s of the Dell's
+352 s install boot on 11.79). The engine that adopts the boot moves the
+appliance's system slabs into the local system slab, then its data slabs into
+the local data slab, then lays local boot; `flow_over_remaining` counts both
+halves. From the handover on, both halves' sources are quarantined (a write
+to an extent still on the appliance lands on the local disk) and each local
+slab records every volume with a leg on its sources, so a boot cut short in
+either half resumes (#171). `STORMBLOCK_SEED_DATA_SYNC` restores the seed
+before export. The initramfs that defers it needs an engine that moves it
+(this one or later): an older successor leaves the data half on the
+appliance. Each slot is moved under a fence: the move
 waits for the I/O on that slot, and an I/O that looked the slot up meanwhile
 finds the copy. Each copy is read back before any map names it. The slabs
 being emptied take no new allocations (#239; `docs/durability.md` rule 10),

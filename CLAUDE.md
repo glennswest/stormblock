@@ -172,24 +172,28 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Install: the data half moves in the background (2026-10-05, #285, P1) — IN PROGRESS
+### Install: the data half moves in the background (2026-10-05, #285, P1) — DONE
 
 Dell 11.79 install boot: the data seed is 166 s of a 352 s boot (47%),
 synchronous in `boot-local` before the root is exported — the rule from
 before the slot fence (#239). With the fence and quarantined sources
 (relocate-on-write) the data half moves while mounted exactly as the system
 half does.
-- [ ] `FlowOver.data_flow` (serde default false); the fresh-lay path sets it
-      instead of seeding (`STORMBLOCK_SEED_DATA_SYNC=1` = the old seed); the
+- [x] `FlowOver.data_flow` (serde default false); the fresh-lay path sets it
+      instead of seeding (`STORMBLOCK_SEED_DATA_SYNC` = the old seed); the
       kept-data-slab update path is unchanged
-- [ ] quarantine and `record_flow_over` for both halves (`flowing_into`: a
+- [x] quarantine and `record_flow_over` for both halves (`flowing_into`: a
       list of (dest, sources)); a resumed flow-over carries `data_flow`
-- [ ] `spawn_flow_over`: system half, then data half, then local boot;
-      `flow_over_remaining` counts both
-- [ ] tests (install: the disk alone names every data volume before any
-      moves; a cut mid data flow resumes intact; the data flow moves it all);
-      docs (README, durability), CHANGELOG. Needs an engine ≥ this with the
+- [x] `spawn_flow_over`: system half, then data half (`flow_slabs`, `extra`
+      so `flow_over_remaining` never dips to 0 between), then local boot
+- [x] tests: `a_fresh_install_seeds_every_data_volume_byte_for_byte` (now
+      through the successor's two halves), `the_data_half_moves_while_
+      written_and_a_cut_resumes_it`; full nextest on dev 880/880. Docs
+      (README, durability), CHANGELOG. Needs an engine ≥ this with the
       initramfs (an older successor ignores `data_flow`)
+- Not on metal: the Dell's next install — boot→apiserver ~160 s expected;
+  the data half then moves for minutes in the background (persist per
+  extent, #277)
 
 ### install-config.yaml from stormbootx onto /state (2026-10-04, #275, P1) — DONE
 
