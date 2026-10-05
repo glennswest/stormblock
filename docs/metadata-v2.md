@@ -130,7 +130,8 @@ already bounded since #155: a page cache plus the free map.
     0 the document (extent size, arrays), 1 a volume header in chunks of at
     most 1536 bytes (the last shorter, so a reader knows where it ends), 2 an
     extent, 3 a parity group. A header is the volume's record without extents
-    or parity, prefixed with its record version (9).
+    or parity, with the volume's extent size (#156), prefixed with the header
+    version (10).
   - Log record: magic, the store's nonce, sequence, length, kind (ops or
     wrap), CRC, then the ops (`Put`, `Del`, `DropVolume`), padded to pages. A
     record that does not fit before the end of the ring is preceded by a wrap

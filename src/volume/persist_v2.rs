@@ -242,7 +242,7 @@ pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, input: Inputs<'_>) ->
     }
     let empty = HashSet::new();
     let headers: Vec<(&VolumeRecord, Vec<u8>)> =
-        input.headers.iter().map(|h| (h, metav2::header_bytes(h))).collect();
+        input.headers.iter().map(|h| (h, metav2::header_bytes(h, input.extent_size))).collect();
 
     let order = st.order.clone();
     let ticket = Ticket { n: st.next_ticket, order };

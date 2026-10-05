@@ -1083,6 +1083,61 @@ impl MetaV2 {
         Ok(merged.into_iter().collect())
     }
 
+    /// The entries with keys in `lo..=hi`, the log applied: only the pages
+    /// whose range meets it are read.
+    pub async fn scan_range(&mut self, lo: Key, hi: Key) -> io::Result<Vec<(Key, Vec<u8>)>> {
+        let mut out = Vec::new();
+        if self.root != EMPTY {
+            // (page, the lowest key it may hold, the lowest key past it)
+            let mut stack: Vec<(u64, Option<Key>, Option<Key>)> = vec![(self.root, None, None)];
+            while let Some((p, p_lo, p_hi)) = stack.pop() {
+                let n = self.node(p).await?;
+                match &*n {
+                    Node::Leaf(entries) => out.extend(
+                        entries
+                            .iter()
+                            .filter(|(k, _)| *k >= lo && *k <= hi && !self.overlay.dropped.contains(&k.vol()))
+                            .cloned(),
+                    ),
+                    Node::Internal { children, .. } => {
+                        for (i, (sep, c)) in children.iter().enumerate().rev() {
+                            let c_lo = if i == 0 { p_lo } else { *sep };
+                            let c_hi = children.get(i + 1).and_then(|(s, _)| *s).or(p_hi);
+                            // [c_lo, c_hi) meets [lo, hi]?
+                            if c_lo.is_some_and(|l| l > hi) || c_hi.is_some_and(|h| h <= lo) {
+                                continue;
+                            }
+                            stack.push((*c, c_lo, c_hi));
+                        }
+                    }
+                }
+            }
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        let puts: Vec<(Key, Option<Vec<u8>>)> =
+            self.overlay.puts.range(lo..=hi).map(|(k, v)| (*k, v.clone())).collect();
+        if puts.is_empty() {
+            return Ok(out);
+        }
+        let mut merged: BTreeMap<Key, Vec<u8>> = out.into_iter().collect();
+        for (k, v) in puts {
+            match v {
+                Some(v) => {
+                    merged.insert(k, v);
+                }
+                None => {
+                    merged.remove(&k);
+                }
+            }
+        }
+        Ok(merged.into_iter().collect())
+    }
+
+    /// One volume's entries: its header, extents and parity groups.
+    pub async fn scan_volume(&mut self, vol: [u8; 16]) -> io::Result<Vec<(Key, Vec<u8>)>> {
+        self.scan_range(Key::first_of(vol), Key::last_of(vol)).await
+    }
+
     /// Tree depth and the page counts, for tests and the pressure report.
     #[cfg(test)]
     async fn check(&mut self) -> io::Result<usize> {
@@ -1121,8 +1176,17 @@ pub async fn read_slab(slab: &crate::drive::slab::Slab) -> io::Result<Option<Vol
 use super::metadata::{ArrayRecord, VolumeMetadata, VolumeRecord};
 use super::extent::VolumeId;
 
-/// The shape of a volume header in v2: a version, then the record.
-const HEADER_VERSION: u32 = 9;
+/// The shape of a volume header in v2: a version, then [`Header`].
+const HEADER_VERSION: u32 = 10;
+
+/// A volume's header: its record without extents or parity, and the size of
+/// its extents (#156: per volume, fixed at creation; one size per node until
+/// stage D builds pools of each).
+#[derive(Serialize, Deserialize)]
+struct Header {
+    extent_size: u64,
+    record: VolumeRecord,
+}
 
 #[derive(Serialize, Deserialize)]
 struct DocValue {
@@ -1135,13 +1199,16 @@ pub fn doc_entry(extent_size: u64, arrays: &[ArrayRecord]) -> (Key, Vec<u8>) {
     (Key::new([0; 16], kind::DOC, 0), bincode::serde::encode_to_vec(&v, bincode::config::standard()).unwrap_or_default())
 }
 
-/// A volume's header bytes: its record with no extents or parity.
-pub fn header_bytes(rec: &VolumeRecord) -> Vec<u8> {
-    let mut h = rec.clone();
-    h.extents.clear();
-    h.parity.clear();
+/// A volume's header bytes: its record with no extents or parity, and its
+/// extent size.
+pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
+    let mut record = rec.clone();
+    record.extents.clear();
+    record.parity.clear();
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
-    out.extend(bincode::serde::encode_to_vec(&h, bincode::config::standard()).unwrap_or_default());
+    out.extend(
+        bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
+    );
     out
 }
 
@@ -1178,8 +1245,8 @@ pub fn parity_entry(vol: VolumeId, stripe: u64, g: &super::gem::ParityGroup) -> 
 }
 
 /// Every entry of one volume.
-pub fn volume_entries(rec: &VolumeRecord) -> Vec<(Key, Vec<u8>)> {
-    let mut out = header_entries(rec.id, &header_bytes(rec));
+pub fn volume_entries(rec: &VolumeRecord, extent_size: u64) -> Vec<(Key, Vec<u8>)> {
+    let mut out = header_entries(rec.id, &header_bytes(rec, extent_size));
     out.extend(rec.extents.iter().map(|(v, l)| extent_entry(rec.id, *v, l)));
     out.extend(rec.parity.iter().map(|(s, g)| parity_entry(rec.id, *s, g)));
     out
@@ -1189,7 +1256,7 @@ pub fn volume_entries(rec: &VolumeRecord) -> Vec<(Key, Vec<u8>)> {
 pub fn document_entries(doc: &VolumeMetadata) -> Vec<(Key, Vec<u8>)> {
     let mut out = vec![doc_entry(doc.extent_size, &doc.arrays)];
     for v in &doc.volumes {
-        out.extend(volume_entries(v));
+        out.extend(volume_entries(v, doc.extent_size));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -1234,9 +1301,9 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
                     if ver != HEADER_VERSION {
                         return Err(err(format!("volume {}: header version {ver}", vol.0)));
                     }
-                    let (r, _): (VolumeRecord, _) = bincode::serde::decode_from_slice(&buf[4..], cfg)
+                    let (h, _): (Header, _) = bincode::serde::decode_from_slice(&buf[4..], cfg)
                         .map_err(|e| err(format!("volume {} header: {e}", vol.0)))?;
-                    *rec = Some(r);
+                    *rec = Some(h.record);
                 }
             }
             kind::EXTENT | kind::PARITY => {
@@ -1459,6 +1526,17 @@ mod tests {
             }
             let got: BTreeMap<Key, Vec<u8>> = s.scan().await.unwrap().into_iter().collect();
             assert!(got == want, "round {round}: contents differ ({} vs {})", got.len(), want.len());
+            // One volume, and an arbitrary range, read alone.
+            let v = rng.gen_range(1..=9u8);
+            let one: BTreeMap<Key, Vec<u8>> = s.scan_volume([v; 16]).await.unwrap().into_iter().collect();
+            let want_one: BTreeMap<Key, Vec<u8>> =
+                want.iter().filter(|(k, _)| k.vol() == [v; 16]).map(|(k, x)| (*k, x.clone())).collect();
+            assert!(one == want_one, "round {round}: volume {v} alone differs");
+            let (a, b) = (rng.gen_range(0..70_000u64), rng.gen_range(0..70_000u64));
+            let (lo, hi) = (k(v, a.min(b)), k(v, a.max(b)));
+            let part: Vec<Key> = s.scan_range(lo, hi).await.unwrap().into_iter().map(|(k, _)| k).collect();
+            let want_part: Vec<Key> = want.range(lo..=hi).map(|(k, _)| *k).collect();
+            assert_eq!(part, want_part, "round {round}: range");
         }
     }
 
@@ -1483,8 +1561,8 @@ mod tests {
             owner: None,
             lba: 4096,
         };
-        let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000))));
-        let short = header_entries(id, &header_bytes(&rec("b")));
+        let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
+        let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
         assert_eq!(long.len(), 4);
         assert_eq!(short.len(), 1);
         let mut store: BTreeMap<Key, Vec<u8>> = long.into_iter().collect();
