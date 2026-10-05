@@ -102,6 +102,9 @@ pub struct AuthConfig {
     /// When set, destructive verbs require THIS token; the api token is not
     /// enough. When unset, the api token covers them.
     pub admin_token: Option<String>,
+    /// `admin_gate = "audit"` (#274): the api token still covers destructive
+    /// verbs, and the engine logs each such call as one `enforce` refuses.
+    pub audit_only: bool,
 }
 
 /// Endpoints reachable without a token: liveness, readiness and telemetry, so
@@ -228,6 +231,131 @@ fn is_destructive(method: &Method, path: &str, query: Option<&str>) -> bool {
     false
 }
 
+/// What a request is, for who may make it (#274, owner's B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Class {
+    /// Open: probes and a machine's boot claim.
+    Public,
+    /// The node token covers it.
+    Ordinary,
+    /// Needs the admin token, or a Kubernetes bearer a SubjectAccessReview
+    /// allows.
+    Destructive,
+    /// Deleting a volume: ordinary for a volume that is unsealed and is no
+    /// template or golden, destructive otherwise. Decided by the engine,
+    /// which can look the volume up.
+    VolumeDelete(String),
+}
+
+/// DELETEs that take nothing away: a detach, an export withdrawn, a job
+/// cancelled, a pin released (#274). Everything else that deletes stays
+/// destructive, as before.
+fn is_detach_like(path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    let seg: Vec<&str> = p.split('/').collect();
+    // /api/v1/volumes/{id}/attach, /api/v1/drives/{id}/drain,
+    // /api/v1/arrays/{id}/scrub
+    if seg.len() == 6 && seg[1] == "api" && seg[2] == "v1" {
+        return matches!((seg[3], seg[5]), ("volumes", "attach") | ("drives", "drain") | ("arrays", "scrub"));
+    }
+    if seg.len() == 5 && seg[1] == "api" && seg[2] == "v1" {
+        // /api/v1/exports/{id}, /api/v1/luns/{id}, /api/v1/rebuilds/{id}
+        return matches!(seg[3], "exports" | "luns" | "rebuilds");
+    }
+    // /api/v1/stormfs/pins/{id}
+    if p.starts_with("/api/v1/stormfs/pins/") {
+        return true;
+    }
+    // /serve/v1/exports/{id}, /mk/v1/exports/{id}
+    if seg.len() == 5 && matches!(seg[1], "serve" | "mk") && seg[3] == "exports" {
+        return true;
+    }
+    // /v1: the CSI contract's own volumes, snapshots and group snapshots,
+    // which a CSI controller deletes as a PVC or a VolumeSnapshot goes.
+    seg.len() == 4 && seg[1] == "v1" && matches!(seg[2], "volumes" | "snapshots" | "group-snapshots")
+}
+
+/// The id a volume DELETE names: `/api/v1/volumes/{id}`, `/serve/v1/volumes/{id}`.
+fn volume_delete(path: &str) -> Option<String> {
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    match seg.as_slice() {
+        ["", "api", "v1", "volumes", id] | ["", "serve" | "mk", "v1", "volumes", id] => Some((*id).to_string()),
+        _ => None,
+    }
+}
+
+/// Verbs destructive since #274 that `is_destructive` did not already name:
+/// formatting a slab, building or changing an array, taking a spare, forge
+/// on or off, the pallet verbs that write a partition table, an emulated
+/// drive's fault.
+fn is_destructive_274(method: &Method, path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    let seg: Vec<&str> = p.split('/').collect();
+    if *method == Method::POST {
+        if matches!(p, "/api/v1/slabs" | "/api/v1/arrays" | "/api/v1/spares") {
+            return true;
+        }
+        if seg.len() >= 6 && seg[3] == "arrays" && seg[5] == "members" {
+            // add a member; `{m}/fail`, `{m}/replace`
+            return seg.len() == 6 || matches!(seg.last(), Some(&"fail") | Some(&"replace"));
+        }
+        if matches!(p, "/api/v1/pallets/gpt" | "/api/v1/pallets/convert" | "/api/v1/pallets/prune" | "/api/v1/pallets/adopt") {
+            return true;
+        }
+        if seg.len() == 6 && seg[3] == "drives" && seg[5] == "emulate" {
+            return true;
+        }
+    }
+    if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
+        return true;
+    }
+    false
+}
+
+/// Classify a request (#274). See [`Class`].
+pub fn classify(method: &Method, path: &str, query: Option<&str>) -> Class {
+    if is_public(path) || is_boot_claim(method, path) {
+        return Class::Public;
+    }
+    if *method == Method::DELETE {
+        if let Some(id) = volume_delete(path) {
+            return Class::VolumeDelete(id);
+        }
+        if is_detach_like(path) {
+            return Class::Ordinary;
+        }
+    }
+    if is_destructive(method, path, query) || is_destructive_274(method, path) {
+        return Class::Destructive;
+    }
+    Class::Ordinary
+}
+
+/// The `storage.storm.io` resource and verb a SubjectAccessReview asks about,
+/// as the console asks its own (stormconsole#82): the first path segment after
+/// `api/v1/` (or the serving surface's), `delete` for DELETE, `create` for a
+/// POST to a collection, `update` otherwise.
+pub fn review_attributes(method: &Method, path: &str) -> (String, String, Option<String>) {
+    let p = path.trim_end_matches('/');
+    let rest = p
+        .strip_prefix("/api/v1/")
+        .or_else(|| p.strip_prefix("/serve/v1/"))
+        .or_else(|| p.strip_prefix("/mk/v1/"))
+        .or_else(|| p.strip_prefix("/v1/"))
+        .unwrap_or(p.trim_start_matches('/'));
+    let mut parts = rest.split('/');
+    let resource = parts.next().unwrap_or("").to_string();
+    let name = parts.next().map(str::to_string);
+    let verb = if *method == Method::DELETE {
+        "delete"
+    } else if *method == Method::POST && name.is_none() {
+        "create"
+    } else {
+        "update"
+    };
+    (resource, verb.to_string(), name)
+}
+
 fn bearer(req: &Request) -> Option<&str> {
     req.headers().get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
 }
@@ -258,11 +386,15 @@ pub fn decide(
     let Some(expected) = auth.api_token.as_deref() else {
         return Ok(()); // explicit insecure mode
     };
-    if is_public(path) || is_boot_claim(method, path) {
-        return Ok(());
-    }
-
-    let destructive = is_destructive(method, path, query);
+    // The serving layer on its own has no volume to look up: a volume delete
+    // is destructive here. The engine's layer (`mgmt::auth`) decides it.
+    let destructive = match classify(method, path, query) {
+        Class::Public => return Ok(()),
+        Class::Ordinary => false,
+        Class::Destructive | Class::VolumeDelete(_) => true,
+    };
+    // Audit mode: the api token covers a destructive verb too, for now.
+    let destructive = destructive && !auth.audit_only;
     let accepted: Vec<&str> = match (&auth.admin_token, destructive) {
         // A distinct admin token, on a destructive verb: only that token.
         (Some(admin), true) => vec![admin.as_str()],
@@ -1330,7 +1462,7 @@ mod tests {
     /// on the same path all stay guarded (#107).
     #[test]
     fn only_the_boot_claim_is_an_open_write() {
-        let auth = AuthConfig { api_token: Some("t".into()), admin_token: None };
+        let auth = AuthConfig { api_token: Some("t".into()), admin_token: None, audit_only: false };
         let open = |m: Method, p: &str| decide(&auth, &m, p, None, None).is_ok();
         assert!(open(Method::POST, "/api/v1/synonyms/boothost/C2NR0Q2/claim"));
         for (m, p) in [
@@ -1356,7 +1488,7 @@ mod tests {
     /// (#148).
     #[test]
     fn the_intent_is_read_open_and_set_by_the_admin() {
-        let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()) };
+        let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()), audit_only: false };
         let as_ = |m: Method, p: &str, tok: Option<&str>| decide(&auth, &m, p, None, tok).is_ok();
         assert!(as_(Method::GET, "/api/v1/synonyms/boothost/ac1f6b8aa79c/intent", None));
         assert!(as_(Method::POST, "/api/v1/synonyms/boothost/C2NR0Q2/installed", None));
@@ -1381,7 +1513,7 @@ mod tests {
     /// (#272).
     #[test]
     fn forge_mode_is_set_by_the_admin() {
-        let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()) };
+        let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()), audit_only: false };
         let as_ = |m: Method, tok: Option<&str>| decide(&auth, &m, "/api/v1/forge", None, tok).is_ok();
         assert!(!as_(Method::GET, None));
         assert!(as_(Method::GET, Some("t")));

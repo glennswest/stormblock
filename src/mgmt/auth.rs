@@ -73,6 +73,25 @@ pub struct Resolved {
     pub source: Source,
     /// True when a distinct admin token guards destructive verbs.
     pub admin: bool,
+    /// Where the admin token came from (#274).
+    pub admin_source: Source,
+}
+
+/// Where a minted admin token is kept (#274): its own directory, never one
+/// a service mounts.
+pub fn admin_token_file(mgmt: &ManagementConfig) -> PathBuf {
+    mgmt.admin_token_file
+        .clone()
+        .or_else(|| non_empty(std::env::var("STORMBLOCK_ADMIN_TOKEN_FILE").ok()))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/run/stormblock-admin/admin_token"))
+}
+
+/// `admin_gate`: `audit` lets the node token through destructive verbs
+/// (logged); anything else enforces (#274).
+pub fn audit_only(mgmt: &ManagementConfig) -> bool {
+    let gate = non_empty(std::env::var("STORMBLOCK_ADMIN_GATE").ok()).or_else(|| mgmt.admin_gate.clone());
+    matches!(gate.as_deref().map(str::trim), Some("audit"))
 }
 
 /// A fresh token: 244 bits of randomness as 64 hex characters.
@@ -144,18 +163,49 @@ fn write_token_file(path: &Path, token: &str) -> std::io::Result<()> {
 /// fails rather than quietly falling back to open, which is the failure mode
 /// this whole module exists to end.
 pub fn resolve(mgmt: &ManagementConfig) -> anyhow::Result<Resolved> {
-    let admin_token = mgmt
-        .admin_token
-        .clone()
-        .or_else(|| non_empty(std::env::var("STORMBLOCK_ADMIN_TOKEN").ok()));
-
     if mgmt.require_auth == Some(false) {
         return Ok(Resolved {
-            auth: AuthConfig { api_token: None, admin_token: None },
+            auth: AuthConfig { api_token: None, admin_token: None, audit_only: false },
             source: Source::Disabled,
             admin: false,
+            admin_source: Source::Disabled,
         });
     }
+
+    // The admin token (#274): configured, else from the environment, else
+    // the one kept in its own file, else minted there. There is always one
+    // on an enforcing node: without it, the node token would cover the
+    // destructive verbs, which is the hole stormcos#250 closes.
+    let admin_path = admin_token_file(mgmt);
+    let (admin_token, admin_source) = if let Some(t) = non_empty(mgmt.admin_token.clone()) {
+        (t, Source::Config)
+    } else if let Some(t) = non_empty(std::env::var("STORMBLOCK_ADMIN_TOKEN").ok()) {
+        (t, Source::Env)
+    } else if let Some(t) = read_token_file(&admin_path) {
+        (t, Source::File(admin_path.clone()))
+    } else {
+        let t = mint();
+        let dir_ok = admin_path.parent().map(|d| {
+            std::fs::create_dir_all(d).is_ok() && {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
+                }
+                true
+            }
+        });
+        match (dir_ok, write_token_file(&admin_path, &t)) {
+            (Some(true), Ok(())) => (t, Source::Minted(admin_path.clone())),
+            (_, r) => {
+                if let Err(e) = r {
+                    tracing::warn!("cannot write the admin token file {}: {e}", admin_path.display());
+                }
+                (t, Source::Ephemeral)
+            }
+        }
+    };
+    let admin_token = Some(admin_token);
 
     let path = token_file(mgmt);
     let (token, source) = if let Some(t) = non_empty(mgmt.api_token.clone()) {
@@ -202,8 +252,10 @@ pub fn resolve(mgmt: &ManagementConfig) -> anyhow::Result<Resolved> {
             // An admin token without an ordinary one guards nothing: with
             // `api_token` unset the middleware lets everything through.
             admin_token: admin_token.filter(|_| source.enforced()),
+            audit_only: audit_only(mgmt),
         },
         source,
+        admin_source,
     })
 }
 
@@ -327,24 +379,44 @@ pub fn log_mode(r: &Resolved, listen_addr: &str, mgmt: &ManagementConfig) {
     }
 }
 
-fn admin_note(r: &Resolved) -> &'static str {
-    if r.admin {
-        "; destructive verbs require the admin token"
+fn admin_note(r: &Resolved) -> String {
+    if !r.admin {
+        return String::new();
+    }
+    let from = match &r.admin_source {
+        Source::Config => "management.admin_token".to_string(),
+        Source::Env => "$STORMBLOCK_ADMIN_TOKEN".to_string(),
+        Source::File(p) => p.display().to_string(),
+        Source::Minted(p) => format!("minted this boot into {} (0600)", p.display()),
+        Source::Ephemeral => "held in memory only: nothing on this node can present it".to_string(),
+        _ => String::new(),
+    };
+    if r.auth.audit_only {
+        format!("; destructive verbs: admin_gate = audit, the node token still covers them and each such call is logged (admin token: {from})")
     } else {
-        ""
+        format!("; destructive verbs require the admin token ({from}) or a Kubernetes bearer a SubjectAccessReview allows")
     }
 }
 
 /// The engine-wide middleware. Reads whatever the node resolved at startup, so
 /// a router built in a test with no resolution stays open and the served one
 /// never is.
+///
+/// Since #274 (owner's B) a destructive call needs the admin token, or a
+/// Kubernetes bearer that a SubjectAccessReview allows for the
+/// `storage.storm.io` resource the path names; the node token covers the
+/// ordinary verbs, including deleting an unsealed volume that is no template
+/// or golden. Every destructive call is recorded in the audit log, refusals
+/// included.
 pub async fn require_token(
     State(state): State<Arc<AppState>>,
     req: Request,
     next: Next,
 ) -> Response {
+    use crate::serve::api::Class;
     let auth = state.auth();
     let path = req.uri().path().to_string();
+    let method = req.method().clone();
     let presented = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -352,19 +424,124 @@ pub async fn require_token(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string());
 
-    match crate::serve::api::decide(
-        &auth,
-        req.method(),
-        &path,
-        req.uri().query(),
-        presented.as_deref(),
-    ) {
-        Ok(()) => next.run(req).await,
-        Err(msg) => {
-            tracing::warn!("unauthorized {} {}", req.method(), path);
-            unauthorized(&path, msg)
+    // Open node: nothing is enforced (and nothing to audit against).
+    let Some(api_token) = auth.api_token.as_deref() else {
+        return next.run(req).await;
+    };
+    let destructive = match crate::serve::api::classify(&method, &path, req.uri().query()) {
+        Class::Public => return next.run(req).await,
+        Class::Ordinary => false,
+        Class::Destructive => true,
+        Class::VolumeDelete(id) => volume_delete_is_destructive(&state, &id).await,
+    };
+    let is_admin = presented.is_some() && presented.as_deref() == auth.admin_token.as_deref();
+    let is_node = presented.as_deref() == Some(api_token);
+
+    if !destructive {
+        if is_admin || is_node {
+            return next.run(req).await;
         }
+        tracing::warn!("unauthorized {} {}", method, path);
+        return unauthorized(&path, crate::serve::api::MISSING_TOKEN);
     }
+
+    // A destructive call: who is asking, and may they?
+    let (resource, verb, target) = crate::serve::api::review_attributes(&method, &path);
+    let mut rec = super::kubeauth::AuditRecord {
+        at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        who: String::new(),
+        method: method.to_string(),
+        path: path.clone(),
+        resource: resource.clone(),
+        verb: verb.clone(),
+        target: target.clone(),
+        decision: String::new(),
+        reason: None,
+        status: None,
+    };
+    let refuse = |mut rec: super::kubeauth::AuditRecord, code: StatusCode, why: String| {
+        rec.decision = "refused".into();
+        rec.reason = Some(why.clone());
+        super::kubeauth::audit(state.audit_log.as_deref(), &rec);
+        tracing::warn!("refused {} {}: {why}", rec.method, rec.path);
+        refused(&rec.path, code, &why)
+    };
+    if is_admin {
+        rec.who = "admin-token".into();
+        rec.decision = "allowed".into();
+    } else if is_node {
+        rec.who = "node-token".into();
+        if !auth.audit_only {
+            return refuse(rec, StatusCode::UNAUTHORIZED, crate::serve::api::NEEDS_ADMIN.to_string());
+        }
+        rec.decision = "allowed-audit-only".into();
+        rec.reason = Some("admin_gate = audit: enforce would refuse the node token here".into());
+    } else if let Some(bearer) = presented.as_deref() {
+        let Some(kube) = state.kube_auth.as_ref() else {
+            rec.who = "unknown-bearer".into();
+            return refuse(
+                rec,
+                StatusCode::UNAUTHORIZED,
+                "admin token required: this node reviews no Kubernetes bearer ([management.kubernetes] is not set)".into(),
+            );
+        };
+        use super::kubeauth::Review;
+        match kube.review(bearer, &resource, &verb, target.as_deref()).await {
+            Review::Allowed(u) => {
+                rec.who = format!("kubernetes:{}", u.username);
+                rec.decision = "allowed".into();
+            }
+            Review::Denied(u, why) => {
+                rec.who = format!("kubernetes:{}", u.username);
+                return refuse(
+                    rec,
+                    StatusCode::FORBIDDEN,
+                    format!("{} may not {verb} storage.storm.io {resource}: {why}", u.username),
+                );
+            }
+            Review::Unauthenticated(why) => {
+                rec.who = "unknown-bearer".into();
+                return refuse(rec, StatusCode::UNAUTHORIZED, format!("the bearer is not a valid token: {why}"));
+            }
+            Review::Unavailable(why) => {
+                rec.who = "unknown-bearer".into();
+                return refuse(rec, StatusCode::SERVICE_UNAVAILABLE, format!("cannot review the bearer with {}: {why}", kube.api_url()));
+            }
+        }
+    } else {
+        rec.who = "none".into();
+        return refuse(rec, StatusCode::UNAUTHORIZED, crate::serve::api::MISSING_TOKEN.to_string());
+    }
+
+    let resp = next.run(req).await;
+    rec.status = Some(resp.status().as_u16());
+    super::kubeauth::audit(state.audit_log.as_deref(), &rec);
+    resp
+}
+
+/// Whether deleting this volume is destructive (#274, owner's B): a sealed
+/// volume (a golden, a blank, a snapshot), or a template's. An unsealed
+/// volume that is no template is the node token's to delete; an unknown id is
+/// too (the delete answers 404).
+async fn volume_delete_is_destructive(state: &AppState, id: &str) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(id) else { return false };
+    let vid = crate::volume::VolumeId(uuid);
+    let vm = state.volume_manager.lock().await;
+    vm.is_sealed(&vid) || vm.is_template(&vid)
+}
+
+/// A refusal in the envelope the surface being called uses.
+fn refused(path: &str, code: StatusCode, msg: &str) -> Response {
+    let v1 = path == "/v1" || path.starts_with("/v1/");
+    let body = if v1 {
+        json!({ "code": if code == StatusCode::FORBIDDEN { "forbidden" } else { "unauthorized" }, "message": msg })
+    } else {
+        json!({ "error": msg, "code": code.as_u16() })
+    };
+    (code, Json(body)).into_response()
 }
 
 /// A 401 in the envelope the surface being called uses. `/v1` is a contract

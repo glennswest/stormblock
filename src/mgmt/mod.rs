@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod kubeauth;
 pub mod config;
 pub mod metrics;
 pub mod discovery;
@@ -312,6 +313,11 @@ pub struct AppState {
     /// The background eraser (#286): overwrites freed slots before they are
     /// reused. Started by [`AppState::start_eraser`].
     pub eraser: Arc<crate::volume::erase::Eraser>,
+    /// The apiserver a destructive call's Kubernetes bearer is reviewed
+    /// against (#274); `None` refuses such bearers.
+    pub kube_auth: Option<Arc<kubeauth::KubeAuth>>,
+    /// Where destructive calls are recorded (#274).
+    pub audit_log: Option<std::path::PathBuf>,
     /// Most recent extent-GC pass, when the background collector is running.
     pub last_gc: Option<Arc<tokio::sync::RwLock<Option<crate::volume::gc::GcSummary>>>>,
     #[cfg(feature = "iscsi")]
@@ -459,6 +465,7 @@ impl AppState {
             auth: std::sync::RwLock::new(Arc::new(crate::serve::api::AuthConfig {
                 api_token: config.management.api_token.clone(),
                 admin_token: config.management.admin_token.clone(),
+                audit_only: false,
             })),
             pallet_mirrors: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::pallets::load_mirrors(std::path::Path::new(dir)),
@@ -469,6 +476,13 @@ impl AppState {
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             serve: std::sync::OnceLock::new(),
             pool_pressure: None,
+            kube_auth: kubeauth::KubeAuth::from_config(config.management.kubernetes.as_ref()).map(Arc::new),
+            audit_log: config
+                .management
+                .audit_log
+                .clone()
+                .map(std::path::PathBuf::from)
+                .or_else(|| config.management.data_dir.as_ref().map(|d| std::path::Path::new(d).join("audit.log"))),
             eraser: crate::volume::erase::Eraser::new(
                 slab_registry_for_eraser,
                 config.management.data_dir.as_ref().map(std::path::PathBuf::from),

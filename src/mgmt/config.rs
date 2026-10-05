@@ -318,6 +318,24 @@ pub struct ManagementConfig {
     /// share it — so a node that wants one mints its own at boot and writes it
     /// here, `0600`. That is the file the registry on the same machine reads.
     pub token_file: Option<String>,
+    /// Where the admin token is kept when none is configured: minted at boot,
+    /// `0600`, in a directory of its own (#274). Default
+    /// `/run/stormblock-admin/admin_token`: **never** under `/run/stormblock`,
+    /// which every engine caller on a stormcos node mounts read-only.
+    pub admin_token_file: Option<String>,
+    /// `enforce` (the default): a destructive verb needs the admin token or
+    /// a Kubernetes bearer a SubjectAccessReview allows (#274). `audit`: the
+    /// node token is still accepted for them, and each such call is logged as
+    /// one that `enforce` would refuse — for rolling the rule out.
+    /// `$STORMBLOCK_ADMIN_GATE` overrides.
+    pub admin_gate: Option<String>,
+    /// The audit log of destructive calls (#274), one JSON line each.
+    /// Default `<data_dir>/audit.log`; none without a data directory.
+    pub audit_log: Option<String>,
+    /// The apiserver a destructive call's Kubernetes bearer is reviewed
+    /// against (TokenReview, then SubjectAccessReview, #274). Unset: such
+    /// bearers are refused.
+    pub kubernetes: Option<KubeAuthConfig>,
     /// Whether a token is required.
     ///
     /// * `Some(true)` — required. One is taken from `api_token`, then
@@ -399,6 +417,10 @@ impl Default for ManagementConfig {
             api_token: None,
             admin_token: None,
             token_file: None,
+            admin_token_file: None,
+            admin_gate: None,
+            audit_log: None,
+            kubernetes: None,
             require_auth: None,
             node_name: None,
             topology: std::collections::BTreeMap::new(),
@@ -409,6 +431,21 @@ impl Default for ManagementConfig {
             ublk_transport: true,
         }
     }
+}
+
+/// `[management.kubernetes]` (#274): where to review a Kubernetes bearer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KubeAuthConfig {
+    /// `https://<apiserver>:6443`. `$STORMBLOCK_KUBE_API` overrides.
+    pub api_url: String,
+    /// The apiserver's CA (PEM). `$STORMBLOCK_KUBE_CA` overrides.
+    pub ca_file: Option<String>,
+    /// The engine's own bearer for the apiserver, which must be allowed to
+    /// create `tokenreviews` and `subjectaccessreviews` (as
+    /// `system:auth-delegator` is). Read at each review, so a rotated token
+    /// is picked up. `$STORMBLOCK_KUBE_TOKEN_FILE` overrides.
+    pub token_file: Option<String>,
 }
 
 fn default_beacon_secs() -> u64 { 5 }
