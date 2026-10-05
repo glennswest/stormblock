@@ -228,6 +228,16 @@ docs/metadata-scale.md §3.2, no on-disk format change. Measured with
 - Restore still holds every allocated slot's entry for its duration
   (`SlotView`): a transient spike at PB scale, gone with #158's paged index
 
+### Decide: #5–#7 in the engine or on stormstorage's heads (2026-10-05, #179, P1) — WAITING ON THE OWNER
+
+A decision issue: the `/v1` prestage/fence/dual-attach API is control-plane
+only (`prestage` records `Resyncing{0%}` and nothing copies), so
+stormblock-csi#29 never converges. Asked on #179 (needs-owner): (a) build the
+data path in the engine, (b) re-scope onto stormstorage's RAID heads
+(recommended: single-node first; stormstorage#33/#44 already orchestrate),
+(c) withdraw the surface. Nothing built until answered; #6's epoch
+enforcement on writes follows the answer's design.
+
 ### Extent size by pool class (2026-10-05, #156, P1) — AFTER #158, two questions asked
 
 Decided (owner, 2026-10-01): extent size is a per-pool property fixed at
