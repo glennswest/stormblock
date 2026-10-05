@@ -566,7 +566,7 @@ mod tests {
         }
 
         async fn fill(&self, volume: VolumeId, vext: u64, byte: u8) {
-            let loc = self.gem.read().await.lookup(volume, vext).cloned().unwrap();
+            let loc = self.gem.read().await.lookup(volume, vext).unwrap();
             let reg = self.registry.read().await;
             reg.get(&loc.slab_id)
                 .unwrap()
@@ -576,7 +576,7 @@ mod tests {
         }
 
         async fn byte_at(&self, volume: VolumeId, vext: u64) -> Option<u8> {
-            let loc = self.gem.read().await.lookup(volume, vext).cloned()?;
+            let loc = self.gem.read().await.lookup(volume, vext)?;
             let reg = self.registry.read().await;
             let mut buf = vec![0u8; SLOT as usize];
             reg.get(&loc.slab_id)

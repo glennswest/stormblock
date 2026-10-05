@@ -645,7 +645,7 @@ pub async fn extent_map(
     let mut extents: Vec<MappedExtent> = g
         .volume_extents(&volume)
         .map(|iter| {
-            iter.map(|(&vext, loc)| {
+            iter.map(|(vext, loc)| {
                 let offset = vext * slot_size;
                 MappedExtent {
                     offset,

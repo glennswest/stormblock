@@ -169,7 +169,7 @@ pub async fn reset_to_source(
         }
 
         // Point back at the source's extent, if it still has one here.
-        if let Some(loc) = gem.lookup(source_id, idx).cloned() {
+        if let Some(loc) = gem.lookup(source_id, idx) {
             for leg in loc.legs() {
                 to_share.entry(leg.slab_id).or_default().push(leg.slot_idx);
             }
@@ -316,10 +316,10 @@ pub fn snapshot_diff(
     let b_map = gem.get_volume_map(&b);
 
     let a_keys: std::collections::BTreeSet<u64> = a_map
-        .map(|m| m.extents.keys().copied().collect())
+        .map(|m| m.extents.keys().collect())
         .unwrap_or_default();
     let b_keys: std::collections::BTreeSet<u64> = b_map
-        .map(|m| m.extents.keys().copied().collect())
+        .map(|m| m.extents.keys().collect())
         .unwrap_or_default();
 
     let mut diff = Vec::new();

@@ -1113,7 +1113,7 @@ impl VolumeManager {
             gem.volume_extents(&id)
                 .map(|it| {
                     it.filter(|(_, loc)| loc.legs().any(|l| l.slab_id != dest))
-                        .map(|(vext, _)| *vext)
+                        .map(|(vext, _)| vext)
                         .collect()
                 })
                 .unwrap_or_default()
@@ -1313,7 +1313,7 @@ impl VolumeManager {
 
         let extents: Vec<u64> = {
             let gem = self.gem.read().await;
-            gem.volume_extents(&id).map(|it| it.map(|(v, _)| *v).collect()).unwrap_or_default()
+            gem.volume_extents(&id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default()
         };
         let _hold = handle.lock().await;
         let mut buf = vec![0u8; self.slot_size as usize];
@@ -1636,7 +1636,7 @@ impl VolumeManager {
         let extents: Vec<u64> = {
             let gem = self.gem.read().await;
             gem.volume_extents(&source_id)
-                .map(|it| it.map(|(v, _)| *v).collect())
+                .map(|it| it.map(|(v, _)| v).collect())
                 .unwrap_or_default()
         };
         let mut buf = vec![0u8; self.slot_size as usize];
@@ -2234,7 +2234,7 @@ impl VolumeManager {
                 lba,
                 extents: gem
                     .get_volume_map(&id)
-                    .map(|m| m.extents.clone())
+                    .map(|m| m.extents.to_btree())
                     .unwrap_or_default(),
                 redundancy,
                 parity: gem
@@ -2484,7 +2484,7 @@ fn reconcile_record(
             .map(|s| s.generation)
     };
     for (vext, loc) in &vrec.extents {
-        match rebuilt.lookup(vrec.id, *vext).cloned() {
+        match rebuilt.lookup(vrec.id, *vext) {
             None => {
                 if reg.get(&loc.slab_id).is_some() {
                     // No slot on disk names this extent of this
@@ -2575,7 +2575,7 @@ fn raise_shares(reg: &mut SlabRegistry, rebuilt: &mut GlobalExtentMap) {
             for (vext, loc) in it {
                 let n = maps.get(&loc.primary()).copied().unwrap_or(1);
                 if loc.ref_count < n {
-                    fix.push((vol, *vext, n));
+                    fix.push((vol, vext, n));
                 }
             }
         }
@@ -3331,7 +3331,7 @@ mod redundancy_tests {
             assert!(gem.get_volume_map(&src).unwrap().all_legs().all(|l| l.slab_id != lost));
             let smap = gem.get_volume_map(&snap).unwrap();
             for (vext, loc) in &smap.extents {
-                if *vext != 0 {
+                if vext != 0 {
                     assert!(loc.legs().all(|l| l.slab_id != lost), "snapshot extent {vext} still names the lost slab");
                 }
             }

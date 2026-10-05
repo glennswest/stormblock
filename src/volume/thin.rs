@@ -709,11 +709,11 @@ impl ThinVolumeHandle {
     /// already be freed. Hold the returned guard until the I/O on those slots
     /// is done. Never call it holding the map or the registry.
     async fn fenced_lookup(&self, vext: u64) -> (Option<ExtentLocation>, Option<fence::Held>) {
-        let mut loc = { self.gem.read().await.lookup(self.id, vext).cloned() };
+        let mut loc = { self.gem.read().await.lookup(self.id, vext) };
         loop {
             let Some(found) = &loc else { return (None, None) };
             let held = fence::hold(found.legs()).await;
-            let again = { self.gem.read().await.lookup(self.id, vext).cloned() };
+            let again = { self.gem.read().await.lookup(self.id, vext) };
             match &again {
                 Some(a) if a.legs().eq(found.legs()) => return (again, Some(held)),
                 _ => loc = again,
@@ -757,7 +757,7 @@ impl ThinVolumeHandle {
             let to_remove: Vec<u64> = {
                 let gem = self.gem.read().await;
                 gem.volume_extents(&self.id)
-                    .map(|iter| iter.filter(|(&idx, _)| idx >= max_vext_idx).map(|(&idx, _)| idx).collect())
+                    .map(|iter| iter.filter(|(idx, _)| *idx >= max_vext_idx).map(|(idx, _)| idx).collect())
                     .unwrap_or_default()
             };
             for vext_idx in to_remove {
@@ -1236,7 +1236,7 @@ impl ThinVolumeHandle {
     pub async fn relocate_extent(&self, vext_idx: u64, dest: SlabId) -> DriveResult<Relocated> {
         let loc = {
             let gem = self.gem.read().await;
-            gem.lookup(self.id, vext_idx).cloned()
+            gem.lookup(self.id, vext_idx)
         };
         let Some(loc) = loc else { return Ok(Relocated::Unmapped) };
         if loc.legs().all(|l| l.slab_id == dest) {
@@ -1493,7 +1493,7 @@ impl ThinVolumeHandle {
         let (locs, group) = {
             let gem = self.gem.read().await;
             let locs: Vec<Option<ExtentLocation>> = (stripe * width as u64..(stripe + 1) * width as u64)
-                .map(|v| gem.lookup(self.id, v).cloned())
+                .map(|v| gem.lookup(self.id, v))
                 .collect();
             (locs, gem.lookup_parity(self.id, stripe).cloned())
         };
@@ -1662,7 +1662,7 @@ impl ThinVolumeHandle {
 
         let (loc, group) = {
             let gem = self.gem.read().await;
-            (gem.lookup(self.id, vext).cloned(), gem.lookup_parity(self.id, stripe).cloned())
+            (gem.lookup(self.id, vext), gem.lookup_parity(self.id, stripe).cloned())
         };
 
         // 1. The data member: old content over the written range, new slot
@@ -1804,7 +1804,7 @@ impl ThinVolumeHandle {
         let _s = self.shard(stripe).lock().await;
         let (loc, group) = {
             let gem = self.gem.read().await;
-            (gem.lookup(self.id, vext).cloned(), gem.lookup_parity(self.id, stripe).cloned())
+            (gem.lookup(self.id, vext), gem.lookup_parity(self.id, stripe).cloned())
         };
         let Some(loc) = loc else { return Ok(()) };
 
@@ -2044,7 +2044,7 @@ impl ThinVolumeHandle {
                         l.leg_count() != copies
                             || l.legs().any(|leg| !attached.contains(&leg.slab_id) || self.is_failed(leg.slab_id))
                     })
-                    .map(|(v, _)| *v)
+                    .map(|(v, _)| v)
                     .collect()
                 })
                 .unwrap_or_default()
@@ -2345,7 +2345,7 @@ impl ThinVolumeHandle {
         // Data legs on missing/failed slabs: rewrite onto fresh ones.
         for (i, member) in members.iter().enumerate() {
             let vext = stripe * width as u64 + i as u64;
-            let loc = { let gem = self.gem.read().await; gem.lookup(self.id, vext).cloned() };
+            let loc = { let gem = self.gem.read().await; gem.lookup(self.id, vext) };
             let Some(loc) = loc else { continue };
             let usable = {
                 let reg = self.registry.read().await;

@@ -1001,7 +1001,7 @@ impl PlacementEngine {
                 for leg in loc.legs() {
                     let d = registry.domain_of(&leg.slab_id);
                     if !d.is_empty() && seen.iter().any(|t| t.same_at(&d, rung)) {
-                        work.push((vol, *vext, leg, false));
+                        work.push((vol, vext, leg, false));
                     } else {
                         seen.push(d);
                     }
@@ -1347,7 +1347,7 @@ impl PlacementEngine {
             let mut result = Vec::new();
             for (&vol_id, policy) in volume_policies {
                 if let Some(iter) = gem.volume_extents(&vol_id) {
-                    for (&vext_idx, loc) in iter {
+                    for (vext_idx, loc) in iter {
                         // Pinned where it is (#150).
                         if registry.is_dedicated(&loc.slab_id) {
                             continue;

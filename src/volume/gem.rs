@@ -926,8 +926,8 @@ mod tests {
 
         let extents: Vec<_> = gem.volume_extents(&vol).unwrap().collect();
         assert_eq!(extents.len(), 2);
-        assert_eq!(*extents[0].0, 0);
-        assert_eq!(*extents[1].0, 5);
+        assert_eq!(extents[0].0, 0);
+        assert_eq!(extents[1].0, 5);
     }
 
     #[test]
