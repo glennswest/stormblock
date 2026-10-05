@@ -1631,3 +1631,51 @@ mod retention_tests {
         }
     }
 }
+
+/// The u64 slot index in memory (#158, stage A) changes nothing on disk:
+/// bincode's standard config writes integers as varints, so a v1 record
+/// written now decodes in an engine whose slot index was u32, and the other
+/// way round, for every slot a v1 slab can have.
+#[cfg(test)]
+mod u64_slot_compat {
+    use crate::drive::slab::SlabId;
+    use crate::volume::gem::{ExtentLocation, Leg};
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct OldLeg {
+        slab_id: SlabId,
+        slot_idx: u32,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct OldLocation {
+        slab_id: SlabId,
+        slot_idx: u32,
+        ref_count: u32,
+        generation: u64,
+        mirrors: Vec<OldLeg>,
+    }
+
+    #[test]
+    fn a_record_written_with_u64_slots_reads_as_the_u32_shape_and_back() {
+        let cfg = bincode::config::standard();
+        let sid = SlabId(uuid::Uuid::new_v4());
+        for slot in [0u64, 1, 300, 70_000, u32::MAX as u64] {
+            let now = ExtentLocation {
+                slab_id: sid,
+                slot_idx: slot,
+                ref_count: 2,
+                generation: 9,
+                mirrors: vec![Leg::new(sid, slot / 2)],
+            };
+            let bytes = bincode::serde::encode_to_vec(&now, cfg).unwrap();
+            let (old, _): (OldLocation, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+            assert_eq!(old.slot_idx as u64, slot);
+            assert_eq!(old.mirrors[0].slot_idx as u64, slot / 2);
+            let back = bincode::serde::encode_to_vec(&old, cfg).unwrap();
+            assert_eq!(back, bytes, "the same bytes either way");
+            let (again, _): (ExtentLocation, _) = bincode::serde::decode_from_slice(&back, cfg).unwrap();
+            assert_eq!(again.slot_idx, slot);
+        }
+    }
+}
