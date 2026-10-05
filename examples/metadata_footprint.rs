@@ -87,6 +87,43 @@ async fn main() -> anyhow::Result<()> {
     let r3 = rss();
     println!("GEM, one extent per slot:          {:>8.1} B/extent", per(r3 - r2, i));
 
+    // What a node really holds is not one volume written front to back: a
+    // thin volume is written where its filesystem writes, and copy-on-write
+    // puts each new slot wherever the slab has one. Scattered: the extents of
+    // 64 volumes, every third virtual extent, in random order, on random
+    // slots. Clones: 16 clones of one golden, each with every extent shared.
+    {
+        use rand::seq::SliceRandom;
+        let mut rng = rand::thread_rng();
+        let mut g2 = GlobalExtentMap::new();
+        let ra = rss();
+        let vols: Vec<VolumeId> = (0..64).map(|_| VolumeId(uuid::Uuid::new_v4())).collect();
+        let mut keys: Vec<(usize, u64)> = (0..i).map(|k| ((k % 64) as usize, (k / 64) * 3)).collect();
+        keys.shuffle(&mut rng);
+        let mut slots_perm: Vec<u32> = (0..i as u32).collect();
+        slots_perm.shuffle(&mut rng);
+        for (n, (v, vext)) in keys.iter().enumerate() {
+            g2.insert(vols[*v], *vext, ExtentLocation::new(sid, slots_perm[n]));
+        }
+        let rb = rss();
+        println!("GEM, scattered (64 vols, random):  {:>8.1} B/extent", per(rb.saturating_sub(ra), i));
+        drop(g2);
+
+        let mut g3 = GlobalExtentMap::new();
+        let golden = VolumeId(uuid::Uuid::new_v4());
+        let per_golden = i / 17;
+        for v in 0..per_golden {
+            g3.insert(golden, v, ExtentLocation::new(sid, slots_perm[v as usize]));
+        }
+        let rc = rss();
+        for _ in 0..16 {
+            g3.clone_volume_map(golden, VolumeId(uuid::Uuid::new_v4()));
+        }
+        let rd = rss();
+        println!("GEM, clone maps (16 of a golden):  {:>8.1} B/extent", per(rd.saturating_sub(rc), per_golden * 16));
+        drop(g3);
+    }
+
     let empty = per(r1 - r0, slots);
     let full = per(r3 - r0, slots);
     let drive_slots = 256e12 / 1048576.0;
