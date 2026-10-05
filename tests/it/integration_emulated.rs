@@ -66,7 +66,9 @@ async fn a_mirror_on_256_tib_drives_survives_one_failing_and_rebuilds() {
     // A write in place reaches both legs: the failed one is found out.
     v.write(0, &data[..MIB as usize]).await.unwrap();
     v.flush().await.unwrap();
-    assert_eq!(mgr.health(&id).await.unwrap().state, HealthState::Degraded);
+    let h = mgr.health(&id).await.unwrap();
+    let failed = mgr.get_volume_handle(&id).unwrap().failed_slabs();
+    assert_eq!(h.state, HealthState::Degraded, "{h:?}; failed slabs {failed:?}; leg slab {leg_slab:?}");
 
     let report = mgr.resync_volume(id, false).await.unwrap();
     assert!(report.legs_added > 0, "{report:?}");
