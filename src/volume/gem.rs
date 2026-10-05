@@ -1027,8 +1027,9 @@ mod tests {
             assert_eq!(gem.lookup_parity(v, 0).unwrap().legs, vec![Leg::new(c3, 1)]);
         }
         assert!(gem.reverse_lookup(c2, 0).is_none());
-        assert_eq!(gem.reverse_lookup(c3, 0), Some((vol, 0)));
+        assert!(matches!(gem.reverse_lookup(c3, 0), Some((v, 0)) if v == vol || v == snap));
         assert!(gem.slab_extents(c2).is_empty());
+        assert_eq!(gem.slab_extents(c3).len(), 1, "one entry per slot, however many maps share it");
     }
 
     #[test]

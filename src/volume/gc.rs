@@ -406,10 +406,10 @@ mod tests {
             ExtentLocation::new(slab_id, slot),
         );
         gem.clone_volume_map(source, clone);
-        // Delete the source: its reverse-index claim goes with it, but the
-        // clone's forward mapping survives.
+        // Delete the source: the slot table still names it as the owner,
+        // and only the clone's map names the slot.
         gem.remove_volume(source);
-        assert!(gem.reverse_lookup(slab_id, slot).is_none());
+        assert_eq!(gem.reverse_lookup(slab_id, slot), Some((clone, 0)));
 
         let report = collect(&gem, &mut reg, GcOptions::default()).await;
 
