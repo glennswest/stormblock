@@ -226,7 +226,10 @@ async fn a_v1_slab_and_a_v2_slab_side_by_side() {
     vm.persist().await;
     assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
     let v1 = Slab::open(d1.clone()).await.unwrap();
-    assert!(v1.read_metadata().await.unwrap().is_some(), "the v1 slab has its v1 record");
+    // A v1 slab stays v1 unless format 2 is the default (then it migrated).
+    assert_eq!(v1.format_version(), stormblock::drive::slab::default_format());
+    let doc1 = stormblock::volume::metav2::read_slab(&v1).await.unwrap().unwrap();
+    assert_eq!(doc1.volumes.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), vec!["sys"]);
     let v2 = Slab::open(d2.clone()).await.unwrap();
     let doc = stormblock::volume::metav2::read_slab(&v2).await.unwrap().unwrap();
     assert_eq!(doc.volumes.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), vec!["dat"]);
@@ -339,6 +342,8 @@ async fn an_idle_map_leaves_memory_and_comes_back() {
 /// done, the slab is v2 and its volumes come back.
 #[tokio::test]
 async fn a_v1_slab_migrates_in_place_and_a_cut_leaves_it_v1() {
+    // Format 1 until the migration (this test's process only, under nextest).
+    stormblock::drive::slab::set_default_format(SLAB_VERSION);
     let dev = device("256M").await;
     let s = slab(&dev, SLAB_VERSION, SlabRole::Data).await;
     let sid = s.slab_id();

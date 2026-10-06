@@ -1108,12 +1108,8 @@ impl VolumeManager {
                     .map(|loc| reg.role_of(&loc.slab_id))
                     .unwrap_or(home)
             };
-            let vol = ThinVolume::restore(
-                vrec.id,
-                vrec.name.clone(),
-                vrec.virtual_size,
-                if vrec.extent_size != 0 { vrec.extent_size } else { self.slot_size },
-            );
+            let extent_size = restored_extent_size(&*self.registry.read().await, &vrec, self.slot_size)?;
+            let vol = ThinVolume::restore(vrec.id, vrec.name.clone(), vrec.virtual_size, extent_size);
             let handle = Arc::new(ThinVolumeHandle::with_redundancy(
                 vol,
                 self.gem.clone(),
@@ -2946,12 +2942,8 @@ impl VolumeManager {
                     .and_then(|m| m.all_legs().next().map(|l| reg.role_of(&l.slab_id)))
                     .unwrap_or(home_role)
             };
-            let vol = ThinVolume::restore(
-                vrec.id,
-                vrec.name.clone(),
-                vrec.virtual_size,
-                if vrec.extent_size != 0 { vrec.extent_size } else { self.slot_size },
-            );
+            let extent_size = restored_extent_size(&*self.registry.read().await, &vrec, self.slot_size)?;
+            let vol = ThinVolume::restore(vrec.id, vrec.name.clone(), vrec.virtual_size, extent_size);
             let handle = Arc::new(ThinVolumeHandle::with_redundancy(
                 vol,
                 self.gem.clone(),
@@ -3103,6 +3095,34 @@ fn reconcile_record(
             }
         }
     }
+}
+
+/// The extent size a restored volume is addressed at (#156): its record's
+/// (the document's, in format 1), which the slot size of every slab it has a
+/// leg on must match. An engine that addressed 1 MiB extents in 4 MiB slots
+/// once wrote every extent across its neighbours; a record and a slab that
+/// disagree are refused, not guessed between.
+fn restored_extent_size(
+    reg: &SlabRegistry,
+    vrec: &metadata::VolumeRecord,
+    default: u64,
+) -> Result<u64, VolumeError> {
+    let size = if vrec.extent_size != 0 { vrec.extent_size } else { default };
+    let mut on: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    let legs = vrec.extents.values().flat_map(|l| l.legs().collect::<Vec<_>>()).chain(vrec.parity.values().flat_map(|g| g.legs.clone()));
+    for leg in legs {
+        if let Some(s) = reg.get(&leg.slab_id) {
+            on.insert(s.slot_size());
+        }
+    }
+    if on.iter().any(|s| *s != size) {
+        return Err(VolumeError::InvalidSize(format!(
+            "volume {} ({}) is recorded with {size}-byte extents and has legs on slabs of {on:?}-byte \
+             slots: addressing it so would read and write across its slots' neighbours",
+            vrec.name, vrec.id.0
+        )));
+    }
+    Ok(size)
 }
 
 /// Raise share counts to the mappings in `gem` (#171). A count on disk can be
@@ -3441,13 +3461,27 @@ mod tests {
         }
         assert_eq!(got, data, "restored volume content differs");
 
-        // Slot-size mismatch must be rejected, not silently misread.
+        // A manager of another extent size never misreads it: where its
+        // records keep one size (format 1) the slab is refused; where they
+        // keep each volume's (format 2, #156) the volume is addressed at its
+        // own size, checked against the slab it is on.
         let dev = FileDevice::open(&backing_str).await.unwrap();
-        let mut wrong = VolumeManager::new(8192);
-        assert!(wrong
-            .open_backing_device(array_id, Arc::new(dev))
-            .await
-            .is_err());
+        let mut wrong = VolumeManager::with_data_dir(8192, meta_dir.clone()).unwrap();
+        match wrong.open_backing_device(array_id, Arc::new(dev)).await {
+            Err(_) => assert_eq!(crate::drive::slab::default_format(), crate::drive::slab::SLAB_VERSION),
+            Ok(()) => {
+                wrong.restore().await.unwrap();
+                let v = wrong.get_volume_handle(&vol_id).expect("restored");
+                assert_eq!(v.extent_size(), 4096);
+                let mut again = vec![0u8; data.len()];
+                let mut off = 0usize;
+                while off < again.len() {
+                    let end = again.len();
+                    off += v.read(off as u64, &mut again[off..end]).await.unwrap();
+                }
+                assert_eq!(again, data, "read at its own extent size");
+            }
+        }
 
         let _ = std::fs::remove_file(&backing_path);
         let _ = std::fs::remove_dir_all(&meta_dir);

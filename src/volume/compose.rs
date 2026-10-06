@@ -373,7 +373,11 @@ mod tests {
     async fn adopting_a_slab_with_a_different_slot_size_is_refused() {
         use crate::drive::discover::FoundSlab;
 
-        let (mut vm, path) = manager().await;
+        // A manager whose records keep one extent size (format 1). In format
+        // 2 another size is a pool of its own (#156), and adopting it works.
+        let (_, path) = manager().await;
+        let meta = std::env::temp_dir().join(format!("stormblock-compose-meta-{}", uuid::Uuid::new_v4().simple()));
+        let mut vm = VolumeManager::with_data_dir(SLOT, meta.clone()).unwrap();
 
         let dir = std::env::temp_dir().join("stormblock-compose-test");
         let other = dir.join(format!("{}.bin", uuid::Uuid::new_v4().simple()));
@@ -384,12 +388,14 @@ mod tests {
         // 1 MiB that went wrong in production, scaled down.
         let slab = Slab::format(dev, SLOT * 4, StorageTier::Hot).await.unwrap();
 
-        let err = vm
-            .adopt_slabs(vec![FoundSlab { label: "test".into(), slab }])
-            .await
-            .expect_err("a slot-size mismatch must be refused");
-        let msg = err.to_string();
-        assert!(msg.contains("slots"), "the error names the sizes: {msg}");
+        let r = vm.adopt_slabs(vec![FoundSlab { label: "test".into(), slab }]).await;
+        if crate::drive::slab::default_format() == crate::drive::slab::SLAB_VERSION_2 {
+            r.expect("format 2: another size is another pool");
+        } else {
+            let msg = r.expect_err("a slot-size mismatch must be refused").to_string();
+            assert!(msg.contains("slots"), "the error names the sizes: {msg}");
+        }
+        let _ = std::fs::remove_dir_all(&meta);
 
         let _ = std::fs::remove_file(&other_str);
         let _ = std::fs::remove_file(&path);
