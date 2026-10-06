@@ -393,7 +393,9 @@ slab header with 64-bit slot counts, and volume records kept as a
 copy-on-write tree plus a log, so a persist writes what changed (one 4 KiB
 record for one extent, where format 1 rewrites every volume's record). An
 engine before #158 refuses a format 2 slab. Existing slabs keep their format;
-migration is #158's last stage, not yet built. `cache_mb` (unset: every map
+a serving engine migrates its v1 metadata slabs in place at the first persist
+once 2 is the default (`stormblock slab upgrade`, `POST /api/v1/slabs/{id}/upgrade`
+by hand); an older engine cannot open a migrated slab. `cache_mb` (unset: every map
 stays in memory): extent maps of idle volumes (nothing attached or serving
 them) beyond this many MiB leave memory and are read from their v2 store at
 the volume's next use; only where every metadata store is format 2.

@@ -102,16 +102,31 @@ already bounded since #155: a page cache plus the free map.
 
 ### Migration and rollback
 
+As decided on #158 (the master's recommendation, accepted: "old slabs migrate
+on first open"), and as built:
+
 - An engine with v2 reads **both** formats. A slab is v1 or v2 as a whole.
-- New slabs are v2 once the gate is on.
-- An existing v1 slab is migrated in place, explicitly, slab by slab:
-  `stormblock slab upgrade <slab>`, or `POST /api/v1/slabs/{id}/upgrade`.
-  The engine writes the v2 tree from its v1 records, flushes, and then
-  rewrites the header to v2 as the last step.
-- A cut before the header write leaves a v1 slab. A slab not yet migrated
-  stays readable by an older engine, which is the rollback.
-- A stormcos install lays fresh v2 slabs (install = wipe, #261), so nodes come
-  to v2 by installing. The forge and long-lived nodes migrate explicitly.
+- New slabs are v2 once the gate's default is 2 (stage E).
+- A serving engine migrates each v1 **metadata** slab in place at its first
+  persist once 2 is the default (`VolumeManager::upgrade_slabs`); by hand,
+  `stormblock slab upgrade <slab>` or `POST /api/v1/slabs/{id}/upgrade`
+  (destructive, #274). Inspection commands (`slab volumes`, `slab holds`,
+  `image inspect`) never migrate.
+- The order makes a cut safe (`Slab::upgrade_to_v2`):
+  1. the slab's record is written into **both** v1 copies, so the copy in the
+     region's second half is current;
+  2. the v2 store is written into the region's **first half only**, flushed;
+  3. the slab header, version 2, last, flushed.
+
+  A cut before 3 leaves a v1 slab whose second copy is its record; after it, a
+  v2 slab. A region too small to hold the store in half of it stays v1 (said
+  in the log) and is written as v1.
+- A slab with no metadata region keeps a v1 header: it holds no record, and
+  v1 reads it fine below 4 Gi slots.
+- Rollback: an engine before #158 refuses a v2 slab. A stormcos install lays
+  fresh slabs (install = wipe, #261), so nodes come to v2 by installing; a
+  long-lived node or the forge migrates in place and cannot go back to an
+  older engine without a reinstall (forge: a VM snapshot, as for v20).
 
 ## As built (stages A and B)
 

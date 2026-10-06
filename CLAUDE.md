@@ -239,7 +239,12 @@ the engine writes v1 until stage E.
             transiently): flow-over, drain, resync, data seed; GC streams
 - [ ] D. extent size per volume/pool (#156); the install's 8 MiB bulk slab
 - [ ] E. `slab upgrade` (in place, header last), gate default v2 for new
-      slabs, emulated 1 PiB runs (#208), docs; close #158, #157, #156
+      slabs, emulated 1 PiB runs (#208), docs; close #158, #157, #156.
+      Built: migration (`Slab::upgrade_to_v2`: record into both v1 copies,
+      v2 store in the region's first half, header last; a cut test), at the
+      first persist once 2 is the default (owner/master on #158: "old slabs
+      migrate on first open"), `slab upgrade`, `POST /slabs/{id}/upgrade`
+      (destructive). Left: the default flip, 1 PiB runs — after D
 
 ### Resident compaction (2026-10-05, #155, P1) — DONE
 
