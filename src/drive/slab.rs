@@ -2862,6 +2862,45 @@ mod tests {
         assert!(SlabHeader::from_bytes(&b).is_err(), "the extended header is checksummed");
     }
 
+    /// #158 at the scale it is for: a v2 slab of 4.25 Gi slots (17 TiB in
+    /// 4 KiB slots, emulated), one slot taken where its index needs 64 bits,
+    /// its entry and its data read back after a reopen. Ignored: minutes, and
+    /// ~0.6 GiB of free map; `cargo nextest run --run-ignored only past_four_gi`.
+    #[tokio::test]
+    #[ignore]
+    async fn a_v2_slab_past_four_gi_slots_addresses_every_slot() {
+        let uri = format!("emulated://past4gi-{}?size=17T", Uuid::new_v4().simple());
+        let dev = crate::drive::open_path(&uri, false).await.unwrap();
+        let t = std::time::Instant::now();
+        let mut slab =
+            Slab::format_with(dev.clone(), SlabFormat::new(4096, StorageTier::Cold).with_version(SLAB_VERSION_2))
+                .await
+                .unwrap();
+        println!("format: {} slots in {:.1} s", slab.total_slots(), t.elapsed().as_secs_f64());
+        assert!(slab.total_slots() > u32::MAX as u64);
+        let idx = u32::MAX as u64 + 7;
+        let vol = VolumeId(Uuid::new_v4());
+        let slot = Slot { state: SlotState::Allocated, volume_id: vol, virtual_extent_idx: 42, ref_count: 1, generation: 3 };
+        slab.write_slot(idx, 0, &[0xAB; 4096]).await.unwrap();
+        slab.table.write(&[(idx, slot.to_bytes())]).await.unwrap();
+        slab.free_bitmap.set(idx as usize, false);
+        slab.free_count -= 1;
+        dev.flush().await.unwrap();
+        drop(slab);
+
+        let t = std::time::Instant::now();
+        let slab = Slab::open(dev).await.unwrap();
+        println!("open: {:.1} s", t.elapsed().as_secs_f64());
+        assert_eq!(slab.format_version(), SLAB_VERSION_2);
+        assert_eq!(slab.allocated_slots(), 1);
+        let got = slab.get_slot(idx).await.expect("the slot past 4 Gi");
+        assert_eq!((got.volume_id, got.virtual_extent_idx, got.generation), (vol, 42, 3));
+        let mut buf = vec![0u8; 4096];
+        slab.read_slot(idx, 0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAB));
+        assert_eq!(slab.owner(idx).await, Some((vol, 42)));
+    }
+
     #[tokio::test]
     async fn a_v2_slab_formats_an_empty_store_and_refuses_v1_metadata() {
         let dev = crate::drive::open_path(&format!("emulated://v2slab-{}?size=1G", Uuid::new_v4()), false).await.unwrap();
