@@ -7507,7 +7507,7 @@ file = "{state}"
                 let osr = String::from_utf8(crate::fs::files::read_file(&root, "/etc/os-release").await.unwrap()).unwrap();
                 assert_eq!(osr.trim(), if active_n1 { "VERSION_ID=11.91" } else { "VERSION_ID=11.90" }, "{when}: the root");
                 let svc = volume_bytes(&m, "svc").await.unwrap();
-                assert_eq!(svc[..n_svc.len()], if active_n1 { &n1_svc[..] } else { &n_svc[..] }, "{when}: svc");
+                assert_eq!(&svc[..n_svc.len()], if active_n1 { &n1_svc[..] } else { &n_svc[..] }, "{when}: svc");
                 assert_eq!(volume_bytes(&m, "state").await.unwrap(), state_before, "{when}: the node's state, kept");
                 let logs = volume_bytes(&m, "logs").await.unwrap();
                 if active_n1 {
