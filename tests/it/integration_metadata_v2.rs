@@ -717,7 +717,7 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
 
     for round in 0..2u8 {
         let t = Instant::now();
-        let vm = open_node(&[pb.clone(), tb.clone(), old.clone()]).await;
+        let mut vm = open_node(&[pb.clone(), tb.clone(), old.clone()]).await;
         eprintln!("restart {round}: slabs opened and volumes restored in {:.2} s", t.elapsed().as_secs_f64());
         for &e in &far {
             assert_eq!(read_mib(&vm, "huge", e).await, pattern(1, e, 0), "round {round}: huge extent {e}");
