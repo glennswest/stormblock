@@ -16,6 +16,13 @@
 //! kind usable at all. It reports `DriveType::Emulated`, so nothing mistakes
 //! it for media.
 //!
+//! **A volatile write cache** (`&volatile=1`, memory only) is the power-cut
+//! test at node scale (#172): writes and zeroes are held until a flush, as a
+//! drive's cache holds them, and [`crash`] cuts the power — every flushed
+//! write kept, each one still cached kept or lost at random, the drive then
+//! reading what survived. A `CrashDevice` does the same for a small device
+//! held whole in memory; an install disk is tens of GiB.
+//!
 //! **Failing one on command** is the rebuild test: [`set_failed`] (or
 //! `POST /api/v1/drives/{id}/emulate {"failed": true}`) makes every I/O
 //! answer EIO until it is cleared, as a drive that died would.
@@ -45,6 +52,8 @@ pub struct EmulatedSpec {
     /// A directory of chunk files; `None` keeps the data in memory.
     pub backing: Option<PathBuf>,
     pub block_size: u32,
+    /// Writes held in a cache until a flush, for power-cut tests (#172).
+    pub volatile: bool,
 }
 
 /// A size: digits with an optional K/M/G/T/P/E suffix (powers of 1024).
@@ -71,7 +80,7 @@ pub fn parse_size(s: &str) -> Option<u64> {
 }
 
 impl EmulatedSpec {
-    /// `emulated://<name>?size=<n>[&backing=<dir>][&lbs=512|4096]`.
+    /// `emulated://<name>?size=<n>[&backing=<dir>][&lbs=512|4096][&volatile=1]`.
     pub fn parse(uri: &str) -> Option<DriveResult<EmulatedSpec>> {
         let rest = uri.strip_prefix("emulated://")?;
         let (name, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -82,6 +91,7 @@ impl EmulatedSpec {
         let mut size = None;
         let mut backing = None;
         let mut block_size = 4096u32;
+        let mut volatile = false;
         for kv in query.split('&').filter(|kv| !kv.is_empty()) {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
             match k {
@@ -95,12 +105,20 @@ impl EmulatedSpec {
                     "4096" => block_size = 4096,
                     _ => return bad(format!("lbs {v:?}: 512 or 4096")),
                 },
-                _ => return bad(format!("unknown option {k:?} (size, backing, lbs)")),
+                "volatile" => match v {
+                    "1" | "true" => volatile = true,
+                    "0" | "false" => volatile = false,
+                    _ => return bad(format!("volatile {v:?}: 1 or 0")),
+                },
+                _ => return bad(format!("unknown option {k:?} (size, backing, lbs, volatile)")),
             }
         }
         let Some(size) = size else { return bad("size= is required".into()) };
+        if volatile && backing.is_some() {
+            return bad("a volatile cache is for a drive held in memory, not one with a backing".into());
+        }
         let size = size - size % block_size as u64;
-        Some(Ok(EmulatedSpec { name: name.to_string(), size, backing, block_size }))
+        Some(Ok(EmulatedSpec { name: name.to_string(), size, backing, block_size, volatile }))
     }
 
     pub fn uri(&self) -> String {
@@ -110,6 +128,9 @@ impl EmulatedSpec {
         }
         if self.block_size != 4096 {
             u.push_str(&format!("&lbs={}", self.block_size));
+        }
+        if self.volatile {
+            u.push_str("&volatile=1");
         }
         u
     }
@@ -129,6 +150,17 @@ struct Inner {
     stored: AtomicU64,
     reads: AtomicU64,
     writes: AtomicU64,
+    /// The volatile cache, when the drive has one.
+    cache: Option<Mutex<Cache>>,
+}
+
+/// What a volatile drive holds that a power cut may lose (#172).
+#[derive(Default)]
+struct Cache {
+    /// Writes since the last flush, in order (`None`: zeros of that length).
+    log: Vec<(u64, Option<Vec<u8>>, u64)>,
+    /// Pages as reads see them: the durable page with the log applied.
+    view: HashMap<u64, Box<[u8]>>,
 }
 
 /// See the module documentation. Cheap to clone: one drive, many handles.
@@ -183,6 +215,7 @@ pub fn open(spec: &EmulatedSpec) -> DriveResult<EmulatedDevice> {
             stored: AtomicU64::new(stored),
             reads: AtomicU64::new(0),
             writes: AtomicU64::new(0),
+            cache: spec.volatile.then(|| Mutex::new(Cache::default())),
         }),
     };
     r.insert(spec.name.clone(), dev.clone());
@@ -209,6 +242,32 @@ pub fn set_failed(path_or_name: &str, failed: bool) -> bool {
         }
         None => false,
     }
+}
+
+/// Cut the power to a volatile emulated drive (#172): every flushed write
+/// stays; each write still in its cache is kept with probability `keep`
+/// (repeatable for one `seed`), in the order it was made; the cache is
+/// emptied. The drive keeps its name, and reads what survived. Returns how
+/// many cached writes there were, or `None` for no such volatile drive.
+pub fn crash(path_or_name: &str, seed: u64, keep: f64) -> Option<usize> {
+    use rand::{Rng, SeedableRng};
+    let name = match EmulatedSpec::parse(path_or_name) {
+        Some(Ok(s)) => s.name,
+        _ => path_or_name.to_string(),
+    };
+    let d = get(&name)?;
+    let Store::Memory(shards) = &d.inner.store else { return None };
+    let mut c = d.inner.cache.as_ref()?.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let n = c.log.len();
+    for (off, data, len) in std::mem::take(&mut c.log) {
+        if rng.gen_bool(keep) {
+            d.mem_write(shards, off, data.as_deref(), len);
+        }
+    }
+    c.view.clear();
+    tracing::warn!("emulated drive {name}: power cut, {n} cached write(s) kept or lost at random");
+    Some(n)
 }
 
 fn human(n: u64) -> String {
@@ -397,8 +456,52 @@ impl EmulatedDevice {
         .map_err(DriveError::Io)
     }
 
+    /// A write into the volatile cache: logged, and applied to the pages
+    /// reads see. `None` writes zeros.
+    fn cache_write(&self, shards: &[Mutex<HashMap<u64, Box<[u8]>>>], c: &mut Cache, offset: u64, buf: Option<&[u8]>, len: u64) {
+        let mut done = 0u64;
+        while done < len {
+            let at = offset + done;
+            let page = at / PAGE;
+            let off = (at % PAGE) as usize;
+            let n = ((PAGE as usize - off) as u64).min(len - done) as usize;
+            let p = c.view.entry(page).or_insert_with(|| {
+                let mut b = vec![0u8; PAGE as usize];
+                Self::mem_read(shards, page * PAGE, &mut b);
+                b.into_boxed_slice()
+            });
+            match buf {
+                Some(b) => p[off..off + n].copy_from_slice(&b[done as usize..done as usize + n]),
+                None => p[off..off + n].fill(0),
+            }
+            done += n as u64;
+        }
+        c.log.push((offset, buf.map(<[u8]>::to_vec), len));
+    }
+
+    fn cache_read(shards: &[Mutex<HashMap<u64, Box<[u8]>>>], c: &Cache, offset: u64, buf: &mut [u8]) {
+        Self::mem_read(shards, offset, buf);
+        let len = buf.len() as u64;
+        let mut done = 0u64;
+        while done < len {
+            let at = offset + done;
+            let page = at / PAGE;
+            let off = (at % PAGE) as usize;
+            let n = ((PAGE as usize - off) as u64).min(len - done) as usize;
+            if let Some(p) = c.view.get(&page) {
+                buf[done as usize..done as usize + n].copy_from_slice(&p[off..off + n]);
+            }
+            done += n as u64;
+        }
+    }
+
     async fn zero(&self, offset: u64, len: u64) -> DriveResult<()> {
         self.check(offset, len)?;
+        if let (Some(cache), Store::Memory(shards)) = (&self.inner.cache, &self.inner.store) {
+            let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            self.cache_write(shards, &mut c, offset, None, len);
+            return Ok(());
+        }
         match &self.inner.store {
             Store::Memory(shards) => {
                 self.mem_write(shards, offset, None, len);
@@ -474,6 +577,11 @@ impl BlockDevice for EmulatedDevice {
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
         self.check(offset, buf.len() as u64)?;
         self.inner.reads.fetch_add(1, Ordering::Relaxed);
+        if let (Some(cache), Store::Memory(shards)) = (&self.inner.cache, &self.inner.store) {
+            let c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            Self::cache_read(shards, &c, offset, buf);
+            return Ok(buf.len());
+        }
         match &self.inner.store {
             Store::Memory(shards) => Self::mem_read(shards, offset, buf),
             Store::Dir(dir) => {
@@ -487,6 +595,11 @@ impl BlockDevice for EmulatedDevice {
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         self.check(offset, buf.len() as u64)?;
         self.inner.writes.fetch_add(1, Ordering::Relaxed);
+        if let (Some(cache), Store::Memory(shards)) = (&self.inner.cache, &self.inner.store) {
+            let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            self.cache_write(shards, &mut c, offset, Some(buf), buf.len() as u64);
+            return Ok(buf.len());
+        }
         match &self.inner.store {
             Store::Memory(shards) => self.mem_write(shards, offset, Some(buf), buf.len() as u64),
             Store::Dir(dir) => {
@@ -499,6 +612,13 @@ impl BlockDevice for EmulatedDevice {
     async fn flush(&self) -> DriveResult<()> {
         if self.is_failed() {
             return Err(eio(&self.inner.spec.name));
+        }
+        if let (Some(cache), Store::Memory(shards)) = (&self.inner.cache, &self.inner.store) {
+            let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            for (off, data, len) in std::mem::take(&mut c.log) {
+                self.mem_write(shards, off, data.as_deref(), len);
+            }
+            c.view.clear();
         }
         Ok(())
     }
@@ -570,6 +690,38 @@ mod tests {
         d.write(PIB - (1 << 20), &vec![0u8; 1 << 20]).await.unwrap();
         assert_eq!(d.stored_bytes(), 1 << 20);
         assert!(d.read(PIB, &mut [0u8; 4096]).await.is_err(), "past the end is refused");
+    }
+
+    /// #172: a volatile drive loses what was not flushed, keeps what was.
+    #[tokio::test]
+    async fn a_volatile_drive_keeps_what_was_flushed_through_a_power_cut() {
+        let name = format!("vol-{}", uuid::Uuid::new_v4().simple());
+        let s = spec(&format!("emulated://{name}?size=1T&volatile=1"));
+        assert!(s.volatile && spec(&s.uri()).volatile);
+        assert!(EmulatedSpec::parse("emulated://x?size=1T&volatile=1&backing=/tmp/y").unwrap().is_err());
+        let d = open(&s).unwrap();
+        d.write(0, &[1u8; 8192]).await.unwrap();
+        d.flush().await.unwrap();
+        d.write(4096, &[2u8; 100]).await.unwrap();
+        d.write(TIB / 2, &[3u8; 4096]).await.unwrap();
+        d.write_zeroes(0, 4096).await.unwrap();
+        // Reads see the cache.
+        let mut b = vec![0u8; 8192];
+        d.read(0, &mut b).await.unwrap();
+        assert!(b[..4096].iter().all(|&x| x == 0) && b[4096..4196].iter().all(|&x| x == 2) && b[4196..].iter().all(|&x| x == 1));
+        // A cut that keeps nothing: what was flushed, and only that.
+        assert_eq!(crash(&name, 1, 0.0), Some(3));
+        d.read(0, &mut b).await.unwrap();
+        assert!(b.iter().all(|&x| x == 1), "the flushed write, whole");
+        let mut far = vec![9u8; 4096];
+        d.read(TIB / 2, &mut far).await.unwrap();
+        assert!(far.iter().all(|&x| x == 0), "the unflushed write is gone");
+        // A cut that keeps everything: as if flushed.
+        d.write(TIB / 2, &[4u8; 4096]).await.unwrap();
+        assert_eq!(crash(&name, 2, 1.0), Some(1));
+        d.read(TIB / 2, &mut far).await.unwrap();
+        assert!(far.iter().all(|&x| x == 4));
+        assert_eq!(crash("no-such-drive", 0, 0.5), None);
     }
 
     #[tokio::test]

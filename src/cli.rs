@@ -2878,6 +2878,13 @@ fn is_fabric_uri(path: &str) -> bool {
     path.contains("://")
 }
 
+/// An `nvme-tcp://` namespace, attached with the engine's own initiator here.
+/// Every other `scheme://` path (`iscsi://`, `emulated://`) is opened as a
+/// drive by `drive::open_path`.
+fn is_nvme_tcp_uri(path: &str) -> bool {
+    path.starts_with("nvme-tcp://")
+}
+
 /// Make `disk` boot on its own from the image at `sources` (#123): the ESP
 /// and the boot pallets, into the boot area of the node layout. Read-only on
 /// every source.
@@ -2887,7 +2894,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
 
     let mut opened: Vec<(String, Arc<dyn BlockDevice>)> = Vec::new();
     for path in sources.iter().filter(|p| p.as_str() != disk) {
-        let dev: Arc<dyn BlockDevice> = if is_fabric_uri(path) {
+        let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(path) {
             let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
                 .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
             Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
@@ -3108,13 +3115,13 @@ async fn open_slabs_resuming(
         // fabric (NvmeofDevice), or — tests and development — a file. The diskless boot hands boot-local an
         // `nvme-tcp://` URI from the appliance claim; attaching it here is what
         // makes a remote root an ordinary slab, exactly as a local one.
-        let dev: Arc<dyn BlockDevice> = if is_fabric_uri(path) {
+        let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(path) {
             let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
                 .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
             Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
         } else {
             let dev = open_storage(path).await?;
-            if !crate::drive::is_block_device(path) {
+            if !is_fabric_uri(path) && !crate::drive::is_block_device(path) {
                 // Real storage is a block device, opened O_DIRECT (#140). A
                 // slab in a regular file goes through the page cache: fine
                 // for a test or a laptop, not for a node, and said so.
@@ -3231,7 +3238,7 @@ async fn open_slabs_resuming(
             let tried = source.clone();
             match source {
                 Some(uri) => {
-                    let dev: Arc<dyn BlockDevice> = if is_fabric_uri(&uri) {
+                    let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(&uri) {
                         let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(&uri)
                             .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {uri}"))?;
                         Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
@@ -6917,6 +6924,320 @@ file = "{logs}"
         let mut after = vec![0u8; (32 * MIB) as usize];
         vol.read(0, &mut after).await.unwrap();
         assert!(after == expect, "and reads the same once it is all on the disk");
+    }
+
+    /// One writer's record (#172): what each block was last acknowledged as
+    /// (a flush came back after the write), and what was written to it since
+    /// without one. After a power cut a block must read as the acknowledged
+    /// value, or as one written after it; never as anything older.
+    #[derive(Default)]
+    struct Acked {
+        acked: std::collections::HashMap<u64, u64>,
+        since: std::collections::HashMap<u64, Vec<u64>>,
+    }
+
+    fn tagged(block: u64, value: u64) -> Vec<u8> {
+        let mut v = vec![0u8; 4096];
+        for c in v.chunks_mut(16) {
+            c[..8].copy_from_slice(&block.to_le_bytes());
+            c[8..].copy_from_slice(&value.to_le_bytes());
+        }
+        v
+    }
+
+    /// A consumer of `vol`: 4 KiB writes to random blocks below `blocks`,
+    /// an fsync (flush) every few, each acknowledged write recorded, until
+    /// `stop`.
+    async fn writer(
+        vol: Arc<dyn BlockDevice>,
+        blocks: u64,
+        seed: u64,
+        log: Arc<std::sync::Mutex<Acked>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let mut x = seed | 1;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut value = 0u64;
+        let mut batch: Vec<(u64, u64)> = Vec::new();
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            let b = next() % blocks;
+            value += 1;
+            log.lock().unwrap().since.entry(b).or_default().push(value);
+            if vol.write(b * 4096, &tagged(b, value)).await.is_err() {
+                return;
+            }
+            batch.push((b, value));
+            if batch.len() >= 4 {
+                if vol.flush().await.is_err() {
+                    return;
+                }
+                let mut l = log.lock().unwrap();
+                for (b, v) in batch.drain(..) {
+                    l.acked.insert(b, v);
+                    if let Some(s) = l.since.get_mut(&b) {
+                        s.retain(|w| *w > v);
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Every block of `vol` against what was acknowledged and the golden.
+    async fn check_acked(what: &str, vol: &Arc<dyn BlockDevice>, golden: &[u8], log: &Acked) -> Vec<String> {
+        let mut bad = Vec::new();
+        let mut got = vec![0u8; golden.len()];
+        if let Err(e) = vol.read(0, &mut got).await {
+            return vec![format!("{what}: read: {e}")];
+        }
+        for (b, chunk) in got.chunks(4096).enumerate() {
+            let b = b as u64;
+            let original = &golden[(b * 4096) as usize..(b * 4096) as usize + chunk.len()];
+            let since = log.since.get(&b).cloned().unwrap_or_default();
+            let ok = match log.acked.get(&b) {
+                Some(v) => chunk == tagged(b, *v).as_slice() || since.iter().any(|w| chunk == tagged(b, *w).as_slice()),
+                None => chunk == original || since.iter().any(|w| chunk == tagged(b, *w).as_slice()),
+            };
+            if !ok {
+                let read_as = if chunk == original {
+                    "the golden's bytes".to_string()
+                } else if chunk[..8] == b.to_le_bytes() {
+                    format!("write {}", u64::from_le_bytes(chunk[8..16].try_into().unwrap()))
+                } else if chunk.iter().all(|&c| c == 0) {
+                    "zeros".to_string()
+                } else {
+                    "something else".to_string()
+                };
+                bad.push(format!(
+                    "{what}: block {b} reads as {read_as}; acknowledged {:?}, since {:?}",
+                    log.acked.get(&b),
+                    since
+                ));
+            }
+        }
+        bad
+    }
+
+    /// `root` and `state` on `mgr` against their writers' records.
+    async fn check_volumes(
+        t: &str,
+        when: &str,
+        mgr: &VolumeManager,
+        goldens: [&[u8]; 2],
+        logs: &[Arc<std::sync::Mutex<Acked>>],
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for ((name, golden), log) in ["root", "state"].into_iter().zip(goldens).zip(logs) {
+            let Some(id) = mgr.find_volume(name).await else {
+                out.push(format!("{t}, {when}: no volume {name}"));
+                continue;
+            };
+            let v = mgr.get_volume(&id).unwrap();
+            let snapshot = {
+                let l = log.lock().unwrap();
+                Acked { acked: l.acked.clone(), since: l.since.clone() }
+            };
+            out.extend(check_acked(&format!("{t}, {when}, {name}"), &v, golden, &snapshot).await);
+        }
+        out
+    }
+
+    /// #172: a power cut during the install boot's flow-over, at several
+    /// points, with consumers writing a system and a data volume and every
+    /// fsync logged. The disk is an emulated drive with a volatile cache
+    /// (`emulated::crash`: what was not flushed is kept or lost at random).
+    /// The next boot opens the disk and resumes from a fresh clone of the
+    /// release; every acknowledged write must be there, and every byte nobody
+    /// wrote must be the golden's — after the resume, after the flow-over
+    /// finishes, and from the disk alone. The owner's acceptance on metal
+    /// (BMC cut ×3) is this, on a real disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_power_cut_anywhere_in_the_flow_over_keeps_every_acknowledged_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let mut seed = 0x172u64;
+        let mut noise = |len: u64| {
+            let mut v = vec![0u8; len as usize];
+            for c in v.chunks_mut(8) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                c.copy_from_slice(&seed.to_le_bytes()[..c.len()]);
+            }
+            v
+        };
+        let (root_bytes, state_bytes) = (noise(24 * MIB), noise(32 * MIB));
+        let (root, state) = (p("root.img"), p("state.img"));
+        std::fs::write(&root, &root_bytes).unwrap();
+        std::fs::write(&state, &state_bytes).unwrap();
+        let spec = format!(
+            r#"
+name = "install-172"
+size = "1G"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "root"
+file = "{root}"
+[data_slab]
+size = "512M"
+[[data_slab.golden]]
+name = "state"
+file = "{state}"
+"#
+        );
+        let image = p("image.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&image))
+            .await
+            .unwrap();
+
+        let mut bad: Vec<String> = Vec::new();
+        // Where the power goes: early and late in the system half, and in
+        // the data half (fractions of every extent the flow-over moves).
+        for (trial, at) in [0.1f64, 0.6, 0.75, 0.95].into_iter().enumerate() {
+            let t = format!("cut at {:.0}%", at * 100.0);
+            // Each boot claims its own copy of the release.
+            let claim = |n: String| {
+                let c = p(&n);
+                std::fs::copy(&image, &c).unwrap();
+                c
+            };
+            let first = claim(format!("claim-{trial}-1.raw"));
+            let disk = format!("emulated://cut172-{trial}-{}?size=80G&volatile=1", uuid::Uuid::new_v4().simple());
+
+            // The install boot lays the disk and hands both halves on.
+            let (mut mgr, _) = super::open_slabs_resuming(&[first.clone()], None, true).await.unwrap();
+            let flow = super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
+            assert!(flow.data_flow);
+            super::quarantine_flow_sources(&mgr, &flow).await;
+            mgr.persist().await;
+            drop(mgr);
+
+            // The successor (`adopt-ublk`): the claim and the disk, records
+            // first on the disk, sources quarantined; consumers writing.
+            let mut succ = super::open_slabs_and_restore(&[first.clone(), flow.disk.clone()], None).await.unwrap();
+            let (sys_dest, data_dest) = (
+                crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
+                crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
+            );
+            let local: Vec<_> = [data_dest, sys_dest].into_iter().filter(|id| succ.is_metadata_slab(id)).collect();
+            succ.keep_metadata_in_first(&local);
+            super::quarantine_flow_sources(&succ, &flow).await;
+            let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+                let reg = succ.registry().read().await;
+                (
+                    reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                    reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+                )
+            };
+            let (sys_n, data_n) = (super::extents_on(succ.gem(), &sys_src).await, super::extents_on(succ.gem(), &data_src).await);
+            assert!(sys_n >= 8 && data_n >= 8, "enough to cut in the middle: {sys_n} + {data_n}");
+            let vols: Vec<(&str, Arc<dyn BlockDevice>, &[u8])> = vec![
+                ("root", succ.get_volume(&succ.find_volume("root").await.unwrap()).unwrap(), &root_bytes),
+                ("state", succ.get_volume(&succ.find_volume("state").await.unwrap()).unwrap(), &state_bytes),
+            ];
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let logs: Vec<Arc<std::sync::Mutex<Acked>>> = vols.iter().map(|_| Default::default()).collect();
+            let writers: Vec<_> = vols
+                .iter()
+                .zip(&logs)
+                .enumerate()
+                .map(|(i, ((_, v, g), l))| {
+                    tokio::spawn(writer(v.clone(), g.len() as u64 / 4096, 0x9E37 + (trial * 7 + i) as u64, l.clone(), stop.clone()))
+                })
+                .collect();
+
+            // The flow-over, system half then data half, until the power goes.
+            let cut_after = ((sys_n + data_n) as f64 * at) as u64;
+            let persists = std::sync::atomic::AtomicU64::new(0);
+            let cut = tokio::sync::Notify::new();
+            let persist = || {
+                let c = persists.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let (succ, cut) = (&succ, &cut);
+                async move {
+                    if c > cut_after {
+                        cut.notify_one();
+                        std::future::pending::<()>().await
+                    }
+                    succ.persist().await
+                }
+            };
+            let flow_both = async {
+                super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, persist, None, data_n).await;
+                super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, persist, None, 0).await
+            };
+            tokio::select! {
+                r = flow_both => panic!("{t}: the flow-over was meant to be cut: {r:?}"),
+                _ = cut.notified() => {}
+            }
+            let left = super::extents_on(succ.gem(), &sys_src).await + super::extents_on(succ.gem(), &data_src).await;
+            // The power goes: the consumers stop where they are, and the
+            // disk keeps a random part of what it had not flushed.
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            for w in writers {
+                w.await.unwrap();
+            }
+            drop(vols);
+            drop(succ);
+            let cached = crate::drive::emulated::crash(&disk, 0x172 + trial as u64, 0.5).expect("a volatile drive");
+            let acked: usize = logs.iter().map(|l| l.lock().unwrap().acked.len()).sum();
+            println!("{t}: {left} of {} extents left on the claim, {cached} cached writes cut, {acked} blocks acknowledged", sys_n + data_n);
+            assert!(left > 0 && left < sys_n + data_n, "{t}: cut part-way");
+
+            // The next boot: the disk, and a fresh claim of the same release
+            // for what it misses.
+            let second = claim(format!("claim-{trial}-2.raw"));
+            std::env::set_var("STORMBLOCK_RESUME_SOURCE", &second);
+            let opened = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await;
+            std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
+            let (next, resumed) = match opened {
+                Ok(o) => o,
+                Err(e) => {
+                    bad.push(format!("{t}: the next boot does not open the disk: {e}"));
+                    continue;
+                }
+            };
+            if resumed.is_none() {
+                bad.push(format!("{t}: the next boot did not resume the flow-over"));
+            }
+            let goldens: [&[u8]; 2] = [&root_bytes, &state_bytes];
+            bad.extend(check_volumes(&t, "after the resume", &next, goldens, &logs).await);
+
+            // The rest moves, and the disk alone is what the node boots next.
+            let mut next = next;
+            let local: Vec<_> = [data_dest, sys_dest].into_iter().filter(|id| next.is_metadata_slab(id)).collect();
+            next.keep_metadata_in_first(&local);
+            super::quarantine_flow_sources(&next, &flow).await;
+            let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+                let reg = next.registry().read().await;
+                (
+                    reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                    reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+                )
+            };
+            super::flow_slabs(next.gem(), next.registry(), &sys_src, sys_dest, || next.persist(), None, 0).await;
+            super::flow_slabs(next.gem(), next.registry(), &data_src, data_dest, || next.persist(), None, 0).await;
+            let rest = super::extents_on(next.gem(), &sys_src).await + super::extents_on(next.gem(), &data_src).await;
+            if rest != 0 {
+                bad.push(format!("{t}: {rest} extents still on the claim after the resumed flow-over"));
+            }
+            bad.extend(check_volumes(&t, "after the flow-over finished", &next, goldens, &logs).await);
+            next.persist().await;
+            drop(next);
+            // A clean power-off now loses nothing that was flushed.
+            crate::drive::emulated::crash(&disk, 0x272 + trial as u64, 0.0);
+            match super::open_slabs_resuming(&[flow.disk.clone()], None, false).await {
+                Ok((alone, _)) => bad.extend(check_volumes(&t, "the disk alone", &alone, goldens, &logs).await),
+                Err(e) => bad.push(format!("{t}: the disk alone does not open: {e}")),
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
     /// The appliance, as the node sees it: a device a network round trip
