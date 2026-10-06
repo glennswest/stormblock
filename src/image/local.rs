@@ -250,9 +250,11 @@ pub async fn node_layout(device: &Arc<dyn BlockDevice>) -> Result<Option<(usize,
 /// The bulk partition of a node layout (#156), if it has one.
 pub async fn bulk_partition(device: &Arc<dyn BlockDevice>) -> Option<usize> {
     let gpt = Gpt::read(device).await.ok()?;
-    gpt.partitions()
+    let found = gpt
+        .partitions()
         .find(|(_, e)| e.type_guid == type_guid::SLAB_DATA && e.name == BULK_PARTITION)
-        .map(|(i, _)| i)
+        .map(|(i, _)| i);
+    found
 }
 
 /// What the system half already holds, by volume id, according to the slab
