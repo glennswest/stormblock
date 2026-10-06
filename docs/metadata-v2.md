@@ -1,6 +1,6 @@
 # Metadata format v2: the one format change (#158, with #157 and #156)
 
-**Status (2026-10-05):** stages A and B built; C, D, E to come. Built in
+**Status (2026-10-05):** stages A, B and C built; D and E to come. Built in
 stages behind a format gate (`[metadata] format = 2`,
 `$STORMBLOCK_METADATA_FORMAT=2`): the engine writes v1 until v2 is complete, so
 nothing half-done ships, and the format changes **once**.
@@ -165,6 +165,41 @@ per persist in v2, against **2 738 435 bytes and 9.4 ms** in v1. The first
 persist (the whole store) is 83 ms in v2 against 16 ms in v1. The full test
 suite passes with the gate on (every slab and the data directory in v2) as
 well as off; the power-cut test runs its 300 cuts in both formats.
+
+## As built (stage C)
+
+- **A map is resident or cold** (`gem.rs`). A cold map keeps a summary
+  (extent count, exclusive/shared counts, the slabs it is on) and nothing
+  else. Every accessor that would read or change a cold map panics, and so
+  does every walk of all maps while one is cold: a missing map would read as
+  "no extents", which serves zeros, allocates over the volume's data and lets
+  GC free its slots. Loud is the safe failure.
+- **Loading** (`gem::ensure_resident`, `persist_v2::StorePager`): from a
+  store that holds the volume; every entry point of a volume's handle (I/O,
+  resize, health, resync, relocate) loads first, as does a delete or clone
+  (`prefetch_volume`). A listing reads the summary and loads nothing.
+- **Eviction** (`VolumeManager::evict_idle`, `[metadata] cache_mb`, a task
+  every 30 s under the manager's lock): least recently used first, only a map
+  that no one outside the manager holds a handle to (nothing attached,
+  served, mid-I/O), that nothing holds, with no change since the last persist,
+  when every metadata store is v2, every record taken has been written and
+  no store is due a whole write. Checked under the GEM's write lock, which a
+  persist needs to take its records. A share count a clone gives back to a
+  cold golden is not applied to it (too high costs a copy, never data).
+- **Walks**: GC reads cold maps from their stores one at a time into a live
+  set of one bit a slot per slab, and collects nothing if any cold map could
+  not be read; it never puts them back in memory. A flow-over, a drain, a
+  resync and the install's data seed pin every map in memory for their run
+  (`gem::pin_resident`): nothing is evicted while a pin is held. A whole
+  write of a store, a v1 record, or the last v2 store going away load every
+  map first.
+- **Checked** by running the whole suite with every slab in v2 and
+  `$STORMBLOCK_METADATA_CACHE_MB=0` (every eligible map evicted after every
+  persist): 920/921 on dev, the one being the qcow2 import's 5 s deadline on
+  a loaded box (#173's class; it passes alone and in its module).
+- Measured (`examples/map_cache`, 64 goldens × 2 000 extents laid in order):
+  a map costs 12.4 B an extent resident, all of it freed when it goes cold;
+  a 2 000-extent map loads in 0.4 ms.
 
 ## Stages
 

@@ -215,24 +215,28 @@ the engine writes v1 until stage E.
       cuts 300/300 in both formats, `--features cluster` checks;
       `examples/persist_cost` 100k extents: 4 KiB / 2.7 ms per persist (v1:
       2.7 MB / 9.4 ms)
-- [ ] C. extent map in memory as a cache of the tree (load on open, evict
+- [x] C. extent map in memory as a cache of the tree (load on open, evict
       idle clean maps, `cache_mb`). Plan (2026-10-05):
-      - [ ] C1 the v2 header carries the volume's extent size (format final
+      - [x] C1 the v2 header carries the volume's extent size (format final
             before anything ships; #156 uses it in D)
-      - [ ] C2 `MetaV2::scan_volume` (one volume's keys, tree + log)
-      - [ ] C3 GEM: a map is Resident or Cold; every accessor on a Cold map
+      - [x] C2 `MetaV2::scan_volume` (one volume's keys, tree + log)
+      - [x] C3 GEM: a map is Resident or Cold; every accessor on a Cold map
             panics (loud, never "no extents": that reads zeros, allocates over
             and lets GC free its slots)
-      - [ ] C4 paging in the manager: a handle's entry points and the
+      - [x] C4 paging in the manager: a handle's entry points and the
             manager's per-volume paths load a cold map; evict when clean (its
             sinks written, nothing pending), unheld, no handle outside the
             manager, at least one v2 sink carries it; LRU under
             `[metadata] cache_mb`
-      - [ ] C5 walkers stream cold maps one at a time (GC's live set becomes
+      - [x] C5 walkers stream cold maps one at a time (GC's live set becomes
             per-slab bitmaps; drain, rebuild, placement, flow-over, restore)
-      - [ ] C6 the whole suite with the gate on and the cache at 0 (every
+      - [x] C6 the whole suite with the gate on and the cache at 0 (every
             eligible map evicted after each persist): a missed path panics;
-            measure resident bytes with cold goldens
+            measure resident bytes with cold goldens. Done: forced 920/921
+            (the qcow2 import deadline under load, #173 class), gate off and
+            on 921/921, cluster checks; map_cache: 12.4 B/extent, all freed
+            cold, 0.4 ms to load 2 000 extents. Walks that pin (load all,
+            transiently): flow-over, drain, resync, data seed; GC streams
 - [ ] D. extent size per volume/pool (#156); the install's 8 MiB bulk slab
 - [ ] E. `slab upgrade` (in place, header last), gate default v2 for new
       slabs, emulated 1 PiB runs (#208), docs; close #158, #157, #156

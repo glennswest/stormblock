@@ -301,6 +301,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_API_TOKEN` | the API token, after `[management] api_token`; also `boot-claim --token` | token file, else minted |
 | `STORMBLOCK_ADMIN_TOKEN` | the admin token, after `[management] admin_token` | no admin tier |
 | `STORMBLOCK_TOKEN_FILE` | where CLI tools look for a local engine's token, before `/etc/stormblock/api_token` and `/var/lib/stormblock/api_token` | those two |
+| `STORMBLOCK_METADATA_CACHE_MB` | tests: evict every idle extent map at the end of every persist (#158), so a path that reads a map without loading it panics | unset |
 | `STORMBLOCK_METADATA_FORMAT` | `2`: new slabs in metadata format v2 (#158), where no `[metadata] format` is read | `1` |
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
@@ -392,7 +393,10 @@ slab header with 64-bit slot counts, and volume records kept as a
 copy-on-write tree plus a log, so a persist writes what changed (one 4 KiB
 record for one extent, where format 1 rewrites every volume's record). An
 engine before #158 refuses a format 2 slab. Existing slabs keep their format;
-migration is #158's last stage, not yet built.
+migration is #158's last stage, not yet built. `cache_mb` (unset: every map
+stays in memory): extent maps of idle volumes (nothing attached or serving
+them) beyond this many MiB leave memory and are read from their v2 store at
+the volume's next use; only where every metadata store is format 2.
 
 **`[pressure]`** — `enabled` (`false`), `high_water_pct` (`80.0`),
 `check_interval_secs` (`60`), `min_slab_bytes` (1 GiB), `max_slabs` (`64`), and
