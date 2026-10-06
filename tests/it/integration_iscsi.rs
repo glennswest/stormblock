@@ -239,7 +239,7 @@ async fn iscsi_chap_authentication() {
         target_name: TARGET_NAME.into(),
         chap: Some(ChapConfig {
             username: "testuser".into(),
-            secret: "testsecret".into(),
+            secret: "testsecret".into(), // not a secret: test fixture
         }),
         max_sessions: 16,
         max_connections: 4,
