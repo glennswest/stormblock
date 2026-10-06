@@ -172,6 +172,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### No release boots: the post-#158 initramfs cannot open forge 13.7's slabs (2026-10-06, #301, P0) — IN PROGRESS
+
+11.87: `open slab nvme-tcp://…: bad slab magic` for slabs forge's 13.7.0
+engine composed (`compose/slab`, `compose/disk`); 11.82's initramfs
+(9cbe6ca) opens the same layout. The new engine must read v1 slabs, and the
+format gate must never turn a v1 slab into "bad magic".
+- [ ] find what the v1 read path or the slab-offset discovery changed
+- [ ] fix + a test with a slab written the way 13.7 writes it
+- [ ] full nextest; restage stormblock (special component)
+
 ### Boot-chain attestation and the per-machine TPM mark (2026-10-06, #216, P2) — DONE
 
 For stormcert's `require.attestation` (stormcert#23, #53). Owner: TPM is
