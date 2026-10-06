@@ -212,7 +212,7 @@ async fn a_slab_on_an_nvme_tcp_namespace_opens_in_either_format() {
         let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
         let dev = open_one_drive(&uri).await.expect("URI attach");
         assert_eq!(dev.block_size(), 4096);
-        let slab = Slab::open(dev).await.unwrap_or_else(|e| panic!("v{version} slab over NVMe/TCP: {e}"));
+        let slab = Slab::open(dev.into()).await.unwrap_or_else(|e| panic!("v{version} slab over NVMe/TCP: {e}"));
         assert_eq!(slab.slab_id(), id);
         assert_eq!(slab.format_version(), version);
         assert_eq!(slab.total_slots() - slab.free_slots(), 2, "both allocations read back");
