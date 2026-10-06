@@ -153,6 +153,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             access: crate::volume::Access::ReadWrite.to_string(),
             writable: true,
             lba: crate::volume::Lba::DEFAULT,
+            extent_size: 0,
             role: crate::drive::slab::SlabRole::System.to_string(),
             fs: None,
             fs_uuid: None,

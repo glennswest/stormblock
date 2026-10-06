@@ -386,3 +386,100 @@ async fn a_v1_slab_migrates_in_place_and_a_cut_leaves_it_v1() {
     assert_eq!(read_first(&vm, "a", 29).await, pattern(6, 29, 0));
     assert_eq!(read_first(&vm, "a-snap", 3).await, pattern(6, 3, 0));
 }
+
+/// #156 with #158: extent size per volume, pools by size. A node with a
+/// 1 MiB and an 8 MiB data slab (format 2) places a small volume in 1 MiB
+/// extents and a 64 GiB one in 8 MiB extents; a clone keeps its golden's;
+/// an explicit size is honoured or refused; a restart brings every volume
+/// back at its size; a move never takes an extent into a slot of another size.
+#[tokio::test]
+async fn volumes_of_each_extent_size_live_in_their_own_pool() {
+    use stormblock::volume::{CreateOptions, BULK_EXTENT};
+    const MIB: u64 = 1 << 20;
+    let (d1, d8) = (device("512M").await, device("1G").await);
+    let mk = |dev: Arc<dyn BlockDevice>, slot: u64| async move {
+        let fmt = SlabFormat::new(slot, StorageTier::Hot)
+            .with_role(SlabRole::Data)
+            .with_version(SLAB_VERSION_2)
+            .with_auto_metadata(dev.capacity_bytes());
+        Slab::format_with(dev, fmt).await.unwrap()
+    };
+    let (s1, s8) = (mk(d1.clone(), MIB).await, mk(d8.clone(), BULK_EXTENT).await);
+    let (id1, id8) = (s1.slab_id(), s8.slab_id());
+    let mut vm = VolumeManager::new(MIB);
+    vm.add_slab(s1).await;
+    vm.add_slab(s8).await;
+    vm.persist_to_slabs(vec![id1, id8]);
+
+    let small = vm.create_volume_any("small", 256 * MIB).await.unwrap();
+    let big = vm.create_volume_any("big", 64 << 30).await.unwrap();
+    let asked = vm
+        .create_volume_with("asked", 256 * MIB, CreateOptions::default().with_extent_size(Some(BULK_EXTENT)))
+        .await
+        .unwrap();
+    assert!(vm
+        .create_volume_with("nowhere", MIB, CreateOptions::default().with_extent_size(Some(4 * MIB)))
+        .await
+        .is_err());
+    let sz = |id| vm.get_volume_handle(&id).unwrap().extent_size();
+    assert_eq!(sz(small), MIB);
+    assert_eq!(sz(big), BULK_EXTENT);
+    assert_eq!(sz(asked), BULK_EXTENT);
+
+    for (id, tag) in [(small, 1u8), (big, 2), (asked, 3)] {
+        let v = vm.get_volume(&id).unwrap();
+        for e in 0..4u64 {
+            let off = e * sz(id) + 4096;
+            v.write(off, &pattern(tag, e, 0)).await.unwrap();
+        }
+        v.flush().await.unwrap();
+    }
+    let legs_on = |vm: &VolumeManager, id| {
+        let vm = vm;
+        async move {
+            let g = vm.gem().read().await;
+            g.get_volume_map(&id).unwrap().all_legs().map(|l| l.slab_id).collect::<std::collections::HashSet<_>>()
+        }
+    };
+    assert_eq!(legs_on(&vm, small).await, [id1].into_iter().collect());
+    assert_eq!(legs_on(&vm, big).await, [id8].into_iter().collect());
+
+    let clone = vm.create_snapshot(big, "big-clone").await.unwrap();
+    assert_eq!(sz(clone), BULK_EXTENT);
+    let cv = vm.get_volume(&clone).unwrap();
+    cv.write(BULK_EXTENT + 8192, &pattern(9, 1, 1)).await.unwrap();
+    cv.flush().await.unwrap();
+    drop(cv);
+    assert_eq!(legs_on(&vm, clone).await, [id8].into_iter().collect(), "the copy-on-write stayed in its pool");
+
+    // A move of a 1 MiB extent onto the 8 MiB slab is refused.
+    let r = vm.retier_volume(small, StorageTier::Hot).await;
+    assert!(legs_on(&vm, small).await.iter().all(|s| *s == id1), "{r:?}");
+    vm.persist().await;
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    drop(vm);
+
+    let vm = reopen(&[d1, d8]).await;
+    let sz = |name: &str| {
+        let vm = &vm;
+        let name = name.to_string();
+        async move { vm.get_volume_handle(&vm.find_volume(&name).await.unwrap()).unwrap().extent_size() }
+    };
+    assert_eq!(sz("small").await, MIB);
+    assert_eq!(sz("big").await, BULK_EXTENT);
+    assert_eq!(sz("big-clone").await, BULK_EXTENT);
+    let read_at = |name: &'static str, off: u64| {
+        let vm = &vm;
+        async move {
+            let id = vm.find_volume(name).await.unwrap();
+            let mut b = vec![0u8; 4096];
+            vm.get_volume(&id).unwrap().read(off, &mut b).await.unwrap();
+            b
+        }
+    };
+    assert_eq!(read_at("small", 2 * MIB + 4096).await, pattern(1, 2, 0));
+    assert_eq!(read_at("big", 3 * BULK_EXTENT + 4096).await, pattern(2, 3, 0));
+    assert_eq!(read_at("big-clone", BULK_EXTENT + 8192).await, pattern(9, 1, 1));
+    assert_eq!(read_at("big-clone", 2 * BULK_EXTENT + 4096).await, pattern(2, 2, 0));
+    assert_eq!(read_at("asked", BULK_EXTENT + 4096).await, pattern(3, 1, 0));
+}
