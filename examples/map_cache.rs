@@ -1,6 +1,6 @@
 //! What the extent map cache keeps in memory (#158 stage C).
 //!
-//! G goldens of E extents each on a format v2 slab (emulated, 64 KiB slots),
+//! G goldens of E extents each on a format v2 slab (emulated, 4 KiB slots),
 //! persisted; heap in use (counted by the allocator) before and after every
 //! idle map leaves memory, and after one golden is read again.
 //!
@@ -34,7 +34,7 @@ fn heap() -> i64 {
     HEAP.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-const SLOT: u64 = 64 * 1024;
+const SLOT: u64 = 4096;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -87,5 +87,16 @@ async fn main() -> anyhow::Result<()> {
         heap() as f64 / (1 << 20) as f64
     );
     anyhow::ensure!(buf == block, "the golden read back wrong");
+    // Every map back, then out again: what a map costs in memory.
+    let out = heap();
+    stormblock::volume::gem::ensure_all_resident(vm.gem()).await?;
+    let back = heap();
+    let n2 = vm.evict_idle(0).await;
+    let again = heap();
+    println!(
+        "every map loaded: +{:.1} B an extent; out again ({n2} maps): -{:.1} B an extent",
+        (back - out) as f64 / all as f64,
+        (back - again) as f64 / all as f64
+    );
     Ok(())
 }
