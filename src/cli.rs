@@ -7405,14 +7405,17 @@ file = "{state}"
         );
         let image_n1 = build(spec, img).await;
 
-        // Install N: lay the disk, flow both halves, and run from the disk.
-        let (mut mgr, _) = super::open_slabs_resuming(&[image_n.clone()], None, true).await.unwrap();
+        // Install N from a claim of it (a copy: the published image is never
+        // written), lay the disk, flow both halves, and run from the disk.
+        let claim = p("claim-11.90.raw");
+        std::fs::copy(&image_n, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
         let disk = p("disk.raw");
         std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
         let flow = super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
         super::quarantine_flow_sources(&mgr, &flow).await;
         drop(mgr);
-        let (succ, _) = super::open_slabs_resuming(&[image_n.clone(), flow.disk.clone()], None, true).await.unwrap();
+        let (succ, _) = super::open_slabs_resuming(&[claim.clone(), flow.disk.clone()], None, true).await.unwrap();
         let (sys_dest, data_dest) = (
             crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
             crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
