@@ -289,8 +289,8 @@ async fn an_idle_map_leaves_memory_and_comes_back() {
     drop(cv);
     vm.persist().await;
 
-    let n = vm.evict_idle(0).await;
-    assert!(n >= 2, "{n} evicted");
+    // (With `$STORMBLOCK_METADATA_CACHE_MB` the persist has done it already.)
+    vm.evict_idle(0).await;
     assert!(vm.gem().read().await.is_cold(&g));
     assert!(vm.gem().read().await.is_cold(&c));
 
