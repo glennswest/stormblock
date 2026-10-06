@@ -189,7 +189,7 @@ impl StormBlockConfig {
     /// with, whether or not serving is on: what tells its exports from the
     /// engine's in a table written before they were marked (#217).
     pub fn serve_prefixes(&self) -> (String, String) {
-        let d = ServeConfig::default();
+        let d = crate::serve::config::ServeConfig::default();
         (
             self.serve.nqn_prefix.clone().unwrap_or(d.nqn_prefix),
             self.serve.iqn_prefix.clone().unwrap_or(d.iqn_prefix),
