@@ -172,6 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A power cut during the install's flow-over (2026-10-06, #172, P0) — IN PROGRESS
+
+The fix is in (9344473 resume from a fresh clone; b189b3e relocate-on-write
+#239; 81537b0 record_flow_over #258); what is open is the on-metal
+acceptance (stormcentral's: BMC cut ×3 mid-flow-over, every acknowledged
+write verified). The in-process tests cut at clean points only (every write
+already in the file). Before handing on:
+- [ ] `emulated://…&volatile=1`: writes held in a cache until a flush;
+      `emulated::crash(name, seed, keep)` keeps a random subset (a power cut)
+- [ ] `open_slabs_resuming` and friends open `emulated://` (not only
+      `nvme-tcp://`) as a device path
+- [ ] test: install onto a volatile emulated disk; writers on a system and a
+      data volume (fsync = flush, logged); the flow-over of both halves cut at
+      several points; crash; the next boot resumes from a fresh clone; every
+      acknowledged write and every golden byte checked, after the resume,
+      after the flow-over finishes and from the disk alone
+- [ ] docs, CHANGELOG; hand the metal run to stormcentral (needs a release
+      with golden-stormblock-32186e26d36f or later, #301)
+
 ### No release boots: the post-#158 initramfs cannot open forge 13.7's slabs (2026-10-06, #301, P0) — DONE (golden-stormblock-32186e26d36f)
 
 11.87: `open slab nvme-tcp://…: bad slab magic` for slabs forge's 13.7.0
