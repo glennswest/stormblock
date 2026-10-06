@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A power cut during the install's flow-over (2026-10-06, #172, P0) — IN PROGRESS
+### A power cut during the install's flow-over (2026-10-06, #172, P0) — DONE here, metal acceptance stormcentral's
 
 The fix is in (9344473 resume from a fresh clone; b189b3e relocate-on-write
 #239; 81537b0 record_flow_over #258); what is open is the on-metal
@@ -190,8 +190,12 @@ already in the file). Before handing on:
       the resume, after the flow-over and from the disk alone. Passes on dev;
       `RELOCATE_OFF_239=1` fails it (acknowledged owned-extent writes read as
       the golden after the resume: #172's failure)
-- [ ] docs, CHANGELOG; hand the metal run to stormcentral (needs a release
-      with golden-stormblock-32186e26d36f or later, #301)
+- [x] docs (durability.md, README), CHANGELOG; full nextest at 24297af
+      929/931 (#134; the pressure flake #279, 5/5 alone); golden
+      golden-stormblock-934b03fe8db5
+- On metal: stormcentral's BMC cut ×3 with every acknowledged write checked,
+  on a release with golden-stormblock-32186e26d36f or later (#301: earlier
+  post-#155 releases do not boot at all)
 
 ### No release boots: the post-#158 initramfs cannot open forge 13.7's slabs (2026-10-06, #301, P0) — DONE (golden-stormblock-32186e26d36f)
 
