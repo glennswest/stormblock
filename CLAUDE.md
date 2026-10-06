@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### No release boots: the post-#158 initramfs cannot open forge 13.7's slabs (2026-10-06, #301, P0) — IN PROGRESS
+### No release boots: the post-#158 initramfs cannot open forge 13.7's slabs (2026-10-06, #301, P0) — DONE (golden-stormblock-32186e26d36f)
 
 11.87: `open slab nvme-tcp://…: bad slab magic` for slabs forge's 13.7.0
 engine composed (`compose/slab`, `compose/disk`); 11.82's initramfs
@@ -189,7 +189,11 @@ format gate must never turn a v1 slab into "bad magic".
       each partition's error. Test `integration_nvmeof::a_slab_on_an_nvme_tcp_
       namespace_opens_in_either_format` (v1 and v2): fails with the old rule
       re-imposed on dev, passes with the fix
-- [ ] full nextest; restage stormblock (special component)
+- [x] full nextest at 2639a5d: 927/929 (#134 and the qcow2 deadline, #173
+      class); staged golden-stormblock-32186e26d36f, stormcos#304
+- Not on metal: a release composed with this golden (and its initramfs)
+  booting from forge 13.7's slabs is the proof; until then compose with
+  `--pick stormblock=golden-stormblock-bf3921ab490c`
 
 ### Boot-chain attestation and the per-machine TPM mark (2026-10-06, #216, P2) — DONE
 
