@@ -333,3 +333,56 @@ async fn an_idle_map_leaves_memory_and_comes_back() {
     assert_eq!(read_first(&vm, "golden", 20).await, pattern(3, 20, 0));
     assert_eq!(read_first(&vm, "clone", 49).await, pattern(3, 49, 0));
 }
+
+/// Migration (#158 E): a v1 slab's record moves into a v2 store in place.
+/// A cut before the header is written leaves the v1 slab with its record;
+/// done, the slab is v2 and its volumes come back.
+#[tokio::test]
+async fn a_v1_slab_migrates_in_place_and_a_cut_leaves_it_v1() {
+    let dev = device("256M").await;
+    let s = slab(&dev, SLAB_VERSION, SlabRole::Data).await;
+    let sid = s.slab_id();
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_slab(s).await;
+    vm.persist_to_slab(sid);
+    let a = vm.create_volume_any("a", VOL).await.unwrap();
+    let av = vm.get_volume(&a).unwrap();
+    for e in 0..30u64 {
+        av.write(e * SLOT, &pattern(6, e, 0)).await.unwrap();
+    }
+    av.flush().await.unwrap();
+    drop(av);
+    let _snap = vm.create_snapshot(a, "a-snap").await.unwrap();
+    vm.persist().await;
+    drop(vm);
+
+    // Cut: everything but the header.
+    let s = Slab::open(dev.clone()).await.unwrap();
+    let record = s.read_metadata().await.unwrap().unwrap();
+    let doc = stormblock::volume::MetadataStore::decode(&record).unwrap();
+    s.prepare_v2(&record, stormblock::volume::metav2::document_entries(&doc)).await.unwrap();
+    drop(s);
+    let s = Slab::open(dev.clone()).await.unwrap();
+    assert_eq!(s.format_version(), SLAB_VERSION, "a cut before the header leaves v1");
+    let again = stormblock::volume::MetadataStore::decode(&s.read_metadata().await.unwrap().unwrap()).unwrap();
+    assert_eq!(again.volumes.len(), 2, "and its record readable");
+    drop(s);
+
+    // A serving engine with format 2 the default migrates it at its first
+    // persist.
+    stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
+    let vm = reopen(std::slice::from_ref(&dev)).await;
+    vm.persist().await;
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    let fmt = vm.registry().read().await.get(&sid).unwrap().format_version();
+    assert_eq!(fmt, SLAB_VERSION_2);
+    drop(vm);
+    let s = Slab::open(dev.clone()).await.unwrap();
+    assert_eq!(s.format_version(), SLAB_VERSION_2);
+    let doc = stormblock::volume::metav2::read_slab(&s).await.unwrap().unwrap();
+    assert_eq!(doc.volumes.len(), 2);
+    drop(s);
+    let vm = reopen(&[dev]).await;
+    assert_eq!(read_first(&vm, "a", 29).await, pattern(6, 29, 0));
+    assert_eq!(read_first(&vm, "a-snap", 3).await, pattern(6, 3, 0));
+}

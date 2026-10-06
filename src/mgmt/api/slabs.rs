@@ -583,6 +583,38 @@ pub async fn durability(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+/// `POST /api/v1/slabs/{id}/upgrade` (#158): migrate a metadata slab to
+/// format 2 in place, from the record the engine holds for it. Destructive
+/// (#274): an engine before #158 cannot open the slab afterwards.
+async fn upgrade_slab(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Ok(uuid) = id.parse::<uuid::Uuid>() else {
+        return ApiError::bad_request(format!("invalid UUID: {id}"));
+    };
+    let slab_id = SlabId(uuid);
+    {
+        let reg = state.slab_registry.read().await;
+        match reg.get(&slab_id) {
+            None => return ApiError::not_found(format!("slab {id} not found")),
+            Some(s) if s.format_version() == crate::drive::slab::SLAB_VERSION_2 => {
+                return Json(serde_json::json!({ "id": id, "format": 2, "upgraded": false })).into_response()
+            }
+            Some(s) if !s.has_metadata_region() => {
+                return ApiError::conflict(format!("slab {id} keeps no volume metadata: there is nothing to migrate"))
+            }
+            Some(_) => {}
+        }
+    }
+    let vm = state.volume_manager.lock().await;
+    match vm.upgrade_slabs(Some(slab_id)).await.into_iter().next() {
+        Some((_, Ok(()))) => {
+            vm.persist().await;
+            Json(serde_json::json!({ "id": id, "format": 2, "upgraded": true })).into_response()
+        }
+        Some((_, Err(e))) => ApiError::conflict(format!("slab {id}: {e}")),
+        None => ApiError::conflict(format!("slab {id} is not one of the engine's metadata slabs")),
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_slabs).post(format_slab))
@@ -594,5 +626,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/durability", get(durability))
         .route("/{id}", get(get_slab).delete(delete_slab))
         .route("/{id}/slots", get(list_slots))
+        .route("/{id}/upgrade", axum::routing::post(upgrade_slab))
         .with_state(state)
 }

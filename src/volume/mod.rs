@@ -2044,6 +2044,15 @@ impl VolumeManager {
             return None;
         }
         let dir_v2 = self.dir_v2();
+        if crate::drive::slab::default_format() == crate::drive::slab::SLAB_VERSION_2 && self.v1_sinks().await {
+            // Old slabs migrate at their first persist once format 2 is the
+            // default (#158). One that cannot stays v1, and is written as v1.
+            for (id, r) in self.upgrade_slabs(None).await {
+                if let Err(e) = r {
+                    tracing::warn!("slab {}: stays in metadata format 1: {e}", id.0);
+                }
+            }
+        }
         if !self.gem.read().await.cold_ids().is_empty() && (self.v1_sinks().await || (self.metadata_store.is_some() && !dir_v2)) {
             // A v1 record is every map, whole.
             if let Err(e) = gem::ensure_all_resident(&self.gem).await {
@@ -2096,6 +2105,55 @@ impl VolumeManager {
         };
         let v2 = self.records_v2(dir_v2).await;
         Some(Records { generation, store, slabs, v2 })
+    }
+
+    /// Migrate v1 metadata slabs to format 2 in place (#158): every one, or
+    /// only `only`. Each from the record it carries now (what a persist would
+    /// write to it), header last (see `Slab::upgrade_to_v2`). What came of
+    /// each, by slab.
+    pub async fn upgrade_slabs(&self, only: Option<SlabId>) -> Vec<(SlabId, Result<(), String>)> {
+        let v1: Vec<SlabId> = {
+            let reg = self.registry.read().await;
+            self.metadata_slabs
+                .iter()
+                .filter(|id| only.is_none_or(|o| o == **id))
+                .filter(|id| reg.get(id).is_some_and(|s| s.format_version() != crate::drive::slab::SLAB_VERSION_2))
+                .copied()
+                .collect()
+        };
+        if v1.is_empty() {
+            return Vec::new();
+        }
+        if let Err(e) = gem::ensure_all_resident(&self.gem).await {
+            return v1.into_iter().map(|id| (id, Err(format!("loading extent maps: {e}")))).collect();
+        }
+        let docs: HashMap<SlabId, metadata::VolumeMetadata> =
+            self.per_slab_metadata().await.into_iter().filter(|(id, _)| v1.contains(id)).collect();
+        let mut out = Vec::new();
+        for id in v1 {
+            let Some(doc) = docs.get(&id) else { continue };
+            let record = match MetadataStore::encode(doc) {
+                Ok(r) => r,
+                Err(e) => {
+                    out.push((id, Err(format!("encode: {e}"))));
+                    continue;
+                }
+            };
+            let entries = metav2::document_entries(doc);
+            let r = {
+                let mut reg = self.registry.write().await;
+                match reg.get_mut(&id) {
+                    Some(slab) => slab.upgrade_to_v2(&record, entries).await.map_err(|e| e.to_string()),
+                    None => Err("not attached".to_string()),
+                }
+            };
+            if r.is_ok() {
+                // What this slab's v1 copy last held no longer matters.
+                self.records_on_slab.lock().unwrap().remove(&id);
+            }
+            out.push((id, r));
+        }
+        out
     }
 
     /// Whether any metadata slab is in format v1.

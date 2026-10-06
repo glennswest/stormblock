@@ -386,9 +386,25 @@ pub struct MetaV2 {
     internal: HashMap<u64, Arc<Node>>,
     /// The first word of `used` that may have a free page.
     hint: usize,
+    /// Pages past this are not used (a migration keeps the region's second
+    /// half, where a v1 copy still is, untouched until it is done).
+    limit: u64,
 }
 
 impl MetaV2 {
+    /// [`format`](Self::format), touching nothing of the region past
+    /// `within` bytes: what a migration from v1 writes while the v1 copy in
+    /// the region's second half is still the record (#158).
+    pub async fn format_within(dev: Arc<dyn BlockDevice>, base: u64, size: u64, within: u64) -> io::Result<MetaV2> {
+        let mut s = Self::format(dev, base, size).await?;
+        let page_off = s.layout.page_off;
+        if within < page_off + PAGE {
+            return Err(err(format!("metadata region of {size} bytes has no room for a v2 store in its first half")));
+        }
+        s.limit = ((within - page_off) / PAGE).min(s.layout.page_count);
+        Ok(s)
+    }
+
     /// Lay an empty store over the region: both superblocks, the log's first
     /// page. Whatever the region held is gone.
     pub async fn format(dev: Arc<dyn BlockDevice>, base: u64, size: u64) -> io::Result<MetaV2> {
@@ -417,6 +433,7 @@ impl MetaV2 {
             overlay: Overlay::default(),
             internal: HashMap::new(),
             hint: 0,
+            limit: layout.page_count,
         })
     }
 
@@ -461,6 +478,7 @@ impl MetaV2 {
             overlay: Overlay::default(),
             internal: HashMap::new(),
             hint: 0,
+            limit: layout.page_count,
         };
         if s.root != EMPTY {
             s.mark_reachable().await?;
@@ -499,7 +517,7 @@ impl MetaV2 {
             if *word != u64::MAX {
                 self.hint = w;
                 let p = w as u64 * 64 + (!word).trailing_zeros() as u64;
-                if p >= self.layout.page_count {
+                if p >= self.layout.page_count || p >= self.limit {
                     break;
                 }
                 self.set_used(p, true);

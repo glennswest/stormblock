@@ -1846,6 +1846,55 @@ impl Slab {
         self.header.version
     }
 
+    /// Migrate this slab's metadata to format v2 in place (#158): `record`
+    /// is the slab's v1 record as it is now, `entries` the same in v2.
+    ///
+    /// 1. the record into both v1 copies (the second copy, in the region's
+    ///    second half, is then current whatever happens next);
+    /// 2. the v2 store into the region's first half only, flushed;
+    /// 3. the slab header, version 2, last, flushed.
+    ///
+    /// A cut before 3 leaves a v1 slab whose second copy is its record; after
+    /// it, a v2 slab. Refused for a slab with no region, one already v2, or
+    /// a region too small to hold the store in half of it.
+    pub async fn upgrade_to_v2(
+        &mut self,
+        record: &[u8],
+        entries: Vec<(crate::volume::metav2::Key, Vec<u8>)>,
+    ) -> DriveResult<()> {
+        self.prepare_v2(record, entries).await?;
+        self.commit_v2().await
+    }
+
+    /// Steps 1 and 2 of [`upgrade_to_v2`](Self::upgrade_to_v2).
+    pub async fn prepare_v2(
+        &self,
+        record: &[u8],
+        entries: Vec<(crate::volume::metav2::Key, Vec<u8>)>,
+    ) -> DriveResult<()> {
+        if self.header.version == SLAB_VERSION_2 {
+            return Err(DriveError::Other(anyhow::anyhow!("slab {} is already format 2", self.id.0)));
+        }
+        let Some((dev, off, size)) = self.metadata_region() else {
+            return Err(DriveError::Other(anyhow::anyhow!("slab {} keeps no volume metadata", self.id.0)));
+        };
+        self.write_metadata(record).await?;
+        self.write_metadata(record).await?;
+        let other = |e: std::io::Error| DriveError::Other(anyhow::anyhow!("slab {}: {e}", self.id.0));
+        let mut store = crate::volume::metav2::MetaV2::format_within(dev, off, size, size / 2).await.map_err(other)?;
+        store.replace_all(entries).await.map_err(other)?;
+        Ok(())
+    }
+
+    /// Step 3 of [`upgrade_to_v2`](Self::upgrade_to_v2): the header.
+    pub async fn commit_v2(&mut self) -> DriveResult<()> {
+        self.header.version = SLAB_VERSION_2;
+        self.device.write(0, &self.header.to_bytes()).await?;
+        self.device.flush().await?;
+        tracing::info!("slab {}: metadata migrated to format 2", self.id.0);
+        Ok(())
+    }
+
     /// The device, offset and size of the metadata region, when there is one.
     pub fn metadata_region(&self) -> Option<(Arc<dyn BlockDevice>, u64, u64)> {
         self.has_metadata_region().then(|| (self.device.clone(), self.header.meta_offset, self.header.meta_size))

@@ -488,6 +488,17 @@ enum SlabAction {
         /// Device paths, partitions or image files to read
         devices: Vec<String>,
     },
+    /// Migrate a slab's volume metadata to format 2 in place (#158).
+    ///
+    /// The slab's own record is written into both v1 copies, the v2 store
+    /// into the first half of its region, and the header last: a cut leaves
+    /// either a v1 slab with its record or a v2 slab. An engine before #158
+    /// cannot open the slab afterwards. A running engine does this itself at
+    /// the first persist once format 2 is the default.
+    Upgrade {
+        /// The slab's device, partition or image file
+        device: String,
+    },
     /// Does a local drive already hold the release on an image? (#236)
     ///
     /// Compares the image's goldens (its sealed volumes, by id) with every
@@ -1932,6 +1943,24 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
                     std::process::exit(2);
                 }
             }
+        }
+        SlabAction::Upgrade { device } => {
+            let dev = crate::drive::open_path(&device, false).await?;
+            let mut slab = Slab::open(dev).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
+            if slab.format_version() == crate::drive::slab::SLAB_VERSION_2 {
+                println!("{device}: slab {} is already format 2", slab.slab_id());
+                return Ok(());
+            }
+            let record = slab
+                .read_metadata()
+                .await
+                .map_err(|e| anyhow::anyhow!("{device}: {e}"))?
+                .ok_or_else(|| anyhow::anyhow!("{device}: slab {} keeps no volume metadata", slab.slab_id()))?;
+            let doc = crate::volume::MetadataStore::decode(&record)?;
+            let entries = crate::volume::metav2::document_entries(&doc);
+            slab.upgrade_to_v2(&record, entries).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
+            println!("{device}: slab {} migrated to format 2 ({} volume(s))", slab.slab_id(), doc.volumes.len());
+            Ok(())
         }
         SlabAction::Volumes { devices } => {
             for device in devices {

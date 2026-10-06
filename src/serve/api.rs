@@ -305,6 +305,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if seg.len() == 6 && seg[3] == "drives" && seg[5] == "emulate" {
             return true;
         }
+        // A metadata migration (#158): older engines cannot open it after.
+        if seg.len() == 6 && seg[3] == "slabs" && seg[5] == "upgrade" {
+            return true;
+        }
     }
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
         return true;
