@@ -378,11 +378,15 @@ impl SlabRegistry {
     /// which side of it a volume is created on, once, and nothing afterwards
     /// spills across.
     pub fn default_role(&self, size: u64) -> SlabRole {
-        if self.distinct_domains_with_space_in_role("drive", SlabRole::System, size) > 0 {
-            return SlabRole::System;
-        }
-        if self.distinct_domains_with_space_in_role("drive", SlabRole::Data, size) > 0 {
-            return SlabRole::Data;
+        // A role with slots of that size first; else the one with any space
+        // (where a size it lacks is then refused, #156).
+        for size in [size, 0] {
+            if self.distinct_domains_with_space_in_role("drive", SlabRole::System, size) > 0 {
+                return SlabRole::System;
+            }
+            if self.distinct_domains_with_space_in_role("drive", SlabRole::Data, size) > 0 {
+                return SlabRole::Data;
+            }
         }
         SlabRole::System
     }
