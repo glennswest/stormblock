@@ -6972,7 +6972,7 @@ file = "{logs}"
                 return;
             }
             batch.push((b, value));
-            if batch.len() >= 4 {
+            if batch.len() >= 16 {
                 if vol.flush().await.is_err() {
                     return;
                 }
@@ -7056,8 +7056,14 @@ file = "{logs}"
     /// wrote must be the golden's — after the resume, after the flow-over
     /// finishes, and from the disk alone. The owner's acceptance on metal
     /// (BMC cut ×3) is this, on a real disk.
+    ///
+    /// `RELOCATE_OFF_239=1` writes owned extents in place on the claim, as
+    /// before #239 (expected to fail: those writes are not on the fresh one).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_power_cut_anywhere_in_the_flow_over_keeps_every_acknowledged_write() {
+        if std::env::var("RELOCATE_OFF_239").is_ok() {
+            crate::volume::fence::RELOCATE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let dir = tempfile::tempdir().unwrap();
         let p = |n: &str| dir.path().join(n).display().to_string();
         let mut seed = 0x172u64;
