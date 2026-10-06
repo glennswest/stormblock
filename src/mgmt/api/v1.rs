@@ -145,6 +145,11 @@ pub struct CreateVolumeRequest {
     /// Where the backing volume lives on this node (#150).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<CreatePlacement>,
+    /// The size of the volume's extents, bytes (#156): a StorageClass's
+    /// `extentSize`. Absent: the node chooses (8 MiB from 64 GiB where it
+    /// has a bulk pool). A clone takes its source's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent_size_bytes: Option<u64>,
 }
 
 /// `placement` on a `/v1` create.
@@ -1204,7 +1209,18 @@ async fn create_volume(
             Some(src) => state.volume_manager.lock().await.create_snapshot(EngineVolumeId(src), &req.name).await,
             None => match pin_array {
                 Some(a) => state.volume_manager.lock().await.create_volume(&req.name, req.size_bytes, a).await,
-                None => state.volume_manager.lock().await.create_volume_any(&req.name, req.size_bytes).await,
+                None => {
+                    state
+                        .volume_manager
+                        .lock()
+                        .await
+                        .create_volume_with(
+                            &req.name,
+                            req.size_bytes,
+                            crate::volume::CreateOptions::default().with_extent_size(req.extent_size_bytes),
+                        )
+                        .await
+                }
             },
         };
         let mut vm = state.volume_manager.lock().await;
