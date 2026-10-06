@@ -1,6 +1,7 @@
 # Metadata format v2: the one format change (#158, with #157 and #156)
 
-**Status (2026-10-05):** built, stages A–E. Format 2 is the default for new
+**Status (2026-10-06):** built, stages A–E, and run at scale on emulated
+1 PiB and 256 TiB drives (below). Format 2 is the default for new
 slabs and data directories; `[metadata] format = 1` (or
 `$STORMBLOCK_METADATA_FORMAT=1`) keeps format 1 and migrates nothing. Built in
 stages behind a format gate (`[metadata] format = 2`,
@@ -249,6 +250,39 @@ well as off; the power-cut test runs its 300 cuts in both formats.
   slab, last, the one that grows); smaller, one data slab. A reinstall of the
   system half keeps both; discovery finds the bulk slab as it finds any slab.
   The quarter is a default, not a decision recorded on #156.
+
+## As built (stage E)
+
+- **The default is format 2** (44fc8e3): new slabs and data directories are
+  v2; `[metadata] format = 1` keeps v1. Migration is as described under
+  "Migration and rollback".
+- **Run at scale** on dev (2026-10-06), on emulated drives (#208), 1 MiB
+  extents, metadata v2 on every slab
+  (`integration_metadata_v2::a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts`,
+  ignored for its minutes; `--run-ignored only -E 'test(petabyte_drives)'`):
+  - one 1 PiB drive and two of 256 TiB, one of them laid as v1 by an earlier
+    engine and migrated at the first persist;
+  - an 8 PiB thin volume with extents at 0, 1 PiB, past 2^32 and at its last
+    extent; a mirror across two drives; a hundred goldens, a clone and its
+    copy-on-write;
+  - maps evicted and loaded back from the store; two restarts from the disks
+    alone (a fresh manager, `Slab::open` + `restore`), every byte checked, a
+    new volume each round.
+
+  | | |
+  |---|---|
+  | format, 1 PiB v2 slab (1.07 Gi slots, 24 GiB region) | 1.3 s |
+  | format, 256 TiB slab (v1 or v2) | 0.3 s |
+  | restart: open the three slabs and restore | 39 s |
+
+  The restart is the slot tables (64 B a slot, 1.6 Gi slots read in one pass
+  each, one slab after another); the store adds nothing measurable. That is
+  #307's subject (160 × 256 TiB take 22 min), not the metadata format.
+- **Slot indexes past 2^32**:
+  `drive::slab::tests::a_v2_slab_past_four_gi_slots_addresses_every_slot`
+  (ignored): a v2 slab of 4.49 Gi 4 KiB slots (17 TiB) formats in 5.4 s, a slot
+  at index 2^32 + 6 is written, and after a reopen (58 s) its entry, owner and
+  data are read back.
 
 ## Stages
 

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **test:** #158 stage E at scale: `integration_metadata_v2::a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts` (ignored, ~2.5 min). It runs a node on emulated 1 PiB and 256 TiB drives with metadata v2, one slab migrated from v1 at the first persist. It covers an 8 PiB thin volume with extent indexes past 2^32, a mirror across drives, a hundred goldens and a clone, evicted maps loaded back, and two restarts from the disks alone with every byte checked. Measured on dev: a 1 PiB v2 slab formats in 1.3 s, and a restart takes 39 s, almost all of it reading slot tables (#307). Docs: metadata-v2.md "As built (stage E)"
 - **feat:** #122: stage the next release on a running node, activate it, roll it back. These are `POST/GET/DELETE /api/v1/releases/{v}/stage` (a job), `POST /api/v1/releases/{v}/activate`, `POST /api/v1/releases/rollback` and `GET /api/v1/releases/generations` (`<data_dir>/release-generations.json`); all but the GETs are destructive.
   - **Stage** reads the published image over HTTP `Range` (`drive::httpdev`, moved from `examples/slab_audit`). It copies the image into the node's slabs as `<name>@<v>`: goldens under the release's ids, sealed when whole; clones as copy-on-write clones of their parent; volumes already here shared.
   - **The release's policy** comes from `/etc/stormblock/data-volumes` in its root (`keep | replace | migrate <hook>`; owner's 1(b)); migrations are listed for stormupdate.
