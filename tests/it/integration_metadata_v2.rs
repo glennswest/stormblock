@@ -607,7 +607,9 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
             .with_auto_metadata(dev.capacity_bytes())
     };
 
-    // An earlier engine's v1 slab, with a volume on it.
+    // An earlier engine's v1 slab, with a volume on it (format 1 for this
+    // phase: with 2 the default its own first persist would migrate it).
+    stormblock::drive::slab::set_default_format(SLAB_VERSION);
     let old = device("256T").await;
     {
         let t = Instant::now();
@@ -628,6 +630,7 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
         assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
     }
 
+    stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
     let pb = device("1P").await;
     let tb = device("256T").await;
     let mut vm = VolumeManager::new(MIB);
