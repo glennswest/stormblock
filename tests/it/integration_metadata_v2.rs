@@ -421,31 +421,23 @@ async fn volumes_of_each_extent_size_live_in_their_own_pool() {
         .create_volume_with("nowhere", MIB, CreateOptions::default().with_extent_size(Some(4 * MIB)))
         .await
         .is_err());
-    let sz = |id| vm.get_volume_handle(&id).unwrap().extent_size();
-    assert_eq!(sz(small), MIB);
-    assert_eq!(sz(big), BULK_EXTENT);
-    assert_eq!(sz(asked), BULK_EXTENT);
+    assert_eq!(esize(&vm, small), MIB);
+    assert_eq!(esize(&vm, big), BULK_EXTENT);
+    assert_eq!(esize(&vm, asked), BULK_EXTENT);
 
     for (id, tag) in [(small, 1u8), (big, 2), (asked, 3)] {
         let v = vm.get_volume(&id).unwrap();
         for e in 0..4u64 {
-            let off = e * sz(id) + 4096;
+            let off = e * esize(&vm, id) + 4096;
             v.write(off, &pattern(tag, e, 0)).await.unwrap();
         }
         v.flush().await.unwrap();
     }
-    let legs_on = |vm: &VolumeManager, id| {
-        let vm = vm;
-        async move {
-            let g = vm.gem().read().await;
-            g.get_volume_map(&id).unwrap().all_legs().map(|l| l.slab_id).collect::<std::collections::HashSet<_>>()
-        }
-    };
     assert_eq!(legs_on(&vm, small).await, [id1].into_iter().collect());
     assert_eq!(legs_on(&vm, big).await, [id8].into_iter().collect());
 
     let clone = vm.create_snapshot(big, "big-clone").await.unwrap();
-    assert_eq!(sz(clone), BULK_EXTENT);
+    assert_eq!(esize(&vm, clone), BULK_EXTENT);
     let cv = vm.get_volume(&clone).unwrap();
     cv.write(BULK_EXTENT + 8192, &pattern(9, 1, 1)).await.unwrap();
     cv.flush().await.unwrap();
@@ -460,26 +452,30 @@ async fn volumes_of_each_extent_size_live_in_their_own_pool() {
     drop(vm);
 
     let vm = reopen(&[d1, d8]).await;
-    let sz = |name: &str| {
-        let vm = &vm;
-        let name = name.to_string();
-        async move { vm.get_volume_handle(&vm.find_volume(&name).await.unwrap()).unwrap().extent_size() }
-    };
-    assert_eq!(sz("small").await, MIB);
-    assert_eq!(sz("big").await, BULK_EXTENT);
-    assert_eq!(sz("big-clone").await, BULK_EXTENT);
-    let read_at = |name: &'static str, off: u64| {
-        let vm = &vm;
-        async move {
-            let id = vm.find_volume(name).await.unwrap();
-            let mut b = vec![0u8; 4096];
-            vm.get_volume(&id).unwrap().read(off, &mut b).await.unwrap();
-            b
-        }
-    };
-    assert_eq!(read_at("small", 2 * MIB + 4096).await, pattern(1, 2, 0));
-    assert_eq!(read_at("big", 3 * BULK_EXTENT + 4096).await, pattern(2, 3, 0));
-    assert_eq!(read_at("big-clone", BULK_EXTENT + 8192).await, pattern(9, 1, 1));
-    assert_eq!(read_at("big-clone", 2 * BULK_EXTENT + 4096).await, pattern(2, 2, 0));
-    assert_eq!(read_at("asked", BULK_EXTENT + 4096).await, pattern(3, 1, 0));
+    for (name, want) in [("small", MIB), ("big", BULK_EXTENT), ("big-clone", BULK_EXTENT), ("asked", BULK_EXTENT)] {
+        let id = vm.find_volume(name).await.unwrap();
+        assert_eq!(esize(&vm, id), want, "{name}");
+    }
+    assert_eq!(read_at(&vm, "small", 2 * MIB + 4096).await, pattern(1, 2, 0));
+    assert_eq!(read_at(&vm, "big", 3 * BULK_EXTENT + 4096).await, pattern(2, 3, 0));
+    assert_eq!(read_at(&vm, "big-clone", BULK_EXTENT + 8192).await, pattern(9, 1, 1));
+    assert_eq!(read_at(&vm, "big-clone", 2 * BULK_EXTENT + 4096).await, pattern(2, 2, 0));
+    assert_eq!(read_at(&vm, "asked", BULK_EXTENT + 4096).await, pattern(3, 1, 0));
+}
+
+fn esize(vm: &VolumeManager, id: stormblock::volume::VolumeId) -> u64 {
+    vm.get_volume_handle(&id).unwrap().extent_size()
+}
+
+async fn legs_on(vm: &VolumeManager, id: stormblock::volume::VolumeId) -> std::collections::HashSet<stormblock::drive::slab::SlabId> {
+    stormblock::volume::gem::ensure_resident(vm.gem(), id).await.unwrap();
+    let g = vm.gem().read().await;
+    g.get_volume_map(&id).unwrap().all_legs().map(|l| l.slab_id).collect()
+}
+
+async fn read_at(vm: &VolumeManager, name: &str, off: u64) -> Vec<u8> {
+    let id = vm.find_volume(name).await.unwrap();
+    let mut b = vec![0u8; 4096];
+    vm.get_volume(&id).unwrap().read(off, &mut b).await.unwrap();
+    b
 }
