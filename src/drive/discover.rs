@@ -35,17 +35,32 @@ pub struct FoundSlab {
 /// root device — a boot failure that reads as a missing volume rather than as
 /// the wrong partition (stormpump#12).
 pub async fn slabs_in_partitions(dev: &Arc<dyn BlockDevice>) -> Vec<FoundSlab> {
+    slabs_in_partitions_why(dev).await.0
+}
+
+/// [`slabs_in_partitions`], and why each place a slab could be did not
+/// open (#301): the whole drive, a drive with no readable table, and every
+/// partition whose slab failed. A caller that finds nothing says these
+/// rather than the whole drive's "bad slab magic", which hid a partition's
+/// real error.
+pub async fn slabs_in_partitions_why(dev: &Arc<dyn BlockDevice>) -> (Vec<FoundSlab>, Vec<String>) {
+    let mut why = Vec::new();
     // A drive that is itself a slab, with no partition table at all. This is
     // what a store built by `POST /api/v1/slabs` on a plain file looks like —
     // the shape an appliance's parts store has — and looking only inside
     // partitions found nothing in it, so a store survived exactly as long as
     // the process that made it.
-    if let Ok(slab) = Slab::open(dev.clone()).await {
-        return vec![FoundSlab { label: "the whole drive".to_string(), slab }];
+    match Slab::open(dev.clone()).await {
+        Ok(slab) => return (vec![FoundSlab { label: "the whole drive".to_string(), slab }], why),
+        Err(e) => why.push(format!("the whole drive: {e}")),
     }
 
-    let Ok(gpt) = crate::pallet::gpt::Gpt::read(dev).await else {
-        return Vec::new();
+    let gpt = match crate::pallet::gpt::Gpt::read(dev).await {
+        Ok(g) => g,
+        Err(e) => {
+            why.push(format!("partition table: {e}"));
+            return (Vec::new(), why);
+        }
     };
     let lba = gpt.block_size as u64;
     let mut found = Vec::new();
@@ -53,17 +68,20 @@ pub async fn slabs_in_partitions(dev: &Arc<dyn BlockDevice>) -> Vec<FoundSlab> {
         if e.first_lba == 0 || e.last_lba < e.first_lba {
             continue;
         }
+        let label = if e.name.is_empty() { format!("partition {}", i + 1) } else { e.name.clone() };
         let start = e.first_lba * lba;
         let len = (e.last_lba + 1 - e.first_lba) * lba;
-        let Ok(part) = PartitionDevice::new(dev.clone(), start, len) else { continue };
-        if let Ok(slab) = Slab::open(Arc::new(part)).await {
-            let label = if e.name.is_empty() {
-                format!("partition {}", i + 1)
-            } else {
-                e.name.clone()
-            };
-            found.push(FoundSlab { label, slab });
+        let part = match PartitionDevice::new(dev.clone(), start, len) {
+            Ok(p) => p,
+            Err(err) => {
+                why.push(format!("{label}: {err}"));
+                continue;
+            }
+        };
+        match Slab::open(Arc::new(part)).await {
+            Ok(slab) => found.push(FoundSlab { label, slab }),
+            Err(err) => why.push(format!("{label}: {err}")),
         }
     }
-    found
+    (found, why)
 }

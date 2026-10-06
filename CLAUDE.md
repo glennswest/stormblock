@@ -178,8 +178,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 engine composed (`compose/slab`, `compose/disk`); 11.82's initramfs
 (9cbe6ca) opens the same layout. The new engine must read v1 slabs, and the
 format gate must never turn a v1 slab into "bad magic".
-- [ ] find what the v1 read path or the slab-offset discovery changed
-- [ ] fix + a test with a slab written the way 13.7 writes it
+- [x] cause: not the format. #155's `SlotTable::scan` reads
+      `total_slots × 64` bytes, and the `nvme-tcp://` initiator refused I/O
+      that was not whole blocks (`check_aligned`); 13.7 padded its table read.
+      The partition scan swallowed each partition's error, leaving the whole
+      disk's "bad slab magic". Files and O_DIRECT (RMW) accept partial blocks,
+      so no test saw it
+- [x] fix: the initiator reads the covering blocks / read-modify-writes them
+      under one connection hold (f29f1a0); `slabs_in_partitions_why` names
+      each partition's error. Test `integration_nvmeof::a_slab_on_an_nvme_tcp_
+      namespace_opens_in_either_format` (v1 and v2): fails with the old rule
+      re-imposed on dev, passes with the fix
 - [ ] full nextest; restage stormblock (special component)
 
 ### Boot-chain attestation and the per-machine TPM mark (2026-10-06, #216, P2) — DONE

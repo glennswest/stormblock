@@ -62,7 +62,10 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
 - **Drives** are raw block devices opened `O_DIRECT` — an io_uring on a thread
   of its own, or `pread`/`pwrite` on the blocking pool where io_uring is
   unavailable (RouterOS) — plus `nvme-tcp://` and `iscsi://` initiators, and
-  files (tests and development only). Drives open and close at runtime
+  files (tests and development only). Like the `O_DIRECT` device, the
+  `nvme-tcp://` initiator takes I/O that is not whole blocks: it reads the
+  covering blocks, and read-modify-writes them under one hold of its
+  connection (#301). Drives open and close at runtime
   (`POST /api/v1/drives`), carry their identity (serial, WWN) and labels
   (`shelf`, `bay`, `hba` from stormdrive), and can be drained and reported
   failing over HTTP.

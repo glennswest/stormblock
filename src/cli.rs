@@ -3139,17 +3139,20 @@ async fn open_slabs_resuming(
             // partitions are; try each one, and take them all: a system slab
             // and a data slab sit in the same GPT.
             Err(first) => {
-                let found: Vec<Slab> = {
-                    let discovered =
-                        crate::drive::discover::slabs_in_partitions(&dev).await;
+                let (found, why): (Vec<Slab>, Vec<String>) = {
+                    let (discovered, why) =
+                        crate::drive::discover::slabs_in_partitions_why(&dev).await;
                     for f in &discovered {
                         let role = if f.slab.is_data() { "data slab" } else { "slab" };
                         println!("  {path}: {role} found in {}", f.label);
                     }
-                    discovered.into_iter().map(|f| f.slab).collect()
+                    (discovered.into_iter().map(|f| f.slab).collect(), why)
                 };
                 if found.is_empty() {
-                    return Err(anyhow::anyhow!("open slab {path}: {first}"));
+                    // Every place a slab could be, and why it did not open:
+                    // the whole drive's "bad slab magic" alone hid #301.
+                    let why = if why.is_empty() { first.to_string() } else { why.join("; ") };
+                    return Err(anyhow::anyhow!("open slab {path}: no slab opened ({why})"));
                 }
                 for s in found {
                     slabs.push(s);
