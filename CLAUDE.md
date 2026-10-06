@@ -394,19 +394,41 @@ Emulated`; `[[drives]] kind = "emulated"`; `POST /api/v1/drives/{id}/emulate
       reopen 3.3 s per 1 PiB; docs (README, metadata-scale.md), CHANGELOG
 - Left to stormcos#92: the node-level `long` suite on 160 of them
 
-### Stage the next release on a running node (2026-10-05, #122, P1) — WAITING ON THE OWNER
+### Stage the next release on a running node (2026-10-06, #122, P1) — IN PROGRESS
 
-The boot-time "adopt the kept data half" path is ruled out (#261: another
-release at boot = wipe). What is left is staging N+1 on a running node for
-stormupdate#1 (`POST /api/v1/releases/{v}/stage`), with #265 (the boot after
-it must read as the same release). Proposed on #122: stage lays N+1's boot
-pallet (below the active one), its system goldens and clones under
-`<name>@<version>`, and the data volumes N+1 adds; `activate` renames
-(N → `<name>@<N>`, N+1 → plain names) and raises the pallet; rollback renames
-back. Asked (needs-owner): (1) a data volume N+1 also carries: always keep
-the node's (a, rec.) or allow "replace" (b); (2) the boot after activate:
-stormupdate re-points `boothost/<tag>` first (A, rec.) or the disk wins (B).
-Answered "b" (2026-10-05); which question it answers is asked back (needs-owner).
+Owner, 2026-10-06 (on #122, master's recommendation accepted): **1(b)** a
+release may mark a data volume replace or migrate (hook the release ships);
+**2(A)** stormupdate re-points `boothost/<tag>` to N+1 before the reboot,
+install = wipe unchanged. Owner's note on #122 (2026-10-06 00:47): an install
+should wipe only the system half; application data survives — not this
+issue (#261's install path), filed separately.
+
+Design (engine side, stormupdate#1):
+- `drive/httpdev.rs`: a read-only `http://` image by Range GET (from
+  `examples/slab_audit`), writes held in memory
+- `image/stage.rs`: open N+1's image, read its policy
+  `/etc/stormblock/data-volumes` from its root volume (`<vol> keep|replace|
+  migrate [hook]`; unlisted: system → replace, data → keep), and copy into the
+  local slabs as `<name>@<v>`: a golden under **its own id** (so `slab holds`
+  answers held, #265), unsealed while copying and sealed when complete; a
+  clone as a CoW clone of its local parent plus its own extents; a volume
+  whose id is already here is shared, not copied. Boot pallet copied
+  **below** the active one (`lay_local_boot` placement)
+- `slab holds`: a golden counts only when the local copy is sealed (a stage
+  cut short is never "held")
+- `<data_dir>/release-generations.json`: current, staged (complete?), previous
+- API (destructive class): `POST/GET /api/v1/releases/{v}/stage {source,
+  current?, root?, disk?}` (a job), `POST /{v}/activate` (N's → `<n>@<N>`,
+  staged → plain, pallet raised), `POST /api/v1/releases/rollback`,
+  `GET /api/v1/releases/generations`. The previous generation is deleted
+  when the next one is staged. Migrations are listed for stormupdate to run
+  the hook; the engine runs nothing of the release's
+- [ ] httpdev; [ ] CreateOptions.id, rename_volume; [ ] stage/activate/
+      rollback library + generations record; [ ] pallet placement; [ ] held
+      needs sealed; [ ] API + auth; [ ] tests (install N, stage N+1 over HTTP,
+      activate, held for both, data kept/replaced, reopen, rollback); [ ] docs,
+      CHANGELOG; [ ] issues: stormcos (data-volumes file), stormupdate (order:
+      stage → hooks → activate → re-point → reboot)
 
 ### The initramfs names the node and says why (2026-10-05, #238, P1) — DONE
 
