@@ -1329,6 +1329,34 @@ down were not the same kind of thing, and the hand-formatted one could only be
 read by attaching it. `--metadata-bytes 0` (or `metadata_bytes: 0`) formats a
 slab that deliberately keeps no record of itself.
 
+### Staging the next release on a running node (#122)
+
+An update is made from the running system (owner, 2026-10-06), driven by
+stormupdate:
+
+1. `POST /api/v1/releases/{v}/stage {source, current?}` reads N+1's published
+   image over HTTP `Range` (`drive::httpdev`) and copies it into the node's
+   slabs as `<name>@<v>`:
+   - goldens go under the release's own ids, sealed only when whole;
+   - clones become copy-on-write clones of their staged or shared parent;
+   - volumes the node already has by id are shared, not copied.
+
+   It also copies N+1's boot pallet in below the active one.
+2. The release's root volume says what happens to each data volume, in
+   `/etc/stormblock/data-volumes` (`keep | replace | migrate <hook>`). An
+   unlisted volume is replaced in the system half and kept in the data half.
+   stormupdate runs any migration hook.
+3. `POST /api/v1/releases/{v}/activate`: N's volumes become `<name>@<N>`, the
+   staged ones take the plain names, and N+1's pallet goes on top.
+4. stormupdate re-points `boothost/<tag>` to N+1 and reboots. `slab holds`
+   finds N+1's goldens by id, so the boot keeps the disk. A rollback
+   (`POST /api/v1/releases/rollback`) keeps it the same way, because N's
+   goldens are still there.
+
+`GET /api/v1/releases/generations` lists `current`, `staged` and `previous`.
+One previous generation is kept. All the verbs but the GETs are destructive.
+Details: [docs/staging.md](docs/staging.md).
+
 ### An installed disk boots on its own
 
 A flow-over lays more than the two slabs now. It also leaves a boot area at the
