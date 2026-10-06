@@ -571,8 +571,11 @@ async fn a_data_directory_moves_to_metadata_v2() {
 /// whose index needs 64 bits; a mirror spans two drives; a hundred goldens
 /// and a clone. Maps leave memory and come back, and the node restarts twice
 /// from the disks alone with every byte where it was. Times are printed
-/// (`--nocapture`); what is asserted is the data.
+/// (`--nocapture`); what is asserted is the data. Ignored: a restart reads
+/// 1.3 Gi slot entries (~40 s on dev, #307);
+/// `cargo nextest run --run-ignored only -E 'test(petabyte_drives)'`.
 #[tokio::test]
+#[ignore]
 async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
     use std::time::Instant;
     use stormblock::volume::redundancy::RedundancyPolicy;
@@ -741,7 +744,6 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
         assert_eq!(read_mib(&vm, "clone", 5).await, pattern(0, 5, 3), "round {round}");
         assert_eq!(read_mib(&vm, "golden0", 4).await, pattern(0, 4, 3), "round {round}");
         assert_eq!(read_mib(&vm, "old", 15).await, pattern(5, 15, 0), "round {round}");
-        assert_eq!(vm.metadata_v2_usage().len(), 3);
         // Something new each round.
         let n = vm.create_volume_any(&format!("new{round}"), 4 * PIB).await.unwrap();
         let nv = vm.get_volume(&n).unwrap();
@@ -750,6 +752,7 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
         drop(nv);
         vm.persist().await;
         assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+        assert_eq!(vm.metadata_v2_usage().len(), 3, "round {round}: every slab a v2 store");
     }
     let vm = open_node(&[pb, tb, old]).await;
     assert_eq!(read_mib(&vm, "new0", 3 << 30).await, pattern(7, 3 << 30, 0));
