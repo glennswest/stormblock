@@ -489,12 +489,36 @@ pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
 }
 
 async fn apply_one(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::io::Result<()> {
-    match apply_store(b, state).await {
+    let r = match apply_store(b, state).await {
         Err(e) if b.sink == Sink::Dir && e.to_string().contains("metadata region full") => {
             let Opener::Dir(path) = &b.opener else { return Err(e) };
             grow_dir(b, path).await
         }
         r => r,
+    };
+    if r.is_ok() && b.full.is_some() {
+        if let Opener::Dir(path) = &b.opener {
+            retire_v1_record(path);
+        }
+    }
+    r
+}
+
+/// Once `metadata.v2` holds the record, the v1 one beside it is set aside
+/// (`volumes.dat.pre-v2`): left as it was, an older engine after a rollback
+/// would trust a record that stopped being written; set aside, it finds none
+/// and says so.
+fn retire_v1_record(path: &std::path::Path) {
+    let Some(dir) = path.parent() else { return };
+    for name in ["volumes.dat", "volumes.dat.bak"] {
+        let p = dir.join(name);
+        if p.exists() {
+            let to = dir.join(format!("{name}.pre-v2"));
+            match std::fs::rename(&p, &to) {
+                Ok(()) => tracing::info!("{} set aside as {} (the record is {DIR_FILE} now)", p.display(), to.display()),
+                Err(e) => tracing::warn!("setting {} aside: {e}", p.display()),
+            }
+        }
     }
 }
 

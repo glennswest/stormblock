@@ -526,3 +526,40 @@ async fn the_data_directory_file_grows_as_it_fills() {
         assert_eq!(b, pattern(8, x, 0), "extent {x}");
     }
 }
+
+/// A data directory moves from `volumes.dat` to `metadata.v2` once format 2
+/// is the default: read from the old, written to the new, the old set aside
+/// so an older engine finds no record rather than a stale one.
+#[tokio::test]
+async fn a_data_directory_moves_to_metadata_v2() {
+    stormblock::drive::slab::set_default_format(SLAB_VERSION);
+    let dir = tempfile::tempdir().unwrap();
+    let dev = device("128M").await;
+    let s = slab(&dev, SLAB_VERSION, SlabRole::Data).await;
+    let mut vm = VolumeManager::with_data_dir(SLOT, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(s).await;
+    let id = vm.create_volume_any("kept", VOL).await.unwrap();
+    let v = vm.get_volume(&id).unwrap();
+    v.write(3 * SLOT, &pattern(5, 3, 0)).await.unwrap();
+    v.flush().await.unwrap();
+    drop(v);
+    vm.persist().await;
+    drop(vm);
+    assert!(dir.path().join("volumes.dat").exists());
+
+    stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
+    let mut vm = VolumeManager::with_data_dir(SLOT, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(Slab::open(dev.clone()).await.unwrap()).await;
+    vm.restore().await.unwrap();
+    vm.persist().await;
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    drop(vm);
+    assert!(dir.path().join("metadata.v2").exists());
+    assert!(!dir.path().join("volumes.dat").exists(), "the v1 record is set aside");
+    assert!(dir.path().join("volumes.dat.pre-v2").exists());
+
+    let mut vm = VolumeManager::with_data_dir(SLOT, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(Slab::open(dev).await.unwrap()).await;
+    vm.restore().await.unwrap();
+    assert_eq!(read_first(&vm, "kept", 3).await, pattern(5, 3, 0));
+}
