@@ -172,6 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### /serve/v1 served every /api/v1 export on an open portal (2026-10-06, #217, P0) — IN PROGRESS
+
+By reading, confirmed: reconcile step 1a wires every NVMe/iSCSI entry of
+`state.exports` on a per-volume portal with `HostAccess::Any` and rewrites
+its nsid to 1; and the engine's `restore_exports` puts serve's own entries
+(nsid 1, no subsystem) on the shared subsystem at NSID 1 at every start.
+- [ ] `ExportEntry.serve` (set by `/serve/v1`); an unmarked entry is serve's
+      only when it carries serve's per-volume name (`<prefix>:vol-<id>`) and
+      no host binding (`serve::wiring::serve_owned`); marked on the first pass
+- [ ] reconciler wires serve's entries only; a row it made for anyone else's
+      drains (portal closed), the entry itself untouched
+- [ ] `restore_exports` leaves serve's entries to serve (not on the shared
+      subsystem)
+- [ ] tests: a host-bound and a shared /api/v1 export are on no portal and
+      keep their nsid; a legacy row is drained; serve's own still wired;
+      docs, CHANGELOG
+
 ### A power cut during the install's flow-over (2026-10-06, #172, P0) — DONE here, metal acceptance stormcentral's
 
 The fix is in (9344473 resume from a fresh clone; b189b3e relocate-on-write
