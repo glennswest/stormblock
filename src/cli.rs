@@ -7330,19 +7330,10 @@ file = "{state}"
         Some(b)
     }
 
-    /// #122: release N installed, the node running from its disk and writing
-    /// its data volumes; release N+1 staged over HTTP from its published
-    /// image, activated, the disk reopened alone, rolled back. N+1's policy
-    /// file (in its root, `stormpump`) says `logs replace`; `state` is left
-    /// to the default (keep); N+1 adds `kubelet-data`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_release_stages_activates_and_rolls_back_on_a_running_node() {
-        use crate::image::stage;
-        let Some(mkfs) = mkfs_ext4() else {
-            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
-            return;
-        };
-        let dir = tempfile::tempdir().unwrap();
+    /// Release 11.90 installed on a disk (from a claim of it, both halves
+    /// flowed) and release 11.91 built beside it: `(disk, image 11.90, image
+    /// 11.91, 11.90's svc, 11.91's svc, 11.91's logs)` (#122).
+    async fn release_fixture(mkfs: String, dir: &tempfile::TempDir) -> (String, String, String, Vec<u8>, Vec<u8>, Vec<u8>) {
         let p = |n: &str| dir.path().join(n).display().to_string();
         let mut seed = 0x122u64;
         let mut noise = |len: u64| {
@@ -7431,6 +7422,23 @@ file = "{state}"
         super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
         succ.persist().await;
         drop(succ);
+        (disk, image_n, image_n1, n_svc, n1_svc, n1_logs)
+    }
+
+    /// #122: release N installed, the node running from its disk and writing
+    /// its data volumes; release N+1 staged over HTTP from its published
+    /// image, activated, the disk reopened alone, rolled back. N+1's policy
+    /// file (in its root, `stormpump`) says `logs replace`; `state` is left
+    /// to the default (keep); N+1 adds `kubelet-data`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_release_stages_activates_and_rolls_back_on_a_running_node() {
+        use crate::image::stage;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, image_n, image_n1, n_svc, n1_svc, n1_logs) = release_fixture(mkfs, &dir).await;
         let held = |image: String| {
             let disk = disk.clone();
             async move {
@@ -7548,6 +7556,117 @@ file = "{state}"
         // Discarding the staged release leaves N whole.
         stage::delete_generation(&node, &gen).await.unwrap();
         assert!(!verify("after discarding 11.91", false).await, "N+1's volumes gone");
+    }
+
+    /// #122 over the API, as stormupdate drives it: stage (a job), the
+    /// generations record, activate, rollback, discard, and the generation
+    /// before last removed by the next stage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stormupdate_stages_activates_and_rolls_back_over_the_api() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, image_n, image_n1, _n_svc, _n1_svc, _n1_logs) = release_fixture(mkfs, &dir).await;
+        let (node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let data_dir = dir.path().join("engine");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let mut config = crate::mgmt::config::StormBlockConfig::default();
+        config.management.data_dir = Some(data_dir.display().to_string());
+        let (reg, gem) = (node.registry().clone(), node.gem().clone());
+        let state = Arc::new(crate::mgmt::AppState::new(config, node, reg, gem));
+        *state.slab_paths.write().await = vec![disk.clone()];
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/api/v1/releases", l.local_addr().unwrap());
+        let router = crate::mgmt::api::router(state.clone());
+        tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+        let c = reqwest::Client::new();
+        let names = || {
+            let state = state.clone();
+            async move {
+                let vm = state.volume_manager.lock().await;
+                let mut n: Vec<String> = vm.list_volumes().await.into_iter().map(|v| v.1).collect();
+                n.sort();
+                n
+            }
+        };
+        let stage = |version: &'static str, source: String| {
+            let (c, base) = (c.clone(), base.clone());
+            async move {
+                let r = c.post(format!("{base}/{version}/stage")).json(&serde_json::json!({"source": source, "current": "11.90"})).send().await.unwrap();
+                assert_eq!(r.status(), 202, "stage {version}: {}", r.text().await.unwrap());
+                loop {
+                    let v: serde_json::Value = c.get(format!("{base}/{version}/stage")).send().await.unwrap().json().await.unwrap();
+                    match v["state"].as_str() {
+                        Some("running") => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+                        _ => return v,
+                    }
+                }
+            }
+        };
+
+        let url = range_server(image_n1.clone()).await;
+        let job = stage("11.91", url.clone()).await;
+        assert_eq!(job["state"], "complete", "{job}");
+        assert_eq!(job["generation"]["complete"], true);
+        assert!(job["volumes_done"].as_u64().unwrap() > 0 && job["bytes_copied"].as_u64().unwrap() > 0, "{job}");
+        let g: serde_json::Value = c.get(format!("{base}/generations")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((g["current"]["version"].as_str(), g["staged"]["version"].as_str()), (Some("11.90"), Some("11.91")), "{g}");
+        assert!(names().await.contains(&"logs@11.91".to_string()));
+        // Another stage while one is recorded is fine; one while running is not
+        // tested here (timing). Activating something not staged is a 404.
+        assert_eq!(c.post(format!("{base}/11.99/activate")).send().await.unwrap().status(), 404);
+
+        let r = c.post(format!("{base}/11.91/activate")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let a: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(a["previous"], "11.90");
+        let n = names().await;
+        assert!(n.contains(&"logs".to_string()) && n.contains(&"logs@11.90".to_string()) && !n.contains(&"logs@11.91".to_string()), "{n:?}");
+        assert!(n.contains(&"kubelet-data".to_string()) && n.contains(&"state".to_string()));
+        let g: serde_json::Value = c.get(format!("{base}/generations")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((g["current"]["version"].as_str(), g["previous"]["version"].as_str()), (Some("11.91"), Some("11.90")), "{g}");
+        assert!(g["staged"].is_null());
+        // Held for both, from the disk alone, as the next boot asks.
+        let held = |image: String| {
+            let disk = disk.clone();
+            async move {
+                let l = super::open_storage(&disk).await.unwrap();
+                let i = super::open_storage(&image).await.unwrap();
+                crate::image::local::release_held(&l, &i).await
+            }
+        };
+        for img in [&image_n, &image_n1] {
+            let h = held(img.clone()).await;
+            assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "{img}: {h:?}");
+        }
+
+        // Rollback, and N+1 is staged again (whole), ready to activate.
+        let r = c.post(format!("{base}/rollback")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let n = names().await;
+        assert!(n.contains(&"logs@11.91".to_string()) && !n.contains(&"logs@11.90".to_string()), "{n:?}");
+        let g: serde_json::Value = c.get(format!("{base}/generations")).send().await.unwrap().json().await.unwrap();
+        assert_eq!((g["current"]["version"].as_str(), g["staged"]["version"].as_str()), (Some("11.90"), Some("11.91")), "{g}");
+        assert_eq!(c.post(format!("{base}/rollback")).send().await.unwrap().status(), 409, "nothing before 11.90");
+
+        // Discarded: nothing of 11.91 is left.
+        let r = c.delete(format!("{base}/11.91/stage")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(!names().await.iter().any(|n| n.ends_with("@11.91")), "{:?}", names().await);
+
+        // Staged and activated again; then the next stage removes 11.90's
+        // volumes, keeping only what something else is cloned from.
+        assert_eq!(stage("11.91", url.clone()).await["state"], "complete");
+        assert_eq!(c.post(format!("{base}/11.91/activate")).send().await.unwrap().status(), 200);
+        assert!(names().await.contains(&"logs@11.90".to_string()));
+        let job = stage("11.92", url).await;
+        assert_eq!(job["state"], "complete", "{job}");
+        let n = names().await;
+        assert!(!n.contains(&"logs@11.90".to_string()), "the generation before last is gone: {n:?}");
+        assert!(n.contains(&"state.golden@11.90".to_string()), "the node's kept state is cloned from it: {n:?}");
+        assert!(n.contains(&"state".to_string()));
     }
 
     /// The appliance, as the node sees it: a device a network round trip
