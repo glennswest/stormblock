@@ -1709,6 +1709,7 @@ impl VolumeManager {
             redundancy: source.redundancy(),
             placement: PlacementPolicy::default(),
             role: Some(role),
+            extent_size: Some(source.extent_size()),
         };
         let dest_id = self.create_volume_with(name, virtual_size, opts).await?;
         let dest = self

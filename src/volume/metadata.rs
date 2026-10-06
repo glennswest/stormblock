@@ -426,7 +426,6 @@ fn as_v8(m: &VolumeMetadata) -> Option<v8::VolumeMetadata> {
                 access: v.access,
                 fs: v.fs.clone(),
                 owner: v.owner.clone(),
-                extent_size: 0,
             })
             .collect(),
     })
@@ -1188,7 +1187,6 @@ mod tests {
                     parent: Some(VolumeId(Uuid::from_u128(54))),
                     sealed: false,
                     fs: None,
-                        extent_size: 0,
                     },
                 v5::VolumeRecord {
                     id: VolumeId(Uuid::from_u128(56)),
@@ -1203,7 +1201,6 @@ mod tests {
                     parent: None,
                     sealed: true,
                     fs: None,
-                    extent_size: 0,
                 },
             ],
         };
@@ -1245,7 +1242,6 @@ mod tests {
                 redundancy: RedundancyPolicy::mirror(2),
                 parity: BTreeMap::new(),
                 failed_slabs: vec![slab_id],
-                    extent_size: 0,
                 }],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
@@ -1325,7 +1321,6 @@ mod tests {
                 array_id: None,
                 extents,
                 retention: Retention::Ephemeral,
-                    extent_size: 0,
                 }],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
@@ -1484,7 +1479,6 @@ mod tests {
                 virtual_size: 100 * 1024 * 1024,
                 array_id,
                 extent_map,
-                    extent_size: 0,
                 }],
         };
 
@@ -1638,7 +1632,6 @@ mod retention_tests {
                 virtual_size: 4096,
                 array_id: None,
                 extents: BTreeMap::new(),
-                    extent_size: 0,
                 }],
         };
         let payload =
