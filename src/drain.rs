@@ -160,6 +160,17 @@ async fn run(
     status: Arc<RwLock<DrainStatus>>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) {
+    // Every map in memory while the drain runs (#158): it walks them all.
+    let _pin = match crate::volume::gem::pin_resident(&gem).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("drain: loading extent maps: {e}");
+            let mut st = status.write().await;
+            st.errors.push(format!("loading extent maps: {e}"));
+            st.state = DrainState::Stuck;
+            return;
+        }
+    };
     let engine = PlacementEngine::new();
     // Legs that failed to move: skipped so one bad extent does not stall
     // everything behind it.

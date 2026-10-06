@@ -4764,6 +4764,8 @@ async fn seed_data_half(
     disk: &str,
     when: SeedWhen,
 ) -> anyhow::Result<()> {
+    // Every map in memory while the seed walks them (#158).
+    let _pin = crate::volume::gem::pin_resident(mgr.gem()).await?;
     // Its own handle on the drive. The one the caller had was consumed laying
     // the slabs, and reading a partition table is cheap next to what follows.
     let dev: Arc<dyn BlockDevice> =

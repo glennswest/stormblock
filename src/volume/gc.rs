@@ -303,6 +303,15 @@ pub async fn run_once(
     registry: &std::sync::Arc<tokio::sync::RwLock<SlabRegistry>>,
     opts: GcOptions,
 ) -> GcReport {
+    // Every map in memory while the pass runs (#158): a map not in memory
+    // would leave its slots looking like nobody's.
+    let _pin = match crate::volume::gem::pin_resident(gem).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("extent gc: loading extent maps: {e}; nothing collected");
+            return GcReport { dry_run: opts.dry_run, ..Default::default() };
+        }
+    };
     // The tables first, holding nothing (#155, #269): reading every slab's
     // table under the registry lock would hold every volume's I/O for it.
     let sources = registry.read().await.iter().map(|(_, s)| s.view_source()).collect();

@@ -2054,6 +2054,15 @@ impl ThinVolumeHandle {
         if let Err(e) = self.resident().await {
             tracing::error!("{e}");
         }
+        // A rebuilt leg is rewritten in every map that names it (a golden's
+        // clones): every map in memory while it runs (#158).
+        let _pin = match super::gem::pin_resident(&self.gem).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::error!("volume {}: loading extent maps for a resync: {e}", self.id.0);
+                None
+            }
+        };
         let policy = self.redundancy();
         let mut report = ResyncReport::default();
         match policy.scheme {
