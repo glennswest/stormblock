@@ -648,6 +648,48 @@ mod tests {
         assert_eq!(r.ladder.len(), 1);
     }
 
+    /// #122: a release staged on a running node goes just below the pallet
+    /// the disk boots now, and the ESP is left alone; activating raises it,
+    /// rolling back raises the other again; one more stage drops the oldest.
+    #[tokio::test]
+    async fn a_staged_release_waits_below_the_active_one_until_raised() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dpath, ddev) = node_disk(&dir).await;
+        let (apath, adev) = image(&dir, "A.img", "A").await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(apath.clone(), adev.clone())]).await.unwrap();
+        let esp_a = esp_of(&ddev).await.unwrap().0.files;
+
+        let (bpath, bdev) = image(&dir, "B.img", "B").await;
+        let r = lay_local_boot_ranked(&dpath, ddev.clone(), vec![(bpath.clone(), bdev.clone())], BootRank::BelowActive)
+            .await
+            .unwrap();
+        assert_eq!(r.copied.len(), 1);
+        let ladder = local_boot_ladder(&dpath, ddev.clone()).await.unwrap();
+        let a = local_boot_ladder(&apath, adev.clone()).await.unwrap()[0].0;
+        let b = local_boot_ladder(&bpath, bdev.clone()).await.unwrap()[0].0;
+        assert_eq!(ladder.iter().map(|l| l.0).collect::<Vec<_>>(), vec![a, b], "staged below the active one");
+        assert_eq!(ladder[0].3, LOCAL_TOP);
+        assert_eq!(esp_of(&ddev).await.unwrap().0.files, esp_a, "a stage leaves the ESP");
+
+        raise_local_boot(&dpath, ddev.clone(), b).await.unwrap();
+        let ladder = local_boot_ladder(&dpath, ddev.clone()).await.unwrap();
+        assert_eq!(ladder.iter().map(|l| l.0).collect::<Vec<_>>(), vec![b, a], "activated");
+        raise_local_boot(&dpath, ddev.clone(), a).await.unwrap();
+        let ladder = local_boot_ladder(&dpath, ddev.clone()).await.unwrap();
+        assert_eq!(ladder.iter().map(|l| l.0).collect::<Vec<_>>(), vec![a, b], "rolled back");
+        assert!(raise_local_boot(&dpath, ddev.clone(), [7u8; 32]).await.is_err(), "no such pallet");
+
+        // Back on B, then C staged: B stays on top, C below, A goes.
+        raise_local_boot(&dpath, ddev.clone(), b).await.unwrap();
+        let (cpath, cdev) = image(&dir, "C.img", "C").await;
+        let r = lay_local_boot_ranked(&dpath, ddev.clone(), vec![(cpath.clone(), cdev.clone())], BootRank::BelowActive)
+            .await
+            .unwrap();
+        let c = local_boot_ladder(&cpath, cdev).await.unwrap()[0].0;
+        let ladder = local_boot_ladder(&dpath, ddev.clone()).await.unwrap();
+        assert_eq!(ladder.iter().map(|l| l.0).collect::<Vec<_>>(), vec![b, c], "{r:?}");
+    }
+
     /// The next release goes on top, the previous one stays as its fallback,
     /// and the one before that is dropped — the A/B ladder an upgrade writes.
     #[tokio::test]

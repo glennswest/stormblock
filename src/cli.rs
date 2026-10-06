@@ -7436,8 +7436,8 @@ file = "{state}"
                 crate::image::local::release_held(&l, &i).await
             }
         };
-        assert!(matches!(held(image_n.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "installed: N held");
-        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::NotHeld { .. }), "N+1 not yet");
+        { let h = held(image_n.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "{}: {h:?}", "installed: N held"); }
+        { let h = held(image_n1.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::NotHeld { .. }), "{}: {h:?}", "N+1 not yet"); }
 
         // The node runs from its disk and writes its data.
         let (node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
@@ -7473,8 +7473,8 @@ file = "{state}"
             assert_eq!(volume_bytes(&m, "svc").await.unwrap()[..n_svc.len()], n_svc[..], "N untouched");
         }
         // Both releases are held now; N's still under its plain names.
-        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "staged: N+1 held");
-        assert!(matches!(held(image_n.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "staged: N still held");
+        { let h = held(image_n1.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "{}: {h:?}", "staged: N+1 held"); }
+        { let h = held(image_n.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "{}: {h:?}", "staged: N still held"); }
         // A golden still being copied (unsealed) is not held.
         {
             let mut m = node.lock().await;
@@ -7482,7 +7482,7 @@ file = "{state}"
             m.unseal_volume(g).await.unwrap();
             m.persist().await;
         }
-        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::NotHeld { .. }), "an unsealed copy is not held");
+        { let h = held(image_n1.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::NotHeld { .. }), "{}: {h:?}", "an unsealed copy is not held"); }
         {
             let mut m = node.lock().await;
             let g = m.find_volume("logs.golden@11.91").await.unwrap();
@@ -7521,8 +7521,8 @@ file = "{state}"
             }
         };
         assert!(!verify("after activate, the disk alone", true).await);
-        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "activated: N+1 held");
-        assert!(matches!(held(image_n.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "activated: N held (rollback)");
+        { let h = held(image_n1.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "{}: {h:?}", "activated: N+1 held"); }
+        { let h = held(image_n.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "{}: {h:?}", "activated: N held (rollback)"); }
 
         // Roll back.
         {

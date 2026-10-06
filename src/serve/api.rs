@@ -1463,6 +1463,21 @@ mod tests {
         assert!(!is_destructive(&Method::POST, "/mk/v1/volumes", None));
     }
 
+    /// #122: staging, activating and rolling back a release rewrite what the
+    /// node boots; reading about them does not; publishing is unchanged.
+    #[test]
+    fn release_staging_verbs_are_destructive() {
+        let d = |m: Method, p: &str| matches!(classify(&m, p, None), Class::Destructive);
+        assert!(d(Method::POST, "/api/v1/releases/11.91/stage"));
+        assert!(d(Method::DELETE, "/api/v1/releases/11.91/stage"));
+        assert!(d(Method::POST, "/api/v1/releases/11.91/activate"));
+        assert!(d(Method::POST, "/api/v1/releases/rollback"));
+        assert!(!d(Method::GET, "/api/v1/releases/11.91/stage"));
+        assert!(!d(Method::GET, "/api/v1/releases/generations"));
+        assert!(!d(Method::POST, "/api/v1/releases"));
+        assert!(!d(Method::GET, "/api/v1/releases/11.91/image.img"));
+    }
+
     #[test]
     fn protocol_names_parse() {
         // No protocol stated ⇒ NVMe-TCP, whether or not iSCSI is served.
