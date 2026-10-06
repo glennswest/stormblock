@@ -7594,7 +7594,14 @@ file = "{state}"
         let stage = |version: &'static str, source: String| {
             let (c, base) = (c.clone(), base.clone());
             async move {
-                let r = c.post(format!("{base}/{version}/stage")).json(&serde_json::json!({"source": source, "current": "11.90"})).send().await.unwrap();
+                // The node's own record says what it runs once it has one;
+                // before that, stormupdate says.
+                let body = if version == "11.92" {
+                    serde_json::json!({"source": source})
+                } else {
+                    serde_json::json!({"source": source, "current": "11.90"})
+                };
+                let r = c.post(format!("{base}/{version}/stage")).json(&body).send().await.unwrap();
                 assert_eq!(r.status(), 202, "stage {version}: {}", r.text().await.unwrap());
                 loop {
                     let v: serde_json::Value = c.get(format!("{base}/{version}/stage")).send().await.unwrap().json().await.unwrap();
