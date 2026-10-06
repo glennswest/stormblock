@@ -563,3 +563,192 @@ async fn a_data_directory_moves_to_metadata_v2() {
     vm.restore().await.unwrap();
     assert_eq!(read_first(&vm, "kept", 3).await, pattern(5, 3, 0));
 }
+
+/// #158 at the scale it is for (stage E; stormcos#92, #208): a node on an
+/// emulated 1 PiB drive and two 256 TiB ones, 1 MiB extents, metadata v2 on
+/// every slab. One of the 256 TiB slabs was laid as v1 by an earlier engine
+/// and migrates at the first persist. A thin volume of 8 PiB has extents
+/// whose index needs 64 bits; a mirror spans two drives; a hundred goldens
+/// and a clone. Maps leave memory and come back, and the node restarts twice
+/// from the disks alone with every byte where it was. Times are printed
+/// (`--nocapture`); what is asserted is the data.
+#[tokio::test]
+async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
+    use std::time::Instant;
+    use stormblock::volume::redundancy::RedundancyPolicy;
+    use stormblock::volume::CreateOptions;
+    const MIB: u64 = 1 << 20;
+    const PIB: u64 = 1 << 50;
+    let big = |n: u64| n * MIB;
+
+    async fn open_node(devs: &[Arc<dyn BlockDevice>]) -> VolumeManager {
+        let mut vm = VolumeManager::new(1 << 20);
+        let mut ids = Vec::new();
+        for d in devs {
+            let s = Slab::open(d.clone()).await.unwrap();
+            ids.push(s.slab_id());
+            vm.add_slab(s).await;
+        }
+        vm.persist_to_slabs(ids);
+        vm.restore().await.unwrap();
+        vm
+    }
+    async fn read_mib(vm: &VolumeManager, name: &str, extent: u64) -> Vec<u8> {
+        let id = vm.find_volume(name).await.unwrap_or_else(|| panic!("{name} did not come back"));
+        let v = vm.get_volume(&id).unwrap();
+        let mut b = vec![0u8; 4096];
+        v.read(extent << 20, &mut b).await.unwrap();
+        b
+    }
+    let fmt = |dev: &Arc<dyn BlockDevice>, version: u32| {
+        SlabFormat::new(MIB, StorageTier::Hot)
+            .with_role(SlabRole::Data)
+            .with_version(version)
+            .with_auto_metadata(dev.capacity_bytes())
+    };
+
+    // An earlier engine's v1 slab, with a volume on it.
+    let old = device("256T").await;
+    {
+        let t = Instant::now();
+        let s = Slab::format_with(old.clone(), fmt(&old, SLAB_VERSION)).await.unwrap();
+        eprintln!("v1 256 TiB slab formatted in {:.2} s", t.elapsed().as_secs_f64());
+        let sid = s.slab_id();
+        let mut vm = VolumeManager::new(MIB);
+        vm.add_slab(s).await;
+        vm.persist_to_slab(sid);
+        let o = vm.create_volume_any("old", 64 * MIB).await.unwrap();
+        let ov = vm.get_volume(&o).unwrap();
+        for e in 0..16u64 {
+            ov.write(big(e), &pattern(5, e, 0)).await.unwrap();
+        }
+        ov.flush().await.unwrap();
+        drop(ov);
+        vm.persist().await;
+        assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    }
+
+    let pb = device("1P").await;
+    let tb = device("256T").await;
+    let mut vm = VolumeManager::new(MIB);
+    let mut ids = Vec::new();
+    for d in [&pb, &tb] {
+        let t = Instant::now();
+        let s = Slab::format_with(d.clone(), fmt(d, SLAB_VERSION_2)).await.unwrap();
+        eprintln!(
+            "v2 {} TiB slab formatted in {:.2} s ({} slots, {} MiB metadata region)",
+            d.capacity_bytes() >> 40,
+            t.elapsed().as_secs_f64(),
+            s.total_slots(),
+            s.metadata_capacity() >> 20
+        );
+        assert_eq!(s.format_version(), SLAB_VERSION_2);
+        ids.push(s.slab_id());
+        vm.add_slab(s).await;
+    }
+    let s = Slab::open(old.clone()).await.unwrap();
+    assert_eq!(s.format_version(), SLAB_VERSION);
+    let old_id = s.slab_id();
+    ids.push(old_id);
+    vm.add_slab(s).await;
+    vm.persist_to_slabs(ids);
+    vm.restore().await.unwrap();
+    assert_eq!(read_mib(&vm, "old", 15).await, pattern(5, 15, 0));
+
+    // 8 PiB thin: extents at 0, 1 PiB, and past 2^32.
+    let far = [0u64, 1, 1 << 30, u32::MAX as u64 + 5, 5 << 30, (8 * PIB >> 20) - 1];
+    let h = vm.create_volume_any("huge", 8 * PIB).await.unwrap();
+    let hv = vm.get_volume(&h).unwrap();
+    for &e in &far {
+        hv.write(e << 20, &pattern(1, e, 0)).await.unwrap();
+    }
+    hv.flush().await.unwrap();
+    drop(hv);
+
+    let m = vm
+        .create_volume_with("mirror", 1 << 40, CreateOptions::redundant(RedundancyPolicy::mirror(2)))
+        .await
+        .unwrap();
+    let mv = vm.get_volume(&m).unwrap();
+    for e in 0..64u64 {
+        mv.write(big(e * 1000), &pattern(2, e, 0)).await.unwrap();
+    }
+    mv.flush().await.unwrap();
+    drop(mv);
+
+    for g in 0..100u64 {
+        let id = vm.create_volume_any(&format!("golden{g}"), 64 * MIB).await.unwrap();
+        let v = vm.get_volume(&id).unwrap();
+        for e in 0..20u64 {
+            v.write(big(e), &pattern(g as u8, e, 3)).await.unwrap();
+        }
+        v.flush().await.unwrap();
+    }
+    let t = Instant::now();
+    vm.persist().await;
+    eprintln!("first persist (migrates the v1 slab, writes each store whole): {:.3} s", t.elapsed().as_secs_f64());
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    let g0 = vm.find_volume("golden0").await.unwrap();
+    let c = vm.create_snapshot(g0, "clone").await.unwrap();
+    let cv = vm.get_volume(&c).unwrap();
+    cv.write(big(4), &pattern(9, 4, 4)).await.unwrap();
+    cv.flush().await.unwrap();
+    drop(cv);
+    let hv = vm.get_volume(&h).unwrap();
+    hv.write(big(u32::MAX as u64 + 6), &pattern(1, u32::MAX as u64 + 6, 1)).await.unwrap();
+    hv.flush().await.unwrap();
+    drop(hv);
+    let t = Instant::now();
+    vm.persist().await;
+    eprintln!("a persist of what changed: {:.3} s", t.elapsed().as_secs_f64());
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    assert_eq!(vm.registry().read().await.get(&old_id).unwrap().format_version(), SLAB_VERSION_2, "the v1 slab migrated");
+    let usage = vm.metadata_v2_usage();
+    assert_eq!(usage.len(), 3, "three v2 stores: {usage:?}");
+    eprintln!("v2 stores: {usage:?}");
+
+    // Out of memory and back.
+    vm.evict_idle(0).await;
+    assert!(vm.gem().read().await.is_cold(&h), "an idle map leaves memory");
+    let e = u32::MAX as u64 + 5;
+    assert_eq!(read_mib(&vm, "huge", e).await, pattern(1, e, 0), "loaded from the store");
+    assert!(!vm.gem().read().await.is_cold(&h));
+    drop(vm);
+
+    for round in 0..2u8 {
+        let t = Instant::now();
+        let vm = open_node(&[pb.clone(), tb.clone(), old.clone()]).await;
+        eprintln!("restart {round}: slabs opened and volumes restored in {:.2} s", t.elapsed().as_secs_f64());
+        for &e in &far {
+            assert_eq!(read_mib(&vm, "huge", e).await, pattern(1, e, 0), "round {round}: huge extent {e}");
+        }
+        let e = u32::MAX as u64 + 6;
+        assert_eq!(read_mib(&vm, "huge", e).await, pattern(1, e, 1), "round {round}");
+        for e in [0u64, 31, 63] {
+            assert_eq!(read_mib(&vm, "mirror", e * 1000).await, pattern(2, e, 0), "round {round}");
+        }
+        let mid = vm.find_volume("mirror").await.unwrap();
+        let slabs: std::collections::HashSet<_> =
+            vm.gem().read().await.get_volume_map(&mid).unwrap().all_legs().map(|l| l.slab_id).collect();
+        assert!(slabs.len() >= 2, "the mirror spans drives: {slabs:?}");
+        for g in [0u64, 57, 99] {
+            assert_eq!(read_mib(&vm, &format!("golden{g}"), 19).await, pattern(g as u8, 19, 3), "round {round}");
+        }
+        assert_eq!(read_mib(&vm, "clone", 4).await, pattern(9, 4, 4), "round {round}");
+        assert_eq!(read_mib(&vm, "clone", 5).await, pattern(0, 5, 3), "round {round}");
+        assert_eq!(read_mib(&vm, "golden0", 4).await, pattern(0, 4, 3), "round {round}");
+        assert_eq!(read_mib(&vm, "old", 15).await, pattern(5, 15, 0), "round {round}");
+        assert_eq!(vm.metadata_v2_usage().len(), 3);
+        // Something new each round.
+        let n = vm.create_volume_any(&format!("new{round}"), 4 * PIB).await.unwrap();
+        let nv = vm.get_volume(&n).unwrap();
+        nv.write(3 * PIB, &pattern(7, 3 << 30, round)).await.unwrap();
+        nv.flush().await.unwrap();
+        drop(nv);
+        vm.persist().await;
+        assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    }
+    let vm = open_node(&[pb, tb, old]).await;
+    assert_eq!(read_mib(&vm, "new0", 3 << 30).await, pattern(7, 3 << 30, 0));
+    assert_eq!(read_mib(&vm, "new1", 3 << 30).await, pattern(7, 3 << 30, 1));
+}
