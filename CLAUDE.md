@@ -394,7 +394,7 @@ Emulated`; `[[drives]] kind = "emulated"`; `POST /api/v1/drives/{id}/emulate
       reopen 3.3 s per 1 PiB; docs (README, metadata-scale.md), CHANGELOG
 - Left to stormcos#92: the node-level `long` suite on 160 of them
 
-### Stage the next release on a running node (2026-10-06, #122, P1) — IN PROGRESS
+### Stage the next release on a running node (2026-10-06, #122, P1) — DONE
 
 Owner, 2026-10-06 (on #122, master's recommendation accepted): **1(b)** a
 release may mark a data volume replace or migrate (hook the release ships);
@@ -423,12 +423,25 @@ Design (engine side, stormupdate#1):
   `GET /api/v1/releases/generations`. The previous generation is deleted
   when the next one is staged. Migrations are listed for stormupdate to run
   the hook; the engine runs nothing of the release's
-- [ ] httpdev; [ ] CreateOptions.id, rename_volume; [ ] stage/activate/
-      rollback library + generations record; [ ] pallet placement; [ ] held
-      needs sealed; [ ] API + auth; [ ] tests (install N, stage N+1 over HTTP,
-      activate, held for both, data kept/replaced, reopen, rollback); [ ] docs,
-      CHANGELOG; [ ] issues: stormcos (data-volumes file), stormupdate (order:
-      stage → hooks → activate → re-point → reboot)
+- [x] httpdev, `CreateOptions.id`, `rename_volume`, `lay_local_boot_ranked`
+      / `raise_local_boot` / `local_boot_ladder`, held needs sealed (017482b);
+      `image/stage.rs`, `api/release_stage.rs`, auth (982132c)
+- [x] tests: `cli::install_tests::a_release_stages_activates_and_rolls_back_
+      on_a_running_node` (install 11.90 from a claim, node writes `state` and
+      `logs`, stage 11.91 over HTTP Range, plan: state kept, logs staged
+      (replace), kubelet-data added, svc a CoW clone, golden under the
+      release's id; held for both; an unsealed copy not held; activate; the
+      disk alone reopened: root/svc/logs N+1's, state the node's, logs@11.90
+      the node's; rollback; discard) and `stormupdate_stages_activates_and_
+      rolls_back_over_the_api` (job, generations record, 404/409s, held from
+      the disk alone, rollback restages, discard, the stage after removes the
+      generation before last but keeps state.golden@11.90, which the node's
+      state is cloned from); `local_boot::a_staged_release_waits_below_the_
+      active_one_until_raised`; `release_staging_verbs_are_destructive`
+- [x] docs/staging.md, README, CHANGELOG; stormcos#326 (the policy file),
+      stormupdate#1 (the sequence); #311 (owner's install note, needs-owner)
+- Not end-to-end: a boot pallet through the API (the test images carry
+  none; the ranking is unit-tested), a real stormupdate run, metal
 
 ### The initramfs names the node and says why (2026-10-05, #238, P1) — DONE
 
