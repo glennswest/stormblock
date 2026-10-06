@@ -51,10 +51,11 @@ pub struct StormBlockConfig {
     pub metadata: MetadataSection,
 }
 
-/// `[metadata]` (#158): `format = 2` writes new slabs, and the data
-/// directory's record, in metadata format v2 (`docs/metadata-v2.md`); 1 is
-/// the default until the format's last stage. Existing slabs keep theirs.
-/// `$STORMBLOCK_METADATA_FORMAT` does the same where no config is read.
+/// `[metadata]` (#158): the format new slabs, and the data directory's
+/// record, are written in: 2 (the default, `docs/metadata-v2.md`) or 1. With
+/// 2, a serving engine migrates its v1 metadata slabs in place at their first
+/// persist. `$STORMBLOCK_METADATA_FORMAT` does the same where no config is
+/// read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetadataSection {

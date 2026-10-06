@@ -1,6 +1,8 @@
 # Metadata format v2: the one format change (#158, with #157 and #156)
 
-**Status (2026-10-05):** stages A–D built, and E's migration; E's default flip and scale runs to come. Built in
+**Status (2026-10-05):** built, stages A–E. Format 2 is the default for new
+slabs and data directories; `[metadata] format = 1` (or
+`$STORMBLOCK_METADATA_FORMAT=1`) keeps format 1 and migrates nothing. Built in
 stages behind a format gate (`[metadata] format = 2`,
 `$STORMBLOCK_METADATA_FORMAT=2`): the engine writes v1 until v2 is complete, so
 nothing half-done ships, and the format changes **once**.

@@ -302,7 +302,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_ADMIN_TOKEN` | the admin token, after `[management] admin_token` | no admin tier |
 | `STORMBLOCK_TOKEN_FILE` | where CLI tools look for a local engine's token, before `/etc/stormblock/api_token` and `/var/lib/stormblock/api_token` | those two |
 | `STORMBLOCK_METADATA_CACHE_MB` | tests: evict every idle extent map at the end of every persist (#158), so a path that reads a map without loading it panics | unset |
-| `STORMBLOCK_METADATA_FORMAT` | `2`: new slabs in metadata format v2 (#158), where no `[metadata] format` is read | `1` |
+| `STORMBLOCK_METADATA_FORMAT` | `1` keeps new slabs (and the data directory) in metadata format 1 and migrates nothing (#158), where no `[metadata] format` is read | `2` |
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
@@ -387,14 +387,13 @@ is overwritten with before it is reused (#286, `docs/erase.md`). A delete may
 ask for more with `DELETE /api/v1/volumes/{id}?erase=`. Slabs reached over a
 fabric are never erased.
 
-**`[metadata]`** — `format` (`1`; or `2`): the format new slabs, and the data
+**`[metadata]`** — `format` (`2`; or `1`): the format new slabs, and the data
 directory's record, are written in (#158, `docs/metadata-v2.md`). Format 2: a
 slab header with 64-bit slot counts, and volume records kept as a
 copy-on-write tree plus a log, so a persist writes what changed (one 4 KiB
 record for one extent, where format 1 rewrites every volume's record). An
-engine before #158 refuses a format 2 slab. Existing slabs keep their format;
-a serving engine migrates its v1 metadata slabs in place at the first persist
-once 2 is the default (`stormblock slab upgrade`, `POST /api/v1/slabs/{id}/upgrade`
+engine before #158 refuses a format 2 slab. A serving engine migrates its v1
+metadata slabs in place at their first persist (format 1 set: none) (`stormblock slab upgrade`, `POST /api/v1/slabs/{id}/upgrade`
 by hand); an older engine cannot open a migrated slab. `cache_mb` (unset: every map
 stays in memory): extent maps of idle volumes (nothing attached or serving
 them) beyond this many MiB leave memory and are read from their v2 store at

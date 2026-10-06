@@ -28,14 +28,14 @@ pub const SLAB_VERSION_2: u32 = 2;
 static DEFAULT_FORMAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// The format new slabs are written in: `[metadata] format`, else
-/// `$STORMBLOCK_METADATA_FORMAT`, else 1 (until #158's stage E).
+/// `$STORMBLOCK_METADATA_FORMAT`, else 2 (#158 stage E; 1 keeps format 1).
 pub fn default_format() -> u32 {
     use std::sync::atomic::Ordering;
     match DEFAULT_FORMAT.load(Ordering::Relaxed) {
         0 => {
             let f = match std::env::var("STORMBLOCK_METADATA_FORMAT").ok().as_deref().map(str::trim) {
-                Some("2") => SLAB_VERSION_2,
-                _ => SLAB_VERSION,
+                Some("1") => SLAB_VERSION,
+                _ => SLAB_VERSION_2,
             };
             DEFAULT_FORMAT.store(f, Ordering::Relaxed);
             f
