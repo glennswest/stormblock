@@ -2161,13 +2161,17 @@ async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
             }
             let laid = crate::image::local::lay_node_slabs(dev, &layout).await.map_err(ie)?;
             println!(
-                "{disk}: {}-byte table, boot area {}, system slab {} ({}), data slab {} ({})",
+                "{disk}: {}-byte table, boot area {}, system slab {} ({}), data slab {} ({}){}",
                 laid.lba,
                 crate::mgmt::config::human_size(layout.boot_bytes),
                 laid.system.slab_id(),
                 crate::mgmt::config::human_size(laid.system_bytes),
                 laid.data.slab_id(),
                 crate::mgmt::config::human_size(laid.data_bytes),
+                match &laid.bulk {
+                    Some(b) => format!(", bulk slab {} ({}, 8 MiB extents)", b.slab_id(), crate::mgmt::config::human_size(laid.bulk_bytes)),
+                    None => String::new(),
+                },
             );
         }
         ImageAction::LocalBoot { disk, from } => {
@@ -4621,6 +4625,9 @@ pub(crate) async fn take_local_disk(
             let mut reg = mgr.registry().write().await;
             reg.add(laid.data);
             reg.add(laid.system);
+            if let Some(b) = laid.bulk {
+                reg.add(b);
+            }
         }
         // Not seeded by default. The data slab kept here holds this
         // node's records, and adopting them over the fresh clone's
@@ -4684,10 +4691,15 @@ pub(crate) async fn take_local_disk(
         .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
     let data_id = laid.data.slab_id();
     let system_id = laid.system.slab_id();
+    let bulk_id = laid.bulk.as_ref().map(|b| b.slab_id());
     println!(
-        "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({})",
+        "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({}){}",
         crate::mgmt::config::human_size(laid.data_bytes),
         crate::mgmt::config::human_size(laid.system_bytes),
+        match bulk_id {
+            Some(b) => format!(", bulk slab {b} ({}, 8 MiB extents)", crate::mgmt::config::human_size(laid.bulk_bytes)),
+            None => String::new(),
+        },
     );
 
     // The system half only, and not from here. **Do not migrate a
@@ -4731,6 +4743,9 @@ pub(crate) async fn take_local_disk(
         let mut reg = mgr.registry().write().await;
         reg.add(laid.data);
         reg.add(laid.system);
+        if let Some(b) = laid.bulk {
+            reg.add(b);
+        }
     }
     // **The records go where the extents go.** The slabs just laid
     // keep metadata of their own, and this manager was only ever
@@ -4745,7 +4760,9 @@ pub(crate) async fn take_local_disk(
     // ago and hold nothing a persist could overwrite. The update path
     // above keeps a data slab that holds this node's records, and
     // writing this manager's view of it would replace them.
-    mgr.keep_metadata_in_first(&[data_id, system_id]);
+    let mut first = vec![data_id, system_id];
+    first.extend(bulk_id);
+    mgr.keep_metadata_in_first(&first);
     // **The data half moves in the background** (#285), like the system
     // half: the engine that adopts this boot empties the appliance's data
     // slabs into this one after the goldens, while the volumes on them are

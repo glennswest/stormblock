@@ -54,7 +54,19 @@ pub struct LocalLayout {
     /// Sized for two generations of the boot pallet and the ESP: the one the
     /// node runs, and the one it falls back to.
     pub boot_bytes: u64,
+    /// Lay the data half as a 1 MiB data slab and an 8 MiB **bulk** slab
+    /// (#156, owner 2026-10-05): the bulk slab last, taking what is left of
+    /// the drive, the data slab a quarter of the data half (at least 64 GiB).
+    /// Only with metadata format 2 (bulk volumes are recorded only there) and
+    /// a data half of [`BULK_MIN_DATA_HALF`] or more.
+    pub bulk: bool,
 }
+
+/// The name of the bulk partition (#156): typed as a data slab, it is the
+/// data half's second pool.
+pub const BULK_PARTITION: &str = "stormblock-bulk";
+/// A data half smaller than this is one 1 MiB data slab.
+pub const BULK_MIN_DATA_HALF: u64 = 256 << 30;
 
 impl LocalLayout {
     /// A sixteenth of the drive for the system half, floored at 32 GiB and
@@ -74,6 +86,7 @@ impl LocalLayout {
             tier: StorageTier::Hot,
             lba: None,
             boot_bytes: boot_area_for(capacity),
+            bulk: crate::drive::slab::default_format() == crate::drive::slab::SLAB_VERSION_2,
         }
     }
 }
@@ -189,8 +202,11 @@ pub async fn has_boot_area(device: &Arc<dyn BlockDevice>, boot_bytes: u64) -> bo
 pub struct LocalSlabs {
     pub data: Slab,
     pub system: Slab,
+    /// The bulk slab (8 MiB slots, #156), when the layout has one.
+    pub bulk: Option<Slab>,
     pub data_bytes: u64,
     pub system_bytes: u64,
+    pub bulk_bytes: u64,
     pub lba: u32,
 }
 
@@ -218,7 +234,8 @@ pub async fn node_layout(device: &Arc<dyn BlockDevice>) -> Result<Option<(usize,
     let mut data = None;
     let mut system = None;
     for (i, e) in gpt.partitions() {
-        if e.type_guid == type_guid::SLAB_DATA && data.is_none() {
+        // The data slab, not the bulk slab beside it (#156).
+        if e.type_guid == type_guid::SLAB_DATA && data.is_none() && e.name != BULK_PARTITION {
             data = Some(i);
         } else if e.type_guid == type_guid::SLAB && system.is_none() {
             system = Some(i);
@@ -228,6 +245,14 @@ pub async fn node_layout(device: &Arc<dyn BlockDevice>) -> Result<Option<(usize,
         (Some(d), Some(s)) => Some((d, s)),
         _ => None,
     })
+}
+
+/// The bulk partition of a node layout (#156), if it has one.
+pub async fn bulk_partition(device: &Arc<dyn BlockDevice>) -> Option<usize> {
+    let gpt = Gpt::read(device).await.ok()?;
+    gpt.partitions()
+        .find(|(_, e)| e.type_guid == type_guid::SLAB_DATA && e.name == BULK_PARTITION)
+        .map(|(i, _)| i)
 }
 
 /// What the system half already holds, by volume id, according to the slab
@@ -512,7 +537,19 @@ pub async fn update_system_slab(
     .await
     .map_err(|e| ImageError::Other(format!("formatting the system slab: {e}")))?;
 
-    Ok(LocalSlabs { data, system, data_bytes, system_bytes, lba })
+    // The bulk slab beside it, kept with the data half (#156).
+    let (bulk, bulk_bytes) = match bulk_partition(&device).await {
+        Some(i) => {
+            let p = part(i)?;
+            let n = p.capacity_bytes();
+            let slab = Slab::open(p)
+                .await
+                .map_err(|e| ImageError::Other(format!("the bulk partition will not open as a slab ({e})")))?;
+            (Some(slab), n)
+        }
+        None => (None, 0),
+    };
+    Ok(LocalSlabs { data, system, bulk, data_bytes, system_bytes, bulk_bytes, lba })
 }
 
 /// Write a GPT with a data slab and a system slab, and format both.
@@ -568,6 +605,13 @@ pub async fn lay_node_slabs(
              {system_bytes} system slab"
         )));
     }
+    // The data half as a 1 MiB data slab and an 8 MiB bulk slab (#156).
+    let (data_bytes, bulk_bytes) = if opts.bulk && data_bytes >= BULK_MIN_DATA_HALF {
+        let data = align_down((data_bytes / 4).max(64 << 30), ALIGN);
+        (data, data_bytes - data)
+    } else {
+        (data_bytes, 0)
+    };
 
     // **Destroy what was there before writing what is.**
     //
@@ -633,14 +677,19 @@ pub async fn lay_node_slabs(
     // reaches the disk: a table that still carried it would read as a drive
     // whose boot area is taken.
     let mut slots = Vec::new();
-    for (name, guid, size, role) in [
-        ("stormblock", type_guid::SLAB, system_bytes, SlabRole::System),
-        ("stormblock-data", type_guid::SLAB_DATA, data_bytes, SlabRole::Data),
-    ] {
+    let mut parts = vec![
+        ("stormblock", type_guid::SLAB, system_bytes, SlabRole::System, opts.slot_size),
+        ("stormblock-data", type_guid::SLAB_DATA, data_bytes, SlabRole::Data, opts.slot_size),
+    ];
+    if bulk_bytes > 0 {
+        parts.push((BULK_PARTITION, type_guid::SLAB_DATA, bulk_bytes, SlabRole::Data, crate::volume::BULK_EXTENT));
+    }
+    let last = parts.len() - 1;
+    for (n, (name, guid, size, role, slot_size)) in parts.into_iter().enumerate() {
         let slot = gpt
             .allocate(name, guid, size, 0)
             .map_err(|e| ImageError::Other(format!("allocating {name}: {e}")))?;
-        slots.push((name, slot, role));
+        slots.push((name, slot, role, slot_size, n == last));
     }
     if let Some(i) = hold {
         gpt.remove(i).map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
@@ -648,7 +697,7 @@ pub async fn lay_node_slabs(
     gpt.write(&device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
 
     let mut out = Vec::new();
-    for (name, slot, role) in slots {
+    for (name, slot, role, slot_size, is_last) in slots {
         let start = gpt.entries[slot].start_bytes(lba);
         let len = gpt.entries[slot].size_bytes(lba);
         let part = Arc::new(
@@ -660,11 +709,13 @@ pub async fn lay_node_slabs(
         // slab that cannot say what it holds boots to "no volume metadata".
         // The data slab reserves room to grow in place to four times its
         // size — its table and its record both — which costs 0.024% of it.
-        let grow_to = if role == SlabRole::Data { len.saturating_mul(DATA_GROWTH) } else { 0 };
-        let meta = auto_metadata_bytes(len.max(grow_to), opts.slot_size);
+        // Only the last partition can grow (#156: the bulk slab, when there
+        // is one).
+        let grow_to = if role == SlabRole::Data && is_last { len.saturating_mul(DATA_GROWTH) } else { 0 };
+        let meta = auto_metadata_bytes(len.max(grow_to), slot_size);
         let slab = Slab::format_with(
             part,
-            SlabFormat::new(opts.slot_size, opts.tier)
+            SlabFormat::new(slot_size, opts.tier)
                 .with_metadata(meta)
                 .with_role(role)
                 .with_growth(grow_to),
@@ -674,9 +725,10 @@ pub async fn lay_node_slabs(
         out.push(slab);
     }
 
+    let bulk = if bulk_bytes > 0 { out.pop() } else { None };
     let data = out.pop().expect("two slabs");
     let system = out.pop().expect("two slabs");
-    Ok(LocalSlabs { data, system, data_bytes, system_bytes, lba })
+    Ok(LocalSlabs { data, system, bulk, data_bytes, system_bytes, bulk_bytes, lba })
 }
 
 /// Grow the data half into whatever the drive has after it.
@@ -696,6 +748,8 @@ pub async fn lay_node_slabs(
 /// do: no node layout, a data partition that is not last, or no space after it.
 pub async fn grow_data_half(device: Arc<dyn BlockDevice>) -> Result<Option<(u64, u64)>> {
     let Some((data_i, _)) = node_layout(&device).await? else { return Ok(None) };
+    // The bulk slab, when there is one, is the last (#156).
+    let data_i = bulk_partition(&device).await.unwrap_or(data_i);
     let mut gpt = Gpt::read(&device)
         .await
         .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
@@ -746,6 +800,49 @@ mod tests {
     /// Enough drive for both halves: `for_drive` gives the data slab half of a
     /// small disk, and the system slab has a floor of its own.
     const CAP: u64 = 256 * 1024 * 1024;
+
+    /// #156: a data half of 256 GiB or more is a 1 MiB data slab and an 8 MiB
+    /// bulk slab, the bulk one last; a smaller one is one data slab; a
+    /// reinstall of the system half keeps both.
+    #[tokio::test]
+    async fn a_large_drive_gets_a_bulk_slab_last() {
+        let uri = format!("emulated://bulk-{}?size=600G", uuid::Uuid::new_v4().simple());
+        let dev = crate::drive::open_path(&uri, false).await.unwrap();
+        let mut layout = LocalLayout::for_drive(dev.capacity_bytes());
+        layout.bulk = true;
+        layout.slot_size = 1 << 20;
+        let laid = lay_node_slabs(dev.clone(), &layout).await.unwrap();
+        let bulk = laid.bulk.as_ref().expect("a bulk slab");
+        assert_eq!(bulk.slot_size(), crate::volume::BULK_EXTENT);
+        assert!(bulk.is_data());
+        assert_eq!(laid.data.slot_size(), 1 << 20);
+        assert!(laid.data_bytes >= 64 << 30, "{}", laid.data_bytes);
+        assert!(laid.bulk_bytes > 2 * laid.data_bytes, "{} {}", laid.bulk_bytes, laid.data_bytes);
+        let bulk_id = bulk.slab_id();
+        let data_id = laid.data.slab_id();
+
+        let (d, _) = node_layout(&dev).await.unwrap().expect("a node layout");
+        let b = bulk_partition(&dev).await.expect("a bulk partition");
+        let gpt = Gpt::read(&dev).await.unwrap();
+        assert_eq!(gpt.entries[d].name, "stormblock-data");
+        assert!(gpt.partitions().all(|(i, e)| i == b || e.last_lba < gpt.entries[b].first_lba), "bulk is last");
+        drop(laid);
+
+        // The system half replaced; both data pools kept.
+        let kept = update_system_slab(dev.clone(), &layout).await.unwrap();
+        assert_eq!(kept.data.slab_id(), data_id);
+        assert_eq!(kept.bulk.as_ref().map(|b| b.slab_id()), Some(bulk_id));
+
+        // A smaller data half: one data slab.
+        let uri = format!("emulated://nobulk-{}?size=200G", uuid::Uuid::new_v4().simple());
+        let small = crate::drive::open_path(&uri, false).await.unwrap();
+        let mut layout = LocalLayout::for_drive(small.capacity_bytes());
+        layout.bulk = true;
+        layout.slot_size = 1 << 20;
+        let laid = lay_node_slabs(small.clone(), &layout).await.unwrap();
+        assert!(laid.bulk.is_none());
+        assert!(bulk_partition(&small).await.is_none());
+    }
 
     fn window(path: &str, at: u64, len: usize) -> Vec<u8> {
         let mut f = std::fs::File::open(path).unwrap();
