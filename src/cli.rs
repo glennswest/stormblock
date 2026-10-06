@@ -1033,6 +1033,24 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 
+    // The extent map cache (#158): idle maps leave memory above the budget,
+    // under the manager's lock, so no operation is part-way through one.
+    if let Some(mb) = config.metadata.cache_mb {
+        let vm = state.volume_manager.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let n = vm.lock().await.evict_idle(mb << 20).await;
+                if n > 0 {
+                    tracing::debug!("extent map cache: {n} idle map(s) out of memory");
+                }
+            }
+        });
+        tracing::info!("extent map cache: {mb} MiB (idle maps beyond it are read from their store when used)");
+    }
+
     // Pool pressure watcher. Thin volumes overcommit, so physical space runs
     // out while every volume still reports free virtual space — nothing else
     // notices until writes start failing (#18).

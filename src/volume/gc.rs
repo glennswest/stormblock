@@ -30,7 +30,7 @@
 //! The optional two-pass confirmation adds a second, independent check for
 //! paths that might be added later without a reservation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::drive::slab::SlabId;
 use crate::drive::slab_registry::SlabRegistry;
@@ -109,11 +109,39 @@ pub async fn collect(
 ) -> GcReport {
     let sources = registry.iter().map(|(_, s)| s.view_source()).collect();
     match crate::volume::gem::SlotView::read(sources).await {
-        Ok(view) => collect_with(gem, registry, &view, opts).await,
+        Ok(view) => collect_with(gem, registry, &view, opts, &Live::default()).await,
         Err(e) => {
             tracing::warn!("extent gc: reading the slot tables: {e}; nothing collected");
             GcReport { dry_run: opts.dry_run, ..Default::default() }
         }
+    }
+}
+
+/// The slots some map references: one bit a slot, per slab (#158). A map
+/// not in memory is read from its store into this, one at a time, and never
+/// put back in memory.
+#[derive(Debug, Default)]
+pub struct Live {
+    by_slab: HashMap<SlabId, Vec<u64>>,
+    /// The maps not in memory that were read into it.
+    pub volumes: HashSet<crate::volume::extent::VolumeId>,
+}
+
+impl Live {
+    pub fn insert(&mut self, slab: SlabId, slot: u64) {
+        let v = self.by_slab.entry(slab).or_default();
+        let w = (slot / 64) as usize;
+        if v.len() <= w {
+            v.resize(w + 1, 0);
+        }
+        v[w] |= 1 << (slot % 64);
+    }
+
+    pub fn contains(&self, slab: SlabId, slot: u64) -> bool {
+        self.by_slab
+            .get(&slab)
+            .and_then(|v| v.get((slot / 64) as usize))
+            .is_some_and(|w| w & (1 << (slot % 64)) != 0)
     }
 }
 
@@ -125,6 +153,7 @@ pub async fn collect_with(
     registry: &mut SlabRegistry,
     view: &crate::volume::gem::SlotView,
     opts: GcOptions,
+    cold: &Live,
 ) -> GcReport {
     let mut report = GcReport {
         dry_run: opts.dry_run,
@@ -132,13 +161,21 @@ pub async fn collect_with(
         ..Default::default()
     };
 
+    // A map not in memory that was not read: its slots would look like
+    // nobody's. Nothing is collected (#158).
+    if let Some(id) = gem.cold_ids().into_iter().find(|id| !cold.volumes.contains(id)) {
+        tracing::warn!("extent gc: volume {}'s extent map was not read; nothing collected", id.0);
+        return report;
+    }
+
     // Live set from the forward maps — see the module note on why the reverse
-    // index is not usable here.
-    let mut live: HashSet<(SlabId, u64)> = HashSet::new();
-    for vid in gem.volume_ids() {
+    // index is not usable here. The maps in memory, then those read from
+    // their stores (`cold`).
+    let mut live = Live::default();
+    for vid in gem.resident_ids() {
         if let Some(map) = gem.get_volume_map(&vid) {
             for leg in map.all_legs() {
-                live.insert((leg.slab_id, leg.slot_idx));
+                live.insert(leg.slab_id, leg.slot_idx);
             }
         }
     }
@@ -159,7 +196,7 @@ pub async fn collect_with(
             if !slot.state.is_owned() {
                 continue;
             }
-            if live.contains(&(slab_id, slot_idx)) {
+            if live.contains(slab_id, slot_idx) || cold.contains(slab_id, slot_idx) {
                 report.live += 1;
                 continue;
             }
@@ -303,14 +340,11 @@ pub async fn run_once(
     registry: &std::sync::Arc<tokio::sync::RwLock<SlabRegistry>>,
     opts: GcOptions,
 ) -> GcReport {
-    // Every map in memory while the pass runs (#158): a map not in memory
-    // would leave its slots looking like nobody's.
-    let _pin = match crate::volume::gem::pin_resident(gem).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("extent gc: loading extent maps: {e}; nothing collected");
-            return GcReport { dry_run: opts.dry_run, ..Default::default() };
-        }
+    // Maps not in memory are read from their stores, one at a time, and
+    // stay out of memory (#158); none leaves memory while the pass runs.
+    let (_pin, cold_ids, pager) = {
+        let g = gem.read().await;
+        (g.pin(), g.cold_ids(), g.pager())
     };
     // The tables first, holding nothing (#155, #269): reading every slab's
     // table under the registry lock would hold every volume's I/O for it.
@@ -322,9 +356,25 @@ pub async fn run_once(
             return GcReport { dry_run: opts.dry_run, ..Default::default() };
         }
     };
+    let mut cold = Live::default();
+    for id in cold_ids {
+        let Some(p) = &pager else { break };
+        match p.load(id).await {
+            Ok(map) => {
+                for leg in map.all_legs() {
+                    cold.insert(leg.slab_id, leg.slot_idx);
+                }
+                cold.volumes.insert(id);
+            }
+            Err(e) => {
+                tracing::warn!("extent gc: reading volume {}'s extent map: {e}; nothing collected", id.0);
+                return GcReport { dry_run: opts.dry_run, ..Default::default() };
+            }
+        }
+    }
     let gem_guard = gem.read().await;
     let mut reg_guard = registry.write().await;
-    collect_with(&gem_guard, &mut reg_guard, &view, opts).await
+    collect_with(&gem_guard, &mut reg_guard, &view, opts, &cold).await
 }
 
 /// Start the background collector.

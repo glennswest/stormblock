@@ -59,6 +59,12 @@ pub struct StormBlockConfig {
 #[serde(default)]
 pub struct MetadataSection {
     pub format: Option<u32>,
+    /// Extent maps kept in memory, MiB (#158 stage C): above it, the least
+    /// recently used maps of idle volumes (nothing attached or serving them)
+    /// leave memory and are read from their format v2 store at their next
+    /// use. Unset: every map stays in memory. Only where every metadata store
+    /// is format v2.
+    pub cache_mb: Option<u64>,
 }
 
 /// `[erase]` (#286): a freed slot is overwritten before it is reused.

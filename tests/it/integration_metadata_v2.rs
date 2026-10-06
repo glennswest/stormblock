@@ -259,3 +259,77 @@ async fn the_data_directory_keeps_metadata_v2() {
     vm.restore().await.unwrap();
     assert_eq!(read_first(&vm, "in-dir", 1).await, pattern(5, 1, 0));
 }
+
+/// Stage C: an idle map leaves memory and comes back at its volume's first
+/// use; listing it does not load it; GC reads it from the store and frees
+/// none of its slots; a write to it after a restart lands where it should.
+#[tokio::test]
+async fn an_idle_map_leaves_memory_and_comes_back() {
+    let dev = device("256M").await;
+    let s = slab(&dev, SLAB_VERSION_2, SlabRole::Data).await;
+    let sid = s.slab_id();
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_slab(s).await;
+    vm.persist_to_slab(sid);
+
+    let g = vm.create_volume_any("golden", VOL).await.unwrap();
+    let gv = vm.get_volume(&g).unwrap();
+    for e in 0..50u64 {
+        gv.write(e * SLOT, &pattern(3, e, 0)).await.unwrap();
+    }
+    gv.flush().await.unwrap();
+    drop(gv);
+    vm.persist().await;
+    let c = vm.create_snapshot(g, "clone").await.unwrap();
+    let cv = vm.get_volume(&c).unwrap();
+    for e in 0..5u64 {
+        cv.write(e * SLOT, &pattern(4, e, 1)).await.unwrap();
+    }
+    cv.flush().await.unwrap();
+    drop(cv);
+    vm.persist().await;
+
+    let n = vm.evict_idle(0).await;
+    assert!(n >= 2, "{n} evicted");
+    assert!(vm.gem().read().await.is_cold(&g));
+    assert!(vm.gem().read().await.is_cold(&c));
+
+    // A listing's numbers come from what was kept.
+    let h = vm.get_volume_handle(&g).unwrap();
+    assert_eq!(h.mapped().await, 50 * SLOT);
+    assert!(vm.gem().read().await.is_cold(&g), "a listing loaded the map");
+    drop(h);
+
+    // GC reads the cold maps from the store and frees nothing of theirs.
+    let report = stormblock::volume::gc::run_once(
+        vm.gem(),
+        vm.registry(),
+        stormblock::volume::gc::GcOptions { confirm_against: None, ..Default::default() },
+    )
+    .await;
+    assert_eq!(report.reclaimed, 0, "{report:?}");
+    assert!(vm.gem().read().await.is_cold(&g), "GC loaded the map");
+
+    // First use loads it.
+    assert_eq!(read_first(&vm, "golden", 7).await, pattern(3, 7, 0));
+    assert_eq!(read_first(&vm, "clone", 2).await, pattern(4, 2, 1));
+    assert_eq!(read_first(&vm, "clone", 30).await, pattern(3, 30, 0));
+    assert!(!vm.gem().read().await.is_cold(&g));
+
+    // Out again; a write to the clone (a copy-on-write of the golden's slot,
+    // whose map is not in memory) and a restart.
+    vm.evict_idle(0).await;
+    assert!(vm.gem().read().await.is_cold(&g));
+    let cv = vm.get_volume(&c).unwrap();
+    cv.write(20 * SLOT, &pattern(4, 20, 2)).await.unwrap();
+    cv.flush().await.unwrap();
+    drop(cv);
+    vm.persist().await;
+    vm.evict_idle(0).await;
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    drop(vm);
+    let vm = reopen(&[dev]).await;
+    assert_eq!(read_first(&vm, "clone", 20).await, pattern(4, 20, 2));
+    assert_eq!(read_first(&vm, "golden", 20).await, pattern(3, 20, 0));
+    assert_eq!(read_first(&vm, "clone", 49).await, pattern(3, 49, 0));
+}
