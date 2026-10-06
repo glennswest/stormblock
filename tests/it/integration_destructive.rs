@@ -208,11 +208,15 @@ async fn a_kubernetes_bearer_is_reviewed_and_named_in_the_audit_log() {
     assert!(log.iter().any(|r| r["who"] == "kubernetes:bob" && r["decision"] == "refused"));
     assert!(log.iter().any(|r| r["who"] == "kubernetes:alice" && r["decision"] == "allowed" && r["status"] == 204));
 
-    // Asked again within the minute, of the same volume: answered from the
-    // cache. A review is of one name (#216), so g2 is asked once.
-    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g2}"), Some("alice-k8s"), None).await, 204);
+    // A review is of one name (#216): g2 is asked about afresh.
     let before = asked.lock().unwrap().len();
-    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g2}"), Some("alice-k8s"), None).await, 404);
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g2}"), Some("alice-k8s"), None).await, 204);
+    assert!(asked.lock().unwrap().len() > before, "another volume, another review");
+    // Asked again within the minute, of the same name: answered from the cache.
+    let tpm = Some(json!({"tpm": "none"}));
+    assert_eq!(call(&n, M::PUT, "/boothost/server1/tpm", Some("alice-k8s"), tpm.clone()).await, 200);
+    let before = asked.lock().unwrap().len();
+    assert_eq!(call(&n, M::PUT, "/boothost/server1/tpm", Some("alice-k8s"), tpm).await, 200);
     assert_eq!(asked.lock().unwrap().len(), before, "the review was cached");
 
     // No apiserver named: a bearer that is not the admin token is refused.
