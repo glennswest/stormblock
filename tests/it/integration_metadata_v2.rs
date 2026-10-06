@@ -484,3 +484,45 @@ async fn read_at(vm: &VolumeManager, name: &str, off: u64) -> Vec<u8> {
     vm.get_volume(&id).unwrap().read(off, &mut b).await.unwrap();
     b
 }
+
+/// `metadata.v2` in a data directory starts small and doubles when it fills
+/// (stormcos copies the data directory a whole file at a time): no write is
+/// lost to a full file, and a restart reads what the grown file holds.
+#[tokio::test]
+async fn the_data_directory_file_grows_as_it_fills() {
+    std::env::set_var("STORMBLOCK_METADATA_DIR_INITIAL", (256 * 1024).to_string());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("metadata.v2"), b"").unwrap();
+    let dev = device("1G").await;
+    const SMALL: u64 = 4096;
+    let fmt = SlabFormat::new(SMALL, StorageTier::Hot).with_role(SlabRole::Data).with_version(SLAB_VERSION);
+    let s = Slab::format_with(dev.clone(), fmt).await.unwrap();
+    let mut vm = VolumeManager::with_data_dir(SMALL, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(s).await;
+    let id = vm.create_volume_any("many", 64 << 20).await.unwrap();
+    let v = vm.get_volume(&id).unwrap();
+    for round in 0..4u64 {
+        for e in 0..5000u64 {
+            let x = round * 5000 + e;
+            v.write(x * SMALL, &pattern(8, x, 0)).await.unwrap();
+        }
+        v.flush().await.unwrap();
+        vm.persist().await;
+        assert!(vm.durability_fault().is_none(), "round {round}: {:?}", vm.durability_fault());
+    }
+    let len = std::fs::metadata(dir.path().join("metadata.v2")).unwrap().len();
+    assert!(len > 256 * 1024, "the file grew: {len}");
+    assert!(len < 64 << 20, "and stayed in proportion: {len}");
+    drop(v);
+    drop(vm);
+    let mut vm = VolumeManager::with_data_dir(SMALL, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(Slab::open(dev).await.unwrap()).await;
+    vm.restore().await.unwrap();
+    let id = vm.find_volume("many").await.unwrap();
+    let v = vm.get_volume(&id).unwrap();
+    for x in [0u64, 4999, 12345, 19999] {
+        let mut b = vec![0u8; 4096];
+        v.read(x * SMALL, &mut b).await.unwrap();
+        assert_eq!(b, pattern(8, x, 0), "extent {x}");
+    }
+}

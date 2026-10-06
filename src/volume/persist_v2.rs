@@ -30,8 +30,20 @@ use crate::drive::BlockDevice;
 
 /// The data directory's store.
 pub const DIR_FILE: &str = "metadata.v2";
-/// Its size: sparse, so only what is written is stored.
-const DIR_SIZE: u64 = 16 << 30;
+/// Its first size. It doubles when it fills ([`grow_dir`]): stormcos copies
+/// the data directory into its state volume every ten seconds, a whole file
+/// at a time, so the file stays in proportion to what it holds.
+const DIR_INITIAL: u64 = 8 << 20;
+
+/// [`DIR_INITIAL`], or `$STORMBLOCK_METADATA_DIR_INITIAL` bytes (tests: a
+/// small file that grows).
+fn dir_initial() -> u64 {
+    std::env::var("STORMBLOCK_METADATA_DIR_INITIAL")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| (v / metav2::PAGE * metav2::PAGE).max(64 * metav2::PAGE))
+        .unwrap_or(DIR_INITIAL)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(super) enum Sink {
@@ -52,10 +64,12 @@ impl Opener {
             Opener::Region(d, b, s) => (d.clone(), *b, *s),
             Opener::Dir(path) => {
                 let p = path.to_string_lossy().to_string();
-                let d = crate::drive::filedev::FileDevice::open_with_capacity(&p, DIR_SIZE)
+                let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                let size = if len >= dir_initial() { len / metav2::PAGE * metav2::PAGE } else { dir_initial() };
+                let d = crate::drive::filedev::FileDevice::open_with_capacity(&p, size)
                     .await
                     .map_err(|e| std::io::Error::other(format!("{p}: {e}")))?;
-                (Arc::new(d) as Arc<dyn BlockDevice>, 0, DIR_SIZE)
+                (Arc::new(d) as Arc<dyn BlockDevice>, 0, size)
             }
         };
         match MetaV2::open(dev.clone(), base, size).await? {
@@ -475,6 +489,65 @@ pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
 }
 
 async fn apply_one(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::io::Result<()> {
+    match apply_store(b, state).await {
+        Err(e) if b.sink == Sink::Dir && e.to_string().contains("metadata region full") => {
+            let Opener::Dir(path) = &b.opener else { return Err(e) };
+            grow_dir(b, path).await
+        }
+        r => r,
+    }
+}
+
+/// `metadata.v2` is full: write what it holds and this batch into a file of
+/// twice the size beside it, flush it, and rename it over the old one.
+async fn grow_dir(b: &Batch, path: &std::path::Path) -> std::io::Result<()> {
+    let mut g = b.store.lock().await;
+    let Some(old) = g.as_mut() else { return Err(std::io::Error::other("metadata.v2: not open")) };
+    let mut all: std::collections::BTreeMap<Key, Vec<u8>> = match &b.full {
+        Some((entries, _)) => entries.iter().cloned().collect(),
+        None => old.scan().await?.into_iter().collect(),
+    };
+    if b.full.is_none() {
+        for op in &b.ops {
+            match op {
+                Op::Put(k, v) => {
+                    all.insert(*k, v.clone());
+                }
+                Op::Del(k) => {
+                    all.remove(k);
+                }
+                Op::DropVolume(v) => all.retain(|k, _| k.vol() != *v),
+            }
+        }
+    }
+    let bytes: u64 = all.iter().map(|(_, v)| v.len() as u64 + 32).sum();
+    let mut size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0).max(dir_initial()) * 2;
+    while size < bytes * 4 {
+        size *= 2;
+    }
+    let tmp = path.with_file_name(format!(".{DIR_FILE}.grow"));
+    let _ = std::fs::remove_file(&tmp);
+    let t = tmp.to_string_lossy().to_string();
+    let d: Arc<dyn BlockDevice> = Arc::new(
+        crate::drive::filedev::FileDevice::open_with_capacity(&t, size)
+            .await
+            .map_err(|e| std::io::Error::other(format!("{t}: {e}")))?,
+    );
+    let mut fresh = MetaV2::format(d, 0, size).await?;
+    fresh.replace_all(all.into_iter().collect()).await?;
+    drop(fresh);
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        if let Ok(f) = std::fs::File::open(dir) {
+            let _ = f.sync_all();
+        }
+    }
+    *g = Some(Opener::Dir(path.to_path_buf()).open().await?);
+    tracing::info!("{DIR_FILE} grown to {} MiB", size >> 20);
+    Ok(())
+}
+
+async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::io::Result<()> {
     let mut g = b.store.lock().await;
     if g.is_none() {
         *g = Some(b.opener.open().await?);
