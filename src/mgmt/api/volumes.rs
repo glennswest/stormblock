@@ -71,6 +71,9 @@ pub struct VolumeResponse {
     /// Bytes per logical block the volume is presented at: 4096, or 512 for
     /// a disk firmware boots from (#228). Clones inherit it.
     pub lba: u32,
+    /// The size of the volume's extents (#156): the slot size of every slab
+    /// it is on. Clones inherit it.
+    pub extent_size: u64,
     /// Which half of the node's mutable storage the volume lives in:
     /// `system` (replaced wholesale by an install) or `data` (identity and
     /// state, which no install path formats). A clone is in its source's
@@ -132,6 +135,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
                 access: handle.access().to_string(),
                 writable: handle.writable(),
                 lba: handle.lba(),
+                extent_size: handle.extent_size(),
                 role: handle.placement_role().to_string(),
                 fs: fs.map(|f| f.json()),
                 fs_uuid: fs.and_then(|f| f.uuid),
@@ -198,6 +202,12 @@ pub struct CreateVolumeRequest {
     /// (`from_template`) takes its source's.
     #[serde(default)]
     pub lba: Option<u32>,
+    /// The size of the volume's extents (#156): `1Mi`, `8Mi` or bytes; fixed
+    /// for its life. Unset: 8 MiB for a volume of 64 GiB or more where the
+    /// node has a pool of that size, else the node's default. A clone takes
+    /// its source's. Sizes other than the default need metadata format 2.
+    #[serde(default)]
+    pub extent_size: Option<String>,
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -737,13 +747,20 @@ async fn create_volume(
             return ApiError::bad_request(format!("array {} is {slab_role} storage, not {r}", a.0));
         }
     }
+    let extent_size = match req.extent_size.as_deref().map(parse_size) {
+        None => None,
+        Some(Ok(n)) => Some(n),
+        Some(Err(e)) => return ApiError::bad_request(format!("extent_size: {e}")),
+    };
     let created = match array_id {
         Some(a) => vm.create_volume(&req.name, size, a).await,
         _ => vm
             .create_volume_with(
                 &req.name,
                 size,
-                crate::volume::CreateOptions::redundant(redundancy.clone()).in_role_opt(role),
+                crate::volume::CreateOptions::redundant(redundancy.clone())
+                    .in_role_opt(role)
+                    .with_extent_size(extent_size),
             )
             .await,
     };

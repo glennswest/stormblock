@@ -442,6 +442,9 @@ pub struct ThinVolumeHandle {
     lba: std::sync::atomic::AtomicU32,
     /// When this volume was last used, for the map cache (#158).
     last_use: AtomicU64,
+    /// The last health computed, answered again while the map is out of
+    /// memory and nothing it is on has changed (#158).
+    last_health: std::sync::Mutex<Option<VolumeHealth>>,
 }
 
 /// A clock for least-recently-used order: a counter, not a time.
@@ -508,6 +511,7 @@ impl ThinVolumeHandle {
             read_only: std::sync::atomic::AtomicBool::new(false),
             lba: std::sync::atomic::AtomicU32::new(Lba::DEFAULT),
             last_use: AtomicU64::new(next_use()),
+            last_health: std::sync::Mutex::new(None),
         }
     }
 
@@ -1934,6 +1938,27 @@ impl ThinVolumeHandle {
 
     /// What the policy asks for versus what is on trusted slabs.
     pub async fn health(&self) -> VolumeHealth {
+        // A map out of memory has not changed since it left: what it said
+        // then holds while every slab it is on is still here and trusted
+        // (#158). A listing asks this of every volume.
+        {
+            let gem = self.gem.read().await;
+            if let Some(c) = gem.cold(&self.id) {
+                let reg = self.registry.read().await;
+                if c.slabs.iter().all(|s| reg.get(s).is_some() && !self.is_failed(*s)) {
+                    let cached = self.last_health.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(h) = cached.filter(|h| h.failed_slabs == self.failed_slabs()) {
+                        return h;
+                    }
+                }
+            }
+        }
+        let h = self.health_resident().await;
+        *self.last_health.lock().unwrap_or_else(|e| e.into_inner()) = Some(h.clone());
+        h
+    }
+
+    async fn health_resident(&self) -> VolumeHealth {
         if let Err(e) = self.resident().await {
             tracing::error!("{e}");
         }

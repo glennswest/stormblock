@@ -102,6 +102,12 @@ impl CreateOptions {
         self.role = role;
         self
     }
+
+    /// Extents of this size (#156); `None` lets the node choose.
+    pub fn with_extent_size(mut self, size: Option<u64>) -> Self {
+        self.extent_size = size;
+        self
+    }
 }
 pub use gem::GlobalExtentMap;
 
@@ -1192,6 +1198,7 @@ impl VolumeManager {
                 )))?
         };
 
+        gem::ensure_resident(&self.gem, id).await.map_err(|e| VolumeError::InvalidSize(e.to_string()))?;
         let todo: Vec<u64> = {
             let gem = self.gem.read().await;
             gem.volume_extents(&id)
@@ -1252,6 +1259,7 @@ impl VolumeManager {
         placements: &[(VolumeId, u64)],
     ) -> Result<VolumeId, VolumeError> {
         let mut components = Vec::with_capacity(placements.len());
+        let mut sizes: Vec<u64> = Vec::new();
         for (source, at) in placements {
             let handle = self.volumes.get(source)
                 .ok_or(VolumeError::VolumeNotFound(*source))?;
@@ -1260,13 +1268,27 @@ impl VolumeManager {
                 at: *at,
                 span: handle.capacity_bytes(),
             });
+            sizes.push(handle.extent_size());
+            gem::ensure_resident(&self.gem, *source).await.map_err(|e| VolumeError::InvalidSize(e.to_string()))?;
         }
+        // A composition shares its members' extents: one size (#156).
+        sizes.sort_unstable();
+        sizes.dedup();
+        let extent_size = match sizes.as_slice() {
+            [] => self.slot_size,
+            [one] => *one,
+            many => {
+                return Err(VolumeError::InvalidSize(format!(
+                    "the components have different extent sizes ({many:?}): a composition shares their extents"
+                )))
+            }
+        };
 
         let vol = {
             let mut gem = self.gem.write().await;
             let mut reg = self.registry.write().await;
             compose::compose_volume(
-                name, declared_size, self.slot_size, &components, &mut gem, &mut reg,
+                name, declared_size, extent_size, &components, &mut gem, &mut reg,
             ).await?
         };
 

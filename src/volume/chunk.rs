@@ -362,7 +362,7 @@ pub async fn allocate(
         for &offset in &offsets {
             for i in 0..slots_per_chunk {
                 let vext = offset / req.slot_size + i;
-                match take_slot_on_tier(&mut reg, req.tier, req.volume, vext).await {
+                match take_slot_on_tier(&mut reg, req.tier, req.slot_size, req.volume, vext).await {
                     Ok((slab_id, slot_idx)) => taken.push((vext, slab_id, slot_idx)),
                     Err(e) => {
                         rollback(&mut reg, &taken).await;
@@ -433,13 +433,15 @@ pub async fn allocate(
 async fn take_slot_on_tier(
     reg: &mut SlabRegistry,
     tier: StorageTier,
+    size: u64,
     volume: VolumeId,
     vext: u64,
 ) -> Result<(SlabId, u64), ChunkError> {
     // `best_slab_for_tier` already skips slabs with no free slots, so one
     // attempt is the whole story: a slab that reports room and then refuses
     // to give any is inconsistent with itself, and retrying would spin.
-    let Some(slab_id) = reg.best_slab_for_tier(tier) else {
+    // A slot of the volume's extent size (#156).
+    let Some(slab_id) = reg.best_slab_for_tier_sized(tier, size) else {
         return Err(ChunkError::TierFull { tier, slots_needed: 1 });
     };
     let Some(slab) = reg.get_mut(&slab_id) else {
