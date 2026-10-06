@@ -428,14 +428,21 @@ pub async fn require_token(
     let Some(api_token) = auth.api_token.as_deref() else {
         return next.run(req).await;
     };
-    let destructive = match crate::serve::api::classify(&method, &path, req.uri().query()) {
+    let class = crate::serve::api::classify(&method, &path, req.uri().query());
+    let is_admin = presented.is_some() && presented.as_deref() == auth.admin_token.as_deref();
+    let is_node = presented.as_deref() == Some(api_token);
+    let destructive = match class {
         Class::Public => return next.run(req).await,
         Class::Ordinary => false,
         Class::Destructive => true,
         Class::VolumeDelete(id) => volume_delete_is_destructive(&state, &id).await,
+        Class::Attestation(host) => {
+            if is_admin || is_node {
+                return next.run(req).await;
+            }
+            return attestation_reader(&state, presented.as_deref(), &host, &path, req, next).await;
+        }
     };
-    let is_admin = presented.is_some() && presented.as_deref() == auth.admin_token.as_deref();
-    let is_node = presented.as_deref() == Some(api_token);
 
     if !destructive {
         if is_admin || is_node {
@@ -520,6 +527,47 @@ pub async fn require_token(
     rec.status = Some(resp.status().as_u16());
     super::kubeauth::audit(state.audit_log.as_deref(), &rec);
     resp
+}
+
+/// A boot-chain attestation read by something other than the node's own
+/// tokens (#216): a Kubernetes bearer whose SubjectAccessReview allows `get`
+/// on `storage.storm.io` `boothost` `{host}`.
+async fn attestation_reader(
+    state: &AppState,
+    presented: Option<&str>,
+    host: &str,
+    path: &str,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(bearer) = presented else {
+        tracing::warn!("unauthorized GET {path}");
+        return unauthorized(path, crate::serve::api::MISSING_TOKEN);
+    };
+    let Some(kube) = state.kube_auth.as_ref() else {
+        tracing::warn!("unauthorized GET {path}: not a token of this node, and no Kubernetes bearer is reviewed here");
+        return unauthorized(path, crate::serve::api::MISSING_TOKEN);
+    };
+    use super::kubeauth::Review;
+    match kube.review(bearer, "boothost", "get", Some(host)).await {
+        Review::Allowed(u) => {
+            tracing::info!(host, who = %u.username, "boot-chain attestation read");
+            next.run(req).await
+        }
+        Review::Denied(u, why) => refused(
+            path,
+            StatusCode::FORBIDDEN,
+            &format!("{} may not get storage.storm.io boothost {host}: {why}", u.username),
+        ),
+        Review::Unauthenticated(why) => {
+            refused(path, StatusCode::UNAUTHORIZED, &format!("the bearer is not a valid token: {why}"))
+        }
+        Review::Unavailable(why) => refused(
+            path,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("cannot review the bearer with {}: {why}", kube.api_url()),
+        ),
+    }
 }
 
 /// Whether deleting this volume is destructive (#274, owner's B): a sealed

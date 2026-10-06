@@ -218,6 +218,19 @@ pub struct Host {
     /// began before the request never answers for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_claim: Option<VolumeId>,
+    /// Whether the machine must prove its boot with a TPM 2.0 quote (#216).
+    /// Set by the platform or an admin, never by the machine: a node that
+    /// could write it could downgrade its own attestation. Unset reads as
+    /// `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<TpmMark>,
+    /// When `tpm` was last set or cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm_set_at: Option<u64>,
+    /// The last boot claim served to this machine (#216): what stormcert's
+    /// boot-chain attestation reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_claim: Option<ClaimRecord>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -267,6 +280,59 @@ impl std::str::FromStr for BootIntent {
             other => Err(format!("intent {other:?}: expected install, local or auto")),
         }
     }
+}
+
+/// A machine's TPM mark (#216): what its attestation must carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TpmMark {
+    /// A TPM 2.0 quote is mandatory; the boot chain alone is refused.
+    Required,
+    /// The machine has no TPM: the boot chain is the evidence.
+    None,
+}
+
+impl TpmMark {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TpmMark::Required => "required",
+            TpmMark::None => "none",
+        }
+    }
+}
+
+impl std::str::FromStr for TpmMark {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "required" => Ok(TpmMark::Required),
+            "none" => Ok(TpmMark::None),
+            other => Err(format!("tpm {other:?}: expected required or none")),
+        }
+    }
+}
+
+/// One boot claim, as the engine served it (#216). Written by the claim path
+/// only: the machine causes it by claiming, it never supplies any of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRecord {
+    /// The boot clone handed out.
+    pub clone: VolumeId,
+    pub clone_name: String,
+    pub claimed_at: u64,
+    /// What the machine claimed as: its name, an alias, or `default`.
+    pub claimed_as: String,
+    /// The host NQNs the clone was bound to (#210). Empty when the node has
+    /// no NVMe/TCP listener to serve it on.
+    #[serde(default)]
+    pub host_nqns: Vec<String>,
+    /// The machine's own sealed golden the clone was made from.
+    pub host_golden: VolumeId,
+    /// The golden `boothost/<name>` assigned, which the host golden is a
+    /// clone of.
+    pub golden: VolumeId,
+    /// `boothost/<name>`'s version when it was claimed.
+    pub assignment_version: u64,
 }
 
 /// What reporting an install done did (#148).
@@ -710,6 +776,47 @@ impl SynonymStore {
         let out = h.clone();
         self.persist();
         Ok(out)
+    }
+
+    /// Set (or, with `None`, clear) a machine's TPM mark (#216). `name` is
+    /// the host's name; a machine not yet known is recorded, so the platform
+    /// can mark it as it joins the fleet, before its first claim.
+    pub fn set_tpm(&mut self, name: &str, tpm: Option<TpmMark>) -> Result<Host, SynonymError> {
+        check_host_name(name)?;
+        let host = match self.host_of(name) {
+            Some(h) if host_match_key(&h) == host_match_key(name) => h,
+            Some(h) => {
+                return Err(SynonymError::Conflict(format!(
+                    "{name} is an alias of host {h}; mark {h}"
+                )))
+            }
+            None => name.to_string(),
+        };
+        let t = now();
+        let base = self.host(&host).unwrap_or(Host {
+            name: host.clone(),
+            created_at: t,
+            ..Host::default()
+        });
+        let h = self.hosts.entry(host).or_insert(base);
+        h.tpm = tpm;
+        h.tpm_set_at = Some(t);
+        h.updated_at = t;
+        let out = h.clone();
+        self.persist();
+        Ok(out)
+    }
+
+    /// Record the boot claim just served to `host` (#216).
+    pub fn note_claim(&mut self, host: &str, rec: ClaimRecord) {
+        let base = self.host(host).unwrap_or(Host {
+            name: host.to_string(),
+            created_at: rec.claimed_at,
+            ..Host::default()
+        });
+        let h = self.hosts.entry(host.to_string()).or_insert(base);
+        h.last_claim = Some(rec);
+        self.persist();
     }
 
     /// A claim of `host` handed out `clone`: when the intent is `install`,

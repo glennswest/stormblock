@@ -245,6 +245,21 @@ pub enum Class {
     /// template or golden, destructive otherwise. Decided by the engine,
     /// which can look the volume up.
     VolumeDelete(String),
+    /// `GET /api/v1/boothost/{name}/attestation` (#216): the node or admin
+    /// token, or a Kubernetes bearer a SubjectAccessReview allows `get` on
+    /// `storage.storm.io` `boothost` `{name}` — so stormcert reads it with its
+    /// own ServiceAccount rather than a copy of the node's token.
+    Attestation(String),
+}
+
+/// The host named by an attestation read, when this is one.
+fn attestation_read(method: &Method, path: &str) -> Option<String> {
+    if *method != Method::GET {
+        return None;
+    }
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    (seg.len() == 6 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "boothost" && seg[5] == "attestation")
+        .then(|| seg[4].to_string())
 }
 
 /// DELETEs that take nothing away: a detach, an export withdrawn, a job
@@ -313,6 +328,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
         return true;
     }
+    // A machine's TPM mark (#216): `none` downgrades its attestation.
+    if matches!(*method, Method::PUT | Method::DELETE) && seg.len() == 6 && seg[3] == "boothost" && seg[5] == "tpm" {
+        return true;
+    }
     false
 }
 
@@ -331,6 +350,9 @@ pub fn classify(method: &Method, path: &str, query: Option<&str>) -> Class {
     }
     if is_destructive(method, path, query) || is_destructive_274(method, path) {
         return Class::Destructive;
+    }
+    if let Some(host) = attestation_read(method, path) {
+        return Class::Attestation(host);
     }
     Class::Ordinary
 }
@@ -394,7 +416,7 @@ pub fn decide(
     // is destructive here. The engine's layer (`mgmt::auth`) decides it.
     let destructive = match classify(method, path, query) {
         Class::Public => return Ok(()),
-        Class::Ordinary => false,
+        Class::Ordinary | Class::Attestation(_) => false,
         Class::Destructive | Class::VolumeDelete(_) => true,
     };
     // Audit mode: the api token covers a destructive verb too, for now.

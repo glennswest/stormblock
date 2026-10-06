@@ -55,7 +55,9 @@ pub struct KubeAuth {
     api_url: String,
     token_file: Option<String>,
     client: crate::http::Client,
-    cache: Mutex<HashMap<(String, String, String), (Instant, Review)>>,
+    /// Keyed by the bearer's digest, resource, verb and name: a review is for
+    /// one name when the role names resources (#216).
+    cache: Mutex<HashMap<(String, String, String, Option<String>), (Instant, Review)>>,
 }
 
 fn non_empty(v: Option<String>) -> Option<String> {
@@ -125,7 +127,7 @@ impl KubeAuth {
     /// May `bearer` `verb` the `storage.storm.io` resource `resource` (named
     /// `name`, when there is one)?
     pub async fn review(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>) -> Review {
-        let key = (digest(bearer), resource.to_string(), verb.to_string());
+        let key = (digest(bearer), resource.to_string(), verb.to_string(), name.map(str::to_string));
         if let Some((at, r)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             if at.elapsed() < CACHE_TTL && !matches!(r, Review::Unavailable(_)) {
                 return r.clone();

@@ -108,7 +108,7 @@ fn releases_path(state: &AppState) -> Option<PathBuf> {
         .map(|d| PathBuf::from(d).join("releases.json"))
 }
 
-async fn load(state: &AppState) -> Vec<Release> {
+pub(crate) async fn load(state: &AppState) -> Vec<Release> {
     let Some(path) = releases_path(state) else { return Vec::new() };
     let Ok(bytes) = std::fs::read(&path) else { return Vec::new() };
     match serde_json::from_slice(&bytes) {

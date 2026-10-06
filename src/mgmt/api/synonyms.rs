@@ -1140,6 +1140,30 @@ async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str
         bind_aliases.push(claimed_as.to_string());
     }
     let attach = attach_info(&state, c.volume_id, AttachFor::Boothost { name: tag, aliases: bind_aliases }).await;
+    // What stormcert's boot-chain attestation reads (#216): written here, by
+    // the engine, from what it served; nothing in it comes from the caller
+    // but the name it claimed as.
+    let host_nqns: Vec<String> = attach
+        .get("host_nqns")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    state.synonyms.write().await.note_claim(
+        tag,
+        synonym::ClaimRecord {
+            clone: c.volume_id,
+            clone_name: clone_name.clone(),
+            claimed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            claimed_as: claimed_as.to_string(),
+            host_nqns,
+            host_golden: golden,
+            golden: release,
+            assignment_version: assignment.version,
+        },
+    );
     let out = json!({
         "intent": intent.as_str(),
         // Who this is, and what the machine called itself: a serial or a MAC

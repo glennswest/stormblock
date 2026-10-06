@@ -1391,3 +1391,108 @@ async fn a_boot_intent_is_read_open_set_by_the_admin_and_install_is_one_shot() {
     assert_eq!(r.status(), 404);
     server.abort();
 }
+
+// ------------------------------------------------------------------ #216
+//
+// Boot-chain attestation for stormcert: the claim the engine last served a
+// machine, checked link by link, and the machine's TPM mark beside it.
+
+#[tokio::test]
+async fn an_attestation_states_the_boot_chain_the_engine_served() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "server1", "volume": v1.to_string(), "label": "11.90"}))
+        .send().await.unwrap();
+    let r = client
+        .post(format!("{base}/api/v1/releases"))
+        .json(&serde_json::json!({"version": "11.90", "volume": v1.to_string(), "digest": "sha256:abc"}))
+        .send().await.unwrap();
+    assert!(r.status().is_success(), "publish: {}", r.status());
+    let r = client
+        .put(format!("{base}/api/v1/boothost/server1"))
+        .json(&serde_json::json!({"aliases": ["C2NR0Q2"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let attest = |name: &'static str| {
+        let c = client.clone();
+        let b = base.clone();
+        async move {
+            let r = c.get(format!("{b}/api/v1/boothost/{name}/attestation")).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+
+    // Known, never claimed: unset mark, nothing to attest.
+    let (s, v) = attest("server1").await;
+    assert_eq!((s, v["claimed"].as_bool(), v["tpm"].as_str(), v["requires"].as_str()), (200, Some(false), Some("unset"), Some("boot_chain")));
+
+    boot_claim(&client, &base, "C2NR0Q2").await;
+    let claim = boot_claim(&client, &base, "server1").await;
+    let (s, v) = attest("server1").await;
+    assert_eq!(s, 200);
+    assert_eq!(v["chain"], "intact", "{v}");
+    assert_eq!(v["clone"]["id"], claim["volume"]["id"], "the latest claim");
+    assert_eq!(v["clone"]["claimed_as"], "server1");
+    assert_eq!(v["host_golden"]["id"], claim["host_golden"]["volume"]);
+    assert_eq!(v["host_golden"]["sealed"], true);
+    assert_eq!(v["golden"]["id"], v1.to_string());
+    assert_eq!(v["golden"]["sealed"], true);
+    assert_eq!(v["golden"]["synonym"], "boothost/server1");
+    assert_eq!(v["golden"]["label"], "11.90");
+    assert_eq!(v["golden"]["assigned_now"], true);
+    assert_eq!(v["golden"]["digest"], "sha256:abc");
+    assert_eq!(v["golden"]["release"]["version"], "11.90");
+    // No NVMe/TCP listener on this node: nothing was bound, and it says so.
+    assert_eq!(v["host_nqns"], serde_json::json!([]));
+
+    // By name only: an alias is not the node a certificate names.
+    let (s, v) = attest("C2NR0Q2").await;
+    assert_eq!(s, 404);
+    assert!(v["error"].as_str().unwrap().contains("alias of host server1"), "{v}");
+    assert_eq!(attest("nobody").await.0, 404);
+
+    // The mark: set, shown, kept in synonyms.json; an alias cannot be marked.
+    let r = client.put(format!("{base}/api/v1/boothost/server1/tpm")).json(&serde_json::json!({"tpm": "required"})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = client.put(format!("{base}/api/v1/boothost/server1/tpm")).json(&serde_json::json!({"tpm": "maybe"})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = client.put(format!("{base}/api/v1/boothost/C2NR0Q2/tpm")).json(&serde_json::json!({"tpm": "none"})).send().await.unwrap();
+    assert_eq!(r.status(), 409);
+    let (_, v) = attest("server1").await;
+    assert_eq!((v["tpm"].as_str(), v["requires"].as_str()), (Some("required"), Some("tpm_quote")));
+    let kept = std::fs::read_to_string(dir.path().join("synonyms.json")).unwrap();
+    assert!(kept.contains("\"tpm\": \"required\""), "persisted");
+    // A machine may be marked before it is ever seen.
+    let r = client.put(format!("{base}/api/v1/boothost/server9/tpm")).json(&serde_json::json!({"tpm": "none"})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(attest("server9").await.1["tpm"], "none");
+    let r = client.delete(format!("{base}/api/v1/boothost/server1/tpm")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(attest("server1").await.1["tpm"], "unset");
+
+    // A claim never touches the mark.
+    client.put(format!("{base}/api/v1/boothost/server1/tpm")).json(&serde_json::json!({"tpm": "required"})).send().await.unwrap();
+    boot_claim(&client, &base, "server1").await;
+    assert_eq!(attest("server1").await.1["tpm"], "required");
+
+    // The clone gone: the chain says so rather than vouching for it.
+    let (_, v) = attest("server1").await;
+    let clone = vid(&v["clone"]["id"]);
+    state.volume_manager.lock().await.delete_volume(clone).await.unwrap();
+    let (_, v) = attest("server1").await;
+    assert_eq!(v["chain"], "broken");
+    assert_eq!(v["clone"]["present"], false);
+    assert!(v["problems"][0].as_str().unwrap().contains("is gone"), "{v}");
+
+    // The host view carries the mark and the last claim.
+    let h: serde_json::Value = client.get(format!("{base}/api/v1/boothost/server1")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["tpm"], "required");
+    assert_eq!(h["last_claim"]["clone"], clone.0.to_string());
+    server.abort();
+}

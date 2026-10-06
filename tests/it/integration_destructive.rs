@@ -32,6 +32,7 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                     let user = match b["spec"]["token"].as_str() {
                         Some("alice-k8s") => Some(("alice", vec!["storage-admins", "system:authenticated"])),
                         Some("bob-k8s") => Some(("bob", vec!["system:authenticated"])),
+                        Some("stormcert-k8s") => Some(("system:serviceaccount:stormcert:stormcert", vec!["system:serviceaccounts"])),
                         _ => None,
                     };
                     Json(match user {
@@ -48,8 +49,14 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                 async move {
                     a.lock().unwrap().push(b.clone());
                     let spec = &b["spec"];
-                    let ok = spec["groups"].as_array().is_some_and(|g| g.iter().any(|x| x == "storage-admins"))
-                        && spec["resourceAttributes"]["group"] == "storage.storm.io";
+                    let ra = &spec["resourceAttributes"];
+                    // stormcert: get boothost, resourceNames [server1] only (#216).
+                    let stormcert = spec["user"] == "system:serviceaccount:stormcert:stormcert"
+                        && ra["resource"] == "boothost"
+                        && ra["verb"] == "get"
+                        && ra["name"] == "server1";
+                    let ok = (spec["groups"].as_array().is_some_and(|g| g.iter().any(|x| x == "storage-admins")) || stormcert)
+                        && ra["group"] == "storage.storm.io";
                     Json(json!({ "status": { "allowed": ok, "reason": if ok { "storage-admin" } else { "no RBAC policy matched" } } }))
                 }
             }),
@@ -201,15 +208,54 @@ async fn a_kubernetes_bearer_is_reviewed_and_named_in_the_audit_log() {
     assert!(log.iter().any(|r| r["who"] == "kubernetes:bob" && r["decision"] == "refused"));
     assert!(log.iter().any(|r| r["who"] == "kubernetes:alice" && r["decision"] == "allowed" && r["status"] == 204));
 
-    // Asked again within the minute: answered from the cache.
-    let before = asked.lock().unwrap().len();
+    // Asked again within the minute, of the same volume: answered from the
+    // cache. A review is of one name (#216), so g2 is asked once.
     assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g2}"), Some("alice-k8s"), None).await, 204);
+    let before = asked.lock().unwrap().len();
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g2}"), Some("alice-k8s"), None).await, 404);
     assert_eq!(asked.lock().unwrap().len(), before, "the review was cached");
 
     // No apiserver named: a bearer that is not the admin token is refused.
     let m = node(false, None).await;
     let g3 = volume(&m, "g3", true).await;
     assert_eq!(call(&m, M::DELETE, &format!("/volumes/{g3}"), Some("alice-k8s"), None).await, 401);
+}
+
+/// stormcert reads a machine's attestation with its own ServiceAccount: a
+/// bearer a SubjectAccessReview allows `get` on `boothost` of that machine,
+/// and nothing else (#216). The TPM mark is the admin's.
+#[tokio::test]
+async fn stormcert_reads_an_attestation_with_its_own_bearer_and_only_that() {
+    use reqwest::Method as M;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let n = node(false, Some(api)).await;
+
+    // The mark: not the node token (it would let a node downgrade itself).
+    let tpm = json!({"tpm": "required"});
+    assert_eq!(call(&n, M::PUT, "/boothost/server1/tpm", Some(NODE), Some(tpm.clone())).await, 401);
+    assert_eq!(call(&n, M::PUT, "/boothost/server1/tpm", Some("stormcert-k8s"), Some(tpm.clone())).await, 403);
+    assert_eq!(call(&n, M::PUT, "/boothost/server1/tpm", Some(ADMIN), Some(tpm.clone())).await, 200);
+    assert_eq!(call(&n, M::PUT, "/boothost/server2/tpm", Some("alice-k8s"), Some(json!({"tpm": "none"}))).await, 200);
+    assert_eq!(call(&n, M::DELETE, "/boothost/server2/tpm", Some(NODE), None).await, 401);
+    assert!(audit(&n).iter().any(|r| r["path"] == "/api/v1/boothost/server1/tpm" && r["who"] == "admin-token"));
+
+    // The read: stormcert's bearer for server1, not server2, and nothing else.
+    assert_eq!(call(&n, M::GET, "/boothost/server1/attestation", Some("stormcert-k8s"), None).await, 200);
+    assert_eq!(call(&n, M::GET, "/boothost/server2/attestation", Some("stormcert-k8s"), None).await, 403);
+    assert_eq!(call(&n, M::GET, "/boothost/server1", Some("stormcert-k8s"), None).await, 401);
+    assert_eq!(call(&n, M::GET, "/boothost/server1/attestation", Some("nobody"), None).await, 401);
+    assert_eq!(call(&n, M::GET, "/boothost/server1/attestation", None, None).await, 401);
+    assert_eq!(call(&n, M::GET, "/boothost/server2/attestation", Some(NODE), None).await, 200);
+    let sar: Vec<Value> = asked.lock().unwrap().iter().filter(|b| b["kind"] == "SubjectAccessReview").cloned().collect();
+    let attrs = &sar.last().unwrap()["spec"]["resourceAttributes"];
+    assert_eq!((attrs["resource"].as_str(), attrs["verb"].as_str(), attrs["name"].as_str()), (Some("boothost"), Some("get"), Some("server2")));
+
+    let v: Value = reqwest::Client::new()
+        .get(format!("{}/boothost/server1/attestation", n.base))
+        .bearer_auth("stormcert-k8s")
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!((v["tpm"].as_str(), v["requires"].as_str(), v["claimed"].as_bool()), (Some("required"), Some("tpm_quote"), Some(false)));
 }
 
 /// An admin token is minted into its own file when none is configured, 0600,
