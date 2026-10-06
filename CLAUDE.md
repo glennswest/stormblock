@@ -292,7 +292,7 @@ off above `FATAL: root device /dev/ublkb0 not found`.
 - Not on metal: needs a stormcos release with this initramfs; then server8
   installing over its older disk (a named boothost answering late)
 
-### Metadata format v2: paged index, u64, log, extent classes (2026-10-05, #158 + #157 + #156, P1) — IN PROGRESS
+### Metadata format v2: paged index, u64, log, extent classes (2026-10-05, #158 + #157 + #156, P1) — IN PROGRESS (stage E: the scale run)
 
 The one format change (owner: #158 2026-10-01, #157 B, #156 1 MiB hot /
 8 MiB bulk). Design and stages: `docs/metadata-v2.md`. Written behind a gate:
@@ -346,7 +346,12 @@ the engine writes v1 until stage E.
       v2 store in the region's first half, header last; a cut test), at the
       first persist once 2 is the default (owner/master on #158: "old slabs
       migrate on first open"), `slab upgrade`, `POST /slabs/{id}/upgrade`
-      (destructive). Left: the default flip, 1 PiB runs — after D
+      (destructive). Default flipped to 2 (44fc8e3; #301 was its fallout,
+      fixed). Left (2026-10-06): the scale run on emulated 1 PiB and 256 TiB
+      drives with v2 metadata slabs (`integration_metadata_v2::a_v2_node_on_
+      petabyte_drives…`: extent indexes past 2^32, a mirror across both, a
+      v1 slab migrated at first persist, maps evicted, restart from the
+      disks alone), then close #158, #157, #156
 
 ### Resident compaction (2026-10-05, #155, P1) — DONE
 
