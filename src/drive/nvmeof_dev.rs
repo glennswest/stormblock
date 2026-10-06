@@ -621,6 +621,55 @@ impl NvmeofDevice {
         Ok(guard)
     }
 
+    fn is_aligned(&self, offset: u64, len: usize) -> bool {
+        let bs = self.block_size as u64;
+        offset % bs == 0 && len as u64 % bs == 0
+    }
+
+    /// The whole blocks that cover `[offset, offset + len)`.
+    fn cover(&self, offset: u64, len: usize) -> DriveResult<(u64, u64)> {
+        let bs = self.block_size as u64;
+        let end = offset + len as u64;
+        if end > self.capacity {
+            return Err(DriveError::OutOfRange { offset, len: len as u64, capacity: self.capacity });
+        }
+        Ok((offset / bs * bs, end.div_ceil(bs) * bs))
+    }
+
+    /// Drop the connection after an error, so the next call reconnects.
+    fn failed(guard: &mut tokio::sync::MutexGuard<'_, Option<Conn>>, e: io::Error) -> DriveError {
+        **guard = None;
+        DriveError::Io(e)
+    }
+
+    /// Whole blocks, in chunks the target takes.
+    async fn read_blocks(&self, conn: &mut Conn, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let bs = self.block_size as u64;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let chunk = (buf.len() - done).min(MAX_CHUNK);
+            let slba = (offset + done as u64) / bs;
+            let nlb = (chunk as u64 / bs) as u16;
+            let data = conn.io_read(self.spec.nsid, slba, nlb, chunk).await?;
+            buf[done..done + chunk].copy_from_slice(&data);
+            done += chunk;
+        }
+        Ok(done)
+    }
+
+    async fn write_blocks(&self, conn: &mut Conn, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        let bs = self.block_size as u64;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let chunk = (buf.len() - done).min(MAX_CHUNK);
+            let slba = (offset + done as u64) / bs;
+            let nlb = (chunk as u64 / bs) as u16;
+            conn.io_write(self.spec.nsid, slba, nlb, &buf[done..done + chunk]).await?;
+            done += chunk;
+        }
+        Ok(done)
+    }
+
     fn check_aligned(&self, offset: u64, len: usize) -> DriveResult<()> {
         let bs = self.block_size as u64;
         if offset % bs != 0 || len as u64 % bs != 0 {
@@ -663,46 +712,56 @@ impl BlockDevice for NvmeofDevice {
     }
 
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
-        self.check_aligned(offset, buf.len())?;
-        let bs = self.block_size as u64;
-        let nsid = self.spec.nsid;
-        let mut done = 0usize;
-        while done < buf.len() {
-            let chunk = (buf.len() - done).min(MAX_CHUNK);
-            let slba = (offset + done as u64) / bs;
-            let nlb = (chunk as u64 / bs) as u16;
+        if self.is_aligned(offset, buf.len()) {
+            self.check_aligned(offset, buf.len())?;
             let mut guard = self.lock_conn().await?;
             let conn = guard.as_mut().expect("lock_conn established");
-            match conn.io_read(nsid, slba, nlb, chunk).await {
-                Ok(data) => buf[done..done + chunk].copy_from_slice(&data),
-                Err(e) => {
-                    *guard = None;
-                    return Err(DriveError::Io(e));
-                }
-            }
-            done += chunk;
+            return match self.read_blocks(conn, offset, buf).await {
+                Ok(n) => Ok(n),
+                Err(e) => Err(Self::failed(&mut guard, e)),
+            };
         }
-        Ok(done)
+        // Not whole blocks (#301): read the blocks that cover it and copy
+        // out, as the O_DIRECT device does. The slot table is read in
+        // entries of 64 bytes, and a namespace's blocks are 4096.
+        let (start, end) = self.cover(offset, buf.len())?;
+        let mut span = vec![0u8; (end - start) as usize];
+        let mut guard = self.lock_conn().await?;
+        let conn = guard.as_mut().expect("lock_conn established");
+        if let Err(e) = self.read_blocks(conn, start, &mut span).await {
+            return Err(Self::failed(&mut guard, e));
+        }
+        let at = (offset - start) as usize;
+        buf.copy_from_slice(&span[at..at + buf.len()]);
+        Ok(buf.len())
     }
 
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
-        self.check_aligned(offset, buf.len())?;
-        let bs = self.block_size as u64;
-        let nsid = self.spec.nsid;
-        let mut done = 0usize;
-        while done < buf.len() {
-            let chunk = (buf.len() - done).min(MAX_CHUNK);
-            let slba = (offset + done as u64) / bs;
-            let nlb = (chunk as u64 / bs) as u16;
+        if self.is_aligned(offset, buf.len()) {
+            self.check_aligned(offset, buf.len())?;
             let mut guard = self.lock_conn().await?;
             let conn = guard.as_mut().expect("lock_conn established");
-            if let Err(e) = conn.io_write(nsid, slba, nlb, &buf[done..done + chunk]).await {
-                *guard = None;
-                return Err(DriveError::Io(e));
-            }
-            done += chunk;
+            return match self.write_blocks(conn, offset, buf).await {
+                Ok(n) => Ok(n),
+                Err(e) => Err(Self::failed(&mut guard, e)),
+            };
         }
-        Ok(done)
+        // Read-modify-write the covering blocks under one hold of the
+        // connection, so no other write of this device lands in between.
+        let (start, end) = self.cover(offset, buf.len())?;
+        let mut span = vec![0u8; (end - start) as usize];
+        let mut guard = self.lock_conn().await?;
+        let conn = guard.as_mut().expect("lock_conn established");
+        if let Err(e) = self.read_blocks(conn, start, &mut span).await {
+            return Err(Self::failed(&mut guard, e));
+        }
+        let at = (offset - start) as usize;
+        span[at..at + buf.len()].copy_from_slice(buf);
+        let conn = guard.as_mut().expect("lock_conn established");
+        if let Err(e) = self.write_blocks(conn, start, &span).await {
+            return Err(Self::failed(&mut guard, e));
+        }
+        Ok(buf.len())
     }
 
     async fn flush(&self) -> DriveResult<()> {

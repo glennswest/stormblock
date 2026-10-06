@@ -168,9 +168,54 @@ async fn nvme_tcp_uri_attaches_as_block_device() {
     // Discard is accepted (thin target reclaims).
     dev.discard(0, (bs * 8) as u64).await.unwrap();
 
-    // Alignment is enforced.
-    let mut small = vec![0u8; bs];
-    assert!(dev.read(1, &mut small).await.is_err(), "unaligned offset must fail");
+    // Not whole blocks (#301): read and read-modify-written byte-exact.
+    let mut small = vec![0u8; 100];
+    dev.read(1, &mut small).await.unwrap();
+    assert_eq!(&small[..], &big[1..101]);
+    dev.write(bs as u64 - 3, &[0xC3; 7]).await.unwrap();
+    let mut around = vec![0u8; 13];
+    dev.read(bs as u64 - 6, &mut around).await.unwrap();
+    let mut want = big[bs - 6..bs + 7].to_vec();
+    want[3..10].copy_from_slice(&[0xC3; 7]);
+    assert_eq!(around, want, "only the bytes asked for changed");
+    // Past the end is still refused.
+    let mut past = vec![0u8; 10];
+    assert!(dev.read(dev.capacity_bytes() - 5, &mut past).await.is_err());
 
     server.abort();
+}
+
+/// #301: a slab on an NVMe/TCP namespace opens, whatever its slot count.
+/// The slot table is `total_slots × 64` bytes, which is rarely whole 4 KiB
+/// blocks; #155's table scan read exactly that, the initiator refused it, and
+/// no release whose slabs forge composed could boot ("bad slab magic", the
+/// partition's real error swallowed by the scan of the disk's partitions).
+#[tokio::test]
+async fn a_slab_on_an_nvme_tcp_namespace_opens_in_either_format() {
+    use stormblock::drive::slab::{Slab, SlabFormat, SLAB_VERSION, SLAB_VERSION_2};
+    use stormblock::placement::topology::StorageTier;
+    for version in [SLAB_VERSION, SLAB_VERSION_2] {
+        let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
+        let id = {
+            let fmt = SlabFormat::new(1024 * 1024, StorageTier::Hot)
+                .with_version(version)
+                .with_auto_metadata(vol.capacity_bytes());
+            let mut slab = Slab::format_with(vol.clone(), fmt).await.unwrap();
+            assert_ne!((slab.total_slots() * 64) % 4096, 0, "a table that is not whole blocks");
+            let v = stormblock::volume::VolumeId(uuid::Uuid::new_v4());
+            slab.allocate(v, 0).await.unwrap();
+            slab.allocate(v, 1).await.unwrap();
+            slab.sync().await.unwrap();
+            slab.slab_id()
+        };
+        let (addr, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+        let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
+        let dev = open_one_drive(&uri).await.expect("URI attach");
+        assert_eq!(dev.block_size(), 4096);
+        let slab = Slab::open(dev).await.unwrap_or_else(|e| panic!("v{version} slab over NVMe/TCP: {e}"));
+        assert_eq!(slab.slab_id(), id);
+        assert_eq!(slab.format_version(), version);
+        assert_eq!(slab.total_slots() - slab.free_slots(), 2, "both allocations read back");
+        server.abort();
+    }
 }
