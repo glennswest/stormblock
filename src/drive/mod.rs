@@ -15,6 +15,7 @@ pub mod freemap;
 pub mod flushgate;
 pub mod identity;
 pub mod handover;
+pub mod httpdev;
 pub mod partition;
 pub mod discover;
 // The initiators reuse the *target's* PDU parsers rather than carrying a

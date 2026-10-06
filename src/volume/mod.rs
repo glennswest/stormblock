@@ -70,6 +70,10 @@ pub struct CreateOptions {
     /// [`BULK_EXTENT`] for a volume of [`BULK_FROM`] or more where the node
     /// has a pool of that size in the role, else the node's default.
     pub extent_size: Option<u64>,
+    /// The volume's id, when it must be a given one: a release's golden
+    /// staged on a node keeps the id the release gave it, which is what
+    /// `slab holds` compares (#122). `None`: a fresh id.
+    pub id: Option<VolumeId>,
 }
 
 /// The bulk extent size (#156, owner 2026-10-05: 8 MiB rather than 64).
@@ -639,6 +643,24 @@ impl VolumeManager {
         tracing::info!("Registered array {array_id} as slab {}", slab_id.0);
     }
 
+    /// Give a volume another name (#122: a staged release's `<name>@<v>`
+    /// becomes `<name>`, and the one it replaces `<name>@<N>`). Refused when
+    /// another volume has the name. The device, its exports and attachments
+    /// are by id and are not touched; the next boot resolves the new name.
+    pub async fn rename_volume(&mut self, id: VolumeId, name: &str) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        if name.is_empty() {
+            return Err(VolumeError::AllocatorError("a volume needs a name".into()));
+        }
+        for (other, h) in &self.volumes {
+            if *other != id && h.name().await == name {
+                return Err(VolumeError::AllocatorError(format!("volume {other} is already called {name}")));
+            }
+        }
+        handle.lock().await.name = name.to_string();
+        Ok(())
+    }
+
     /// Register a pre-formatted slab directly.
     pub async fn add_slab(&mut self, slab: Slab) {
         let id = slab.slab_id();
@@ -932,7 +954,13 @@ impl VolumeManager {
             }
         }
         let placement = PlacementPolicy { role, ..opts.placement };
-        let vol = ThinVolume::new(name.to_string(), virtual_size, extent_size);
+        let vol = match opts.id {
+            Some(id) if self.volumes.contains_key(&id) => {
+                return Err(VolumeError::AllocatorError(format!("volume {id} already exists")));
+            }
+            Some(id) => ThinVolume::restore(id, name.to_string(), virtual_size, extent_size),
+            None => ThinVolume::new(name.to_string(), virtual_size, extent_size),
+        };
         let id = vol.id();
         let parity = opts.redundancy.scheme.is_parity();
         let handle = Arc::new(ThinVolumeHandle::with_redundancy(
@@ -1728,6 +1756,7 @@ impl VolumeManager {
             placement: PlacementPolicy::default(),
             role: Some(role),
             extent_size: Some(source.extent_size()),
+            id: None,
         };
         let dest_id = self.create_volume_with(name, virtual_size, opts).await?;
         let dest = self

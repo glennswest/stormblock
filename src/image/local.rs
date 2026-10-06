@@ -384,7 +384,11 @@ pub async fn release_held(local: &Arc<dyn BlockDevice>, image: &Arc<dyn BlockDev
     let Some((local_vols, here)) = recorded_volumes_and_slabs(local).await else {
         return ReleaseHeld::CannotSay("the local drive keeps no volume records".into());
     };
-    let have: std::collections::HashSet<uuid::Uuid> = local_vols.iter().map(|v| v.id.0).collect();
+    // Sealed here too: a golden a stage is still copying in (#122) has the
+    // release's id and is sealed only once it is whole, so a stage cut short
+    // never reads as holding the release.
+    let have: std::collections::HashSet<uuid::Uuid> =
+        local_vols.iter().filter(|v| v.sealed).map(|v| v.id.0).collect();
     let missing = goldens.iter().filter(|id| !have.contains(id)).count();
     if missing > 0 {
         return ReleaseHeld::NotHeld { goldens: goldens.len(), missing };

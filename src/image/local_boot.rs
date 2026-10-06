@@ -111,6 +111,17 @@ fn describe(p: &PalletLocation) -> String {
     }
 }
 
+/// Where the sources' boot pallets go on the local ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootRank {
+    /// On top, and the ESP laid from the sources: what the disk boots next.
+    Top,
+    /// Just below the pallet the disk boots now, and the ESP left as it is:
+    /// a release staged on a running node (#122), raised by
+    /// [`raise_local_boot`] when it is activated.
+    BelowActive,
+}
+
 /// Lay the ESP and the boot pallets of `sources` onto `disk`, a drive that
 /// already carries a node layout with a boot area.
 ///
@@ -122,13 +133,23 @@ pub async fn lay_local_boot(
     disk: Arc<dyn BlockDevice>,
     sources: Vec<(String, Arc<dyn BlockDevice>)>,
 ) -> Result<LocalBootReport> {
+    lay_local_boot_ranked(disk_path, disk, sources, BootRank::Top).await
+}
+
+/// [`lay_local_boot`], with the sources' pallets placed at `rank`.
+pub async fn lay_local_boot_ranked(
+    disk_path: &str,
+    disk: Arc<dyn BlockDevice>,
+    sources: Vec<(String, Arc<dyn BlockDevice>)>,
+    rank: BootRank,
+) -> Result<LocalBootReport> {
     if node_layout(&disk).await?.is_none() {
         return Err(ImageError::Spec(format!("{disk_path} does not carry a node layout")));
     }
 
     // 1. The source's ESP, and room for ours. The room is taken first so the
     //    ESP is the first thing in the boot area, ahead of the pallets.
-    let src_esp = find_esp(&sources).await;
+    let src_esp = if rank == BootRank::Top { find_esp(&sources).await } else { None };
     let mut esp_index = None;
     if let Some((_, _, len)) = &src_esp {
         esp_index = Some(reserve_esp(&disk, *len).await?);
@@ -149,6 +170,19 @@ pub async fn lay_local_boot(
         store.add_drive(path.clone(), dev.clone());
     }
     let mgr = PalletManager::new(store);
+    // The pallet the disk boots now, before anything is copied: what a
+    // staged release goes below.
+    let active: Option<[u8; 32]> = match rank {
+        BootRank::Top => None,
+        BootRank::BelowActive => {
+            let mut local = boot_pallets(&mgr, |d| d == 0).await;
+            local.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
+            match local.first() {
+                Some(p) => Some(digest(&mgr, p).await?),
+                None => None,
+            }
+        }
+    };
 
     let mut wanted: Vec<PalletLocation> = boot_pallets(&mgr, |d| d != 0).await;
     wanted.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
@@ -176,7 +210,9 @@ pub async fn lay_local_boot(
                     // Make room by dropping the lowest-ranked local pallet the
                     // sources do not carry — never one they do, and never the
                     // last one standing.
-                    match evictable(&mgr, &wanted_digests).await? {
+                    // Never the pallet the disk boots now, either.
+                    let protect: Vec<[u8; 32]> = wanted_digests.iter().copied().chain(active).collect();
+                    match evictable(&mgr, &protect).await? {
                         Some(victim) => {
                             remove(&disk, &victim).await?;
                             report.removed.push(describe(&victim));
@@ -198,22 +234,48 @@ pub async fn lay_local_boot(
         }
     }
 
-    // 3. The ladder: the sources' pallets on top in their own order, then
-    //    whatever the disk already carried, then nothing past LOCAL_KEEP.
-    let mut local = boot_pallets(&mgr, |d| d == 0).await;
+    // 3. The ladder: the sources' pallets on top in their own order (or,
+    //    staged, just below the active one), then whatever the disk already
+    //    carried, then nothing past LOCAL_KEEP.
+    let mut order: Vec<[u8; 32]> = Vec::new();
+    order.extend(active);
+    order.extend(wanted_digests.iter().copied().filter(|d| Some(*d) != active));
+    let (ladder, removed) = rerank(&disk, &mgr, &order).await?;
+    report.ladder = ladder;
+    report.removed.extend(removed);
+
+    // 4. The ESP last, so the disk becomes bootable only once there is
+    //    something on it to boot.
+    if let (Some((src_dev, start, len)), Some(i)) = (src_esp, esp_index) {
+        report.esp = fill_esp(&disk, i, src_dev, start, len).await?;
+    }
+    Ok(report)
+}
+
+/// Order the disk's boot pallets: those in `first` (by manifest digest) on
+/// top in that order, then the rest by their own order, removing past
+/// [`LOCAL_KEEP`] any that `first` does not name. Returns the ladder and what
+/// was removed.
+async fn rerank(
+    disk: &Arc<dyn BlockDevice>,
+    mgr: &PalletManager,
+    first: &[[u8; 32]],
+) -> Result<(Vec<(String, u64, u8)>, Vec<String>)> {
+    let mut local = boot_pallets(mgr, |d| d == 0).await;
     let mut ranked: Vec<(usize, PalletLocation)> = Vec::new();
     for p in local.drain(..) {
-        let d = digest(&mgr, &p).await?;
-        let rank = wanted_digests.iter().position(|w| *w == d).unwrap_or(usize::MAX);
+        let d = digest(mgr, &p).await?;
+        let rank = first.iter().position(|w| *w == d).unwrap_or(usize::MAX);
         ranked.push((rank, p));
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.order_key().cmp(&a.1.order_key())));
-    let mut gpt = Gpt::read(&disk).await?;
+    let mut gpt = Gpt::read(disk).await?;
     let mut keep = Vec::new();
+    let mut removed = Vec::new();
     for (i, (rank, p)) in ranked.iter().enumerate() {
         if i >= LOCAL_KEEP && *rank == usize::MAX {
             gpt.remove(p.entry_index)?;
-            report.removed.push(describe(p));
+            removed.push(describe(p));
             continue;
         }
         let mut a = p.attributes;
@@ -224,15 +286,49 @@ pub async fn lay_local_boot(
         gpt.entries[p.entry_index].attributes = a.to_u64();
         keep.push((p.name.clone(), p.version, a.priority));
     }
-    gpt.write(&disk).await?;
-    report.ladder = keep;
+    gpt.write(disk).await?;
+    Ok((keep, removed))
+}
 
-    // 4. The ESP last, so the disk becomes bootable only once there is
-    //    something on it to boot.
-    if let (Some((src_dev, start, len)), Some(i)) = (src_esp, esp_index) {
-        report.esp = fill_esp(&disk, i, src_dev, start, len).await?;
+/// The disk's boot pallets, top first: `(manifest digest, name, version,
+/// priority)`.
+pub async fn local_boot_ladder(
+    disk_path: &str,
+    disk: Arc<dyn BlockDevice>,
+) -> Result<Vec<([u8; 32], String, u64, u8)>> {
+    let mut store = PalletStore::new(Vec::new());
+    store.add_drive(disk_path, disk);
+    let mgr = PalletManager::new(store);
+    let mut local = boot_pallets(&mgr, |d| d == 0).await;
+    local.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
+    let mut out = Vec::new();
+    for p in local {
+        out.push((digest(&mgr, &p).await?, p.name.clone(), p.version, p.attributes.priority));
     }
-    Ok(report)
+    Ok(out)
+}
+
+/// Put the boot pallet whose manifest digest is `top` on top of the disk's
+/// ladder (#122: a staged release activated, or the kept one rolled back
+/// to). An error when the disk has no such pallet.
+pub async fn raise_local_boot(
+    disk_path: &str,
+    disk: Arc<dyn BlockDevice>,
+    top: [u8; 32],
+) -> Result<Vec<(String, u64, u8)>> {
+    let mut store = PalletStore::new(Vec::new());
+    store.add_drive(disk_path, disk.clone());
+    let mgr = PalletManager::new(store);
+    let mut found = false;
+    for p in boot_pallets(&mgr, |d| d == 0).await {
+        if digest(&mgr, &p).await? == top {
+            found = true;
+        }
+    }
+    if !found {
+        return Err(ImageError::Spec(format!("{disk_path} has no boot pallet with that manifest digest")));
+    }
+    Ok(rerank(&disk, &mgr, &[top]).await?.0)
 }
 
 /// The first ESP among the sources: `(device, start, len)` in bytes.
