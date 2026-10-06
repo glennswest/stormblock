@@ -28,6 +28,8 @@ use crate::mgmt::config::human_size;
 use crate::mgmt::AppState;
 use crate::volume::VolumeId;
 
+pub use super::release_stage::StageJob;
+
 /// How much is read from the volume per chunk while streaming a download.
 const CHUNK: u64 = 4 * 1024 * 1024;
 
@@ -982,6 +984,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{version}/notes", get(notes))
         .route("/{version}/changes", get(changes))
         .route("/{version}/image.img", get(download))
+        // Staging the next release on this node (#122).
+        .route("/generations", get(super::release_stage::get_generations))
+        .route("/rollback", axum::routing::post(super::release_stage::post_rollback))
+        .route(
+            "/{version}/stage",
+            get(super::release_stage::get_stage)
+                .post(super::release_stage::post_stage)
+                .delete(super::release_stage::delete_stage),
+        )
+        .route("/{version}/activate", axum::routing::post(super::release_stage::post_activate))
         .with_state(state)
 }
 

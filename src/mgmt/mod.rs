@@ -305,6 +305,12 @@ pub struct AppState {
     /// runs no flow-over; 0 once it has finished. An atomic so the open probe
     /// never waits on the extent map the flow-over is holding.
     pub flow_over_remaining: Arc<std::sync::atomic::AtomicI64>,
+    /// The paths this engine opened its slabs from (`--slab`, or the
+    /// handover record's): where a staged release's boot pallet goes is the
+    /// one among them that carries a node layout (#122).
+    pub slab_paths: tokio::sync::RwLock<Vec<String>>,
+    /// The release being staged on this node, if any (#122).
+    pub stage_job: tokio::sync::Mutex<Option<crate::mgmt::api::releases::StageJob>>,
     /// Drives being emptied so they can be pulled (#70 item 3).
     pub drains: tokio::sync::RwLock<crate::drain::Drains>,
     /// Per-volume rebuilds after a drive fails (#146).
@@ -431,6 +437,8 @@ impl AppState {
             arrays: tokio::sync::RwLock::new(HashMap::new()),
             spares: crate::raid::spares::SparePool::new(),
             flow_over_remaining: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
+            slab_paths: Default::default(),
+            stage_job: Default::default(),
             volume_manager,
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,

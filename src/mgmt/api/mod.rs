@@ -21,6 +21,7 @@ pub mod kube;
 pub mod moves;
 pub mod synonyms;
 pub mod boothost;
+pub mod release_stage;
 pub mod releases;
 #[cfg(feature = "nvmeof")]
 pub mod forge;

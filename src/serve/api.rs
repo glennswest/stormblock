@@ -328,6 +328,15 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
         return true;
     }
+    // Staging, activating or rolling back a release on this node (#122): it
+    // rewrites what the node boots.
+    if seg.len() >= 4 && seg[3] == "releases" {
+        let stage = seg.len() == 6 && matches!(seg[5], "stage" | "activate") && *method != Method::GET;
+        let rollback = seg.len() == 5 && seg[4] == "rollback" && *method == Method::POST;
+        if stage || rollback {
+            return true;
+        }
+    }
     // A machine's TPM mark (#216): `none` downgrades its attestation.
     if matches!(*method, Method::PUT | Method::DELETE) && seg.len() == 6 && seg[3] == "boothost" && seg[5] == "tpm" {
         return true;

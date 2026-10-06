@@ -27,6 +27,7 @@
 pub mod build;
 pub mod local;
 pub mod local_boot;
+pub mod stage;
 pub mod decode;
 pub mod import;
 pub mod fat;

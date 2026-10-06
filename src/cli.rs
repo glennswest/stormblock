@@ -5819,6 +5819,8 @@ async fn handle_adopt_ublk(
         let gem = mgr.gem().clone();
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
         state.start_eraser().await;
+        // Where a staged release's boot pallet goes (#122).
+        *state.slab_paths.write().await = slab_paths.to_vec();
         // The boot devices this process now serves are in use, and a volume
         // listing must say so — they were recorded nowhere (#138).
         {
@@ -7273,6 +7275,276 @@ file = "{state}"
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// A file served with HTTP `Range` GETs, the way the appliance serves a
+    /// release's `image.img`: what a stage reads N+1 from (#122).
+    async fn range_server(file: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = l.accept().await else { return };
+                let file = file.clone();
+                tokio::spawn(async move {
+                    let mut req = Vec::new();
+                    let mut b = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut b).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => req.extend_from_slice(&b[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&req).to_ascii_lowercase();
+                    let size = std::fs::metadata(&file).unwrap().len();
+                    let (a, z) = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("range: bytes="))
+                        .and_then(|r| r.trim().split_once('-'))
+                        .map(|(a, z)| (a.parse::<u64>().unwrap(), z.parse::<u64>().unwrap().min(size - 1)))
+                        .unwrap_or((0, size - 1));
+                    let mut body = vec![0u8; (z - a + 1) as usize];
+                    {
+                        use std::os::unix::fs::FileExt;
+                        std::fs::File::open(&file).unwrap().read_exact_at(&mut body, a).unwrap();
+                    }
+                    let h = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{z}/{size}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = s.write_all(h.as_bytes()).await;
+                    let _ = s.write_all(&body).await;
+                });
+            }
+        });
+        format!("http://{addr}/image.img")
+    }
+
+    /// The bytes of `name` on `mgr`, the whole volume.
+    async fn volume_bytes(mgr: &VolumeManager, name: &str) -> Option<Vec<u8>> {
+        let id = mgr.find_volume(name).await?;
+        let v = mgr.get_volume(&id)?;
+        let mut b = vec![0u8; v.capacity_bytes() as usize];
+        v.read(0, &mut b).await.ok()?;
+        Some(b)
+    }
+
+    /// #122: release N installed, the node running from its disk and writing
+    /// its data volumes; release N+1 staged over HTTP from its published
+    /// image, activated, the disk reopened alone, rolled back. N+1's policy
+    /// file (in its root, `stormpump`) says `logs replace`; `state` is left
+    /// to the default (keep); N+1 adds `kubelet-data`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_release_stages_activates_and_rolls_back_on_a_running_node() {
+        use crate::image::stage;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let mut seed = 0x122u64;
+        let mut noise = |len: u64| {
+            let mut v = vec![0u8; len as usize];
+            for c in v.chunks_mut(8) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                c.copy_from_slice(&seed.to_le_bytes()[..c.len()]);
+            }
+            v
+        };
+        // A root filesystem with what a release writes into it.
+        let root_fs = |name: &str, policy: Option<&str>| {
+            let tree = p(&format!("{name}-tree"));
+            std::fs::create_dir_all(format!("{tree}/etc/stormblock")).unwrap();
+            std::fs::write(format!("{tree}/etc/os-release"), format!("VERSION_ID={name}\n")).unwrap();
+            if let Some(pol) = policy {
+                std::fs::write(format!("{tree}/etc/stormblock/data-volumes"), pol).unwrap();
+            }
+            let img = p(&format!("{name}-root.img"));
+            std::fs::File::create(&img).unwrap().set_len(16 * MIB).unwrap();
+            let st = std::process::Command::new(&mkfs)
+                .args(["-q", "-F", "-b", "4096", "-d", &tree, &img])
+                .status()
+                .unwrap();
+            assert!(st.success(), "mkfs.ext4 -d failed");
+            img
+        };
+        let release = |name: &str, files: Vec<(&str, Vec<u8>, bool)>, policy: Option<&str>| {
+            let root = root_fs(name, policy);
+            let mut sys = format!("[[slab.golden]]\nname = \"stormpump\"\nfile = \"{root}\"\n");
+            let mut data = String::new();
+            for (vol, bytes, is_data) in files {
+                let f = p(&format!("{name}-{vol}.img"));
+                std::fs::write(&f, bytes).unwrap();
+                let entry = format!("[[{}.golden]]\nname = \"{vol}\"\nfile = \"{f}\"\n", if is_data { "data_slab" } else { "slab" });
+                if is_data { data += &entry } else { sys += &entry }
+            }
+            let spec = format!("name = \"rel-{name}\"\nsize = \"1G\"\n[slab]\nsize = \"rest\"\n{sys}[data_slab]\nsize = \"512M\"\n{data}");
+            let img = p(&format!("{name}.raw"));
+            (spec, img)
+        };
+        let build = |spec: String, img: String| async move {
+            crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+                .build(std::path::Path::new(&img))
+                .await
+                .unwrap();
+            img
+        };
+        let n_svc = noise(8 * MIB);
+        let (spec, img) = release("11.90", vec![("svc", n_svc.clone(), false), ("state", noise(8 * MIB), true), ("logs", noise(4 * MIB), true)], None);
+        let image_n = build(spec, img).await;
+        let n1_svc = noise(8 * MIB);
+        let n1_logs = noise(4 * MIB);
+        let (spec, img) = release(
+            "11.91",
+            vec![("svc", n1_svc.clone(), false), ("state", noise(8 * MIB), true), ("logs", n1_logs.clone(), true), ("kubelet-data", noise(4 * MIB), true)],
+            Some("# what 11.91 does to the node's data\nlogs replace\n"),
+        );
+        let image_n1 = build(spec, img).await;
+
+        // Install N: lay the disk, flow both halves, and run from the disk.
+        let (mut mgr, _) = super::open_slabs_resuming(&[image_n.clone()], None, true).await.unwrap();
+        let disk = p("disk.raw");
+        std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
+        let flow = super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+        let (succ, _) = super::open_slabs_resuming(&[image_n.clone(), flow.disk.clone()], None, true).await.unwrap();
+        let (sys_dest, data_dest) = (
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
+        );
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+        drop(succ);
+        let held = |image: String| {
+            let disk = disk.clone();
+            async move {
+                let l = super::open_storage(&disk).await.unwrap();
+                let i = super::open_storage(&image).await.unwrap();
+                crate::image::local::release_held(&l, &i).await
+            }
+        };
+        assert!(matches!(held(image_n.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "installed: N held");
+        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::NotHeld { .. }), "N+1 not yet");
+
+        // The node runs from its disk and writes its data.
+        let (node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        for (vol, mark) in [("state", 0x51u8), ("logs", 0x52)] {
+            let v = node.get_volume(&node.find_volume(vol).await.unwrap()).unwrap();
+            v.write(4096, &[mark; 8192]).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        let state_before = volume_bytes(&node, "state").await.unwrap();
+        let logs_before = volume_bytes(&node, "logs").await.unwrap();
+        let node = tokio::sync::Mutex::new(node);
+
+        // Stage N+1 from its published image, over HTTP.
+        let url = range_server(image_n1.clone()).await;
+        let image = Arc::new(crate::drive::httpdev::HttpDevice::open(&url).await.unwrap()) as Arc<dyn BlockDevice>;
+        let opts = stage::StageOptions { version: "11.91".into(), root: "stormpump".into(), source: url.clone() };
+        let progress = stage::Progress::default();
+        let (gen, plan) = stage::stage(&node, image, &opts, &progress, |_| {}).await.expect("staged");
+        assert!(gen.complete);
+        let action = |name: &str| plan.iter().find(|i| i.name == name).map(|i| (i.action.clone(), i.staged_as.clone()));
+        assert_eq!(action("state").unwrap().0, stage::Action::Kept, "a data volume the node has is kept by default");
+        assert!(action("logs").unwrap().1.is_some(), "logs replace: staged");
+        assert!(action("kubelet-data").unwrap().1.is_some(), "a volume N+1 adds is staged");
+        assert!(matches!(action("svc").unwrap().0, stage::Action::Clone { .. }), "a clone is a clone of its staged golden");
+        assert_eq!(gen.kept, vec!["state".to_string()]);
+        {
+            let m = node.lock().await;
+            let v = m.find_volume("svc.golden@11.91").await.expect("the staged golden");
+            let image_id = plan.iter().find(|i| i.name == "svc.golden").unwrap().id;
+            assert_eq!(v, image_id, "a golden keeps the release's id");
+            assert!(m.is_sealed(&v));
+            assert_eq!(volume_bytes(&m, "svc@11.91").await.unwrap()[..n1_svc.len()], n1_svc[..], "the staged clone reads N+1's bytes");
+            assert_eq!(volume_bytes(&m, "svc").await.unwrap()[..n_svc.len()], n_svc[..], "N untouched");
+        }
+        // Both releases are held now; N's still under its plain names.
+        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "staged: N+1 held");
+        assert!(matches!(held(image_n.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "staged: N still held");
+        // A golden still being copied (unsealed) is not held.
+        {
+            let mut m = node.lock().await;
+            let g = m.find_volume("logs.golden@11.91").await.unwrap();
+            m.unseal_volume(g).await.unwrap();
+            m.persist().await;
+        }
+        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::NotHeld { .. }), "an unsealed copy is not held");
+        {
+            let mut m = node.lock().await;
+            let g = m.find_volume("logs.golden@11.91").await.unwrap();
+            m.seal_volume(g, None).await.unwrap();
+            m.persist().await;
+        }
+
+        // Activate.
+        {
+            let mut m = node.lock().await;
+            let (renames, moved) = stage::activation_renames(&m, &gen, "11.90").await.unwrap();
+            stage::apply_renames(&mut m, &renames).await.unwrap();
+            assert!(moved.iter().any(|v| v.name == "logs"), "the node's logs goes aside");
+            assert!(!moved.iter().any(|v| v.name == "state"), "the node's state stays");
+        }
+        let verify = |when: &'static str, active_n1: bool| {
+            let disk = disk.clone();
+            let (state_before, logs_before, n_svc, n1_svc, n1_logs) = (state_before.clone(), logs_before.clone(), n_svc.clone(), n1_svc.clone(), n1_logs.clone());
+            async move {
+                let (m, _) = super::open_slabs_resuming(&[disk], None, false).await.unwrap();
+                let root = m.get_volume(&m.find_volume("stormpump").await.unwrap()).unwrap();
+                let osr = String::from_utf8(crate::fs::files::read_file(&root, "/etc/os-release").await.unwrap()).unwrap();
+                assert_eq!(osr.trim(), if active_n1 { "VERSION_ID=11.91" } else { "VERSION_ID=11.90" }, "{when}: the root");
+                let svc = volume_bytes(&m, "svc").await.unwrap();
+                assert_eq!(svc[..n_svc.len()], if active_n1 { &n1_svc[..] } else { &n_svc[..] }, "{when}: svc");
+                assert_eq!(volume_bytes(&m, "state").await.unwrap(), state_before, "{when}: the node's state, kept");
+                let logs = volume_bytes(&m, "logs").await.unwrap();
+                if active_n1 {
+                    assert_eq!(logs[..n1_logs.len()], n1_logs[..], "{when}: logs replaced by N+1's");
+                    assert_eq!(volume_bytes(&m, "logs@11.90").await.unwrap(), logs_before, "{when}: the node's logs kept aside");
+                    assert!(m.find_volume("kubelet-data").await.is_some(), "{when}: the volume N+1 adds");
+                } else {
+                    assert_eq!(logs, logs_before, "{when}: the node's logs back");
+                }
+                m.find_volume("logs@11.91").await.is_some()
+            }
+        };
+        assert!(!verify("after activate, the disk alone", true).await);
+        assert!(matches!(held(image_n1.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "activated: N+1 held");
+        assert!(matches!(held(image_n.clone()).await, crate::image::local::ReleaseHeld::Held { .. }), "activated: N held (rollback)");
+
+        // Roll back.
+        {
+            let mut m = node.lock().await;
+            let previous = stage::Generation {
+                version: "11.90".into(),
+                volumes: m.list_volumes().await.into_iter().filter_map(|(id, n, _, _)| n.strip_suffix("@11.90").map(|b| stage::GenVolume { id, name: b.to_string() })).collect(),
+                complete: true,
+                pallet: None,
+                migrations: Vec::new(),
+                kept: Vec::new(),
+                source: None,
+                at: 0,
+            };
+            let renames = stage::rollback_renames(&gen, &previous);
+            stage::apply_renames(&mut m, &renames).await.unwrap();
+        }
+        assert!(verify("after rollback, the disk alone", false).await, "N+1's kept aside as logs@11.91");
+
+        // Discarding the staged release leaves N whole.
+        stage::delete_generation(&node, &gen).await.unwrap();
+        assert!(!verify("after discarding 11.91", false).await, "N+1's volumes gone");
     }
 
     /// The appliance, as the node sees it: a device a network round trip
