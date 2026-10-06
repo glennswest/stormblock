@@ -162,6 +162,7 @@ async fn an_exported_volume_cannot_be_moved() {
         nsid: None,
         host_nqn: None,
         subsystem: None,
+        serve: false,
     });
 
     let (base, server) = start(state.clone()).await;
