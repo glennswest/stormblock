@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Boot-chain attestation and the per-machine TPM mark (2026-10-06, #216, P2) — IN PROGRESS
+### Boot-chain attestation and the per-machine TPM mark (2026-10-06, #216, P2) — DONE
 
 For stormcert's `require.attestation` (stormcert#23, #53). Owner: TPM is
 marked per machine, set by the platform, never self-reported. The shape was
@@ -191,8 +191,14 @@ left to this side:
   unsealed, parent = host golden; host golden sealed, parent = golden; golden
   sealed). Readable with the node/admin token or a Kubernetes bearer allowed
   `get` on `boothost` (stormcert's ServiceAccount, no shared token)
-- [ ] store + claim record; [ ] routes + auth class; [ ] tests; [ ] docs
-      (auth.md, README), CHANGELOG; [ ] answer stormcert's two questions
+- [x] store + claim record (`synonym::{TpmMark, ClaimRecord}`), routes
+      (`api/boothost.rs`), auth class `Class::Attestation` (ba6e3d9). Found:
+      the kube review cache ignored the name; keyed by it now
+- [x] tests: `integration_synonyms::an_attestation_states_the_boot_chain_
+      the_engine_served`, `integration_destructive::stormcert_reads_an_
+      attestation_with_its_own_bearer_and_only_that`; docs (auth.md, README),
+      CHANGELOG; stormcert's two questions answered on #216
+- Not proven: the claimant is the machine (stormcos#35); stage 2 (TPM quote)
 
 ### An install booted the old disk: no appliance, no check (2026-10-05, #294, P0) — DONE
 

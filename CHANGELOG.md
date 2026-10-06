@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-10-06
+- **feat:** #216 (stormcert#23): boot-chain attestation and a per-machine TPM mark on the host record. `tpm: required | none` (unset = none) is set by `PUT`/`DELETE /api/v1/boothost/{name}/tpm`, which are destructive (admin token or a SubjectAccessReview), so a node cannot downgrade itself. Every boothost claim records what the engine served (`last_claim`: clone, claimed_at, claimed_as, host NQNs, host golden, golden, assignment version). `GET /api/v1/boothost/{name}/attestation` (by name, never an alias) returns both, the clone → host golden → golden chain checked when it is read (`chain: intact|broken|none`, `problems`), and the golden's release digest when it was published here. Readable with the node or admin token, or a Kubernetes bearer whose SubjectAccessReview allows `get` on `boothost/{name}` (stormcert's ServiceAccount)
+- **fix:** #216: the Kubernetes review cache was keyed by bearer, resource and verb only, so a review allowed for one name answered for every name; it is keyed by name too
+
 ### 2026-10-05
 - **BREAKING:** #158 stage E: metadata format 2 is the default. New slabs are written in format 2 (an engine before #158 refuses them), a serving engine migrates its v1 metadata slabs in place at their first persist, and a data directory moves from `volumes.dat` to `metadata.v2` (the old record set aside as `volumes.dat.pre-v2`, so an older engine finds none rather than a stale one). `[metadata] format = 1` / `$STORMBLOCK_METADATA_FORMAT=1` keeps format 1. Rollback to an engine before #158 needs a reinstall (a node) or a snapshot (the forge)
 - **fix:** #158: `metadata.v2` in a data directory starts at 8 MiB and doubles when full: stormcos copies the data directory into its state volume a whole file at a time every ten seconds

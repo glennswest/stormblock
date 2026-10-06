@@ -78,6 +78,7 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
 - writing files or a tar into a filesystem;
 - `?repair=true` on an fsck and `?apply` on a trim;
 - a boot intent;
+- a machine's TPM mark (`PUT`/`DELETE /api/v1/boothost/{name}/tpm`, #216);
 - every other `DELETE`.
 
 **The admin token** is never under `/run/stormblock`, which every service
@@ -107,8 +108,9 @@ does not. The outcomes:
 - the apiserver unreachable: **503**;
 - no apiserver configured: **401**.
 
-Answers are cached for a minute per bearer, resource and verb. A Kubernetes
-bearer is not an ordinary credential: reads stay the node token's.
+Answers are cached for a minute per bearer, resource, verb and name. A
+Kubernetes bearer is not an ordinary credential: reads stay the node token's,
+with one exception, a machine's boot-chain attestation (below).
 
 **`admin_gate = "audit"`** (or `$STORMBLOCK_ADMIN_GATE=audit`) is for rolling
 this out. The node token still gets through destructive verbs, and each such
@@ -287,6 +289,69 @@ stormblock-csi #20 (manifests), stormblock-registry #40 and stormstorage #12
 (token paths), vmcloud-image-operator #7. Inside this repo, cluster heartbeat,
 join and Raft present the cluster's shared token, and the `ci-*.sh` scripts
 give their engines one.
+
+## Boot-chain attestation and the TPM mark (#216, stormcert#23)
+
+stormcert's `require.attestation` asks the engine whether a node booted what
+the platform handed it. Two things on the host record answer it, and the
+machine can write neither:
+
+**The TPM mark**, `tpm: required | none`, per machine (owner, 2026-09-28: some
+machines have no TPM). `required`: a TPM 2.0 quote is mandatory and the boot
+chain alone is refused. `none` or unset: the boot chain suffices. It is set by
+the platform or an admin, typically as the machine joins the fleet (a machine
+may be marked before its first claim), and never by the node: setting it is
+destructive in the sense above, so the node token cannot downgrade a machine.
+
+```
+PUT    /api/v1/boothost/<name>/tpm   {"tpm": "required"|"none"}   admin token / SAR update boothost
+DELETE /api/v1/boothost/<name>/tpm                                admin token / SAR delete boothost
+```
+
+**The last boot claim.** Every boothost claim records, on the host, what the
+engine served: the boot clone and when, what the machine claimed as, the host
+NQNs the clone was bound to (#210), the host golden, the golden
+`boothost/<name>` assigned and that assignment's version. The machine causes
+the record by claiming; it supplies none of it.
+
+```
+GET /api/v1/boothost/<name>/attestation
+→ {host, aliases, tpm: required|none|unset, tpm_set_at,
+   requires: boot_chain|tpm_quote, claimed, host_nqns,
+   clone:       {id, name, present, sealed, parent, claimed_at, claimed_as},
+   host_golden: {id, name, present, sealed, parent},
+   golden:      {id, name, present, sealed, synonym, assignment_version,
+                 assigned_now, label, digest, release: {version, digest, created_unix}},
+   chain: intact|broken|none, problems: [...]}
+```
+
+Each link is checked when it is read: the clone exists, is unsealed and is a
+clone of the host golden; the host golden is sealed and a clone of the golden;
+the golden is sealed. `assigned_now` says whether `boothost/<name>` still
+names that golden (false after a re-image the machine has not booted yet; not
+a broken chain). `digest` is the one recorded when the golden was published as
+a release here (`POST /api/v1/releases`), and absent otherwise: the engine does
+not compute one. Who *built* the golden is not recorded by the engine; what it
+can say is that the golden is sealed and is what `boothost/<name>`, which only
+an authenticated caller sets, assigned.
+
+**By name only.** An alias (a serial, a MAC) is a 404 naming the host. The name
+is the machine's DNS name, which is its Kubernetes node name, so stormcert
+matches a CSR's `system:node:<name>` to `boothost/<name>` exactly.
+
+**Who may read it.** The node or admin token, or a **Kubernetes bearer** whose
+SubjectAccessReview allows `get` on `storage.storm.io` `boothost` named
+`<name>` — so stormcert reads with its own ServiceAccount (a Role with
+`resources: [boothost], verbs: [get]`), not a copy of the node's token, and
+`[management.kubernetes]` must be set on the engine. That bearer reaches
+nothing else. Over plain HTTP any bearer crosses the wire in the clear (#203):
+serve the API with `management.tls_cert`/`tls_key`.
+
+**What it does not prove.** That the machine asking for a certificate is the
+one that claimed. Until a claim is bound to the host itself (stormcos#35) the
+tag is the binding: anything that reaches the open claim can claim as a
+machine, which hands it that machine's image and moves this record. Stage 2
+(a TPM quote) is not built here.
 
 ## The data path: who may connect over NVMe/TCP
 

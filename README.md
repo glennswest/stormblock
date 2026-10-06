@@ -503,7 +503,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
 | `/api/v1/erasures` | secure delete (#286): the node's level, slots waiting, volumes being erased, and the audit record of every finished erase (`erasures.json`). `DELETE /api/v1/volumes/{id}?erase=once\|dod3\|dod7` asks for more than the default |
 | `/api/v1/forge` | this node as its site's forge (#272): `PUT` the `[nvmeof]` settings (`listen_addr`, `nqn`, `allowed_hosts`, `allow_any_host`, `require_dhchap`, `boothost_host_nqn`; admin token) starts the shared NVMe/TCP target live and keeps them in `forge.json`, served again at every start; `DELETE` (admin) stops accepting and keeps the node off (`forge.json` = `{"enabled": false}`), so its default does not turn it back on at the next start (#287); `GET` says `state` (`on`/`off`) and `from` (`default`, `persisted` or `config`), plus `source` (`default`, `api` or `config`). On a node (`adopt-ublk`) forge mode is on by default; on the daemon it is off unless kept. A target the command line or `--config` set up answers `409` |
-| `/api/v1/boothost` | boot hosts by DNS name: list (`?unnamed=1`: booted the default, not named yet, #200), find by name or alias, `PUT {aliases}`, `POST …/rename` (#199) |
+| `/api/v1/boothost` | boot hosts by DNS name: list (`?unnamed=1`: booted the default, not named yet, #200), find by name or alias, `PUT {aliases}`, `POST …/rename` (#199); `PUT/DELETE …/tpm` (admin) and `GET …/attestation` (#216) |
 | `/api/v1/fstemplates`, `/moves`, `/synonyms`, `/releases` | templates and blanks (`{id}/clone`, `{id}/claim`), offline moves, names and boot claims, published releases (`index.html`, `manifest`, `notes`, `changes`) |
 | `/api/v1/pallets`, `/images` | pallets on drives, image build/convert/inspect |
 | `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery (`/discovery/cluster`, `…/join`, `…/leave`), cluster (`nodes`, `nodes/{id}`, `status`, `heartbeat`) |
@@ -828,6 +828,15 @@ itself: MicroCloud nodes share a chassis serial, so which machine a serial means
 is said explicitly. In the `boothost` and `hostgolden` namespaces, resolve,
 re-point, rollback and claim accept an alias; `DELETE` takes the exact name.
 Hosts are kept in `synonyms.json` (`hosts`) beside the synonyms they name.
+
+**Attestation and the TPM mark (#216).** Each host carries `tpm: required |
+none` (unset = none), set by an admin or the platform (`PUT
+/api/v1/boothost/{name}/tpm`, destructive: the node token cannot downgrade
+it), and the record of its last boot claim (clone, claimed at, host NQNs,
+host golden, golden). `GET /api/v1/boothost/{name}/attestation` (by name only)
+returns both, with the clone → host golden → golden chain checked when it is
+read; stormcert reads it with a Kubernetes bearer allowed `get` on `boothost`.
+See [docs/auth.md](docs/auth.md#boot-chain-attestation-and-the-tpm-mark-216-stormcert23).
 
 **Boot intent (#148).** Each host carries an intent its boot agent reads before
 it claims: `auto` (never set; claim and boot), `local` (boot the local disk, no
