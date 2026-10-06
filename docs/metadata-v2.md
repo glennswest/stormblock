@@ -1,6 +1,6 @@
 # Metadata format v2: the one format change (#158, with #157 and #156)
 
-**Status (2026-10-05):** stages A, B and C built; D and E to come. Built in
+**Status (2026-10-05):** stages A–D built, and E's migration; E's default flip and scale runs to come. Built in
 stages behind a format gate (`[metadata] format = 2`,
 `$STORMBLOCK_METADATA_FORMAT=2`): the engine writes v1 until v2 is complete, so
 nothing half-done ships, and the format changes **once**.
@@ -215,6 +215,38 @@ well as off; the power-cut test runs its 300 cuts in both formats.
 - Measured (`examples/map_cache`, 64 goldens × 2 000 extents laid in order):
   a map costs 12.4 B an extent resident, all of it freed when it goes cold;
   a 2 000-extent map loads in 0.4 ms.
+
+## As built (stage D, #156)
+
+- **A volume's extent size** is fixed at creation and kept with it:
+  `ThinVolume`'s slot size, `VolumeRecord.extent_size` (never written by
+  bincode, so v1 records are unchanged), the v2 header (`Header.extent_size`).
+  A v1 record has one size a document: it decodes as every volume at the
+  document's size, and refuses to encode a volume of another size.
+- **Pools are role × tier × size.** Every picker filters by slot size
+  (`SlabRegistry::size_ok`, `best_slab_for_tier_in_role(…, size)`,
+  `distinct_domains_with_space_in_role(…, size)`), and so do placement's own
+  (drain, rebalance, evacuation, flow-over destinations) and StormFS chunks.
+  A move into a slab of another slot size is refused.
+- **Creation** (`VolumeManager::choose_extent_size`): what was asked
+  (`CreateOptions::extent_size`, `POST /api/v1/volumes {extent_size}`,
+  `/v1 {extent_size_bytes}` = a StorageClass `extentSize`, stormblock-csi#37);
+  else 8 MiB for a volume of 64 GiB or more where the role has an 8 MiB pool;
+  else the node's default; else the smallest size the role has. A pinned
+  volume takes its slab's. A clone takes its source's; a composition its
+  members' (one size, or refused). Sizes other than the default only where
+  every metadata store is v2 (or 2 is the default).
+- **Adoption and restore.** A slab of another slot size is another pool where
+  the records can say each volume's size, and refused (as before) where they
+  cannot. A restored volume's size must equal the slot size of every slab it
+  has a leg on, or it is refused: the incident that refusal came from (1 MiB
+  extents addressed in 4 MiB slots) is checked per volume now.
+- **The install** (`lay_node_slabs`, `LocalLayout::bulk`, on with format 2):
+  a data half of 256 GiB or more is a 1 MiB data slab (a quarter of it, at
+  least 64 GiB) and an 8 MiB bulk slab (`stormblock-bulk`, typed as a data
+  slab, last, the one that grows); smaller, one data slab. A reinstall of the
+  system half keeps both; discovery finds the bulk slab as it finds any slab.
+  The quarter is a default, not a decision recorded on #156.
 
 ## Stages
 

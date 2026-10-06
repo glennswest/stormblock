@@ -237,7 +237,13 @@ the engine writes v1 until stage E.
             on 921/921, cluster checks; map_cache: 12.4 B/extent, all freed
             cold, 0.4 ms to load 2 000 extents. Walks that pin (load all,
             transiently): flow-over, drain, resync, data seed; GC streams
-- [ ] D. extent size per volume/pool (#156); the install's 8 MiB bulk slab
+- [x] D. extent size per volume/pool (#156); the install's 8 MiB bulk slab.
+      Pickers by size, creation rule (asked / ≥64 GiB bulk / default),
+      clones and compositions keep size, restore checks a volume's size
+      against its slabs, install lays data (¼, ≥64 GiB) + bulk (last) when
+      format 2 and the data half ≥ 256 GiB; `/v1 extent_size_bytes`
+      (stormblock-csi#37). Full suite gate off/on/forced green (bar the
+      qcow2 deadline flake once, gate off)
 - [ ] E. `slab upgrade` (in place, header last), gate default v2 for new
       slabs, emulated 1 PiB runs (#208), docs; close #158, #157, #156.
       Built: migration (`Slab::upgrade_to_v2`: record into both v1 copies,
