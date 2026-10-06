@@ -679,6 +679,7 @@ async fn export_volume(
             },
             host_nqn: None,
             subsystem: None,
+            serve: true,
         });
         drop(ex);
         w.persist()?;

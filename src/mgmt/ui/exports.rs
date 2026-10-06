@@ -139,6 +139,7 @@ pub async fn create(
         nsid: None,
         host_nqn: None,
         subsystem: None,
+        serve: false,
     };
 
     {

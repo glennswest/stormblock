@@ -73,7 +73,29 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
     // draining a LUN that had only just been created.
     {
         let mut w = ctx.wiring.lock().await;
-        let entries: Vec<ExportEntry> = ctx.state.exports.read().await.clone();
+        // Only `/serve/v1`'s own exports (#217). The engine's — a host-bound
+        // export on the host's own subsystem (#210), a shared-subsystem
+        // export, an iSCSI LUN — are served by the engine under its own host
+        // policy; wiring one here put it on a portal that admits any host,
+        // and rewrote its NSID to 1. An entry from before the mark is
+        // recognised by serve's per-volume name and marked now.
+        let entries: Vec<ExportEntry> = {
+            let mut ex = ctx.state.exports.write().await;
+            let mut ours = Vec::new();
+            for e in ex.iter_mut() {
+                if super::wiring::serve_owned(e, &ctx.cfg.nqn_prefix, &ctx.cfg.iqn_prefix) {
+                    if !e.serve {
+                        e.serve = true;
+                        dirty = true;
+                    }
+                    ours.push(e.clone());
+                }
+            }
+            ours
+        };
+        // A row for an export that is not serve's — one an earlier engine
+        // wired — is no longer live: it drains like a withdrawn export, its
+        // portal closes, and the export itself stays with the engine.
         let live: HashSet<Uuid> = entries.iter().map(|e| e.id).collect();
 
         // 1a. Exports we have not seen before get their identity pinned.

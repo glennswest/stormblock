@@ -170,7 +170,18 @@ pub async fn restore_exports(state: &Arc<AppState>) -> usize {
     let mut restored = 0usize;
     let mut entries = Vec::with_capacity(persisted.len());
 
+    let (nqn_prefix, iqn_prefix) = state.config.serve_prefixes();
     for mut entry in persisted {
+        // `/serve/v1`'s own exports are its reconciler's to serve, each as
+        // namespace 1 of a subsystem of its own on its own portal (#217).
+        // Putting one on the shared subsystem as well — which its recorded
+        // NSID 1 used to do at every start — served it to whoever the shared
+        // subsystem admits, at an NSID another export may hold.
+        if crate::serve::wiring::serve_owned(&entry, &nqn_prefix, &iqn_prefix) {
+            entry.serve = true;
+            entries.push(entry);
+            continue;
+        }
         match entry.protocol {
             #[cfg(feature = "nvmeof")]
             ExportProtocol::Nvmeof if entry.subsystem.is_some() => {
@@ -390,6 +401,7 @@ async fn create_export(
         nsid,
         host_nqn,
         subsystem,
+        serve: false,
     };
 
     let mut resp = export_to_response(&entry);

@@ -140,6 +140,14 @@ pub struct ExportEntry {
     pub host_nqn: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subsystem: Option<String>,
+    /// Made by `/serve/v1` (#217): served on a portal of its own by the
+    /// serving layer's reconciler, and by nothing else. Every other export
+    /// (`/api/v1/exports`, the UI) is the engine's, on its own listener with
+    /// its own host policy, and the reconciler never touches it. An entry
+    /// written before this field is recognised by its name
+    /// (`serve::wiring::serve_owned`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serve: bool,
 }
 
 /// Backing type for a dynamically-created LUN.

@@ -185,6 +185,17 @@ impl std::fmt::Display for ServeSkipped {
 }
 
 impl StormBlockConfig {
+    /// The NQN and IQN prefixes `/serve/v1` names its per-volume exports
+    /// with, whether or not serving is on: what tells its exports from the
+    /// engine's in a table written before they were marked (#217).
+    pub fn serve_prefixes(&self) -> (String, String) {
+        let d = ServeConfig::default();
+        (
+            self.serve.nqn_prefix.clone().unwrap_or(d.nqn_prefix),
+            self.serve.iqn_prefix.clone().unwrap_or(d.iqn_prefix),
+        )
+    }
+
     /// Build the serving parameters for the stock binary, or say why not.
     ///
     /// `iscsi_bind` and `nvmeof_bind` come from wherever the targets are

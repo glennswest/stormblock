@@ -317,6 +317,28 @@ impl WiringTable {
     }
 }
 
+/// Whether `/serve/v1` made this export, and so whether its reconciler may
+/// serve it (#217). Marked ones are; an entry written before the mark is
+/// serve's only when it carries the per-volume name serve gives its exports
+/// (`<prefix>:vol-<volume>`, which `/api/v1/exports` never assigns) and no
+/// host binding. Everything else is the engine's: a host-bound export (#210)
+/// on the host's own subsystem, a shared-subsystem export at the NSID it was
+/// given, an iSCSI LUN on the shared target.
+pub fn serve_owned(e: &crate::mgmt::ExportEntry, nqn_prefix: &str, iqn_prefix: &str) -> bool {
+    use crate::mgmt::ExportProtocol;
+    if e.serve {
+        return true;
+    }
+    if e.host_nqn.is_some() || e.subsystem.is_some() {
+        return false;
+    }
+    let prefix = match e.protocol {
+        ExportProtocol::Nvmeof => nqn_prefix,
+        ExportProtocol::Iscsi => iqn_prefix,
+    };
+    e.target_id == format!("{prefix}:vol-{}", e.volume_id)
+}
+
 /// tmp + fsync + rename. Used for every mk-owned durable file, so a power cut
 /// mid-write can never leave a truncated table behind.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
