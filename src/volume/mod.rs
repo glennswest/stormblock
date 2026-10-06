@@ -66,7 +66,16 @@ pub struct CreateOptions {
     /// Which half of the node's storage to place in. `None` asks the node:
     /// system where it has a system slab, otherwise the role it does have.
     pub role: Option<SlabRole>,
+    /// The size of the volume's extents (#156), fixed for its life. `None`:
+    /// [`BULK_EXTENT`] for a volume of [`BULK_FROM`] or more where the node
+    /// has a pool of that size in the role, else the node's default.
+    pub extent_size: Option<u64>,
 }
+
+/// The bulk extent size (#156, owner 2026-10-05: 8 MiB rather than 64).
+pub const BULK_EXTENT: u64 = 8 << 20;
+/// Volumes this large or larger are bulk when nothing says otherwise.
+pub const BULK_FROM: u64 = 64 << 30;
 
 impl CreateOptions {
     pub fn redundant(policy: RedundancyPolicy) -> Self {
@@ -658,7 +667,9 @@ impl VolumeManager {
         array_id: RaidArrayId,
         slab: Slab,
     ) -> Result<(), VolumeError> {
-        if slab.slot_size() != self.slot_size {
+        // Another size is another pool (#156), where the records can say
+        // each volume's size (format 2).
+        if slab.slot_size() != self.slot_size && !self.records_any_size().await {
             return Err(VolumeError::InvalidSize(format!(
                 "slab slot size {} does not match manager slot size {}",
                 slab.slot_size(),
@@ -691,6 +702,64 @@ impl VolumeManager {
             ));
         };
         self.create_volume_with(name, virtual_size, CreateOptions::pinned_to(slab)).await
+    }
+
+    /// The extent size a new volume gets (#156): what was asked, else bulk for
+    /// a volume of [`BULK_FROM`] or more where the role has a bulk pool, else
+    /// the node's default, else the smallest size the role has. Sizes other
+    /// than the default are recorded only by metadata format 2, so they need
+    /// every metadata store to be v2 or to become v2 at its next persist.
+    async fn choose_extent_size(
+        &self,
+        role: SlabRole,
+        pinned: Option<SlabId>,
+        virtual_size: u64,
+        asked: Option<u64>,
+    ) -> Result<u64, VolumeError> {
+        let (sizes, pin_size) = {
+            let reg = self.registry.read().await;
+            (reg.sizes_in_role(role), pinned.and_then(|p| reg.get(&p).map(|s| s.slot_size())))
+        };
+        let v2_ok = self.records_any_size().await;
+        if let Some(a) = asked {
+            if a < 4096 || !a.is_power_of_two() {
+                return Err(VolumeError::InvalidSize(format!("extent size {a}: a power of two of 4 KiB or more")));
+            }
+            if pin_size.is_some_and(|p| p != a) || (pin_size.is_none() && !sizes.is_empty() && !sizes.contains(&a)) {
+                return Err(VolumeError::InvalidSize(format!(
+                    "no {role} slab with {a}-byte slots to place it in (this node has {sizes:?})"
+                )));
+            }
+            if a != self.slot_size && !v2_ok {
+                return Err(VolumeError::InvalidSize(format!(
+                    "{a}-byte extents are recorded only by metadata format 2 ([metadata] format = 2)"
+                )));
+            }
+            return Ok(a);
+        }
+        if let Some(p) = pin_size {
+            return Ok(p);
+        }
+        if v2_ok && virtual_size >= BULK_FROM && sizes.contains(&BULK_EXTENT) {
+            return Ok(BULK_EXTENT);
+        }
+        if sizes.is_empty() || sizes.contains(&self.slot_size) || !v2_ok {
+            return Ok(self.slot_size);
+        }
+        Ok(sizes[0])
+    }
+
+    /// Whether every place this manager records volumes can record a
+    /// volume's own extent size (#156): metadata format 2, or format 2 the
+    /// default (a v1 metadata slab migrates at the next persist).
+    async fn records_any_size(&self) -> bool {
+        if crate::drive::slab::default_format() == crate::drive::slab::SLAB_VERSION_2 {
+            return true;
+        }
+        if self.metadata_slabs.is_empty() && self.metadata_store.is_none() {
+            return true;
+        }
+        (self.metadata_store.is_none() || self.dir_v2()) && !self.v1_sinks().await
     }
 
     /// The slab an array's storage is, when the array has one here.
@@ -838,15 +907,16 @@ impl VolumeManager {
             // A pinned volume is in its slab's half, whatever else was said.
             (Some(pin), _) => self.registry.read().await.role_of(&pin),
             (None, Some(r)) => r,
-            (None, None) => self.registry.read().await.default_role(),
+            (None, None) => self.registry.read().await.default_role(opts.extent_size.unwrap_or(0)),
         };
+        let extent_size = self.choose_extent_size(role, opts.placement.pinned, virtual_size, opts.extent_size).await?;
         let needed = opts.redundancy.scheme.width();
         if needed > 1 {
             let available = self
                 .registry
                 .read()
                 .await
-                .distinct_domains_with_space_in_role(&opts.redundancy.spread, role);
+                .distinct_domains_with_space_in_role(&opts.redundancy.spread, role, extent_size);
             if available < needed {
                 return Err(VolumeError::InsufficientDomains {
                     policy: opts.redundancy.spelling(),
@@ -856,7 +926,7 @@ impl VolumeManager {
             }
         }
         let placement = PlacementPolicy { role, ..opts.placement };
-        let vol = ThinVolume::new(name.to_string(), virtual_size, self.slot_size);
+        let vol = ThinVolume::new(name.to_string(), virtual_size, extent_size);
         let id = vol.id();
         let parity = opts.redundancy.scheme.is_parity();
         let handle = Arc::new(ThinVolumeHandle::with_redundancy(
@@ -908,11 +978,12 @@ impl VolumeManager {
         let mut metadata_slabs = Vec::new();
         // Slabs whose own metadata region should carry the record from now on.
         let mut adopted_meta: Vec<SlabId> = Vec::new();
+        let any_size = self.records_any_size().await;
         {
             let mut reg = self.registry.write().await;
             for f in found {
                 let id = f.slab.slab_id();
-                if f.slab.slot_size() != self.slot_size {
+                if f.slab.slot_size() != self.slot_size && !any_size {
                     return Err(VolumeError::InvalidSize(format!(
                         "slab {} in {} has {}-byte slots and this engine addresses \
                          {}-byte extents: adopting it would write every extent \
@@ -1032,7 +1103,10 @@ impl VolumeManager {
                     .unwrap_or(home)
             };
             let vol = ThinVolume::restore(
-                vrec.id, vrec.name.clone(), vrec.virtual_size, self.slot_size,
+                vrec.id,
+                vrec.name.clone(),
+                vrec.virtual_size,
+                if vrec.extent_size != 0 { vrec.extent_size } else { self.slot_size },
             );
             let handle = Arc::new(ThinVolumeHandle::with_redundancy(
                 vol,
@@ -1112,7 +1186,7 @@ impl VolumeManager {
 
         let dest = {
             let reg = self.registry.read().await;
-            reg.best_slab_for_tier_in_role(tier, role)
+            reg.best_slab_for_tier_in_role(tier, role, handle.extent_size())
                 .ok_or_else(|| VolumeError::InvalidSize(format!(
                     "no {tier} slab in the {role} role to move to"
                 )))?
@@ -1231,7 +1305,7 @@ impl VolumeManager {
                 .registry
                 .read()
                 .await
-                .distinct_domains_with_space_in_role(&policy.spread, handle.placement_role());
+                .distinct_domains_with_space_in_role(&policy.spread, handle.placement_role(), handle.extent_size());
             if available < needed {
                 return Err(VolumeError::InsufficientDomains {
                     policy: policy.spelling(),
@@ -1302,7 +1376,7 @@ impl VolumeManager {
                 .registry
                 .read()
                 .await
-                .distinct_domains_with_space_in_role(&policy.spread, handle.placement_role());
+                .distinct_domains_with_space_in_role(&policy.spread, handle.placement_role(), handle.extent_size());
             if available < needed {
                 return Err(VolumeError::InsufficientDomains { policy: policy.spelling(), needed, available });
             }
@@ -2293,12 +2367,20 @@ impl VolumeManager {
         let gem = self.gem.read().await;
         let reg = self.registry.read().await;
         let single = self.metadata_slabs.len() == 1 && !reg.is_dedicated(&self.metadata_slabs[0]);
+        let sizes: HashMap<VolumeId, u64> = self.volumes.iter().map(|(id, h)| (*id, h.extent_size())).collect();
         let home = |vid: &VolumeId| -> Option<SlabId> {
             if let Some(p) = pins.get(vid) {
                 return self.metadata_slabs.contains(p).then_some(*p);
             }
             let want = roles.get(vid).copied().unwrap_or_default();
-            self.metadata_slabs.iter().copied().find(|s| reg.role_of(s) == want && !reg.is_dedicated(s))
+            let ok = |s: &SlabId| reg.role_of(s) == want && !reg.is_dedicated(s);
+            // Where its first write would land: a slab of its size (#156).
+            let size = sizes.get(vid).copied().unwrap_or(0);
+            self.metadata_slabs
+                .iter()
+                .copied()
+                .find(|s| ok(s) && reg.size_ok(s, size))
+                .or_else(|| self.metadata_slabs.iter().copied().find(|s| ok(s)))
         };
         let carries = |sink: Sink, vid: &VolumeId, on: &HashSet<SlabId>| -> bool {
             match sink {
@@ -2465,6 +2547,11 @@ impl VolumeManager {
         // One metadata slab carries everything — unless it is dedicated, which
         // carries only what is pinned to it (#150).
         if self.metadata_slabs.len() == 1 && !self.registry.read().await.is_dedicated(&self.metadata_slabs[0]) {
+            let mut full = full;
+            // A v1 record's one extent size is its slab's (#156).
+            if let Some(sz) = self.registry.read().await.get(&self.metadata_slabs[0]).map(|s| s.slot_size()) {
+                full.extent_size = sz;
+            }
             return vec![(self.metadata_slabs[0], full)];
         }
         let pins: HashMap<VolumeId, SlabId> = self
@@ -2493,12 +2580,20 @@ impl VolumeManager {
         let reg = self.registry.read().await;
         // Where a volume with no extents is recorded: the first metadata
         // slab whose role matches it.
+        let sizes: HashMap<VolumeId, u64> = self.volumes.iter().map(|(id, h)| (*id, h.extent_size())).collect();
         let home = |vid: &VolumeId| -> Option<SlabId> {
             if let Some(p) = pins.get(vid) {
                 return self.metadata_slabs.contains(p).then_some(*p);
             }
             let want = roles.get(vid).copied().unwrap_or_default();
-            self.metadata_slabs.iter().copied().find(|s| reg.role_of(s) == want && !reg.is_dedicated(s))
+            let ok = |s: &SlabId| reg.role_of(s) == want && !reg.is_dedicated(s);
+            // Where its first write would land: a slab of its size (#156).
+            let size = sizes.get(vid).copied().unwrap_or(0);
+            self.metadata_slabs
+                .iter()
+                .copied()
+                .find(|s| ok(s) && reg.size_ok(s, size))
+                .or_else(|| self.metadata_slabs.iter().copied().find(|s| ok(s)))
         };
         let array_of: HashMap<SlabId, RaidArrayId> = self
             .array_slabs
@@ -2534,7 +2629,12 @@ impl VolumeManager {
                 };
                 (
                     *slab_id,
-                    metadata::VolumeMetadata { extent_size: full.extent_size, arrays, volumes },
+                    metadata::VolumeMetadata {
+                        // A v1 record's one extent size is its slab's (#156).
+                        extent_size: reg.get(slab_id).map(|s| s.slot_size()).unwrap_or(full.extent_size),
+                        arrays,
+                        volumes,
+                    },
                 )
             })
             .collect()
@@ -2595,6 +2695,7 @@ impl VolumeManager {
                 redundancy: handle.redundancy(),
                 parity: Default::default(),
                 failed_slabs: handle.failed_slabs(),
+                extent_size: handle.extent_size(),
             });
         }
         out
@@ -2618,6 +2719,7 @@ impl VolumeManager {
                 handle.access(),
                 handle.pinned_slab(),
                 handle.lba(),
+                handle.extent_size(),
             ));
         }
 
@@ -2636,7 +2738,7 @@ impl VolumeManager {
             .collect();
         let volumes = vol_info
             .into_iter()
-            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed, access, pinned, lba)| metadata::VolumeRecord {
+            .map(|(id, name, virtual_size, redundancy, failed_slabs, sealed, access, pinned, lba, extent_size)| metadata::VolumeRecord {
                 id,
                 name,
                 virtual_size,
@@ -2660,6 +2762,7 @@ impl VolumeManager {
                     .map(|m| m.parity.clone())
                     .unwrap_or_default(),
                 failed_slabs,
+                extent_size,
             })
             .collect();
         metadata::VolumeMetadata {
@@ -2824,7 +2927,7 @@ impl VolumeManager {
                 vrec.id,
                 vrec.name.clone(),
                 vrec.virtual_size,
-                self.slot_size,
+                if vrec.extent_size != 0 { vrec.extent_size } else { self.slot_size },
             );
             let handle = Arc::new(ThinVolumeHandle::with_redundancy(
                 vol,

@@ -854,6 +854,12 @@ impl ThinVolumeHandle {
         gem.get_volume_map(&self.id).map(|m| m.len()).unwrap_or(0)
     }
 
+    /// The size of this volume's extents: the slot size of every slab it
+    /// allocates from (#156).
+    pub fn extent_size(&self) -> u64 {
+        self.slot_size
+    }
+
     /// Load this volume's map if it is not in memory (#158 stage C), and
     /// count the use for the cache's least-recently-used order. Every entry
     /// point that reads or changes the map calls this first.
@@ -931,7 +937,7 @@ impl ThinVolumeHandle {
             let mut tried: Vec<SlabId> = Vec::new();
             loop {
                 let Some(slab_id) = registry.best_slab_for_tier_apart_from_except(
-                    tier, apart_from, rung, self.placement.role, &tried,
+                    tier, apart_from, rung, self.placement.role, self.slot_size, &tried,
                 ) else {
                     break;
                 };

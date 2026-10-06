@@ -1220,6 +1220,8 @@ pub fn doc_entry(extent_size: u64, arrays: &[ArrayRecord]) -> (Key, Vec<u8>) {
 /// A volume's header bytes: its record with no extents or parity, and its
 /// extent size.
 pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
+    // The volume's own size when it says one; else the document's.
+    let extent_size = if rec.extent_size != 0 { rec.extent_size } else { extent_size };
     let mut record = rec.clone();
     record.extents.clear();
     record.parity.clear();
@@ -1346,7 +1348,9 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
                     }
                     let (h, _): (Header, _) = bincode::serde::decode_from_slice(&buf[4..], cfg)
                         .map_err(|e| err(format!("volume {} header: {e}", vol.0)))?;
-                    *rec = Some(h.record);
+                    let mut r = h.record;
+                    r.extent_size = h.extent_size;
+                    *rec = Some(r);
                 }
             }
             kind::EXTENT | kind::PARITY => {
@@ -1603,6 +1607,7 @@ mod tests {
             fs: None,
             owner: None,
             lba: 4096,
+            extent_size: 0,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1635,6 +1640,7 @@ mod tests {
             fs: None,
             owner: None,
             lba: 4096,
+            extent_size: 0,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

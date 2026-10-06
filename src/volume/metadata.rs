@@ -222,6 +222,11 @@ pub struct VolumeRecord {
     /// The logical block size the volume is presented at (#228): 512 for
     /// what firmware reads, 4096 for everything else. V9.
     pub lba: u32,
+    /// The size of the volume's extents (#156), 0 for the document's
+    /// `extent_size`. Never written by bincode (v1 has one size a document);
+    /// a format v2 header carries it.
+    #[serde(skip)]
+    pub extent_size: u64,
 }
 
 /// What a volume belongs to.
@@ -387,6 +392,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     owner: v.owner,
                     // Every volume before V9 was presented at 4096.
                     lba: crate::volume::thin::Lba::DEFAULT,
+                    extent_size: 0,
                 })
                 .collect(),
         }
@@ -420,6 +426,7 @@ fn as_v8(m: &VolumeMetadata) -> Option<v8::VolumeMetadata> {
                 access: v.access,
                 fs: v.fs.clone(),
                 owner: v.owner.clone(),
+                extent_size: 0,
             })
             .collect(),
     })
@@ -497,6 +504,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     // recorded at all, which is the truth about them.
                     owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
+                    extent_size: 0,
                 })
                 .collect(),
         }
@@ -559,6 +567,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     // A slab written then simply has no templates, which is
                     // what it had anyway.
                     template: false,
+                    extent_size: 0,
                 })
                 .collect(),
         }
@@ -622,6 +631,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
+                        extent_size: 0,
                     })
                 .collect(),
         }
@@ -680,6 +690,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
+                        extent_size: 0,
                     })
                 .collect(),
         }
@@ -740,6 +751,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
+                        extent_size: 0,
                     })
                 .collect(),
         }
@@ -794,6 +806,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
+                        extent_size: 0,
                     })
                 .collect(),
         }
@@ -851,6 +864,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                     template: false,
+                        extent_size: 0,
                     })
                 .collect(),
         }
@@ -879,6 +893,21 @@ impl MetadataStore {
     /// that carries its own metadata stores exactly these bytes, so there is
     /// one encoder however the record is kept.
     pub fn encode(metadata: &VolumeMetadata) -> io::Result<Vec<u8>> {
+        // Format 1 records one extent size a document (#156).
+        if let Some(v) = metadata
+            .volumes
+            .iter()
+            .find(|v| v.extent_size != 0 && v.extent_size != metadata.extent_size)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "volume {} has {}-byte extents and this record {}-byte ones: \
+                     only metadata format 2 records both",
+                    v.name, v.extent_size, metadata.extent_size
+                ),
+            ));
+        }
         let (version, payload) = match as_v8(metadata) {
             Some(old) => (VERSION_V8, bincode::serde::encode_to_vec(&old, bincode::config::standard())),
             None => (VERSION, bincode::serde::encode_to_vec(metadata, bincode::config::standard())),
@@ -908,6 +937,15 @@ impl MetadataStore {
 
     /// Decode the binary envelope, verify magic + CRC, return payload.
     pub fn decode(data: &[u8]) -> io::Result<VolumeMetadata> {
+        let mut doc = Self::decode_envelope(data)?;
+        // One size a document in format 1: every volume's (#156).
+        for v in &mut doc.volumes {
+            v.extent_size = doc.extent_size;
+        }
+        Ok(doc)
+    }
+
+    fn decode_envelope(data: &[u8]) -> io::Result<VolumeMetadata> {
         if data.len() < 32 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "metadata too short"));
         }
@@ -1118,6 +1156,7 @@ mod tests {
                 owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                 template: false,
+                    extent_size: 0,
                 }],
         }
     }
@@ -1149,6 +1188,7 @@ mod tests {
                     parent: Some(VolumeId(Uuid::from_u128(54))),
                     sealed: false,
                     fs: None,
+                        extent_size: 0,
                     },
                 v5::VolumeRecord {
                     id: VolumeId(Uuid::from_u128(56)),
@@ -1163,6 +1203,7 @@ mod tests {
                     parent: None,
                     sealed: true,
                     fs: None,
+                    extent_size: 0,
                 },
             ],
         };
@@ -1204,6 +1245,7 @@ mod tests {
                 redundancy: RedundancyPolicy::mirror(2),
                 parity: BTreeMap::new(),
                 failed_slabs: vec![slab_id],
+                    extent_size: 0,
                 }],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
@@ -1254,6 +1296,7 @@ mod tests {
                 template: false,
                 owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
+                extent_size: 0,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1282,6 +1325,7 @@ mod tests {
                 array_id: None,
                 extents,
                 retention: Retention::Ephemeral,
+                    extent_size: 0,
                 }],
         };
         let payload = bincode::serde::encode_to_vec(&old, bincode::config::standard()).unwrap();
@@ -1339,6 +1383,7 @@ mod tests {
                 owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                 template: false,
+                    extent_size: 0,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1439,6 +1484,7 @@ mod tests {
                 virtual_size: 100 * 1024 * 1024,
                 array_id,
                 extent_map,
+                    extent_size: 0,
                 }],
         };
 
@@ -1562,6 +1608,7 @@ mod retention_tests {
                 owner: None,
                     lba: crate::volume::thin::Lba::DEFAULT,
                 template: false,
+                    extent_size: 0,
                 }],
         }
     }
@@ -1591,6 +1638,7 @@ mod retention_tests {
                 virtual_size: 4096,
                 array_id: None,
                 extents: BTreeMap::new(),
+                    extent_size: 0,
                 }],
         };
         let payload =

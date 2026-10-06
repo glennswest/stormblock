@@ -581,6 +581,11 @@ impl PlacementEngine {
                 if registry.is_quarantined(&id) {
                     return Err(PlacementError::NoDestination);
                 }
+                // An extent fits only a slot of its size (#156).
+                let size = registry.get(&source_slab_id).map(|s| s.slot_size()).unwrap_or(0);
+                if !registry.size_ok(&id, size) {
+                    return Err(PlacementError::NoDestination);
+                }
                 id
             }
             None => {
@@ -768,6 +773,11 @@ impl PlacementEngine {
                 return Err(PlacementError::SlabFull);
             }
             if r.is_quarantined(&dest_id) {
+                return Err(PlacementError::NoDestination);
+            }
+            // An extent fits only a slot of its size (#156).
+            let size = r.get(&old.slab_id).map(|s| s.slot_size()).unwrap_or(0);
+            if !r.size_ok(&dest_id, size) {
                 return Err(PlacementError::NoDestination);
             }
             let slab = r.get_mut(&dest_id).ok_or(PlacementError::SlabNotFound(dest_id))?;
@@ -1227,9 +1237,12 @@ impl PlacementEngine {
         // A leg stays in its half (#88): a move never takes a system volume's
         // extent into a data slab or the other way round.
         let role = registry.role_of(&exclude);
+        // And keeps its size (#156): an extent fits only a slot of its size.
+        let size = registry.get(&exclude).map(|s| s.slot_size()).unwrap_or(0);
         let pick = |ids: Vec<SlabId>| -> Option<SlabId> {
             ids.into_iter()
                 .filter(|id| *id != exclude && !registry.is_quarantined(id))
+                .filter(|id| registry.size_ok(id, size))
                 // A dedicated slab holds only what is pinned to it (#150).
                 .filter(|id| !registry.is_dedicated(id))
                 .filter(|id| registry.role_of(id) == role)
@@ -1374,8 +1387,10 @@ impl PlacementEngine {
                 break;
             }
 
-            // Find a slab on the preferred tier with space
-            let dest = registry.best_slab_for_tier(preferred_tier);
+            // Find a slab on the preferred tier with space, of the
+            // extent's size (#156).
+            let size = registry.get(&_source_slab).map(|s| s.slot_size()).unwrap_or(0);
+            let dest = registry.best_slab_for_tier_sized(preferred_tier, size);
             match dest {
                 Some(dest_id) => {
                     match self.migrate_extent(gem, registry, vol_id, vext_idx, Some(dest_id)).await {
@@ -1401,10 +1416,13 @@ impl PlacementEngine {
     ) -> Result<SlabId, PlacementError> {
         // A leg stays in its half (#88).
         let role = registry.role_of(&exclude);
+        // And keeps its size (#156).
+        let size = registry.get(&exclude).map(|s| s.slot_size()).unwrap_or(0);
         // First try same tier
         let candidates: Vec<(SlabId, u64)> = registry.by_tier(tier)
             .iter()
             .filter(|&&id| id != exclude && !registry.is_quarantined(&id))
+            .filter(|&&id| registry.size_ok(&id, size))
             .filter(|&&id| !registry.is_dedicated(&id))
             .filter(|&&id| registry.role_of(&id) == role)
             .filter(|&id| !registry.collides(id, keep_apart_from, DEFAULT_RUNG))
@@ -1425,6 +1443,7 @@ impl PlacementEngine {
                 && !registry.is_quarantined(id)
                 && !registry.is_dedicated(id)
                 && registry.role_of(id) == role
+                && registry.size_ok(id, size)
                 && slab.free_slots() > 0
                 && !registry.collides(id, keep_apart_from, DEFAULT_RUNG)
             {

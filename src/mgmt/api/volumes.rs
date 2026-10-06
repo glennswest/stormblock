@@ -467,10 +467,10 @@ async fn retier_volume(
         ));
     };
 
-    let role = {
+    let (role, size) = {
         let vm = state.volume_manager.lock().await;
         match vm.get_volume_handle(&vol_id) {
-            Some(h) => h.placement_role(),
+            Some(h) => (h.placement_role(), h.extent_size()),
             None => return ApiError::not_found(format!("volume {vol_id} not found")),
         }
     };
@@ -480,7 +480,7 @@ async fn retier_volume(
     // what an install is allowed to erase.
     let dest = {
         let reg = state.slab_registry.read().await;
-        reg.best_slab_for_tier_in_role(tier, role)
+        reg.best_slab_for_tier_in_role(tier, role, size)
     };
     let Some(dest) = dest else {
         return ApiError::conflict(format!(

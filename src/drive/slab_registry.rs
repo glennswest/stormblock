@@ -304,8 +304,29 @@ impl SlabRegistry {
         taken: &[FailureDomain],
         rung: &str,
         role: SlabRole,
+        size: u64,
     ) -> Option<SlabId> {
-        self.best_slab_for_tier_apart_from_except(tier, taken, rung, role, &[])
+        self.best_slab_for_tier_apart_from_except(tier, taken, rung, role, size, &[])
+    }
+
+    /// Whether a slab's slots are `size` bytes (0: any). The extent size is
+    /// part of the pool a volume allocates from (#156, #158): a 1 MiB extent
+    /// has no place in an 8 MiB slot, nor the other way round.
+    pub fn size_ok(&self, id: &SlabId, size: u64) -> bool {
+        size == 0 || self.slabs.get(id).is_some_and(|s| s.slot_size() == size)
+    }
+
+    /// The slot sizes of the slabs of `role` with free space.
+    pub fn sizes_in_role(&self, role: SlabRole) -> Vec<u64> {
+        let mut v: Vec<u64> = self
+            .slabs
+            .iter()
+            .filter(|(id, _)| self.role_of(id) == role && self.allocatable(id).is_some())
+            .map(|(_, s)| s.slot_size())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// The same, never choosing a slab in `except` — one already tried, or
@@ -317,6 +338,7 @@ impl SlabRegistry {
         taken: &[FailureDomain],
         rung: &str,
         role: SlabRole,
+        size: u64,
         except: &[SlabId],
     ) -> Option<SlabId> {
         self.tier_index
@@ -324,7 +346,11 @@ impl SlabRegistry {
             .iter()
             .filter_map(|id| {
                 let free = self.allocatable(id)?;
-                if self.role_of(id) != role || except.contains(id) || self.collides(id, taken, rung) {
+                if self.role_of(id) != role
+                    || !self.size_ok(id, size)
+                    || except.contains(id)
+                    || self.collides(id, taken, rung)
+                {
                     None
                 } else {
                     Some((*id, free))
@@ -337,7 +363,7 @@ impl SlabRegistry {
     /// How many distinct domains at `rung` have a slab with free space, on
     /// any tier — what a create checks before promising a policy.
     pub fn distinct_domains_with_space(&self, rung: &str) -> usize {
-        self.distinct_domains_with_space_in_role(rung, SlabRole::System)
+        self.distinct_domains_with_space_in_role(rung, SlabRole::System, 0)
     }
 
     /// Which role a new volume goes in when the caller did not say.
@@ -351,11 +377,11 @@ impl SlabRegistry {
     /// domain(s)" (#92, #93). The role boundary is still hard: this picks
     /// which side of it a volume is created on, once, and nothing afterwards
     /// spills across.
-    pub fn default_role(&self) -> SlabRole {
-        if self.distinct_domains_with_space_in_role("drive", SlabRole::System) > 0 {
+    pub fn default_role(&self, size: u64) -> SlabRole {
+        if self.distinct_domains_with_space_in_role("drive", SlabRole::System, size) > 0 {
             return SlabRole::System;
         }
-        if self.distinct_domains_with_space_in_role("drive", SlabRole::Data) > 0 {
+        if self.distinct_domains_with_space_in_role("drive", SlabRole::Data, size) > 0 {
             return SlabRole::Data;
         }
         SlabRole::System
@@ -363,10 +389,10 @@ impl SlabRegistry {
 
     /// The same, counting only slabs of one role — the space a volume of
     /// that role can actually reach.
-    pub fn distinct_domains_with_space_in_role(&self, rung: &str, role: SlabRole) -> usize {
+    pub fn distinct_domains_with_space_in_role(&self, rung: &str, role: SlabRole, size: u64) -> usize {
         let mut seen: Vec<FailureDomain> = Vec::new();
         for id in self.slabs.keys() {
-            if self.allocatable(id).is_none() || self.role_of(id) != role {
+            if self.allocatable(id).is_none() || self.role_of(id) != role || !self.size_ok(id, size) {
                 continue;
             }
             let d = self.domain_of(id);
@@ -410,16 +436,21 @@ impl SlabRegistry {
     /// Find the system slab on the given tier with the most free slots.
     /// Returns None if no slabs on that tier have free space.
     pub fn best_slab_for_tier(&self, tier: StorageTier) -> Option<SlabId> {
-        self.best_slab_for_tier_in_role(tier, SlabRole::System)
+        self.best_slab_for_tier_in_role(tier, SlabRole::System, 0)
     }
 
-    /// The same, for a named role.
-    pub fn best_slab_for_tier_in_role(&self, tier: StorageTier, role: SlabRole) -> Option<SlabId> {
+    /// The same, with slots of `size` bytes (0: any).
+    pub fn best_slab_for_tier_sized(&self, tier: StorageTier, size: u64) -> Option<SlabId> {
+        self.best_slab_for_tier_in_role(tier, SlabRole::System, size)
+    }
+
+    /// The same, for a named role and slot size (0: any).
+    pub fn best_slab_for_tier_in_role(&self, tier: StorageTier, role: SlabRole, size: u64) -> Option<SlabId> {
         self.tier_index
             .get(&tier)?
             .iter()
             .filter_map(|id| {
-                if self.role_of(id) != role {
+                if self.role_of(id) != role || !self.size_ok(id, size) {
                     return None;
                 }
                 Some((*id, self.allocatable(id)?))
