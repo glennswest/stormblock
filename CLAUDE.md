@@ -179,15 +179,17 @@ The fix is in (9344473 resume from a fresh clone; b189b3e relocate-on-write
 acceptance (stormcentral's: BMC cut ×3 mid-flow-over, every acknowledged
 write verified). The in-process tests cut at clean points only (every write
 already in the file). Before handing on:
-- [ ] `emulated://…&volatile=1`: writes held in a cache until a flush;
+- [x] `emulated://…&volatile=1`: writes held in a cache until a flush;
       `emulated::crash(name, seed, keep)` keeps a random subset (a power cut)
-- [ ] `open_slabs_resuming` and friends open `emulated://` (not only
+- [x] `open_slabs_resuming` and friends open `emulated://` (not only
       `nvme-tcp://`) as a device path
-- [ ] test: install onto a volatile emulated disk; writers on a system and a
-      data volume (fsync = flush, logged); the flow-over of both halves cut at
-      several points; crash; the next boot resumes from a fresh clone; every
-      acknowledged write and every golden byte checked, after the resume,
-      after the flow-over finishes and from the disk alone
+- [x] test `cli::install_tests::a_power_cut_anywhere_in_the_flow_over_keeps_
+      every_acknowledged_write`: system, data and a stamped service clone
+      (owns extent 0 on the claim) written with logged fsyncs; cut at 10, 60,
+      75, 95 %; half the cache lost; resume from a fresh claim; checked after
+      the resume, after the flow-over and from the disk alone. Passes on dev;
+      `RELOCATE_OFF_239=1` fails it (acknowledged owned-extent writes read as
+      the golden after the resume: #172's failure)
 - [ ] docs, CHANGELOG; hand the metal run to stormcentral (needs a release
       with golden-stormblock-32186e26d36f or later, #301)
 

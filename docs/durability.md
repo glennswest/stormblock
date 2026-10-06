@@ -172,6 +172,19 @@ tests run on.
   an e2fsprogs blank in its data slab and installs it onto an empty disk. It
   checks every volume's sha256 after the seed, after a fresh open of the image
   and the disk, and from the disk alone.
+* `cli::install_tests::a_power_cut_anywhere_in_the_flow_over_keeps_every_acknowledged_write`
+  (rules 9 and 10, #172). It installs a release onto an `emulated://…&volatile=1`
+  disk (80 GiB, writes held until a flush). Consumers write a system volume, a
+  data volume and a stamped service clone, which owns its first extent on the
+  claim, with an fsync every 16 writes, and every acknowledged block is logged.
+  The flow-over of both halves is cut at 10, 60, 75 and 95 % of its extents, and
+  `emulated::crash` keeps a random half of what was not flushed. The next boot
+  opens the disk and resumes from a fresh claim. Every acknowledged block reads
+  what it held, or something written after it, and every other block reads the
+  release's bytes. That is checked after the resume, after the flow-over
+  finishes, and from the disk alone. With relocate-on-write off
+  (`RELOCATE_OFF_239=1`), acknowledged writes to the owned extent read as the
+  golden after the resume.
 * On metal: stormcentral's power-cut check (fastetcd, 300 objects, hard
   power-off, 5 runs). Passed 2026-09-27 on C2NR0Q2 with v19.2.1 in the engine
   and the initramfs: 1500 of 1500 objects (#171). Rule 9 has not yet met

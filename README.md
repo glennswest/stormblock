@@ -1149,7 +1149,7 @@ re-run, which costs time and never data.
 
 ### Emulated drives for scale tests (#208)
 
-`emulated://<name>?size=256T|1P[&backing=<dir>][&lbs=512]` is a drive that
+`emulated://<name>?size=256T|1P[&backing=<dir>][&lbs=512][&volatile=1]` is a drive that
 reports the size it is given and stores only what is written:
 
 - **Where the data lives:** in memory, in 64 KiB pages, or under `backing`,
@@ -1160,6 +1160,11 @@ reports the size it is given and stores only what is written:
 - **Where it is accepted:** wherever a device path is, including `[[drives]]`
   (or `kind = "emulated"`), `POST /api/v1/drives`, `POST /api/v1/slabs` and
   `slab format`.
+- **A volatile cache** (`volatile=1`, in memory only, #172): writes and zeroes
+  are held until a flush, and `drive::emulated::crash(name, seed, keep)` cuts
+  the power. Every flushed write stays, and each cached write is kept with
+  probability `keep`. This is the power-cut test at the size of an install
+  disk.
 - **Identity:** one name is one drive for the life of the process. It reports
   `device_type` `Emulated`, and `GET /api/v1/drives` adds `emulated
   {name, stored_bytes, backing, failed}`.
