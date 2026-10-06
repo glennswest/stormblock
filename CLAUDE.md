@@ -172,6 +172,28 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Boot-chain attestation and the per-machine TPM mark (2026-10-06, #216, P2) — IN PROGRESS
+
+For stormcert's `require.attestation` (stormcert#23, #53). Owner: TPM is
+marked per machine, set by the platform, never self-reported. The shape was
+left to this side:
+- `Host.tpm` (`required` | `none`, unset = none) + `tpm_set_at`, in
+  `synonyms.json`; `PUT/DELETE /api/v1/boothost/{name}/tpm` are destructive
+  (admin token or a SubjectAccessReview `update`/`delete` boothost): a node
+  token cannot downgrade it. A host may be marked before its first claim.
+- `Host.last_claim`: every boothost claim records clone, claimed_at,
+  claimed_as, host NQNs it was bound to (#210), host golden, assigned golden
+  and the assignment's version
+- `GET /api/v1/boothost/{name}/attestation` (by name only, never an alias):
+  host, tpm, requires (`boot_chain` | `tpm_quote`), host_nqns, clone, host
+  golden, golden (sealed, synonym version/label, release digest when it is a
+  published release), and the chain the engine checked now (clone exists,
+  unsealed, parent = host golden; host golden sealed, parent = golden; golden
+  sealed). Readable with the node/admin token or a Kubernetes bearer allowed
+  `get` on `boothost` (stormcert's ServiceAccount, no shared token)
+- [ ] store + claim record; [ ] routes + auth class; [ ] tests; [ ] docs
+      (auth.md, README), CHANGELOG; [ ] answer stormcert's two questions
+
 ### An install booted the old disk: no appliance, no check (2026-10-05, #294, P0) — DONE
 
 server8, 11.82 over an older disk: forge missed the one 3 s health check
