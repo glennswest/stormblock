@@ -185,5 +185,16 @@ naming a host. On a node whose clients do not send `host_nqn` yet, set
 nothing from the firmware. Callers: stormcentral (`sc-build-out`),
 stormstorage (RAID legs), rustkube-node, stormblock-csi, stormvm.
 
-Not covered here: `/serve/v1` per-volume subsystems (the RouterOS serving
-layer) still admit any host.
+**`/serve/v1` serves its own exports only (#217).** Its reconciler wires the
+exports `/serve/v1` made (`ExportEntry.serve`; an entry from before the mark
+is recognised by serve's per-volume name, `<nqn_prefix>:vol-<volume>`, and no
+host binding). An export made through `/api/v1/exports` stays the engine's:
+- a host-bound one only on its host's subsystem, at its own NSID;
+- a shared one only on the shared subsystem, at its own NSID;
+- a wiring row an earlier engine made for one drains, closing its portal.
+
+The engine, for its part, does not restore serve's exports (NSID 1 of their
+own subsystem) onto its shared subsystem at start.
+
+Not covered here: `/serve/v1`'s own per-volume subsystems still admit any
+host (#212).

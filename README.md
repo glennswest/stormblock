@@ -1587,10 +1587,9 @@ What earlier docs described and the code does not do, each with its issue:
   two subsystem schemes are live at once (#98).
 - **"No C dependencies"** was never true: TLS brings in `ring` (the only
   backend since #209; `aws-lc-sys` is gone).
-- **NVMe/TCP access** (#210, `docs/nvme-access.md`): the `/serve/v1`
-  reconciler also serves every `/api/v1` export — host-bound ones included —
-  on a per-volume portal that admits any host (#217); `/serve/v1`'s own
-  subsystems admit any host (#212); an `nvme-tcp://` drive cannot be given a
+- **NVMe/TCP access** (#210, `docs/nvme-access.md`): `/serve/v1`'s own
+  subsystems admit any host (#212). Since #217 it serves only its own
+  exports; an `nvme-tcp://` drive cannot be given a
   DH-HMAC-CHAP secret except through the environment (#213).
 - **The slot fence (#239)** covers thin, mirrored and copy-on-write I/O; parity
   stripes and the StormFS chunk/versioned paths are not fenced against a move

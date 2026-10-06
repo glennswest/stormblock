@@ -172,22 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### /serve/v1 served every /api/v1 export on an open portal (2026-10-06, #217, P0) — IN PROGRESS
+### /serve/v1 served every /api/v1 export on an open portal (2026-10-06, #217, P0) — DONE
 
 By reading, confirmed: reconcile step 1a wires every NVMe/iSCSI entry of
 `state.exports` on a per-volume portal with `HostAccess::Any` and rewrites
 its nsid to 1; and the engine's `restore_exports` puts serve's own entries
 (nsid 1, no subsystem) on the shared subsystem at NSID 1 at every start.
-- [ ] `ExportEntry.serve` (set by `/serve/v1`); an unmarked entry is serve's
-      only when it carries serve's per-volume name (`<prefix>:vol-<id>`) and
-      no host binding (`serve::wiring::serve_owned`); marked on the first pass
-- [ ] reconciler wires serve's entries only; a row it made for anyone else's
-      drains (portal closed), the entry itself untouched
-- [ ] `restore_exports` leaves serve's entries to serve (not on the shared
-      subsystem)
-- [ ] tests: a host-bound and a shared /api/v1 export are on no portal and
-      keep their nsid; a legacy row is drained; serve's own still wired;
-      docs, CHANGELOG
+- [x] `ExportEntry.serve` (set by `/serve/v1`); an unmarked entry is serve's
+      only by serve's per-volume name and no host binding
+      (`serve::wiring::serve_owned`), marked on the first pass
+- [x] reconciler wires serve's entries only; a row it made for another
+      export drains; `restore_exports` leaves serve's to serve (465deb9)
+- [x] `integration_serve_own_exports` (2): host-bound and shared exports keep
+      NSIDs 3 and 7, no portal in the range answers for them (in-house
+      initiator), an earlier engine's row drains, serve's legacy and marked
+      exports are wired; restore puts the shared one back at NSID 5 and not
+      serve's. Both fail with `serve_owned` = always (the old rule). Docs
+      (nvme-access.md, README), CHANGELOG
+- An `/api/v1` shared export whose NSID an earlier engine rewrote to 1 is
+  restored at 1: the number it had is not recorded anywhere
 
 ### A power cut during the install's flow-over (2026-10-06, #172, P0) — DONE here, metal acceptance stormcentral's
 
