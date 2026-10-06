@@ -1960,7 +1960,6 @@ async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
             let entries = crate::volume::metav2::document_entries(&doc);
             slab.upgrade_to_v2(&record, entries).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
             println!("{device}: slab {} migrated to format 2 ({} volume(s))", slab.slab_id(), doc.volumes.len());
-            Ok(())
         }
         SlabAction::Volumes { devices } => {
             for device in devices {
