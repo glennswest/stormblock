@@ -7023,16 +7023,17 @@ file = "{logs}"
         bad
     }
 
-    /// `root` and `state` on `mgr` against their writers' records.
+    /// Each written volume on `mgr` against its writer's record.
     async fn check_volumes(
         t: &str,
         when: &str,
         mgr: &VolumeManager,
-        goldens: [&[u8]; 2],
+        names: &[&str],
+        goldens: &[Vec<u8>],
         logs: &[Arc<std::sync::Mutex<Acked>>],
     ) -> Vec<String> {
         let mut out = Vec::new();
-        for ((name, golden), log) in ["root", "state"].into_iter().zip(goldens).zip(logs) {
+        for ((name, golden), log) in names.iter().zip(goldens).zip(logs) {
             let Some(id) = mgr.find_volume(name).await else {
                 out.push(format!("{t}, {when}: no volume {name}"));
                 continue;
@@ -7077,10 +7078,31 @@ file = "{logs}"
             }
             v
         };
-        let (root_bytes, state_bytes) = (noise(24 * MIB), noise(32 * MIB));
         let (root, state) = (p("root.img"), p("state.img"));
-        std::fs::write(&root, &root_bytes).unwrap();
-        std::fs::write(&state, &state_bytes).unwrap();
+        std::fs::write(&root, noise(24 * MIB)).unwrap();
+        std::fs::write(&state, noise(32 * MIB)).unwrap();
+        // A service golden as stormcentral builds one (#239): its clone is
+        // stamped, so the clone owns its first extent on the claim, and a
+        // write there is the one a resume from a fresh claim would lose if
+        // it were left in place.
+        let svc = mkfs_ext4().map(|mkfs| {
+            let blank = p("svc.img");
+            std::fs::File::create(&blank).unwrap().set_len(16 * MIB).unwrap();
+            let st = std::process::Command::new(&mkfs)
+                .args(["-q", "-F", "-b", "4096", "-O", "^has_journal", "-m", "0", &blank])
+                .status()
+                .unwrap();
+            assert!(st.success(), "mkfs.ext4 failed");
+            blank
+        });
+        let svc_spec = match &svc {
+            Some(b) => format!("[[slab.golden]]\nname = \"svc\"\nfile = \"{b}\"\ntemplate = true\n"),
+            None => {
+                eprintln!("no mkfs.ext4: the owned-extent case (#239) is not covered");
+                String::new()
+            }
+        };
+        let names: Vec<&str> = if svc.is_some() { vec!["root", "state", "svc"] } else { vec!["root", "state"] };
         let spec = format!(
             r#"
 name = "install-172"
@@ -7090,7 +7112,7 @@ size = "rest"
 [[slab.golden]]
 name = "root"
 file = "{root}"
-[data_slab]
+{svc_spec}[data_slab]
 size = "512M"
 [[data_slab.golden]]
 name = "state"
@@ -7144,17 +7166,25 @@ file = "{state}"
             };
             let (sys_n, data_n) = (super::extents_on(succ.gem(), &sys_src).await, super::extents_on(succ.gem(), &data_src).await);
             assert!(sys_n >= 8 && data_n >= 8, "enough to cut in the middle: {sys_n} + {data_n}");
-            let vols: Vec<(&str, Arc<dyn BlockDevice>, &[u8])> = vec![
-                ("root", succ.get_volume(&succ.find_volume("root").await.unwrap()).unwrap(), &root_bytes),
-                ("state", succ.get_volume(&succ.find_volume("state").await.unwrap()).unwrap(), &state_bytes),
-            ];
+            // Each volume as the release has it: what a block nobody wrote
+            // must still read as.
+            let mut vols: Vec<Arc<dyn BlockDevice>> = Vec::new();
+            let mut goldens: Vec<Vec<u8>> = Vec::new();
+            for n in &names {
+                let v = succ.get_volume(&succ.find_volume(n).await.unwrap()).unwrap();
+                let mut g = vec![0u8; v.capacity_bytes().min(32 * MIB) as usize];
+                v.read(0, &mut g).await.unwrap();
+                vols.push(v);
+                goldens.push(g);
+            }
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let logs: Vec<Arc<std::sync::Mutex<Acked>>> = vols.iter().map(|_| Default::default()).collect();
             let writers: Vec<_> = vols
                 .iter()
+                .zip(&goldens)
                 .zip(&logs)
                 .enumerate()
-                .map(|(i, ((_, v, g), l))| {
+                .map(|(i, ((v, g), l))| {
                     tokio::spawn(writer(v.clone(), g.len() as u64 / 4096, 0x9E37 + (trial * 7 + i) as u64, l.clone(), stop.clone()))
                 })
                 .collect();
@@ -7212,8 +7242,7 @@ file = "{state}"
             if resumed.is_none() {
                 bad.push(format!("{t}: the next boot did not resume the flow-over"));
             }
-            let goldens: [&[u8]; 2] = [&root_bytes, &state_bytes];
-            bad.extend(check_volumes(&t, "after the resume", &next, goldens, &logs).await);
+            bad.extend(check_volumes(&t, "after the resume", &next, &names, &goldens, &logs).await);
 
             // The rest moves, and the disk alone is what the node boots next.
             let mut next = next;
@@ -7233,13 +7262,13 @@ file = "{state}"
             if rest != 0 {
                 bad.push(format!("{t}: {rest} extents still on the claim after the resumed flow-over"));
             }
-            bad.extend(check_volumes(&t, "after the flow-over finished", &next, goldens, &logs).await);
+            bad.extend(check_volumes(&t, "after the flow-over finished", &next, &names, &goldens, &logs).await);
             next.persist().await;
             drop(next);
             // A clean power-off now loses nothing that was flushed.
             crate::drive::emulated::crash(&disk, 0x272 + trial as u64, 0.0);
             match super::open_slabs_resuming(&[flow.disk.clone()], None, false).await {
-                Ok((alone, _)) => bad.extend(check_volumes(&t, "the disk alone", &alone, goldens, &logs).await),
+                Ok((alone, _)) => bad.extend(check_volumes(&t, "the disk alone", &alone, &names, &goldens, &logs).await),
                 Err(e) => bad.push(format!("{t}: the disk alone does not open: {e}")),
             }
         }
