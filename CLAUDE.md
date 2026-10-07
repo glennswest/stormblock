@@ -172,6 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A write to a just-moved extent lost on a cut before the persist (2026-10-06, #277, P1) — IN PROGRESS
+
+By reading: `move_slot` and `migrate_leg_unlocked` allocate the destination
+at the source's generation while `rewrite_legs` bumps the map's by one. A cut
+between a write+fsync to the moved extent (in place on the destination, its
+entry published by the fsync) and the next persist leaves two slots at equal
+generations; restore keeps the record's, the source: the write is gone.
+- [ ] test in `integration_power_cut` (both formats): move extent 0, write,
+      fsync, cut before any persist, restore from the slabs alone; fails today
+- [ ] a moved primary is allocated at `generation + 1` (= the map's after
+      `rewrite_legs`) in both paths; a mirror or parity leg keeps its
+      generation (they tie by design, see the follow-up)
+- [ ] durability.md rule, CHANGELOG; full nextest; follow-up issue for
+      mirror/parity legs moved in place
+
 ### Optional mount entries `?vol:path` (2026-10-06, #288, P1) — DONE
 
 stormcos#208: one stormpump golden serves every flavor (cilium, flowsdn), so
