@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### CrashDevice tears writes; cuts inside an operation (2026-10-07, #191, P2) — IN PROGRESS
+### CrashDevice tears writes; cuts inside an operation (2026-10-07, #191, P2) — DONE
 
 From #171: `CrashDevice` kept or dropped each unflushed write whole; a drive
 can persist part of a multi-block write.
@@ -187,8 +187,10 @@ can persist part of a multi-block write.
 - [x] found: format v1 loses a clone's unwritten extent to a cut inside a
       persist (9/300, not tearing) — #340; v1 runs cut between operations,
       `v1_survives_a_power_cut_inside_a_persist` ignored repro. v2: 0 lost
-- [ ] verified on a build VM (power-cut tests, the ignored repro still
-      fails, full suite); durability.md, CHANGELOG
+- [x] verified on a build VM at fedaaf3: 17/17 power-cut tests (v2: 205/300
+      cuts inside an operation, 0 lost, 98–247 torn writes per run); the
+      ignored v1 repro still fails 9/300 (#340's repro); full nextest
+      1003/1003. Test infrastructure only: no golden needed. #340 is next
 
 ### Import refuses an XFS dirty log or an ext4 pending journal (2026-10-07, #198, P2) — DONE
 
