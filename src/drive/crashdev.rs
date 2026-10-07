@@ -58,6 +58,12 @@ struct State {
     /// Writes since the last flush, in order.
     cached: Vec<(u64, Vec<u8>)>,
     flushes: u64,
+    /// Writes taken so far.
+    writes: u64,
+    /// The power goes as this write arrives (#191): what survived then is
+    /// kept in `cut`, and a crash uses it.
+    cut_at: Option<u64>,
+    cut: Option<(Vec<u8>, Vec<(u64, Vec<u8>)>)>,
 }
 
 impl CrashDevice {
@@ -78,7 +84,15 @@ impl CrashDevice {
             block: 4096,
             atomic: 4096,
             torn: 0,
-            state: Mutex::new(State { view: image.clone(), durable: image, cached: Vec::new(), flushes: 0 }),
+            state: Mutex::new(State {
+                view: image.clone(),
+                durable: image,
+                cached: Vec::new(),
+                flushes: 0,
+                writes: 0,
+                cut_at: None,
+                cut: None,
+            }),
         }
     }
 
@@ -94,10 +108,15 @@ impl CrashDevice {
     pub fn crash_with(&self, seed: u64, keep: f64, tear: Tear) -> CrashDevice {
         let st = self.state.lock().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut image = st.durable.clone();
+        // A cut armed with `cut_at` that fired: the power went then.
+        let (durable, cached) = match &st.cut {
+            Some((d, c)) => (d, c),
+            None => (&st.durable, &st.cached),
+        };
+        let mut image = durable.clone();
         let block = self.atomic;
         let mut torn = 0;
-        for (off, data) in &st.cached {
+        for (off, data) in cached {
             if !rng.gen_bool(keep) {
                 continue;
             }
@@ -148,6 +167,21 @@ impl CrashDevice {
         self.torn
     }
 
+    /// Cut the power as the `n`th write from now arrives (#191), whatever is
+    /// running then: a persist or a slot-table sync part-way, its pieces
+    /// cached and not flushed. The device goes on working; `crash_with` uses
+    /// what survived at the cut.
+    pub fn cut_at(&self, n: u64) {
+        let mut st = self.state.lock().unwrap();
+        st.cut_at = Some(st.writes + n);
+        st.cut = None;
+    }
+
+    /// Whether an armed cut has happened.
+    pub fn cut_taken(&self) -> bool {
+        self.state.lock().unwrap().cut.is_some()
+    }
+
     /// Writes waiting in the cache.
     pub fn cached_writes(&self) -> usize {
         self.state.lock().unwrap().cached.len()
@@ -196,6 +230,11 @@ impl BlockDevice for CrashDevice {
         if end > st.view.len() {
             return Err(DriveError::OutOfRange { offset, len: buf.len() as u64, capacity: st.view.len() as u64 });
         }
+        if st.cut.is_none() && st.cut_at == Some(st.writes) {
+            // The power goes as this write arrives: it is not in the cache.
+            st.cut = Some((st.durable.clone(), st.cached.clone()));
+        }
+        st.writes += 1;
         st.view[offset as usize..end].copy_from_slice(buf);
         st.cached.push((offset, buf.to_vec()));
         Ok(buf.len())

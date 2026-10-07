@@ -81,7 +81,7 @@ enum Allowed {
     Any,
 }
 
-async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<usize, String> {
+async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<(usize, bool), String> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024).with_atomic_unit(atomic));
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
@@ -118,8 +118,16 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<usi
     let mut current: HashMap<u64, Option<u64>> = (0..BLOCKS).map(|i| (i, Some(blank_value(i)))).collect();
 
     let ops = rng.gen_range(20..200);
+    // In most trials the power goes in the middle of an operation (#191): as
+    // a random write arrives, so a persist or a slot-table sync is caught
+    // part-way, its pieces cached, to be kept, torn or lost.
+    if rng.gen_bool(0.8) {
+        dev.cut_at(rng.gen_range(1..=ops as u64 * 3));
+    }
     let mut seq = 1u64;
     for _ in 0..ops {
+        // What a block may read had the power gone before this operation.
+        let before = allowed.clone();
         let r: f64 = rng.gen();
         if r < 0.70 {
             let i = rng.gen_range(0..BLOCKS);
@@ -160,12 +168,24 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<usi
             // Something that rewrites the volume records.
             vm.persist().await;
         }
+        if dev.cut_taken() {
+            // The power went during this operation: a block may read what
+            // was allowed before it or after it.
+            for (i, a) in allowed.iter_mut() {
+                *a = match (&before[i], &*a) {
+                    (Allowed::Values(b), Allowed::Values(c)) => Allowed::Values(b.union(c).copied().collect()),
+                    _ => Allowed::Any,
+                };
+            }
+            break;
+        }
     }
 
     // The power goes.
     let keep = rng.gen_range(0.0..1.0);
     let after = Arc::new(dev.crash_with(seed, keep, tear));
     let torn = after.torn_writes();
+    let mid_op = dev.cut_taken();
     let slab = Slab::open(after.clone() as Arc<dyn BlockDevice>).await.map_err(|e| format!("reopen: {e}"))?;
     let mut vm2 = VolumeManager::new(SLOT);
     vm2.add_slab(slab).await;
@@ -193,7 +213,7 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<usi
             _ => {}
         }
     }
-    Ok(torn)
+    Ok((torn, mid_op))
 }
 
 #[tokio::test]
@@ -248,14 +268,18 @@ async fn fsynced_writes_survive_a_power_cut_that_tears_sectors_in_format_v2() {
 
 async fn power_cuts(version: u32, tear: Tear, atomic: usize) {
     let mut failures = Vec::new();
-    let mut torn = 0usize;
+    let (mut torn, mut mid_op) = (0usize, 0usize);
     for seed in 0..300u64 {
         match trial(seed, version, tear, atomic).await {
-            Ok(n) => torn += n,
+            Ok((t, m)) => {
+                torn += t;
+                mid_op += m as usize;
+            }
             Err(e) => failures.push(e),
         }
     }
-    println!("{tear:?} at {atomic} bytes: {torn} write(s) torn over 300 cuts");
+    println!("{tear:?} at {atomic} bytes: {mid_op} of 300 cuts inside an operation, {torn} write(s) torn");
+    assert!(mid_op > 150, "most cuts land inside an operation: {mid_op}");
     if tear != Tear::None {
         assert!(torn > 0, "the cuts tore no write: the test exercised nothing");
     }
