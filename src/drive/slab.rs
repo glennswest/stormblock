@@ -617,6 +617,10 @@ pub struct Slab {
     /// For the frees of one delete that asked for more (#286), set and
     /// cleared around it under the registry's write lock.
     erase_now: Option<super::erase::EraseLevel>,
+    /// Slots this slab has marked `Erasing` since the count was last taken
+    /// (#313): what one delete queued for overwrite, read and reset by its
+    /// caller under the registry's write lock.
+    retired_for_erase: u64,
 }
 
 /// What a sync of one slab needs, apart from the slab (#269): taken from the
@@ -954,6 +958,7 @@ impl Slab {
             syncs: Default::default(),
             erase: Default::default(),
             erase_now: None,
+            retired_for_erase: 0,
         })
     }
 
@@ -1006,6 +1011,7 @@ impl Slab {
             syncs: Default::default(),
             erase: Default::default(),
             erase_now: None,
+            retired_for_erase: 0,
         })
     }
 
@@ -1148,6 +1154,8 @@ impl Slab {
             p.unpublished.remove(&(idx as u64));
             if p.erasing.insert(idx as u64, (level, old.volume_id)).is_none() {
                 *p.erasing_by_volume.entry(old.volume_id).or_default() += 1;
+                drop(p);
+                self.retired_for_erase += 1;
             }
             return Ok(true);
         }
@@ -1687,6 +1695,12 @@ impl Slab {
     /// caller holds the registry's write lock across the frees and clears it.
     pub fn set_erase_override(&mut self, level: Option<super::erase::EraseLevel>) {
         self.erase_now = level;
+    }
+
+    /// Slots marked `Erasing` since the last call, and the count reset
+    /// (#313).
+    pub fn take_retired_for_erase(&mut self) -> u64 {
+        std::mem::take(&mut self.retired_for_erase)
     }
 
     /// Slots waiting to be overwritten or being overwritten.

@@ -93,6 +93,19 @@ impl SlabRegistry {
         }
     }
 
+    /// Slots marked `Erasing` over every slab since the last call, and their
+    /// bytes; the counts reset (#313). Called around one delete under the
+    /// write lock, so it counts that delete's slots only.
+    pub fn take_retired_for_erase(&mut self) -> (u64, u64) {
+        let (mut slots, mut bytes) = (0, 0);
+        for slab in self.slabs.values_mut() {
+            let n = slab.take_retired_for_erase();
+            slots += n;
+            bytes += n * slab.slot_size();
+        }
+        (slots, bytes)
+    }
+
     /// Slots of `volume` waiting to be overwritten, over every slab.
     pub fn erasing_for(&self, volume: crate::volume::extent::VolumeId) -> u64 {
         self.slabs.values().map(|s| s.erasing_for(volume)).sum()

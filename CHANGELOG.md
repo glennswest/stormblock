@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** #313: `?scrub=used` on `DELETE /api/v1/volumes/{id}` and `/serve/v1/volumes/{id}`, the owner's rule for removing data ("overwrite only what's used, once"), with a report. Since #286 a delete already overwrites once every slot whose last reference goes with it (copy-on-write aware), discards it on flash, then frees it. What was missing was the word and the answer.
+  - **The word:** `scrub=used` means at least `once`, even on a node whose `[erase] default` is `none`.
+  - **The answer:** the delete returns **200** `{deleted, scrub: {volume, level, slots, bytes}}`, counting the slots this delete queued (counted when they are retired, under the registry lock). `/serve/v1` adds `scrub` to its body always. Completion is the volume's record in `GET /api/v1/erasures`. Without `scrub` the delete answers 204 as before.
+  - `/serve/v1`'s delete now also wakes the eraser.
+  - **Test:** `integration_erase::scrub_used_overwrites_what_the_last_holder_frees_and_reports_it` (a clone scrubs its own copy-on-write slot only, the golden's delete then scrubs the shared ones, the bytes are gone from the device, raised from a `none` default, 400 for an unknown scrub, 204 without it).
 - **docs:** removed references to the CoreOS trademark (owner); the Ignition interface name `opt/com.coreos/config` stays where Ignition requires it
 - **fix:** #308 (stormcos#92): a flush that reaches a mirror's failed drive degrades that leg instead of failing the volume. On the 160-drive shelf, a `mirror:2` volume's flush right after one of its drives was failed returned EIO (`flushing the filesystem: device I/O failed`), and health still said `healthy`. `flush` returned the first slab's sync error for every volume. The write path already marks a failing leg's slab failed and goes on, but a flush that is the first I/O to reach a dead drive did not: on 160 drives the writes before it usually land elsewhere (2 of 4 shelf runs), and on 8 drives they hit it first (4 of 4 passed).
   - **Fix:** on a redundant volume, a media error from a slab's sync now puts that slab in the volume's failed set (the volume is `degraded`) and the flush completes on the other legs. It fails only when something is no longer readable. An unreplicated volume's flush error is still the volume's.

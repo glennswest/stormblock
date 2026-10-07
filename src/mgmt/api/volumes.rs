@@ -241,6 +241,26 @@ pub struct DeleteQuery {
     /// `dod3`, `dod7`. Never less than the node's `[erase] default`.
     #[serde(default)]
     pub erase: Option<String>,
+    /// `used` (#313): overwrite once every slot whose last reference goes
+    /// with this delete (thin and copy-on-write aware), then free it, and
+    /// answer what was queued. The owner's rule for removing data. Without
+    /// it the node's `[erase] default` applies as always (`once` unless
+    /// configured) and the delete answers 204.
+    #[serde(default)]
+    pub scrub: Option<String>,
+}
+
+/// The level `?scrub=` asks for (#313): `used` is one pass over what the
+/// volume was the last user of.
+pub(crate) fn scrub_level(scrub: Option<&str>) -> Result<Option<crate::drive::erase::EraseLevel>, String> {
+    match scrub {
+        None => Ok(None),
+        Some("used") => Ok(Some(crate::drive::erase::EraseLevel::Once)),
+        Some(other) => Err(format!(
+            "scrub={other}: the only scrub is `used` (overwrite, once, what this volume was the last \
+             user of); `erase=dod3|dod7` asks for more passes"
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1718,6 +1738,12 @@ async fn delete_volume(
         Some(Ok(l)) => Some(l),
         Some(Err(e)) => return ApiError::bad_request(e),
     };
+    let scrub = match scrub_level(q.scrub.as_deref()) {
+        Ok(l) => l,
+        Err(e) => return ApiError::bad_request(e),
+    };
+    // Both asked: the more thorough.
+    let erase = erase.max(scrub);
 
     // A synonym pointing here is a reference held by something that knows
     // this volume only by name. Deleting under it leaves a name that
@@ -1755,7 +1781,7 @@ async fn delete_volume(
 
     let mut vm = state.volume_manager.lock().await;
     match vm.delete_volume_erasing(vol_id, erase).await {
-        Ok(()) => {
+        Ok(scrubbed) => {
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             drop(vm);
             state.eraser.kick();
@@ -1764,7 +1790,13 @@ async fn delete_volume(
             // keep answering, on a bound port, for a volume that is gone
             // (#98).
             stop_volume_subsystem(&state, uuid).await;
-            axum::http::StatusCode::NO_CONTENT.into_response()
+            if scrub.is_some() {
+                // What was queued; `GET /api/v1/erasures` has the volume's
+                // record once every slot is overwritten.
+                Json(serde_json::json!({ "deleted": uuid, "scrub": scrubbed })).into_response()
+            } else {
+                axum::http::StatusCode::NO_CONTENT.into_response()
+            }
         }
         Err(e @ crate::volume::thin::VolumeError::InUse { .. }) => {
             ApiError::conflict(format!("cannot delete volume {uuid}: {e}"))

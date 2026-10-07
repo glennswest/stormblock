@@ -1004,8 +1004,12 @@ async fn delete_volume(
         }
     }
 
+    // `scrub=used` (#313): at least one pass over what this volume was the
+    // last user of. The node's default applies without it.
+    let scrub = crate::mgmt::api::volumes::scrub_level(q.get("scrub").map(String::as_str))
+        .map_err(|e| MkError::bad(e))?;
     let mut vm = ctx.state.volume_manager.lock().await;
-    vm.delete_volume(VolumeId(id)).await.map_err(|e| match e {
+    let scrubbed = vm.delete_volume_erasing(VolumeId(id), scrub).await.map_err(|e| match e {
         // Even with force: the node has it as a device (#267).
         crate::volume::thin::VolumeError::InUse { .. } => {
             MkError::conflict(format!("deleting volume {id}: {e}"))
@@ -1013,6 +1017,7 @@ async fn delete_volume(
         e => MkError::not_found(format!("deleting volume {id}: {e}")),
     })?;
     drop(vm);
+    ctx.state.eraser.kick();
 
     // The volume is gone, so any export naming it must go too. Leaving the
     // entry behind strands its wiring row `Pending` forever — un-wireable,
@@ -1027,7 +1032,7 @@ async fn delete_volume(
             withdrawn
         );
     }
-    ok(json!({ "deleted": id, "exports_withdrawn": withdrawn }))
+    ok(json!({ "deleted": id, "exports_withdrawn": withdrawn, "scrub": scrubbed }))
 }
 
 /// Refuse to write to a volume an initiator is currently holding.

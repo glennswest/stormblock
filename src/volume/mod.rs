@@ -248,6 +248,19 @@ struct Records {
     v2: Option<persist_v2::V2Records>,
 }
 
+/// What one delete queued for overwrite (#313, #286): every slot whose last
+/// reference went with it. They are overwritten (and discarded on flash) by
+/// the eraser, then freed; the volume's record in `GET /api/v1/erasures`
+/// says when. Slots on a slab reached over a fabric are not counted: their
+/// own engine erases them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Scrubbed {
+    pub volume: VolumeId,
+    pub level: crate::drive::erase::EraseLevel,
+    pub slots: u64,
+    pub bytes: u64,
+}
+
 impl VolumeManager {
     /// Create a new VolumeManager.
     ///
@@ -1552,17 +1565,20 @@ impl VolumeManager {
 
     /// Delete a volume, freeing all slab slots.
     pub async fn delete_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
-        self.delete_volume_erasing(id, None).await
+        self.delete_volume_erasing(id, None).await.map(|_| ())
     }
 
     /// Delete a volume, overwriting the slots it frees with at least `erase`
     /// (#286) — more than the node's default, never less. Slots it still
     /// shares with another volume are not freed, so not erased.
+    ///
+    /// Answers what it queued for overwrite (#313): the slots whose last
+    /// reference went with it, at the level they will be overwritten with.
     pub async fn delete_volume_erasing(
         &mut self,
         id: VolumeId,
         erase: Option<crate::drive::erase::EraseLevel>,
-    ) -> Result<(), VolumeError> {
+    ) -> Result<Scrubbed, VolumeError> {
         // Never under something serving it (#267): a ublk device mounted
         // under running containers read zeros and other volumes' data once
         // its volume was deleted and its slots reused.
@@ -1582,15 +1598,19 @@ impl VolumeManager {
         self.prefetch_volume(id).await;
         let mut gem = self.gem.write().await;
         let mut reg = self.registry.write().await;
+        let level = erase.unwrap_or(reg.erase_default()).max(reg.erase_default());
+        // Whatever an earlier free left in the counts is not this delete's.
+        let _ = reg.take_retired_for_erase();
         reg.set_erase_override(erase);
         let res = snapshot::delete_snapshot(id, &mut gem, &mut reg).await;
         reg.set_erase_override(None);
+        let (slots, bytes) = reg.take_retired_for_erase();
         res?;
         drop(gem);
         drop(reg);
 
         self.persist().await;
-        Ok(())
+        Ok(Scrubbed { volume: id, level, slots, bytes })
     }
 
     /// Grow a volume to `new_size` bytes.

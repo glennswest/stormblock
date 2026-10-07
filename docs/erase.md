@@ -62,7 +62,19 @@ Where a level is set:
   (`nvme-tcp://`, `iscsi://`), because it is another engine's volume, such as
   the appliance's per-boot clone during a flow-over. Its own engine erases what
   it frees.
-- **For one delete:** `DELETE /api/v1/volumes/{id}?erase=dod3`. The higher of
+- **For one delete, the owner's rule (#313):** `?scrub=used` on
+  `DELETE /api/v1/volumes/{id}` or `DELETE /serve/v1/volumes/{id}`. It means
+  "overwrite only what is used, once": every slot whose last reference goes
+  with this delete is overwritten at least `once`, discarded afterwards on
+  flash, then freed. That holds even on a node whose default is `none`. The
+  delete answers **200** with what it queued:
+  `{"deleted": "<id>", "scrub": {"volume": "<id>", "level": "once", "slots": 3, "bytes": 3145728}}`.
+  The volume's record in `GET /api/v1/erasures` (below) says when the slots
+  are overwritten. Node reset (#312) and the registry's forge cleanup
+  (stormblock-registry#70) delete this way. Without `scrub` a delete answers
+  204 as before, and the node's default still applies. `/serve/v1` always
+  answers JSON, and its body has `scrub` too.
+- **For one delete, more passes:** `DELETE /api/v1/volumes/{id}?erase=dod3`. The higher of
   this and the node's default applies to every slot the delete frees.
   - Slots the volume still shares with another volume are not freed, so they
     are not erased. A clone's own copy-on-write slots are freed; its golden's
