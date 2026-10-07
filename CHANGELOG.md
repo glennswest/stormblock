@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **test:** #191: the power-cut simulation tears writes and cuts inside operations.
+  - **Tearing:** `CrashDevice::crash_with(seed, keep, Tear)` tears the writes it keeps. `Tear::Prefix` keeps the first n units of a write (a drive writing in order) and `Tear::Scatter` any subset (out of order). It tears at the drive's atomic unit: 4096 bytes, or 512 with `with_atomic_unit(512)`, where one 4 KiB slot-table page or record block can land in part.
+  - **Cut inside an operation:** `CrashDevice::cut_at(n)` takes the power as the nth write arrives, so a persist or a slot-table sync is caught part-way.
+  - **Tests:** the 300-cut power-cut test runs under none, prefix, scatter and 512-byte sectors, in both formats. In format v2 most cuts land inside an operation. Each run says how many cuts and torn writes it made, and fails if it tore nothing or cut too few operations. Format v2: 0 lost in every variant.
+  - **Found:** format v1 loses a clone's unwritten extent to a cut inside a persist (9 of 300, tearing or not), filed as **#340**. Its runs cut between operations until then, and `v1_survives_a_power_cut_inside_a_persist` (`#[ignore]`) reproduces it.
 - **fix:** #198: an imported image that was not cleanly unmounted no longer passes verification. `fio-xfs` never read the XFS log, and the import ignored ext4's RECOVER flag, so an image taken from a running or crashed system walked clean and was sealed, though Linux replays it on first mount and the guest sees something other than what was surveyed.
   - **fio-xfs v0.3.0** (fio.xfs.rs#6) reads the log.
   - **Survey:** each filesystem in the import's survey has a `log` field: `clean`; for XFS `dirty`, `external` or `unreadable`; for ext4 `needs_recovery`. Anything else fails verification unless `"verify": false`.

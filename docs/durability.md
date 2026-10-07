@@ -233,5 +233,19 @@ tests run on.
   and the initramfs: 1500 of 1500 objects (#171). Rule 9 has not yet met
   metal; that check is #172.
 
-What the simulation cannot show: sectors torn inside one write, and drives
-that lie about FLUSH. Torn sectors can be simulated; that is #191.
+**Torn writes and cuts inside an operation (#191).**
+- **Torn writes:** `CrashDevice::crash_with` tears the writes it keeps. A kept
+  write lands as a prefix of its blocks (a drive writing in order), or as any
+  subset of them (out of order). It tears at the drive's atomic unit: 4096
+  bytes, or 512 with `with_atomic_unit(512)` for a drive with 512-byte
+  sectors, where even one 4 KiB slot-table page or record block can land in
+  part.
+- **Cuts inside an operation:** `CrashDevice::cut_at(n)` takes the power as
+  the nth write arrives, so a persist or a slot-table sync is cut part-way,
+  with its pieces cached.
+- **Results:** format v2 keeps every acknowledged write through 300 cuts of
+  each kind (none, prefix, scatter, 512-byte sectors), most of them inside an
+  operation. Format v1 does not survive a cut inside a persist: #340, open.
+  Its runs cut between operations until that is fixed.
+
+What the simulation cannot show: drives that lie about FLUSH.

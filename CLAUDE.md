@@ -172,18 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### CrashDevice tears writes (2026-10-07, #191, P2) — IN PROGRESS
+### CrashDevice tears writes; cuts inside an operation (2026-10-07, #191, P2) — IN PROGRESS
 
 From #171: `CrashDevice` kept or dropped each unflushed write whole; a drive
-can persist part of a multi-block write. Torn at the device's atomic unit
-(its 4096-byte block, as a 4Kn drive): inside a block would only show a
-consumer's unflushed 4 KiB write torn, which is its journal's business.
-- [ ] `Tear`: `Prefix(p)` (the first n blocks of a kept write, the issue's
-      model) and `Scatter(p)` (any subset, out-of-order completion);
-      `crash_with(seed, keep, tear)`; `crash` unchanged
-- [ ] the 300-cut power-cut test under each, in metadata formats v1 and v2:
-      the record copies and slot-table sectors must survive it
-- [ ] durability.md (what the simulation shows), CHANGELOG
+can persist part of a multi-block write.
+- [x] `Tear::Prefix|Scatter` at the drive's atomic unit (4096, or 512 with
+      `with_atomic_unit`), `crash_with`, `torn_writes()`
+- [x] found that tears never reached metadata (cuts fell between operations,
+      when persists and syncs had flushed): `cut_at(n)` takes the power as
+      the nth write arrives — inside a persist or a slot-table sync
+- [x] the 300-cut test under none/prefix/scatter/512, formats v1 and v2;
+      sector-wise check where a block can tear; counts reported, a run that
+      tears nothing or cuts too few operations fails
+- [x] found: format v1 loses a clone's unwritten extent to a cut inside a
+      persist (9/300, not tearing) — #340; v1 runs cut between operations,
+      `v1_survives_a_power_cut_inside_a_persist` ignored repro. v2: 0 lost
+- [ ] verified on a build VM (power-cut tests, the ignored repro still
+      fails, full suite); durability.md, CHANGELOG
 
 ### Import refuses an XFS dirty log or an ext4 pending journal (2026-10-07, #198, P2) — DONE
 
