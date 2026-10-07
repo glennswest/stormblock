@@ -172,6 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Optional mount entries `?vol:path` (2026-10-06, #288, P1) — IN PROGRESS
+
+stormcos#208: one stormpump golden serves every flavor (cilium, flowsdn), so
+its `/etc/stormblock/mounts` must name per-flavor volumes that a release may
+not have. A `?` line is mounted when the slab has the volume and skipped
+otherwise; plain lines stay required; `rd.stormblock.mount=` still wins (and
+takes `?` too).
+- [ ] `/init` mount list block: `mounts_optional <slab>` resolves `?`
+      entries from `slab volumes` (one listing, only when there is a `?`);
+      absent = "optional, not in this release"; listing unreadable = skipped,
+      said so. Done before the ublk numbering, so indices stay in step
+- [ ] probe: a `?` entry is never counted missing
+- [ ] tests (`tests/initramfs-mounts.sh`, `tests/initramfs-no-appliance.sh`)
+      under sh and busybox sh on dev; README, CHANGELOG
+
 ### Forge 13.7.0 → ≥ v20 (2026-10-06, #235, P1) — WAITING ON THE OWNER
 
 No code left here: the intent route shipped in v20.0.0. Forge still answers
