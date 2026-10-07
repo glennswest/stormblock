@@ -172,6 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### First boot slower while the flow-over runs (2026-10-07, #278, P1) — IN PROGRESS
+
+stormcentral's metrics: pvetest1 boot→apiserver 223 s (11.73), 334 s
+(11.78), and since 11.82 (stormblock 9cbe6ca ⊇ bc825e7, 71785d4, the
+reopened-#269 work) 63, 74, 65, 109, 92 s; Dell 325 s (11.79) → 179 (11.82),
+165 (11.88). The issue's target is met. What is left is the owner's comment:
+a *reboot* during the flow-over on the Dell's SMR disk still runs stormpump
+15.1 s vs 7.9 and the apiserver 30.2 s vs 15.3 (11.88): boot reads compete
+with the moves. Owner's suggestion, the engine-only form: a boot grace.
+- [ ] the successor's flow-over waits, before its first move, until volume
+      I/O has been quiet for 10 s or 90 s have passed
+      (`STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 0 = off); `flow_over_remaining`
+      reported during it
+- [ ] unit tests (quiet node starts after the quiet window; a busy one at
+      the bound); full nextest; README, durability.md, CHANGELOG
+- Not on metal until a release carries it: the Dell's reboot phases
+
 ### #239's fix on metal (2026-10-07, #257, P1) — HALF VERIFIED, waits on stormcentral#503
 
 From stormcentral's install records and serial logs (no install of mine):
