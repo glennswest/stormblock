@@ -123,6 +123,10 @@ fn exports_path(state: &AppState) -> Option<PathBuf> {
 /// an address a machine is still dialling.
 pub async fn persist_exports(state: &AppState) {
     let Some(path) = exports_path(state) else { return };
+    // One persist at a time, the table read under the lock, each with a
+    // temporary file of its own (#174).
+    static PERSIST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = PERSIST.lock().await;
 
     let snapshot: Vec<ExportEntry> = state.exports.read().await.clone();
     let bytes = match serde_json::to_vec_pretty(&snapshot) {
@@ -135,13 +139,11 @@ pub async fn persist_exports(state: &AppState) {
 
     // Temp file and rename, so a crash mid-write cannot truncate the table
     // that is already there.
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, &bytes) {
-        tracing::warn!("failed to write export table to {}: {e}", tmp.display());
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        tracing::warn!("failed to install export table at {}: {e}", path.display());
+    let written = tokio::task::spawn_blocking(move || crate::serve::wiring::write_atomic(&path, &bytes)).await;
+    match written {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("failed to persist the export table: {e}"),
+        Err(e) => tracing::warn!("failed to persist the export table: {e}"),
     }
 }
 

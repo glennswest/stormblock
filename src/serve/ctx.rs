@@ -177,10 +177,19 @@ impl ServeContext {
 
     /// Persist the engine's export table. The engine keeps it in memory only;
     /// mk owns durability for it, atomically.
+    ///
+    /// One persist at a time, the table read under the lock (#174): so the
+    /// last persist writes the newest table, and an older snapshot never
+    /// lands on top of a newer one.
     pub async fn persist_exports(&self) -> anyhow::Result<()> {
+        static PERSIST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _one = PERSIST.lock().await;
         let entries: Vec<ExportEntry> = self.state.exports.read().await.clone();
         let json = serde_json::to_string_pretty(&entries)?;
-        write_atomic(&self.exports_path, json.as_bytes())
+        let path = self.exports_path.clone();
+        tokio::task::spawn_blocking(move || write_atomic(&path, json.as_bytes()))
+            .await
+            .map_err(|e| anyhow::anyhow!("persisting the export table: {e}"))?
     }
 
     /// Exactly what a consumer needs to attach — the deliverable of issue #2.

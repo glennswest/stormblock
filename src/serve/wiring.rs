@@ -343,16 +343,26 @@ pub fn serve_owned(e: &crate::mgmt::ExportEntry, nqn_prefix: &str, iqn_prefix: &
 /// mid-write can never leave a truncated table behind.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("tmp");
-    {
+    // A temporary file of this write's own (#174). One fixed `<file>.tmp` for
+    // every writer let two persists at once truncate each other's file, or
+    // rename it away under the other: `rename exports.tmp -> exports.json:
+    // No such file or directory`, a 500 for an export that existed.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{file}.{}.{n}.tmp", std::process::id()));
+    let written = (|| {
         let mut f = std::fs::File::create(&tmp)
             .map_err(|e| anyhow::anyhow!("creating {}: {e}", tmp.display()))?;
         f.write_all(bytes).map_err(|e| anyhow::anyhow!("writing {}: {e}", tmp.display()))?;
         f.sync_all().map_err(|e| anyhow::anyhow!("fsync {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp.display(), path.display()))
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
-        .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
-    Ok(())
+    written
 }
 
 #[cfg(test)]

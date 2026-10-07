@@ -155,3 +155,93 @@ async fn without_a_context_the_serving_surface_is_simply_absent() {
     let resp = c.get(format!("{base}/api/v1/drives")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200, "the engine surface is untouched");
 }
+
+/// #174: 16 exports at once — what a registry pushing images does. Every
+/// persist used to write one fixed `exports.tmp`, so concurrent ones renamed
+/// it away under each other (`rename exports.tmp -> exports.json: No such
+/// file or directory`, a 500). Now every one is a 201, the table on disk
+/// names all 16, and no temporary file is left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_exports_all_persist() {
+    let dir = TempDir::new().unwrap();
+    let (state, config) = stock_node(&dir).await;
+    attach_serving(&state, &config);
+    let mut ids = Vec::new();
+    {
+        let mut vm = state.volume_manager.lock().await;
+        for i in 0..16 {
+            ids.push(vm.create_volume_any(&format!("c{i}"), 1024 * 1024).await.unwrap().0);
+        }
+    }
+    let base = start_server(state.clone()).await;
+    let c = reqwest::Client::new();
+    let calls = ids.iter().map(|id| {
+        let (c, base, id) = (c.clone(), base.clone(), *id);
+        tokio::spawn(async move {
+            let r = c
+                .post(format!("{base}/serve/v1/exports"))
+                .json(&serde_json::json!({"volume_id": id}))
+                .send()
+                .await
+                .unwrap();
+            let status = r.status().as_u16();
+            (status, r.text().await.unwrap_or_default())
+        })
+    });
+    for call in calls.collect::<Vec<_>>() {
+        let (status, body) = call.await.unwrap();
+        assert_eq!(status, 201, "{body}");
+    }
+    let serve_dir = dir.path().join("serve");
+    let on_disk: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(serve_dir.join("exports.json")).unwrap()).unwrap();
+    for id in &ids {
+        assert!(
+            on_disk.iter().any(|e| e["volume_id"] == id.to_string()),
+            "volume {id}'s export is in the table on disk"
+        );
+    }
+    let tmp: Vec<_> = std::fs::read_dir(&serve_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(tmp.is_empty(), "temporary files left: {tmp:?}");
+}
+
+/// #174: a create-and-export whose export cannot be kept answers an error
+/// and leaves nothing behind — no volume, no export. A 500 for a volume that
+/// exists is how a caller leaks it.
+#[tokio::test]
+async fn a_volume_whose_export_fails_is_not_left_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let (state, config) = stock_node(&dir).await;
+    attach_serving(&state, &config);
+    let base = start_server(state.clone()).await;
+    let c = reqwest::Client::new();
+    let before = state.volume_manager.lock().await.list_volumes().await.len();
+
+    // Nowhere to write the tables: every persist fails.
+    let serve_dir = dir.path().join("serve");
+    std::fs::set_permissions(&serve_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::File::create(serve_dir.join("probe")).is_ok() {
+        eprintln!("SKIP: running as root, a read-only directory is still writable");
+        std::fs::set_permissions(&serve_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let r = c
+        .post(format!("{base}/serve/v1/volumes"))
+        .json(&serde_json::json!({"name": "leaky", "size_bytes": 1048576, "export": true}))
+        .send()
+        .await
+        .unwrap();
+    std::fs::set_permissions(&serve_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(r.status().as_u16(), 500);
+    let vm = state.volume_manager.lock().await;
+    assert_eq!(vm.list_volumes().await.len(), before, "the volume made for the export is gone");
+    assert!(vm.find_volume("leaky").await.is_none());
+    drop(vm);
+    assert!(state.exports.read().await.is_empty(), "and so is its export");
+}

@@ -748,10 +748,25 @@ async fn export_volume(
             serve: true,
         });
         drop(ex);
-        w.persist()?;
+        if let Err(e) = w.persist() {
+            // Nothing half-made (#174): the row and the entry go again.
+            w.remove(&export_id);
+            ctx.state.exports.write().await.retain(|e| e.id != export_id);
+            return Err(e.into());
+        }
         row
     };
-    ctx.persist_exports().await?;
+    if let Err(e) = ctx.persist_exports().await {
+        // The caller is told it failed, so it must not exist: a retry would
+        // otherwise make a second export of the volume (#174).
+        let mut w = ctx.wiring.lock().await;
+        w.remove(&export_id);
+        ctx.state.exports.write().await.retain(|x| x.id != export_id);
+        if let Err(e2) = w.persist() {
+            tracing::warn!("export {export_id}: rolled back in memory, wiring table not rewritten: {e2}");
+        }
+        return Err(e.into());
+    }
 
     // Wire it now rather than at the next tick, so the attach parameters in
     // the response are usable the moment the caller receives them.
@@ -949,7 +964,18 @@ async fn create_volume(
         "from_template": req.from_template,
     });
     if req.export {
-        let attach = export_volume(&ctx, volume_id, proto, req.ephemeral).await?;
+        let attach = match export_volume(&ctx, volume_id, proto, req.ephemeral).await {
+            Ok(a) => a,
+            Err(e) => {
+                // The volume was made for this export, and the caller is told
+                // neither happened: so neither did (#174). A 500 for a volume
+                // that exists is how a caller leaks it.
+                if let Err(d) = ctx.state.volume_manager.lock().await.delete_volume(VolumeId(volume_id)).await {
+                    tracing::warn!("volume {volume_id}: its export failed and it could not be removed: {d}");
+                }
+                return Err(e);
+            }
+        };
         if let Some(obj) = body.as_object_mut() {
             obj.insert("export".into(), attach);
         }
