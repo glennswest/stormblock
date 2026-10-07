@@ -850,6 +850,22 @@ The same MAC again is the same machine and the same golden; once named, the MAC
 used: seven MicroCloud blades share one. A default claim with no MAC, or with
 something that is not a unicast MAC, is a 400 and makes nothing.
 
+**A name from DNS (#204, stormbootx#23).** A machine whose media states no tag
+claims the first label of its DHCP or PTR name, with its MAC and serial:
+`POST …/boothost/server3/claim {"mac": …, "serial": …}`. If no host answers to
+`server3`, the machine may still be one under another name:
+- its MAC's host, else the host its serial is an alias of. A serial only
+  counts as an alias an operator set, never as an assignment named by a serial;
+- a provisional `mac-<hex>` host found that way is **renamed** to `server3`,
+  its old name kept as an alias. Its golden and history move with it;
+- a host with a real name keeps its name, and `server3` becomes one more alias
+  of it. Two DNS names for one machine is the operator's to settle;
+- found by neither, `server3` is a new host pinned to the default, with its
+  MAC (never the serial) as its alias.
+
+The reply's `host.resolved` says which: `"known"`, `{"renamed_from", "by"}`,
+`{"alias_added", "by"}` or `"new"`.
+
 `GET /api/v1/boothost` lists every host with its aliases, former names,
 assignment and golden; `GET /api/v1/boothost/{name|alias}` finds one. Two hosts
 never share an alias — setting one that another host already answers to, or

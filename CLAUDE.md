@@ -172,6 +172,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A claim by an unknown name with a known MAC reaches that host (2026-10-07, #204, P1) — DONE
+
+stormbootx#23 claims `boothost/<first DNS label>` with `{mac, serial}`; an
+unknown name used to become a new host even when the machine was one under
+another name.
+- [x] `SynonymStore::resolve_named_claim` (`NamedClaim`): a known name as
+      before; else the MAC's host, or the serial's when it is an operator-set
+      alias (`alias_owner`, never an assignment's name); provisional → renamed
+      (old name an alias), named → the claimed name added as an alias;
+      neither → new from the default with the MAC as its alias
+- [x] `ClaimRequest.serial`; `claim_boothost` resolves, keeps the new host's
+      MAC; reply `host.resolved`
+- [x] tests on dev (49/49 synonym + auth); README, auth.md, CHANGELOG
+
 ### Console: WARN and the stage lines only; the record in a file (2026-10-07, #243, P1) — DONE
 
 Owner (server8's VGA): "the info messages we need to turn off to the

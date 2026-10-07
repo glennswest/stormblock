@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** #204 (stormbootx#23): a boothost claim of a name no host has, carrying the machine's `mac` (and `serial`), reaches the host the machine already is instead of making a new one.
+  - **Finding the host:** by its MAC, else by the serial when an operator made it one of that host's aliases. An assignment named by a serial never counts, since blades share chassis serials.
+  - **A provisional `mac-<hex>` host** is renamed to the claimed name, its old name kept as an alias, golden and history moved.
+  - **A named host** keeps its name, and the claimed name becomes an alias.
+  - **Neither:** a new host pinned to the default, with its MAC (never the serial) as its alias.
+  - **Reply:** `host.resolved` says which (`SynonymStore::resolve_named_claim`, `NamedClaim`).
+  - **Tests:** `synonym::tests::a_named_claim_reaches_the_machine_it_already_is`, `integration_synonyms::a_named_claim_with_a_known_mac_reaches_that_host`.
 - **feat:** #243: on a node the console gets the engine's warnings, not its INFO.
   - **Where:** `boot-local`, `adopt-ublk` and `boot-iscsi`. Their stderr is every console (`/init` follows it; stormpump echoes it), and at INFO a shutdown printed 2–3 lines per volume across ~55 volumes.
   - **The record:** the whole log goes to `/run/stormblock/stormblock.log` (`STORMBLOCK_LOG_FILE`) at `RUST_LOG`, else `stormblock.log=` on the kernel line, else `info`. `/run` moves into the real root, so it is one file for the boot.

@@ -206,6 +206,14 @@ it safe by what it **cannot** do rather than by who calls it:
    claim of `boothost/default` without a MAC is a 400: tag `default` would be
    one boot clone for every machine, each claim releasing the clone the last
    machine is running on. Naming it is the #199 rename; the golden is kept.
+   **A name from DNS (#204):** a claim of a name no host has carries `mac`
+   and `serial` too. The MAC's host, or the host an operator made that serial
+   an alias of, is the machine: a provisional one is renamed to the claimed
+   name (old name kept as an alias), and a named one gains the claimed name as
+   an alias. Neither: a new host from the default, its MAC its alias. A claim
+   can therefore rename a provisional host or add an alias: no more than the
+   claim of a known MAC by `default` already reaches, and never onto a name
+   another host holds.
 3. **Every boot is a fresh clone** of the host's golden (`boothost-<tag>`), and
    **every earlier clone of that tag is released** (#127) — each one that is
    not inside the grace protecting the firmware → initramfs double claim (#97,
@@ -214,7 +222,7 @@ it safe by what it **cannot** do rather than by who calls it:
    holds at most this boot's clones; the claim response lists what it
    `released` and what a guard `kept`. Nothing written to the image survives a
    reboot; a machine's state lives in its data volumes.
-4. **The claim takes no options** (apart from `mac` on a default claim). Whatever the body says — a name to bind, a
+4. **The claim takes no options** (apart from `mac`, and `serial` on a claim by name, #204). Whatever the body says — a name to bind, a
    namespace, a size, `unsealed_ok` — is ignored in the `boothost` namespace.
    It can only hand tag X a fresh clone of X's own golden, and it refuses an
    assignment that is not sealed.
