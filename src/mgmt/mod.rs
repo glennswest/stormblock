@@ -311,6 +311,12 @@ pub struct AppState {
     /// handover record's): where a staged release's boot pallet goes is the
     /// one among them that carries a node layout (#122).
     pub slab_paths: tokio::sync::RwLock<Vec<String>>,
+    /// The disks those slabs were opened from, as this engine holds them —
+    /// on a network-booted node the claimed clone's `nvme-tcp://` namespace
+    /// (#314). Not drives: nothing is placed on them through `drives`. The
+    /// pallet reads list and verify the pallets on them; no pallet verb
+    /// writes to them (a boot clone is shared with the appliance's lineage).
+    pub boot_disks: tokio::sync::RwLock<Vec<DriveInfo>>,
     /// The release being staged on this node, if any (#122).
     pub stage_job: tokio::sync::Mutex<Option<crate::mgmt::api::releases::StageJob>>,
     /// Drives being emptied so they can be pulled (#70 item 3).
@@ -444,6 +450,7 @@ impl AppState {
             spares: crate::raid::spares::SparePool::new(),
             flow_over_remaining: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             slab_paths: Default::default(),
+            boot_disks: tokio::sync::RwLock::new(Vec::new()),
             stage_job: Default::default(),
             volume_manager,
             exports: tokio::sync::RwLock::new(Vec::new()),

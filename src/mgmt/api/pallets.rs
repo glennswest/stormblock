@@ -4,6 +4,12 @@
 //! request. That is deliberate: pallet state lives in the GPT and in each
 //! pallet's superblock, never in a cache here, so there is nothing that can
 //! disagree with the disk — including after a drive is moved between nodes.
+//!
+//! The reads (list, status, chain, get, verify) also see the disks this
+//! engine's slabs were opened from (`AppState::boot_disks`, #314): on a
+//! network-booted node that is the claimed clone, which carries the boot
+//! pallet the node booted. The writes see the drives only, so a pallet on a
+//! boot disk is never activated, marked, moved or deleted through here.
 
 use std::sync::Arc;
 
@@ -38,6 +44,24 @@ async fn store(state: &AppState) -> PalletStore {
 async fn manager(state: &AppState) -> PalletManager {
     let mirrors = state.pallet_mirrors.read().await.clone();
     PalletManager::with_mirrors(store(state).await, mirrors)
+}
+
+/// The drives, then every boot disk that is not one of them (#314). Drives
+/// first, so a drive's index is the same here as in [`store`].
+async fn read_store(state: &AppState) -> PalletStore {
+    let mut s = store(state).await;
+    for d in state.boot_disks.read().await.iter() {
+        if s.drives().iter().all(|r| r.path != d.path) {
+            s.add_drive_labelled(d.path.clone(), d.device.clone(), d.labels.clone());
+        }
+    }
+    s
+}
+
+/// A manager over [`read_store`], for the verbs that only read.
+async fn read_manager(state: &AppState) -> PalletManager {
+    let mirrors = state.pallet_mirrors.read().await.clone();
+    PalletManager::with_mirrors(read_store(state).await, mirrors)
 }
 
 const MIRRORS_FILE: &str = "pallet_mirrors.json";
@@ -171,7 +195,7 @@ pub struct PalletDetail {
 
 async fn list(State(state): State<Arc<AppState>>, Query(q): Query<KindQuery>) -> Response {
     let kind = q.parsed();
-    let items: Vec<PalletResponse> = manager(&state)
+    let items: Vec<PalletResponse> = read_manager(&state)
         .await
         .list()
         .await
@@ -208,7 +232,7 @@ async fn status(State(state): State<Arc<AppState>>, Query(q): Query<KindQuery>) 
         mirrors: Vec<Mirror>,
     }
 
-    let s = manager(&state).await.status(q.parsed()).await;
+    let s = read_manager(&state).await.status(q.parsed()).await;
     Json(StatusResponse {
         active: s.active.as_ref().map(PalletResponse::from),
         available: s.available.iter().map(PalletResponse::from).collect(),
@@ -278,7 +302,7 @@ async fn resync(State(state): State<Arc<AppState>>) -> Response {
 /// The order a boot-time consumer would try them in — the read-only half of
 /// the policy, answerable without touching a thing.
 async fn chain(State(state): State<Arc<AppState>>, Query(q): Query<KindQuery>) -> Response {
-    let browser = PalletBrowser::new(store(&state).await);
+    let browser = PalletBrowser::new(read_store(&state).await);
     let items: Vec<PalletResponse> =
         browser.chain(q.parsed()).await.iter().map(PalletResponse::from).collect();
     let count = items.len();
@@ -289,7 +313,7 @@ async fn get_one(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
     let Ok(id) = Uuid::parse_str(&id) else {
         return ApiError::bad_request("pallet id must be a UUID");
     };
-    let mgr = manager(&state).await;
+    let mgr = read_manager(&state).await;
     let loc = match mgr.get(id).await {
         Ok(l) => l,
         Err(e) => return err(e),
@@ -317,7 +341,7 @@ async fn verify(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> R
     let Ok(id) = Uuid::parse_str(&id) else {
         return ApiError::bad_request("pallet id must be a UUID");
     };
-    match manager(&state).await.verify(id).await {
+    match read_manager(&state).await.verify(id).await {
         Ok(r) => Json(r).into_response(),
         Err(e) => err(e),
     }

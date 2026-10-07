@@ -3087,6 +3087,29 @@ async fn open_slabs_resuming(
     meta: Option<&str>,
     resume: bool,
 ) -> anyhow::Result<(VolumeManager, Option<Resumed>)> {
+    open_slabs_with_disks(slab_paths, meta, resume).await.map(|(m, r, _)| (m, r))
+}
+
+/// The disk each slab path was opened from, as the engine holds it (#314).
+type OpenedDisks = Vec<(String, Arc<dyn BlockDevice>)>;
+
+/// Keep the disks the slabs were opened from as the state's boot disks:
+/// read by `/api/v1/pallets`, written by nothing (#314).
+async fn set_boot_disks(state: &AppState, disks: OpenedDisks) {
+    *state.boot_disks.write().await = disks
+        .into_iter()
+        .map(|(path, device)| DriveInfo { device, path, labels: Default::default() })
+        .collect();
+}
+
+/// [`open_slabs_resuming`], and the disk device each slab path was opened
+/// from (#314): the whole disk a path names, whose GPT also carries its boot
+/// pallets — on a network-booted node the claimed clone's namespace.
+async fn open_slabs_with_disks(
+    slab_paths: &[String],
+    meta: Option<&str>,
+    resume: bool,
+) -> anyhow::Result<(VolumeManager, Option<Resumed>, OpenedDisks)> {
     use std::path::{Path, PathBuf};
     use crate::volume::MetadataStore;
 
@@ -3111,6 +3134,7 @@ async fn open_slabs_resuming(
     // slabs, so this is what the per-slab reporting below zips against —
     // `slab_paths` is no longer 1:1 with `slabs`.
     let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
+    let mut disks: OpenedDisks = Vec::with_capacity(slab_paths.len());
     for path in slab_paths {
         // A slab is on a block device (O_DIRECT, #140), a namespace on the
         // fabric (NvmeofDevice), or — tests and development — a file. The diskless boot hands boot-local an
@@ -3134,6 +3158,7 @@ async fn open_slabs_resuming(
             }
             dev
         };
+        disks.push((path.clone(), dev.clone()));
         match Slab::open(dev.clone()).await {
             Ok(s) => {
                 slabs.push(s);
@@ -3471,7 +3496,7 @@ async fn open_slabs_resuming(
             Some(Resumed { uri, system_slab: local(false), data_slab: local(true) })
         }
     };
-    Ok((mgr, resumed))
+    Ok((mgr, resumed, disks))
 }
 
 /// adopt-ublk: take over the ublk devices an earlier server created.
@@ -5752,6 +5777,8 @@ async fn handle_adopt_ublk(
 
     // Stand the incumbent down and wait for it to be gone, THEN read the
     // slabs (#171). ublk recovery holds every device's I/O in the gap.
+    // The disks the slabs are opened from, kept for the pallet reads (#314).
+    let opened_disks: Arc<std::sync::Mutex<OpenedDisks>> = Default::default();
     let (mgr, serving, adopted_ids) = crate::drive::handover::take_over(
         || async {
             let ids = dev_ids.clone();
@@ -5764,7 +5791,8 @@ async fn handle_adopt_ublk(
             Ok(())
         },
         || async {
-            let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
+            let (mut mgr, _, disks) = open_slabs_with_disks(slab_paths, meta, false).await?;
+            *opened_disks.lock().unwrap() = disks;
 
             // The drive this boot laid keeps the records first, as it does in the
             // engine that laid it (#118). The slabs open in handover order, appliance
@@ -5976,6 +6004,10 @@ async fn handle_adopt_ublk(
         state.start_eraser().await;
         // Where a staged release's boot pallet goes (#122).
         *state.slab_paths.write().await = slab_paths.to_vec();
+        // Their disks, so `/api/v1/pallets` lists and verifies the boot
+        // pallet this node booted — on a netbooted node the claimed clone's
+        // (#314).
+        set_boot_disks(&state, std::mem::take(&mut *opened_disks.lock().unwrap())).await;
         // The boot devices this process now serves are in use, and a volume
         // listing must say so — they were recorded nowhere (#138).
         {
@@ -9254,6 +9286,171 @@ mod forge_mode_tests {
         let mut back = vec![0u8; MIB as usize];
         dev.read(0, &mut back).await.unwrap();
         assert_eq!(back, image, "the clone reads as the release it was claimed from");
+    }
+
+    /// #314: a network-booted node's engine lists and verifies the boot
+    /// pallet of the clone it booted from. The appliance serves a release
+    /// disk (GPT: slabs + a boot pallet) as a golden; the node claims it,
+    /// opens its slabs over NVMe/TCP as `adopt-ublk` does, and its own API
+    /// answers `GET /api/v1/pallets/{id}` and `POST …/verify` — read-only:
+    /// no pallet verb writes to the shared clone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_netbooted_node_lists_and_verifies_the_boot_pallet_it_booted() {
+        use crate::pallet::{BytesContent, MemberKind, MemberSpec, PalletKind, PalletManager, PalletStore};
+        use crate::pallet::manager::PublishSpec;
+
+        const DISK: u64 = 256 * MIB;
+        let dir = tempfile::tempdir().unwrap();
+
+        // The release disk, laid as an image is: slabs, a boot area, and the
+        // boot pallet in it.
+        let disk_path = dir.path().join("release.disk").to_string_lossy().to_string();
+        let disk: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&disk_path, DISK).await.unwrap());
+        let mut layout = crate::image::local::LocalLayout::for_drive(DISK);
+        layout.system_bytes = 96 * MIB;
+        layout.slot_size = MIB;
+        layout.lba = Some(4096);
+        layout.boot_bytes = 32 * MIB;
+        layout.bulk = false;
+        crate::image::local::lay_node_slabs(disk.clone(), &layout).await.unwrap();
+        let kernel = b"vmlinuz 11.89 ".repeat(30_000);
+        let pallet_id = {
+            let mut store = PalletStore::new(Vec::new());
+            store.add_drive(disk_path.clone(), disk.clone());
+            let mut spec = PublishSpec::new("kernel1", PalletKind::Boot)
+                .member(MemberSpec::new("kernel", "kernel", MemberKind::Kernel, Arc::new(BytesContent(kernel.clone()))))
+                .member(MemberSpec::new(
+                    "cmdline",
+                    "cmdline",
+                    MemberKind::BootConfig,
+                    Arc::new(BytesContent(b"root=/dev/ublkb0".to_vec())),
+                ));
+            spec.version_label = "11.89".into();
+            spec.priority = Some(15);
+            PalletManager::new(store).publish(spec).await.unwrap().id
+        };
+        disk.flush().await.unwrap();
+
+        // The appliance: that disk as a sealed golden, served over NVMe/TCP.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut config = StormBlockConfig::default();
+        let forge_dir = dir.path().join("forge");
+        std::fs::create_dir_all(&forge_dir).unwrap();
+        config.management.data_dir = Some(forge_dir.to_string_lossy().to_string());
+        config.management.advertised_addr = Some("127.0.0.1".into());
+        config.nvmeof = Some(section(&format!("127.0.0.1:{port}")));
+        let mut vm = VolumeManager::new(MIB);
+        let array = RaidArrayId(uuid::Uuid::new_v4());
+        let pool = FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 512 * MIB)
+            .await
+            .unwrap();
+        vm.add_backing_device(array, Arc::new(pool)).await;
+        let golden = vm.create_volume("release-11.89", DISK, array).await.unwrap();
+        {
+            let g = vm.get_volume(&golden).unwrap();
+            let mut buf = vec![0u8; MIB as usize];
+            for off in (0..DISK).step_by(MIB as usize) {
+                disk.read(off, &mut buf).await.unwrap();
+                if buf.iter().any(|b| *b != 0) {
+                    g.write(off, &buf).await.unwrap();
+                }
+            }
+            g.flush().await.unwrap();
+        }
+        vm.seal_volume(golden, None).await.unwrap();
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let forge = Arc::new(AppState::new(config.clone(), vm, reg, gem));
+        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config.management).unwrap();
+        let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false }));
+        mgmt::forge::serve(&forge, &reactor, Arc::new(target)).await.unwrap();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let serve = |state: Arc<AppState>| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api = listener.local_addr().unwrap();
+            let router = mgmt::api::router(state);
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            api
+        };
+        let forge_api = serve(forge.clone()).await;
+        let c = reqwest::Client::new();
+        let r = c
+            .post(format!("http://{forge_api}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": "server3", "volume": golden.0.to_string()}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "boothost synonym: {}", r.status());
+        let claim: serde_json::Value = c
+            .post(format!("http://{forge_api}/api/v1/synonyms/boothost/server3/claim"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let attach = &claim["attach"];
+        let uri = NvmeTcpSpec {
+            addr: addr.to_string(),
+            nqn: attach["nqn"].as_str().unwrap().to_string(),
+            nsid: attach["nsid"].as_u64().unwrap() as u32,
+            host_nqn: Some(attach["host_nqns"][0].as_str().unwrap().to_string()),
+            dhchap: None,
+        }
+        .uri();
+
+        // The node: its slabs from the claimed clone, as adopt-ublk opens them.
+        let (node, _, disks) = super::open_slabs_with_disks(&[uri.clone()], None, false).await.unwrap();
+        assert!(node.registry().read().await.iter().count() >= 2, "the clone's slabs opened");
+        let node_dir = dir.path().join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let mut node_config = StormBlockConfig::default();
+        node_config.management.data_dir = Some(node_dir.to_string_lossy().to_string());
+        let (reg, gem) = (node.registry().clone(), node.gem().clone());
+        let state = Arc::new(AppState::new(node_config, node, reg, gem));
+        let api = serve(state.clone()).await;
+        let pallet = format!("http://{api}/api/v1/pallets/{pallet_id}");
+
+        // Before #314: the engine held the clone and listed nothing on it.
+        let r = c.get(&pallet).send().await.unwrap();
+        assert_eq!(r.status(), 404, "no boot disks: not listed");
+
+        super::set_boot_disks(&state, disks).await;
+        let got: serde_json::Value = c.get(&pallet).send().await.unwrap().json().await.unwrap();
+        assert_eq!(got["name"], "kernel1", "{got}");
+        assert_eq!(got["kind"], "boot", "{got}");
+        assert_eq!(got["drive"], uri.as_str(), "on the claimed clone: {got}");
+        let members = got["members"].as_array().unwrap();
+        assert_eq!(members.len(), 2, "{got}");
+        let k = members.iter().find(|m| m["name"] == "kernel").unwrap();
+        assert_eq!(k["byte_len"], kernel.len() as u64);
+        assert!(k["digest"].as_str().is_some_and(|d| !d.is_empty()), "{got}");
+
+        let v: serde_json::Value =
+            c.post(format!("{pallet}/verify")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["ok"], true, "every member re-read over NVMe/TCP: {v}");
+
+        let list: serde_json::Value =
+            c.get(format!("http://{api}/api/v1/pallets?kind=boot")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(list["count"], 1, "{list}");
+
+        // Read-only: no verb writes to the shared clone.
+        for verb in ["activate", "successful"] {
+            let r = c.post(format!("{pallet}/{verb}")).send().await.unwrap();
+            assert_eq!(r.status(), 404, "{verb} does not reach a boot disk");
+        }
+        let r = c.delete(&pallet).send().await.unwrap();
+        assert_eq!(r.status(), 404, "delete does not reach a boot disk");
+        let v: serde_json::Value =
+            c.post(format!("{pallet}/verify")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["ok"], true, "still whole: {v}");
     }
 }
 

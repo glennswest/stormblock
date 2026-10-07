@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #314 (sectionsystems#7): a network-booted node could not verify its boot pallet. `/api/v1/pallets` was built from the engine's drives, and `adopt-ublk` (every node's engine) registers none, so the claimed clone's GPT, which carries the boot pallet, was in no store.
+  - **Boot disks:** the disk each slab path was opened from (the claimed clone's `nvme-tcp://` namespace, or the local disk) is kept as `AppState.boot_disks`.
+  - **Reads only:** list, `status`, `chain`, `GET /{id}` and `POST /{id}/verify` see the drives and the boot disks. Every write verb sees the drives only, so a pallet on a shared clone is never activated, marked, moved or deleted (404).
+  - **Test:** `forge_mode_tests::a_netbooted_node_lists_and_verifies_the_boot_pallet_it_booted`: an appliance serves a release disk (slabs plus a boot pallet) over NVMe/TCP, the node claims it and opens its slabs as `adopt-ublk` does, and its API returns the pallet with member digests and `verify` gives `ok: true`. `activate`, `successful` and `DELETE` answer 404.
 - **fix:** #174 (found by stormblock-registry's long test): concurrent export persists raced on one `exports.tmp`. `POST /serve/v1/exports` and `/volumes` answered 500 (`rename exports.tmp -> exports.json: No such file or directory`), could leave the table with another writer's bytes, and leaked volumes.
   - **Unique temporary files:** `serve::wiring::write_atomic` writes a file of its own (`<file>.<pid>.<seq>.tmp`), removed on failure. The engine's own `exports.json` now goes through it too.
   - **One persist at a time:** both export persists run one at a time, with the table read under the lock, so an older snapshot never lands on a newer one.

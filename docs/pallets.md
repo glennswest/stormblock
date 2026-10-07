@@ -626,6 +626,15 @@ usually want.
 Base `/api/v1/pallets`. The store is rebuilt from the node's open drives on
 every request rather than cached, so nothing here can disagree with the disk.
 
+The reads — list, `status`, `chain`, `/{id}`, `/{id}/verify` — also see the
+disks the engine's slabs were opened from (#314). On a node's engine
+(`adopt-ublk`) that is the local disk, or on a network-booted node the
+claimed clone's `nvme-tcp://` namespace, so the node can list and verify the
+boot pallet it booted (`stormuefi.pallet=` on its command line); such a
+pallet's `drive` is that path or URI. Every other verb sees the drives only:
+a pallet on a boot disk is never activated, marked, moved or deleted here
+(404), since a boot clone is shared with the appliance's lineage.
+
 | Method | Path | |
 |---|---|---|
 | GET | `/` `?kind=` | list every pallet on every drive |
