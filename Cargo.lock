@@ -751,8 +751,8 @@ dependencies = [
 
 [[package]]
 name = "fio-xfs"
-version = "0.2.0"
-source = "git+https://github.com/glennswest/fio.xfs.rs?tag=v0.2.0#12b4943389f9f4307938298401566681512e09f8"
+version = "0.3.0"
+source = "git+https://github.com/glennswest/fio.xfs.rs?tag=v0.3.0#a72b29fc7c83b23f3258d5fc4d6e37845fff01b8"
 dependencies = [
  "async-trait",
  "thiserror 2.0.21",

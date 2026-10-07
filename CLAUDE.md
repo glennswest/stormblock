@@ -172,6 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Import refuses an XFS dirty log or an ext4 pending journal (2026-10-07, #198, P2) — IN PROGRESS
+
+An image taken from a running or crashed system walked clean and was sealed:
+`fio-xfs` never read the log, and the import ignored ext4's RECOVER. Linux
+replays on first mount, so what the engine surveyed (os-release, entries)
+was not what the guest sees. fio-xfs v0.3.0 (fio.xfs.rs#6) reads the log.
+- [ ] pin fio-xfs v0.3.0 (same dependencies; Cargo.lock by hand, built
+      `--locked`)
+- [ ] survey: `log` per filesystem (`clean`, `dirty`, `external`,
+      `unreadable`; ext4 `needs_recovery`) and anything not clean an error,
+      so the import fails unless `verify: false`; an external XFS log is not
+      verifiable (fio.xfs.rs#17); a dirty XFS log's message says a clean one
+      is on rare occasions read dirty (fio.xfs.rs#16)
+- [ ] XFS seal blockers: the log not clean
+- [ ] tests: an engine-made XFS reads clean and seals; its log made dirty by
+      hand (records after the unmount record): survey dirty, the import
+      verdict fails (passes with verify false), seal refused; ext4 with
+      RECOVER: needs_recovery, verdict fails; README, CHANGELOG
+
 ### A flush with nothing to make durable returns at once (2026-10-07, #338, P1) — DONE
 
 stormpump#107 / rustkube-node#95: a pod's 64Mi claim spends 553–878 ms in
