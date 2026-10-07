@@ -172,6 +172,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A network-booted node lists and verifies its boot pallet (2026-10-07, #314, P3) — IN PROGRESS
+
+sectionsystems#7 verifies the boot pallet through the node's engine
+(`GET /api/v1/pallets/{stormuefi.pallet}`, `POST …/verify`). `/pallets` is
+built from `state.drives` only, and `adopt-ublk` (the node's engine, netbooted
+or not) registers no drives: the disks its slabs were opened from — the
+claimed clone's `nvme-tcp://` namespace, or the local disk — are in no store.
+The issue's option 1, read-only:
+- [ ] `open_slabs_resuming` also hands back the disk device each slab path was
+      opened from; `adopt-ublk` keeps them as `AppState.boot_disks`
+- [ ] `/pallets` reads (list, status, chain, get, verify) see `drives` +
+      `boot_disks`; every write verb sees `drives` only (a shared clone's
+      pallets are never activated, marked or moved: 404 there)
+- [ ] test: a node disk with slabs + a boot pallet, opened as adopt-ublk
+      does, GET/verify answer, activate does not; docs, CHANGELOG
+
 ### Concurrent export persists no longer race (2026-10-07, #174) — DONE
 
 stormblock-registry's long test: `rename exports.tmp -> exports.json: ENOENT`
