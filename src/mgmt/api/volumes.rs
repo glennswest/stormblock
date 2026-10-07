@@ -1477,6 +1477,88 @@ pub struct CidataRequest {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AnaRequest {
+    state: String,
+}
+
+/// The NVMe ANA state of a volume on this node, and where it is served.
+#[cfg(feature = "nvmeof")]
+async fn ana_view(state: &Arc<AppState>, id: Uuid) -> serde_json::Value {
+    use crate::target::nvmeof::ana;
+    let mut served = Vec::new();
+    if let Some(t) = state.nvmeof_target.read().await.as_ref() {
+        for sub in t.subsystems() {
+            if let Some(nsid) = sub.nsid_of(id).await {
+                served.push(serde_json::json!({ "nqn": sub.nqn(), "nsid": nsid }));
+            }
+        }
+    }
+    if let Some(s) = state.volume_subsystems.lock().await.get(&id) {
+        served.push(serde_json::json!({ "nqn": s.nqn, "nsid": 1, "port": s.port }));
+    }
+    let st = ana::state_of(id);
+    serde_json::json!({
+        "id": id,
+        "state": st.as_str(),
+        "group": st.group(),
+        "change_count": ana::change_count(),
+        "served": served,
+    })
+}
+
+/// `GET /api/v1/volumes/{id}/ana` — the volume's ANA state here (#83).
+async fn get_ana(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    #[cfg(feature = "nvmeof")]
+    {
+        let Some(vid) = resolve_volume(&state, &id).await else {
+            return ApiError::not_found(format!("volume {id} not found"));
+        };
+        Json(ana_view(&state, vid.0).await).into_response()
+    }
+    #[cfg(not(feature = "nvmeof"))]
+    {
+        let _ = (state, id);
+        ApiError::bad_request("this engine was built without NVMe-oF".to_string())
+    }
+}
+
+/// `PUT /api/v1/volumes/{id}/ana {state}` — how hosts should use this
+/// node's path to the volume (#83): `optimized`, `non_optimized`,
+/// `inaccessible`, `persistent_loss` or `change`. Every subsystem serving it
+/// here reports the new state and tells its connected hosts (an ANA change
+/// notice); I/O on a state that does not serve is refused with the path
+/// status, so a multipath host moves to the other node. Kept across a
+/// restart.
+async fn set_ana(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<AnaRequest>,
+) -> Response {
+    #[cfg(feature = "nvmeof")]
+    {
+        use crate::target::nvmeof::ana::AnaState;
+        let Some(st) = AnaState::parse(req.state.trim()) else {
+            return ApiError::bad_request(format!(
+                "ANA state {:?}: one of optimized, non_optimized, inaccessible, persistent_loss, change",
+                req.state
+            ));
+        };
+        let Some(vid) = resolve_volume(&state, &id).await else {
+            return ApiError::not_found(format!("volume {id} not found"));
+        };
+        if let Err(e) = crate::mgmt::ana::set(&state.config, vid.0, st) {
+            return ApiError::internal(format!("ANA state for {} not kept, so not applied: {e}", vid.0));
+        }
+        Json(ana_view(&state, vid.0).await).into_response()
+    }
+    #[cfg(not(feature = "nvmeof"))]
+    {
+        let _ = (state, id, req);
+        ApiError::bad_request("this engine was built without NVMe-oF".to_string())
+    }
+}
+
 /// A volume by id, by name, or by synonym — for the doors that take one in
 /// a path.
 ///
@@ -2527,6 +2609,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/clone", axum::routing::post(clone_volume))
         .route("/{id}/lineage", get(volume_lineage))
         .route("/{id}/attach", get(get_attach).post(attach_volume).delete(detach_volume))
+        .route("/{id}/ana", get(get_ana).put(set_ana))
         .route("/import", get(list_imports).post(start_import))
         .route("/import/{id}", get(get_import))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))

@@ -103,6 +103,23 @@ pub struct Volume {
     pub qos_class: Option<String>,
     #[serde(default)]
     pub bandwidth_class: BandwidthClass,
+    /// What is attached, each at the epoch it was attached at (#83, #6). A
+    /// fence revokes every attachment below the epoch it moves to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// One attachment of a volume: who, how, and at which epoch (#83, #6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub node: String,
+    /// The host it is served to, from its own subsystem (#210). Absent: the
+    /// node's shared subsystem, or a local ublk device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_nqn: Option<String>,
+    pub epoch: Epoch,
+    /// `nvme_tcp`, `ublk`, or `none` (nothing served from this node).
+    pub transport: String,
 }
 
 impl Volume {
@@ -1002,6 +1019,13 @@ pub(crate) async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
         nsid
     };
     let Some(nsid) = nsid else { return };
+    withdraw_shared_namespace(state, volume_id, nsid).await;
+}
+
+/// Take a volume's namespace off the shared subsystem, its record already
+/// gone — unless an export serves it there too.
+#[cfg(feature = "nvmeof")]
+async fn withdraw_shared_namespace(state: &AppState, volume_id: &str, nsid: u32) {
     // An export may serve the same volume at the same NSID (a subsystem
     // never holds one volume twice): it keeps the namespace.
     if state.exports.read().await.iter().any(|e| e.nsid == Some(nsid) && e.subsystem.is_none()) {
@@ -1267,6 +1291,7 @@ async fn create_volume(
         encrypted: req.encrypted,
         qos_class: req.qos_class,
         bandwidth_class: req.bandwidth_class,
+        attachments: Vec::new(),
     };
     account_static_nodes(&mut v1, &vol.replicas, vol.size_bytes, true);
     v1.volumes.insert(
@@ -1469,6 +1494,82 @@ struct AttachRequest {
     /// Give that host a DH-HMAC-CHAP secret (returned as `dhchap_secret`).
     #[serde(default)]
     dhchap: bool,
+    /// The volume's epoch as the caller last saw it (#83, #6): what its last
+    /// fence returned. Another epoch is refused (412 `stale_epoch`); so is
+    /// leaving it out once the volume has been fenced, or a zombie could
+    /// reattach by not saying. Absent at epoch 1: accepted, as before.
+    #[serde(default)]
+    epoch: Option<Epoch>,
+}
+
+/// Refuse an attach at an epoch that is not the volume's (#83, #6).
+fn check_attach_epoch(current: Epoch, asked: Option<Epoch>) -> Result<Epoch, V1Error> {
+    match asked {
+        Some(e) if e != current => Err(V1Error::StaleEpoch(current)),
+        None if current > 1 => Err(V1Error::StaleEpoch(current)),
+        _ => Ok(current),
+    }
+}
+
+/// What serves an attachment here, from what the attach answered.
+fn attachment_of(node: &str, epoch: Epoch, info: &AttachInfo) -> Attachment {
+    let (transport, host_nqn) = match info {
+        AttachInfo::Ublk { .. } => ("ublk", None),
+        AttachInfo::NvmeTcp { nsid: Some(_), host_nqn, .. } => ("nvme_tcp", host_nqn.clone()),
+        AttachInfo::NvmeTcp { nsid: None, .. } => ("none", None),
+    };
+    Attachment { node: node.to_string(), host_nqn, epoch, transport: transport.to_string() }
+}
+
+/// Take an attachment's data path away (#83, #6): its namespace leaves the
+/// host's subsystem (or the shared one), or its ublk device goes. A
+/// namespace removal returns once nothing in flight on it can still land,
+/// so a caller that answers after this answers after the last write.
+///
+/// `kept` are the attachments that stay: a shared namespace or a ublk
+/// device one of them still uses is left alone, as is a host subsystem
+/// namespace for a host one of them names. `nsid` is the shared
+/// namespace's number, already taken out of the record by the caller (who
+/// holds the `/v1` state).
+async fn revoke_attachment(
+    state: &AppState,
+    id: &str,
+    local: Option<Uuid>,
+    att: &Attachment,
+    kept: &[Attachment],
+    shared_nsid: Option<u32>,
+) {
+    let same = |k: &Attachment| k.transport == att.transport && k.host_nqn == att.host_nqn;
+    if kept.iter().any(same) {
+        return;
+    }
+    match (att.transport.as_str(), att.host_nqn.as_deref()) {
+        ("ublk", _) => {
+            state.ublk_exports.lock().await.remove(id);
+        }
+        #[cfg(feature = "nvmeof")]
+        ("nvme_tcp", Some(host)) => {
+            if let Some(local) = local {
+                crate::mgmt::nvme_hosts::detach(state, local, Some(host), crate::mgmt::nvme_hosts::Release::All)
+                    .await;
+            }
+        }
+        #[cfg(feature = "nvmeof")]
+        ("nvme_tcp", None) => {
+            if let Some(nsid) = shared_nsid {
+                withdraw_shared_namespace(state, id, nsid).await;
+            }
+        }
+        _ => {}
+    }
+    let _ = (local, shared_nsid);
+    tracing::info!(
+        "volume {id}: attachment of {} ({}{}) at epoch {} revoked",
+        att.node,
+        att.transport,
+        att.host_nqn.as_deref().map(|h| format!(" for {h}")).unwrap_or_default(),
+        att.epoch
+    );
 }
 
 async fn attach_volume(
@@ -1476,6 +1577,50 @@ async fn attach_volume(
     Path(id): Path<String>,
     Json(req): Json<AttachRequest>,
 ) -> V1Result<AttachInfo> {
+    let node = req.node.clone();
+    let asked = req.epoch;
+    let epoch = {
+        let v1 = state.v1.lock().await;
+        let rec = v1.volumes.get(&id).ok_or_else(|| V1Error::NotFound(format!("volume {id}")))?;
+        check_attach_epoch(rec.vol.epoch, asked)?
+    };
+    let Json(info) = attach_data_path(state.clone(), id.clone(), req).await?;
+    let att = attachment_of(&node, epoch, &info);
+
+    // A fence may have run while the data path was being set up: then this
+    // attachment is below the volume's epoch, the fence did not see it, and
+    // it is taken away here instead of answered.
+    let mut v1 = state.v1.lock().await;
+    let Some(rec) = v1.volumes.get_mut(&id) else {
+        return Err(V1Error::NotFound(format!("volume {id}")));
+    };
+    if rec.vol.epoch != epoch {
+        let current = rec.vol.epoch;
+        let local = rec.local_id;
+        let kept = rec.vol.attachments.clone();
+        let shared = if att.transport == "nvme_tcp" && att.host_nqn.is_none()
+            && !kept.iter().any(|k| k.transport == "nvme_tcp" && k.host_nqn.is_none())
+        {
+            v1.nvme_nsids.remove(&id)
+        } else {
+            None
+        };
+        if let Some(nodes) = v1.attachments.get_mut(&id) {
+            if !kept.iter().any(|k| k.node == node) {
+                nodes.retain(|n| n != &node);
+            }
+        }
+        v1.save();
+        revoke_attachment(&state, &id, local, &att, &kept, shared).await;
+        return Err(V1Error::StaleEpoch(current));
+    }
+    rec.vol.attachments.retain(|a| !(a.node == att.node && a.host_nqn == att.host_nqn));
+    rec.vol.attachments.push(att);
+    v1.save();
+    Ok(Json(info))
+}
+
+async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) -> V1Result<AttachInfo> {
     let want = WantTransport::parse(req.transport.as_deref()).map_err(V1Error::BadRequest)?;
     let mut v1 = state.v1.lock().await;
     v1.expire_windows(now_ms());
@@ -1715,8 +1860,11 @@ async fn detach_volume(
     let local_node = v1.local_node.clone();
     if let Some(nodes) = v1.attachments.get_mut(&id) {
         nodes.retain(|n| n != &req.node);
-        v1.save();
     }
+    if let Some(rec) = v1.volumes.get_mut(&id) {
+        rec.vol.attachments.retain(|a| a.node != req.node);
+    }
+    v1.save();
     drop(v1);
     // If the local ublk fast path was serving this node, tear the device down
     // now — its lifetime is the attachment, and the CSI node deliberately
@@ -1877,6 +2025,7 @@ fn apply_promote(
     rec.vol.replicas[0].role = ReplicaRole::Master;
     rec.vol.replicas[0].sync = SyncState::InSync;
     rec.vol.health = VolumeHealth::Degraded; // single replica until restaged
+    rec.vol.attachments.clear();
     let vol = rec.vol.clone();
     v1.attachments.remove(id);
     v1.save();
@@ -1888,6 +2037,41 @@ struct FenceRequest {
     expected_epoch: Epoch,
 }
 
+/// Take away every attachment of `id` made below its epoch, except those of
+/// `spare` (a dual-attach commit's target, which becomes the master), while
+/// the caller holds the `/v1` state — so an attach at the new epoch cannot
+/// be recorded, and then revoked, in between (#83, #6). Answers how many.
+async fn revoke_below_epoch(
+    state: &AppState,
+    v1: &mut V1State,
+    id: &str,
+    spare: Option<&str>,
+) -> usize {
+    let Some(rec) = v1.volumes.get_mut(id) else { return 0 };
+    let epoch = rec.vol.epoch;
+    let local = rec.local_id;
+    let (stale, kept): (Vec<Attachment>, Vec<Attachment>) = rec
+        .vol
+        .attachments
+        .drain(..)
+        .partition(|a| a.epoch < epoch && Some(a.node.as_str()) != spare);
+    rec.vol.attachments = kept.clone();
+    if stale.is_empty() {
+        return 0;
+    }
+    let shared_stale = stale.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none());
+    let shared_kept = kept.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none());
+    let shared = if shared_stale && !shared_kept { v1.nvme_nsids.remove(id) } else { None };
+    if let Some(nodes) = v1.attachments.get_mut(id) {
+        nodes.retain(|n| kept.iter().any(|k| &k.node == n) || !stale.iter().any(|s| &s.node == n));
+    }
+    v1.save();
+    for att in &stale {
+        revoke_attachment(state, id, local, att, &kept, shared).await;
+    }
+    stale.len()
+}
+
 async fn fence_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1896,7 +2080,10 @@ async fn fence_volume(
     let mut v1 = state.v1.lock().await;
     v1.expire_windows(now_ms());
     let epoch = apply_fence(&mut v1, &id, req.expected_epoch)?;
-    Ok(Json(serde_json::json!({ "epoch": epoch })))
+    // Before answering: once the fence has answered, a host attached below
+    // it can no longer write (#83, #6).
+    let revoked = revoke_below_epoch(&state, &mut v1, &id, None).await;
+    Ok(Json(serde_json::json!({ "epoch": epoch, "revoked": revoked })))
 }
 
 #[derive(Deserialize)]
@@ -1992,6 +2179,24 @@ async fn close_dual_attach(
             if let Some(nodes) = v1.attachments.get_mut(&id) {
                 nodes.retain(|n| n != &target);
             }
+            // The migration target's access ends with the window (#83).
+            if let Some(rec) = v1.volumes.get_mut(&id) {
+                let local = rec.local_id;
+                let (gone, kept): (Vec<Attachment>, Vec<Attachment>) =
+                    rec.vol.attachments.drain(..).partition(|a| a.node == target);
+                rec.vol.attachments = kept.clone();
+                let shared = if gone.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none())
+                    && !kept.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none())
+                {
+                    v1.nvme_nsids.remove(&id)
+                } else {
+                    None
+                };
+                v1.save();
+                for att in &gone {
+                    revoke_attachment(&state, &id, local, att, &kept, shared).await;
+                }
+            }
             let vol = v1
                 .volumes
                 .get(&id)
@@ -2002,9 +2207,27 @@ async fn close_dual_attach(
             Ok(Json(vol))
         }
         DualAttachOutcome::Commit => {
-            // Cutover: fence the old master, promote the migration target.
+            // Cutover: fence the old master — its attachments revoked before
+            // anything answers — and promote the migration target, whose
+            // attachment stays.
             let fenced = apply_fence(&mut v1, &id, req.epoch)?;
-            apply_promote(&mut v1, &id, &target, fenced).map(Json)
+            revoke_below_epoch(&state, &mut v1, &id, Some(target.as_str())).await;
+            let kept = v1.volumes.get(&id).map(|r| r.vol.attachments.clone()).unwrap_or_default();
+            let mut vol = apply_promote(&mut v1, &id, &target, fenced)?;
+            // The target's attachment is now the master's, at the new epoch.
+            if let Some(rec) = v1.volumes.get_mut(&id) {
+                rec.vol.attachments = kept
+                    .into_iter()
+                    .map(|a| Attachment { epoch: fenced, ..a })
+                    .collect();
+                vol = rec.vol.clone();
+                let nodes: Vec<String> = rec.vol.attachments.iter().map(|a| a.node.clone()).collect();
+                if !nodes.is_empty() {
+                    v1.attachments.insert(id.clone(), nodes);
+                }
+                v1.save();
+            }
+            Ok(Json(vol))
         }
     }
 }
@@ -2390,6 +2613,7 @@ mod persistence_tests {
                 encrypted: false,
                 qos_class: None,
                 bandwidth_class: BandwidthClass::Normal,
+                attachments: Vec::new(),
             },
             local_id: None,
             source_local: None,
@@ -2596,7 +2820,7 @@ mod transport_tests {
 
     async fn attach(state: &Arc<AppState>, id: &str, transport: Option<&str>) -> Result<AttachInfo, u16> {
         let node = state.v1.lock().await.local_node.clone();
-        let req = AttachRequest { node, mode: AttachMode::ReadWrite, transport: transport.map(String::from), host_nqn: None, dhchap: false };
+        let req = AttachRequest { node, mode: AttachMode::ReadWrite, transport: transport.map(String::from), host_nqn: None, dhchap: false, epoch: None };
         match attach_volume(State(state.clone()), Path(id.to_string()), Json(req)).await {
             Ok(Json(info)) => Ok(info),
             Err(e) => Err(e.into_response().status().as_u16()),

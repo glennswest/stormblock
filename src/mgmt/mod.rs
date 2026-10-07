@@ -12,6 +12,8 @@ pub mod raid_sets;
 #[cfg(feature = "nvmeof")]
 pub mod nvme_hosts;
 #[cfg(feature = "nvmeof")]
+pub mod ana;
+#[cfg(feature = "nvmeof")]
 pub mod forge;
 #[cfg(feature = "ui")]
 pub mod ui;
@@ -427,6 +429,10 @@ impl AppState {
             }
         }
         let holds = volume_manager.holds();
+        // Before any target serves: a volume this node was told is not to be
+        // used through it must not answer optimized after a restart (#83).
+        #[cfg(feature = "nvmeof")]
+        ana::load(&config);
         #[cfg(feature = "nvmeof")]
         let nvmeof_settings = config.nvmeof.clone();
         let volume_manager = Arc::new(tokio::sync::Mutex::new(volume_manager));

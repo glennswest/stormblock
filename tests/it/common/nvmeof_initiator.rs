@@ -194,6 +194,22 @@ impl NvmeofInitiator {
         self.read_data_response().await
     }
 
+    /// Post an Asynchronous Event Request; it completes when the controller
+    /// has something to say ([`Self::next_completion_dw0`]).
+    pub async fn post_async_event(&mut self) -> io::Result<()> {
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = 0x0C;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        self.send_capsule_cmd(&sqe, &[]).await
+    }
+
+    /// The next completion's DW0 (an AER's event).
+    pub async fn next_completion_dw0(&mut self) -> io::Result<u32> {
+        let (cqe, _) = self.read_capsule_resp().await?;
+        Ok(u32::from_le_bytes(cqe.raw[0..4].try_into().unwrap()))
+    }
+
     /// Identify with the Active Namespace ID list (CNS 2).
     pub async fn active_namespaces(&mut self) -> io::Result<Vec<u32>> {
         let cid = self.next_cid();
