@@ -172,26 +172,29 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A flush with nothing to make durable returns at once (2026-10-07, #338, P1) — IN PROGRESS
+### A flush with nothing to make durable returns at once (2026-10-07, #338, P1) — DONE
 
 stormpump#107 / rustkube-node#95: a pod's 64Mi claim spends 553–878 ms in
 its ext4 mount on a warm node (46–88 cold). The mount's ublk FLUSHes each run
 `sync_registered` on every slab the volume touches: a device-wide flush,
 queued behind any other volume's sync on that slab. A FLUSH only has to
 make durable the writes completed before it was issued.
-- [ ] per volume handle: `completed` (bumped when a write, discard or
+- [x] per volume handle: `completed` (bumped when a write, discard or
       write-zeroes finishes — success, error or dropped, by a guard) and
       `synced` (the `completed` a successful flush started from). `flush`
       returns at once when nothing completed since; otherwise the full
       ordered sync, then `synced = max(synced, start)`. Starts 1/0: a
       handle's first flush is always full
-- [ ] tests: a clean flush touches no device and does not wait behind a
+- [x] tests: a clean flush touches no device and does not wait behind a
       slow flush of another volume on the slab; a write that completes
       during a flush makes the next flush a full one; power-cut and
       durability tests unchanged; durability.md, CHANGELOG
 - Note: an rw ext4 mount writes its superblock, so its post-write flush
   still pays; the clean ones (the pre-flush, barriers before any write) do
   not. stormpump's per-step timing on the next probe says how much
+- Verified on a build VM at eb63634: the three new tests 3/3 each; full
+  nextest 994/994 (16 power-cut/durability/crash tests among them). Not on
+  metal: stormpump's mount timing on a release with this engine
 
 ### The stall watchdog's task dump panicked a ublk device's runtime (2026-10-07, #334, P0) — DONE
 
