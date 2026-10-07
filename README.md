@@ -467,7 +467,7 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
 
 ## Health, readiness and metrics
 
-- `GET /api/v1/health` — public, no locks, no I/O:
+- `GET /api/v1/health` — public, never waits on a lock, no I/O:
   `{"status":"ok","service":"stormblock","version":…,"auth":"required"|"none"}`,
   plus `"raid"` (the worst RAID set's state) on a node that has sets, and
   `"flow_over_remaining"` (#260) on an engine running a flow-over: the extents
@@ -475,6 +475,17 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   flow-over has finished, left out when there is none. Kept by the flow-over
   as it goes, so it is never missing for being busy; an abandoned flow-over
   leaves it above 0 (the node still runs from the appliance).
+  And `"slabs"` (#322): where the node runs from.
+  - `diskless` is true when no volume has a leg on a local slab.
+  - `system` and `data` are each `local`, `remote`, `mixed` (some of each,
+    as during a flow-over) or `none`.
+  - `items` lists each slab: `role`, `source`, and for a local slab its
+    `device`, for a remote one only its `transport` (`nvme-tcp`/`iscsi`).
+    The remote URI carries what attaching the clone takes, so it is never
+    shown. `volumes` counts the volumes with a leg on that slab.
+  - It is counted only on a node with a remote slab, at most every 10 s, and
+    never waited for: it is left out until a first answer could be read, so
+    absent means unknown.
   A booting node asks this of every candidate address before it has a token.
 - `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
   public, read-only, no volume data (#269): what the engine is doing when its

@@ -9814,6 +9814,18 @@ mod forge_mode_tests {
         }
         let r = c.delete(&pallet).send().await.unwrap();
         assert_eq!(r.status(), 404, "delete does not reach a boot disk");
+
+        // #322: the open health says this node runs from a remote slab, and
+        // names it by transport only.
+        let h = c.get(format!("http://{api}/api/v1/health")).send().await.unwrap().text().await.unwrap();
+        let hv: serde_json::Value = serde_json::from_str(&h).unwrap();
+        assert_eq!(hv["slabs"]["diskless"], true, "{h}");
+        assert_eq!(hv["slabs"]["system"], "remote", "{h}");
+        assert!(
+            hv["slabs"]["items"].as_array().unwrap().iter().all(|i| i["source"] == "remote" && i["transport"] == "nvme-tcp"),
+            "{h}"
+        );
+        assert!(!h.contains("nvme-tcp://") && !h.contains("nqn.") && !h.contains("127.0.0.1"), "health names no remote slab: {h}");
         let v: serde_json::Value =
             c.post(format!("{pallet}/verify")).send().await.unwrap().json().await.unwrap();
         assert_eq!(v["ok"], true, "still whole: {v}");

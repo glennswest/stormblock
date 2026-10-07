@@ -111,6 +111,10 @@ async fn probes_stay_public_and_health_reports_the_mode() {
     let body: serde_json::Value = health.json().await.unwrap();
     assert_eq!(body["auth"], "required");
     assert_eq!(body["service"], "stormblock");
+    // #322: a node on its own drives is not diskless, and says so openly.
+    assert_eq!(body["slabs"]["diskless"], false, "{body}");
+    assert_eq!(body["slabs"]["system"], "local", "{body}");
+    assert!(body["slabs"]["items"].as_array().is_some_and(|i| !i.is_empty() && i.iter().all(|i| i["source"] == "local")), "{body}");
 
     server.abort();
 }

@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod discovery;
 pub mod ublk_export;
 pub mod debug;
+pub mod slab_report;
 pub mod tls;
 pub mod raid_sets;
 #[cfg(feature = "nvmeof")]
@@ -316,6 +317,8 @@ pub struct AppState {
     /// pallet reads list and verify the pallets on them; no pallet verb
     /// writes to them (a boot clone is shared with the appliance's lineage).
     pub boot_disks: tokio::sync::RwLock<Vec<DriveInfo>>,
+    /// Where the slabs are, for health (#322): the last answer and when.
+    pub slab_report: std::sync::Mutex<Option<(std::time::Instant, slab_report::SlabReport)>>,
     /// The release being staged on this node, if any (#122).
     pub stage_job: tokio::sync::Mutex<Option<crate::mgmt::api::releases::StageJob>>,
     /// Drives being emptied so they can be pulled (#70 item 3).
@@ -450,6 +453,7 @@ impl AppState {
             flow_over_remaining: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             slab_paths: Default::default(),
             boot_disks: tokio::sync::RwLock::new(Vec::new()),
+            slab_report: std::sync::Mutex::new(None),
             stage_job: Default::default(),
             volume_manager,
             exports: tokio::sync::RwLock::new(Vec::new()),

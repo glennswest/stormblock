@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** #322 (stormcentral#353): the open `/api/v1/health` says where the node runs from. C2NR0Q2 had passed the "local boot" and "fresh slab" stages while running entirely from a forge clone (#268).
+  - **`slabs`:** `diskless`; `system` and `data`, each `local`, `remote`, `mixed` or `none` (by where the volumes' legs are); and each slab with its role, source, local `device` or remote `transport`, and the volumes with legs on it.
+  - **Never the remote URI:** health is unauthenticated, and the URI (forge's address, the clone's subsystem NQN, the host NQN, with no secret for a boot host, #210) is what attaching the machine's boot clone takes.
+  - **Cost:** never waits (try_read, cached 10 s). On a node with no remote slab (forge, a disk-booted node), nothing is counted.
+  - **Tests:** `slab_report` units (diskless, mid-flow-over mixed, all local); the #314 netboot test's node over NVMe/TCP reports `diskless`/`remote` and its health names no URI, NQN or address; a local node's health reports `local` (`integration_auth`).
 - **feat:** #313: `?scrub=used` on `DELETE /api/v1/volumes/{id}` and `/serve/v1/volumes/{id}`, the owner's rule for removing data ("overwrite only what's used, once"), with a report. Since #286 a delete already overwrites once every slot whose last reference goes with it (copy-on-write aware), discards it on flash, then frees it. What was missing was the word and the answer.
   - **The word:** `scrub=used` means at least `once`, even on a node whose `[erase] default` is `none`.
   - **The answer:** the delete returns **200** `{deleted, scrub: {volume, level, slots, bytes}}`, counting the slots this delete queued (counted when they are retired, under the registry lock). `/serve/v1` adds `scrub` to its body always. Completion is the volume's record in `GET /api/v1/erasures`. Without `scrub` the delete answers 204 as before.

@@ -58,7 +58,9 @@ use super::AppState;
 /// right address by DHCP reported "no engine" about it and dropped to a
 /// shell.
 ///
-/// Cheap on purpose: no locks, no I/O, no counting. A discovery probe runs
+/// Cheap on purpose: no waiting on a lock, no I/O. The one count, where the
+/// slabs are (#322), runs only on a node with a remote slab, at most every
+/// 10 s, and is skipped when anything is busy. A discovery probe runs
 /// against several addresses on every boot of every node, and one that reads
 /// state is one that answers slowly when the appliance is busy — which is
 /// when a node most wants an answer.
@@ -85,6 +87,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// must not read as settled mid-move.
         #[serde(skip_serializing_if = "Option::is_none")]
         flow_over_remaining: Option<u64>,
+        /// Where the node's slabs are (#322): whether it runs from its own
+        /// disk or from a remote (forge) clone, per half. A remote slab is
+        /// named by its transport only. Never waited for: left out until a
+        /// first answer could be read without waiting (unknown, not settled).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slabs: Option<super::slab_report::SlabReport>,
     }
     let flow_over_remaining =
         u64::try_from(state.flow_over_remaining.load(std::sync::atomic::Ordering::Relaxed)).ok();
@@ -104,6 +112,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         auth: if state.auth_enforced() { "required" } else { "none" },
         raid,
         flow_over_remaining,
+        slabs: super::slab_report::for_health(&state),
     })
     .into_response()
 }
