@@ -172,6 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Units' first I/O waits on the engine handover (2026-10-07, #303, P1) — IN PROGRESS
+
+stormcos#300: stormcert-init's first write waits for `Adopted 65 device(s)`
+(5.4 s Dell, 5.7 s pve); on a reboot from the Dell's HDD the incumbent let go
+~21 s after `adopting 64 volume(s)`. The issue's ask 2 (open the slabs and
+restore *before* the incumbent lets go) is the order the owner ruled out on
+#171 (durability rule 8: reading first lost the incumbent's last
+allocations), so it is not done here without the owner. Done here:
+- [x] ask 1: timing lines `[adopt +T s] … (Δ s)` for every handover step
+      (stand-down asked, quiesced, incumbent exited, each slab path attached
+      and opened with its slot count, records read, restored, devices live),
+      and `[boot-local stop +T s]` in the incumbent's stop
+- [x] ask 3: `/run/stormblock/handover-state.json` `adopting` → `serving`
+      (with `took_ms`) for stormpump to hold units on (stormpump issue)
+- [ ] verified (ci-adopt-retry-verify.sh `timing`, nextest); README,
+      CHANGELOG; the owner asked on #303 whether rule 8 may be relaxed
+
 ### The initramfs mounts the container volumes in parallel (2026-10-07, #302, P1) — DONE
 
 stormcos#300: 63 volumes mounted one at a time, ~130–200 ms each, 8.6–10.5 s

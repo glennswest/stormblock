@@ -3091,40 +3091,82 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     /// A stop: SIGINT, or SIGTERM — what a supervisor sends (#144). Created
-/// before the wait so a SIGTERM in between is queued for it rather than
-/// taking the default action (the process dying mid-way with nothing torn
-/// down and nothing saved).
-pub(crate) struct StopSignal {
-    #[cfg(unix)]
-    term: tokio::signal::unix::Signal,
-}
-
-impl StopSignal {
-    pub(crate) fn new() -> anyhow::Result<Self> {
-        Ok(StopSignal {
-            #[cfg(unix)]
-            term: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
-        })
+    /// before the wait so a SIGTERM in between is queued for it rather than
+    /// taking the default action (the process dying mid-way with nothing torn
+    /// down and nothing saved).
+    pub(crate) struct StopSignal {
+        #[cfg(unix)]
+        term: tokio::signal::unix::Signal,
     }
 
-    /// Wait for one; answers which.
-    pub(crate) async fn wait(&mut self) -> anyhow::Result<&'static str> {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                r = tokio::signal::ctrl_c() => { r?; Ok("SIGINT") }
-                _ = self.term.recv() => Ok("SIGTERM"),
+    impl StopSignal {
+        pub(crate) fn new() -> anyhow::Result<Self> {
+            Ok(StopSignal {
+                #[cfg(unix)]
+                term: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+            })
+        }
+
+        /// Wait for one; answers which.
+        pub(crate) async fn wait(&mut self) -> anyhow::Result<&'static str> {
+            #[cfg(unix)]
+            {
+                tokio::select! {
+                    r = tokio::signal::ctrl_c() => { r?; Ok("SIGINT") }
+                    _ = self.term.recv() => Ok("SIGTERM"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c().await?;
+                Ok("SIGINT")
             }
         }
-        #[cfg(not(unix))]
-        {
-            tokio::signal::ctrl_c().await?;
-            Ok("SIGINT")
+    }
+
+    /// Timing lines for a node phase (#303), like the initramfs's: `[adopt +2.31s]
+    /// slabs opened (1.84s)` — the time since the phase began, and since the
+    /// last line. On the console, so a boot's record says where its seconds
+    /// went.
+    pub(crate) struct Steps {
+        tag: &'static str,
+        t0: std::time::Instant,
+        last: std::time::Instant,
+    }
+
+    impl Steps {
+        pub(crate) fn new(tag: &'static str) -> Self {
+            let now = std::time::Instant::now();
+            Steps { tag, t0: now, last: now }
+        }
+
+        pub(crate) fn mark(&mut self, what: impl std::fmt::Display) {
+            let now = std::time::Instant::now();
+            let line = format!(
+                "[{} +{:.2}s] {what} ({:.2}s)",
+                self.tag,
+                now.duration_since(self.t0).as_secs_f64(),
+                now.duration_since(self.last).as_secs_f64()
+            );
+            println!("{line}");
+            tracing::info!("{line}");
+            self.last = now;
+        }
+
+        /// The time the phase began, for a line written on another thread.
+        pub(crate) fn start(&self) -> std::time::Instant {
+            self.t0
         }
     }
-}
 
-/// The disk each slab path was opened from, as the engine holds it (#314).
+    /// A timing line from another thread (#303): `[tag +T s] what`.
+    pub(crate) fn stamp(tag: &str, t0: std::time::Instant, what: impl std::fmt::Display) {
+        let line = format!("[{tag} +{:.2}s] {what}", t0.elapsed().as_secs_f64());
+        println!("{line}");
+        tracing::info!("{line}");
+    }
+
+    /// The disk each slab path was opened from, as the engine holds it (#314).
     type OpenedDisks = Vec<(String, Arc<dyn BlockDevice>)>;
 
     /// Keep the disks the slabs were opened from as the state's boot disks:
@@ -3169,6 +3211,10 @@ impl StopSignal {
         // `slab_paths` is no longer 1:1 with `slabs`.
         let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
         let mut disks: OpenedDisks = Vec::with_capacity(slab_paths.len());
+        // Where opening the slabs goes (#303): attaching each path, finding and
+        // opening its slabs (the slot tables are read here), the records, the
+        // restore.
+        let mut steps = Steps::new("slabs");
         for path in slab_paths {
             // A slab is on a block device (O_DIRECT, #140), a namespace on the
             // fabric (NvmeofDevice), or — tests and development — a file. The diskless boot hands boot-local an
@@ -3193,6 +3239,8 @@ impl StopSignal {
                 dev
             };
             disks.push((path.clone(), dev.clone()));
+            steps.mark(format_args!("{path}: attached"));
+            let before = slabs.len();
             match Slab::open(dev.clone()).await {
                 Ok(s) => {
                     slabs.push(s);
@@ -3227,6 +3275,11 @@ impl StopSignal {
                     }
                 }
             }
+            let opened: u64 = slabs[before..].iter().map(|s| s.total_slots()).sum();
+            steps.mark(format_args!(
+                "{path}: {} slab(s) opened, {opened} slot(s) in their tables",
+                slabs.len() - before
+            ));
         }
 
         // 2. Metadata: an explicit --meta wins, then each slab's own copy, then
@@ -3264,6 +3317,7 @@ impl StopSignal {
         } else {
             embedded.resize_with(slabs.len(), || None);
         }
+        steps.mark("records read");
 
         // Slabs the records need and that did not open here (#171).
         let mut fetched: Vec<(String, Slab)> = Vec::new();
@@ -3529,6 +3583,7 @@ impl StopSignal {
             println!("Attached {role} slab {uri} (to finish the flow-over)");
         }
         mgr.restore().await?;
+        steps.mark("restored");
 
         let resumed = match resumed_uri {
             None => None,
@@ -5755,6 +5810,32 @@ impl StopSignal {
         std::process::exit(ADOPT_HELD_EXIT)
     }
 
+    /// Where the handover says how far it is (#303): `adopting` from just
+    /// before the incumbent is stood down — from then until `serving`, I/O on
+    /// every adopted device waits — and `serving` once they are live again,
+    /// with how long it took. For a supervisor that would rather hold units
+    /// than let them block in D state (stormpump).
+    pub const HANDOVER_STATE_PATH: &str = "/run/stormblock/handover-state.json";
+
+    #[cfg(target_os = "linux")]
+    fn write_handover_state(state: &str, devices: usize, took: Option<std::time::Duration>) {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut v = serde_json::json!({ "state": state, "devices": devices, "at_ms": at, "pid": std::process::id() });
+        if let Some(t) = took {
+            v["took_ms"] = serde_json::json!(t.as_millis() as u64);
+        }
+        let path = std::path::Path::new(HANDOVER_STATE_PATH);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = crate::serve::wiring::write_atomic(path, &serde_json::to_vec_pretty(&v).unwrap_or_default()) {
+            tracing::warn!("{HANDOVER_STATE_PATH}: {e}");
+        }
+    }
+
     /// A successful adopt clears an earlier one's failure record.
     #[cfg(target_os = "linux")]
     fn adopt_succeeded() {
@@ -5830,6 +5911,8 @@ impl StopSignal {
         // list that is short by one, which leaves the devices left off it mounted
         // with no server and the node unable to restart the engine, because its
         // own root is among them.
+        // Where the handover's time goes (#303), on the console.
+        let mut steps = Steps::new("adopt");
         let record = crate::drive::handover::Record::read(std::path::Path::new(
             crate::drive::handover::DEFAULT_PATH,
         ));
@@ -5937,6 +6020,10 @@ impl StopSignal {
         // serves (#190): from the stand-down until this process serves the
         // devices, nothing on them answers — a read there is a hang, not an error.
         let restore_paths = adopt_preflight(slab_paths, meta).await?;
+        steps.mark(format_args!("{} volume(s) to adopt; what the restore reads checked", volumes.len()));
+        // The window units wait in starts here: say so, for whoever holds them
+        // (stormpump), until `serving`.
+        write_handover_state("adopting", dev_ids.len(), None);
         let slab_paths_given = slab_paths;
         let slab_paths: &[String] = &restore_paths;
 
@@ -5952,9 +6039,13 @@ impl StopSignal {
         let taken = crate::drive::handover::take_over_retrying(
             || async {
                 let ids = dev_ids.clone();
+                let t0 = steps.start();
                 tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    stamp("adopt", t0, "asking the incumbent to stand down");
                     let pids = crate::drive::ublk::stand_down(&ids, std::time::Duration::from_secs(15))?;
+                    stamp("adopt", t0, format_args!("{} device(s) quiesced (the incumbent let go)", ids.len()));
                     crate::drive::ublk::wait_exited(&pids, std::time::Duration::from_secs(30));
+                    stamp("adopt", t0, "the incumbent has exited; reading the slabs");
                     Ok(())
                 })
                 .await??;
@@ -6044,6 +6135,7 @@ impl StopSignal {
     // (#144).
     let mut stop = StopSignal::new()?;
     let slab_paths = slab_paths_given;
+    steps.mark(format_args!("restored; serving {} device(s)", serving.len()));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut threads = Vec::new();
@@ -6088,6 +6180,11 @@ impl StopSignal {
     for id in &not_live {
         tracing::error!("/dev/ublkb{id} did not come back after recovery");
     }
+    steps.mark(format_args!(
+        "{} of {} device(s) live again",
+        dev_ids.len() - not_live.len(),
+        dev_ids.len()
+    ));
     let live = threads.iter().filter(|t| !t.is_finished()).count();
     if live == 0 {
         let _ = shutdown_tx.send(true);
@@ -6102,6 +6199,7 @@ impl StopSignal {
         );
     }
     adopt_succeeded();
+    write_handover_state("serving", live, Some(steps.start().elapsed()));
     if live < threads.len() {
         tracing::warn!(
             "adopted {live} of {} device(s); the rest are named in the errors above",
@@ -6932,14 +7030,21 @@ async fn handle_boot_local(
             }
         }
         println!("Shutting down...");
+        // How long the successor waits on this (#303): the devices are
+        // released first, then the records written; it reads only after
+        // this process has exited (#171).
+        let mut steps = Steps::new("boot-local stop");
         let _ = shutdown_tx.send(true);
+        let n = ublk_threads.len();
         let stuck = join_ublk_threads(ublk_threads, std::time::Duration::from_secs(10));
         if stuck > 0 {
             eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
         }
+        steps.mark(format_args!("{} of {n} ublk device(s) released", n - stuck));
         // Capture extent maps mutated while serving (COW allocations) so
         // snapshots stay bootable across the next reattach (#13).
         mgr.persist().await;
+        steps.mark("volume metadata persisted; exiting");
         if let Some(msg) = fatal {
             anyhow::bail!("{msg} — is ublk_drv loaded (Linux 6.0+)?");
         }

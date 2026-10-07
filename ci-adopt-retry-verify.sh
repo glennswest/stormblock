@@ -18,6 +18,8 @@
 #   refused    adopt-ublk told to read a slab on /dev/ublkb0: refused before
 #              the stand-down, and the server it would have replaced still
 #              serves
+#   timing     (#303) the handover's steps on the console ([adopt +T s] …,
+#              [boot-local stop +T s] …) and handover-state.json `serving`
 #   sigterm-handover  (#144) the adopter the next one stands down gets
 #              SIGTERM and stops in order (exit 0); the next one serves
 #   sigterm-capture   (#144) a file written to the engine's state dir just
@@ -170,6 +172,19 @@ else
     log adopt-a /run/adopt-a.log 20
 fi
 
+# 3b. timing (#303): the handover's steps on the console, and its state.
+grep -h '^\[slabs +\|^\[adopt +' /run/adopt-a.log | sed 's/^/GUEST timing: /'
+grep -h '^\[boot-local stop +' /run/boot-local.log | sed 's/^/GUEST timing: /'
+hs=$(sed -n 's/.*"state": *"\([a-z]*\)".*/\1/p' /run/stormblock/handover-state.json 2>/dev/null)
+if [ "$hs" = serving ] && grep -q '^\[adopt +.*live again' /run/adopt-a.log \
+   && grep -q '^\[adopt +.*the incumbent has exited' /run/adopt-a.log \
+   && grep -q '^\[boot-local stop +.*released' /run/boot-local.log; then
+    r timing PASS
+else
+    r timing "FAIL (state '$hs')"
+fi
+sed 's/^/GUEST handover-state: /' /run/stormblock/handover-state.json 2>/dev/null | tr -d '\n'; echo
+
 # 4. give up: every restore fails, 5 s budget.
 STORMBLOCK_ADOPT_TEST_FAIL_RESTORES=1000 STORMBLOCK_ADOPT_RESTORE_SECS=5 \
     stormblock adopt-ublk > /run/adopt-b.log 2>&1 &
@@ -262,7 +277,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -drive file="$W/a.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG|PS|WATCHDOG)|panick'
 
-for m in incumbent-serves retry give-up rerun refused sigterm-handover sigterm-capture; do
+for m in incumbent-serves retry timing give-up rerun refused sigterm-handover sigterm-capture; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi
