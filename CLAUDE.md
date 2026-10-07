@@ -180,11 +180,11 @@ contract: stormstorage#33 settled #6's leg attach contract (epoch on attach,
 Item 1 (ANA) is the target's alone. Cross-node multipath works through the
 per-volume serve subsystems (`<prefix>:vol-<uuid>`, NSID 1: one NQN per
 volume on every node); the shared and per-host subsystems name the node.
-- [ ] target: a namespace removal drains (revoked flag + in-flight count,
+- [x] target: a namespace removal drains (revoked flag + in-flight count,
       checked right before the device op, after any R2T data): a removed
       namespace's commands fail Invalid Namespace, and the removal returns
       only once nothing in flight can still land
-- [ ] target ANA: CMIC (multi-port, multi-ctrl, ANA), OAES ANA change,
+- [x] target ANA: CMIC (multi-port, multi-ctrl, ANA), OAES ANA change,
       ANATT/ANACAP/ANAGRPMAX/NANAGRPID/MNAN, NMIC shared + ANAGRPID in
       Identify NS, log page 0x0C (groups by state: 1 optimized, 2
       non-optimized, 3 inaccessible, 4 persistent loss, 5 change), ANA change
@@ -192,15 +192,20 @@ volume on every node); the shared and per-host subsystems name the node.
       per-volume state process-wide (every subsystem serving it); a cntlid
       range per node (`[nvmeof] cntlid_min/max`) so two nodes' controllers
       of one subsystem never collide
-- [ ] API: `GET/PUT /api/v1/volumes/{id}/ana {state}`, kept in
+- [x] API: `GET/PUT /api/v1/volumes/{id}/ana {state}`, kept in
       `<data_dir>/ana.json` (a node told "inaccessible" stays so across a
       restart)
-- [ ] /v1 epoch (#6's contract): `epoch` on attach (412 stale; absent after
+- [x] /v1 epoch (#6's contract): `epoch` on attach (412 stale; absent after
       a fence = 412), attachment records with epoch on the volume, fence
       revokes lower-epoch attachments before answering (namespace out of the
       host's subsystem, drained; shared namespace released; ublk removed);
       an attach that raced a fence undoes itself
-- [ ] tests (target units, HTTP, Linux kernel multipath in QEMU), docs, CHANGELOG
+- [x] `POST /api/v1/volumes {id}` (one volume, one NGUID, on two nodes)
+- [x] tests: target units 42/42 and the targeted suite 118/118 on dev
+      (`integration_ana_epoch` 2); docs/migration.md, README, CHANGELOG,
+      contract README; stormblock-csi#42 (send `epoch` on attach)
+- [ ] `ci-ana-verify.sh` on dev (kernel multipath across two engines, fence);
+      full nextest
 
 ### A ready fstemplate whose sealed volume is gone (2026-10-06, #281, P1) — DONE (golden-stormblock-ae10dc337da8)
 
