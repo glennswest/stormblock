@@ -172,6 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Delete with `scrub=used` (2026-10-07, #313, P1) — IN PROGRESS
+
+Owner (2026-10-06): data removal is "overwrite only what's used, once",
+everywhere (reset #312, registry cleanup stormblock-registry#70, user
+deletes). Already true since #286: a delete marks every slot whose last
+reference goes `Erasing`, the eraser overwrites it once (the node's default)
+and discards it on flash, then frees it; copy-on-write aware; every local
+delete path. Missing: the word, and the report.
+- [ ] `?scrub=used` on `DELETE /api/v1/volumes/{id}` and
+      `/serve/v1/volumes/{id}`: at least `once`; answers 200 `{volume,
+      scrub: {level, slots, bytes}}` (the slots this delete queued, counted
+      at retire under the registry lock). Without it, 204 as before.
+      Completion: the volume's record in `GET /api/v1/erasures`
+- [ ] tests (a clone sharing its golden's slots: only its own scrubbed; the
+      golden's delete then scrubs the rest; bytes overwritten on the device);
+      docs/erase.md, README, CHANGELOG; tell #312 and registry#70
+
 ### A flush to a failed mirror leg degrades it (2026-10-07, #308, P1) — DONE
 
 stormcos#92's shelf (160 emulated drives): after a drive under a mirror leg
