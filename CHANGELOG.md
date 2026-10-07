@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-10-07
+- **docs:** #257: #239's fix checked against stormcentral's 11.88 install runs. On pvetest1 and pvetest2 (a fresh install, a power cut mid flow-over, a resume from a fresh clone) the serial logs have no ext4 errors. Not checked: the e2fsck of the service clones after the flow-over, which needs stormcentral#503. The work plan records it.
+
 ### 2026-10-06
 - **feat:** #83: moving a VM disk between nodes, on the engine's side (`docs/migration.md`).
   - **NVMe ANA:** Identify reports ANA (CMIC, OAES bit 11, ANATT, ANACAP, five groups by state, NN = MNAN = 1024; NMIC shared and ANAGRPID per namespace). Log page 0x0C is served, and a change sends an ANA change notice to every connected host of every subsystem that serves the volume. I/O on an `inaccessible`, `persistent_loss` or `change` path fails with the path status (SCT 3), which a multipath host fails over on.

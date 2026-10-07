@@ -172,6 +172,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### #239's fix on metal (2026-10-07, #257, P1) — HALF VERIFIED, waits on stormcentral#503
+
+From stormcentral's install records and serial logs (no install of mine):
+11.88 carries stormblock@9cbe6ca (⊇ b189b3e, 2ceec10) in engine and
+initramfs. pvetest1 (11.88) and pvetest2 (11.88-flowsdn): fresh slab,
+power cut mid flow-over, `a flow-over cut short. Finishing it from …`,
+durability 301/300, **0** ext4 errors in the full serial logs. server3's
+SOL capture dies inside stormbootx on every run (no kernel lines), so the
+blade proves nothing either way, and the 11.57 question cannot be answered.
+Not verified: `e2fsck -fn` of the service clones after the flow-over (no
+run lasts that long; pvetest1 had 2320 extents left after ~5.5 h, #282) →
+stormcentral#503 (after-settle ext4 check as a run check, blades' SOL).
+#257 proposed after it.
+
 ### Live migration of a VM disk: ANA, epoch at the target (2026-10-06, #83, P3) — DONE
 
 Item 3 (durable export table) was done in 2603646. Item 2 now has its
