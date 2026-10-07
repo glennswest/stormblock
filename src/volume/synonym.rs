@@ -377,6 +377,20 @@ pub fn normalize_alias(s: &str) -> String {
     }
 }
 
+/// How a claim of `boothost/<name>` found its host (#204).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamedClaim {
+    /// The name is a host's (its name, an alias, a former name).
+    Known,
+    /// A provisional host (`mac-<hex>`) found by `by`, renamed to the name.
+    Renamed { from: String, by: &'static str },
+    /// A host with a name of its own, found by `by`: the claimed name was
+    /// added as an alias.
+    Aliased { name: String, by: &'static str },
+    /// Nobody: a new host, to be pinned to the default, with this MAC.
+    New { mac: Option<String> },
+}
+
 /// What a machine is called before it has a name: `mac-<12 hex digits>` of
 /// the first NIC's MAC it claimed `boothost/default` with (#200). `None` when
 /// `mac` is not a MAC, or is all zeros or all ones.
@@ -682,6 +696,69 @@ impl SynonymStore {
         Ok(out)
     }
 
+    /// The host this is an **alias** of — never an assignment's name (#204).
+    /// What a serial may be matched by: an alias is set by an operator, on
+    /// one host (two may not share one), so a chassis serial every blade of a
+    /// MicroCloud reports means nothing unless someone said it means one
+    /// machine. A `boothost/<serial>` assignment (server1's old trial one,
+    /// #249) is not that.
+    pub fn alias_owner(&self, k: &str) -> Option<String> {
+        let want = host_match_key(k);
+        if want.is_empty() {
+            return None;
+        }
+        self.hosts
+            .values()
+            .find(|h| h.aliases.iter().any(|a| host_match_key(a) == want))
+            .map(|h| h.name.clone())
+    }
+
+    /// Which host a claim of `boothost/<claimed>` is, when the machine says
+    /// its MAC and serial too (#204, stormbootx#23: a name from DNS).
+    ///
+    /// A name some host has (its own, an alias, a former name) is that host,
+    /// whatever the MAC says. Otherwise the machine may already be a host
+    /// under another name:
+    /// - its MAC's host, else the host its serial is an alias of;
+    /// - a provisional one (`mac-<hex>`, #200) is **renamed** to the claimed
+    ///   name, its old name kept as an alias — "named after the first boot",
+    ///   done by DNS;
+    /// - one with a real name keeps it: the claimed name becomes one more
+    ///   alias of it, and the claim is that host's (two DNS names for one
+    ///   machine is the operator's to settle, not this claim's).
+    ///
+    /// Neither: a new host of the claimed name, which the caller pins to the
+    /// default, with the MAC (never the serial) as its alias.
+    pub fn resolve_named_claim(
+        &mut self,
+        claimed: &str,
+        mac: Option<&str>,
+        serial: Option<&str>,
+    ) -> Result<(String, NamedClaim), SynonymError> {
+        if let Some(h) = self.host_of(claimed) {
+            return Ok((h, NamedClaim::Known));
+        }
+        let mac = mac.filter(|m| provisional_host_name(m).is_some());
+        let by_mac = mac.and_then(|m| self.host_of(m));
+        let found = match by_mac {
+            Some(h) => Some((h, "mac")),
+            None => serial.filter(|s| !s.trim().is_empty()).and_then(|s| self.alias_owner(s)).map(|h| (h, "serial")),
+        };
+        match found {
+            Some((h, by)) if is_provisional(&h) => {
+                let renamed = self.rename_host(&h, claimed, true)?;
+                Ok((renamed.name, NamedClaim::Renamed { from: h, by }))
+            }
+            Some((h, by)) => {
+                let mut aliases = self.host(&h).map(|x| x.aliases).unwrap_or_default();
+                aliases.push(claimed.to_string());
+                self.set_aliases(&h, &aliases)?;
+                Ok((h, NamedClaim::Aliased { name: claimed.to_string(), by }))
+            }
+            None => Ok((claimed.to_string(), NamedClaim::New { mac: mac.map(normalize_alias) })),
+        }
+    }
+
     /// The host a machine claiming `boothost/default` with this MAC is (#200):
     /// the host the MAC is an alias of, or the one still (or once) called
     /// `mac-<hex>`, or else a new provisional host of that name with the MAC
@@ -875,6 +952,46 @@ impl SynonymStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_named_claim_reaches_the_machine_it_already_is() {
+        use super::*;
+        let mut st = SynonymStore::in_memory();
+        let (prov, _) = st.provisional_host("aa:bb:cc:dd:ee:01").unwrap();
+        assert_eq!(prov, "mac-aabbccddee01");
+
+        // A DNS name with the provisional host's MAC: renamed, the old name kept.
+        let (h, how) = st.resolve_named_claim("server3", Some("AA-BB-CC-DD-EE-01"), None).unwrap();
+        assert_eq!(h, "server3");
+        assert_eq!(how, NamedClaim::Renamed { from: prov.clone(), by: "mac" });
+        assert_eq!(st.host_of(&prov).as_deref(), Some("server3"));
+        assert_eq!(st.host_of("aa:bb:cc:dd:ee:01").as_deref(), Some("server3"));
+        // Again: now simply that host.
+        assert_eq!(st.resolve_named_claim("server3", Some("aa:bb:cc:dd:ee:01"), None).unwrap().1, NamedClaim::Known);
+
+        // A second DNS name for a named machine: an alias, not a rename.
+        let (h, how) = st.resolve_named_claim("blade3", Some("aa:bb:cc:dd:ee:01"), None).unwrap();
+        assert_eq!(h, "server3");
+        assert_eq!(how, NamedClaim::Aliased { name: "blade3".into(), by: "mac" });
+        assert_eq!(st.host_of("blade3").as_deref(), Some("server3"));
+
+        // A serial an operator set on one host finds it; a serial nobody set does not.
+        st.set_aliases("C2NR0Q2", &["C2NR0Q2-SN".to_string()]).unwrap();
+        let (h, how) = st.resolve_named_claim("stormblock1", None, Some("c2nr0q2-sn")).unwrap();
+        assert_eq!(h, "C2NR0Q2");
+        assert_eq!(how, NamedClaim::Aliased { name: "stormblock1".into(), by: "serial" });
+        // An assignment named by a serial (server1's trial one) is not an alias.
+        st.create(BOOTHOST_NS, "S11075924402016", Target::Volume { id: VolumeId(uuid::Uuid::new_v4()) }, None, None).unwrap();
+        let (h, how) = st.resolve_named_claim("server8", None, Some("S11075924402016")).unwrap();
+        assert_eq!((h.as_str(), how), ("server8", NamedClaim::New { mac: None }));
+
+        // Nobody: a new host, with the MAC to alias.
+        let (h, how) = st.resolve_named_claim("server4", Some("aa:bb:cc:dd:ee:04"), None).unwrap();
+        assert_eq!((h.as_str(), how), ("server4", NamedClaim::New { mac: Some("aa:bb:cc:dd:ee:04".into()) }));
+        // A MAC that is no MAC is not used.
+        let (_, how) = st.resolve_named_claim("server5", Some("not-a-mac"), None).unwrap();
+        assert_eq!(how, NamedClaim::New { mac: None });
+    }
+
     use super::*;
 
     fn vol() -> VolumeId {

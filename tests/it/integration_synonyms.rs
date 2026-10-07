@@ -1252,6 +1252,89 @@ async fn two_untagged_machines_booting_the_default_each_get_their_own_clone() {
     server.abort();
 }
 
+async fn named_claim(client: &reqwest::Client, base: &str, name: &str, body: serde_json::Value) -> serde_json::Value {
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/{name}/claim"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "claim of {name}");
+    resp.json().await.unwrap()
+}
+
+/// #204 (stormbootx#23: a name from DNS). A machine that booted the default
+/// as `mac-…` and now claims `boothost/server3` with that MAC is the same
+/// machine: renamed, its golden (lineage) kept, its old name still finding
+/// it. A machine claiming an unknown name with an unknown MAC is new, pinned
+/// to the default, with the MAC as its alias. A named machine claimed by a
+/// second DNS name keeps its own and gains an alias. A shared serial, or one
+/// that only names an assignment, finds nobody.
+#[tokio::test]
+async fn a_named_claim_with_a_known_mac_reaches_that_host() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    // First boot with no name: the provisional host.
+    let first = default_claim(&client, &base, "aa:bb:cc:dd:ee:01").await;
+    assert_eq!(first["host"]["name"], "mac-aabbccddee01");
+    let golden = vid(&first["host_golden"]["volume"]);
+
+    // DNS gives it a name: the same machine, renamed.
+    let named = named_claim(&client, &base, "server3", serde_json::json!({"mac": "AA:BB:CC:DD:EE:01", "serial": "S11075924402016"})).await;
+    assert_eq!(named["host"]["name"], "server3");
+    assert_eq!(named["host"]["resolved"]["renamed_from"], "mac-aabbccddee01");
+    assert_eq!(named["host"]["resolved"]["by"], "mac");
+    assert_eq!(named["host_golden"]["minted"], false, "the same golden: nothing made again");
+    assert_eq!(vid(&named["host_golden"]["volume"]), golden);
+    {
+        let vm = state.volume_manager.lock().await;
+        assert_eq!(vm.parent(&vid(&named["volume"]["id"])), Some(golden), "the same lineage");
+    }
+    // Its old name and its MAC still find it.
+    let by_old = boot_claim(&client, &base, "mac-aabbccddee01").await;
+    assert_eq!(by_old["host"]["name"], "server3");
+    let by_default = default_claim(&client, &base, "aa:bb:cc:dd:ee:01").await;
+    assert_eq!(by_default["host"]["name"], "server3");
+    assert_eq!(vid(&by_default["host_golden"]["volume"]), golden);
+
+    // A second DNS name for that named machine: its name stays, an alias added.
+    let second = named_claim(&client, &base, "blade3", serde_json::json!({"mac": "aa:bb:cc:dd:ee:01"})).await;
+    assert_eq!(second["host"]["name"], "server3");
+    assert_eq!(second["host"]["resolved"]["alias_added"], "blade3");
+    assert_eq!(vid(&second["host_golden"]["volume"]), golden);
+
+    // A machine nobody has seen: new, from the default, its MAC its alias.
+    let new = named_claim(&client, &base, "server4", serde_json::json!({"mac": "aa:bb:cc:dd:ee:04", "serial": "S11075924402016"})).await;
+    assert_eq!(new["host"]["name"], "server4");
+    assert_eq!(new["host"]["resolved"], "new");
+    assert_eq!(new["host"]["new"], false);
+    assert_eq!(new["host_golden"]["minted"], true);
+    assert_eq!(new["host"]["aliases"], serde_json::json!(["aa:bb:cc:dd:ee:04"]));
+    assert_ne!(vid(&new["host_golden"]["volume"]), golden);
+    let again = default_claim(&client, &base, "aa:bb:cc:dd:ee:04").await;
+    assert_eq!(again["host"]["name"], "server4", "its MAC finds it by default too");
+
+    // The chassis serial both sent belongs to nobody: server5 is new, not server3.
+    let s5 = named_claim(&client, &base, "server5", serde_json::json!({"serial": "S11075924402016"})).await;
+    assert_eq!(s5["host"]["name"], "server5");
+    assert_eq!(s5["host"]["resolved"], "new");
+
+    let all: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(all["count"], 3, "server3, server4, server5: no host made twice");
+    server.abort();
+}
+
 /// Tag `default` is one boot clone for every machine: a claim of it without a
 /// MAC, or with something that is not one, is refused and makes nothing.
 #[tokio::test]

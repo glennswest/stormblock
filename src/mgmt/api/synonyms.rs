@@ -404,6 +404,11 @@ pub struct ClaimRequest {
     /// claim reads from its body; `?mac=` works too.
     #[serde(default)]
     pub mac: Option<String>,
+    /// For a boot claim of a name no host has: the machine's SMBIOS serial,
+    /// which finds the host it already is when an operator made that serial
+    /// one of its aliases (#204). Never used to make a host.
+    #[serde(default)]
+    pub serial: Option<String>,
     /// The host NQN that will connect to the clone: it is served from that
     /// host's own subsystem, to that host alone (#210). Not read by a boot
     /// claim, which binds the clone to the boot host's own NQNs.
@@ -744,7 +749,7 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // A machine claiming its boot image is the one caller that arrives with
     // no credential, so its claim is a different, narrower verb (#107).
     if namespace == BOOTHOST_NS {
-        return claim_boothost(state, name, req.mac.as_deref()).await;
+        return claim_boothost(state, name, req.mac.as_deref(), req.serial.as_deref()).await;
     }
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(syn) = found else {
@@ -946,9 +951,10 @@ static BOOT_CLAIMS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// never another machine's. A claim of `boothost/default` with no MAC is
 /// refused — tag `default` would be one boot clone for every machine, each
 /// claim releasing the clone the last machine is running on.
-async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str>) -> Response {
+async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str>, serial: Option<&str>) -> Response {
     let _one_at_a_time = BOOT_CLAIMS.lock().await;
     let by_default = claimed_as.eq_ignore_ascii_case(DEFAULT_HOST);
+    let mut named_claim: Option<synonym::NamedClaim> = None;
     let (tag, mac, new_machine) = if by_default {
         let Some(mac) = mac.filter(|m| !m.trim().is_empty()) else {
             return ApiError::bad_request(format!(
@@ -968,12 +974,34 @@ async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str
             Err(e) => return err(e),
         }
     } else {
-        (canonical(&state, BOOTHOST_NS, claimed_as).await, None, false)
+        // A name from DNS (#204): the machine may already be a host under
+        // another name — its MAC's, or its serial's when that is an alias.
+        let resolved = state.synonyms.write().await.resolve_named_claim(claimed_as, mac, serial);
+        match resolved {
+            Ok((host, how)) => {
+                match &how {
+                    synonym::NamedClaim::Renamed { from, by } => {
+                        tracing::info!(host, from, by, "a machine claimed by a name of its own: renamed from its provisional one")
+                    }
+                    synonym::NamedClaim::Aliased { name, by } => {
+                        tracing::info!(host, name, by, "a machine claimed by a second name: kept its own, the new one is an alias")
+                    }
+                    _ => {}
+                }
+                let new_mac = match &how {
+                    synonym::NamedClaim::New { mac } => mac.clone(),
+                    _ => None,
+                };
+                named_claim = Some(how);
+                (host, new_mac, false)
+            }
+            Err(e) => return err(e),
+        }
     };
     let tag = tag.as_str();
     // Every name this host has had: its clones and goldens carry the name
     // they were made under, and a rename must not strand them (#199).
-    let host = state.synonyms.read().await.host(tag);
+    let mut host = state.synonyms.read().await.host(tag);
     let names: Vec<String> = std::iter::once(tag.to_string())
         .chain(host.iter().flat_map(|h| h.former_names.iter().cloned()))
         .collect();
@@ -997,13 +1025,22 @@ async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str
                     synonym::key(BOOTHOST_NS, DEFAULT_HOST),
                     default.version
                 );
-                match store.create(BOOTHOST_NS, tag, default.target.clone(), default.label.clone(), Some(why)) {
+                let made = match store.create(BOOTHOST_NS, tag, default.target.clone(), default.label.clone(), Some(why)) {
                     Ok(s) => {
                         tracing::info!(tag, "new machine: {} pinned to the default image", s.name);
                         s.clone()
                     }
                     Err(e) => return err(e),
+                };
+                // A new host claimed by name with its MAC (#204): the MAC is
+                // its alias, so the next claim by MAC or by default finds it.
+                if let (false, Some(m)) = (by_default, mac.as_deref()) {
+                    match store.set_aliases(tag, &[m.to_string()]) {
+                        Ok(h) => host = Some(h),
+                        Err(e) => tracing::warn!(tag, mac = m, "the new host's MAC not kept as its alias: {e}"),
+                    }
                 }
+                made
             }
         }
     };
@@ -1176,6 +1213,14 @@ async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str
             "provisional": synonym::is_provisional(tag),
             "mac": mac,
             "new": new_machine,
+            // How a claim by name found its host (#204).
+            "resolved": match &named_claim {
+                Some(synonym::NamedClaim::Renamed { from, by }) => json!({"renamed_from": from, "by": by}),
+                Some(synonym::NamedClaim::Aliased { name, by }) => json!({"alias_added": name, "by": by}),
+                Some(synonym::NamedClaim::New { .. }) => json!("new"),
+                Some(synonym::NamedClaim::Known) => json!("known"),
+                None => serde_json::Value::Null,
+            },
         },
         "claimed_from": {
             "synonym": synonym::key(BOOTHOST_NS, tag),
