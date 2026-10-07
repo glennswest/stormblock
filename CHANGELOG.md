@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** #244: a local root that does not come up falls back to the claimed image instead of stopping at a shell. The root may never appear, or may fail to mount (server1 11.56: `erofs: cannot find valid erofs superblock`).
+  - **When:** once per boot; when the root came from a local disk (no hook decided it); when an appliance is known; and when the name is not a guess (#249).
+  - **What it does:** `/init` stops the engine and boots the claimed image (claiming one if needed). It installs that image over the disk, its system half laid again (`STORMBLOCK_RELAY_SYSTEM_HALF=1` bypasses the "already up to date" shortcut) and its data half kept (#311). The console says `ROOT FAILED` / `FALLING BACK`, or why it did not fall back.
+  - **Code:** the post-probe launch is now `launch_local`, the root wait `wait_root`, and the new block is `root fallback`.
+  - **Tests:** `tests/initramfs-root-fallback.sh`; `cli::install_tests::a_held_disk_whose_root_fails_is_laid_again_keeping_its_data`; `cli::relay_tests`.
+- **fix (data):** #244/#311: an install of the release a disk already holds lost the node's data in every data volume the release ships. That covers an install ticket over the same release, and now #244's fallback.
+  - **Cause:** the claim's copy carries the node volume's id, and `adopt_slabs` kept the record it already knew, the claim's. The node's bytes were unmapped, to be freed by GC.
+  - **Fix:** `install::adopt` drops the claim's copy of a same-id unsealed volume before adopting, so the node's record and bytes are what stay, whatever the policy. Same-id goldens are one volume.
+  - **Test:** the held-disk test failed on `state`'s bytes before the fix.
 - **docs:** #284: forge mode is a day-2 switch. `PUT/DELETE /api/v1/forge` is called by stormcluster's day-2 operation (stormcluster#16); nothing chooses it at install, and stormcos#82's install-config carries no forge role. CLAUDE.md's #272 entry said otherwise and is corrected, and the README's `/api/v1/forge` row now says who calls it. `docs/auth.md` and `docs/boot-hooks.md` never made the claim.
 - **perf:** #278: a successor's flow-over lets the node boot first. The first move waits until the node's volume I/O has been still for 10 s, or 90 s at most (`STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 0 = no wait). `flow_over_remaining` is reported during the wait.
   - **Why:** on the Dell (SMR disk), a reboot during the flow-over ran stormpump in 15.1 s instead of 7.9 and the apiserver in 30.2 s instead of 15.3 (11.88). The per-move yield (#269) gives back one move's time, not a boot.

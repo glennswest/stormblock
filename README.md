@@ -318,6 +318,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
 | `STORMBLOCK_BOOT_TAG` | this machine's name for that claim; the initramfs exports the name it resolved (#259) | the firmware's `StormBootTag` EFI variable, else SMBIOS serial, else SMBIOS UUID (#249) |
+| `STORMBLOCK_RELAY_SYSTEM_HALF` | `1`: lay the local disk's system half again even when it already holds every volume of the image by id. The initramfs sets it when a local disk's root did not come up and it falls back to the claimed image (#244) | the "already up to date" shortcut |
 | `STORMBLOCK_RESUME_SOURCE` | the clone to finish a cut-short flow-over from, instead of a claim; the initramfs exports the clone its probe claimed when `slab holds` exits 3 (#259) | a claim from `STORMBLOCK_BOOTHOST` |
 | `STORMBLOCK_RESUME_SOURCE` | a device path or `nvme-tcp://` URI used instead of claiming (tests, recovery by hand) | claim through `STORMBLOCK_BOOTHOST` |
 

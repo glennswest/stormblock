@@ -172,6 +172,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A local root that does not come up falls back to the claimed image (2026-10-07, #244, P1) — DONE
+
+server1 11.56: a held disk whose root would not mount stopped at a shell.
+- [x] `/init`: `launch_local` (everything from the diskless claim to the
+      engine's start), `wait_root`, block `root fallback`: once per boot,
+      from a local disk (no hook), an appliance known, the name not a guess
+      (#249): stop the engine (SIGTERM, zombie-aware wait, SIGKILL), claim if
+      needed, `SLAB=$CLAIMED`, `INSTALL_OVER=<disk>`,
+      `STORMBLOCK_RELAY_SYSTEM_HALF=1`, launch again; root not appearing,
+      plain mount, overlay lower
+- [x] engine: `STORMBLOCK_RELAY_SYSTEM_HALF=1` skips the up-to-date shortcut
+      (`holds_everything`)
+- [x] found by the test: an install of the release the disk already holds
+      lost the node's data volumes that share the claim's ids (adopt kept the
+      claim's record) — `install::adopt` drops the claim's same-id copy first
+- [x] tests: `tests/initramfs-root-fallback.sh`, every initramfs test under
+      sh and busybox sh, the generated /init parses (both); the held-disk
+      install test, relay unit test, #311's two install tests on dev
+- Not on metal: needs a stormcos release with this initramfs and engine
+
 ### First boot slower while the flow-over runs (2026-10-07, #278, P1) — DONE
 
 stormcentral's metrics: pvetest1 boot→apiserver 223 s (11.73), 334 s
