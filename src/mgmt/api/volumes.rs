@@ -210,6 +210,12 @@ pub struct CreateVolumeRequest {
     /// its source's. Sizes other than the default need metadata format 2.
     #[serde(default)]
     pub extent_size: Option<String>,
+    /// The new volume's id, when it must be a given one (#83): a volume
+    /// served from two nodes is one multipath namespace to a host only when
+    /// both carry its id (the NGUID). Refused if a volume here has it. Not
+    /// with `from_template` or `array_id`.
+    #[serde(default)]
+    pub id: Option<Uuid>,
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -635,6 +641,9 @@ async fn create_volume(
     // snapshot plus a fresh filesystem UUID: no mkfs, no attach. Placement
     // comes from the source's own extents. One namespace: a template is a
     // volume that has been sealed (#76).
+    if req.id.is_some() && req.from_template.is_some() {
+        return ApiError::bad_request("a clone gets an id of its own; drop id or from_template");
+    }
     if let Some(key) = req.from_template.as_deref() {
         let is_template = state.fstemplates.lock().await.find(key).is_some();
         let (vol_id, fs_uuid, size_bytes) = if is_template {
@@ -697,6 +706,9 @@ async fn create_volume(
         Some(s) => s,
         None => return ApiError::bad_request("size is required"),
     };
+    if req.id.is_some() && req.array_id.is_some() {
+        return ApiError::bad_request("a given id is for a volume the node places itself; drop array_id");
+    }
     let redundancy = match req.redundancy.as_deref() {
         Some(r) => match crate::volume::RedundancyPolicy::parse(r) {
             Ok(p) => p,
@@ -760,15 +772,13 @@ async fn create_volume(
     };
     let created = match array_id {
         Some(a) => vm.create_volume(&req.name, size, a).await,
-        _ => vm
-            .create_volume_with(
-                &req.name,
-                size,
-                crate::volume::CreateOptions::redundant(redundancy.clone())
-                    .in_role_opt(role)
-                    .with_extent_size(extent_size),
-            )
-            .await,
+        _ => {
+            let mut opts = crate::volume::CreateOptions::redundant(redundancy.clone())
+                .in_role_opt(role)
+                .with_extent_size(extent_size);
+            opts.id = req.id.map(VolumeId);
+            vm.create_volume_with(&req.name, size, opts).await
+        }
     };
     match created {
         Ok(vol_id) => {
