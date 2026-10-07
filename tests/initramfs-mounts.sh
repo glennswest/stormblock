@@ -35,6 +35,10 @@ STUB="$WORK/stormblock"
 cat > "$STUB" <<'STUBEOF'
 #!/bin/sh
 echo "$*" >> "$STUB_LOG"
+if [ "$1 $2" = "slab volumes" ]; then
+    [ -n "${STUB_VOLS:-}" ] && [ -r "$STUB_VOLS" ] && cat "$STUB_VOLS"
+    exit 0
+fi
 [ "$1 $2" = "slab cat" ] || exit 2
 out=""; vol=""; slab=""
 shift 2
@@ -89,6 +93,64 @@ check "no slab to read: no list" \
 check "an empty file: no list" \
     "|/etc/stormblock/mounts in stormpump|1" \
     "$(run "" "$WORK/empty" "" /dev/sda)"
+
+# Optional entries (#288): `?vol:path` mounted when the slab has the volume.
+opt() { # mounts vols-file-or-empty slab -> "MOUNTS|MOUNTS_SKIPPED|listings" ; console in $WORK/opt.out
+    : > "$WORK/log"
+    out=$(STUB_LOG="$WORK/log" STUB_VOLS="$2" STORM_STORMBLOCK="$STUB" STORM_RUN="$WORK/run" \
+        MOUNTS="$1" SLAB_ARG="$3" sh -c '
+        . "$0"
+        mounts_optional "$SLAB_ARG" > "$1"
+        printf "%s|%s" "$MOUNTS" "$MOUNTS_SKIPPED"
+    ' "$WORK/mounts.sh" "$WORK/opt.out")
+    printf '%s|%s' "$out" "$(grep -c 'slab volumes' "$WORK/log" | tr -d ' ')"
+}
+cat > "$WORK/vols" <<'VOLS'
+/dev/sda2: volume stormpump (4.3 GB, 4096 slots, sealed)
+/dev/sda2: volume cilium (210 MB, 200 slots, sealed)
+/dev/sda2: volume cilium-data (64 MB, 3 slots)
+/dev/sda3: volume kubelet-data (2.1 GB, 540 slots)
+VOLS
+check "no optional entry: the list as it is, and no listing read" \
+    "stormblock:/p/stormblock,fastetcd:/p/fastetcd||0" \
+    "$(opt "stormblock:/p/stormblock,fastetcd:/p/fastetcd" "$WORK/vols" /dev/sda)"
+check "an optional entry the slab has is mounted, in its place" \
+    "stormblock:/p/stormblock,cilium:/p/cilium,kubelet-data:/var/lib/kubelet||1" \
+    "$(opt "stormblock:/p/stormblock,?cilium:/p/cilium,kubelet-data:/var/lib/kubelet" "$WORK/vols" /dev/sda)"
+check "one it does not have is left out, the rest kept in order" \
+    "stormblock:/p/stormblock,cilium:/p/cilium|flowsdn:/p/flowsdn,release:/release|1" \
+    "$(opt "stormblock:/p/stormblock,?flowsdn:/p/flowsdn,?cilium:/p/cilium,?release:/release" "$WORK/vols" /dev/sda)"
+case "$(cat "$WORK/opt.out")" in
+*"optional, not in this release: flowsdn (/p/flowsdn)"*) echo "  ok    and the console says which, and why" ;;
+*) echo "  FAIL  console: $(cat "$WORK/opt.out")"; fail=1 ;;
+esac
+check "a name that is a prefix of one the slab has is not taken for it" \
+    "|cilium-d:/p/x|1" \
+    "$(opt "?cilium-d:/p/x" "$WORK/vols" /dev/sda)"
+check "a required entry is never dropped, even when the slab lacks it" \
+    "flowsdn:/p/flowsdn|nothing:/n|1" \
+    "$(opt "flowsdn:/p/flowsdn,?nothing:/n" "$WORK/vols" /dev/sda)"
+echo "/dev/sdb: slab 1111 keeps no volume metadata" > "$WORK/novols"
+check "a slab that cannot list its volumes: optional entries left out" \
+    "stormblock:/p/stormblock|cilium:/p/cilium|1" \
+    "$(opt "stormblock:/p/stormblock,?cilium:/p/cilium" "$WORK/novols" /dev/sdb)"
+case "$(cat "$WORK/opt.out")" in
+*"optional, left out: cilium (/p/cilium): /dev/sdb cannot list its volumes"*) echo "  ok    and says it could not tell" ;;
+*) echo "  FAIL  console: $(cat "$WORK/opt.out")"; fail=1 ;;
+esac
+check "every entry optional and absent: an empty list" \
+    "|flowsdn:/p/flowsdn|1" \
+    "$(opt "?flowsdn:/p/flowsdn" "$WORK/vols" /dev/sda)"
+
+# Read from the file, `?` lines survive the comment and space stripping.
+cat > "$WORK/optlist" <<'LIST'
+stormblock:/p/stormblock
+? cilium:/p/cilium      # cilium flavor only
+?flowsdn:/p/flowsdn
+LIST
+check "a ? line in /etc/stormblock/mounts reads as an optional entry" \
+    "stormblock:/p/stormblock,?cilium:/p/cilium,?flowsdn:/p/flowsdn|/etc/stormblock/mounts in stormpump|1" \
+    "$(run "" "$WORK/optlist" "" /dev/sda)"
 
 # The block parses under the shell /init runs in.
 if command -v busybox >/dev/null 2>&1; then

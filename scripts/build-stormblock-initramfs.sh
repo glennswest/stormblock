@@ -894,6 +894,62 @@ mounts_from() { # slab -> MOUNTS (comma-separated) and MOUNTS_FROM
     return 0
 }
 
+# Optional entries (#288, stormcos#208): `?<vol>:<path>`.
+#
+# One stormpump golden serves every flavor of a release (cilium, flowsdn), so
+# its list names volumes a given release does not carry. A plain entry is
+# required, as before: missing, the disk cannot boot this node (the probe) and
+# the engine dies on "volume not found". A `?` entry is mounted when the slab
+# has the volume and left out when it does not - before the ublk numbers are
+# handed out, so the devices and the mount points stay in step.
+#
+# Which volumes the slab has comes from `slab volumes`, read once and only
+# when the list has a `?` in it. A slab that cannot say (no metadata on it,
+# unreadable) leaves its optional entries out too, and says so: a mount left
+# out costs one service, a volume asked for and not there costs the boot.
+slab_has_volume() { # listing name
+    printf '%s\n' "$1" | grep -qE ": volume $2 | $2\$"
+}
+MOUNTS_SKIPPED=""
+mounts_optional() { # slab; MOUNTS -> MOUNTS without `?`, MOUNTS_SKIPPED
+    MOUNTS_SKIPPED=""
+    case ",$MOUNTS" in *",?"*) ;; *) return 0 ;; esac
+    _mo_vols=""
+    _mo_why=""
+    if [ -n "${1:-}" ]; then
+        _mo_vols=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab volumes "$1" 2>/dev/null)
+    fi
+    if ! printf '%s\n' "$_mo_vols" | grep -q ': volume '; then
+        _mo_why="${1:-no slab} cannot list its volumes"
+    fi
+    _mo_keep=""
+    OIFS_MO=$IFS; IFS=,
+    for _mo_e in $MOUNTS; do
+        IFS=$OIFS_MO
+        case "$_mo_e" in
+        \?*)
+            _mo_e="${_mo_e#?}"
+            _mo_n="${_mo_e%%:*}"
+            if [ -z "$_mo_why" ] && slab_has_volume "$_mo_vols" "$_mo_n"; then
+                _mo_keep="$_mo_keep${_mo_keep:+,}$_mo_e"
+            else
+                MOUNTS_SKIPPED="$MOUNTS_SKIPPED${MOUNTS_SKIPPED:+,}$_mo_e"
+                if [ -n "$_mo_why" ]; then
+                    echo "  optional, left out: $_mo_n (${_mo_e#*:}): $_mo_why"
+                else
+                    echo "  optional, not in this release: $_mo_n (${_mo_e#*:})"
+                fi
+            fi
+            ;;
+        *) _mo_keep="$_mo_keep${_mo_keep:+,}$_mo_e" ;;
+        esac
+        IFS=,
+    done
+    IFS=$OIFS_MO
+    MOUNTS="$_mo_keep"
+    return 0
+}
+
 # What release a disk holds, for a message (#294): its root volume's
 # os-release, read with nothing attached. "unknown" when it does not say.
 disk_release() { # slab
@@ -2334,6 +2390,8 @@ if [ "$BOOT_MODE" = "local" ]; then
                         mounts_from "$SLAB"
                         MISSING=""
                         for entry in $(printf '%s' "$MOUNTS" | tr ',' ' '); do
+                            # Optional (#288): absent is not missing.
+                            case "$entry" in \?*) continue ;; esac
                             name="${entry%%:*}"
                             [ -n "$name" ] || continue
                             printf '%s\n' "$VOLS" \
@@ -2535,6 +2593,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     # The release this boot runs says what it mounts (#262): read again, since
     # the slab may have changed since the probe (a claimed image, an install).
     mounts_from "$SLAB"
+    mounts_optional "$SLAB"
     if [ -n "$MOUNTS" ]; then
         echo "Mount list: $(printf '%s' "$MOUNTS" | tr ',' '\n' | grep -c .) volume(s), from $MOUNTS_FROM"
     else

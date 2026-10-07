@@ -155,8 +155,15 @@ check "and the slab is not handed to boot-local as if it were fine" "$old" "${r%
 
 r=$(probe "$old" "pod-logs:/var/log/pods")
 check "a disk with everything boots" "$old|" "$r"
+
 contains "and the skipped release check is said" "RELEASE CHECK SKIPPED: the boothost the network names" \
     "$(cat "$WORK/probe.out")"
+
+# #288: an optional entry the disk lacks is not a missing volume.
+r=$(probe "$old" "?kubelet-data:/var/lib/kubelet,?cilium:/p/cilium,pod-logs:/var/log/pods")
+check "optional entries the disk lacks do not stop the boot" "$old|" "$r"
+r=$(probe "$old" "?cilium:/p/cilium,kubelet-data:/var/lib/kubelet")
+contains "a required one beside them still does" "missing 1 mounted volume(s)" "${r#*|}"
 
 notslab="$WORK/sdb"; : > "$notslab"
 answer_for sdb "$notslab: not a slab"
