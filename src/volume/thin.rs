@@ -2884,6 +2884,14 @@ impl BlockDevice for ThinVolumeHandle {
                 .unwrap_or_default()
         };
 
+        // A redundant volume treats a leg whose slab will not flush as it
+        // treats one that will not take a write: lost, for this volume (#308).
+        // A drive can die between writes, and a flush may be the first I/O to
+        // reach it — on a shelf of 160 drives the writes before it usually
+        // land elsewhere. The flush then answers for what is left, and fails
+        // only when something is no longer readable from it.
+        let redundant = !self.redundancy().is_none();
+        let mut lost: Option<DriveError> = None;
         for slab_id in slab_ids {
             if self.is_failed(slab_id) {
                 continue;
@@ -2891,7 +2899,25 @@ impl BlockDevice for ThinVolumeHandle {
             // Data first, then the entries of slots allocated since the last
             // flush, then flushed again (#171) — with no registry lock held
             // across a flush (#269).
-            crate::drive::slab::sync_registered(&self.registry, slab_id).await?;
+            if let Err(e) = crate::drive::slab::sync_registered(&self.registry, slab_id).await {
+                if !redundant || !e.is_media_failure() {
+                    return Err(e);
+                }
+                tracing::warn!(volume = %self.id, slab = %slab_id, "flush failed on a leg: {e}");
+                self.mark_failed(slab_id, &e);
+                lost = Some(e);
+            }
+        }
+        if let Some(e) = lost {
+            let h = self.health_resident().await;
+            *self.last_health.lock().unwrap_or_else(|p| p.into_inner()) = Some(h.clone());
+            if h.unreadable > 0 {
+                return Err(e);
+            }
+            tracing::warn!(
+                volume = %self.id, failed_slabs = ?h.failed_slabs,
+                "flushed on the surviving legs; the volume is {}", h.state
+            );
         }
         // Everything written so far is on the media, parity included: no
         // stripe is mid-write from the consumer's point of view.
@@ -3654,6 +3680,72 @@ mod redundancy_tests {
         assert_eq!(m3.health().await.margin, 1);
         assert_eq!(p.health().await.margin, 0, "one more loss and a stripe is gone");
         cleanup(&paths);
+    }
+
+    /// Slabs on emulated drives that can be failed on command (#308).
+    async fn emulated_slabs(n: usize, slot_size: u64) -> (Shared<GlobalExtentMap>, Shared<SlabRegistry>, Vec<SlabId>, Vec<String>) {
+        let mut registry = SlabRegistry::new();
+        let (mut ids, mut names) = (Vec::new(), Vec::new());
+        for _ in 0..n {
+            let name = format!("t308-{}", uuid::Uuid::new_v4().simple());
+            let spec = crate::drive::emulated::EmulatedSpec::parse(&format!("emulated://{name}?size=8M"))
+                .unwrap()
+                .unwrap();
+            let dev = crate::drive::emulated::open(&spec).unwrap();
+            let slab = Slab::format(Arc::new(dev), slot_size, StorageTier::Hot).await.unwrap();
+            ids.push(slab.slab_id());
+            registry.add(slab);
+            names.push(name);
+        }
+        (
+            Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            ids,
+            names,
+        )
+    }
+
+    /// #308: a mirror's drive fails between writes, and the flush is the
+    /// first I/O to reach it. The flush degrades that leg and succeeds on the
+    /// other; the data reads back. An unreplicated volume's flush on a failed
+    /// drive, and a mirror with no leg left, still fail.
+    #[tokio::test]
+    async fn a_flush_to_a_failed_leg_degrades_the_mirror_not_the_volume() {
+        let slot = 4096u64;
+        let (gem, reg, ids, names) = emulated_slabs(2, slot).await;
+        let v = volume(&gem, &reg, "mirror:2", slot);
+        for i in 0..4u64 {
+            v.write(i * slot, &pattern(i as u8 + 1, slot as usize)).await.unwrap();
+        }
+        assert_eq!(v.health().await.state, HealthState::Healthy);
+
+        // The drive under one leg dies; nothing has noticed yet.
+        assert!(crate::drive::emulated::set_failed(&names[1], true));
+        assert_eq!(v.health().await.state, HealthState::Healthy, "not noticed before any I/O");
+        v.flush().await.expect("the flush completes on the surviving leg");
+        let h = v.health().await;
+        assert_eq!(h.state, HealthState::Degraded, "{h:?}");
+        assert_eq!(h.failed_slabs, vec![ids[1]]);
+        for i in 0..4u64 {
+            let mut back = vec![0u8; slot as usize];
+            v.read(i * slot, &mut back).await.unwrap();
+            assert_eq!(back, pattern(i as u8 + 1, slot as usize));
+        }
+        // Writes and flushes go on, on the one leg.
+        v.write(0, &pattern(9, slot as usize)).await.unwrap();
+        v.flush().await.unwrap();
+
+        // The other drive too: nothing is left to flush to.
+        assert!(crate::drive::emulated::set_failed(&names[0], true));
+        v.write(slot * 8, &pattern(7, slot as usize)).await.ok();
+        assert!(v.flush().await.is_err(), "no leg left: the flush fails");
+
+        // An unreplicated volume on a failed drive fails its flush.
+        let (g2, r2, _, n2) = emulated_slabs(1, slot).await;
+        let plain = volume(&g2, &r2, "none", slot);
+        plain.write(0, &pattern(3, slot as usize)).await.unwrap();
+        crate::drive::emulated::set_failed(&n2[0], true);
+        assert!(plain.flush().await.is_err(), "no redundancy: the error is the volume's");
     }
 
     #[tokio::test]

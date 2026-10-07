@@ -172,7 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Units' first I/O waits on the engine handover (2026-10-07, #303, P1) — IN PROGRESS
+### A flush to a failed mirror leg degrades it (2026-10-07, #308, P1) — IN PROGRESS
+
+stormcos#92's shelf (160 emulated drives): after a drive under a mirror leg
+was failed, the next flush returned EIO for the whole volume and health said
+healthy. Found: `flush` returned the first slab's sync error for every
+volume; the write path marks a failing leg's slab failed and goes on, but a
+flush that is the first I/O to reach a dead drive did not (on 160 drives the
+writes before it usually land elsewhere; on 8 they hit it first).
+- [x] flush: a media error from a slab's sync on a redundant volume marks
+      that slab failed for the volume and goes on; error only when something
+      is then unreadable; an unreplicated volume's error stays the volume's
+- [ ] test `thin::tests::a_flush_to_a_failed_leg_degrades_the_mirror_not_the_
+      volume` (emulated drives); nextest; CHANGELOG, docs/redundancy.md
+
+### Units' first I/O waits on the engine handover (2026-10-07, #303, P1) — PART DONE, WAITING ON THE OWNER
 
 stormcos#300: stormcert-init's first write waits for `Adopted 65 device(s)`
 (5.4 s Dell, 5.7 s pve); on a reboot from the Dell's HDD the incumbent let go
@@ -186,8 +200,12 @@ allocations), so it is not done here without the owner. Done here:
       and `[boot-local stop +T s]` in the incumbent's stop
 - [x] ask 3: `/run/stormblock/handover-state.json` `adopting` → `serving`
       (with `took_ms`) for stormpump to hold units on (stormpump issue)
-- [ ] verified (ci-adopt-retry-verify.sh `timing`, nextest); README,
-      CHANGELOG; the owner asked on #303 whether rule 8 may be relaxed
+- [x] verified on a build VM at 1cb6aa7: ci-adopt-retry-verify.sh ALL PASS
+      (`timing` step: the lines and `serving`), full nextest 985/985;
+      README, CHANGELOG; stormpump#109 (hold units on the state)
+- Asked on #303 (needs-owner): A keep rule 8 (pre-attach only), B read
+  ahead + reconcile, C decide after the Dell's timing lines (recommended).
+  The issue stays open. Golden not staged yet: stormcentral#362
 
 ### The initramfs mounts the container volumes in parallel (2026-10-07, #302, P1) — DONE
 

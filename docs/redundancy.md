@@ -111,10 +111,15 @@ already replicated, and a write copies the extent to a fresh set of legs. For
 a parity volume the stripe's parity group is shared too and is copied — with a
 full recompute — the first time a write in that stripe diverges.
 
-**Failed set.** A leg whose write (or read) fails puts its slab into the
+**Failed set.** A leg whose write, read or flush fails puts its slab into the
 volume's failed set, persisted with the volume: skipped for every read and
 write from then on, so a stale leg is never served. The volume reports
-`degraded`. New allocations avoid it.
+`degraded`. New allocations avoid it. A flush is often the first I/O to
+reach a drive that died between writes (on a shelf of 160 drives, the
+writes before it usually land elsewhere), so a flush that fails on one slab
+of a redundant volume completes on the others. It fails only when something
+is no longer readable from what is left (#308). On an unreplicated volume a
+failed flush is the volume's error.
 
 ## Health and resync
 
