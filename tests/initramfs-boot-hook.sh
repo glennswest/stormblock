@@ -528,14 +528,14 @@ check "a lone data slab is an identity and is left" "" \
 check "'blank' leaves a drive that carries any slab" "" \
     "$(survey blank "$SYS_ONLY")"
 check "'off' takes nothing" "" "$(survey off "$SYS_ONLY")"
-check "'force' takes a lone data slab" "/dev/sda force" "$(survey force "$DATA_ONLY")"
+check "'force' over a lone data slab: taken, never forced (#311; boot-local refuses it)" "/dev/sda" "$(survey force "$DATA_ONLY")"
 
-# An install the appliance asked for (#148) is `force`, unless this machine's
-# cmdline says off.
+# An install the appliance asked for (#148) is `force` only over a drive with
+# no data slab (#311), and never when this machine's cmdline says off.
 TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
-check "an install ticket takes a lone data slab, with force" "/dev/sda force" \
+check "an install ticket over a lone data slab: never forced (#311)" "/dev/sda" \
     "$(survey any "$DATA_ONLY")"
-check "an install ticket forces over the default policy too" "/dev/sda force" \
+check "an install ticket under the default policy: never forced over data (#311)" "/dev/sda" \
     "$(survey "" "$DATA_ONLY")"
 check "'off' still refuses an install" "" "$(survey off "$DATA_ONLY")"
 TICKET=""
@@ -546,13 +546,14 @@ check "no ticket, no force" "/dev/sda" "$(survey any "$SYS_ONLY")"
 # data half belongs to the release being replaced): it is forced, fresh.
 CLAIM_URI="nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1"
 NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
-# #261 (owner, 2026-10-02): install = wipe, the same release = recovery. The
-# release on the drive decides: another release is wiped whole (forced); the
-# same release, or the same release cut short (#258), is kept; when it cannot
-# be told, the drive is left alone (neither wiped nor merged).
-check "no intent, the unbootable disk holds another release: wiped (#261)" "/dev/sda force" \
+# #311 (owner, 2026-10-06, superseding #261's install = wipe): the release on
+# the drive decides. Another release is an install: the system half laid
+# again, the data half kept (never forced); the same release, or the same
+# release cut short (#258), is kept; when it cannot be told, the drive is left
+# alone.
+check "no intent, the disk holds another release: system half laid again, data kept (#311)" "/dev/sda" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
-check "no intent, another release on a lone data slab: wiped (#261)" "/dev/sda force" \
+check "no intent, another release on a lone data slab: not wiped (#311)" "/dev/sda" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey "" "$DATA_ONLY")"
 check "no intent, the same release cut short: kept, not forced (#258)" "/dev/sda" \
     "$(STUB_HOLDS=3 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
@@ -566,11 +567,11 @@ check "cannot tell the release: even 'force' on the cmdline merges nothing" "" \
     "$(STUB_HOLDS=2 CLAIMED_T="$CLAIM_URI" survey force "$DATA_ONLY" "$SYS_HALF")"
 check "a guessed name, another release: still left (#249)" "" \
     "$(STUB_HOLDS=1 FROM=smbios CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
-check "no intent, the probe ruled an install over the node's layout: forced (#236)" "/dev/sda force" \
+check "no intent, the probe ruled an install over the node's layout: data kept (#311)" "/dev/sda" \
     "$(CLAIMED_T="$CLAIM_URI" OVER=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
 check "no intent, a drive with no data slab: forced, nothing to keep" "/dev/sda force" \
     "$(CLAIMED_T="$CLAIM_URI" survey any "$SYS_ONLY")"
-check "no intent, an install ticket still forces a data slab" "/dev/sda force" \
+check "no intent, an install ticket: the node's layout taken, data kept (#311)" "/dev/sda" \
     "$(TICKET="$WORK/install.json" CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 check "no intent stated, but 'off': nothing is taken" "" \
     "$(CLAIMED_T="$CLAIM_URI" survey off "$DATA_ONLY" "$SYS_HALF")"
@@ -589,19 +590,18 @@ check "a guessed name: a blank drive is still taken" "/dev/sda" \
     "$(FROM=smbios CLAIMED_T="$CLAIM_URI" survey any "/dev/sda: not a slab (bad slab magic)")"
 check "a guessed name: 'force' on the cmdline is not a licence" "" \
     "$(FROM=smbios CLAIMED_T="$CLAIM_URI" survey force "$DATA_ONLY" "$SYS_HALF")"
-check "a guessed name, rd.stormblock.trust-smbios=1: forced as before" "/dev/sda force" \
+check "a guessed name, rd.stormblock.trust-smbios=1: installed, data kept (#311)" "/dev/sda" \
     "$(FROM=smbios TRUST=1 CLAIMED_T="$CLAIM_URI" OVER=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
-check "a name given on the cmdline is not a guess: forced" "/dev/sda force" \
+check "a name given on the cmdline is not a guess: installed, data kept (#311)" "/dev/sda" \
     "$(FROM=cmdline CLAIMED_T="$CLAIM_URI" OVER=/dev/sda survey any "$DATA_ONLY" "$SYS_HALF")"
 TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
 check "a guessed name's install ticket forces nothing" "" \
     "$(FROM=smbios survey any "$DATA_ONLY")"
 TICKET=""
 NOINTENT=""
-# An intent other than `install` changes nothing about #261: another release
-# is still an install, and an install wipes (no system-half update over the
-# old data half).
-check "an intent was stated, another release on the disk: wiped (#261)" "/dev/sda force" \
+# An intent other than `install` changes nothing: another release is still an
+# install, and an install keeps the data half (#311).
+check "an intent was stated, another release on the disk: data kept (#311)" "/dev/sda" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 check "an intent was stated, the same release: kept, not forced" "/dev/sda" \
     "$(STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey any "$DATA_ONLY" "$SYS_HALF")"
@@ -674,7 +674,7 @@ check "the named drive is spent: no other drive is taken instead" "" \
     "$(NAMED=/dev/sda survey_m any sda\|foreign sdb\|blank sdc\|shelf)"
 grep -q "not the drive rd.stormblock.slab= names" "$WORK/msurvey.log" \
     && check "and the console says why" yes yes || check "and the console says why" yes no
-check "an install over the node's layout lands on the named drive, with force" "/dev/sda force" \
+check "an install over the node's layout lands on the named drive, data kept (#311)" "/dev/sda" \
     "$(NAMED=/dev/sda STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|datashelf)"
 check "'force' clears the named drive whatever it carries (#236)" "/dev/sda force" \
     "$(NAMED=/dev/sda survey_m force sda\|foreign sdb\|shelf)"

@@ -4633,7 +4633,9 @@ pub(crate) async fn take_local_disk_for(
         );
         // Everything that can refuse, before anything is written: the data
         // half's records must read and every leg they name must be in it.
-        let plan = crate::image::install::plan(&dest_dev)
+        let release: std::collections::HashSet<String> =
+            mgr.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
+        let plan = crate::image::install::plan(&dest_dev, &release)
             .await
             .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
         let policy = match root {
@@ -7516,6 +7518,161 @@ file = "{state}"
         succ.persist().await;
         drop(succ);
         (disk, image_n, image_n1, n_svc, n1_svc, n1_logs)
+    }
+
+    /// #311 (owner, 2026-10-06: "an install never wipes data; only the system
+    /// half of the system drive"): release N installed and running, the node
+    /// writing its data (`state`, which N+1 leaves to keep; `logs`, which N+1
+    /// marks replace) and holding a volume no release names (a PVC); a second
+    /// drive with known bytes beside it. Release N+1 installed over the disk
+    /// from a claim of it, as a boot does: every byte of the node's data is
+    /// there after the install, after the flow-over and from the disk alone,
+    /// under the same ids; N+1 is held; the second drive is untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_install_over_a_node_keeps_every_byte_of_its_data_half() {
+        use crate::drive::slab::SlabRole;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, _image_n, image_n1, _n_svc, n1_svc, n1_logs) = release_fixture(mkfs, &dir).await;
+
+        // The node runs from its disk: its data, and a PVC.
+        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        for (vol, mark) in [("state", 0x51u8), ("logs", 0x52)] {
+            let v = node.get_volume(&node.find_volume(vol).await.unwrap()).unwrap();
+            v.write(4096, &[mark; 8192]).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        let pvc = node
+            .create_volume_with("pvc-default-db", 16 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::Data))
+            .await
+            .unwrap();
+        let pvc_bytes: Vec<u8> = (0..16 * MIB as usize).map(|i| (i % 241) as u8 ^ 0x5A).collect();
+        {
+            let v = node.get_volume(&pvc).unwrap();
+            v.write(0, &pvc_bytes).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        node.persist().await;
+        let state_id = node.find_volume("state").await.unwrap();
+        let logs_id = node.find_volume("logs").await.unwrap();
+        let state_before = volume_bytes(&node, "state").await.unwrap();
+        let logs_before = volume_bytes(&node, "logs").await.unwrap();
+        drop(node);
+
+        // A second drive, which no install may touch.
+        let extra = dir.path().join("extra.raw");
+        let extra_bytes: Vec<u8> = (0..8 * MIB as usize).map(|i| (i % 253) as u8).collect();
+        std::fs::write(&extra, &extra_bytes).unwrap();
+
+        // Install N+1 over the disk, as `boot-local` does: from a claim of
+        // it, no force.
+        let claim = dir.path().join("claim-11.91.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await.unwrap();
+        let flow = flow.expect("the system half laid again");
+        let report = report.expect("the data half kept");
+        assert!(flow.data_flow, "the release's own data volumes move in");
+        assert_eq!((report.previous.as_str(), report.version.as_str()), ("11.90", "11.91"));
+        assert_eq!(report.kept, vec!["state".to_string()], "{report:?}");
+        assert!(report.aside.contains(&("logs".into(), "logs@11.90".into())), "{report:?}");
+        assert!(report.migrations.is_empty());
+
+        let check = |m: &VolumeManager, when: &'static str| {
+            let (state_before, logs_before, pvc_bytes, n1_svc, n1_logs) =
+                (state_before.clone(), logs_before.clone(), pvc_bytes.clone(), n1_svc.clone(), n1_logs.clone());
+            async move {
+                assert_eq!(m.find_volume("state").await, Some(state_id), "{when}: the node's state, by its id");
+                assert_eq!(volume_bytes(m, "state").await.unwrap(), state_before, "{when}: state");
+                assert_eq!(m.find_volume("logs@11.90").await, Some(logs_id), "{when}: the node's logs, aside");
+                assert_eq!(volume_bytes(m, "logs@11.90").await.unwrap(), logs_before, "{when}: the node's logs");
+                assert_eq!(volume_bytes(m, "logs").await.unwrap()[..n1_logs.len()], n1_logs[..], "{when}: logs, N+1's");
+                assert_eq!(m.find_volume("pvc-default-db").await, Some(pvc), "{when}: the PVC, by its id");
+                assert_eq!(volume_bytes(m, "pvc-default-db").await.unwrap(), pvc_bytes, "{when}: the PVC");
+                assert!(m.find_volume("kubelet-data").await.is_some(), "{when}: the volume N+1 adds");
+                assert_eq!(volume_bytes(m, "svc").await.unwrap()[..n1_svc.len()], n1_svc[..], "{when}: svc, N+1's");
+                // One volume to a name.
+                let mut names: Vec<String> = m.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
+                let all = names.len();
+                names.sort();
+                names.dedup();
+                assert_eq!(names.len(), all, "{when}: a name answered by two volumes: {names:?}");
+            }
+        };
+        check(&mgr, "after the install").await;
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+
+        // The successor: the flow-over, both halves.
+        let (succ, _) = super::open_slabs_resuming(&[claim.clone(), flow.disk.clone()], None, true).await.unwrap();
+        let (sys_dest, data_dest) = (
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
+        );
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        check(&succ, "after the handover").await;
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+        check(&succ, "after the flow-over").await;
+        drop(succ);
+
+        // The disk alone, as the next boot opens it.
+        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        check(&alone, "from the disk alone").await;
+        drop(alone);
+        let l = super::open_storage(&disk).await.unwrap();
+        let i = super::open_storage(&image_n1).await.unwrap();
+        let h = crate::image::local::release_held(&l, &i).await;
+        assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "N+1 held: {h:?}");
+        assert_eq!(std::fs::read(&extra).unwrap(), extra_bytes, "the second drive");
+    }
+
+    /// #311: an install never falls back to a wipe. A volume the node made in
+    /// the system half (no role asked, on a node with both halves) is not one
+    /// the release brings back: the install stops before writing anything,
+    /// and every byte of the disk is as it was. `--local-disk-force` does not
+    /// change that.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_install_that_would_lose_a_volume_stops_and_writes_nothing() {
+        use crate::drive::slab::SlabRole;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
+        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let vm_disk = node
+            .create_volume_with("vm-disk-1", 8 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::System))
+            .await
+            .unwrap();
+        node.get_volume(&vm_disk).unwrap().write(0, &[0xD1; 65536]).await.unwrap();
+        node.get_volume(&vm_disk).unwrap().flush().await.unwrap();
+        node.persist().await;
+        drop(node);
+        let before = std::fs::read(&disk).unwrap();
+
+        for force in [false, true] {
+            let claim = dir.path().join(format!("claim-{force}.raw")).display().to_string();
+            std::fs::copy(&image_n1, &claim).unwrap();
+            let (mut mgr, _) = super::open_slabs_resuming(&[claim], None, true).await.unwrap();
+            let err = super::take_local_disk_for(&mut mgr, &disk, "hot", force, Some("stormpump"))
+                .await
+                .expect_err("an install that would lose vm-disk-1");
+            let msg = err.to_string();
+            assert!(msg.contains("vm-disk-1") && msg.contains("untouched"), "force {force}: {msg}");
+            assert!(std::fs::read(&disk).unwrap() == before, "force {force}: the disk was written");
+        }
     }
 
     /// #122: release N installed, the node running from its disk and writing

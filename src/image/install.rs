@@ -99,9 +99,10 @@ impl InstallMigration {
     }
 }
 
-/// The data and bulk partitions of a node layout, as slabs.
-async fn data_half(device: &Arc<dyn BlockDevice>) -> anyhow::Result<(Slab, Option<Slab>)> {
-    let (data_i, _) = crate::image::local::node_layout(device)
+/// The data and bulk partitions of a node layout, as slabs, and the system
+/// slab (when it opens).
+async fn halves(device: &Arc<dyn BlockDevice>) -> anyhow::Result<(Slab, Option<Slab>, Option<Slab>)> {
+    let (data_i, system_i) = crate::image::local::node_layout(device)
         .await?
         .ok_or_else(|| anyhow::anyhow!("the drive does not carry a node layout"))?;
     let gpt = Gpt::read(device).await.map_err(|e| anyhow::anyhow!("reading the table: {e}"))?;
@@ -117,14 +118,23 @@ async fn data_half(device: &Arc<dyn BlockDevice>) -> anyhow::Result<(Slab, Optio
         Some(i) => Some(Slab::open(part(i)?).await.map_err(|e| anyhow::anyhow!("the bulk slab will not open: {e}"))?),
         None => None,
     };
-    Ok((data, bulk))
+    let system = Slab::open(part(system_i)?).await.ok();
+    Ok((data, bulk, system))
 }
 
 /// Read the node's data half and check this install may keep it. Writes
 /// nothing; an error here means the install must not go on (the data is
 /// untouched, and the caller boots from the appliance).
-pub async fn plan(device: &Arc<dyn BlockDevice>) -> anyhow::Result<Plan> {
-    let (data, bulk) = data_half(device).await?;
+///
+/// `release` is every volume name the release being installed carries. The
+/// system half is laid again, so a volume in it that the release does not
+/// bring back is lost: one the node made there itself (a volume created with
+/// no role on a node with both halves lands in the system half) is
+/// application data. An unsealed volume in the system half that the release
+/// does not name stops the install, named; a release's own previous
+/// generation (`<name>@<version>`, #122) and sealed goldens do not.
+pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> anyhow::Result<Plan> {
+    let (data, bulk, system) = halves(device).await?;
     if !data.is_data() {
         anyhow::bail!("the partition typed as the data slab says it is a system slab");
     }
@@ -162,6 +172,30 @@ pub async fn plan(device: &Arc<dyn BlockDevice>) -> anyhow::Result<Plan> {
             "data volume(s) with extents outside the data half, which laying the system half again would lose: {}",
             outside.join(", ")
         );
+    }
+    // The system half: what laying it again would lose that the release does
+    // not bring back.
+    if let Some(sys) = system.as_ref().filter(|s| s.has_metadata_region()) {
+        let doc = match crate::volume::metav2::read_slab(sys).await {
+            Ok(d) => d,
+            Err(e) => anyhow::bail!("the system half's records do not read ({e}): what it holds cannot be told"),
+        };
+        let mut lost: Vec<String> = Vec::new();
+        for v in doc.map(|d| d.volumes).unwrap_or_default() {
+            if v.sealed || seen.contains(&v.id) || release.contains(&v.name) || v.name.contains('@') {
+                continue;
+            }
+            lost.push(v.name);
+        }
+        if !lost.is_empty() {
+            lost.sort();
+            anyhow::bail!(
+                "the system half holds {} volume(s) this release does not bring back, which laying it again \
+                 would destroy: {} — move them to the data half (or delete them) and install again",
+                lost.len(),
+                lost.join(", ")
+            );
+        }
     }
     Ok(Plan { data_slab: data.slab_id(), bulk_slab: bulk.as_ref().map(|b| b.slab_id()), volumes })
 }
