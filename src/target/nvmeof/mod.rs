@@ -8,6 +8,7 @@ pub mod admin;
 pub mod io;
 pub mod discovery;
 pub mod auth;
+pub mod ana;
 #[cfg(target_os = "linux")]
 pub mod zerocopy;
 
@@ -41,10 +42,27 @@ pub struct NvmeofConfig {
     /// Address reported in the discovery log page. `listen_addr` is usually a
     /// wildcard, which a remote initiator cannot connect back to (#26).
     pub advertised_addr: Option<SocketAddr>,
+    /// The controller IDs this target hands out, inclusive. A host that
+    /// reaches one subsystem through two nodes (multipath, #83) refuses a
+    /// second controller with an ID it already has, so nodes serving the
+    /// same subsystem need ranges that do not overlap.
+    pub cntlid_min: u16,
+    pub cntlid_max: u16,
+}
+
+/// The controller-ID range a target gets unless its config says otherwise:
+/// `[management] nvme_cntlid_range` for the whole node (#83). Packed
+/// `min << 16 | max`.
+static DEFAULT_CNTLID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new((1 << 16) | 0xFFEF);
+
+/// Set the controller IDs every target made after this hands out.
+pub fn set_default_cntlid_range(min: u16, max: u16) {
+    DEFAULT_CNTLID.store(((min as u32) << 16) | max as u32, Ordering::SeqCst);
 }
 
 impl Default for NvmeofConfig {
     fn default() -> Self {
+        let range = DEFAULT_CNTLID.load(Ordering::SeqCst);
         NvmeofConfig {
             listen_addr: "0.0.0.0:4420".parse().unwrap(),
             nqn: "nqn.2024.io.stormblock:default".into(),
@@ -52,6 +70,8 @@ impl Default for NvmeofConfig {
             queue_depth: 128,
             maxh2cdata: 131072,
             advertised_addr: None,
+            cntlid_min: (range >> 16) as u16,
+            cntlid_max: (range & 0xFFFF) as u16,
         }
     }
 }
@@ -71,8 +91,18 @@ async fn write_ns_changed_aen<W: AsyncWriteExt + Unpin>(
     cid: u16,
     hdgst: bool,
 ) -> std::io::Result<()> {
+    write_aen(writer, cid, AEN_NS_ATTR_CHANGED, hdgst).await
+}
+
+/// Complete a held Asynchronous Event Request with `dw0`.
+async fn write_aen<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    cid: u16,
+    dw0: u32,
+    hdgst: bool,
+) -> std::io::Result<()> {
     let mut cqe = NvmeCqe::success(cid, 0, 0);
-    cqe.set_dw0(AEN_NS_ATTR_CHANGED);
+    cqe.set_dw0(dw0);
     pdu::write_capsule_resp(writer, &cqe, hdgst).await
 }
 
@@ -114,6 +144,63 @@ struct Namespace {
     /// Served write-protected: identify says so (NSATTR) and writes are
     /// refused at the protocol, whatever the device would do with them.
     read_only: bool,
+    ctl: Arc<NsCtl>,
+}
+
+impl Namespace {
+    fn new(device: Arc<dyn BlockDevice>, read_only: bool) -> Self {
+        Namespace { device, read_only, ctl: Arc::new(NsCtl::default()) }
+    }
+}
+
+/// What makes a namespace's removal final (#83).
+///
+/// A command resolves its namespace once, then may wait for R2T data
+/// before it touches the device. Taking the namespace out of the map stops
+/// the next command; this stops the ones already holding it. Every device
+/// operation is bracketed by `inflight` and checks `revoked` inside the
+/// bracket; a removal sets `revoked` and then waits for `inflight` to reach
+/// zero. Both sides use SeqCst, so one of them always sees the other: either
+/// the command sees `revoked` and refuses, or the removal sees it in flight
+/// and waits for it. Once a removal returns, nothing from that namespace
+/// can still land — which is what a fence answering means.
+#[derive(Default)]
+struct NsCtl {
+    revoked: std::sync::atomic::AtomicBool,
+    inflight: std::sync::atomic::AtomicUsize,
+}
+
+/// How long a removal waits for commands in flight on the namespace.
+const DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl NsCtl {
+    /// Enter a device operation; false when the namespace has been removed.
+    fn enter(&self) -> bool {
+        self.inflight.fetch_add(1, Ordering::SeqCst);
+        if self.revoked.load(Ordering::SeqCst) {
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    fn leave(&self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Refuse every later operation and wait for the ones in flight. True
+    /// when they all finished within [`DRAIN_WAIT`].
+    async fn revoke(&self) -> bool {
+        self.revoked.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + DRAIN_WAIT;
+        while self.inflight.load(Ordering::SeqCst) > 0 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        true
+    }
 }
 
 /// An NVM subsystem: an NQN, its namespaces and who may reach them.
@@ -183,7 +270,11 @@ impl Subsystem {
             } else if ns.values().any(|n| n.device.id().uuid == uuid) {
                 return false;
             }
-            ns.insert(nsid, Namespace { device, read_only });
+            if ns.get(&nsid).is_none() {
+                ns.insert(nsid, Namespace::new(device, read_only));
+            } else if let Some(cur) = ns.get_mut(&nsid) {
+                cur.read_only = read_only;
+            }
         }
         self.notify_ns_changed(nsid);
         true
@@ -205,7 +296,7 @@ impl Subsystem {
                 return n;
             }
             let nsid = (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1);
-            ns.insert(nsid, Namespace { device, read_only });
+            ns.insert(nsid, Namespace::new(device, read_only));
             nsid
         };
         self.notify_ns_changed(nsid);
@@ -213,12 +304,38 @@ impl Subsystem {
     }
 
     /// Remove a namespace. Returns true if it existed.
+    ///
+    /// Returns once no command can still reach the device through it:
+    /// commands that resolved it before it went (a write waiting for its R2T
+    /// data) are refused, and the ones already at the device are waited for
+    /// (#83).
     pub async fn remove_namespace(&self, nsid: u32) -> bool {
-        let existed = self.namespaces.write().await.remove(&nsid).is_some();
-        if existed {
-            self.notify_ns_changed(nsid);
+        let gone = self.namespaces.write().await.remove(&nsid);
+        let Some(ns) = gone else { return false };
+        self.notify_ns_changed(nsid);
+        if !ns.ctl.revoke().await {
+            tracing::warn!(
+                "{}: namespace {nsid} removed, but commands on it were still at the device after {}s",
+                self.nqn,
+                DRAIN_WAIT.as_secs()
+            );
         }
-        existed
+        true
+    }
+
+    /// Whether this subsystem serves the volume whose device UUID this is.
+    pub async fn serves(&self, device_uuid: uuid::Uuid) -> bool {
+        self.nsid_of(device_uuid).await.is_some()
+    }
+
+    /// Every namespace with its ANA state on this node (#83).
+    async fn ana_states(&self) -> Vec<(u32, ana::AnaState)> {
+        self.namespaces
+            .read()
+            .await
+            .iter()
+            .map(|(n, v)| (*n, ana::state_of(v.device.id().uuid)))
+            .collect()
     }
 
     /// The NSID `device_uuid` is served at here, if it is.
@@ -381,11 +498,12 @@ impl NvmeofTarget {
     /// engine whose caller sets [`Subsystem::set_access`] before serving.
     pub fn new(config: NvmeofConfig) -> Self {
         let default = Arc::new(Subsystem::new(config.nqn.clone(), HostAccess::Any));
+        let first_cntlid = config.cntlid_min.max(1);
         NvmeofTarget {
             config,
             default,
             others: std::sync::RwLock::new(HashMap::new()),
-            next_cntlid: AtomicU16::new(1),
+            next_cntlid: AtomicU16::new(first_cntlid),
             live: std::sync::atomic::AtomicUsize::new(0),
             accepting: std::sync::atomic::AtomicBool::new(true),
             stop_accept: tokio::sync::Notify::new(),
@@ -434,6 +552,15 @@ impl NvmeofTarget {
         v
     }
 
+    /// The next controller ID, within `cntlid_min..=cntlid_max` (#83).
+    fn alloc_cntlid(&self) -> u16 {
+        let lo = self.config.cntlid_min.max(1);
+        let hi = self.config.cntlid_max.clamp(lo, 0xFFEF);
+        let span = (hi - lo) as u32 + 1;
+        let n = self.next_cntlid.fetch_add(1, Ordering::Relaxed);
+        lo + ((n.wrapping_sub(lo) as u32) % span) as u16
+    }
+
     /// The address the target listens on.
     pub fn listen_addr(&self) -> SocketAddr {
         self.config.listen_addr
@@ -447,7 +574,7 @@ impl NvmeofTarget {
     /// Add a namespace mapping at startup (before the target is shared).
     pub fn add_namespace(&mut self, nsid: u32, device: Arc<dyn BlockDevice>) {
         if let Some(d) = Arc::get_mut(&mut self.default) {
-            d.namespaces.get_mut().insert(nsid, Namespace { device, read_only: false });
+            d.namespaces.get_mut().insert(nsid, Namespace::new(device, false));
         }
     }
 
@@ -683,6 +810,10 @@ impl NvmeofTarget {
         // A discovery connection has no namespaces to hear about; it listens
         // on the default subsystem's stream, where nothing it acts on arrives.
         let mut events = session.sub.as_ref().unwrap_or(&self.default).ns_changed.subscribe();
+        // ANA changes are per volume and process-wide (#83): each is checked
+        // against what this connection's subsystem serves.
+        let mut ana_events = ana::subscribe();
+        let mut ana_pending = false;
         // AERs the host has posted that we have not answered yet.
         let mut held_aers: VecDeque<u16> = VecDeque::new();
         // Namespaces changed since the host last read the log page.
@@ -720,7 +851,20 @@ impl NvmeofTarget {
                                 if let Some(cid) = held_aers.pop_front() {
                                     write_ns_changed_aen(writer, cid, hdgst).await?;
                                 }
+                            } else if ana_pending {
+                                if let Some(cid) = held_aers.pop_front() {
+                                    ana_pending = false;
+                                    write_aen(writer, cid, ana::AEN_ANA_CHANGE, hdgst).await?;
+                                }
                             }
+                        }
+                        admin::ADMIN_GET_LOG_PAGE if (sqe.cdw10() & 0xFF) as u8 == ana::LID_ANA => {
+                            // Reading the page is the host catching up: a
+                            // change it has not been told of yet is in it.
+                            if sqe.cdw10() & (1 << 15) == 0 {
+                                ana_pending = false;
+                            }
+                            self.handle_admin_cmd(&sqe, writer, cntlid, session, hdgst, ddgst).await?;
                         }
                         admin::ADMIN_GET_LOG_PAGE
                             if (sqe.cdw10() & 0xFF) as u8 == LID_CHANGED_NS_LIST =>
@@ -737,6 +881,23 @@ impl NvmeofTarget {
                         _ => {
                             self.handle_admin_cmd(&sqe, writer, cntlid, session, hdgst, ddgst).await?;
                         }
+                    }
+                }
+                ev = ana_events.recv() => {
+                    let Some(sub) = session.sub.as_ref() else { continue };
+                    let relevant = match ev {
+                        Ok(volume) => sub.serves(volume).await,
+                        Err(RecvError::Lagged(_)) => true,
+                        Err(RecvError::Closed) => false,
+                    };
+                    if !relevant {
+                        continue;
+                    }
+                    if let Some(cid) = held_aers.pop_front() {
+                        ana_pending = false;
+                        write_aen(writer, cid, ana::AEN_ANA_CHANGE, hdgst).await?;
+                    } else {
+                        ana_pending = true;
                     }
                 }
                 ev = events.recv() => {
@@ -852,7 +1013,7 @@ impl NvmeofTarget {
             session.sub = Some(sub);
         }
 
-        let cntlid = self.next_cntlid.fetch_add(1, Ordering::Relaxed);
+        let cntlid = self.alloc_cntlid();
         let mut cqe = NvmeCqe::success(sqe.cid(), 0, 0);
         // CNTLID in DW0 of the connect response, and ATR when this queue has
         // to authenticate before anything else.
@@ -1051,9 +1212,14 @@ impl NvmeofTarget {
                         let serial = format!("SB{cntlid:04X}");
                         // A connection made to the discovery NQN must identify
                         // as a discovery controller under that NQN.
+                        // NN is the largest NSID, not how many there are: MNAN
+                        // (= NN) sizes the host's ANA log buffer (#83).
                         let (subnqn, count) = match session.sub.as_ref() {
                             None => (discovery::DISCOVERY_NQN, 0),
-                            Some(s) => (s.nqn.as_str(), s.namespace_count().await as u32),
+                            Some(s) => (
+                                s.nqn.as_str(),
+                                (s.list_namespaces().await.last().copied().unwrap_or(0)).max(ana::MAX_NAMESPACES),
+                            ),
                         };
                         let mut d = admin::identify_controller(
                             subnqn,
@@ -1140,6 +1306,14 @@ impl NvmeofTarget {
                     let mut out = log[start..].to_vec();
                     out.resize(log_bytes, 0);
                     out
+                } else if lid == ana::LID_ANA && session.sub.is_some() {
+                    // LSP bit 0 (CDW10 bit 8): Return Groups Only.
+                    let rgo = sqe.cdw10() & (1 << 8) != 0;
+                    let states = match session.sub.as_ref() {
+                        Some(s) => s.ana_states().await,
+                        None => Vec::new(),
+                    };
+                    ana::log_page(&states, rgo, lpo as usize, log_bytes)
                 } else {
                     // Return empty log for unknown pages
                     vec![0u8; log_bytes]
@@ -1231,6 +1405,12 @@ impl NvmeofTarget {
             let cqe = NvmeCqe::error(cid, 0, 0, 0, 0x0B);
             return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
         };
+        // Not served on this path (#83): the host retries on another and
+        // re-reads the ANA log page. Path errors carry no DNR.
+        if let Some(sc) = ana::state_of(ns.device.id().uuid).io_refusal() {
+            let cqe = NvmeCqe::error(cid, 0, 0, 3, sc);
+            return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+        }
         // A write-protected namespace refuses anything that changes it,
         // before any R2T asks the host for data it would only throw away.
         if ns.read_only && matches!(sqe.opcode(), io::IO_WRITE | io::IO_DATASET_MGMT | io::IO_WRITE_ZEROES) {
@@ -1281,7 +1461,15 @@ impl NvmeofTarget {
             }
         }
 
+        // The namespace may have been removed while this command waited for
+        // its data — a fence (#83). Refused then, and counted in flight
+        // otherwise, so a removal knows when nothing can still land.
+        if !ns.ctl.enter() {
+            let cqe = NvmeCqe::error_dnr(cid, 0, 0, 0, 0x0B); // Invalid Namespace
+            return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+        }
         let result = io::handle_io_command(sqe, device, data).await;
+        ns.ctl.leave();
         if result.cqe.status() != 0 {
             metrics::counter!("stormblock_nvmeof_io_errors_total", "op" => opcode_name(false, sqe.opcode()))
                 .increment(1);
@@ -1501,5 +1689,36 @@ mod tests {
         let many: Vec<u32> = (1..=2000).collect();
         let page = admin::changed_ns_list(&many, false);
         assert_eq!(u32::from_le_bytes(page[0..4].try_into().unwrap()), admin::NS_LIST_OVERFLOW);
+    }
+    #[test]
+    fn controller_ids_stay_in_their_range() {
+        let t = NvmeofTarget::new(NvmeofConfig { cntlid_min: 100, cntlid_max: 102, ..Default::default() });
+        let ids: Vec<u16> = (0..7).map(|_| t.alloc_cntlid()).collect();
+        assert_eq!(ids, vec![100, 101, 102, 100, 101, 102, 100]);
+        let d = NvmeofTarget::new(NvmeofConfig::default());
+        assert_eq!(d.alloc_cntlid(), 1, "the default range starts where it always did");
+    }
+
+    /// A removal returns only once a command already at the device has
+    /// finished, and a command that resolved the namespace before it went
+    /// (a write waiting for its data) is refused after (#83).
+    #[tokio::test]
+    async fn removing_a_namespace_waits_for_what_is_in_flight() {
+        let target = NvmeofTarget::new(NvmeofConfig::default());
+        let (dev, _p) = test_device("drain").await;
+        let sub = target.default_subsystem();
+        assert!(sub.add_namespace_at(1, dev, false).await);
+        let in_flight = sub.namespace(1).await.unwrap();
+        let waiting = sub.namespace(1).await.unwrap();
+        assert!(in_flight.ctl.enter(), "at the device");
+
+        let sub2 = sub.clone();
+        let removal = tokio::spawn(async move { sub2.remove_namespace(1).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!removal.is_finished(), "the removal waits for the command at the device");
+        assert!(sub.namespace(1).await.is_none(), "and no new command finds it meanwhile");
+        assert!(!waiting.ctl.enter(), "a command that held it from before is refused");
+        in_flight.ctl.leave();
+        assert!(removal.await.unwrap());
     }
 }

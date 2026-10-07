@@ -432,6 +432,13 @@ pub struct ManagementConfig {
     /// request with `"transport": "nvme_tcp"` on the attach (#149), so this
     /// stays on for the node's own containers.
     pub ublk_transport: bool,
+    /// The NVMe controller IDs every target of this node hands out,
+    /// `[min, max]` (#83). A host reaching one subsystem through two nodes —
+    /// a volume's per-volume subsystem served from both during a move —
+    /// refuses a second controller whose ID it already has, so nodes that
+    /// may serve the same volume need ranges that do not overlap. Unset:
+    /// 1..=65519, as before.
+    pub nvme_cntlid_range: Option<[u16; 2]>,
 }
 
 /// serde needs a function for a default of `true`.
@@ -461,6 +468,7 @@ impl Default for ManagementConfig {
             peer_stale_secs: default_peer_stale_secs(),
             advertised_addr: None,
             ublk_transport: true,
+            nvme_cntlid_range: None,
         }
     }
 }
@@ -782,6 +790,15 @@ impl StormBlockConfig {
             anyhow::ensure!(f == 1 || f == 2, "[metadata] format = {f}: 1 or 2");
             crate::drive::slab::set_default_format(f);
             tracing::info!("new slabs are written in metadata format {f}");
+        }
+        #[cfg(feature = "nvmeof")]
+        if let Some([lo, hi]) = config.management.nvme_cntlid_range {
+            anyhow::ensure!(
+                (1..=0xFFEF).contains(&lo) && (lo..=0xFFEF).contains(&hi),
+                "[management] nvme_cntlid_range = [{lo}, {hi}]: 1 <= min <= max <= 65519"
+            );
+            crate::target::nvmeof::set_default_cntlid_range(lo, hi);
+            tracing::info!("NVMe controller IDs {lo}..={hi}");
         }
         Ok(config)
     }

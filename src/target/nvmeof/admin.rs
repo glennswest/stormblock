@@ -92,6 +92,23 @@ pub fn identify_controller(
     // CNTRLTYPE (byte 111): 1 = I/O controller, 2 = discovery controller
     data[111] = if discovery { 2 } else { 1 };
 
+    if !discovery {
+        // Asymmetric Namespace Access (#83). CMIC: the subsystem may have
+        // several ports and controllers (bits 0, 1) and reports ANA (bit 3)
+        // — what makes Linux put a namespace served by two nodes under one
+        // multipath head. OAES bit 11: ANA change notices.
+        data[76] = 0b1011;
+        let oaes = u32::from_le_bytes(data[92..96].try_into().unwrap()) | (1 << 11);
+        data[92..96].copy_from_slice(&oaes.to_le_bytes());
+        data[343] = super::ana::ANATT_SECS;
+        data[344] = super::ana::ANACAP;
+        data[345..349].copy_from_slice(&super::ana::GROUPS.to_le_bytes()); // ANAGRPMAX
+        data[349..353].copy_from_slice(&super::ana::GROUPS.to_le_bytes()); // NANAGRPID
+        // MNAN: Linux sizes its ANA log buffer from it and refuses a
+        // controller whose MNAN is zero or above NN.
+        data[540..544].copy_from_slice(&max_namespaces.to_le_bytes());
+    }
+
     // OACS (Optional Admin Command Support) — none for now
     data[256..258].copy_from_slice(&0u16.to_le_bytes());
 
@@ -177,8 +194,14 @@ pub fn identify_namespace(device: &Arc<dyn BlockDevice>) -> Vec<u8> {
     // DPS (Data Protection) — none
     data[29] = 0;
 
-    // NGUID (16 bytes at offset 104)
+    // NMIC bit 0: the namespace may be reached through several controllers
+    // (Linux refuses a second path to an "unshared" namespace), and its ANA
+    // group: the group of its state on this node (#83).
+    data[30] = 0x01;
     let uuid = device.id().uuid;
+    data[92..96].copy_from_slice(&super::ana::state_of(uuid).group().to_le_bytes());
+
+    // NGUID (16 bytes at offset 104)
     data[104..120].copy_from_slice(uuid.as_bytes());
 
     // LBA Format 0 (offset 128): LBADS = log2(block_size), RP=0 (best perf)
@@ -248,6 +271,20 @@ mod tests {
         assert_ne!(sgls & 0x3, 0, "SGLS mandatory for fabrics");
         assert_eq!(data[111], 1, "CNTRLTYPE = I/O controller");
 
+        // ANA (#83), as Linux's nvme_mpath_init_identify reads it.
+        assert_eq!(data[76] & 0b1010, 0b1010, "CMIC: multi-controller + ANA");
+        let oaes = u32::from_le_bytes(data[92..96].try_into().unwrap());
+        assert_ne!(oaes & (1 << 11), 0, "ANA change notices");
+        assert_ne!(oaes & (1 << 8), 0, "namespace notices kept");
+        assert_eq!(data[344], 0x1F, "ANACAP");
+        assert_eq!(u32::from_le_bytes(data[345..349].try_into().unwrap()), 5, "ANAGRPMAX");
+        assert_eq!(u32::from_le_bytes(data[349..353].try_into().unwrap()), 5, "NANAGRPID");
+        let mnan = u32::from_le_bytes(data[540..544].try_into().unwrap());
+        assert!(mnan > 0 && mnan <= 16, "MNAN nonzero and within NN");
+
+        let disc = identify_controller("nqn.2014-08.org.nvmexpress.discovery", "SN", "M", "1", 0, true);
+        assert_eq!(disc[76], 0, "a discovery controller reports no ANA");
+
         // Serial
         let sn = std::str::from_utf8(&data[4..24]).unwrap().trim();
         assert_eq!(sn, "SN123456");
@@ -286,6 +323,12 @@ mod tests {
 
         let lbads = data[130];
         assert_eq!(lbads, 12); // log2(4096) = 12
+
+        assert_eq!(data[30] & 1, 1, "NMIC: shared");
+        assert_eq!(u32::from_le_bytes(data[92..96].try_into().unwrap()), 1, "ANAGRPID: optimized");
+        crate::target::nvmeof::ana::set(dev.id().uuid, crate::target::nvmeof::ana::AnaState::Inaccessible);
+        let data = identify_namespace(&dev);
+        assert_eq!(u32::from_le_bytes(data[92..96].try_into().unwrap()), 3, "ANAGRPID: inaccessible");
 
         let _ = std::fs::remove_file(&path);
     }
