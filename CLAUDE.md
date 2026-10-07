@@ -172,6 +172,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The initramfs mounts the container volumes in parallel (2026-10-07, #302, P1) — IN PROGRESS
+
+stormcos#300: 63 volumes mounted one at a time, ~130–200 ms each, 8.6–10.5 s
+of every boot (Dell, install and reboot). Bare `mount` probes types; the
+device wait is per entry.
+- [ ] `# --- BEGIN container mounts`: one wait for every device
+      (`STORM_MOUNT_WAIT`, 15 s); then mounts in waves by mount-point depth
+      (a nested mount point never before its parent), at most
+      `STORM_MOUNT_PARALLEL` (16) at once; `-t ext4` first, a probing mount
+      if that fails (XFS volumes); the same `mounted:` / `WARNING:` lines,
+      and one line with the count and the time
+- [ ] `tests/initramfs-container-mounts.sh` (stubbed mount and devices):
+      all mounted, parallel (time), bounded, nested order, XFS fallback, a
+      bad volume warned, a missing device waited for once; under sh and
+      busybox sh; the generated /init parses. README, CHANGELOG
+
 ### adopt-ublk stops in order on SIGTERM (2026-10-07, #144, P1) — DONE
 
 It waited for SIGINT only; stormpump's stop and a successor's stand-down are
