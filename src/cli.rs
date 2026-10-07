@@ -5175,6 +5175,58 @@ pub(crate) async fn quarantine_flow_sources(
 /// seconds as well.
 const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long the node's volume I/O must be still before a successor's
+/// flow-over starts (#278).
+const FLOW_BOOT_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The most a successor's flow-over waits for the node's boot (#278):
+/// `STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 90 by default, 0 = no wait.
+fn flow_boot_grace() -> std::time::Duration {
+    let secs = std::env::var("STORMBLOCK_FLOW_BOOT_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(90);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Wait for the node's boot before moving anything (#278).
+///
+/// A successor starts its flow-over the moment it has adopted the devices,
+/// which is when the node above it boots: stormpump starts every unit,
+/// fastetcd and the apiserver read their state. On the Dell's SMR disk a
+/// reboot during the flow-over took stormpump 15 s instead of 8 and the
+/// apiserver 30 s instead of 15: the boot's reads queued behind the moves,
+/// and the per-move yield (#269) gives back one move's time, not the boot.
+/// So the first move waits until volume I/O (`FOREGROUND_IO`) has been
+/// still for `quiet`, or until `max` has passed — a node that never goes
+/// quiet still gets its flow-over. Answers how long it waited and whether
+/// the node went quiet.
+async fn wait_for_boot_quiet(max: std::time::Duration, quiet: std::time::Duration) -> (std::time::Duration, bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let start = tokio::time::Instant::now();
+    if max.is_zero() {
+        return (std::time::Duration::ZERO, false);
+    }
+    let step = quiet.min(std::time::Duration::from_millis(500)).max(std::time::Duration::from_millis(1));
+    let mut seen = crate::volume::thin::FOREGROUND_IO.load(Relaxed);
+    let mut still_since = start;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now.duration_since(still_since) >= quiet {
+            return (now.duration_since(start), true);
+        }
+        if now.duration_since(start) >= max {
+            return (now.duration_since(start), false);
+        }
+        tokio::time::sleep(step).await;
+        let cur = crate::volume::thin::FOREGROUND_IO.load(Relaxed);
+        if cur != seen {
+            seen = cur;
+            still_since = tokio::time::Instant::now();
+        }
+    }
+}
+
 pub(crate) async fn flow_system_half<P, F>(
     gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
     registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
@@ -5483,6 +5535,23 @@ fn spawn_flow_over(
             flow.disk,
             if data_left > 0 { format!(" (the data half, {data_left} extent(s), after the system half)") } else { String::new() }
         );
+        // The node boots first (#278); what is left is reported meanwhile,
+        // so a settle check (#260) does not read the wait as done.
+        let grace = flow_boot_grace();
+        if !grace.is_zero() {
+            let left = extents_on(&gem_arc, &sources).await + data_left;
+            flow_remaining.store(left as i64, std::sync::atomic::Ordering::Relaxed);
+            let (waited, quiet) = wait_for_boot_quiet(grace, FLOW_BOOT_QUIET).await;
+            println!(
+                "Flow-over: starting after {:.1}s ({})",
+                waited.as_secs_f64(),
+                if quiet {
+                    format!("the node's volume I/O was still for {}s", FLOW_BOOT_QUIET.as_secs())
+                } else {
+                    format!("the boot grace of {}s ran out", grace.as_secs())
+                }
+            );
+        }
         // Detached (#269): the manager is held only to take the records, so
         // the API does not wait behind the flushes of a persist that runs
         // after every extent moved.
@@ -9436,5 +9505,50 @@ mod flow_over_api_tests {
         eprintln!("flow-over: {left} extent(s) still on the appliance after {:.0}s", began.elapsed().as_secs_f64());
         eprint!("{}", crate::drive::flushgate::summary(Duration::from_secs(600)));
         assert!(worst < 1.0, "API p99 {worst:.3}s during the flow-over (#269): over 1 s");
+    }
+}
+
+#[cfg(test)]
+mod flow_boot_grace_tests {
+    use super::*;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::time::Duration;
+
+    /// A node whose boot has gone quiet: the flow-over starts once its
+    /// volume I/O has been still for the quiet window (#278).
+    #[tokio::test]
+    async fn a_quiet_node_gets_its_flow_over_after_the_quiet_window() {
+        let busy = tokio::spawn(async {
+            for _ in 0..10 {
+                crate::volume::thin::FOREGROUND_IO.fetch_add(1, Relaxed);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        let (waited, quiet) = wait_for_boot_quiet(Duration::from_secs(20), Duration::from_millis(400)).await;
+        busy.await.unwrap();
+        assert!(quiet, "the node went quiet");
+        // Booting for ~0.5 s, then 0.4 s still.
+        assert!(waited >= Duration::from_millis(850) && waited < Duration::from_secs(5), "{waited:?}");
+    }
+
+    /// A node that never goes quiet still gets its flow-over at the bound.
+    #[tokio::test]
+    async fn a_busy_node_gets_its_flow_over_at_the_bound() {
+        let busy = tokio::spawn(async {
+            loop {
+                crate::volume::thin::FOREGROUND_IO.fetch_add(1, Relaxed);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let (waited, quiet) = wait_for_boot_quiet(Duration::from_secs(2), Duration::from_millis(400)).await;
+        busy.abort();
+        assert!(!quiet);
+        assert!(waited >= Duration::from_secs(2) && waited < Duration::from_secs(4), "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn no_grace_is_no_wait() {
+        let (waited, quiet) = wait_for_boot_quiet(Duration::ZERO, Duration::from_secs(10)).await;
+        assert_eq!((waited, quiet), (Duration::ZERO, false));
     }
 }
