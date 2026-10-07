@@ -4519,6 +4519,13 @@ pub(crate) async fn take_local_disk(
     Ok(take_local_disk_for(mgr, disk, local_tier, local_disk_force, None).await?.0)
 }
 
+/// The "already up to date" test of [`take_local_disk_for`]: the system half
+/// holds every volume this boot would copy, by id. Never with
+/// `STORMBLOCK_RELAY_SYSTEM_HALF=1` (#244), which the caller checks first.
+fn holds_everything(want: &std::collections::HashSet<uuid::Uuid>, have: &std::collections::HashSet<uuid::Uuid>) -> bool {
+    !want.is_empty() && want.iter().all(|id| have.contains(id))
+}
+
 /// [`take_local_disk`], naming the release's root volume (`root`), whose
 /// `/etc/stormblock/data-volumes` and `/etc/os-release` an install over a
 /// node's disk reads (#311). Also returns what the install did with the
@@ -4617,7 +4624,7 @@ pub(crate) async fn take_local_disk_for(
             );
         }
         if let Some(have) = have.filter(|_| boot_ready && !relay) {
-            if !want.is_empty() && want.iter().all(|id| have.contains(id)) {
+            if holds_everything(&want, &have) {
                 println!(
                     "Flow-over: {disk} already holds all {} volume(s) this boot would \
                      copy — nothing to do",
@@ -7765,15 +7772,19 @@ file = "{state}"
             std::fs::copy(&image_n, &c).unwrap();
             c
         };
-        // The same release, claimed again: held, so nothing is done.
-        let c1 = claim("claim-again-1.raw");
-        let (mut mgr, _) = super::open_slabs_resuming(&[c1.clone()], None, true).await.unwrap();
-        let image_root = volume_bytes(&mgr, "stormpump").await.unwrap();
+        // The disk holds the release by id (what sent the boot to it).
+        {
+            let l = super::open_storage(&disk).await.unwrap();
+            let i = super::open_storage(&image_n).await.unwrap();
+            let h = crate::image::local::release_held(&l, &i).await;
+            assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "held by id: {h:?}");
+        }
+        let image_root = {
+            let c = claim("claim-read.raw");
+            let (m, _) = super::open_slabs_resuming(&[c], None, true).await.unwrap();
+            volume_bytes(&m, "stormpump").await.unwrap()
+        };
         assert_ne!(image_root[..65536], [0u8; 65536][..]);
-        std::env::remove_var("STORMBLOCK_RELAY_SYSTEM_HALF");
-        let (flow, _) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await.unwrap();
-        assert!(flow.is_none(), "held by id: the shortcut leaves the broken root as it is");
-        drop(mgr);
 
         // The fallback: laid again from the image.
         let c2 = claim("claim-again-2.raw");
@@ -9648,5 +9659,29 @@ mod flow_boot_grace_tests {
     async fn no_grace_is_no_wait() {
         let (waited, quiet) = wait_for_boot_quiet(Duration::ZERO, Duration::from_secs(10)).await;
         assert_eq!((waited, quiet), (Duration::ZERO, false));
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use std::collections::HashSet;
+
+    /// #244: the shortcut that leaves a disk as it is ("already holds all")
+    /// answers by id, which a broken root keeps; the fallback bypasses it.
+    #[test]
+    fn a_disk_holding_every_id_is_up_to_date_unless_relaid() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let want: HashSet<_> = [a, b].into();
+        let have: HashSet<_> = [a, b, uuid::Uuid::new_v4()].into();
+        assert!(super::holds_everything(&want, &have));
+        assert!(!super::holds_everything(&want, &[a].into()));
+        assert!(!super::holds_everything(&HashSet::new(), &have), "nothing wanted is not up to date");
+        // The caller's gate: relay set, the shortcut is not asked at all.
+        std::env::set_var("STORMBLOCK_RELAY_SYSTEM_HALF", "1");
+        let relay = std::env::var("STORMBLOCK_RELAY_SYSTEM_HALF").is_ok_and(|v| v.trim() == "1");
+        std::env::remove_var("STORMBLOCK_RELAY_SYSTEM_HALF");
+        assert!(relay);
+        assert!(Some(have).filter(|_| !relay).is_none());
     }
 }
