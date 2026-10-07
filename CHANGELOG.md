@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #334 (P0, Dell 11.91 under rustkube-node's `medium` suite): the API stall watchdog's task dump panicked a ublk device's runtime. `ublk-adopt-36` panicked with `RefCell already borrowed` (tokio `current_thread/mod.rs:723`), its I/O hung, and :9090 stopped answering.
+  - **Cause:** requests stalled over 10 s, so the watchdog (#269) ran `task_dump`, which spawned `dump()` on every registered runtime, including each adopted or exported ublk device's current-thread runtime. On a current-thread runtime, `dump()` holds the core while it polls each task in trace mode. Our I/O futures are not tokio's, so tracing runs them, and a task that finishes and releases a tokio lock wakes another task on the same runtime, so `schedule()` borrows the core again and panics. The API's multi-thread runtime traces with the core taken out and is not affected.
+  - **Fix:** `task_dump` never dumps a current-thread runtime. It names it and says why; its threads are still in `/debug/threads`.
+  - **Test:** `debug::tests::a_task_dump_leaves_a_current_thread_runtime_running`. A traced task releases a tokio Mutex another task waits on; the runtime keeps running and answers after the dump.
 - **feat:** #322 (stormcentral#353): the open `/api/v1/health` says where the node runs from. C2NR0Q2 had passed the "local boot" and "fresh slab" stages while running entirely from a forge clone (#268).
   - **`slabs`:** `diskless`; `system` and `data`, each `local`, `remote`, `mixed` or `none` (by where the volumes' legs are); and each slab with its role, source, local `device` or remote `transport`, and the volumes with legs on it.
   - **Never the remote URI:** health is unauthenticated, and the URI (forge's address, the clone's subsystem NQN, the host NQN, with no secret for a boot host, #210) is what attaching the machine's boot clone takes.

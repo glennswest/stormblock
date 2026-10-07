@@ -9,10 +9,11 @@
 //!   [`STALL_AFTER`] is logged with what the engine was doing then (below),
 //!   and kept for `GET /debug/stalls`. The watchdog also notices a runtime
 //!   that has stopped running tasks at all (its heartbeat goes stale).
-//! * **`GET /debug/tasks`**: every async task of every runtime the engine
-//!   runs (the API's, each adopted ublk device's), with the `.await` it is
-//!   parked on — a tokio task dump. Needs `--cfg tokio_unstable` (set in
-//!   `.cargo/config.toml`); a build without it says so.
+//! * **`GET /debug/tasks`**: every async task of the API's runtime, with the
+//!   `.await` it is parked on — a tokio task dump. Needs `--cfg
+//!   tokio_unstable` (set in `.cargo/config.toml`); a build without it says
+//!   so. The ublk devices' current-thread runtimes are named but never dumped:
+//!   tracing one while it serves I/O re-enters it and panics it (#334).
 //! * **`GET /debug/threads`**: every OS thread, its state and kernel stack:
 //!   what a thread blocked in a syscall (a flush, an io_uring wait) is
 //!   waiting for.
@@ -226,9 +227,23 @@ pub async fn task_dump(limit: Duration) -> String {
         let mut out = String::new();
         for (name, h) in handles {
             out.push_str(&format!("=== runtime {name} ===\n"));
+            // Never a current-thread runtime (#334). Its `dump()` holds the
+            // core while it polls every task in trace mode, and our I/O
+            // futures are not tokio's: tracing runs them, and one that
+            // finishes and releases a tokio lock wakes another task on the
+            // same runtime — `schedule()` borrows the core again and the
+            // runtime panics ("RefCell already borrowed"). Each adopted or
+            // exported ublk device runs on one: the panic killed its server
+            // and its I/O hung. Their threads are in /debug/threads.
+            if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+                out.push_str(
+                    "not dumped: a current-thread runtime (a ublk device's) is not safe to \
+                     trace while it serves I/O (#334) — see /debug/threads\n",
+                );
+                continue;
+            }
             let h2 = h.clone();
-            // Dumped on its own runtime: a current-thread runtime is dumped
-            // by a task it runs, never from outside.
+            // Dumped on its own runtime, by a task it runs.
             let dump = h.spawn(async move { h2.dump().await });
             match tokio::time::timeout(limit, dump).await {
                 Ok(Ok(d)) => {
@@ -336,5 +351,79 @@ pub fn start(state: Arc<AppState>) {
     });
     if let Err(e) = spawned {
         tracing::error!("API watchdog not started: {e}");
+    }
+}
+
+#[cfg(all(test, tokio_unstable, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
+    use std::task::{Context, Poll};
+
+    /// Pending until `flag` is set, waking nobody: what an I/O future that
+    /// has completed underneath looks like when tracing polls it again.
+    struct Flag(Arc<AtomicBool>);
+    impl Future for Flag {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            if self.0.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    /// #334: a ublk device's current-thread runtime, with a task that, when
+    /// polled again, finishes and releases a tokio Mutex another task on the
+    /// same runtime waits on. The watchdog's dump must leave it running.
+    #[test]
+    fn a_task_dump_leaves_a_current_thread_runtime_running() {
+        let (flag, stop) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (tx, rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();
+        let (flag2, stop2) = (flag.clone(), stop.clone());
+        let device = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            tx.send(rt.handle().clone()).unwrap();
+            rt.block_on(async move {
+                let m = Arc::new(tokio::sync::Mutex::new(()));
+                let (m1, f1) = (m.clone(), flag2.clone());
+                tokio::spawn(async move {
+                    let g = m1.lock_owned().await;
+                    Flag(f1).await;
+                    drop(g); // wakes the waiter below, on this runtime
+                    std::future::pending::<()>().await;
+                });
+                tokio::task::yield_now().await;
+                let m2 = m.clone();
+                tokio::spawn(async move {
+                    let _g = m2.lock().await;
+                    std::future::pending::<()>().await;
+                });
+                tokio::task::yield_now().await;
+                // The I/O "completes" without waking its task.
+                flag2.store(true, Ordering::SeqCst);
+                while !stop2.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+        });
+        let h = rx.recv().unwrap();
+        register_runtime("ublk-adopt-test (#334)", h.clone());
+
+        let api = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let out = api.block_on(task_dump(Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!device.is_finished(), "the device's runtime died during the dump:\n{out}");
+        assert!(out.contains("not dumped: a current-thread runtime"), "{out}");
+        // Still serving: it runs what it is given.
+        let ping = api.block_on(async { h.spawn(async { 7 }).await.unwrap() });
+        assert_eq!(ping, 7);
+
+        stop.store(true, Ordering::SeqCst);
+        device.join().expect("the device's runtime ends cleanly");
+        runtimes().lock().unwrap().retain(|(n, _)| !n.starts_with("ublk-adopt-test"));
     }
 }

@@ -492,9 +492,10 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   API stops answering. `stalls`: requests in flight and the last watchdog
   reports (a request waiting over 10 s is logged with a capture, from an OS
   thread that works when the async runtime is stuck); `tasks`: every async
-  task of every runtime the engine runs (the API's, each adopted ublk
-  device's) with the `.await` it is parked on (a tokio task dump: the build
-  sets `--cfg tokio_unstable` in `.cargo/config.toml`); `threads`: every OS
+  task of the API's runtime with the `.await` it is parked on (a tokio task
+  dump: the build sets `--cfg tokio_unstable` in `.cargo/config.toml`). Each
+  ublk device's current-thread runtime is named but never dumped, because
+  tracing it while it serves I/O re-enters it and panics it (#334); `threads`: every OS
   thread, its state and kernel stack; `locks`: whether the volume manager,
   the extent map and the slab registry are held.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
