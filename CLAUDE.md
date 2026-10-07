@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A flush to a failed mirror leg degrades it (2026-10-07, #308, P1) — IN PROGRESS
+### A flush to a failed mirror leg degrades it (2026-10-07, #308, P1) — DONE
 
 stormcos#92's shelf (160 emulated drives): after a drive under a mirror leg
 was failed, the next flush returned EIO for the whole volume and health said
@@ -183,8 +183,11 @@ writes before it usually land elsewhere; on 8 they hit it first).
 - [x] flush: a media error from a slab's sync on a redundant volume marks
       that slab failed for the volume and goes on; error only when something
       is then unreadable; an unreplicated volume's error stays the volume's
-- [ ] test `thin::tests::a_flush_to_a_failed_leg_degrades_the_mirror_not_the_
-      volume` (emulated drives); nextest; CHANGELOG, docs/redundancy.md
+- [x] test `thin::redundancy_tests::a_flush_to_a_failed_leg_degrades_the_
+      mirror_not_the_volume` (emulated drives): passes at 428b11a, fails
+      without the fix at the flush (checked on a throwaway branch); full
+      nextest 985/986 (#333's port race); CHANGELOG, docs/redundancy.md
+- Not on stormcos#92's shelf yet: its pb-scale run on an engine with this
 
 ### Units' first I/O waits on the engine handover (2026-10-07, #303, P1) — PART DONE, WAITING ON THE OWNER
 
