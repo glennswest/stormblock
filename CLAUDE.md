@@ -222,7 +222,7 @@ Plan:
   stormcos release with this engine + initramfs installing over a running
   node (stormcentral#462's standing gate)
 
-### A write to a just-moved extent lost on a cut before the persist (2026-10-06, #277, P1) — FIX IN, close pending (paused for P0 #311)
+### A write to a just-moved extent lost on a cut before the persist (2026-10-06, #277, P1) — DONE (in golden-stormblock-3fed70dce709)
 
 By reading: `move_slot` and `migrate_leg_unlocked` allocate the destination
 at the source's generation while `rewrite_legs` bumps the map's by one. A cut
@@ -236,13 +236,12 @@ generations; restore keeps the record's, the source: the write is gone.
 - [x] a moved primary is allocated at `generation + 1` (= the map's after
       `rewrite_legs`), `PlacementEngine::moved_generation`, both paths; a
       mirror or parity leg keeps its generation (they tie by design: #316)
-- [x] durability.md rule 5, CHANGELOG? (NOT YET: add the entry), #316 filed
+- [x] durability.md rule 5, CHANGELOG, #316 filed
 - [x] targeted on dev: 50/50 (power cuts, placement, flow-over, drain,
       migrate); full nextest at eba4123: 939/941 = #134 and
       `a_flow_over_copy_holds_no_lock_the_node_needs` (#297/#305 flake,
       but it goes through `migrate_leg_unlocked`)
 - [x] that test alone ×5 on dev at eba4123: 5/5 (0.16–1.4 s): the flake
-- [ ] LEFT: the CHANGELOG entry; close #277 with the verification comment
 
 ### Optional mount entries `?vol:path` (2026-10-06, #288, P1) — DONE
 
