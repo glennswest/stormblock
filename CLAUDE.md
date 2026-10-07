@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The stall watchdog's task dump panicked a ublk device's runtime (2026-10-07, #334, P0) — IN PROGRESS
+### The stall watchdog's task dump panicked a ublk device's runtime (2026-10-07, #334, P0) — DONE
 
 Dell 11.91 under rustkube-node's `medium` suite: `ublk-adopt-36` panicked
 `RefCell already borrowed` (tokio current_thread/mod.rs:723), then :9090
@@ -185,12 +185,19 @@ and a task that finishes and releases a tokio lock wakes another on the same
 runtime: `schedule()` borrows the core again → panic. That device's server
 thread dies and its I/O hangs. The multi-thread (API) runtime traces with
 the core taken out and the workers parked: not affected.
-- [ ] `task_dump` never dumps a current-thread runtime (names it, says why;
+- [x] `task_dump` never dumps a current-thread runtime (names it, says why;
       /debug/threads still shows its threads)
-- [ ] test: a current-thread runtime with a task that, traced, releases a
-      tokio Mutex another task waits on; registered; task_dump leaves it
-      running. Fails without the fix (checked on a throwaway branch)
-- [ ] docs (debug), CHANGELOG
+- [x] test: an I/O task holds a tokio Mutex an older task waits on; its I/O
+      completes underneath; the dump comes first (tokio traces oldest first,
+      and a fresh leaf poll in trace mode registers nothing — three earlier
+      versions of the test did not reproduce it for those reasons). Without
+      the fix: `RefCell already borrowed` at current_thread/mod.rs:723:40,
+      and the I/O and its waiter never go on (3/3, throwaway branch). With
+      it: 5/5. The panic is caught by tokio; the lost wake is what hung the
+      Dell's API
+- [x] docs (debug), CHANGELOG
+- Verified on a build VM at 43982c6: full nextest 991/991. Not on metal:
+  rustkube-node's `medium` suite on the Dell with this engine (stormcos#36)
 
 ### Health says whether the node runs from local or remote slabs (2026-10-07, #322, P1) — DONE
 
