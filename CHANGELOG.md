@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** #243: on a node the console gets the engine's warnings, not its INFO.
+  - **Where:** `boot-local`, `adopt-ublk` and `boot-iscsi`. Their stderr is every console (`/init` follows it; stormpump echoes it), and at INFO a shutdown printed 2–3 lines per volume across ~55 volumes.
+  - **The record:** the whole log goes to `/run/stormblock/stormblock.log` (`STORMBLOCK_LOG_FILE`) at `RUST_LOG`, else `stormblock.log=` on the kernel line, else `info`. `/run` moves into the real root, so it is one file for the boot.
+  - **The console:** WARN and above, raised with `stormblock.console_log=` on the kernel line or `STORMBLOCK_CONSOLE_LOG`. The stage lines are `println!` and always shown. Other commands log as before.
+  - **Refused requests:** `unauthorized …` is warned once a minute, the rest counted and said with the next one (`serve::api::RefusalLimiter`). That was stormstorage polling without a token, every 15 s on every console.
+  - **`/init`:** its engine report after a FATAL names the record.
+  - **Tests:** `logging::tests` (5), `refusals_are_said_once_a_minute_then_counted`, `tests/initramfs-no-appliance.sh` +2. Checked on dev with the built binary: `boot-local` against a missing slab printed only its error on stderr, with INFO in the record. `STORMBLOCK_CONSOLE_LOG=info` put INFO back on stderr. `slab list` wrote no record and logged to stderr as before.
 - **docs:** #265: status. #122's stage/activate/rollback tests were re-run on dev at b30cecf: 4/4. The check on real hardware waits for stormupdate#3 and a stormcos release that carries the #122 engine.
 - **feat:** #244: a local root that does not come up falls back to the claimed image instead of stopping at a shell. The root may never appear, or may fail to mount (server1 11.56: `erofs: cannot find valid erofs superblock`).
   - **When:** once per boot; when the root came from a local disk (no hook decided it); when an appliance is known; and when the name is not a guess (#249).

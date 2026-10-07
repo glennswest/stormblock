@@ -251,6 +251,24 @@ unit's `TimeoutStopSec` (30 s in `systemd/stormblock-target.service`) is never
 reached mid-teardown. `RUST_LOG` sets the log filter (default `info`); logs go
 to stderr.
 
+**On a node the console gets warnings only** (#243). In `boot-local`,
+`adopt-ublk` and `boot-iscsi`, stderr is every console of the machine (the
+initramfs follows it; stormpump echoes it), and at INFO a shutdown printed
+two or three lines per volume. So there:
+- **The record** (INFO, or `RUST_LOG`, or `stormblock.log=` on the kernel
+  line) goes to `/run/stormblock/stormblock.log` (`STORMBLOCK_LOG_FILE`).
+  `/run` moves into the real root, so it is one file for the boot, the
+  initramfs engine's lines and the node's.
+- **The console** (stderr) gets WARN and above. `stormblock.console_log=info`
+  on the kernel line, or `STORMBLOCK_CONSOLE_LOG`, raises it without a
+  rebuild.
+- **The stage lines** (`Flow-over: …`, `Boot volume: …`) are printed and
+  always shown.
+- **Refused requests** (`unauthorized GET …`) are warned once a minute; the
+  rest are counted and said with the next one.
+
+Every other command logs to stderr as before.
+
 ### Subcommands
 
 | subcommand | what it does |
@@ -300,7 +318,9 @@ only in the file is **not applied**.
 
 | variable | used for | when unset |
 |---|---|---|
-| `RUST_LOG` | log filter | `info` |
+| `RUST_LOG` | log filter (on a node: the record's) | `info`, or `stormblock.log=` on the kernel line |
+| `STORMBLOCK_CONSOLE_LOG` | on a node (`boot-local`, `adopt-ublk`, `boot-iscsi`): what reaches stderr, every console (#243) | `warn`, or `stormblock.console_log=` on the kernel line |
+| `STORMBLOCK_LOG_FILE` | on a node: the record, everything at `RUST_LOG` | `/run/stormblock/stormblock.log` |
 | `STORMBLOCK_API_TOKEN` | the API token, after `[management] api_token`; also `boot-claim --token` | token file, else minted |
 | `STORMBLOCK_ADMIN_TOKEN` | the admin token, after `[management] admin_token` | no admin tier |
 | `STORMBLOCK_TOKEN_FILE` | where CLI tools look for a local engine's token, before `/etc/stormblock/api_token` and `/var/lib/stormblock/api_token` | those two |
@@ -521,6 +541,10 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/ui`, `/` | the old web UI, only with `--features ui` (outside the token check, #166) |
 
 ## Files
+
+On a node, `/run/stormblock/stormblock.log`: the engine's whole log for the
+boot, the initramfs engine's and the node's (#243). The console gets its
+warnings only.
 
 In the data directory (`[management] data_dir`; `adopt-ublk --data-dir`):
 `volumes.dat` (+ `.bak`; or `metadata.v2`, a sparse 16 GiB file, in format 2,
