@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Live migration of a VM disk: ANA, epoch at the target (2026-10-06, #83, P3) — IN PROGRESS
+### Live migration of a VM disk: ANA, epoch at the target (2026-10-06, #83, P3) — DONE
 
 Item 3 (durable export table) was done in 2603646. Item 2 now has its
 contract: stormstorage#33 settled #6's leg attach contract (epoch on attach,
@@ -204,8 +204,14 @@ volume on every node); the shared and per-host subsystems name the node.
 - [x] tests: target units 42/42 and the targeted suite 118/118 on dev
       (`integration_ana_epoch` 2); docs/migration.md, README, CHANGELOG,
       contract README; stormblock-csi#42 (send `epoch` on attach)
-- [ ] `ci-ana-verify.sh` on dev (kernel multipath across two engines, fence);
-      full nextest
+- [x] `ci-ana-verify.sh` on dev at 720f60d, ALL PASS (10 guest checks,
+      kernel 7.2.8): one multipath head over two engines, reads follow the
+      ANA moves both ways with no reconnect, a fenced leg goes from the
+      guest, a stale reattach 412. Found by it: an empty `change` group made
+      Linux arm ANATT and reset the controller (now only listed when used).
+      Full nextest at 8f2ae03 953/955 (#134, the qcow2 deadline, #173
+      class); `--features cluster` checks
+- Not on metal: a stormvm live migration through stormstorage's heads
 
 ### A ready fstemplate whose sealed volume is gone (2026-10-06, #281, P1) — DONE (golden-stormblock-ae10dc337da8)
 
