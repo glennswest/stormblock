@@ -445,6 +445,24 @@ pub struct ThinVolumeHandle {
     /// The last health computed, answered again while the map is out of
     /// memory and nothing it is on has changed (#158).
     last_health: std::sync::Mutex<Option<VolumeHealth>>,
+    /// Writes, discards and write-zeroes finished on this volume (#338),
+    /// counted when they return — success, error or dropped. Starts at 1,
+    /// so a handle's first flush is always a full one.
+    completed: AtomicU64,
+    /// The `completed` a successful flush started from: everything finished
+    /// before it is durable. A flush that finds `completed` no further has
+    /// nothing to make durable and touches no device.
+    synced: AtomicU64,
+}
+
+/// Counts one write, discard or write-zeroes as finished when it returns,
+/// however it returns (#338).
+struct Finished<'a>(&'a AtomicU64);
+
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// A clock for least-recently-used order: a counter, not a time.
@@ -512,6 +530,8 @@ impl ThinVolumeHandle {
             lba: std::sync::atomic::AtomicU32::new(Lba::DEFAULT),
             last_use: AtomicU64::new(next_use()),
             last_health: std::sync::Mutex::new(None),
+            completed: AtomicU64::new(1),
+            synced: AtomicU64::new(0),
         }
     }
 
@@ -2866,6 +2886,7 @@ impl BlockDevice for ThinVolumeHandle {
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         self.resident().await?;
         self.refuse_if_sealed()?;
+        let _finished = Finished(&self.completed);
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bs = u64::from(self.block_size());
         if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
@@ -2876,6 +2897,17 @@ impl BlockDevice for ThinVolumeHandle {
 
     async fn flush(&self) -> DriveResult<()> {
         self.resident().await?;
+        // Nothing finished since a successful flush began: nothing to make
+        // durable, so no device is flushed (#338). A FLUSH covers the writes
+        // completed before it was issued, and every one of those bumped
+        // `completed` before it completed; one still in flight is not owed
+        // and bumps it when it lands, so the next flush is a full one. A
+        // fresh clone's ext4 mount sent its FLUSHes through a device-wide
+        // sync, queued behind other volumes' (553–878 ms, stormpump#107).
+        let start = self.completed.load(Ordering::SeqCst);
+        if self.synced.load(Ordering::SeqCst) >= start {
+            return Ok(());
+        }
         // Collect unique slab IDs for this volume, then flush their devices
         let slab_ids: Vec<SlabId> = {
             let gem = self.gem.read().await;
@@ -2924,12 +2956,14 @@ impl BlockDevice for ThinVolumeHandle {
         if let Err(e) = self.stripe_log.read().unwrap().clear() {
             tracing::warn!(volume = %self.id, "dirty-stripe log could not be cleared: {e}");
         }
+        self.synced.fetch_max(start, Ordering::SeqCst);
         Ok(())
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
         self.resident().await?;
         self.refuse_if_sealed()?;
+        let _finished = Finished(&self.completed);
         let policy = self.redundancy();
         // An unreplicated volume serialises against its own allocations with
         // the volume lock; a redundant one uses the extent/stripe shards,
@@ -2978,6 +3012,7 @@ impl BlockDevice for ThinVolumeHandle {
     async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
         self.resident().await?;
         self.refuse_if_sealed()?;
+        let _finished = Finished(&self.completed);
         let zeros = vec![0u8; self.slot_size as usize];
         let mut pos = offset;
         let end = offset + len;
@@ -3296,6 +3331,157 @@ mod tests {
         assert!(buf.iter().all(|&b| b == 0xBB), "data at a high offset must persist");
 
         cleanup(&paths);
+    }
+
+    /// A device that counts its flushes and can make them slow (#338).
+    struct SlowFlush {
+        inner: Arc<dyn BlockDevice>,
+        flushes: Arc<AtomicU64>,
+        delay_ms: Arc<AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for SlowFlush {
+        fn id(&self) -> &DeviceId {
+            self.inner.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.inner.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> DriveResult<()> {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            let d = self.delay_ms.load(Ordering::SeqCst);
+            if d > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(d)).await;
+            }
+            self.inner.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+    }
+
+    /// Two volumes on one slab over a [`SlowFlush`] device.
+    async fn two_volumes_on_a_slow_flush(
+    ) -> (Arc<ThinVolumeHandle>, Arc<ThinVolumeHandle>, Arc<AtomicU64>, Arc<AtomicU64>, String) {
+        let path = std::env::temp_dir()
+            .join("stormblock-volume-test")
+            .join(format!("{}-338.bin", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = path.to_str().unwrap().to_string();
+        let file: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, 32 * 1024 * 1024).await.unwrap());
+        let (flushes, delay_ms) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(SlowFlush { inner: file, flushes: flushes.clone(), delay_ms: delay_ms.clone() });
+        let slab = Slab::format(dev, 4096, StorageTier::Hot).await.unwrap();
+        let mut registry = SlabRegistry::new();
+        registry.add(slab);
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let mk = |name: &str| {
+            Arc::new(ThinVolumeHandle::new(
+                ThinVolume::new(name.to_string(), 4 * 1024 * 1024, 4096),
+                gem.clone(),
+                registry.clone(),
+                PlacementPolicy::default(),
+            ))
+        };
+        (mk("busy"), mk("fresh-clone"), flushes, delay_ms, path)
+    }
+
+    /// #338: a flush with nothing finished since the last successful one
+    /// touches no device; one after a write does the full sync.
+    #[tokio::test]
+    async fn a_flush_with_nothing_to_make_durable_touches_no_device() {
+        let (v, _, flushes, _, path) = two_volumes_on_a_slow_flush().await;
+        v.write(0, &[0xCC_u8; 4096]).await.unwrap();
+        v.flush().await.unwrap();
+        let after_first = flushes.load(Ordering::SeqCst);
+        assert!(after_first >= 1, "the write's flush reached the device");
+
+        v.flush().await.unwrap();
+        v.flush().await.unwrap();
+        assert_eq!(flushes.load(Ordering::SeqCst), after_first, "nothing finished since: no device flush");
+
+        // A write, a discard, a write-zeroes: each makes the next flush full.
+        v.write(4096, &[1u8; 4096]).await.unwrap();
+        v.flush().await.unwrap();
+        let n = flushes.load(Ordering::SeqCst);
+        assert!(n > after_first, "a write since: the flush syncs");
+        v.write_zeroes(0, 4096).await.unwrap();
+        v.flush().await.unwrap();
+        let m = flushes.load(Ordering::SeqCst);
+        assert!(m > n, "write-zeroes since: the flush syncs");
+        v.discard(0, 4096).await.unwrap();
+        v.flush().await.unwrap();
+        assert!(flushes.load(Ordering::SeqCst) > m, "a discard since: the flush syncs");
+
+        // Read only: still nothing to make durable.
+        let before = flushes.load(Ordering::SeqCst);
+        let mut buf = vec![0u8; 4096];
+        v.read(4096, &mut buf).await.unwrap();
+        v.flush().await.unwrap();
+        assert_eq!(flushes.load(Ordering::SeqCst), before);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The issue's case: a fresh clone (flushed once, nothing written since)
+    /// flushes while a busy volume on the same slab holds a slow device
+    /// flush. It must not wait for it.
+    #[tokio::test]
+    async fn a_clean_volume_does_not_wait_behind_another_volumes_slow_flush() {
+        let (busy, clone, _, delay_ms, path) = two_volumes_on_a_slow_flush().await;
+        clone.flush().await.unwrap(); // its first, full one
+        delay_ms.store(600, Ordering::SeqCst);
+        busy.write(0, &[7u8; 4096]).await.unwrap();
+        let slow = tokio::spawn({
+            let busy = busy.clone();
+            async move { busy.flush().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let t = std::time::Instant::now();
+        clone.flush().await.unwrap();
+        assert!(t.elapsed() < std::time::Duration::from_millis(100), "the clean flush waited {:?}", t.elapsed());
+        assert!(!slow.is_finished(), "the busy volume's flush is still on the device");
+        slow.await.unwrap().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A write that finishes while a flush is running is not covered by it:
+    /// the next flush does the full sync.
+    #[tokio::test]
+    async fn a_write_that_lands_during_a_flush_makes_the_next_one_full() {
+        let (v, _, flushes, delay_ms, path) = two_volumes_on_a_slow_flush().await;
+        v.write(0, &[1u8; 4096]).await.unwrap();
+        delay_ms.store(300, Ordering::SeqCst);
+        let running = tokio::spawn({
+            let v = v.clone();
+            async move { v.flush().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        v.write(4096, &[2u8; 4096]).await.unwrap(); // lands mid-flush
+        running.await.unwrap().unwrap();
+        delay_ms.store(0, Ordering::SeqCst);
+        let before = flushes.load(Ordering::SeqCst);
+        v.flush().await.unwrap();
+        assert!(flushes.load(Ordering::SeqCst) > before, "the write during the last flush is synced now");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

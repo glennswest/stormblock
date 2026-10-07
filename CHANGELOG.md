@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **perf:** #338 (stormpump#107, rustkube-node#95): a flush with nothing to make durable returns at once. A fresh 64Mi claim spent 553–878 ms in its ext4 mount on a warm node, because every ublk FLUSH ran a device-wide sync of each slab the volume touches, queued behind any other volume's sync.
+  - **How:** each volume counts the writes, discards and write-zeroes that have finished on it (when each returns, failed or dropped included), and a successful flush records the count it started from. A flush with nothing finished since touches no device. Durability rule 13.
+  - **What it changes:** a write still in flight is not owed by a running flush, and makes the next flush a full one. A handle's first flush is always full.
+  - **Caveat:** an rw ext4 mount writes its superblock, so the flush after that write still pays; the clean ones do not.
+  - **Tests:** `thin::tests`:
+    - a clean flush reaches no device (after reads too), and a write, write-zeroes or discard makes the next one sync;
+    - a clean volume's flush returns in under 100 ms while another volume on the slab holds a 600 ms device flush;
+    - a write that lands during a flush makes the next flush full.
 - **fix:** #334 (P0, Dell 11.91 under rustkube-node's `medium` suite): the API stall watchdog's task dump panicked a ublk device's runtime. `ublk-adopt-36` panicked with `RefCell already borrowed` (tokio `current_thread/mod.rs:723`), its I/O hung, and :9090 stopped answering.
   - **Cause:** requests stalled over 10 s, so the watchdog (#269) ran `task_dump`, which spawned `dump()` on every registered runtime, including each adopted or exported ublk device's current-thread runtime. On a current-thread runtime, `dump()` holds the core while it polls each task in trace mode. Our I/O futures are not tokio's, so tracing runs them, and a task that finishes and releases a tokio lock wakes another task on the same runtime, so `schedule()` borrows the core again and panics. The API's multi-thread runtime traces with the core taken out and is not affected.
   - **Fix:** `task_dump` never dumps a current-thread runtime. It names it and says why; its threads are still in `/debug/threads`.

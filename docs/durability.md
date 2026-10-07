@@ -170,6 +170,16 @@ tests run on.
    writes new pages, flushes, then the other superblock; the pages it stops
    naming are reused only after that superblock is flushed, so the previous
    superblock's tree is whole until the new one is.
+13. **A flush owes exactly what finished before it** (#338). A volume
+   counts the writes, discards and write-zeroes that have finished on it
+   (when each returns, failed or dropped included). A flush records the
+   count it started from once it succeeds. A flush that finds nothing
+   finished since then has nothing to make durable and returns without
+   touching a device. Without that, a fresh clone's ext4 mount sent its
+   FLUSHes through a device-wide sync, queued behind other volumes' syncs.
+   A write still in flight when a flush starts is not owed by it, and it
+   bumps the count when it lands, so the next flush is a full one. A
+   handle's first flush is always full.
 
 ## How it is checked
 
