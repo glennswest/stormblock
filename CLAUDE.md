@@ -353,7 +353,7 @@ the engine writes v1 until stage E.
       extent indexes past 2^32, mirror, goldens + clone, cold maps, two
       restarts, every byte back; restart 39 s = slot tables (#307). Slot
       index past 2^32: `a_v2_slab_past_four_gi_slots…` passes (open 58 s).
-      Closed #158, #157, #156
+      Full nextest at 54084cb: 938/939 (#134). Closed #158, #157, #156
 
 ### Resident compaction (2026-10-05, #155, P1) — DONE
 
