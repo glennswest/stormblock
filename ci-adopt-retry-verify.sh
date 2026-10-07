@@ -150,11 +150,14 @@ read_in_gap $inc /tmp/ra; rd=$RD
 for i in $(seq 1 200); do grep -q "Adopted\|adopted" /run/adopt-a.log && break; alive $a || break; sleep 0.1; done
 sleep 1
 wait $rd 2>/dev/null
-grep -c "restore attempt [0-9]* failed" /run/adopt-a.log | sed 's/^/GUEST retry: failures said: /'
-if alive $a && cmp -s /tmp/pat /tmp/ra && [ "$(grep -c 'restore attempt [12] failed' /run/adopt-a.log)" = 2 ]; then
+# The console line (the log has its own ERROR line for each).
+said=$(grep -c "restore attempt [0-9]* failed (" /run/adopt-a.log)
+echo "GUEST retry: failures on the console: $said"
+if alive $a && cmp -s /tmp/pat /tmp/ra && [ "$said" = 2 ]; then
     r retry PASS
 else
-    r retry FAIL; log adopt-a /run/adopt-a.log 20
+    r retry "FAIL (adopter $(alive $a && echo up || echo down), gap read $(cmp -s /tmp/pat /tmp/ra && echo right || echo wrong))"
+    log adopt-a /run/adopt-a.log 20
 fi
 
 # 4. give up: every restore fails, 5 s budget.
@@ -172,7 +175,7 @@ else
     r give-up "FAIL (exit $rc, marker $([ -e /run/stormblock/adopt-failed.json ] && echo yes || echo no), read $(alive $held && echo waiting || echo ended))"
     log adopt-b /run/adopt-b.log 20
 fi
-sed 's/^/GUEST marker: /' /run/stormblock/adopt-failed.json 2>/dev/null | head -12
+sed 's/^/GUEST marker: /' /run/stormblock/adopt-failed.json 2>/dev/null | head -12; echo
 
 # 5. rerun: takes the held device; the waiting read completes.
 stormblock adopt-ublk > /run/adopt-c.log 2>&1 &
