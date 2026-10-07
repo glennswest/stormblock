@@ -1717,8 +1717,7 @@ What earlier docs described and the code does not do, each with its issue:
   call (#233), and whether to keep the capability at all is #248.
 - **Smaller known faults**: ublk attach polls device readiness with a blocking
   sleep under the export lock (#231); the volume listing's `generation` does not
-  move on attach, detach or slab state (#218); `local-boot`'s ladder retention
-  ignores `successful`/`tries` (#205).
+  move on attach, detach or slab state (#218).
 
 ## Docs
 
