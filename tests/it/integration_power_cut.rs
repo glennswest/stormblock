@@ -125,10 +125,23 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<(us
         dev.cut_at(rng.gen_range(1..=ops as u64));
     }
     let mut seq = 1u64;
+    // The operation the power went in, if it went in one.
+    let mut cut_in = "none";
     for _ in 0..ops {
         // What a block may read had the power gone before this operation.
         let before = allowed.clone();
         let r: f64 = rng.gen();
+        let op = if r < 0.70 {
+            "write"
+        } else if r < 0.85 {
+            "flush"
+        } else if r < 0.90 {
+            "discard"
+        } else if r < 0.97 {
+            "churn"
+        } else {
+            "persist"
+        };
         if r < 0.70 {
             let i = rng.gen_range(0..BLOCKS);
             seq += 1;
@@ -169,6 +182,7 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<(us
             vm.persist().await;
         }
         if dev.cut_taken() {
+            cut_in = op;
             // The power went during this operation: a block may read what
             // was allowed before it or after it.
             for (i, a) in allowed.iter_mut() {
@@ -206,7 +220,7 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<(us
         match &allowed[&i] {
             Allowed::Values(s) if !vs.is_subset(s) => {
                 return Err(format!(
-                    "seed {seed} (keep {keep:.2}, {tear:?}, atomic {atomic}, {ops} ops): block {i} reads {vs:?}, allowed {:?}",
+                    "seed {seed} (keep {keep:.2}, {tear:?}, atomic {atomic}, {ops} ops, cut in {cut_in}): block {i} reads {vs:?}, allowed {:?}",
                     s
                 ))
             }
@@ -283,7 +297,7 @@ async fn power_cuts(version: u32, tear: Tear, atomic: usize) {
         failures.is_empty(),
         "{} of 300 power cuts lost acknowledged data; first: {}",
         failures.len(),
-        failures.first().unwrap()
+        failures.join("\n")
     );
     if tear != Tear::None {
         assert!(torn > 0, "the cuts tore no write: the test exercised nothing");
