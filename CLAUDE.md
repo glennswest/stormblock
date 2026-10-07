@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The management API over TLS, a node-CA client certificate as a credential (2026-10-07, #203, P1) — IN PROGRESS
+### The management API over TLS, a node-CA client certificate as a credential (2026-10-07, #203, P1) — DONE
 
 stormcos#81's rule (owner, 2026-09-25): every API on a node is TLS with a
 stormcert pair, every client verifies the node CA and authenticates, nothing
@@ -181,18 +181,21 @@ serve :9090 over HTTPS (adopt-ublk too, from `--config`). Missing here (the
 owner's validation, 2026-10-02): client verification against the node CA as
 an alternative to the token. stormcos ships the pair and settings, callers
 move to https: theirs.
-- [ ] `[management] tls_client_ca`: client certificates requested and
+- [x] `[management] tls_client_ca`: client certificates requested and
       verified against it, optional (token callers and probes still work); a
       verified certificate = the node token's tier (ordinary verbs,
       attestation reads); a destructive verb still needs the admin token or
       a reviewed Kubernetes bearer (#274), audited as `client-cert:<sha256>`
-- [ ] the pair and the CA re-read when their files change (stormcert renews
+- [x] the pair and the CA re-read when their files change (stormcert renews
       them), the old kept when a new one does not load
-- [ ] tests: HTTPS with the node CA; a client cert from the node CA gets
+- [x] tests: HTTPS with the node CA; a client cert from the node CA gets
       ordinary verbs, no destructive; one from another CA is refused at the
       handshake; no cert + token works; health anonymous; a renewed pair is
       served without a restart. Docs (auth.md, README), CHANGELOG; stormcos
       issue (ship pair + CA, `tls_client_ca`)
+- Verified on dev: `integration_mgmt_tls` (3) with real handshakes, every
+  auth and destructive test. Not on a node: stormcos#374 (the pair, the CA
+  and the keys in the engine's config; callers to https)
 
 ### adopt-ublk: a restore that fails after the incumbent exited (2026-10-07, #190, P1) — DONE
 
