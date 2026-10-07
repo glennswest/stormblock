@@ -7667,7 +7667,37 @@ file = "{state}"
         node.get_volume(&vm_disk).unwrap().flush().await.unwrap();
         node.persist().await;
         drop(node);
-        let before = std::fs::read(&disk).unwrap();
+        // The disk is 80 GiB and sparse: what it holds is its allocated
+        // ranges, and their bytes.
+        fn allocated(path: &str) -> Vec<(u64, u64, u64)> {
+            use std::hash::{Hash, Hasher};
+            use std::os::unix::fs::FileExt;
+            use std::os::unix::io::AsRawFd;
+            let f = std::fs::File::open(path).unwrap();
+            let len = f.metadata().unwrap().len() as i64;
+            let mut out = Vec::new();
+            let mut at = 0i64;
+            while at < len {
+                let start = unsafe { libc::lseek(f.as_raw_fd(), at, libc::SEEK_DATA) };
+                if start < 0 {
+                    break;
+                }
+                let end = unsafe { libc::lseek(f.as_raw_fd(), start, libc::SEEK_HOLE) }.max(start);
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                let mut buf = vec![0u8; 1 << 20];
+                let mut off = start as u64;
+                while off < end as u64 {
+                    let n = buf.len().min((end as u64 - off) as usize);
+                    f.read_exact_at(&mut buf[..n], off).unwrap();
+                    buf[..n].hash(&mut h);
+                    off += n as u64;
+                }
+                out.push((start as u64, end as u64, h.finish()));
+                at = end;
+            }
+            out
+        }
+        let before = allocated(&disk);
 
         for force in [false, true] {
             let claim = dir.path().join(format!("claim-{force}.raw")).display().to_string();
@@ -7678,7 +7708,7 @@ file = "{state}"
                 .expect_err("an install that would lose vm-disk-1");
             let msg = err.to_string();
             assert!(msg.contains("vm-disk-1") && msg.contains("untouched"), "force {force}: {msg}");
-            assert!(std::fs::read(&disk).unwrap() == before, "force {force}: the disk was written");
+            assert!(allocated(&disk) == before, "force {force}: the disk was written");
         }
     }
 
