@@ -1483,4366 +1483,4529 @@ pub async fn run() -> anyhow::Result<()> {
         tokio::spawn({
             let iscsi = iscsi.clone();
             async move {
-                if let Err(e) = iscsi.run(&reactor_for_iscsi).await {
-                    tracing::error!("iSCSI target error: {e}");
+                    if let Err(e) = iscsi.run(&reactor_for_iscsi).await {
+                        tracing::error!("iSCSI target error: {e}");
+                    }
+                }
+            });
+        }
+
+        // Start NVMe-oF/TCP target (only if we have a device to export)
+        #[cfg(feature = "nvmeof")]
+        if !cli.no_nvmeof {
+            if let Some(ref device) = export_device {
+                let listen_addr: std::net::SocketAddr = cli.nvmeof_addr.parse()
+                    .expect("invalid NVMe-oF listen address");
+                // Report a routable address in the discovery log page — a wildcard
+                // listen address is useless to a remote initiator (#26).
+                let advertised_addr = config.management
+                    .advertised_host()
+                    .and_then(|h| format!("{h}:{}", listen_addr.port()).parse().ok());
+                let nvmeof_config = target::nvmeof::NvmeofConfig {
+                    listen_addr,
+                    nqn: cli.nvmeof_nqn.clone(),
+                    advertised_addr,
+                    ..Default::default()
+                };
+                let mut nvmeof = target::nvmeof::NvmeofTarget::new(nvmeof_config);
+                // Namespace n is the nth drive in the configuration, from 1. That
+                // ordering is the whole contract an initiator has for telling the
+                // drives apart, so it is logged rather than left to be inferred.
+                if !config.nvmeof.as_ref().map(|n| n.export_drives).unwrap_or(true) {
+                    // The drives are this engine's storage pool, not what it
+                    // serves. Publishing them raw beside the volume exports would
+                    // hand every initiator an unmanaged second writer into slabs
+                    // the engine allocates from.
+                    tracing::info!(
+                        "NVMe-oF: not publishing {} drive(s) as raw namespaces \
+                         (nvmeof.export_drives = false); volume exports only",
+                        raw_drive_namespaces.len().max(1),
+                    );
+                } else if raw_drive_namespaces.is_empty() {
+                    nvmeof.add_namespace(1, device.clone());
+                } else {
+                    for (i, drive) in raw_drive_namespaces.iter().enumerate() {
+                        let nsid = i as u32 + 1;
+                        tracing::info!(
+                            "NVMe-oF namespace {nsid}: {} ({} bytes)",
+                            device_paths.get(i).map(|d| d.as_str()).unwrap_or("?"),
+                            drive.capacity_bytes(),
+                        );
+                        nvmeof.add_namespace(nsid, drive.clone());
+                    }
+                }
+                // Before the exports, because a template is a fact about a
+                // volume and an export is a decision about one.
+                mgmt::api::fstemplates::adopt_slab_templates(&state).await;
+                match mgmt::forge::serve(&state, &reactor, Arc::new(nvmeof)).await {
+                    Ok(()) => mgmt::forge::mark_configured(&state).await,
+                    Err(e) => tracing::error!("NVMe-oF target not started on {listen_addr}: {e}"),
+                }
+            } else {
+                // No device of its own to export: the forge this node keeps, if
+                // it is one (#272). The daemon is an appliance's: off unless kept.
+                mgmt::forge::restore(&state, None).await;
+            }
+        }
+
+        // Phase 5: the serving surface (#60).
+        //
+        // `docs/layering.md` puts this in layer 2 — what it takes to serve volumes
+        // to something — so the stock binary mounts it rather than leaving each
+        // profile to remember. A consumer that runs against a RouterOS node and an
+        // x86 one can then rely on `/serve/v1` being there instead of probing for
+        // it.
+        //
+        // Built here, after the targets, for two reasons: the reactor pool it runs
+        // per-export portals on exists by now, and so does the shared iSCSI target
+        // it reports LUN counts from. The management API is started after it, so
+        // the router sees the context rather than racing it.
+        // A build without NVMe-oF still has to answer "which interface do the
+        // per-export portals bind?", and the answer is the same one it would have
+        // been — the range is allocated the same way whichever transport wires it.
+        #[cfg(feature = "nvmeof")]
+        let nvmeof_bind = cli.nvmeof_addr.clone();
+        #[cfg(not(feature = "nvmeof"))]
+        let nvmeof_bind = "0.0.0.0:4420".to_string();
+        #[cfg(feature = "iscsi")]
+        let iscsi_bind = cli.iscsi_addr.clone();
+        #[cfg(not(feature = "iscsi"))]
+        let iscsi_bind = "0.0.0.0:3260".to_string();
+
+        start_serving(&config, &state, &iscsi_bind, &nvmeof_bind, &reactor).await;
+
+        // Phase 6: Start management API. Last, so the router it builds sees
+        // everything above it.
+        tokio::spawn({
+            let state = state.clone();
+            async move {
+                if let Err(e) = mgmt::start_management_server(state).await {
+                    tracing::error!("Management API error: {e}");
                 }
             }
         });
-    }
 
-    // Start NVMe-oF/TCP target (only if we have a device to export)
-    #[cfg(feature = "nvmeof")]
-    if !cli.no_nvmeof {
-        if let Some(ref device) = export_device {
-            let listen_addr: std::net::SocketAddr = cli.nvmeof_addr.parse()
-                .expect("invalid NVMe-oF listen address");
-            // Report a routable address in the discovery log page — a wildcard
-            // listen address is useless to a remote initiator (#26).
-            let advertised_addr = config.management
-                .advertised_host()
-                .and_then(|h| format!("{h}:{}", listen_addr.port()).parse().ok());
-            let nvmeof_config = target::nvmeof::NvmeofConfig {
-                listen_addr,
-                nqn: cli.nvmeof_nqn.clone(),
-                advertised_addr,
-                ..Default::default()
-            };
-            let mut nvmeof = target::nvmeof::NvmeofTarget::new(nvmeof_config);
-            // Namespace n is the nth drive in the configuration, from 1. That
-            // ordering is the whole contract an initiator has for telling the
-            // drives apart, so it is logged rather than left to be inferred.
-            if !config.nvmeof.as_ref().map(|n| n.export_drives).unwrap_or(true) {
-                // The drives are this engine's storage pool, not what it
-                // serves. Publishing them raw beside the volume exports would
-                // hand every initiator an unmanaged second writer into slabs
-                // the engine allocates from.
-                tracing::info!(
-                    "NVMe-oF: not publishing {} drive(s) as raw namespaces \
-                     (nvmeof.export_drives = false); volume exports only",
-                    raw_drive_namespaces.len().max(1),
-                );
-            } else if raw_drive_namespaces.is_empty() {
-                nvmeof.add_namespace(1, device.clone());
-            } else {
-                for (i, drive) in raw_drive_namespaces.iter().enumerate() {
-                    let nsid = i as u32 + 1;
-                    tracing::info!(
-                        "NVMe-oF namespace {nsid}: {} ({} bytes)",
-                        device_paths.get(i).map(|d| d.as_str()).unwrap_or("?"),
-                        drive.capacity_bytes(),
-                    );
-                    nvmeof.add_namespace(nsid, drive.clone());
-                }
+        if export_device.is_some() {
+            tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");
+        } else {
+            tracing::info!("No device to export — LUNs can be added via REST API POST /api/v1/luns");
+            tracing::info!("Management API running on {}, press Ctrl+C to stop", config.management.listen_addr);
+        }
+
+        // SIGINT (Ctrl+C) and SIGTERM (systemctl stop) both shut down gracefully.
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! {
+                r = tokio::signal::ctrl_c() => r?,
+                _ = sigterm.recv() => {},
             }
-            // Before the exports, because a template is a fact about a
-            // volume and an export is a decision about one.
-            mgmt::api::fstemplates::adopt_slab_templates(&state).await;
-            match mgmt::forge::serve(&state, &reactor, Arc::new(nvmeof)).await {
-                Ok(()) => mgmt::forge::mark_configured(&state).await,
-                Err(e) => tracing::error!("NVMe-oF target not started on {listen_addr}: {e}"),
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Shutting down...");
+
+        // **Kernel devices first, and signalled before anything is waited on.**
+        //
+        // A ublk export's queue threads sit in `io_uring_enter` waiting for work.
+        // Nothing here used to tell them to stop, so the process exited with the
+        // devices still up: the threads stayed in the kernel, and a thread stuck
+        // in the kernel cannot be reaped. forge carried a defunct process in its
+        // unit's cgroup for four days, and *every* restart after it ended in
+        // "failed mode" because systemd found something it could not kill (#105).
+        //
+        // The lock is bounded too, for the same reason the flush below is: a
+        // claim in flight holds this map, and a stop that waits on a lock is a
+        // stop that does not happen.
+        let ublk = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            state.ublk_exports.lock(),
+        )
+        .await
+        {
+            Ok(mut mgr) => {
+                let wait = mgr.shutdown_all();
+                if !wait.is_empty() {
+                    tracing::info!("stopping {} ublk export(s)", wait.len());
+                }
+                wait
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ublk exports not signalled: something still holds the export map. \
+                     Their devices stay up and their threads with them."
+                );
+                mgmt::ublk_export::ShutdownWait::none()
+            }
+        };
+
+        // Bounded, because a stop that waits on a lock is a stop that does not
+        // happen.
+        //
+        // This took the volume manager's mutex and flushed under it. Any task
+        // holding that lock — a compose, a reconciler pass, a claim — holds it
+        // against the shutdown too, so `systemctl stop` sat for its full timeout
+        // and systemd escalated to SIGKILL. A process killed there leaves its
+        // io_uring and ublk teardown unrun, and a thread stuck in the kernel
+        // cannot be reaped: forge carried an unreapable process in the unit's
+        // cgroup for four days, and *every* restart after it ended in "failed
+        // mode" because systemd found something it could not kill.
+        //
+        // Ten seconds is enough for a flush and short enough to be a stop. What
+        // is lost by giving up is nothing that is not recoverable: each slab
+        // keeps its own copy of the volume record, which is what a node reads at
+        // boot and what adoption rebuilds from.
+        //
+        // Run alongside the ublk teardown rather than after it: they contend for
+        // nothing, and a stop's budget is the sum of what it does in series. The
+        // whole of this is ~13 s worst case, comfortably inside the unit's
+        // `TimeoutStopSec` — which is the number that decides whether systemd
+        // sends SIGKILL into the middle of a device teardown.
+        let flush = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let vm = state.volume_manager.lock().await;
+            vm.persist().await;
+        });
+        let ublk_count = ublk.len();
+        let (flushed, stuck) = tokio::join!(flush, ublk.settle(std::time::Duration::from_secs(10)));
+        match flushed {
+            Ok(()) => tracing::info!("volume metadata flushed"),
+            Err(_) => tracing::warn!(
+                "volume metadata not flushed within 10s — something still holds the manager. \
+                 Each slab's own copy stands, which is what adoption reads."
+            ),
+        }
+        if stuck.is_empty() {
+            if ublk_count > 0 {
+                tracing::info!("{ublk_count} ublk export(s) stopped");
             }
         } else {
-            // No device of its own to export: the forge this node keeps, if
-            // it is one (#272). The daemon is an appliance's: off unless kept.
-            mgmt::forge::restore(&state, None).await;
-        }
-    }
-
-    // Phase 5: the serving surface (#60).
-    //
-    // `docs/layering.md` puts this in layer 2 — what it takes to serve volumes
-    // to something — so the stock binary mounts it rather than leaving each
-    // profile to remember. A consumer that runs against a RouterOS node and an
-    // x86 one can then rely on `/serve/v1` being there instead of probing for
-    // it.
-    //
-    // Built here, after the targets, for two reasons: the reactor pool it runs
-    // per-export portals on exists by now, and so does the shared iSCSI target
-    // it reports LUN counts from. The management API is started after it, so
-    // the router sees the context rather than racing it.
-    // A build without NVMe-oF still has to answer "which interface do the
-    // per-export portals bind?", and the answer is the same one it would have
-    // been — the range is allocated the same way whichever transport wires it.
-    #[cfg(feature = "nvmeof")]
-    let nvmeof_bind = cli.nvmeof_addr.clone();
-    #[cfg(not(feature = "nvmeof"))]
-    let nvmeof_bind = "0.0.0.0:4420".to_string();
-    #[cfg(feature = "iscsi")]
-    let iscsi_bind = cli.iscsi_addr.clone();
-    #[cfg(not(feature = "iscsi"))]
-    let iscsi_bind = "0.0.0.0:3260".to_string();
-
-    start_serving(&config, &state, &iscsi_bind, &nvmeof_bind, &reactor).await;
-
-    // Phase 6: Start management API. Last, so the router it builds sees
-    // everything above it.
-    tokio::spawn({
-        let state = state.clone();
-        async move {
-            if let Err(e) = mgmt::start_management_server(state).await {
-                tracing::error!("Management API error: {e}");
-            }
-        }
-    });
-
-    if export_device.is_some() {
-        tracing::info!("StormBlock ready, waiting for connections (Ctrl+C to stop)");
-    } else {
-        tracing::info!("No device to export — LUNs can be added via REST API POST /api/v1/luns");
-        tracing::info!("Management API running on {}, press Ctrl+C to stop", config.management.listen_addr);
-    }
-
-    // SIGINT (Ctrl+C) and SIGTERM (systemctl stop) both shut down gracefully.
-    #[cfg(unix)]
-    {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            r = tokio::signal::ctrl_c() => r?,
-            _ = sigterm.recv() => {},
-        }
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Shutting down...");
-
-    // **Kernel devices first, and signalled before anything is waited on.**
-    //
-    // A ublk export's queue threads sit in `io_uring_enter` waiting for work.
-    // Nothing here used to tell them to stop, so the process exited with the
-    // devices still up: the threads stayed in the kernel, and a thread stuck
-    // in the kernel cannot be reaped. forge carried a defunct process in its
-    // unit's cgroup for four days, and *every* restart after it ended in
-    // "failed mode" because systemd found something it could not kill (#105).
-    //
-    // The lock is bounded too, for the same reason the flush below is: a
-    // claim in flight holds this map, and a stop that waits on a lock is a
-    // stop that does not happen.
-    let ublk = match tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        state.ublk_exports.lock(),
-    )
-    .await
-    {
-        Ok(mut mgr) => {
-            let wait = mgr.shutdown_all();
-            if !wait.is_empty() {
-                tracing::info!("stopping {} ublk export(s)", wait.len());
-            }
-            wait
-        }
-        Err(_) => {
+            // Named, because this is the log line that says why the next restart
+            // ends in failed mode.
             tracing::warn!(
-                "ublk exports not signalled: something still holds the export map. \
-                 Their devices stay up and their threads with them."
+                "ublk teardown unfinished after 10s for {} — exiting anyway; \
+                 a thread of this process may be left in the kernel",
+                stuck.join(", ")
             );
-            mgmt::ublk_export::ShutdownWait::none()
         }
-    };
-
-    // Bounded, because a stop that waits on a lock is a stop that does not
-    // happen.
-    //
-    // This took the volume manager's mutex and flushed under it. Any task
-    // holding that lock — a compose, a reconciler pass, a claim — holds it
-    // against the shutdown too, so `systemctl stop` sat for its full timeout
-    // and systemd escalated to SIGKILL. A process killed there leaves its
-    // io_uring and ublk teardown unrun, and a thread stuck in the kernel
-    // cannot be reaped: forge carried an unreapable process in the unit's
-    // cgroup for four days, and *every* restart after it ended in "failed
-    // mode" because systemd found something it could not kill.
-    //
-    // Ten seconds is enough for a flush and short enough to be a stop. What
-    // is lost by giving up is nothing that is not recoverable: each slab
-    // keeps its own copy of the volume record, which is what a node reads at
-    // boot and what adoption rebuilds from.
-    //
-    // Run alongside the ublk teardown rather than after it: they contend for
-    // nothing, and a stop's budget is the sum of what it does in series. The
-    // whole of this is ~13 s worst case, comfortably inside the unit's
-    // `TimeoutStopSec` — which is the number that decides whether systemd
-    // sends SIGKILL into the middle of a device teardown.
-    let flush = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let vm = state.volume_manager.lock().await;
-        vm.persist().await;
-    });
-    let ublk_count = ublk.len();
-    let (flushed, stuck) = tokio::join!(flush, ublk.settle(std::time::Duration::from_secs(10)));
-    match flushed {
-        Ok(()) => tracing::info!("volume metadata flushed"),
-        Err(_) => tracing::warn!(
-            "volume metadata not flushed within 10s — something still holds the manager. \
-             Each slab's own copy stands, which is what adoption reads."
-        ),
-    }
-    if stuck.is_empty() {
-        if ublk_count > 0 {
-            tracing::info!("{ublk_count} ublk export(s) stopped");
+        #[cfg(feature = "cluster")]
+        if let Some(ref _cluster_mgr) = state.cluster {
+            tracing::info!("Cluster shutdown initiated");
         }
-    } else {
-        // Named, because this is the log line that says why the next restart
-        // ends in failed mode.
-        tracing::warn!(
-            "ublk teardown unfinished after 10s for {} — exiting anyway; \
-             a thread of this process may be left in the kernel",
-            stuck.join(", ")
-        );
-    }
-    #[cfg(feature = "cluster")]
-    if let Some(ref _cluster_mgr) = state.cluster {
-        tracing::info!("Cluster shutdown initiated");
-    }
-    drop(reactor);
+        drop(reactor);
 
-    Ok(())
-}
+        Ok(())
+    }
 
-/// Wait for ublk export threads to finish their teardown, up to `budget`.
-///
-/// `JoinHandle::join` has no deadline, and a teardown that wedges in the
-/// kernel would hold the whole stop open until systemd sends SIGKILL — which
-/// is what leaves a thread stuck and a process that cannot be reaped (#105).
-/// So poll, and leave: the process is exiting, and a thread that is not going
-/// to finish is not going to finish because we waited longer.
-///
-/// Returns how many were still running when the budget ran out.
-// Every caller is behind `cfg(target_os = "linux")` — ublk is a Linux
-// interface — so a macOS build has none.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn join_ublk_threads<T>(
-    threads: Vec<std::thread::JoinHandle<T>>,
-    budget: std::time::Duration,
-) -> usize {
-    let deadline = std::time::Instant::now() + budget;
-    let mut pending = threads;
-    loop {
-        let (done, still): (Vec<_>, Vec<_>) = pending.into_iter().partition(|t| t.is_finished());
-        for t in done {
-            let _ = t.join();
+    /// Wait for ublk export threads to finish their teardown, up to `budget`.
+    ///
+    /// `JoinHandle::join` has no deadline, and a teardown that wedges in the
+    /// kernel would hold the whole stop open until systemd sends SIGKILL — which
+    /// is what leaves a thread stuck and a process that cannot be reaped (#105).
+    /// So poll, and leave: the process is exiting, and a thread that is not going
+    /// to finish is not going to finish because we waited longer.
+    ///
+    /// Returns how many were still running when the budget ran out.
+    // Every caller is behind `cfg(target_os = "linux")` — ublk is a Linux
+    // interface — so a macOS build has none.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn join_ublk_threads<T>(
+        threads: Vec<std::thread::JoinHandle<T>>,
+        budget: std::time::Duration,
+    ) -> usize {
+        let deadline = std::time::Instant::now() + budget;
+        let mut pending = threads;
+        loop {
+            let (done, still): (Vec<_>, Vec<_>) = pending.into_iter().partition(|t| t.is_finished());
+            for t in done {
+                let _ = t.join();
+            }
+            if still.is_empty() {
+                return 0;
+            }
+            if std::time::Instant::now() >= deadline {
+                return still.len();
+            }
+            pending = still;
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        if still.is_empty() {
-            return 0;
-        }
-        if std::time::Instant::now() >= deadline {
-            return still.len();
-        }
-        pending = still;
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-}
 
-fn parse_tier(s: &str) -> Result<StorageTier, String> {
-    match s.to_lowercase().as_str() {
-        "hot" => Ok(StorageTier::Hot),
-        "warm" => Ok(StorageTier::Warm),
-        "cool" => Ok(StorageTier::Cool),
-        "cold" => Ok(StorageTier::Cold),
-        _ => Err(format!("unknown tier '{s}' (use hot, warm, cool, cold)")),
+    fn parse_tier(s: &str) -> Result<StorageTier, String> {
+        match s.to_lowercase().as_str() {
+            "hot" => Ok(StorageTier::Hot),
+            "warm" => Ok(StorageTier::Warm),
+            "cool" => Ok(StorageTier::Cool),
+            "cold" => Ok(StorageTier::Cold),
+            _ => Err(format!("unknown tier '{s}' (use hot, warm, cool, cold)")),
+        }
     }
-}
 
-async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
-    match action {
-        SlabAction::Format { device, tier, role, metadata_bytes } => {
-            let tier = parse_tier(tier)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let role = SlabRole::parse(role)
-                .ok_or_else(|| anyhow::anyhow!("unknown slab role '{role}': system or data"))?;
-            // Formatting is destructive, and a data slab is the one thing on
-            // the node nothing can mint again (#88).
-            if let Some(what) = data_slab_on(device).await? {
-                if role != SlabRole::Data {
-                    anyhow::bail!(
-                        "refusing to format {device}: {what}. Pass --role data if you mean to \
-                         replace it"
-                    );
+    async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {
+        match action {
+            SlabAction::Format { device, tier, role, metadata_bytes } => {
+                let tier = parse_tier(tier)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let role = SlabRole::parse(role)
+                    .ok_or_else(|| anyhow::anyhow!("unknown slab role '{role}': system or data"))?;
+                // Formatting is destructive, and a data slab is the one thing on
+                // the node nothing can mint again (#88).
+                if let Some(what) = data_slab_on(device).await? {
+                    if role != SlabRole::Data {
+                        anyhow::bail!(
+                            "refusing to format {device}: {what}. Pass --role data if you mean to \
+                             replace it"
+                        );
+                    }
+                }
+                let dev = (
+                    open_storage(device).await?
+                );
+                // Every slab carries its own volume records, whatever its role,
+                // and how much room that takes scales with the slots it can hand
+                // out — leave it at none and every write to it is acknowledged and
+                // lost at the next restart.
+                //
+                // This reserved a region for `data` alone, and the reasoning was
+                // sound as far as it went: a data slab has to outlive whatever
+                // formatted it. But `image build` gives *both* roles a region, so
+                // a disk formatted here and a disk the image builder laid down
+                // were not the same kind of thing. A system slab formatted by this
+                // command could not say what was on it: `slab volumes` answered
+                // "keeps no volume metadata", the initramfs boot probe could not
+                // verify the volume the loader entry names, and the fallback the
+                // bounded shutdown flush leans on — each slab keeps its own copy,
+                // which is what adoption reads — did not exist for it.
+                //
+                // `--metadata-bytes 0` is the door out for a slab that
+                // deliberately keeps no record of itself.
+                let capacity = dev.capacity_bytes();
+                let meta = metadata_bytes.unwrap_or_else(|| {
+                    crate::drive::slab::auto_metadata_bytes(capacity, SLAB_SLOT_SIZE)
+                });
+                let opts = crate::drive::slab::SlabFormat::new(SLAB_SLOT_SIZE, tier)
+                    .with_role(role)
+                    .with_metadata(meta);
+                let slab = Slab::format_with(dev, opts).await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("Slab formatted: {}", slab.slab_id());
+                println!("  format: {}", slab.format_version());
+                println!("  role: {}", slab.role());
+                println!("  tier: {}", slab.tier());
+                // Said out loud, because "keeps no volume metadata" from
+                // `slab volumes` later is otherwise the first anyone hears of it.
+                println!(
+                    "  own record: {}",
+                    if slab.has_metadata_region() {
+                        crate::mgmt::config::human_size(slab.metadata_capacity())
+                    } else {
+                        "none — this slab cannot say what is on it".to_string()
+                    }
+                );
+                println!("  slot size: {} bytes", slab.slot_size());
+                println!("  total slots: {}", slab.total_slots());
+                println!("  capacity: {}", crate::mgmt::config::human_size(
+                    slab.total_slots() * slab.slot_size()));
+            }
+            SlabAction::Grow { device } => {
+                // `open` creates a missing path; a typo must not become a file.
+                if !std::path::Path::new(device).exists() {
+                    anyhow::bail!("{device} does not exist");
+                }
+                let dev: Arc<dyn BlockDevice> =
+                    open_storage(device).await?;
+                match crate::image::local::grow_data_half(dev).await? {
+                    Some((was, now)) => println!(
+                        "{device}: data slab grew from {was} to {now} slots (+{})",
+                        crate::mgmt::config::human_size((now - was) * SLAB_SLOT_SIZE)
+                    ),
+                    None => println!("{device}: nothing to grow into"),
                 }
             }
-            let dev = (
-                open_storage(device).await?
-            );
-            // Every slab carries its own volume records, whatever its role,
-            // and how much room that takes scales with the slots it can hand
-            // out — leave it at none and every write to it is acknowledged and
-            // lost at the next restart.
-            //
-            // This reserved a region for `data` alone, and the reasoning was
-            // sound as far as it went: a data slab has to outlive whatever
-            // formatted it. But `image build` gives *both* roles a region, so
-            // a disk formatted here and a disk the image builder laid down
-            // were not the same kind of thing. A system slab formatted by this
-            // command could not say what was on it: `slab volumes` answered
-            // "keeps no volume metadata", the initramfs boot probe could not
-            // verify the volume the loader entry names, and the fallback the
-            // bounded shutdown flush leans on — each slab keeps its own copy,
-            // which is what adoption reads — did not exist for it.
-            //
-            // `--metadata-bytes 0` is the door out for a slab that
-            // deliberately keeps no record of itself.
-            let capacity = dev.capacity_bytes();
-            let meta = metadata_bytes.unwrap_or_else(|| {
-                crate::drive::slab::auto_metadata_bytes(capacity, SLAB_SLOT_SIZE)
-            });
-            let opts = crate::drive::slab::SlabFormat::new(SLAB_SLOT_SIZE, tier)
-                .with_role(role)
-                .with_metadata(meta);
-            let slab = Slab::format_with(dev, opts).await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("Slab formatted: {}", slab.slab_id());
-            println!("  format: {}", slab.format_version());
-            println!("  role: {}", slab.role());
-            println!("  tier: {}", slab.tier());
-            // Said out loud, because "keeps no volume metadata" from
-            // `slab volumes` later is otherwise the first anyone hears of it.
-            println!(
-                "  own record: {}",
-                if slab.has_metadata_region() {
-                    crate::mgmt::config::human_size(slab.metadata_capacity())
-                } else {
-                    "none — this slab cannot say what is on it".to_string()
-                }
-            );
-            println!("  slot size: {} bytes", slab.slot_size());
-            println!("  total slots: {}", slab.total_slots());
-            println!("  capacity: {}", crate::mgmt::config::human_size(
-                slab.total_slots() * slab.slot_size()));
-        }
-        SlabAction::Grow { device } => {
-            // `open` creates a missing path; a typo must not become a file.
-            if !std::path::Path::new(device).exists() {
-                anyhow::bail!("{device} does not exist");
-            }
-            let dev: Arc<dyn BlockDevice> =
-                open_storage(device).await?;
-            match crate::image::local::grow_data_half(dev).await? {
-                Some((was, now)) => println!(
-                    "{device}: data slab grew from {was} to {now} slots (+{})",
-                    crate::mgmt::config::human_size((now - was) * SLAB_SLOT_SIZE)
-                ),
-                None => println!("{device}: nothing to grow into"),
-            }
-        }
-        SlabAction::List { devices } => {
-            for device in devices {
-                match inspect_storage(device).await {
-                    Ok(dev) => {
-                        match Slab::open(dev.clone()).await {
-                            Ok(slab) => {
-                                println!("{}: slab {} (role={}, tier={}, {} slots, {} free)",
-                                    device, slab.slab_id(), slab.role(), slab.tier(),
-                                    slab.total_slots(), slab.free_slots());
-                            }
-                            // A disk whose *partitions* are slabs is a slab
-                            // disk, and saying "not a slab" about it is
-                            // wrong in the way that matters most.
-                            //
-                            // The boot path has walked the GPT for a long
-                            // time — it is how `rd.stormblock.slab=/dev/sda`
-                            // works on a composed disk — and this did not, so
-                            // the same drive gave two answers depending on
-                            // which asked. The node that flowed over onto its
-                            // own disk then read `/dev/sda is not a slab` from
-                            // its own probe and went back to the appliance,
-                            // with 4399 migrated extents sitting unused on the
-                            // drive underneath it.
-                            Err(e) => {
-                                let found =
-                                    crate::drive::discover::slabs_in_partitions(&dev).await;
-                                if found.is_empty() {
-                                    println!("{}: not a slab ({e})", device);
-                                } else {
-                                    for f in found {
-                                        println!(
-                                            "{}: slab {} (role={}, tier={}, {} slots, {} free, \
-                                             in {})",
-                                            device, f.slab.slab_id(), f.slab.role(),
-                                            f.slab.tier(), f.slab.total_slots(),
-                                            f.slab.free_slots(), f.label,
-                                        );
+            SlabAction::List { devices } => {
+                for device in devices {
+                    match inspect_storage(device).await {
+                        Ok(dev) => {
+                            match Slab::open(dev.clone()).await {
+                                Ok(slab) => {
+                                    println!("{}: slab {} (role={}, tier={}, {} slots, {} free)",
+                                        device, slab.slab_id(), slab.role(), slab.tier(),
+                                        slab.total_slots(), slab.free_slots());
+                                }
+                                // A disk whose *partitions* are slabs is a slab
+                                // disk, and saying "not a slab" about it is
+                                // wrong in the way that matters most.
+                                //
+                                // The boot path has walked the GPT for a long
+                                // time — it is how `rd.stormblock.slab=/dev/sda`
+                                // works on a composed disk — and this did not, so
+                                // the same drive gave two answers depending on
+                                // which asked. The node that flowed over onto its
+                                // own disk then read `/dev/sda is not a slab` from
+                                // its own probe and went back to the appliance,
+                                // with 4399 migrated extents sitting unused on the
+                                // drive underneath it.
+                                Err(e) => {
+                                    let found =
+                                        crate::drive::discover::slabs_in_partitions(&dev).await;
+                                    if found.is_empty() {
+                                        println!("{}: not a slab ({e})", device);
+                                    } else {
+                                        for f in found {
+                                            println!(
+                                                "{}: slab {} (role={}, tier={}, {} slots, {} free, \
+                                                 in {})",
+                                                device, f.slab.slab_id(), f.slab.role(),
+                                                f.slab.tier(), f.slab.total_slots(),
+                                                f.slab.free_slots(), f.label,
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        println!("{}: cannot open ({e})", device);
+                        Err(e) => {
+                            println!("{}: cannot open ({e})", device);
+                        }
                     }
                 }
             }
-        }
-        SlabAction::Info { device } => {
-            let dev = (
-                inspect_storage(device).await?
-            );
-            let slab = Slab::open(dev).await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("Slab {}", slab.slab_id());
-            println!("  format: {}", slab.format_version());
-            println!("  role: {}", slab.role());
-            println!("  tier: {}", slab.tier());
-            println!("  slot size: {} bytes", slab.slot_size());
-            println!("  total slots: {}", slab.total_slots());
-            println!("  free slots: {}", slab.free_slots());
-            println!("  allocated slots: {}", slab.allocated_slots());
-            println!("  capacity: {}", crate::mgmt::config::human_size(
-                slab.total_slots() * slab.slot_size()));
-            println!("  free: {}", crate::mgmt::config::human_size(
-                slab.free_slots() * slab.slot_size()));
-        }
-        SlabAction::Cat { slabs, volume, out, path } => {
-            match volume_file_on_slabs(&slabs, &volume, &path).await {
-                Ok(bytes) => {
-                    if let Err(e) = std::fs::write(&out, &bytes) {
-                        println!("cannot write {out}: {e}");
+            SlabAction::Info { device } => {
+                let dev = (
+                    inspect_storage(device).await?
+                );
+                let slab = Slab::open(dev).await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("Slab {}", slab.slab_id());
+                println!("  format: {}", slab.format_version());
+                println!("  role: {}", slab.role());
+                println!("  tier: {}", slab.tier());
+                println!("  slot size: {} bytes", slab.slot_size());
+                println!("  total slots: {}", slab.total_slots());
+                println!("  free slots: {}", slab.free_slots());
+                println!("  allocated slots: {}", slab.allocated_slots());
+                println!("  capacity: {}", crate::mgmt::config::human_size(
+                    slab.total_slots() * slab.slot_size()));
+                println!("  free: {}", crate::mgmt::config::human_size(
+                    slab.free_slots() * slab.slot_size()));
+            }
+            SlabAction::Cat { slabs, volume, out, path } => {
+                match volume_file_on_slabs(&slabs, &volume, &path).await {
+                    Ok(bytes) => {
+                        if let Err(e) = std::fs::write(&out, &bytes) {
+                            println!("cannot write {out}: {e}");
+                            std::process::exit(2);
+                        }
+                        println!("{path} of {volume}: {} byte(s) to {out}", bytes.len());
+                    }
+                    Err((code, why)) => {
+                        println!("{why}");
+                        std::process::exit(code);
+                    }
+                }
+            }
+            SlabAction::Holds { local, image } => {
+                use crate::image::local::{release_held, ReleaseHeld};
+                let open = |p: String| async move {
+                    inspect_storage(&p).await.map_err(|e| anyhow::anyhow!("cannot open {p}: {e}"))
+                };
+                let (l, i) = match (open(local.clone()).await, open(image.clone()).await) {
+                    (Ok(l), Ok(i)) => (l, i),
+                    (Err(e), _) | (_, Err(e)) => {
+                        println!("cannot say: {e}");
                         std::process::exit(2);
                     }
-                    println!("{path} of {volume}: {} byte(s) to {out}", bytes.len());
-                }
-                Err((code, why)) => {
-                    println!("{why}");
-                    std::process::exit(code);
-                }
-            }
-        }
-        SlabAction::Holds { local, image } => {
-            use crate::image::local::{release_held, ReleaseHeld};
-            let open = |p: String| async move {
-                inspect_storage(&p).await.map_err(|e| anyhow::anyhow!("cannot open {p}: {e}"))
-            };
-            let (l, i) = match (open(local.clone()).await, open(image.clone()).await) {
-                (Ok(l), Ok(i)) => (l, i),
-                (Err(e), _) | (_, Err(e)) => {
-                    println!("cannot say: {e}");
-                    std::process::exit(2);
-                }
-            };
-            match release_held(&l, &i).await {
-                ReleaseHeld::Held { goldens } => {
-                    println!("{local} holds the release on {image}: all {goldens} golden(s)");
-                }
-                ReleaseHeld::NotHeld { goldens, missing } => {
-                    println!(
-                        "{local} does not hold the release on {image}: {missing} of {goldens} \
-                         golden(s) missing"
-                    );
-                    std::process::exit(1);
-                }
-                ReleaseHeld::Unfinished { goldens, slabs } => {
-                    // The same release, cut short: a power cut during the
-                    // install's flow-over. Booting the drive finishes it; an
-                    // install over it would destroy what the node wrote
-                    // since (#258, 0 of 300 objects on 11.63).
-                    println!(
-                        "{local} holds the release on {image}, unfinished: all {goldens} golden(s) \
-                         are recorded, and extents are still placed on {slabs} slab(s) not on this \
-                         drive — booting it finishes the flow-over from a fresh clone"
-                    );
-                    std::process::exit(3);
-                }
-                ReleaseHeld::CannotSay(why) => {
-                    println!("cannot say whether {local} holds the release on {image}: {why}");
-                    std::process::exit(2);
-                }
-            }
-        }
-        SlabAction::Upgrade { device } => {
-            let dev = crate::drive::open_path(&device, false).await?;
-            let mut slab = Slab::open(dev).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
-            if slab.format_version() == crate::drive::slab::SLAB_VERSION_2 {
-                println!("{device}: slab {} is already format 2", slab.slab_id());
-                return Ok(());
-            }
-            let record = slab
-                .read_metadata()
-                .await
-                .map_err(|e| anyhow::anyhow!("{device}: {e}"))?
-                .ok_or_else(|| anyhow::anyhow!("{device}: slab {} keeps no volume metadata", slab.slab_id()))?;
-            let doc = crate::volume::MetadataStore::decode(&record)?;
-            let entries = crate::volume::metav2::document_entries(&doc);
-            slab.upgrade_to_v2(&record, entries).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
-            println!("{device}: slab {} migrated to format 2 ({} volume(s))", slab.slab_id(), doc.volumes.len());
-        }
-        SlabAction::Volumes { devices } => {
-            for device in devices {
-                // Read-only, and never created: this is the command something
-                // runs on a machine it knows nothing about, before deciding
-                // whether that machine's disk is one to touch. The ordinary
-                // door creates what it cannot find, so `slab volumes /dev/sdz`
-                // made a zero-byte /dev/sdz and called it "not a slab" — true,
-                // and not what happened.
-                let dev = match inspect_storage(device).await {
-                    Ok(d) => d,
-                    Err(e) => {
-                        println!("{device}: cannot open ({e})");
-                        continue;
-                    }
                 };
-                // A whole disk whose partitions are slabs answers for all
-                // of them. `rd.stormblock.slab=/dev/sda` names a disk, and
-                // this is the command the boot probe runs to decide whether
-                // that disk can boot the node — so it has to look where the
-                // boot itself looks. It did not, and a node that had just
-                // migrated 4399 extents onto its own drive read `/dev/sda is
-                // not a slab` from its own probe and went back to the
-                // appliance, leaving every one of them unused.
-                let slabs: Vec<Slab> = match Slab::open(dev.clone()).await {
-                    Ok(s) => vec![s],
-                    Err(e) => {
-                        let found =
-                            crate::drive::discover::slabs_in_partitions(&dev).await;
-                        if found.is_empty() {
-                            println!("{device}: not a slab ({e})");
+                match release_held(&l, &i).await {
+                    ReleaseHeld::Held { goldens } => {
+                        println!("{local} holds the release on {image}: all {goldens} golden(s)");
+                    }
+                    ReleaseHeld::NotHeld { goldens, missing } => {
+                        println!(
+                            "{local} does not hold the release on {image}: {missing} of {goldens} \
+                             golden(s) missing"
+                        );
+                        std::process::exit(1);
+                    }
+                    ReleaseHeld::Unfinished { goldens, slabs } => {
+                        // The same release, cut short: a power cut during the
+                        // install's flow-over. Booting the drive finishes it; an
+                        // install over it would destroy what the node wrote
+                        // since (#258, 0 of 300 objects on 11.63).
+                        println!(
+                            "{local} holds the release on {image}, unfinished: all {goldens} golden(s) \
+                             are recorded, and extents are still placed on {slabs} slab(s) not on this \
+                             drive — booting it finishes the flow-over from a fresh clone"
+                        );
+                        std::process::exit(3);
+                    }
+                    ReleaseHeld::CannotSay(why) => {
+                        println!("cannot say whether {local} holds the release on {image}: {why}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            SlabAction::Upgrade { device } => {
+                let dev = crate::drive::open_path(&device, false).await?;
+                let mut slab = Slab::open(dev).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
+                if slab.format_version() == crate::drive::slab::SLAB_VERSION_2 {
+                    println!("{device}: slab {} is already format 2", slab.slab_id());
+                    return Ok(());
+                }
+                let record = slab
+                    .read_metadata()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{device}: {e}"))?
+                    .ok_or_else(|| anyhow::anyhow!("{device}: slab {} keeps no volume metadata", slab.slab_id()))?;
+                let doc = crate::volume::MetadataStore::decode(&record)?;
+                let entries = crate::volume::metav2::document_entries(&doc);
+                slab.upgrade_to_v2(&record, entries).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
+                println!("{device}: slab {} migrated to format 2 ({} volume(s))", slab.slab_id(), doc.volumes.len());
+            }
+            SlabAction::Volumes { devices } => {
+                for device in devices {
+                    // Read-only, and never created: this is the command something
+                    // runs on a machine it knows nothing about, before deciding
+                    // whether that machine's disk is one to touch. The ordinary
+                    // door creates what it cannot find, so `slab volumes /dev/sdz`
+                    // made a zero-byte /dev/sdz and called it "not a slab" — true,
+                    // and not what happened.
+                    let dev = match inspect_storage(device).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            println!("{device}: cannot open ({e})");
                             continue;
                         }
-                        found.into_iter().map(|f| f.slab).collect()
+                    };
+                    // A whole disk whose partitions are slabs answers for all
+                    // of them. `rd.stormblock.slab=/dev/sda` names a disk, and
+                    // this is the command the boot probe runs to decide whether
+                    // that disk can boot the node — so it has to look where the
+                    // boot itself looks. It did not, and a node that had just
+                    // migrated 4399 extents onto its own drive read `/dev/sda is
+                    // not a slab` from its own probe and went back to the
+                    // appliance, leaving every one of them unused.
+                    let slabs: Vec<Slab> = match Slab::open(dev.clone()).await {
+                        Ok(s) => vec![s],
+                        Err(e) => {
+                            let found =
+                                crate::drive::discover::slabs_in_partitions(&dev).await;
+                            if found.is_empty() {
+                                println!("{device}: not a slab ({e})");
+                                continue;
+                            }
+                            found.into_iter().map(|f| f.slab).collect()
+                        }
+                    };
+                    for slab in slabs {
+                    // Said apart from "no volumes", because they are different
+                    // facts: one is a slab that cannot answer and the other is a
+                    // slab that answered "nothing". A caller that treats them the
+                    // same boots off an empty disk.
+                    if !slab.has_metadata_region() {
+                        println!("{device}: slab {} keeps no volume metadata", slab.slab_id());
+                        continue;
                     }
-                };
-                for slab in slabs {
-                // Said apart from "no volumes", because they are different
-                // facts: one is a slab that cannot answer and the other is a
-                // slab that answered "nothing". A caller that treats them the
-                // same boots off an empty disk.
-                if !slab.has_metadata_region() {
-                    println!("{device}: slab {} keeps no volume metadata", slab.slab_id());
-                    continue;
-                }
-                let meta = match crate::volume::metav2::read_slab(&slab).await {
-                    Ok(Some(m)) => m,
-                    Ok(None) => {
-                        // The region is there and no copy has ever been
-                        // written: this slab is *empty*, which is a different
-                        // answer from "cannot say" and the one #108 was filed
-                        // about — a slab formatted and never filled boots
-                        // nothing, and reads as fine to everything that only
-                        // asks whether a slab is there.
+                    let meta = match crate::volume::metav2::read_slab(&slab).await {
+                        Ok(Some(m)) => m,
+                        Ok(None) => {
+                            // The region is there and no copy has ever been
+                            // written: this slab is *empty*, which is a different
+                            // answer from "cannot say" and the one #108 was filed
+                            // about — a slab formatted and never filled boots
+                            // nothing, and reads as fine to everything that only
+                            // asks whether a slab is there.
+                            println!("{device}: slab {} holds no volumes", slab.slab_id());
+                            continue;
+                        }
+                        Err(e) => {
+                            println!("{device}: slab {} metadata unreadable ({e})", slab.slab_id());
+                            continue;
+                        }
+                    };
+                    let mut volumes = meta.volumes;
+                    volumes.sort_by(|a, b| a.name.cmp(&b.name));
+                    if volumes.is_empty() {
                         println!("{device}: slab {} holds no volumes", slab.slab_id());
                         continue;
                     }
-                    Err(e) => {
-                        println!("{device}: slab {} metadata unreadable ({e})", slab.slab_id());
-                        continue;
-                    }
-                };
-                let mut volumes = meta.volumes;
-                volumes.sort_by(|a, b| a.name.cmp(&b.name));
-                if volumes.is_empty() {
-                    println!("{device}: slab {} holds no volumes", slab.slab_id());
-                    continue;
-                }
-                for v in &volumes {
-                    // Slots, not extents: an extent *is* a slot, and slots are
-                    // what `slab list` counts, so the two numbers on a screen
-                    // are in the same unit.
-                    let slots = v.extents.len() as u64;
-                    let mut notes = String::new();
-                    if v.sealed {
-                        notes.push_str(", sealed");
-                    }
-                    if v.template {
-                        notes.push_str(", template");
-                    }
-                    if let Some(parent) = v.parent {
-                        notes.push_str(&format!(", clone of {parent}"));
-                    }
-                    println!(
-                        "{device}: volume {} ({}, {} slots{}) {}",
-                        v.name,
-                        crate::mgmt::config::human_size(v.virtual_size),
-                        slots,
-                        notes,
-                        v.id
-                    );
-                }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------- pallets
-
-/// Open the drives a pallet command works over. A file is a drive here — same
-/// GPT, same partitions — which is what makes an image assembled on a laptop
-/// and a disk in a node the same thing.
-async fn pallet_store(drives: &[String]) -> anyhow::Result<crate::pallet::PalletStore> {
-    let mut store = crate::pallet::PalletStore::default();
-    for path in drives {
-        let dev = crate::drive::open_one_drive(path)
-            .await
-            .map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-        store.add_drive(path.clone(), Arc::from(dev));
-    }
-    Ok(store)
-}
-
-fn parse_member_spec(s: &str) -> anyhow::Result<(String, String, String, String)> {
-    let parts: Vec<&str> = s.split(':').collect();
-    match parts.as_slice() {
-        [name, role, kind, path] => Ok((
-            name.to_string(),
-            role.to_string(),
-            kind.to_string(),
-            path.to_string(),
-        )),
-        [name, role, path] => Ok((
-            name.to_string(),
-            role.to_string(),
-            role.to_string(),
-            path.to_string(),
-        )),
-        _ => Err(anyhow::anyhow!(
-            "member must be name:role:kind:path (or name:role:path), got '{s}'"
-        )),
-    }
-}
-
-fn print_pallet(p: &crate::pallet::PalletLocation) {
-    let where_ = if p.is_whole_drive() {
-        format!("{} (whole drive, no GPT)", p.drive)
-    } else {
-        format!("{}#{}", p.drive, p.entry_index)
-    };
-    let state = if p.is_readable() { "" } else { " UNREADABLE" };
-    println!(
-        "{}  {} v{} [{}] {:<10} pri={} tries={} {}{}{}{}",
-        p.id,
-        p.name,
-        p.version,
-        p.kind,
-        where_,
-        p.attributes.priority,
-        p.attributes.tries_left,
-        if p.attributes.successful { "good " } else { "" },
-        if p.attributes.sealed { "sealed " } else { "" },
-        if p.attributes.read_only { "ro" } else { "rw" },
-        state,
-    );
-}
-
-/// Pallet errors carry their own explanation; this just changes the type.
-fn pe<T>(r: Result<T, crate::pallet::PalletError>) -> anyhow::Result<T> {
-    r.map_err(|err| anyhow::anyhow!("{err}"))
-}
-
-// ----------------------------------------------------------------- images
-
-async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
-    use std::path::{Path, PathBuf};
-    use crate::image::{ImageBuilder, ImageFormat, ImageSpec};
-
-    let ie = |e: crate::image::ImageError| anyhow::anyhow!("{e}");
-    let resolve = |out: &str, want: &Option<String>| -> anyhow::Result<ImageFormat> {
-        match want {
-            Some(f) => ImageFormat::parse(f)
-                .ok_or_else(|| anyhow::anyhow!("unknown image format '{f}'")),
-            None => Ok(ImageFormat::from_path(Path::new(out)).unwrap_or(ImageFormat::Raw)),
-        }
-    };
-
-    match action {
-        ImageAction::Formats => {
-            for f in ImageFormat::ALL {
-                println!("{:<6} .{}", f.as_str(), f.extension());
-            }
-        }
-        ImageAction::LayNode { disk, lba, boot_area, system } => {
-            if let Some(what) = data_slab_on(disk).await? {
-                anyhow::bail!("refusing to lay a node layout on {disk}: {what}");
-            }
-            let dev: Arc<dyn BlockDevice> =
-                open_storage(disk).await?;
-            let mut layout = crate::image::local::LocalLayout::for_drive(dev.capacity_bytes());
-            layout.lba = lba.or_else(|| crate::drive::filedev::logical_sector_size(disk));
-            if let Some(b) = boot_area {
-                layout.boot_bytes = crate::mgmt::config::parse_size(b).map_err(|e| anyhow::anyhow!(e))?;
-            }
-            if let Some(sz) = system {
-                layout.system_bytes = crate::mgmt::config::parse_size(sz).map_err(|e| anyhow::anyhow!(e))?;
-            }
-            let laid = crate::image::local::lay_node_slabs(dev, &layout).await.map_err(ie)?;
-            println!(
-                "{disk}: {}-byte table, boot area {}, system slab {} ({}), data slab {} ({}){}",
-                laid.lba,
-                crate::mgmt::config::human_size(layout.boot_bytes),
-                laid.system.slab_id(),
-                crate::mgmt::config::human_size(laid.system_bytes),
-                laid.data.slab_id(),
-                crate::mgmt::config::human_size(laid.data_bytes),
-                match &laid.bulk {
-                    Some(b) => format!(", bulk slab {} ({}, 8 MiB extents)", b.slab_id(), crate::mgmt::config::human_size(laid.bulk_bytes)),
-                    None => String::new(),
-                },
-            );
-        }
-        ImageAction::LocalBoot { disk, from } => {
-            run_local_boot(disk, from).await?;
-        }
-        ImageAction::Build { spec, out, format, keep_raw, engine } => {
-            let format = resolve(out, format)?;
-            let spec_dir = Path::new(spec).parent().map(PathBuf::from);
-            let image_spec = ImageSpec::load(spec).await.map_err(ie)?;
-            // Paths in a spec are relative to the spec, which is what anyone
-            // editing one expects.
-            if let Some(dir) = spec_dir.filter(|d| !d.as_os_str().is_empty()) {
-                std::env::set_current_dir(&dir)
-                    .map_err(|e| anyhow::anyhow!("cannot enter {}: {e}", dir.display()))?;
-            }
-            let out_path = PathBuf::from(out);
-            let raw_path = if format == ImageFormat::Raw {
-                out_path.clone()
-            } else {
-                out_path.with_extension("raw.img")
-            };
-
-            let report = ImageBuilder::new(image_spec)
-                .engine(engine.clone())
-                .build(&raw_path)
-                .await
-                .map_err(ie)?;
-            println!(
-                "{} — {} in {} partitions, GPT in {}-byte LBAs",
-                raw_path.display(),
-                crate::mgmt::config::human_size(report.size_bytes),
-                report.partitions.len(),
-                report.block_size
-            );
-            // Firmware parses the GPT using the *media's* block size, and does
-            // not probe for it the way `Gpt::read` does. A 512-LBA image
-            // written to a 4Kn drive puts the header where firmware will not
-            // look, and the symptom is a disk that simply does not boot — so
-            // say which one was written whenever the image is meant to.
-            if report.block_size == 512 && report.partitions.iter().any(|p| p.kind == "esp") {
-                println!(
-                    "  note: bootable image at 512-byte LBAs. A 4Kn target needs \
-                     `block_size = 4096` in the spec, or firmware will not find the GPT."
-                );
-            }
-            for p in &report.partitions {
-                println!(
-                    "  {:<14} {:>10} at {:<12} {}",
-                    p.kind,
-                    crate::mgmt::config::human_size(p.size_bytes),
-                    crate::mgmt::config::human_size(p.start_bytes),
-                    match (&p.pallet_id, p.verified) {
-                        (Some(id), Some(true)) => format!("{} v{} verified", id, p.pallet_version.unwrap_or(0)),
-                        (Some(id), _) => format!("{id} NOT VERIFIED"),
-                        _ => p.name.clone(),
-                    }
-                );
-                for v in &p.volumes {
-                    println!(
-                        "      {:<12} {:>10} {:>10} mapped  {}",
-                        v.name,
-                        crate::mgmt::config::human_size(v.size_bytes),
-                        crate::mgmt::config::human_size(v.allocated_bytes),
-                        match v.clone_of {
-                            Some(g) => format!("clone of {g}"),
-                            None => "golden".to_string(),
+                    for v in &volumes {
+                        // Slots, not extents: an extent *is* a slot, and slots are
+                        // what `slab list` counts, so the two numbers on a screen
+                        // are in the same unit.
+                        let slots = v.extents.len() as u64;
+                        let mut notes = String::new();
+                        if v.sealed {
+                            notes.push_str(", sealed");
                         }
-                    );
-                }
-            }
-
-            if format != ImageFormat::Raw {
-                crate::image::formats::convert(&raw_path, &out_path, format)
-                    .await
-                    .map_err(ie)?;
-                let len = tokio::fs::metadata(&out_path).await?.len();
-                println!(
-                    "{} — {} ({})",
-                    out_path.display(),
-                    crate::mgmt::config::human_size(len),
-                    format
-                );
-                if !keep_raw {
-                    tokio::fs::remove_file(&raw_path).await.ok();
-                }
-            }
-        }
-        ImageAction::Convert { input, out, format, include_slab } => {
-            let format = resolve(out, format)?;
-            if format == ImageFormat::Iso {
-                crate::image::iso::from_image_with(
-                    Path::new(input),
-                    Path::new(out),
-                    crate::image::iso::IsoOptions { include_slab: *include_slab },
-                )
-                .await
-                .map_err(ie)?;
-            } else {
-                crate::image::formats::convert(Path::new(input), Path::new(out), format)
-                    .await
-                    .map_err(ie)?;
-            }
-            let len = tokio::fs::metadata(out).await?.len();
-            println!("{out} — {} ({format})", crate::mgmt::config::human_size(len));
-        }
-        ImageAction::Inspect { image } => {
-            let path = Path::new(image);
-            let gpt = crate::image::build::table_of(path).await.map_err(ie)?;
-            println!(
-                "{image}: GPT in {}-byte LBAs{}",
-                gpt.block_size,
-                if gpt.recovered_from_backup { " (read from the backup)" } else { "" }
-            );
-            for (i, e) in gpt.partitions() {
-                println!(
-                    "  {i:>3}  {:<20} {:>10} at {:<12} {}",
-                    e.name,
-                    crate::mgmt::config::human_size(e.size_bytes(gpt.block_size)),
-                    crate::mgmt::config::human_size(e.start_bytes(gpt.block_size)),
-                    if e.is_pallet() { "pallet" } else { "" }
-                );
-            }
-            for p in crate::image::build::pallets_in(path).await.map_err(ie)? {
-                println!(
-                    "  pallet {} {} v{} [{}] {} — {} member(s){}",
-                    p.id,
-                    p.name,
-                    p.version,
-                    p.kind,
-                    p.version_label,
-                    p.member_count,
-                    if p.is_readable() { "" } else { " UNREADABLE" }
-                );
-            }
-            for s in crate::image::build::slabs_in(path).await.map_err(ie)? {
-                println!(
-                    "  {} slab {} — {} slots of {}, {} free{}",
-                    s.role,
-                    s.name,
-                    s.total_slots,
-                    crate::mgmt::config::human_size(s.slot_size),
-                    s.free_slots,
-                    if s.self_describing { "" } else { " (keeps no volume metadata)" }
-                );
-                for v in &s.volumes {
-                    println!(
-                        "    volume {:<24} {:>10} {:>10} mapped  {}",
-                        v.name,
-                        crate::mgmt::config::human_size(v.size_bytes),
-                        crate::mgmt::config::human_size(v.allocated_bytes),
-                        v.id
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyhow::Result<()> {
-    use crate::pallet::format::{parse_pallet_kind, MemberExt};
-    use crate::pallet::manager::{PublishSpec, RecomposeSpec};
-    use crate::pallet::{PalletBrowser, PalletManager};
-
-    if drives.is_empty() {
-        anyhow::bail!("no drives given: pass --drive <path> at least once");
-    }
-    let store = pallet_store(drives).await?;
-    let mgr = PalletManager::new(store.clone());
-    let kind_of = |k: &Option<String>| k.as_deref().map(parse_pallet_kind);
-    let id_of = |s: &str| {
-        uuid::Uuid::parse_str(s).map_err(|_| anyhow::anyhow!("'{s}' is not a pallet UUID"))
-    };
-
-    match action {
-        PalletAction::InitGpt { drive, force } => {
-            let idx = pe(store.drive_index_of(drive))?;
-            pe(mgr.init_gpt(idx, *force).await)?;
-            println!("{drive}: GPT written (primary and backup)");
-        }
-        PalletAction::List { kind } => {
-            let kind = kind_of(kind);
-            let all = mgr.list().await;
-            let shown: Vec<_> =
-                all.iter().filter(|p| kind.is_none() || Some(p.kind) == kind).collect();
-            if shown.is_empty() {
-                println!("no pallets on {} drive(s)", drives.len());
-            }
-            for p in shown {
-                print_pallet(p);
-            }
-        }
-        PalletAction::Info { id } => {
-            let loc = pe(mgr.get(id_of(id)?).await)?;
-            print_pallet(&loc);
-            println!("  label: {}", loc.version_label);
-            println!(
-                "  partition: start {} bytes, size {}, used {}",
-                loc.start_bytes,
-                crate::mgmt::config::human_size(loc.size_bytes),
-                crate::mgmt::config::human_size(loc.used_bytes),
-            );
-            match mgr.store().open(&loc).await {
-                Ok(p) => {
-                    for m in p.members() {
+                        if v.template {
+                            notes.push_str(", template");
+                        }
+                        if let Some(parent) = v.parent {
+                            notes.push_str(&format!(", clone of {parent}"));
+                        }
                         println!(
-                            "  member {:<20} role={:<12} kind={:<10} {:>10}  {}",
-                            m.name(),
-                            m.role(),
-                            m.kind,
-                            crate::mgmt::config::human_size(m.byte_len),
-                            &m.digest_hex()[..16],
+                            "{device}: volume {} ({}, {} slots{}) {}",
+                            v.name,
+                            crate::mgmt::config::human_size(v.virtual_size),
+                            slots,
+                            notes,
+                            v.id
                         );
                     }
-                }
-                Err(err) => println!("  manifest unreadable: {err}"),
-            }
-        }
-        PalletAction::Status { kind } => {
-            let s = mgr.status(kind_of(kind)).await;
-            match &s.active {
-                Some(a) => {
-                    print!("active:    ");
-                    print_pallet(a);
-                }
-                None => println!("active:    none"),
-            }
-            for p in s.available.iter().filter(|p| Some(p.id) != s.active.as_ref().map(|a| a.id)) {
-                print!("available: ");
-                print_pallet(p);
-            }
-            for f in &s.failed {
-                print!("failed:    ");
-                print_pallet(&f.location);
-                println!("           {}", f.reason);
-            }
-        }
-        PalletAction::Chain { kind } => {
-            let browser = PalletBrowser::new(store.clone());
-            for (i, p) in browser.chain(kind_of(kind)).await.iter().enumerate() {
-                print!("{}. ", i + 1);
-                print_pallet(p);
-            }
-        }
-        PalletAction::Verify { id } => {
-            let targets = if id == "all" {
-                mgr.list().await.into_iter().map(|p| p.id).collect::<Vec<_>>()
-            } else {
-                vec![id_of(id)?]
-            };
-            let mut bad = 0;
-            for t in targets {
-                let r = pe(mgr.verify(t).await)?;
-                println!(
-                    "{} {} v{}: {}",
-                    r.id,
-                    r.name,
-                    r.version,
-                    if r.ok { "ok".to_string() } else { format!("FAILED — {}", r.reason.clone().unwrap_or_default()) }
-                );
-                for m in &r.members {
-                    println!(
-                        "    {:<20} {}",
-                        m.name,
-                        if m.ok { "ok".into() } else { format!("FAILED — {}", m.reason.clone().unwrap_or_default()) }
-                    );
-                }
-                if !r.ok {
-                    bad += 1;
+                    }
                 }
             }
-            if bad > 0 {
-                anyhow::bail!("{bad} pallet(s) failed verification");
-            }
         }
-        PalletAction::Publish { name, kind, label, members, drive, size, activate } => {
-            let mut spec = PublishSpec::new(name.clone(), parse_pallet_kind(kind));
-            spec.version_label = label.clone();
-            spec.activate = *activate;
-            if let Some(d) = drive {
-                spec.drive = Some(pe(store.drive_index_of(d))?);
-            }
-            if let Some(sz) = size {
-                spec.size_bytes = Some(parse_size(sz).map_err(|m| anyhow::anyhow!("{m}"))?);
-            }
-            for m in members {
-                let (name, role, kind, path) = parse_member_spec(m)?;
-                spec.members.push(pe(crate::pallet::manager::file_member(
-                    name,
-                    role,
-                    crate::pallet::parse_member_kind(&kind),
-                    path,
-                )
-                .await)?);
-            }
-            let loc = pe(mgr.publish(spec).await)?;
-            println!("published and verified:");
-            print_pallet(&loc);
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------- pallets
+
+    /// Open the drives a pallet command works over. A file is a drive here — same
+    /// GPT, same partitions — which is what makes an image assembled on a laptop
+    /// and a disk in a node the same thing.
+    async fn pallet_store(drives: &[String]) -> anyhow::Result<crate::pallet::PalletStore> {
+        let mut store = crate::pallet::PalletStore::default();
+        for path in drives {
+            let dev = crate::drive::open_one_drive(path)
+                .await
+                .map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+            store.add_drive(path.clone(), Arc::from(dev));
         }
-        PalletAction::Activate { id } => {
-            let loc = pe(mgr.activate(id_of(id)?).await)?;
-            print!("active: ");
-            print_pallet(&loc);
-        }
-        PalletAction::Successful { id } => {
-            let loc = pe(mgr.mark_successful(id_of(id)?).await)?;
-            print!("confirmed good: ");
-            print_pallet(&loc);
-        }
-        PalletAction::Rollback { kind } => {
-            let loc = pe(mgr.rollback(kind_of(kind)).await)?;
-            print!("rolled back to: ");
-            print_pallet(&loc);
-        }
-        PalletAction::Copy { id, to } => {
-            let dest = pe(store.drive_index_of(to))?;
-            let loc = pe(mgr.copy_pallet(id_of(id)?, dest).await)?;
-            print!("copied: ");
-            print_pallet(&loc);
-        }
-        PalletAction::Move { id, to } => {
-            let dest = pe(store.drive_index_of(to))?;
-            let loc = pe(mgr.move_pallet(id_of(id)?, dest).await)?;
-            print!("moved: ");
-            print_pallet(&loc);
-        }
-        PalletAction::AddMember { id, members, drive, activate } => {
-            let mut add = Vec::new();
-            for m in members {
-                let (name, role, kind, path) = parse_member_spec(m)?;
-                add.push(pe(crate::pallet::manager::file_member(
-                    name,
-                    role,
-                    crate::pallet::parse_member_kind(&kind),
-                    path,
-                )
-                .await)?);
-            }
-            let on = match drive {
-                Some(d) => Some(pe(store.drive_index_of(d))?),
-                None => None,
-            };
-            let loc = pe(mgr
-                .recompose(
-                    id_of(id)?,
-                    RecomposeSpec { add, drive: on, activate: *activate, ..Default::default() },
-                )
-                .await)?;
-            print!("new version: ");
-            print_pallet(&loc);
-            println!("(the previous version is untouched — prune it when you are ready)");
-        }
-        PalletAction::RemoveMember { id, members, drive, activate } => {
-            let on = match drive {
-                Some(d) => Some(pe(store.drive_index_of(d))?),
-                None => None,
-            };
-            let loc = pe(mgr
-                .recompose(
-                    id_of(id)?,
-                    RecomposeSpec {
-                        remove: members.clone(),
-                        drive: on,
-                        activate: *activate,
-                        ..Default::default()
-                    },
-                )
-                .await)?;
-            print!("new version: ");
-            print_pallet(&loc);
-        }
-        PalletAction::CopyMember { id, member, into } => {
-            let loc = pe(mgr.copy_member(id_of(id)?, member, id_of(into)?, false).await)?;
-            print!("destination: ");
-            print_pallet(&loc);
-            println!("(a new version of the destination; the source is unchanged)");
-        }
-        PalletAction::MoveMember { id, member, into } => {
-            let (dest, src) = pe(mgr.move_member(id_of(id)?, member, id_of(into)?, false).await)?;
-            print!("destination: ");
-            print_pallet(&dest);
-            print!("source:      ");
-            print_pallet(&src);
-            println!("(both are new versions; the originals are untouched)");
-        }
-        PalletAction::ReadOnly { id, value, force } => {
-            let loc = pe(mgr.set_read_only(id_of(id)?, *value, *force).await)?;
-            print_pallet(&loc);
-        }
-        PalletAction::Sealed { id, value } => {
-            let loc = pe(mgr.set_sealed(id_of(id)?, *value).await)?;
-            print_pallet(&loc);
-        }
-        PalletAction::Delete { id, force } => {
-            let loc = pe(mgr.delete(id_of(id)?, *force).await)?;
-            println!("removed {} ({} v{})", loc.id, loc.name, loc.version);
-        }
-        PalletAction::Prune { name, keep } => {
-            let removed = pe(mgr.prune(name, *keep).await)?;
-            for p in &removed {
-                println!("pruned {} ({} v{})", p.id, p.name, p.version);
-            }
-            println!("{} removed, keeping the newest {}", removed.len(), (*keep).max(2));
-        }
-        PalletAction::Convert { from, to, keep_source, reinit_source } => {
-            let (f, t) = (pe(store.drive_index_of(from))?, pe(store.drive_index_of(to))?);
-            let report = pe(mgr
-                .convert_drive(
-                    f,
-                    t,
-                    crate::pallet::ConvertOptions {
-                        remove_source: !*keep_source,
-                        init_destination: true,
-                        reinit_source: *reinit_source,
-                    },
-                )
-                .await)?;
-            println!("{} -> {}", report.source, report.destination);
-            for p in &report.converted {
-                print!("  converted: ");
-                print_pallet(p);
-            }
-            for (p, why) in &report.skipped {
-                print!("  SKIPPED:   ");
-                print_pallet(p);
-                println!("             {why}");
-            }
-            println!(
-                "{} converted, {} removed from the source{}",
-                report.converted.len(),
-                report.removed_from_source,
-                if report.source_reinitialized { ", source reinitialized" } else { "" }
-            );
-            if let Some(note) = &report.note {
-                println!("note: {note}");
-            }
-            if !report.skipped.is_empty() {
-                anyhow::bail!("{} pallet(s) did not convert", report.skipped.len());
-            }
-        }
-        PalletAction::Adopt { from, to } => {
-            let (f, t) = (pe(store.drive_index_of(from))?, pe(store.drive_index_of(to))?);
-            let loc = pe(mgr.adopt_whole_drive(f, t).await)?;
-            print!("adopted: ");
-            print_pallet(&loc);
-            println!("the source drive can now be subdivided: pallet init-gpt {from} --force");
+        Ok(store)
+    }
+
+    fn parse_member_spec(s: &str) -> anyhow::Result<(String, String, String, String)> {
+        let parts: Vec<&str> = s.split(':').collect();
+        match parts.as_slice() {
+            [name, role, kind, path] => Ok((
+                name.to_string(),
+                role.to_string(),
+                kind.to_string(),
+                path.to_string(),
+            )),
+            [name, role, path] => Ok((
+                name.to_string(),
+                role.to_string(),
+                role.to_string(),
+                path.to_string(),
+            )),
+            _ => Err(anyhow::anyhow!(
+                "member must be name:role:kind:path (or name:role:path), got '{s}'"
+            )),
         }
     }
-    Ok(())
-}
 
-#[cfg(feature = "iscsi")]
-async fn handle_boot_iscsi(
-    portal: &str,
-    port: u16,
-    iqn: &str,
-    layout_str: &str,
-    ublk: bool,
-) -> anyhow::Result<()> {
-    let layout = BootDiskLayout::parse(layout_str)
-        .map_err(|e| anyhow::anyhow!("layout parse error: {e}"))?;
-
-    println!("Boot-from-iSCSI: {}:{} target={}", portal, port, iqn);
-    println!("Partition layout:");
-    for part in &layout.partitions {
-        let size_str = if part.size == 0 { "rest".to_string() } else {
-            crate::mgmt::config::human_size(part.size)
+    fn print_pallet(p: &crate::pallet::PalletLocation) {
+        let where_ = if p.is_whole_drive() {
+            format!("{} (whole drive, no GPT)", p.drive)
+        } else {
+            format!("{}#{}", p.drive, p.entry_index)
         };
-        println!("  {} ({}) — {} at {}", part.name, part.fs_type, size_str, part.mount_point);
-    }
-
-    let mgr = IscsiBootManager::new();
-    let result = mgr.provision(portal, port, iqn, layout).await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    println!("\nBoot disk provisioned on slab {}", result.slab_id);
-    println!("Backing: iSCSI {}:{}/{}", portal, port, iqn);
-    println!("\nPartitions:");
-    for part in &result.partitions {
+        let state = if p.is_readable() { "" } else { " UNREADABLE" };
         println!(
-            "  {:6} {:>10}  {}  {} (vol={})",
-            part.name,
-            crate::mgmt::config::human_size(part.size),
-            part.fs_type,
-            part.mount_point,
-            part.volume_id,
+            "{}  {} v{} [{}] {:<10} pri={} tries={} {}{}{}{}",
+            p.id,
+            p.name,
+            p.version,
+            p.kind,
+            where_,
+            p.attributes.priority,
+            p.attributes.tries_left,
+            if p.attributes.successful { "good " } else { "" },
+            if p.attributes.sealed { "sealed " } else { "" },
+            if p.attributes.read_only { "ro" } else { "rw" },
+            state,
         );
     }
 
-    // Export partitions via ublk if requested (Linux only)
-    #[cfg(target_os = "linux")]
-    if ublk {
-        use crate::drive::ublk::UblkServer;
+    /// Pallet errors carry their own explanation; this just changes the type.
+    fn pe<T>(r: Result<T, crate::pallet::PalletError>) -> anyhow::Result<T> {
+        r.map_err(|err| anyhow::anyhow!("{err}"))
+    }
 
-        println!("\nStarting ublk export for {} partitions...", result.partitions.len());
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let mut ublk_threads = Vec::new();
+    // ----------------------------------------------------------------- images
 
-        for (i, part) in result.partitions.iter().enumerate() {
-            let server = UblkServer::new(part.handle.clone() as Arc<dyn BlockDevice>)
-                .with_dev_id(i as u32);
-            let rx = shutdown_rx.clone();
-            let name = part.name.clone();
-            // UblkServer::run() holds raw pointers (not Send), so run on a
-            // dedicated OS thread with its own tokio runtime.
-            let thread = std::thread::Builder::new()
-                .name(format!("ublk-boot-{i}"))
-                .spawn(move || {
-                    let rt = tokio::runtime::Runtime::new()
-                        .expect("failed to create ublk tokio runtime");
-                    rt.block_on(async move {
-                        match server.run(rx).await {
-                            Ok(()) => tracing::info!("ublk#{i} ({name}) stopped"),
-                            Err(e) => tracing::error!("ublk#{i} ({name}) error: {e}"),
+    async fn handle_image_command(action: &ImageAction) -> anyhow::Result<()> {
+        use std::path::{Path, PathBuf};
+        use crate::image::{ImageBuilder, ImageFormat, ImageSpec};
+
+        let ie = |e: crate::image::ImageError| anyhow::anyhow!("{e}");
+        let resolve = |out: &str, want: &Option<String>| -> anyhow::Result<ImageFormat> {
+            match want {
+                Some(f) => ImageFormat::parse(f)
+                    .ok_or_else(|| anyhow::anyhow!("unknown image format '{f}'")),
+                None => Ok(ImageFormat::from_path(Path::new(out)).unwrap_or(ImageFormat::Raw)),
+            }
+        };
+
+        match action {
+            ImageAction::Formats => {
+                for f in ImageFormat::ALL {
+                    println!("{:<6} .{}", f.as_str(), f.extension());
+                }
+            }
+            ImageAction::LayNode { disk, lba, boot_area, system } => {
+                if let Some(what) = data_slab_on(disk).await? {
+                    anyhow::bail!("refusing to lay a node layout on {disk}: {what}");
+                }
+                let dev: Arc<dyn BlockDevice> =
+                    open_storage(disk).await?;
+                let mut layout = crate::image::local::LocalLayout::for_drive(dev.capacity_bytes());
+                layout.lba = lba.or_else(|| crate::drive::filedev::logical_sector_size(disk));
+                if let Some(b) = boot_area {
+                    layout.boot_bytes = crate::mgmt::config::parse_size(b).map_err(|e| anyhow::anyhow!(e))?;
+                }
+                if let Some(sz) = system {
+                    layout.system_bytes = crate::mgmt::config::parse_size(sz).map_err(|e| anyhow::anyhow!(e))?;
+                }
+                let laid = crate::image::local::lay_node_slabs(dev, &layout).await.map_err(ie)?;
+                println!(
+                    "{disk}: {}-byte table, boot area {}, system slab {} ({}), data slab {} ({}){}",
+                    laid.lba,
+                    crate::mgmt::config::human_size(layout.boot_bytes),
+                    laid.system.slab_id(),
+                    crate::mgmt::config::human_size(laid.system_bytes),
+                    laid.data.slab_id(),
+                    crate::mgmt::config::human_size(laid.data_bytes),
+                    match &laid.bulk {
+                        Some(b) => format!(", bulk slab {} ({}, 8 MiB extents)", b.slab_id(), crate::mgmt::config::human_size(laid.bulk_bytes)),
+                        None => String::new(),
+                    },
+                );
+            }
+            ImageAction::LocalBoot { disk, from } => {
+                run_local_boot(disk, from).await?;
+            }
+            ImageAction::Build { spec, out, format, keep_raw, engine } => {
+                let format = resolve(out, format)?;
+                let spec_dir = Path::new(spec).parent().map(PathBuf::from);
+                let image_spec = ImageSpec::load(spec).await.map_err(ie)?;
+                // Paths in a spec are relative to the spec, which is what anyone
+                // editing one expects.
+                if let Some(dir) = spec_dir.filter(|d| !d.as_os_str().is_empty()) {
+                    std::env::set_current_dir(&dir)
+                        .map_err(|e| anyhow::anyhow!("cannot enter {}: {e}", dir.display()))?;
+                }
+                let out_path = PathBuf::from(out);
+                let raw_path = if format == ImageFormat::Raw {
+                    out_path.clone()
+                } else {
+                    out_path.with_extension("raw.img")
+                };
+
+                let report = ImageBuilder::new(image_spec)
+                    .engine(engine.clone())
+                    .build(&raw_path)
+                    .await
+                    .map_err(ie)?;
+                println!(
+                    "{} — {} in {} partitions, GPT in {}-byte LBAs",
+                    raw_path.display(),
+                    crate::mgmt::config::human_size(report.size_bytes),
+                    report.partitions.len(),
+                    report.block_size
+                );
+                // Firmware parses the GPT using the *media's* block size, and does
+                // not probe for it the way `Gpt::read` does. A 512-LBA image
+                // written to a 4Kn drive puts the header where firmware will not
+                // look, and the symptom is a disk that simply does not boot — so
+                // say which one was written whenever the image is meant to.
+                if report.block_size == 512 && report.partitions.iter().any(|p| p.kind == "esp") {
+                    println!(
+                        "  note: bootable image at 512-byte LBAs. A 4Kn target needs \
+                         `block_size = 4096` in the spec, or firmware will not find the GPT."
+                    );
+                }
+                for p in &report.partitions {
+                    println!(
+                        "  {:<14} {:>10} at {:<12} {}",
+                        p.kind,
+                        crate::mgmt::config::human_size(p.size_bytes),
+                        crate::mgmt::config::human_size(p.start_bytes),
+                        match (&p.pallet_id, p.verified) {
+                            (Some(id), Some(true)) => format!("{} v{} verified", id, p.pallet_version.unwrap_or(0)),
+                            (Some(id), _) => format!("{id} NOT VERIFIED"),
+                            _ => p.name.clone(),
                         }
-                    });
-                })
-                .expect("failed to spawn ublk thread");
-            ublk_threads.push(thread);
-            println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
-                crate::mgmt::config::human_size(part.size), part.fs_type);
+                    );
+                    for v in &p.volumes {
+                        println!(
+                            "      {:<12} {:>10} {:>10} mapped  {}",
+                            v.name,
+                            crate::mgmt::config::human_size(v.size_bytes),
+                            crate::mgmt::config::human_size(v.allocated_bytes),
+                            match v.clone_of {
+                                Some(g) => format!("clone of {g}"),
+                                None => "golden".to_string(),
+                            }
+                        );
+                    }
+                }
+
+                if format != ImageFormat::Raw {
+                    crate::image::formats::convert(&raw_path, &out_path, format)
+                        .await
+                        .map_err(ie)?;
+                    let len = tokio::fs::metadata(&out_path).await?.len();
+                    println!(
+                        "{} — {} ({})",
+                        out_path.display(),
+                        crate::mgmt::config::human_size(len),
+                        format
+                    );
+                    if !keep_raw {
+                        tokio::fs::remove_file(&raw_path).await.ok();
+                    }
+                }
+            }
+            ImageAction::Convert { input, out, format, include_slab } => {
+                let format = resolve(out, format)?;
+                if format == ImageFormat::Iso {
+                    crate::image::iso::from_image_with(
+                        Path::new(input),
+                        Path::new(out),
+                        crate::image::iso::IsoOptions { include_slab: *include_slab },
+                    )
+                    .await
+                    .map_err(ie)?;
+                } else {
+                    crate::image::formats::convert(Path::new(input), Path::new(out), format)
+                        .await
+                        .map_err(ie)?;
+                }
+                let len = tokio::fs::metadata(out).await?.len();
+                println!("{out} — {} ({format})", crate::mgmt::config::human_size(len));
+            }
+            ImageAction::Inspect { image } => {
+                let path = Path::new(image);
+                let gpt = crate::image::build::table_of(path).await.map_err(ie)?;
+                println!(
+                    "{image}: GPT in {}-byte LBAs{}",
+                    gpt.block_size,
+                    if gpt.recovered_from_backup { " (read from the backup)" } else { "" }
+                );
+                for (i, e) in gpt.partitions() {
+                    println!(
+                        "  {i:>3}  {:<20} {:>10} at {:<12} {}",
+                        e.name,
+                        crate::mgmt::config::human_size(e.size_bytes(gpt.block_size)),
+                        crate::mgmt::config::human_size(e.start_bytes(gpt.block_size)),
+                        if e.is_pallet() { "pallet" } else { "" }
+                    );
+                }
+                for p in crate::image::build::pallets_in(path).await.map_err(ie)? {
+                    println!(
+                        "  pallet {} {} v{} [{}] {} — {} member(s){}",
+                        p.id,
+                        p.name,
+                        p.version,
+                        p.kind,
+                        p.version_label,
+                        p.member_count,
+                        if p.is_readable() { "" } else { " UNREADABLE" }
+                    );
+                }
+                for s in crate::image::build::slabs_in(path).await.map_err(ie)? {
+                    println!(
+                        "  {} slab {} — {} slots of {}, {} free{}",
+                        s.role,
+                        s.name,
+                        s.total_slots,
+                        crate::mgmt::config::human_size(s.slot_size),
+                        s.free_slots,
+                        if s.self_describing { "" } else { " (keeps no volume metadata)" }
+                    );
+                    for v in &s.volumes {
+                        println!(
+                            "    volume {:<24} {:>10} {:>10} mapped  {}",
+                            v.name,
+                            crate::mgmt::config::human_size(v.size_bytes),
+                            crate::mgmt::config::human_size(v.allocated_bytes),
+                            v.id
+                        );
+                    }
+                }
+            }
         }
+        Ok(())
+    }
 
-        println!("\nublk devices ready. Press Ctrl+C to stop.");
-        tokio::signal::ctrl_c().await?;
-        println!("Shutting down...");
+    async fn handle_pallet_command(drives: &[String], action: &PalletAction) -> anyhow::Result<()> {
+        use crate::pallet::format::{parse_pallet_kind, MemberExt};
+        use crate::pallet::manager::{PublishSpec, RecomposeSpec};
+        use crate::pallet::{PalletBrowser, PalletManager};
 
-        // Signal all ublk servers to stop, and wait — bounded (#105).
-        let _ = shutdown_tx.send(true);
-        let stuck = join_ublk_threads(ublk_threads, std::time::Duration::from_secs(10));
-        if stuck > 0 {
-            eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
+        if drives.is_empty() {
+            anyhow::bail!("no drives given: pass --drive <path> at least once");
         }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    if ublk {
-        eprintln!("Error: --ublk requires Linux 6.0+ with ublk_drv module loaded");
-        std::process::exit(1);
-    }
-
-    if !ublk {
-        println!("\nVolumes ready for ublk export.");
-        println!("On Linux, each volume can be exported as /dev/ublkbN:");
-        for (i, part) in result.partitions.iter().enumerate() {
-            println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
-                crate::mgmt::config::human_size(part.size), part.fs_type);
-        }
-
-        // Keep running until Ctrl+C
-        println!("\nPress Ctrl+C to stop");
-        tokio::signal::ctrl_c().await?;
-        println!("Shutting down...");
-    }
-
-    // Disconnect iSCSI
-    if let Err(e) = result.iscsi_device.disconnect().await {
-        tracing::warn!("iSCSI disconnect: {e}");
-    }
-
-    Ok(())
-}
-
-/// boot.toml handoff dropped into the initramfs by `BootManager::initramfs_config`.
-#[derive(serde::Deserialize)]
-struct BootToml {
-    boot: BootTomlSection,
-}
-
-#[derive(serde::Deserialize)]
-struct BootTomlSection {
-    volume: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    server: Option<String>,
-}
-
-/// Resolve a volume selector (UUID or name) against restored metadata.
-/// The volume the engine keeps its own state in.
-///
-/// A well-known name rather than a flag: every node that has one wants it used,
-/// and a node that has not got one carries on without. Never exported and never
-/// mounted — the engine reads it in-process with the ext4 library.
-const STATE_VOLUME: &str = "stormblock-state";
-
-async fn resolve_boot_volume(
-    mgr: &VolumeManager,
-    selector: &str,
-) -> anyhow::Result<crate::volume::VolumeId> {
-    use crate::volume::VolumeId;
-    if let Ok(u) = uuid::Uuid::parse_str(selector) {
-        let id = VolumeId(u);
-        if mgr.get_volume(&id).is_some() {
-            return Ok(id);
-        }
-    }
-    for (id, name, _, _) in mgr.list_volumes().await {
-        if name == selector {
-            return Ok(id);
-        }
-    }
-    anyhow::bail!(
-        "volume '{selector}' not found in slab metadata (have: {})",
-        mgr.list_volumes()
-            .await
-            .iter()
-            .map(|(id, name, _, _)| format!("{name}={}", id.0))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-/// Open the slabs, find the volume metadata, and restore what it describes.
-///
-/// Shared by every path that attaches to an existing node's storage —
-/// `boot-local` at boot and `adopt-ublk` at handover — because they need
-/// exactly the same three things and disagreeing about any of them would mean
-/// the two halves of a handover had different ideas of what the node holds.
-
-/// Whether `path` carries a data slab, and what names it.
-///
-/// Asked of the *device*, never of the path: the answer has to hold when an
-/// operator hands over `/dev/sda` and the data slab is `/dev/sda6`, and when
-/// they hand over `/dev/sda6` itself. Two independent records say so — the
-/// GPT type GUID of the partition, which can be read without opening
-/// anything, and the role byte in the slab's own header, which is what a
-/// whole-drive slab with no partition table has instead (#88).
-///
-/// `Ok(None)` means nothing on the device claims to be one. A device that
-/// cannot be read at all is not an error here: the caller is about to open it
-/// properly and will fail there with a better message.
-async fn data_slab_on(path: &str) -> anyhow::Result<Option<String>> {
-    use crate::drive::partition::PartitionDevice;
-
-    if !std::path::Path::new(path).exists() {
-        return Ok(None);
-    }
-    let dev: Arc<dyn BlockDevice> =
-        match inspect_storage(path).await {
-            Ok(d) => d,
-            Err(_) => return Ok(None),
+        let store = pallet_store(drives).await?;
+        let mgr = PalletManager::new(store.clone());
+        let kind_of = |k: &Option<String>| k.as_deref().map(parse_pallet_kind);
+        let id_of = |s: &str| {
+            uuid::Uuid::parse_str(s).map_err(|_| anyhow::anyhow!("'{s}' is not a pallet UUID"))
         };
 
-    // The device itself, when it is a bare slab rather than a partitioned
-    // drive.
-    if let Ok(slab) = Slab::open(dev.clone()).await {
-        if slab.is_data() {
-            return Ok(Some(format!("{path} is itself a data slab ({})", slab.slab_id().0)));
-        }
-        return Ok(None);
-    }
-
-    let Ok(gpt) = crate::pallet::gpt::Gpt::read(&dev).await else {
-        return Ok(None);
-    };
-    let lba = gpt.block_size as u64;
-    for (i, e) in gpt.entries.iter().enumerate() {
-        if e.first_lba == 0 || e.last_lba < e.first_lba {
-            continue;
-        }
-        let label = if e.name.is_empty() {
-            format!("partition {}", i + 1)
-        } else {
-            format!("partition {} ({})", i + 1, e.name)
-        };
-        if e.type_guid == crate::image::type_guid::SLAB_DATA {
-            return Ok(Some(format!("{path} {label} is typed as a stormblock data slab")));
-        }
-        // A slab whose GPT entry predates the data type still knows what it
-        // is: the header carries the role too, and the two are written
-        // together.
-        let start = e.first_lba * lba;
-        let len = (e.last_lba + 1 - e.first_lba) * lba;
-        let Ok(part) = PartitionDevice::new(dev.clone(), start, len) else { continue };
-        if let Ok(slab) = Slab::open(Arc::new(part)).await {
-            if slab.is_data() {
-                return Ok(Some(format!("{path} {label} holds a data slab")));
+        match action {
+            PalletAction::InitGpt { drive, force } => {
+                let idx = pe(store.drive_index_of(drive))?;
+                pe(mgr.init_gpt(idx, *force).await)?;
+                println!("{drive}: GPT written (primary and backup)");
+            }
+            PalletAction::List { kind } => {
+                let kind = kind_of(kind);
+                let all = mgr.list().await;
+                let shown: Vec<_> =
+                    all.iter().filter(|p| kind.is_none() || Some(p.kind) == kind).collect();
+                if shown.is_empty() {
+                    println!("no pallets on {} drive(s)", drives.len());
+                }
+                for p in shown {
+                    print_pallet(p);
+                }
+            }
+            PalletAction::Info { id } => {
+                let loc = pe(mgr.get(id_of(id)?).await)?;
+                print_pallet(&loc);
+                println!("  label: {}", loc.version_label);
+                println!(
+                    "  partition: start {} bytes, size {}, used {}",
+                    loc.start_bytes,
+                    crate::mgmt::config::human_size(loc.size_bytes),
+                    crate::mgmt::config::human_size(loc.used_bytes),
+                );
+                match mgr.store().open(&loc).await {
+                    Ok(p) => {
+                        for m in p.members() {
+                            println!(
+                                "  member {:<20} role={:<12} kind={:<10} {:>10}  {}",
+                                m.name(),
+                                m.role(),
+                                m.kind,
+                                crate::mgmt::config::human_size(m.byte_len),
+                                &m.digest_hex()[..16],
+                            );
+                        }
+                    }
+                    Err(err) => println!("  manifest unreadable: {err}"),
+                }
+            }
+            PalletAction::Status { kind } => {
+                let s = mgr.status(kind_of(kind)).await;
+                match &s.active {
+                    Some(a) => {
+                        print!("active:    ");
+                        print_pallet(a);
+                    }
+                    None => println!("active:    none"),
+                }
+                for p in s.available.iter().filter(|p| Some(p.id) != s.active.as_ref().map(|a| a.id)) {
+                    print!("available: ");
+                    print_pallet(p);
+                }
+                for f in &s.failed {
+                    print!("failed:    ");
+                    print_pallet(&f.location);
+                    println!("           {}", f.reason);
+                }
+            }
+            PalletAction::Chain { kind } => {
+                let browser = PalletBrowser::new(store.clone());
+                for (i, p) in browser.chain(kind_of(kind)).await.iter().enumerate() {
+                    print!("{}. ", i + 1);
+                    print_pallet(p);
+                }
+            }
+            PalletAction::Verify { id } => {
+                let targets = if id == "all" {
+                    mgr.list().await.into_iter().map(|p| p.id).collect::<Vec<_>>()
+                } else {
+                    vec![id_of(id)?]
+                };
+                let mut bad = 0;
+                for t in targets {
+                    let r = pe(mgr.verify(t).await)?;
+                    println!(
+                        "{} {} v{}: {}",
+                        r.id,
+                        r.name,
+                        r.version,
+                        if r.ok { "ok".to_string() } else { format!("FAILED — {}", r.reason.clone().unwrap_or_default()) }
+                    );
+                    for m in &r.members {
+                        println!(
+                            "    {:<20} {}",
+                            m.name,
+                            if m.ok { "ok".into() } else { format!("FAILED — {}", m.reason.clone().unwrap_or_default()) }
+                        );
+                    }
+                    if !r.ok {
+                        bad += 1;
+                    }
+                }
+                if bad > 0 {
+                    anyhow::bail!("{bad} pallet(s) failed verification");
+                }
+            }
+            PalletAction::Publish { name, kind, label, members, drive, size, activate } => {
+                let mut spec = PublishSpec::new(name.clone(), parse_pallet_kind(kind));
+                spec.version_label = label.clone();
+                spec.activate = *activate;
+                if let Some(d) = drive {
+                    spec.drive = Some(pe(store.drive_index_of(d))?);
+                }
+                if let Some(sz) = size {
+                    spec.size_bytes = Some(parse_size(sz).map_err(|m| anyhow::anyhow!("{m}"))?);
+                }
+                for m in members {
+                    let (name, role, kind, path) = parse_member_spec(m)?;
+                    spec.members.push(pe(crate::pallet::manager::file_member(
+                        name,
+                        role,
+                        crate::pallet::parse_member_kind(&kind),
+                        path,
+                    )
+                    .await)?);
+                }
+                let loc = pe(mgr.publish(spec).await)?;
+                println!("published and verified:");
+                print_pallet(&loc);
+            }
+            PalletAction::Activate { id } => {
+                let loc = pe(mgr.activate(id_of(id)?).await)?;
+                print!("active: ");
+                print_pallet(&loc);
+            }
+            PalletAction::Successful { id } => {
+                let loc = pe(mgr.mark_successful(id_of(id)?).await)?;
+                print!("confirmed good: ");
+                print_pallet(&loc);
+            }
+            PalletAction::Rollback { kind } => {
+                let loc = pe(mgr.rollback(kind_of(kind)).await)?;
+                print!("rolled back to: ");
+                print_pallet(&loc);
+            }
+            PalletAction::Copy { id, to } => {
+                let dest = pe(store.drive_index_of(to))?;
+                let loc = pe(mgr.copy_pallet(id_of(id)?, dest).await)?;
+                print!("copied: ");
+                print_pallet(&loc);
+            }
+            PalletAction::Move { id, to } => {
+                let dest = pe(store.drive_index_of(to))?;
+                let loc = pe(mgr.move_pallet(id_of(id)?, dest).await)?;
+                print!("moved: ");
+                print_pallet(&loc);
+            }
+            PalletAction::AddMember { id, members, drive, activate } => {
+                let mut add = Vec::new();
+                for m in members {
+                    let (name, role, kind, path) = parse_member_spec(m)?;
+                    add.push(pe(crate::pallet::manager::file_member(
+                        name,
+                        role,
+                        crate::pallet::parse_member_kind(&kind),
+                        path,
+                    )
+                    .await)?);
+                }
+                let on = match drive {
+                    Some(d) => Some(pe(store.drive_index_of(d))?),
+                    None => None,
+                };
+                let loc = pe(mgr
+                    .recompose(
+                        id_of(id)?,
+                        RecomposeSpec { add, drive: on, activate: *activate, ..Default::default() },
+                    )
+                    .await)?;
+                print!("new version: ");
+                print_pallet(&loc);
+                println!("(the previous version is untouched — prune it when you are ready)");
+            }
+            PalletAction::RemoveMember { id, members, drive, activate } => {
+                let on = match drive {
+                    Some(d) => Some(pe(store.drive_index_of(d))?),
+                    None => None,
+                };
+                let loc = pe(mgr
+                    .recompose(
+                        id_of(id)?,
+                        RecomposeSpec {
+                            remove: members.clone(),
+                            drive: on,
+                            activate: *activate,
+                            ..Default::default()
+                        },
+                    )
+                    .await)?;
+                print!("new version: ");
+                print_pallet(&loc);
+            }
+            PalletAction::CopyMember { id, member, into } => {
+                let loc = pe(mgr.copy_member(id_of(id)?, member, id_of(into)?, false).await)?;
+                print!("destination: ");
+                print_pallet(&loc);
+                println!("(a new version of the destination; the source is unchanged)");
+            }
+            PalletAction::MoveMember { id, member, into } => {
+                let (dest, src) = pe(mgr.move_member(id_of(id)?, member, id_of(into)?, false).await)?;
+                print!("destination: ");
+                print_pallet(&dest);
+                print!("source:      ");
+                print_pallet(&src);
+                println!("(both are new versions; the originals are untouched)");
+            }
+            PalletAction::ReadOnly { id, value, force } => {
+                let loc = pe(mgr.set_read_only(id_of(id)?, *value, *force).await)?;
+                print_pallet(&loc);
+            }
+            PalletAction::Sealed { id, value } => {
+                let loc = pe(mgr.set_sealed(id_of(id)?, *value).await)?;
+                print_pallet(&loc);
+            }
+            PalletAction::Delete { id, force } => {
+                let loc = pe(mgr.delete(id_of(id)?, *force).await)?;
+                println!("removed {} ({} v{})", loc.id, loc.name, loc.version);
+            }
+            PalletAction::Prune { name, keep } => {
+                let removed = pe(mgr.prune(name, *keep).await)?;
+                for p in &removed {
+                    println!("pruned {} ({} v{})", p.id, p.name, p.version);
+                }
+                println!("{} removed, keeping the newest {}", removed.len(), (*keep).max(2));
+            }
+            PalletAction::Convert { from, to, keep_source, reinit_source } => {
+                let (f, t) = (pe(store.drive_index_of(from))?, pe(store.drive_index_of(to))?);
+                let report = pe(mgr
+                    .convert_drive(
+                        f,
+                        t,
+                        crate::pallet::ConvertOptions {
+                            remove_source: !*keep_source,
+                            init_destination: true,
+                            reinit_source: *reinit_source,
+                        },
+                    )
+                    .await)?;
+                println!("{} -> {}", report.source, report.destination);
+                for p in &report.converted {
+                    print!("  converted: ");
+                    print_pallet(p);
+                }
+                for (p, why) in &report.skipped {
+                    print!("  SKIPPED:   ");
+                    print_pallet(p);
+                    println!("             {why}");
+                }
+                println!(
+                    "{} converted, {} removed from the source{}",
+                    report.converted.len(),
+                    report.removed_from_source,
+                    if report.source_reinitialized { ", source reinitialized" } else { "" }
+                );
+                if let Some(note) = &report.note {
+                    println!("note: {note}");
+                }
+                if !report.skipped.is_empty() {
+                    anyhow::bail!("{} pallet(s) did not convert", report.skipped.len());
+                }
+            }
+            PalletAction::Adopt { from, to } => {
+                let (f, t) = (pe(store.drive_index_of(from))?, pe(store.drive_index_of(to))?);
+                let loc = pe(mgr.adopt_whole_drive(f, t).await)?;
+                print!("adopted: ");
+                print_pallet(&loc);
+                println!("the source drive can now be subdivided: pallet init-gpt {from} --force");
             }
         }
+        Ok(())
     }
-    Ok(None)
-}
 
-/// A slab named as a fabric URI (`nvme-tcp://…`) rather than a local path.
-/// stormblock opens one wherever it opens a device path — attaching instead of
-/// statting — so a remote root is an ordinary slab.
-/// Real storage by path, for writing (#140): a block device is opened
-/// `O_DIRECT` as the drive it is and a fabric URI is attached — never a
-/// `FileDevice`. A regular file stays one, and may be created: that is an
-/// image being made, or a test's scratch disk.
-async fn open_storage(path: &str) -> anyhow::Result<Arc<dyn BlockDevice>> {
-    if is_fabric_uri(path) || crate::drive::is_block_device(path) {
-        return Ok(crate::drive::open_path(path, false).await?);
-    }
-    Ok(Arc::new(crate::drive::filedev::FileDevice::open(path).await?))
-}
+    #[cfg(feature = "iscsi")]
+    async fn handle_boot_iscsi(
+        portal: &str,
+        port: u16,
+        iqn: &str,
+        layout_str: &str,
+        ublk: bool,
+    ) -> anyhow::Result<()> {
+        let layout = BootDiskLayout::parse(layout_str)
+            .map_err(|e| anyhow::anyhow!("layout parse error: {e}"))?;
 
-/// Storage by path, for looking at (#140): read-only, never created.
-async fn inspect_storage(path: &str) -> anyhow::Result<Arc<dyn BlockDevice>> {
-    Ok(crate::drive::open_path(path, true).await?)
-}
-
-fn is_fabric_uri(path: &str) -> bool {
-    path.contains("://")
-}
-
-/// An `nvme-tcp://` namespace, attached with the engine's own initiator here.
-/// Every other `scheme://` path (`iscsi://`, `emulated://`) is opened as a
-/// drive by `drive::open_path`.
-fn is_nvme_tcp_uri(path: &str) -> bool {
-    path.starts_with("nvme-tcp://")
-}
-
-/// Make `disk` boot on its own from the image at `sources` (#123): the ESP
-/// and the boot pallets, into the boot area of the node layout. Read-only on
-/// every source.
-/// Answers whether the disk now boots on its own.
-async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> {
-    use crate::image::local_boot::{lay_local_boot, EspOutcome};
-
-    let mut opened: Vec<(String, Arc<dyn BlockDevice>)> = Vec::new();
-    for path in sources.iter().filter(|p| p.as_str() != disk) {
-        let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(path) {
-            let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
-                .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
-            Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
-        } else {
-            inspect_storage(path).await?
-        };
-        opened.push((path.clone(), dev));
-    }
-    let dest: Arc<dyn BlockDevice> =
-        open_storage(disk).await?;
-    let r = lay_local_boot(disk, dest, opened)
-        .await
-        .map_err(|e| anyhow::anyhow!("local boot on {disk}: {e}"))?;
-
-    match &r.esp {
-        EspOutcome::NoSource => println!("Local boot: {disk}: no ESP on the image — nothing to start the kernel with"),
-        EspOutcome::Unchanged => println!("Local boot: {disk}: ESP already current"),
-        EspOutcome::Copied { bytes } => println!("Local boot: {disk}: ESP copied ({bytes} bytes)"),
-        EspOutcome::Rebuilt { from_sector, to_sector, files } => println!(
-            "Local boot: {disk}: ESP rebuilt at {to_sector}-byte sectors from {from_sector} ({files} file(s))"
-        ),
-    }
-    for c in &r.copied {
-        println!("Local boot: {disk}: boot pallet {c} copied and verified");
-    }
-    if r.already > 0 {
-        println!("Local boot: {disk}: {} boot pallet(s) already present", r.already);
-    }
-    for g in &r.removed {
-        println!("Local boot: {disk}: removed {g}");
-    }
-    for f in &r.failed {
-        println!("Local boot: {disk}: not copied — {f}");
-    }
-    for (name, version, pri) in &r.ladder {
-        println!("Local boot: {disk}: ladder {name} v{version} priority {pri}");
-    }
-    if r.bootable() {
-        println!("Local boot: {disk} boots on its own");
-    } else {
-        println!("Local boot: {disk} does not boot on its own yet");
-    }
-    Ok(r.bootable())
-}
-
-async fn open_slabs_and_restore(
-    slab_paths: &[String],
-    meta: Option<&str>,
-) -> anyhow::Result<VolumeManager> {
-    Ok(open_slabs_resuming(slab_paths, meta, false).await?.0)
-}
-
-/// A file out of a volume's filesystem on `slabs`, read-only (#262). The
-/// error carries `slab cat`'s exit code: 1 for the file, 2 for the volume.
-async fn volume_file_on_slabs(slabs: &[String], volume: &str, path: &str) -> Result<Vec<u8>, (i32, String)> {
-    let mgr = open_slabs_and_restore(slabs, None)
-        .await
-        .map_err(|e| (2, format!("cannot read the slabs: {e}")))?;
-    let id = mgr
-        .find_volume(volume)
-        .await
-        .ok_or_else(|| (2, format!("no volume {volume} on these slabs")))?;
-    let dev = mgr.get_volume(&id).ok_or_else(|| (2, format!("volume {volume} has no handle")))?;
-    crate::fs::files::read_file(&dev, path).await.map_err(|e| (1, format!("{volume}: {e}")))
-}
-
-/// What `open_slabs_resuming` had to fetch from the appliance (#171).
-struct Resumed {
-    /// The clone's attach URI, as the successor must open it.
-    uri: String,
-    /// The local slabs the flow-over resumes into.
-    system_slab: Option<crate::drive::slab::SlabId>,
-    data_slab: Option<crate::drive::slab::SlabId>,
-}
-
-/// The vendor GUID of stormbootx's volatile variables (#249).
-const STORMBOOT_GUID: &str = "ab361f54-0166-44a4-a088-1ac22e98ab76";
-
-/// This machine's name to the appliance, by the initramfs's rules (#249):
-/// `STORMBLOCK_BOOT_TAG` (what `/init` resolved and exported), else the name
-/// stormbootx claimed on (`StormBootTag`, a volatile EFI variable), else the
-/// SMBIOS serial (a Dell's service tag), else the SMBIOS UUID. The SMBIOS
-/// values are a guess: a MicroCloud's blades share one serial, and a resume
-/// that claimed by it got another machine's image (#259).
-fn machine_tag() -> Option<String> {
-    let efivars = std::env::var("STORM_EFIVARS").unwrap_or_else(|_| "/sys/firmware/efi/efivars".into());
-    let dmi = std::env::var("STORM_DMI").unwrap_or_else(|_| "/sys/class/dmi/id".into());
-    let read = |f: String| std::fs::read_to_string(f).ok();
-    machine_tag_from(
-        std::env::var("STORMBLOCK_BOOT_TAG").ok(),
-        std::fs::read(format!("{efivars}/StormBootTag-{STORMBOOT_GUID}")).ok(),
-        read(format!("{dmi}/product_serial")),
-        read(format!("{dmi}/product_uuid")),
-    )
-}
-
-fn machine_tag_from(
-    env: Option<String>,
-    efivar: Option<Vec<u8>>,
-    serial: Option<String>,
-    uuid: Option<String>,
-) -> Option<String> {
-    if let Some(t) = env.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
-        return Some(t);
-    }
-    // 4 attribute bytes, then the value: ASCII, no NUL (stormbootx#76). A
-    // value outside the name alphabet is not one stormbootx would set — the
-    // same check `/init` makes.
-    if let Some(raw) = efivar.filter(|r| r.len() > 4) {
-        let v: String = String::from_utf8_lossy(&raw[4..])
-            .chars()
-            .filter(|c| !matches!(c, '\0' | '\n' | '\r' | ' '))
-            .collect();
-        if !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || "._:-".contains(c)) {
-            return Some(v);
+        println!("Boot-from-iSCSI: {}:{} target={}", portal, port, iqn);
+        println!("Partition layout:");
+        for part in &layout.partitions {
+            let size_str = if part.size == 0 { "rest".to_string() } else {
+                crate::mgmt::config::human_size(part.size)
+            };
+            println!("  {} ({}) — {} at {}", part.name, part.fs_type, size_str, part.mount_point);
         }
-    }
-    let clean = |s: Option<String>| s.map(|s| s.trim().replace(' ', ""));
-    if let Some(serial) = clean(serial) {
-        let placeholder = matches!(serial.as_str(), "" | "NotSpecified" | "None" | "Unknown" | "ToBeFilledByO.E.M.")
-            || serial.starts_with("Default");
-        if !placeholder {
-            return Some(serial);
-        }
-    }
-    clean(uuid).filter(|u| !u.is_empty())
-}
 
-/// Extents the records place only on slabs not in `have`: no leg left to
-/// read them from (#259). Volumes with parity groups are left out — a lost
-/// data leg there is reconstructed, and a missing drive is their ordinary
-/// degraded state. Returns (volume name, extents) per volume affected.
-fn stranded_extents(
-    docs: &[Option<crate::volume::metadata::VolumeMetadata>],
-    have: &std::collections::HashSet<crate::drive::slab::SlabId>,
-) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
-    for d in docs.iter().flatten() {
-        for v in &d.volumes {
-            if !v.parity.is_empty() {
-                continue;
-            }
-            let n = v
-                .extents
-                .values()
-                .filter(|loc| !loc.legs().any(|l| have.contains(&l.slab_id)))
-                .count();
-            if n > 0 {
-                out.push((v.name.clone(), n));
-            }
-        }
-    }
-    out
-}
+        let mgr = IscsiBootManager::new();
+        let result = mgr.provision(portal, port, iqn, layout).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-/// Every slab a set of volume records places an extent on.
-fn slabs_named(docs: &[Option<crate::volume::metadata::VolumeMetadata>]) -> std::collections::HashSet<crate::drive::slab::SlabId> {
-    let mut ids = std::collections::HashSet::new();
-    for d in docs.iter().flatten() {
-        for v in &d.volumes {
-            for loc in v.extents.values() {
-                ids.extend(loc.legs().map(|l| l.slab_id));
-            }
-            for g in v.parity.values() {
-                ids.extend(g.legs.iter().map(|l| l.slab_id));
-            }
-        }
-    }
-    ids
-}
-
-/// Open the slabs and restore — and when the local records place extents on
-/// a slab that is not here, fetch it (#171).
-///
-/// That is a flow-over cut short: the power went while the goldens were still
-/// moving from the appliance's clone onto this disk. The next boot claims a
-/// *new* clone, so those extents were dropped, the root came up with holes,
-/// and the node could not boot again. But every system golden is sealed and a
-/// claim is a clone of it, and cloning restamps the disk's GPT, never the
-/// slabs inside it: a fresh clone carries the same slabs, by id, holding the
-/// same bytes. So claim one, attach its slabs for their data only (their
-/// records are the image's and are never read), let the local records map
-/// onto them, and hand the flow-over on to finish. Only `boot-local` asks
-/// (`resume`), and only when an appliance is named (`STORMBLOCK_BOOTHOST`,
-/// which the initramfs exports): a claim releases the machine's earlier
-/// clones, which is not something a diagnostic may do.
-async fn open_slabs_resuming(
-    slab_paths: &[String],
-    meta: Option<&str>,
-    resume: bool,
-) -> anyhow::Result<(VolumeManager, Option<Resumed>)> {
-    open_slabs_with_disks(slab_paths, meta, resume).await.map(|(m, r, _)| (m, r))
-}
-
-/// The disk each slab path was opened from, as the engine holds it (#314).
-type OpenedDisks = Vec<(String, Arc<dyn BlockDevice>)>;
-
-/// Keep the disks the slabs were opened from as the state's boot disks:
-/// read by `/api/v1/pallets`, written by nothing (#314).
-async fn set_boot_disks(state: &AppState, disks: OpenedDisks) {
-    *state.boot_disks.write().await = disks
-        .into_iter()
-        .map(|(path, device)| DriveInfo { device, path, labels: Default::default() })
-        .collect();
-}
-
-/// [`open_slabs_resuming`], and the disk device each slab path was opened
-/// from (#314): the whole disk a path names, whose GPT also carries its boot
-/// pallets — on a network-booted node the claimed clone's namespace.
-async fn open_slabs_with_disks(
-    slab_paths: &[String],
-    meta: Option<&str>,
-    resume: bool,
-) -> anyhow::Result<(VolumeManager, Option<Resumed>, OpenedDisks)> {
-    use std::path::{Path, PathBuf};
-    use crate::volume::MetadataStore;
-
-    // 1. Open the slabs. A slab formatted by `image build` carries its own
-    //    volumes.dat, so opening it is also how the metadata is found — an
-    //    image has no filesystem to keep one in, and the "meta" directory
-    //    beside `/dev/sda4` is `/dev/meta`, which is nothing (#62).
-    for path in slab_paths {
-        // A fabric URI is opened by attaching, not by statting a file — see the
-        // scheme dispatch below. Only a local path is required to exist first:
-        // FileDevice::open would create a missing path as an empty file and die
-        // later with a misleading "bad slab magic", so name the real problem
-        // (storage driver not loaded / wrong device) instead (#14).
-        if !is_fabric_uri(path) && !Path::new(path).exists() {
-            anyhow::bail!(
-                "slab device {path} does not exist — storage driver not loaded or wrong path?"
+        println!("\nBoot disk provisioned on slab {}", result.slab_id);
+        println!("Backing: iSCSI {}:{}/{}", portal, port, iqn);
+        println!("\nPartitions:");
+        for part in &result.partitions {
+            println!(
+                "  {:6} {:>10}  {}  {} (vol={})",
+                part.name,
+                crate::mgmt::config::human_size(part.size),
+                part.fs_type,
+                part.mount_point,
+                part.volume_id,
             );
         }
+
+        // Export partitions via ublk if requested (Linux only)
+        #[cfg(target_os = "linux")]
+        if ublk {
+            use crate::drive::ublk::UblkServer;
+
+            println!("\nStarting ublk export for {} partitions...", result.partitions.len());
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let mut ublk_threads = Vec::new();
+
+            for (i, part) in result.partitions.iter().enumerate() {
+                let server = UblkServer::new(part.handle.clone() as Arc<dyn BlockDevice>)
+                    .with_dev_id(i as u32);
+                let rx = shutdown_rx.clone();
+                let name = part.name.clone();
+                // UblkServer::run() holds raw pointers (not Send), so run on a
+                // dedicated OS thread with its own tokio runtime.
+                let thread = std::thread::Builder::new()
+                    .name(format!("ublk-boot-{i}"))
+                    .spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create ublk tokio runtime");
+                        rt.block_on(async move {
+                            match server.run(rx).await {
+                                Ok(()) => tracing::info!("ublk#{i} ({name}) stopped"),
+                                Err(e) => tracing::error!("ublk#{i} ({name}) error: {e}"),
+                            }
+                        });
+                    })
+                    .expect("failed to spawn ublk thread");
+                ublk_threads.push(thread);
+                println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
+                    crate::mgmt::config::human_size(part.size), part.fs_type);
+            }
+
+            println!("\nublk devices ready. Press Ctrl+C to stop.");
+            tokio::signal::ctrl_c().await?;
+            println!("Shutting down...");
+
+            // Signal all ublk servers to stop, and wait — bounded (#105).
+            let _ = shutdown_tx.send(true);
+            let stuck = join_ublk_threads(ublk_threads, std::time::Duration::from_secs(10));
+            if stuck > 0 {
+                eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        if ublk {
+            eprintln!("Error: --ublk requires Linux 6.0+ with ublk_drv module loaded");
+            std::process::exit(1);
+        }
+
+        if !ublk {
+            println!("\nVolumes ready for ublk export.");
+            println!("On Linux, each volume can be exported as /dev/ublkbN:");
+            for (i, part) in result.partitions.iter().enumerate() {
+                println!("  /dev/ublkb{i} ← {} ({}, {})", part.name,
+                    crate::mgmt::config::human_size(part.size), part.fs_type);
+            }
+
+            // Keep running until Ctrl+C
+            println!("\nPress Ctrl+C to stop");
+            tokio::signal::ctrl_c().await?;
+            println!("Shutting down...");
+        }
+
+        // Disconnect iSCSI
+        if let Err(e) = result.iscsi_device.disconnect().await {
+            tracing::warn!("iSCSI disconnect: {e}");
+        }
+
+        Ok(())
     }
-    let mut slabs = Vec::with_capacity(slab_paths.len());
-    // The path each slab came from. One whole-disk path can yield several
-    // slabs, so this is what the per-slab reporting below zips against —
-    // `slab_paths` is no longer 1:1 with `slabs`.
-    let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
-    let mut disks: OpenedDisks = Vec::with_capacity(slab_paths.len());
-    for path in slab_paths {
-        // A slab is on a block device (O_DIRECT, #140), a namespace on the
-        // fabric (NvmeofDevice), or — tests and development — a file. The diskless boot hands boot-local an
-        // `nvme-tcp://` URI from the appliance claim; attaching it here is what
-        // makes a remote root an ordinary slab, exactly as a local one.
-        let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(path) {
-            let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
-                .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
-            Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
-        } else {
-            let dev = open_storage(path).await?;
-            if !is_fabric_uri(path) && !crate::drive::is_block_device(path) {
-                // Real storage is a block device, opened O_DIRECT (#140). A
-                // slab in a regular file goes through the page cache: fine
-                // for a test or a laptop, not for a node, and said so.
-                println!(
-                    "WARNING: {path} is a regular file, not a block device — a slab in a file is \
-                     for tests and development only"
-                );
-                tracing::warn!("slab {path} is on a regular file (tests and development only)");
+
+    /// boot.toml handoff dropped into the initramfs by `BootManager::initramfs_config`.
+    #[derive(serde::Deserialize)]
+    struct BootToml {
+        boot: BootTomlSection,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct BootTomlSection {
+        volume: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        server: Option<String>,
+    }
+
+    /// Resolve a volume selector (UUID or name) against restored metadata.
+    /// The volume the engine keeps its own state in.
+    ///
+    /// A well-known name rather than a flag: every node that has one wants it used,
+    /// and a node that has not got one carries on without. Never exported and never
+    /// mounted — the engine reads it in-process with the ext4 library.
+    const STATE_VOLUME: &str = "stormblock-state";
+
+    async fn resolve_boot_volume(
+        mgr: &VolumeManager,
+        selector: &str,
+    ) -> anyhow::Result<crate::volume::VolumeId> {
+        use crate::volume::VolumeId;
+        if let Ok(u) = uuid::Uuid::parse_str(selector) {
+            let id = VolumeId(u);
+            if mgr.get_volume(&id).is_some() {
+                return Ok(id);
             }
-            dev
+        }
+        for (id, name, _, _) in mgr.list_volumes().await {
+            if name == selector {
+                return Ok(id);
+            }
+        }
+        anyhow::bail!(
+            "volume '{selector}' not found in slab metadata (have: {})",
+            mgr.list_volumes()
+                .await
+                .iter()
+                .map(|(id, name, _, _)| format!("{name}={}", id.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    /// Open the slabs, find the volume metadata, and restore what it describes.
+    ///
+    /// Shared by every path that attaches to an existing node's storage —
+    /// `boot-local` at boot and `adopt-ublk` at handover — because they need
+    /// exactly the same three things and disagreeing about any of them would mean
+    /// the two halves of a handover had different ideas of what the node holds.
+
+    /// Whether `path` carries a data slab, and what names it.
+    ///
+    /// Asked of the *device*, never of the path: the answer has to hold when an
+    /// operator hands over `/dev/sda` and the data slab is `/dev/sda6`, and when
+    /// they hand over `/dev/sda6` itself. Two independent records say so — the
+    /// GPT type GUID of the partition, which can be read without opening
+    /// anything, and the role byte in the slab's own header, which is what a
+    /// whole-drive slab with no partition table has instead (#88).
+    ///
+    /// `Ok(None)` means nothing on the device claims to be one. A device that
+    /// cannot be read at all is not an error here: the caller is about to open it
+    /// properly and will fail there with a better message.
+    async fn data_slab_on(path: &str) -> anyhow::Result<Option<String>> {
+        use crate::drive::partition::PartitionDevice;
+
+        if !std::path::Path::new(path).exists() {
+            return Ok(None);
+        }
+        let dev: Arc<dyn BlockDevice> =
+            match inspect_storage(path).await {
+                Ok(d) => d,
+                Err(_) => return Ok(None),
+            };
+
+        // The device itself, when it is a bare slab rather than a partitioned
+        // drive.
+        if let Ok(slab) = Slab::open(dev.clone()).await {
+            if slab.is_data() {
+                return Ok(Some(format!("{path} is itself a data slab ({})", slab.slab_id().0)));
+            }
+            return Ok(None);
+        }
+
+        let Ok(gpt) = crate::pallet::gpt::Gpt::read(&dev).await else {
+            return Ok(None);
         };
-        disks.push((path.clone(), dev.clone()));
-        match Slab::open(dev.clone()).await {
-            Ok(s) => {
-                slabs.push(s);
-                slab_sources.push(path.clone());
+        let lba = gpt.block_size as u64;
+        for (i, e) in gpt.entries.iter().enumerate() {
+            if e.first_lba == 0 || e.last_lba < e.first_lba {
+                continue;
             }
-            // A whole disk, or a disk image, rather than the partition the
-            // slab is in. Both are the ordinary thing to be handed — a disk
-            // image is what `image build` produces and what someone copies off
-            // a node — and requiring the offset to be worked out by hand is
-            // how a debugging tool ends up unused. The table says where the
-            // partitions are; try each one, and take them all: a system slab
-            // and a data slab sit in the same GPT.
-            Err(first) => {
-                let (found, why): (Vec<Slab>, Vec<String>) = {
-                    let (discovered, why) =
-                        crate::drive::discover::slabs_in_partitions_why(&dev).await;
-                    for f in &discovered {
-                        let role = if f.slab.is_data() { "data slab" } else { "slab" };
-                        println!("  {path}: {role} found in {}", f.label);
-                    }
-                    (discovered.into_iter().map(|f| f.slab).collect(), why)
-                };
-                if found.is_empty() {
-                    // Every place a slab could be, and why it did not open:
-                    // the whole drive's "bad slab magic" alone hid #301.
-                    let why = if why.is_empty() { first.to_string() } else { why.join("; ") };
-                    return Err(anyhow::anyhow!("open slab {path}: no slab opened ({why})"));
+            let label = if e.name.is_empty() {
+                format!("partition {}", i + 1)
+            } else {
+                format!("partition {} ({})", i + 1, e.name)
+            };
+            if e.type_guid == crate::image::type_guid::SLAB_DATA {
+                return Ok(Some(format!("{path} {label} is typed as a stormblock data slab")));
+            }
+            // A slab whose GPT entry predates the data type still knows what it
+            // is: the header carries the role too, and the two are written
+            // together.
+            let start = e.first_lba * lba;
+            let len = (e.last_lba + 1 - e.first_lba) * lba;
+            let Ok(part) = PartitionDevice::new(dev.clone(), start, len) else { continue };
+            if let Ok(slab) = Slab::open(Arc::new(part)).await {
+                if slab.is_data() {
+                    return Ok(Some(format!("{path} {label} holds a data slab")));
                 }
-                for s in found {
+            }
+        }
+        Ok(None)
+    }
+
+    /// A slab named as a fabric URI (`nvme-tcp://…`) rather than a local path.
+    /// stormblock opens one wherever it opens a device path — attaching instead of
+    /// statting — so a remote root is an ordinary slab.
+    /// Real storage by path, for writing (#140): a block device is opened
+    /// `O_DIRECT` as the drive it is and a fabric URI is attached — never a
+    /// `FileDevice`. A regular file stays one, and may be created: that is an
+    /// image being made, or a test's scratch disk.
+    async fn open_storage(path: &str) -> anyhow::Result<Arc<dyn BlockDevice>> {
+        if is_fabric_uri(path) || crate::drive::is_block_device(path) {
+            return Ok(crate::drive::open_path(path, false).await?);
+        }
+        Ok(Arc::new(crate::drive::filedev::FileDevice::open(path).await?))
+    }
+
+    /// Storage by path, for looking at (#140): read-only, never created.
+    async fn inspect_storage(path: &str) -> anyhow::Result<Arc<dyn BlockDevice>> {
+        Ok(crate::drive::open_path(path, true).await?)
+    }
+
+    fn is_fabric_uri(path: &str) -> bool {
+        path.contains("://")
+    }
+
+    /// An `nvme-tcp://` namespace, attached with the engine's own initiator here.
+    /// Every other `scheme://` path (`iscsi://`, `emulated://`) is opened as a
+    /// drive by `drive::open_path`.
+    fn is_nvme_tcp_uri(path: &str) -> bool {
+        path.starts_with("nvme-tcp://")
+    }
+
+    /// Make `disk` boot on its own from the image at `sources` (#123): the ESP
+    /// and the boot pallets, into the boot area of the node layout. Read-only on
+    /// every source.
+    /// Answers whether the disk now boots on its own.
+    async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> {
+        use crate::image::local_boot::{lay_local_boot, EspOutcome};
+
+        let mut opened: Vec<(String, Arc<dyn BlockDevice>)> = Vec::new();
+        for path in sources.iter().filter(|p| p.as_str() != disk) {
+            let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(path) {
+                let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
+                    .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
+                Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
+            } else {
+                inspect_storage(path).await?
+            };
+            opened.push((path.clone(), dev));
+        }
+        let dest: Arc<dyn BlockDevice> =
+            open_storage(disk).await?;
+        let r = lay_local_boot(disk, dest, opened)
+            .await
+            .map_err(|e| anyhow::anyhow!("local boot on {disk}: {e}"))?;
+
+        match &r.esp {
+            EspOutcome::NoSource => println!("Local boot: {disk}: no ESP on the image — nothing to start the kernel with"),
+            EspOutcome::Unchanged => println!("Local boot: {disk}: ESP already current"),
+            EspOutcome::Copied { bytes } => println!("Local boot: {disk}: ESP copied ({bytes} bytes)"),
+            EspOutcome::Rebuilt { from_sector, to_sector, files } => println!(
+                "Local boot: {disk}: ESP rebuilt at {to_sector}-byte sectors from {from_sector} ({files} file(s))"
+            ),
+        }
+        for c in &r.copied {
+            println!("Local boot: {disk}: boot pallet {c} copied and verified");
+        }
+        if r.already > 0 {
+            println!("Local boot: {disk}: {} boot pallet(s) already present", r.already);
+        }
+        for g in &r.removed {
+            println!("Local boot: {disk}: removed {g}");
+        }
+        for f in &r.failed {
+            println!("Local boot: {disk}: not copied — {f}");
+        }
+        for (name, version, pri) in &r.ladder {
+            println!("Local boot: {disk}: ladder {name} v{version} priority {pri}");
+        }
+        if r.bootable() {
+            println!("Local boot: {disk} boots on its own");
+        } else {
+            println!("Local boot: {disk} does not boot on its own yet");
+        }
+        Ok(r.bootable())
+    }
+
+    async fn open_slabs_and_restore(
+        slab_paths: &[String],
+        meta: Option<&str>,
+    ) -> anyhow::Result<VolumeManager> {
+        Ok(open_slabs_resuming(slab_paths, meta, false).await?.0)
+    }
+
+    /// A file out of a volume's filesystem on `slabs`, read-only (#262). The
+    /// error carries `slab cat`'s exit code: 1 for the file, 2 for the volume.
+    async fn volume_file_on_slabs(slabs: &[String], volume: &str, path: &str) -> Result<Vec<u8>, (i32, String)> {
+        let mgr = open_slabs_and_restore(slabs, None)
+            .await
+            .map_err(|e| (2, format!("cannot read the slabs: {e}")))?;
+        let id = mgr
+            .find_volume(volume)
+            .await
+            .ok_or_else(|| (2, format!("no volume {volume} on these slabs")))?;
+        let dev = mgr.get_volume(&id).ok_or_else(|| (2, format!("volume {volume} has no handle")))?;
+        crate::fs::files::read_file(&dev, path).await.map_err(|e| (1, format!("{volume}: {e}")))
+    }
+
+    /// What `open_slabs_resuming` had to fetch from the appliance (#171).
+    struct Resumed {
+        /// The clone's attach URI, as the successor must open it.
+        uri: String,
+        /// The local slabs the flow-over resumes into.
+        system_slab: Option<crate::drive::slab::SlabId>,
+        data_slab: Option<crate::drive::slab::SlabId>,
+    }
+
+    /// The vendor GUID of stormbootx's volatile variables (#249).
+    const STORMBOOT_GUID: &str = "ab361f54-0166-44a4-a088-1ac22e98ab76";
+
+    /// This machine's name to the appliance, by the initramfs's rules (#249):
+    /// `STORMBLOCK_BOOT_TAG` (what `/init` resolved and exported), else the name
+    /// stormbootx claimed on (`StormBootTag`, a volatile EFI variable), else the
+    /// SMBIOS serial (a Dell's service tag), else the SMBIOS UUID. The SMBIOS
+    /// values are a guess: a MicroCloud's blades share one serial, and a resume
+    /// that claimed by it got another machine's image (#259).
+    fn machine_tag() -> Option<String> {
+        let efivars = std::env::var("STORM_EFIVARS").unwrap_or_else(|_| "/sys/firmware/efi/efivars".into());
+        let dmi = std::env::var("STORM_DMI").unwrap_or_else(|_| "/sys/class/dmi/id".into());
+        let read = |f: String| std::fs::read_to_string(f).ok();
+        machine_tag_from(
+            std::env::var("STORMBLOCK_BOOT_TAG").ok(),
+            std::fs::read(format!("{efivars}/StormBootTag-{STORMBOOT_GUID}")).ok(),
+            read(format!("{dmi}/product_serial")),
+            read(format!("{dmi}/product_uuid")),
+        )
+    }
+
+    fn machine_tag_from(
+        env: Option<String>,
+        efivar: Option<Vec<u8>>,
+        serial: Option<String>,
+        uuid: Option<String>,
+    ) -> Option<String> {
+        if let Some(t) = env.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+            return Some(t);
+        }
+        // 4 attribute bytes, then the value: ASCII, no NUL (stormbootx#76). A
+        // value outside the name alphabet is not one stormbootx would set — the
+        // same check `/init` makes.
+        if let Some(raw) = efivar.filter(|r| r.len() > 4) {
+            let v: String = String::from_utf8_lossy(&raw[4..])
+                .chars()
+                .filter(|c| !matches!(c, '\0' | '\n' | '\r' | ' '))
+                .collect();
+            if !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || "._:-".contains(c)) {
+                return Some(v);
+            }
+        }
+        let clean = |s: Option<String>| s.map(|s| s.trim().replace(' ', ""));
+        if let Some(serial) = clean(serial) {
+            let placeholder = matches!(serial.as_str(), "" | "NotSpecified" | "None" | "Unknown" | "ToBeFilledByO.E.M.")
+                || serial.starts_with("Default");
+            if !placeholder {
+                return Some(serial);
+            }
+        }
+        clean(uuid).filter(|u| !u.is_empty())
+    }
+
+    /// Extents the records place only on slabs not in `have`: no leg left to
+    /// read them from (#259). Volumes with parity groups are left out — a lost
+    /// data leg there is reconstructed, and a missing drive is their ordinary
+    /// degraded state. Returns (volume name, extents) per volume affected.
+    fn stranded_extents(
+        docs: &[Option<crate::volume::metadata::VolumeMetadata>],
+        have: &std::collections::HashSet<crate::drive::slab::SlabId>,
+    ) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        for d in docs.iter().flatten() {
+            for v in &d.volumes {
+                if !v.parity.is_empty() {
+                    continue;
+                }
+                let n = v
+                    .extents
+                    .values()
+                    .filter(|loc| !loc.legs().any(|l| have.contains(&l.slab_id)))
+                    .count();
+                if n > 0 {
+                    out.push((v.name.clone(), n));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every slab a set of volume records places an extent on.
+    fn slabs_named(docs: &[Option<crate::volume::metadata::VolumeMetadata>]) -> std::collections::HashSet<crate::drive::slab::SlabId> {
+        let mut ids = std::collections::HashSet::new();
+        for d in docs.iter().flatten() {
+            for v in &d.volumes {
+                for loc in v.extents.values() {
+                    ids.extend(loc.legs().map(|l| l.slab_id));
+                }
+                for g in v.parity.values() {
+                    ids.extend(g.legs.iter().map(|l| l.slab_id));
+                }
+            }
+        }
+        ids
+    }
+
+    /// Open the slabs and restore — and when the local records place extents on
+    /// a slab that is not here, fetch it (#171).
+    ///
+    /// That is a flow-over cut short: the power went while the goldens were still
+    /// moving from the appliance's clone onto this disk. The next boot claims a
+    /// *new* clone, so those extents were dropped, the root came up with holes,
+    /// and the node could not boot again. But every system golden is sealed and a
+    /// claim is a clone of it, and cloning restamps the disk's GPT, never the
+    /// slabs inside it: a fresh clone carries the same slabs, by id, holding the
+    /// same bytes. So claim one, attach its slabs for their data only (their
+    /// records are the image's and are never read), let the local records map
+    /// onto them, and hand the flow-over on to finish. Only `boot-local` asks
+    /// (`resume`), and only when an appliance is named (`STORMBLOCK_BOOTHOST`,
+    /// which the initramfs exports): a claim releases the machine's earlier
+    /// clones, which is not something a diagnostic may do.
+    async fn open_slabs_resuming(
+        slab_paths: &[String],
+        meta: Option<&str>,
+        resume: bool,
+    ) -> anyhow::Result<(VolumeManager, Option<Resumed>)> {
+        open_slabs_with_disks(slab_paths, meta, resume).await.map(|(m, r, _)| (m, r))
+    }
+
+    /// The disk each slab path was opened from, as the engine holds it (#314).
+    type OpenedDisks = Vec<(String, Arc<dyn BlockDevice>)>;
+
+    /// Keep the disks the slabs were opened from as the state's boot disks:
+    /// read by `/api/v1/pallets`, written by nothing (#314).
+    async fn set_boot_disks(state: &AppState, disks: OpenedDisks) {
+        *state.boot_disks.write().await = disks
+            .into_iter()
+            .map(|(path, device)| DriveInfo { device, path, labels: Default::default() })
+            .collect();
+    }
+
+    /// [`open_slabs_resuming`], and the disk device each slab path was opened
+    /// from (#314): the whole disk a path names, whose GPT also carries its boot
+    /// pallets — on a network-booted node the claimed clone's namespace.
+    async fn open_slabs_with_disks(
+        slab_paths: &[String],
+        meta: Option<&str>,
+        resume: bool,
+    ) -> anyhow::Result<(VolumeManager, Option<Resumed>, OpenedDisks)> {
+        use std::path::{Path, PathBuf};
+        use crate::volume::MetadataStore;
+
+        // 1. Open the slabs. A slab formatted by `image build` carries its own
+        //    volumes.dat, so opening it is also how the metadata is found — an
+        //    image has no filesystem to keep one in, and the "meta" directory
+        //    beside `/dev/sda4` is `/dev/meta`, which is nothing (#62).
+        for path in slab_paths {
+            // A fabric URI is opened by attaching, not by statting a file — see the
+            // scheme dispatch below. Only a local path is required to exist first:
+            // FileDevice::open would create a missing path as an empty file and die
+            // later with a misleading "bad slab magic", so name the real problem
+            // (storage driver not loaded / wrong device) instead (#14).
+            if !is_fabric_uri(path) && !Path::new(path).exists() {
+                anyhow::bail!(
+                    "slab device {path} does not exist — storage driver not loaded or wrong path?"
+                );
+            }
+        }
+        let mut slabs = Vec::with_capacity(slab_paths.len());
+        // The path each slab came from. One whole-disk path can yield several
+        // slabs, so this is what the per-slab reporting below zips against —
+        // `slab_paths` is no longer 1:1 with `slabs`.
+        let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
+        let mut disks: OpenedDisks = Vec::with_capacity(slab_paths.len());
+        for path in slab_paths {
+            // A slab is on a block device (O_DIRECT, #140), a namespace on the
+            // fabric (NvmeofDevice), or — tests and development — a file. The diskless boot hands boot-local an
+            // `nvme-tcp://` URI from the appliance claim; attaching it here is what
+            // makes a remote root an ordinary slab, exactly as a local one.
+            let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(path) {
+                let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(path)
+                    .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {path}"))?;
+                Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
+            } else {
+                let dev = open_storage(path).await?;
+                if !is_fabric_uri(path) && !crate::drive::is_block_device(path) {
+                    // Real storage is a block device, opened O_DIRECT (#140). A
+                    // slab in a regular file goes through the page cache: fine
+                    // for a test or a laptop, not for a node, and said so.
+                    println!(
+                        "WARNING: {path} is a regular file, not a block device — a slab in a file is \
+                         for tests and development only"
+                    );
+                    tracing::warn!("slab {path} is on a regular file (tests and development only)");
+                }
+                dev
+            };
+            disks.push((path.clone(), dev.clone()));
+            match Slab::open(dev.clone()).await {
+                Ok(s) => {
                     slabs.push(s);
                     slab_sources.push(path.clone());
                 }
+                // A whole disk, or a disk image, rather than the partition the
+                // slab is in. Both are the ordinary thing to be handed — a disk
+                // image is what `image build` produces and what someone copies off
+                // a node — and requiring the offset to be worked out by hand is
+                // how a debugging tool ends up unused. The table says where the
+                // partitions are; try each one, and take them all: a system slab
+                // and a data slab sit in the same GPT.
+                Err(first) => {
+                    let (found, why): (Vec<Slab>, Vec<String>) = {
+                        let (discovered, why) =
+                            crate::drive::discover::slabs_in_partitions_why(&dev).await;
+                        for f in &discovered {
+                            let role = if f.slab.is_data() { "data slab" } else { "slab" };
+                            println!("  {path}: {role} found in {}", f.label);
+                        }
+                        (discovered.into_iter().map(|f| f.slab).collect(), why)
+                    };
+                    if found.is_empty() {
+                        // Every place a slab could be, and why it did not open:
+                        // the whole drive's "bad slab magic" alone hid #301.
+                        let why = if why.is_empty() { first.to_string() } else { why.join("; ") };
+                        return Err(anyhow::anyhow!("open slab {path}: no slab opened ({why})"));
+                    }
+                    for s in found {
+                        slabs.push(s);
+                        slab_sources.push(path.clone());
+                    }
+                }
             }
         }
-    }
 
-    // 2. Metadata: an explicit --meta wins, then each slab's own copy, then
-    //    the "meta" directory beside the first slab.
-    //
-    //    **Each slab's own copy**, plural, because a node's mutable storage
-    //    is a system slab and a data slab, and the second one's record has to
-    //    survive the first being replaced by an install. A single merged copy
-    //    living in one of them would recreate exactly the coupling the split
-    //    exists to break (#88). A slab with no copy of its own is the older
-    //    arrangement — one document naming every array, positionally — and
-    //    still works.
-    let meta_dir: PathBuf = match meta {
-        Some(m) => PathBuf::from(m),
-        None => Path::new(&slab_paths[0])
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("meta"),
-    };
-    let mut embedded: Vec<Option<crate::volume::metadata::VolumeMetadata>> =
-        Vec::with_capacity(slabs.len());
-    if meta.is_none() {
-        for (path, slab) in slab_sources.iter().zip(&slabs) {
-            let doc = crate::volume::metav2::read_slab(slab)
-                .await
-                .map_err(|e| anyhow::anyhow!("read slab metadata from {path}: {e}"))?;
-            embedded.push(doc);
+        // 2. Metadata: an explicit --meta wins, then each slab's own copy, then
+        //    the "meta" directory beside the first slab.
+        //
+        //    **Each slab's own copy**, plural, because a node's mutable storage
+        //    is a system slab and a data slab, and the second one's record has to
+        //    survive the first being replaced by an install. A single merged copy
+        //    living in one of them would recreate exactly the coupling the split
+        //    exists to break (#88). A slab with no copy of its own is the older
+        //    arrangement — one document naming every array, positionally — and
+        //    still works.
+        //    A fabric URI has no directory beside it: its "parent" is a relative
+        //    path, which became a directory in the cwd — on a node, the root
+        //    filesystem, which adopt-ublk must not touch (#190).
+        let meta_dir: Option<PathBuf> = match meta {
+            Some(m) => Some(PathBuf::from(m)),
+            None if is_fabric_uri(&slab_paths[0]) => None,
+            None => Some(
+                Path::new(&slab_paths[0])
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("meta"),
+            ),
+        };
+        let mut embedded: Vec<Option<crate::volume::metadata::VolumeMetadata>> =
+            Vec::with_capacity(slabs.len());
+        if meta.is_none() {
+            for (path, slab) in slab_sources.iter().zip(&slabs) {
+                let doc = crate::volume::metav2::read_slab(slab)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("read slab metadata from {path}: {e}"))?;
+                embedded.push(doc);
+            }
+        } else {
+            embedded.resize_with(slabs.len(), || None);
         }
-    } else {
-        embedded.resize_with(slabs.len(), || None);
-    }
 
-    // Slabs the records need and that did not open here (#171).
-    let mut fetched: Vec<(String, Slab)> = Vec::new();
-    let mut resumed_uri: Option<String> = None;
-    {
-        let opened: std::collections::HashSet<_> = slabs.iter().map(|s| s.slab_id()).collect();
-        let mut missing: std::collections::HashSet<_> =
-            slabs_named(&embedded).into_iter().filter(|id| !opened.contains(id)).collect();
-        if resume && !missing.is_empty() {
-            let boothost = std::env::var("STORMBLOCK_BOOTHOST").ok().filter(|b| !b.trim().is_empty());
-            // A test (or an operator by hand) can name the source directly.
-            let given = std::env::var("STORMBLOCK_RESUME_SOURCE").ok().filter(|b| !b.trim().is_empty());
-            let source: Option<String> = match (given, boothost, machine_tag()) {
-                (Some(src), _, _) => {
-                    println!(
-                        "The local records place extents on {} slab(s) not on this machine - a \
-                         flow-over cut short. Finishing it from {src}.",
-                        missing.len()
-                    );
-                    Some(src)
-                }
-                (None, Some(boothost), Some(tag)) => {
-                    println!(
-                        "The local records place extents on {} slab(s) not on this machine - a \
-                         flow-over cut short. Claiming a fresh clone of {tag}'s image from {boothost} \
-                         to finish it.",
-                        missing.len()
-                    );
-                    let mut uri = claim_boot_uri(&boothost, &tag, "boothost", 120, None).await?;
-                    if std::env::var("STORMBLOCK_HOST_NQN").is_err() && !uri.contains("hostnqn=") {
-                        uri.push_str(if uri.contains('?') { "&" } else { "?" });
-                        uri.push_str(&format!("hostnqn=nqn.2026-09.lo.storm:host-{tag}"));
+        // Slabs the records need and that did not open here (#171).
+        let mut fetched: Vec<(String, Slab)> = Vec::new();
+        let mut resumed_uri: Option<String> = None;
+        {
+            let opened: std::collections::HashSet<_> = slabs.iter().map(|s| s.slab_id()).collect();
+            let mut missing: std::collections::HashSet<_> =
+                slabs_named(&embedded).into_iter().filter(|id| !opened.contains(id)).collect();
+            if resume && !missing.is_empty() {
+                let boothost = std::env::var("STORMBLOCK_BOOTHOST").ok().filter(|b| !b.trim().is_empty());
+                // A test (or an operator by hand) can name the source directly.
+                let given = std::env::var("STORMBLOCK_RESUME_SOURCE").ok().filter(|b| !b.trim().is_empty());
+                let source: Option<String> = match (given, boothost, machine_tag()) {
+                    (Some(src), _, _) => {
+                        println!(
+                            "The local records place extents on {} slab(s) not on this machine - a \
+                             flow-over cut short. Finishing it from {src}.",
+                            missing.len()
+                        );
+                        Some(src)
                     }
-                    Some(uri)
-                }
-                _ => None,
-            };
-            let tried = source.clone();
-            match source {
-                Some(uri) => {
-                    let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(&uri) {
-                        let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(&uri)
-                            .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {uri}"))?;
-                        Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
-                    } else {
-                        open_storage(&uri).await?
-                    };
-                    let candidates: Vec<Slab> = match Slab::open(dev.clone()).await {
-                        Ok(s) => vec![s],
-                        Err(_) => crate::drive::discover::slabs_in_partitions(&dev)
-                            .await
-                            .into_iter()
-                            .map(|f| f.slab)
-                            .collect(),
-                    };
-                    for slab in candidates {
-                        if missing.remove(&slab.slab_id()) {
-                            println!("  {uri}: slab {} - the extents still to move", slab.slab_id().0);
-                            fetched.push((uri.clone(), slab));
+                    (None, Some(boothost), Some(tag)) => {
+                        println!(
+                            "The local records place extents on {} slab(s) not on this machine - a \
+                             flow-over cut short. Claiming a fresh clone of {tag}'s image from {boothost} \
+                             to finish it.",
+                            missing.len()
+                        );
+                        let mut uri = claim_boot_uri(&boothost, &tag, "boothost", 120, None).await?;
+                        if std::env::var("STORMBLOCK_HOST_NQN").is_err() && !uri.contains("hostnqn=") {
+                            uri.push_str(if uri.contains('?') { "&" } else { "?" });
+                            uri.push_str(&format!("hostnqn=nqn.2026-09.lo.storm:host-{tag}"));
+                        }
+                        Some(uri)
+                    }
+                    _ => None,
+                };
+                let tried = source.clone();
+                match source {
+                    Some(uri) => {
+                        let dev: Arc<dyn BlockDevice> = if is_nvme_tcp_uri(&uri) {
+                            let spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(&uri)
+                                .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {uri}"))?;
+                            Arc::new(crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec).await?)
+                        } else {
+                            open_storage(&uri).await?
+                        };
+                        let candidates: Vec<Slab> = match Slab::open(dev.clone()).await {
+                            Ok(s) => vec![s],
+                            Err(_) => crate::drive::discover::slabs_in_partitions(&dev)
+                                .await
+                                .into_iter()
+                                .map(|f| f.slab)
+                                .collect(),
+                        };
+                        for slab in candidates {
+                            if missing.remove(&slab.slab_id()) {
+                                println!("  {uri}: slab {} - the extents still to move", slab.slab_id().0);
+                                fetched.push((uri.clone(), slab));
+                            }
+                        }
+                        if !fetched.is_empty() {
+                            resumed_uri = Some(uri);
+                        }
+                        if !missing.is_empty() {
+                            println!(
+                                "WARNING: {} slab(s) the records need are not in this machine's image either: {}",
+                                missing.len(),
+                                missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", ")
+                            );
                         }
                     }
-                    if !fetched.is_empty() {
-                        resumed_uri = Some(uri);
-                    }
-                    if !missing.is_empty() {
-                        println!(
-                            "WARNING: {} slab(s) the records need are not in this machine's image either: {}",
-                            missing.len(),
-                            missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", ")
-                        );
-                    }
+                    None => println!(
+                        "WARNING: the local records place extents on {} slab(s) not on this machine \
+                         (a flow-over cut short?), and no appliance or machine tag is known to fetch \
+                         them from",
+                        missing.len()
+                    ),
                 }
-                None => println!(
-                    "WARNING: the local records place extents on {} slab(s) not on this machine \
-                     (a flow-over cut short?), and no appliance or machine tag is known to fetch \
-                     them from",
-                    missing.len()
-                ),
-            }
-            // Booting on with those mappings dropped is a root that reads
-            // holes: PID 1 died of SIGSEGV on server3 (#259). Stop, and say
-            // what is missing and from where it was looked for.
-            let mut have = opened.clone();
-            have.extend(fetched.iter().map(|(_, s)| s.slab_id()));
-            let stranded = stranded_extents(&embedded, &have);
-            if !stranded.is_empty() {
-                let total: usize = stranded.iter().map(|(_, n)| n).sum();
-                let names: Vec<String> =
-                    stranded.iter().take(8).map(|(v, n)| format!("{v} ({n})")).collect();
-                anyhow::bail!(
-                    "refusing to boot: the local records place {total} extent(s) of {} volume(s) \
-                     [{}{}] only on slab(s) {} - not on this machine, and not in the image claimed \
-                     to finish the flow-over{}. That image is not the one this disk was laid from \
-                     (the wrong machine name?), or the flow-over's source is gone (#259)",
-                    stranded.len(),
-                    names.join(", "),
-                    if stranded.len() > 8 { ", ..." } else { "" },
-                    missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", "),
-                    match &tried {
-                        Some(t) => format!(" ({t})"),
-                        None => " (none was: no appliance or machine name known)".into(),
-                    },
-                );
-            }
-        }
-    }
-
-    let primary = embedded.iter().position(|d| d.is_some());
-    let (extent_size, from_slabs, source) = match primary {
-        Some(i) => {
-            let carriers: Vec<&str> = slab_sources
-                .iter()
-                .zip(&embedded)
-                .filter(|(_, d)| d.is_some())
-                .map(|(p, _)| p.as_str())
-                .collect();
-            (
-                embedded[i].as_ref().unwrap().extent_size,
-                true,
-                format!("slab(s) {}", carriers.join(", ")),
-            )
-        }
-        None => {
-            let store = MetadataStore::new(meta_dir.clone())?;
-            if !store.exists() {
-                anyhow::bail!(
-                    "no volume metadata: none of the slab(s) {} carries any, and there is no volumes.dat in {}",
-                    slab_paths.join(", "),
-                    meta_dir.display()
-                );
-            }
-            let doc = store.load()?;
-            if doc.arrays.is_empty() {
-                anyhow::bail!("metadata in {} records no arrays", meta_dir.display());
-            }
-            if slabs.len() > doc.arrays.len() {
-                anyhow::bail!(
-                    "{} slab(s) opened but metadata records only {} array(s)",
-                    slabs.len(),
-                    doc.arrays.len()
-                );
-            }
-            let size = doc.extent_size;
-            embedded[0] = Some(doc);
-            (size, false, meta_dir.display().to_string())
-        }
-    };
-    println!("Volume metadata from {source}");
-
-    // Every document has to agree on the slot size: it is the unit the extent
-    // maps are written in, and two slabs disagreeing about it is not something
-    // to average out.
-    for (path, doc) in slab_sources.iter().zip(&embedded) {
-        if let Some(d) = doc {
-            if d.extent_size != extent_size {
-                anyhow::bail!(
-                    "slab {path} records a {}-byte extent and slab {} records {extent_size}",
-                    d.extent_size,
-                    slab_sources[primary.unwrap_or(0)]
-                );
-            }
-        }
-    }
-
-    // 3. Attach the slabs non-destructively (no reformat) and restore volumes.
-    //    Runtime changes go back where the metadata came from.
-    let mut mgr = if from_slabs {
-        VolumeManager::new(extent_size)
-    } else {
-        VolumeManager::with_data_dir(extent_size, meta_dir.clone())?
-    };
-    // Array ids: a slab that describes itself names its own; one that does
-    // not falls back to the positional pairing the single-document layout
-    // used, taking the next unclaimed record.
-    let fallback: Vec<RaidArrayId> = embedded[primary.unwrap_or(0)]
-        .as_ref()
-        .map(|d| d.arrays.iter().map(|a| a.array_id).collect())
-        .unwrap_or_default();
-    let mut claimed: Vec<RaidArrayId> = embedded
-        .iter()
-        .filter_map(|d| d.as_ref().and_then(|d| d.arrays.first()).map(|a| a.array_id))
-        .collect();
-    let mut metadata_slabs = Vec::new();
-    for ((path, slab), doc) in slab_sources.iter().zip(slabs).zip(&embedded) {
-        let array_id = match doc.as_ref().and_then(|d| d.arrays.first()) {
-            Some(rec) => rec.array_id,
-            None => match fallback.iter().find(|a| !claimed.contains(a)) {
-                Some(next) => {
-                    let next = *next;
-                    claimed.push(next);
-                    next
-                }
-                // An empty slab is a new array, not a pairing failure.
-                //
-                // The positional fallback exists for the old single-document
-                // layout, where a slab's record lived in another slab's
-                // document — so a slab with no metadata means "find its
-                // record over there". A slab that was formatted a second ago
-                // and has never held an extent has no record anywhere,
-                // because there is nothing to record. Refusing it broke the
-                // boot that laid one: `boot-local` formatted a local disk,
-                // put it in the handover, and the engine that adopted the
-                // devices died on
-                //
-                //   slab /dev/sda carries no metadata of its own and the
-                //   record names no further array to pair it with
-                //
-                // leaving the node with a login prompt, no engine, and a
-                // registry reporting "stormblockmk not ready after 120s".
-                //
-                // "Has a region of its own, and nothing in it" is the test.
-                //
-                // Not "no allocated slots": formatting a slab allocates some
-                // — the system slab on this drive came up with two the
-                // instant it was laid, its own reserved region — so counting
-                // them called a brand-new slab occupied and failed the boot a
-                // second time. And `read_metadata` returning `None` means the
-                // region is empty rather than unreadable, because a region
-                // that cannot be decoded is an error, not a `None`.
-                //
-                // A slab with no metadata region at all is the legacy layout
-                // this fallback was written for, and still pairs positionally.
-                None if slab.has_metadata_region() => {
-                    let fresh = RaidArrayId(uuid::Uuid::new_v4());
-                    tracing::info!(
-                        "slab {path} is empty and names no array — opening it as a new one \
-                         ({fresh})"
+                // Booting on with those mappings dropped is a root that reads
+                // holes: PID 1 died of SIGSEGV on server3 (#259). Stop, and say
+                // what is missing and from where it was looked for.
+                let mut have = opened.clone();
+                have.extend(fetched.iter().map(|(_, s)| s.slab_id()));
+                let stranded = stranded_extents(&embedded, &have);
+                if !stranded.is_empty() {
+                    let total: usize = stranded.iter().map(|(_, n)| n).sum();
+                    let names: Vec<String> =
+                        stranded.iter().take(8).map(|(v, n)| format!("{v} ({n})")).collect();
+                    anyhow::bail!(
+                        "refusing to boot: the local records place {total} extent(s) of {} volume(s) \
+                         [{}{}] only on slab(s) {} - not on this machine, and not in the image claimed \
+                         to finish the flow-over{}. That image is not the one this disk was laid from \
+                         (the wrong machine name?), or the flow-over's source is gone (#259)",
+                        stranded.len(),
+                        names.join(", "),
+                        if stranded.len() > 8 { ", ..." } else { "" },
+                        missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", "),
+                        match &tried {
+                            Some(t) => format!(" ({t})"),
+                            None => " (none was: no appliance or machine name known)".into(),
+                        },
                     );
-                    claimed.push(fresh);
-                    fresh
                 }
-                None => anyhow::bail!(
-                    "slab {path} keeps no metadata region of its own, holds {} allocated \
-                     slot(s), and the record names no further array to pair it with — its \
-                     extents belong to an array this boot cannot name",
-                    slab.allocated_slots()
-                ),
-            },
-        };
-        let role = slab.role();
-        if slab.has_metadata_region() {
-            metadata_slabs.push(slab.slab_id());
+            }
         }
-        mgr.attach_slab(array_id, slab)
-            .await
-            .map_err(|e| anyhow::anyhow!("attach slab {path}: {e}"))?;
-        println!("Attached {role} slab {path} (array {array_id})");
-    }
-    if !metadata_slabs.is_empty() {
-        mgr.persist_to_slabs(metadata_slabs);
-    }
-    // Fetched slabs are sources of data only: registered, never read for
-    // records nor written with them.
-    for (uri, slab) in fetched {
-        let role = slab.role();
-        mgr.add_slab(slab).await;
-        println!("Attached {role} slab {uri} (to finish the flow-over)");
-    }
-    mgr.restore().await?;
 
-    let resumed = match resumed_uri {
-        None => None,
-        Some(uri) => {
-            let reg = mgr.registry().read().await;
-            let local = |data: bool| {
-                reg.iter()
-                    .find(|(id, s)| s.is_data() == data && mgr.is_metadata_slab(id))
-                    .map(|(id, _)| *id)
+        let primary = embedded.iter().position(|d| d.is_some());
+        let (extent_size, from_slabs, source) = match primary {
+            Some(i) => {
+                let carriers: Vec<&str> = slab_sources
+                    .iter()
+                    .zip(&embedded)
+                    .filter(|(_, d)| d.is_some())
+                    .map(|(p, _)| p.as_str())
+                    .collect();
+                (
+                    embedded[i].as_ref().unwrap().extent_size,
+                    true,
+                    format!("slab(s) {}", carriers.join(", ")),
+                )
+            }
+            None => {
+                let Some(meta_dir) = meta_dir.clone() else {
+                    anyhow::bail!(
+                        "no volume metadata: none of the slab(s) {} carries any, and no --meta was given",
+                        slab_paths.join(", ")
+                    );
+                };
+                let store = MetadataStore::new(meta_dir.clone())?;
+                if !store.exists() {
+                    anyhow::bail!(
+                        "no volume metadata: none of the slab(s) {} carries any, and there is no volumes.dat in {}",
+                        slab_paths.join(", "),
+                        meta_dir.display()
+                    );
+                }
+                let doc = store.load()?;
+                if doc.arrays.is_empty() {
+                    anyhow::bail!("metadata in {} records no arrays", meta_dir.display());
+                }
+                if slabs.len() > doc.arrays.len() {
+                    anyhow::bail!(
+                        "{} slab(s) opened but metadata records only {} array(s)",
+                        slabs.len(),
+                        doc.arrays.len()
+                    );
+                }
+                let size = doc.extent_size;
+                embedded[0] = Some(doc);
+                (size, false, meta_dir.display().to_string())
+            }
+        };
+        println!("Volume metadata from {source}");
+
+        // Every document has to agree on the slot size: it is the unit the extent
+        // maps are written in, and two slabs disagreeing about it is not something
+        // to average out.
+        for (path, doc) in slab_sources.iter().zip(&embedded) {
+            if let Some(d) = doc {
+                if d.extent_size != extent_size {
+                    anyhow::bail!(
+                        "slab {path} records a {}-byte extent and slab {} records {extent_size}",
+                        d.extent_size,
+                        slab_sources[primary.unwrap_or(0)]
+                    );
+                }
+            }
+        }
+
+        // 3. Attach the slabs non-destructively (no reformat) and restore volumes.
+        //    Runtime changes go back where the metadata came from.
+        let mut mgr = if from_slabs {
+            VolumeManager::new(extent_size)
+        } else {
+            VolumeManager::with_data_dir(extent_size, meta_dir.clone().expect("metadata came from a directory"))?
+        };
+        // Array ids: a slab that describes itself names its own; one that does
+        // not falls back to the positional pairing the single-document layout
+        // used, taking the next unclaimed record.
+        let fallback: Vec<RaidArrayId> = embedded[primary.unwrap_or(0)]
+            .as_ref()
+            .map(|d| d.arrays.iter().map(|a| a.array_id).collect())
+            .unwrap_or_default();
+        let mut claimed: Vec<RaidArrayId> = embedded
+            .iter()
+            .filter_map(|d| d.as_ref().and_then(|d| d.arrays.first()).map(|a| a.array_id))
+            .collect();
+        let mut metadata_slabs = Vec::new();
+        for ((path, slab), doc) in slab_sources.iter().zip(slabs).zip(&embedded) {
+            let array_id = match doc.as_ref().and_then(|d| d.arrays.first()) {
+                Some(rec) => rec.array_id,
+                None => match fallback.iter().find(|a| !claimed.contains(a)) {
+                    Some(next) => {
+                        let next = *next;
+                        claimed.push(next);
+                        next
+                    }
+                    // An empty slab is a new array, not a pairing failure.
+                    //
+                    // The positional fallback exists for the old single-document
+                    // layout, where a slab's record lived in another slab's
+                    // document — so a slab with no metadata means "find its
+                    // record over there". A slab that was formatted a second ago
+                    // and has never held an extent has no record anywhere,
+                    // because there is nothing to record. Refusing it broke the
+                    // boot that laid one: `boot-local` formatted a local disk,
+                    // put it in the handover, and the engine that adopted the
+                    // devices died on
+                    //
+                    //   slab /dev/sda carries no metadata of its own and the
+                    //   record names no further array to pair it with
+                    //
+                    // leaving the node with a login prompt, no engine, and a
+                    // registry reporting "stormblockmk not ready after 120s".
+                    //
+                    // "Has a region of its own, and nothing in it" is the test.
+                    //
+                    // Not "no allocated slots": formatting a slab allocates some
+                    // — the system slab on this drive came up with two the
+                    // instant it was laid, its own reserved region — so counting
+                    // them called a brand-new slab occupied and failed the boot a
+                    // second time. And `read_metadata` returning `None` means the
+                    // region is empty rather than unreadable, because a region
+                    // that cannot be decoded is an error, not a `None`.
+                    //
+                    // A slab with no metadata region at all is the legacy layout
+                    // this fallback was written for, and still pairs positionally.
+                    None if slab.has_metadata_region() => {
+                        let fresh = RaidArrayId(uuid::Uuid::new_v4());
+                        tracing::info!(
+                            "slab {path} is empty and names no array — opening it as a new one \
+                             ({fresh})"
+                        );
+                        claimed.push(fresh);
+                        fresh
+                    }
+                    None => anyhow::bail!(
+                        "slab {path} keeps no metadata region of its own, holds {} allocated \
+                         slot(s), and the record names no further array to pair it with — its \
+                         extents belong to an array this boot cannot name",
+                        slab.allocated_slots()
+                    ),
+                },
             };
-            Some(Resumed { uri, system_slab: local(false), data_slab: local(true) })
+            let role = slab.role();
+            if slab.has_metadata_region() {
+                metadata_slabs.push(slab.slab_id());
+            }
+            mgr.attach_slab(array_id, slab)
+                .await
+                .map_err(|e| anyhow::anyhow!("attach slab {path}: {e}"))?;
+            println!("Attached {role} slab {path} (array {array_id})");
         }
-    };
-    Ok((mgr, resumed, disks))
-}
-
-/// adopt-ublk: take over the ublk devices an earlier server created.
-///
-/// The handover the boot needs. The engine the initramfs started owns the slab
-/// and serves root, and it can never be restarted: `switch_root` deleted the
-/// filesystem its binary came from, so `/proc/<pid>/exe` reads `(deleted)` and
-/// nothing on the node could exec it again. That makes the one process the
-/// root filesystem depends on unrepeatable — a failure with no recovery path
-/// rather than one with a slow recovery path.
-///
-/// So the long-term owner is a process that lives in a golden, can be
-/// upgraded, and can be put back by PID 1 when it dies. It takes over here.
-///
-/// **The order matters and the caller owns it.** The previous server must be
-/// stopped before this runs: `START_USER_RECOVERY` is the kernel refusing to
-/// have two servers, not a way to have them briefly. The block device itself
-/// never goes away, so a filesystem mounted on it stays mounted throughout,
-/// and `UBLK_F_USER_RECOVERY_REISSUE` hands this server the I/O that was in
-/// flight rather than failing it.
-///
-/// The slab needs no handover of its own: `Slab::open` reads the header and
-/// the slot table from disk and derives the free bitmap, so the on-disk state
-/// *is* the allocator. Opening it here, after the old engine has stopped, is
-/// the whole transfer.
-/// Mount the `/serve/v1` surface over an engine that is already assembled.
-///
-/// Shared by the two ways this binary becomes a node's engine: the ordinary
-/// serve path, and `adopt-ublk`, which takes the devices over from the
-/// initramfs and then *is* the engine. Only the first one had it, so a node
-/// that booted through a handover answered 404 to every call the registry
-/// next door made — while its management API, one port along, was answering
-/// perfectly. Layer 2 belongs to the engine, not to one of its entry points.
-async fn start_serving(
-    config: &crate::mgmt::config::StormBlockConfig,
-    state: &Arc<AppState>,
-    iscsi_bind: &str,
-    nvmeof_bind: &str,
-    reactor: &Arc<ReactorPool>,
-) {
-    match config.serve_config(iscsi_bind, nvmeof_bind) {
-        Ok(serve_cfg) => {
-            if let Err(e) = std::fs::create_dir_all(&serve_cfg.data_dir) {
-                tracing::error!(
-                    "not serving /serve/v1: cannot create {} ({e}) — the wiring table has to \
-                     survive a restart",
-                    serve_cfg.data_dir
-                );
-                return;
-            }
-            #[cfg(feature = "iscsi")]
-            let shared_iscsi = state.iscsi_target.read().await.clone();
-
-            let wiring = crate::serve::wiring::WiringTable::load(&serve_cfg.data_dir);
-            let status = Arc::new(crate::serve::status::MkStatus::new());
-            tracing::info!(
-                "Serving /serve/v1 — advertising {}, portals {}..{}, state in {}",
-                serve_cfg.advertise_addr,
-                serve_cfg.portal_base,
-                serve_cfg.portal_base.saturating_add(serve_cfg.portal_span),
-                serve_cfg.data_dir,
-            );
-            let reconcile_secs = serve_cfg.reconcile_secs;
-            let reap_secs = serve_cfg.reap_secs;
-            let ctx = Arc::new(crate::serve::ctx::ServeContext::new(
-                serve_cfg,
-                state.clone(),
-                status,
-                #[cfg(feature = "iscsi")]
-                shared_iscsi,
-                reactor.clone(),
-                wiring,
-            ));
-            // Tell the API how to serve a volume as a subsystem of its own.
-            // The settings live in the serve config and the API cannot see it,
-            // so publish them: a claim then hands out the address that names
-            // the volume rather than a namespace number in a shared subsystem
-            // (#98).
-            *state.per_volume.write().await = Some(crate::mgmt::PerVolumeServing {
-                nqn_prefix: ctx.cfg.nqn_prefix.clone(),
-                portal_base: ctx.cfg.portal_base,
-                portal_span: ctx.cfg.portal_span,
-                reactor: reactor.clone(),
-            });
-            // Readiness reflects what this engine has actually done.
-            //
-            // These flags were set by the profile that owned the serving layer
-            // before it was promoted into the engine (#60); the fields came
-            // across and the code that set them did not. Nothing set them
-            // afterwards, so every node reported "slab not open", "volume
-            // metadata not restored" and "management API not listening" while
-            // demonstrably doing all three — and a registry asking whether the
-            // storage was ready was told no, forever.
-            //
-            // Both are true by construction here: `start_serving` is only
-            // reached with a volume manager built over attached slabs, in
-            // either of the two ways this binary becomes a node's engine.
-            ctx.status.set(&ctx.status.slab_open, true);
-            ctx.status.set(&ctx.status.volumes_restored, true);
-            // The transport, in the sense this layer means it: portals are
-            // bound per export from the range above rather than one listener
-            // held open, so what readiness can say is that the node is able to
-            // bind them. A portal that then fails to bind surfaces as that
-            // export staying pending, which is where it belongs.
-            ctx.status.set(&ctx.status.nvmeof_listening, true);
-
-            if state.serve.set(ctx.clone()).is_err() {
-                tracing::error!("serving context was already set — not starting a second one");
-                return;
-            }
-            tokio::spawn(crate::serve::reconcile::run(ctx.clone()));
-            tracing::debug!("export reconciler running every {reconcile_secs}s");
-            if reap_secs > 0 {
-                tokio::spawn(crate::serve::reap::run(ctx));
-                tracing::debug!("template reaper running every {reap_secs}s");
-            }
+        if !metadata_slabs.is_empty() {
+            mgr.persist_to_slabs(metadata_slabs);
         }
-        // Not an error: a node that is not meant to serve, or has nowhere to
-        // keep the wiring table, is a legitimate configuration. But it is
-        // never silent — a consumer getting 404s from /serve/v1 has to be able
-        // to find out why from this node's log.
-        Err(why) => tracing::warn!("not serving /serve/v1: {why}"),
-    }
-}
+        // Fetched slabs are sources of data only: registered, never read for
+        // records nor written with them.
+        for (uri, slab) in fetched {
+            let role = slab.role();
+            mgr.add_slab(slab).await;
+            println!("Attached {role} slab {uri} (to finish the flow-over)");
+        }
+        mgr.restore().await?;
 
-/// Every block device this node has, with identity, firmware and health.
-///
-/// From sysfs where sysfs knows, and from the drive itself where it does not:
-/// NVMe endurance and temperature live in a SMART log page reached by an admin
-/// command, not in a sysfs file, so a report built only from sysfs silently
-/// omits the two numbers most worth having.
-#[cfg(target_os = "linux")]
-fn collect_devices() -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-
-    let read = |p: String| -> String {
-        std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_default()
-    };
-
-    let Ok(blocks) = std::fs::read_dir("/sys/block") else {
-        return "cannot read /sys/block\n".into();
-    };
-    let mut names: Vec<String> = blocks
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        // Virtual devices are this node's own doing and say nothing about its
-        // media; ublk especially, since those are volumes we serve.
-        .filter(|n| !n.starts_with("loop") && !n.starts_with("ram") && !n.starts_with("ublk"))
-        .collect();
-    names.sort();
-
-    for n in names {
-        let base = format!("/sys/block/{n}");
-        let sectors: u64 = read(format!("{base}/size")).parse().unwrap_or(0);
-        let bytes = sectors * 512;
-        let rotational = read(format!("{base}/queue/rotational"));
-        let model = {
-            let m = read(format!("{base}/device/model"));
-            if m.is_empty() { read(format!("{base}/device/name")) } else { m }
+        let resumed = match resumed_uri {
+            None => None,
+            Some(uri) => {
+                let reg = mgr.registry().read().await;
+                let local = |data: bool| {
+                    reg.iter()
+                        .find(|(id, s)| s.is_data() == data && mgr.is_metadata_slab(id))
+                        .map(|(id, _)| *id)
+                };
+                Some(Resumed { uri, system_slab: local(false), data_slab: local(true) })
+            }
         };
-        let _ = writeln!(
-            out,
-            "{n}: {} {}  {}  {}",
-            read(format!("{base}/device/vendor")),
-            model,
-            crate::mgmt::config::human_size(bytes),
-            if rotational == "1" { "rotational" } else { "solid state" },
-        );
-        for (label, path) in [
-            ("serial", format!("{base}/device/serial")),
-            ("firmware", format!("{base}/device/firmware_rev")),
-            ("firmware", format!("{base}/device/rev")),
-            ("wwid", format!("{base}/device/wwid")),
-            ("queue depth", format!("{base}/device/queue_depth")),
-            ("scheduler", format!("{base}/queue/scheduler")),
-            ("logical block", format!("{base}/queue/logical_block_size")),
-            ("physical block", format!("{base}/queue/physical_block_size")),
-        ] {
-            let v = read(path);
-            if !v.is_empty() {
-                let _ = writeln!(out, "    {label:<16} {v}");
+        Ok((mgr, resumed, disks))
+    }
+
+    /// adopt-ublk: take over the ublk devices an earlier server created.
+    ///
+    /// The handover the boot needs. The engine the initramfs started owns the slab
+    /// and serves root, and it can never be restarted: `switch_root` deleted the
+    /// filesystem its binary came from, so `/proc/<pid>/exe` reads `(deleted)` and
+    /// nothing on the node could exec it again. That makes the one process the
+    /// root filesystem depends on unrepeatable — a failure with no recovery path
+    /// rather than one with a slow recovery path.
+    ///
+    /// So the long-term owner is a process that lives in a golden, can be
+    /// upgraded, and can be put back by PID 1 when it dies. It takes over here.
+    ///
+    /// **The order matters and the caller owns it.** The previous server must be
+    /// stopped before this runs: `START_USER_RECOVERY` is the kernel refusing to
+    /// have two servers, not a way to have them briefly. The block device itself
+    /// never goes away, so a filesystem mounted on it stays mounted throughout,
+    /// and `UBLK_F_USER_RECOVERY_REISSUE` hands this server the I/O that was in
+    /// flight rather than failing it.
+    ///
+    /// The slab needs no handover of its own: `Slab::open` reads the header and
+    /// the slot table from disk and derives the free bitmap, so the on-disk state
+    /// *is* the allocator. Opening it here, after the old engine has stopped, is
+    /// the whole transfer.
+    /// Mount the `/serve/v1` surface over an engine that is already assembled.
+    ///
+    /// Shared by the two ways this binary becomes a node's engine: the ordinary
+    /// serve path, and `adopt-ublk`, which takes the devices over from the
+    /// initramfs and then *is* the engine. Only the first one had it, so a node
+    /// that booted through a handover answered 404 to every call the registry
+    /// next door made — while its management API, one port along, was answering
+    /// perfectly. Layer 2 belongs to the engine, not to one of its entry points.
+    async fn start_serving(
+        config: &crate::mgmt::config::StormBlockConfig,
+        state: &Arc<AppState>,
+        iscsi_bind: &str,
+        nvmeof_bind: &str,
+        reactor: &Arc<ReactorPool>,
+    ) {
+        match config.serve_config(iscsi_bind, nvmeof_bind) {
+            Ok(serve_cfg) => {
+                if let Err(e) = std::fs::create_dir_all(&serve_cfg.data_dir) {
+                    tracing::error!(
+                        "not serving /serve/v1: cannot create {} ({e}) — the wiring table has to \
+                         survive a restart",
+                        serve_cfg.data_dir
+                    );
+                    return;
+                }
+                #[cfg(feature = "iscsi")]
+                let shared_iscsi = state.iscsi_target.read().await.clone();
+
+                let wiring = crate::serve::wiring::WiringTable::load(&serve_cfg.data_dir);
+                let status = Arc::new(crate::serve::status::MkStatus::new());
+                tracing::info!(
+                    "Serving /serve/v1 — advertising {}, portals {}..{}, state in {}",
+                    serve_cfg.advertise_addr,
+                    serve_cfg.portal_base,
+                    serve_cfg.portal_base.saturating_add(serve_cfg.portal_span),
+                    serve_cfg.data_dir,
+                );
+                let reconcile_secs = serve_cfg.reconcile_secs;
+                let reap_secs = serve_cfg.reap_secs;
+                let ctx = Arc::new(crate::serve::ctx::ServeContext::new(
+                    serve_cfg,
+                    state.clone(),
+                    status,
+                    #[cfg(feature = "iscsi")]
+                    shared_iscsi,
+                    reactor.clone(),
+                    wiring,
+                ));
+                // Tell the API how to serve a volume as a subsystem of its own.
+                // The settings live in the serve config and the API cannot see it,
+                // so publish them: a claim then hands out the address that names
+                // the volume rather than a namespace number in a shared subsystem
+                // (#98).
+                *state.per_volume.write().await = Some(crate::mgmt::PerVolumeServing {
+                    nqn_prefix: ctx.cfg.nqn_prefix.clone(),
+                    portal_base: ctx.cfg.portal_base,
+                    portal_span: ctx.cfg.portal_span,
+                    reactor: reactor.clone(),
+                });
+                // Readiness reflects what this engine has actually done.
+                //
+                // These flags were set by the profile that owned the serving layer
+                // before it was promoted into the engine (#60); the fields came
+                // across and the code that set them did not. Nothing set them
+                // afterwards, so every node reported "slab not open", "volume
+                // metadata not restored" and "management API not listening" while
+                // demonstrably doing all three — and a registry asking whether the
+                // storage was ready was told no, forever.
+                //
+                // Both are true by construction here: `start_serving` is only
+                // reached with a volume manager built over attached slabs, in
+                // either of the two ways this binary becomes a node's engine.
+                ctx.status.set(&ctx.status.slab_open, true);
+                ctx.status.set(&ctx.status.volumes_restored, true);
+                // The transport, in the sense this layer means it: portals are
+                // bound per export from the range above rather than one listener
+                // held open, so what readiness can say is that the node is able to
+                // bind them. A portal that then fails to bind surfaces as that
+                // export staying pending, which is where it belongs.
+                ctx.status.set(&ctx.status.nvmeof_listening, true);
+
+                if state.serve.set(ctx.clone()).is_err() {
+                    tracing::error!("serving context was already set — not starting a second one");
+                    return;
+                }
+                tokio::spawn(crate::serve::reconcile::run(ctx.clone()));
+                tracing::debug!("export reconciler running every {reconcile_secs}s");
+                if reap_secs > 0 {
+                    tokio::spawn(crate::serve::reap::run(ctx));
+                    tracing::debug!("template reaper running every {reap_secs}s");
+                }
             }
+            // Not an error: a node that is not meant to serve, or has nowhere to
+            // keep the wiring table, is a legitimate configuration. But it is
+            // never silent — a consumer getting 404s from /serve/v1 has to be able
+            // to find out why from this node's log.
+            Err(why) => tracing::warn!("not serving /serve/v1: {why}"),
         }
-        // Temperature, where the kernel exposes it without an admin command.
-        for hw in ["device/hwmon", "device/device/hwmon"] {
-            if let Ok(rd) = std::fs::read_dir(format!("{base}/{hw}")) {
-                for e in rd.flatten() {
-                    let t = read(format!("{}/temp1_input", e.path().display()));
-                    if let Ok(milli) = t.parse::<i64>() {
-                        let _ = writeln!(out, "    {:<16} {}°C", "temperature", milli / 1000);
+    }
+
+    /// Every block device this node has, with identity, firmware and health.
+    ///
+    /// From sysfs where sysfs knows, and from the drive itself where it does not:
+    /// NVMe endurance and temperature live in a SMART log page reached by an admin
+    /// command, not in a sysfs file, so a report built only from sysfs silently
+    /// omits the two numbers most worth having.
+    #[cfg(target_os = "linux")]
+    fn collect_devices() -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+
+        let read = |p: String| -> String {
+            std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_default()
+        };
+
+        let Ok(blocks) = std::fs::read_dir("/sys/block") else {
+            return "cannot read /sys/block\n".into();
+        };
+        let mut names: Vec<String> = blocks
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            // Virtual devices are this node's own doing and say nothing about its
+            // media; ublk especially, since those are volumes we serve.
+            .filter(|n| !n.starts_with("loop") && !n.starts_with("ram") && !n.starts_with("ublk"))
+            .collect();
+        names.sort();
+
+        for n in names {
+            let base = format!("/sys/block/{n}");
+            let sectors: u64 = read(format!("{base}/size")).parse().unwrap_or(0);
+            let bytes = sectors * 512;
+            let rotational = read(format!("{base}/queue/rotational"));
+            let model = {
+                let m = read(format!("{base}/device/model"));
+                if m.is_empty() { read(format!("{base}/device/name")) } else { m }
+            };
+            let _ = writeln!(
+                out,
+                "{n}: {} {}  {}  {}",
+                read(format!("{base}/device/vendor")),
+                model,
+                crate::mgmt::config::human_size(bytes),
+                if rotational == "1" { "rotational" } else { "solid state" },
+            );
+            for (label, path) in [
+                ("serial", format!("{base}/device/serial")),
+                ("firmware", format!("{base}/device/firmware_rev")),
+                ("firmware", format!("{base}/device/rev")),
+                ("wwid", format!("{base}/device/wwid")),
+                ("queue depth", format!("{base}/device/queue_depth")),
+                ("scheduler", format!("{base}/queue/scheduler")),
+                ("logical block", format!("{base}/queue/logical_block_size")),
+                ("physical block", format!("{base}/queue/physical_block_size")),
+            ] {
+                let v = read(path);
+                if !v.is_empty() {
+                    let _ = writeln!(out, "    {label:<16} {v}");
+                }
+            }
+            // Temperature, where the kernel exposes it without an admin command.
+            for hw in ["device/hwmon", "device/device/hwmon"] {
+                if let Ok(rd) = std::fs::read_dir(format!("{base}/{hw}")) {
+                    for e in rd.flatten() {
+                        let t = read(format!("{}/temp1_input", e.path().display()));
+                        if let Ok(milli) = t.parse::<i64>() {
+                            let _ = writeln!(out, "    {:<16} {}°C", "temperature", milli / 1000);
+                        }
                     }
                 }
             }
+            if n.starts_with("nvme") {
+                let ctrl = n.split('n').next().unwrap_or(&n).to_owned();
+                let _ = write!(out, "{}", nvme_smart(&format!("/dev/{ctrl}")));
+            }
+            out.push('\n');
         }
-        if n.starts_with("nvme") {
-            let ctrl = n.split('n').next().unwrap_or(&n).to_owned();
-            let _ = write!(out, "{}", nvme_smart(&format!("/dev/{ctrl}")));
+        out
+    }
+
+    /// NVMe SMART / Health Information (log page 0x02), by admin passthrough.
+    ///
+    /// The numbers here are the ones a sysfs-only report cannot have: endurance
+    /// used, spare remaining, media errors, unsafe shutdowns. A drive at 95% of
+    /// its endurance explains a class of behaviour that looks like a software
+    /// problem right up until someone reads this counter.
+    #[cfg(target_os = "linux")]
+    fn nvme_smart(dev: &str) -> String {
+        use std::fmt::Write as _;
+        use std::os::unix::io::AsRawFd;
+
+        #[repr(C)]
+        #[derive(Default)]
+        struct AdminCmd {
+            opcode: u8,
+            flags: u8,
+            rsvd1: u16,
+            nsid: u32,
+            cdw2: u32,
+            cdw3: u32,
+            metadata: u64,
+            addr: u64,
+            metadata_len: u32,
+            data_len: u32,
+            cdw10: u32,
+            cdw11: u32,
+            cdw12: u32,
+            cdw13: u32,
+            cdw14: u32,
+            cdw15: u32,
+            timeout_ms: u32,
+            result: u32,
         }
-        out.push('\n');
-    }
-    out
-}
+        // _IOWR('N', 0x41, struct nvme_admin_cmd), sizeof == 72.
+        // libc's ioctl request type differs by target (c_ulong on glibc,
+        // c_int on musl) and has changed across libc releases — keep the raw
+        // value and cast at the call site.
+        const NVME_IOCTL_ADMIN_CMD: u32 =
+            (3u32 << 30) | (72u32 << 16) | ((b'N' as u32) << 8) | 0x41;
 
-/// NVMe SMART / Health Information (log page 0x02), by admin passthrough.
-///
-/// The numbers here are the ones a sysfs-only report cannot have: endurance
-/// used, spare remaining, media errors, unsafe shutdowns. A drive at 95% of
-/// its endurance explains a class of behaviour that looks like a software
-/// problem right up until someone reads this counter.
-#[cfg(target_os = "linux")]
-fn nvme_smart(dev: &str) -> String {
-    use std::fmt::Write as _;
-    use std::os::unix::io::AsRawFd;
+        let Ok(f) = std::fs::File::open(dev) else {
+            return format!("    (no SMART: cannot open {dev})\n");
+        };
+        let mut buf = [0u8; 512];
+        let mut cmd = AdminCmd {
+            opcode: 0x02, // Get Log Page
+            nsid: 0xffff_ffff,
+            addr: buf.as_mut_ptr() as u64,
+            data_len: buf.len() as u32,
+            // Log id 0x02, number of dwords - 1 in the top half.
+            cdw10: 0x02 | (((buf.len() / 4 - 1) as u32) << 16),
+            ..Default::default()
+        };
+        // SAFETY: an ioctl on a file this process opened, with a buffer it owns.
+        let rc = unsafe { libc::ioctl(f.as_raw_fd(), NVME_IOCTL_ADMIN_CMD as _, &mut cmd) };
+        if rc != 0 {
+            return format!("    (no SMART from {dev}: {})\n", std::io::Error::last_os_error());
+        }
 
-    #[repr(C)]
-    #[derive(Default)]
-    struct AdminCmd {
-        opcode: u8,
-        flags: u8,
-        rsvd1: u16,
-        nsid: u32,
-        cdw2: u32,
-        cdw3: u32,
-        metadata: u64,
-        addr: u64,
-        metadata_len: u32,
-        data_len: u32,
-        cdw10: u32,
-        cdw11: u32,
-        cdw12: u32,
-        cdw13: u32,
-        cdw14: u32,
-        cdw15: u32,
-        timeout_ms: u32,
-        result: u32,
-    }
-    // _IOWR('N', 0x41, struct nvme_admin_cmd), sizeof == 72.
-    // libc's ioctl request type differs by target (c_ulong on glibc,
-    // c_int on musl) and has changed across libc releases — keep the raw
-    // value and cast at the call site.
-    const NVME_IOCTL_ADMIN_CMD: u32 =
-        (3u32 << 30) | (72u32 << 16) | ((b'N' as u32) << 8) | 0x41;
-
-    let Ok(f) = std::fs::File::open(dev) else {
-        return format!("    (no SMART: cannot open {dev})\n");
-    };
-    let mut buf = [0u8; 512];
-    let mut cmd = AdminCmd {
-        opcode: 0x02, // Get Log Page
-        nsid: 0xffff_ffff,
-        addr: buf.as_mut_ptr() as u64,
-        data_len: buf.len() as u32,
-        // Log id 0x02, number of dwords - 1 in the top half.
-        cdw10: 0x02 | (((buf.len() / 4 - 1) as u32) << 16),
-        ..Default::default()
-    };
-    // SAFETY: an ioctl on a file this process opened, with a buffer it owns.
-    let rc = unsafe { libc::ioctl(f.as_raw_fd(), NVME_IOCTL_ADMIN_CMD as _, &mut cmd) };
-    if rc != 0 {
-        return format!("    (no SMART from {dev}: {})\n", std::io::Error::last_os_error());
+        let u16le = |o: usize| u16::from_le_bytes([buf[o], buf[o + 1]]);
+        let u128le = |o: usize| {
+            let mut v = [0u8; 16];
+            v.copy_from_slice(&buf[o..o + 16]);
+            u128::from_le_bytes(v)
+        };
+        let mut out = String::new();
+        // Composite temperature is in kelvin.
+        let kelvin = u16le(1);
+        let _ = writeln!(out, "    {:<16} {}°C", "temperature", kelvin as i32 - 273);
+        let _ = writeln!(out, "    {:<16} {}%", "spare left", buf[3]);
+        let _ = writeln!(out, "    {:<16} {}% (endurance consumed)", "wear", buf[5]);
+        let _ = writeln!(out, "    {:<16} {}", "critical warning", buf[0]);
+        let _ = writeln!(out, "    {:<16} {}", "power-on hours", u128le(128));
+        let _ = writeln!(out, "    {:<16} {}", "unsafe shutdowns", u128le(160));
+        let _ = writeln!(out, "    {:<16} {}", "media errors", u128le(176));
+        let _ = writeln!(out, "    {:<16} {}", "error log entries", u128le(192));
+        out
     }
 
-    let u16le = |o: usize| u16::from_le_bytes([buf[o], buf[o + 1]]);
-    let u128le = |o: usize| {
-        let mut v = [0u8; 16];
-        v.copy_from_slice(&buf[o..o + 16]);
-        u128::from_le_bytes(v)
-    };
-    let mut out = String::new();
-    // Composite temperature is in kelvin.
-    let kelvin = u16le(1);
-    let _ = writeln!(out, "    {:<16} {}°C", "temperature", kelvin as i32 - 273);
-    let _ = writeln!(out, "    {:<16} {}%", "spare left", buf[3]);
-    let _ = writeln!(out, "    {:<16} {}% (endurance consumed)", "wear", buf[5]);
-    let _ = writeln!(out, "    {:<16} {}", "critical warning", buf[0]);
-    let _ = writeln!(out, "    {:<16} {}", "power-on hours", u128le(128));
-    let _ = writeln!(out, "    {:<16} {}", "unsafe shutdowns", u128le(160));
-    let _ = writeln!(out, "    {:<16} {}", "media errors", u128le(176));
-    let _ = writeln!(out, "    {:<16} {}", "error log entries", u128le(192));
-    out
-}
+    #[cfg(not(target_os = "linux"))]
+    fn collect_devices() -> String {
+        "device inventory is read from sysfs and NVMe admin commands, which are Linux-only\n".into()
+    }
 
-#[cfg(not(target_os = "linux"))]
-fn collect_devices() -> String {
-    "device inventory is read from sysfs and NVMe admin commands, which are Linux-only\n".into()
-}
+    /// `must-gather` — one directory holding everything needed to explain a node.
+    ///
+    /// Modelled on `oc adm must-gather`, and for the same reason: the node with
+    /// the problem is rarely the node in front of you, and asking someone to run
+    /// eleven commands and paste the output loses the one that mattered. This
+    /// collects what the kernel saw, what the storage layer thinks it has, and the
+    /// contents of the log volumes, and puts them in one place.
+    ///
+    /// **Read-only throughout.** A diagnostic that can change what it is
+    /// diagnosing is not one, so the volumes are mounted `ro` and released again.
+    #[cfg(target_os = "linux")]
+    async fn handle_must_gather(
+        slab_paths: &[String],
+        meta: Option<&str>,
+        out: &str,
+        extra_volumes: &[String],
+        no_contents: bool,
+        max_file_mb: u64,
+    ) -> anyhow::Result<()> {
+        use std::io::Write;
 
-/// `must-gather` — one directory holding everything needed to explain a node.
-///
-/// Modelled on `oc adm must-gather`, and for the same reason: the node with
-/// the problem is rarely the node in front of you, and asking someone to run
-/// eleven commands and paste the output loses the one that mattered. This
-/// collects what the kernel saw, what the storage layer thinks it has, and the
-/// contents of the log volumes, and puts them in one place.
-///
-/// **Read-only throughout.** A diagnostic that can change what it is
-/// diagnosing is not one, so the volumes are mounted `ro` and released again.
-#[cfg(target_os = "linux")]
-async fn handle_must_gather(
-    slab_paths: &[String],
-    meta: Option<&str>,
-    out: &str,
-    extra_volumes: &[String],
-    no_contents: bool,
-    max_file_mb: u64,
-) -> anyhow::Result<()> {
-    use std::io::Write;
+        let root = std::path::Path::new(out);
+        std::fs::create_dir_all(root)?;
+        let mut manifest = Vec::<String>::new();
 
-    let root = std::path::Path::new(out);
-    std::fs::create_dir_all(root)?;
-    let mut manifest = Vec::<String>::new();
-
-    let write = |name: &str, body: &str| -> anyhow::Result<()> {
-        let mut f = std::fs::File::create(root.join(name))?;
-        f.write_all(body.as_bytes())?;
-        Ok(())
-    };
-    // A command's output, or the reason there is none. An absent file would
-    // leave the reader unable to tell "nothing to report" from "never ran".
-    let run = |cmd: &str, args: &[&str]| -> String {
-        match std::process::Command::new(cmd).args(args).output() {
-            Ok(o) => {
-                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-                if !o.stderr.is_empty() {
-                    s.push_str("\n--- stderr ---\n");
-                    s.push_str(&String::from_utf8_lossy(&o.stderr));
+        let write = |name: &str, body: &str| -> anyhow::Result<()> {
+            let mut f = std::fs::File::create(root.join(name))?;
+            f.write_all(body.as_bytes())?;
+            Ok(())
+        };
+        // A command's output, or the reason there is none. An absent file would
+        // leave the reader unable to tell "nothing to report" from "never ran".
+        let run = |cmd: &str, args: &[&str]| -> String {
+            match std::process::Command::new(cmd).args(args).output() {
+                Ok(o) => {
+                    let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                    if !o.stderr.is_empty() {
+                        s.push_str("\n--- stderr ---\n");
+                        s.push_str(&String::from_utf8_lossy(&o.stderr));
+                    }
+                    s
                 }
-                s
+                Err(e) => format!("({cmd}: {e})\n"),
             }
-            Err(e) => format!("({cmd}: {e})\n"),
+        };
+
+        // --- the node itself ---
+        let mut node = String::new();
+        node.push_str(&format!("stormblock {}\n", env!("CARGO_PKG_VERSION")));
+        for (label, path) in [
+            ("kernel", "/proc/version"),
+            ("cmdline", "/proc/cmdline"),
+            ("uptime", "/proc/uptime"),
+            ("meminfo", "/proc/meminfo"),
+            ("mounts", "/proc/mounts"),
+            ("modules", "/proc/modules"),
+            ("partitions", "/proc/partitions"),
+        ] {
+            node.push_str(&format!("\n=== {label} ({path}) ===\n"));
+            node.push_str(&std::fs::read_to_string(path).unwrap_or_else(|e| format!("({e})\n")));
         }
-    };
+        write("node.txt", &node)?;
+        manifest.push("node.txt — kernel, command line, memory, mounts, modules".into());
 
-    // --- the node itself ---
-    let mut node = String::new();
-    node.push_str(&format!("stormblock {}\n", env!("CARGO_PKG_VERSION")));
-    for (label, path) in [
-        ("kernel", "/proc/version"),
-        ("cmdline", "/proc/cmdline"),
-        ("uptime", "/proc/uptime"),
-        ("meminfo", "/proc/meminfo"),
-        ("mounts", "/proc/mounts"),
-        ("modules", "/proc/modules"),
-        ("partitions", "/proc/partitions"),
-    ] {
-        node.push_str(&format!("\n=== {label} ({path}) ===\n"));
-        node.push_str(&std::fs::read_to_string(path).unwrap_or_else(|e| format!("({e})\n")));
-    }
-    write("node.txt", &node)?;
-    manifest.push("node.txt — kernel, command line, memory, mounts, modules".into());
+        write("dmesg.txt", &run("dmesg", &["-T"]))?;
+        manifest.push("dmesg.txt — the kernel's account of this boot".into());
 
-    write("dmesg.txt", &run("dmesg", &["-T"]))?;
-    manifest.push("dmesg.txt — the kernel's account of this boot".into());
-
-    // --- ublk: the devices, who serves them, what state they are in ---
-    let mut ublk = String::new();
-    match crate::drive::ublk::devices() {
-        Ok(ids) if ids.is_empty() => ublk.push_str("no ublk devices\n"),
-        Ok(ids) => {
-            for id in ids {
-                let pid = crate::drive::ublk::server_pid(id)
-                    .ok()
-                    .flatten()
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "?".into());
-                let state = crate::drive::ublk::dev_state(id)
-                    .ok()
-                    .flatten()
-                    .map(|s| match s {
-                        0 => "DEAD".to_string(),
-                        1 => "LIVE".to_string(),
-                        2 => "QUIESCED".to_string(),
-                        other => format!("state {other}"),
-                    })
-                    .unwrap_or_else(|| "?".into());
-                ublk.push_str(&format!("/dev/ublkb{id}  server {pid}  {state}\n"));
+        // --- ublk: the devices, who serves them, what state they are in ---
+        let mut ublk = String::new();
+        match crate::drive::ublk::devices() {
+            Ok(ids) if ids.is_empty() => ublk.push_str("no ublk devices\n"),
+            Ok(ids) => {
+                for id in ids {
+                    let pid = crate::drive::ublk::server_pid(id)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "?".into());
+                    let state = crate::drive::ublk::dev_state(id)
+                        .ok()
+                        .flatten()
+                        .map(|s| match s {
+                            0 => "DEAD".to_string(),
+                            1 => "LIVE".to_string(),
+                            2 => "QUIESCED".to_string(),
+                            other => format!("state {other}"),
+                        })
+                        .unwrap_or_else(|| "?".into());
+                    ublk.push_str(&format!("/dev/ublkb{id}  server {pid}  {state}\n"));
+                }
             }
+            Err(e) => ublk.push_str(&format!("(cannot enumerate: {e})\n")),
         }
-        Err(e) => ublk.push_str(&format!("(cannot enumerate: {e})\n")),
-    }
-    write("ublk.txt", &ublk)?;
-    manifest.push("ublk.txt — exported devices, their servers and their state".into());
+        write("ublk.txt", &ublk)?;
+        manifest.push("ublk.txt — exported devices, their servers and their state".into());
 
-    // --- the node's configuration, as it actually is on disk ---
-    //
-    // Not as it was meant to be. Half the questions a bundle answers are
-    // "what was this node configured to do", and the answer is a file someone
-    // edited, a unit that was generated, or a default that was never
-    // overridden — and which of those it is only shows in the file itself.
-    {
-        let dst = root.join("config");
-        let mut n = 0;
-        for dir in ["/etc/stormblock", "/etc/stormpump", "/etc/sbregistry", "/etc/registry"] {
-            let src = std::path::Path::new(dir);
-            if src.is_dir() {
-                n += copy_tree(src, &dst.join(dir.trim_start_matches('/')), 1024 * 1024)
-                    .unwrap_or(0);
+        // --- the node's configuration, as it actually is on disk ---
+        //
+        // Not as it was meant to be. Half the questions a bundle answers are
+        // "what was this node configured to do", and the answer is a file someone
+        // edited, a unit that was generated, or a default that was never
+        // overridden — and which of those it is only shows in the file itself.
+        {
+            let dst = root.join("config");
+            let mut n = 0;
+            for dir in ["/etc/stormblock", "/etc/stormpump", "/etc/sbregistry", "/etc/registry"] {
+                let src = std::path::Path::new(dir);
+                if src.is_dir() {
+                    n += copy_tree(src, &dst.join(dir.trim_start_matches('/')), 1024 * 1024)
+                        .unwrap_or(0);
+                }
             }
+            for f in ["/proc/cmdline", "/etc/fstab", "/etc/resolv.conf"] {
+                let p = std::path::Path::new(f);
+                if p.is_file() {
+                    let _ = std::fs::create_dir_all(&dst);
+                    if std::fs::copy(p, dst.join(f.trim_start_matches('/').replace('/', "_"))).is_ok() {
+                        n += 1;
+                    }
+                }
+            }
+            manifest.push(format!("config/ — {n} configuration file(s) as they are on this node"));
         }
-        for f in ["/proc/cmdline", "/etc/fstab", "/etc/resolv.conf"] {
-            let p = std::path::Path::new(f);
-            if p.is_file() {
+
+        // --- the drives themselves: what they are, and how worn ---
+        //
+        // A storage node's most useful fact about itself is often the state of its
+        // media. Model and firmware because a fault is frequently a firmware
+        // revision rather than a drive; wear and temperature because a drive at
+        // 95% endurance or 70°C explains a class of behaviour that looks like a
+        // software problem right up until someone reads the counter.
+        write("devices.txt", &collect_devices())?;
+        manifest.push("devices.txt — every drive, its firmware, and its wear and temperature".into());
+
+        // --- what the last crash left behind ---
+        //
+        // A panic that takes the kernel down cannot be logged by anything running
+        // on it: the log service is gone with everything else, the file it was
+        // writing may be short by whatever was still in the page cache, and the
+        // network stack that would have carried it out is dead. What survives is
+        // pstore — the kernel's own crash record, written to firmware-backed
+        // storage on the way down and still there on the next boot.
+        //
+        // So this is the one part of a bundle that is about the *previous* boot,
+        // and it is often the only account of the failure anyone will get.
+        {
+            let pstore = std::path::Path::new("/sys/fs/pstore");
+            let mut found = 0;
+            if pstore.is_dir() {
+                let dst = root.join("crash");
                 let _ = std::fs::create_dir_all(&dst);
-                if std::fs::copy(p, dst.join(f.trim_start_matches('/').replace('/', "_"))).is_ok() {
-                    n += 1;
+                if let Ok(entries) = std::fs::read_dir(pstore) {
+                    for e in entries.flatten() {
+                        if std::fs::copy(e.path(), dst.join(e.file_name())).is_ok() {
+                            found += 1;
+                        }
+                    }
                 }
             }
+            if found > 0 {
+                manifest.push(format!(
+                    "crash/ — {found} record(s) the kernel wrote on its way down in a previous boot"
+                ));
+            } else {
+                // Said explicitly, because "no crash directory" and "a crash with
+                // nothing recorded" are very different findings and both look like
+                // an absent directory.
+                write(
+                    "crash.txt",
+                    if pstore.is_dir() {
+                        "/sys/fs/pstore is mounted and empty: no crash record from a previous boot\n"
+                    } else {
+                        "/sys/fs/pstore is not mounted: this kernel keeps no crash record, so a \
+                         panic leaves nothing behind. Mount pstore to change that.\n"
+                    },
+                )?;
+                manifest.push("crash.txt — whether this node can record a kernel crash at all".into());
+            }
         }
-        manifest.push(format!("config/ — {n} configuration file(s) as they are on this node"));
-    }
 
-    // --- the drives themselves: what they are, and how worn ---
-    //
-    // A storage node's most useful fact about itself is often the state of its
-    // media. Model and firmware because a fault is frequently a firmware
-    // revision rather than a drive; wear and temperature because a drive at
-    // 95% endurance or 70°C explains a class of behaviour that looks like a
-    // software problem right up until someone reads the counter.
-    write("devices.txt", &collect_devices())?;
-    manifest.push("devices.txt — every drive, its firmware, and its wear and temperature".into());
+        // --- the handover record, which says what this node was serving ---
+        let hpath = std::path::Path::new(crate::drive::handover::DEFAULT_PATH);
+        if let Ok(body) = std::fs::read_to_string(hpath) {
+            write("handover.json", &body)?;
+            manifest.push("handover.json — slabs and volumes the boot handed over".into());
+        }
 
-    // --- what the last crash left behind ---
-    //
-    // A panic that takes the kernel down cannot be logged by anything running
-    // on it: the log service is gone with everything else, the file it was
-    // writing may be short by whatever was still in the page cache, and the
-    // network stack that would have carried it out is dead. What survives is
-    // pstore — the kernel's own crash record, written to firmware-backed
-    // storage on the way down and still there on the next boot.
-    //
-    // So this is the one part of a bundle that is about the *previous* boot,
-    // and it is often the only account of the failure anyone will get.
-    {
-        let pstore = std::path::Path::new("/sys/fs/pstore");
-        let mut found = 0;
-        if pstore.is_dir() {
-            let dst = root.join("crash");
-            let _ = std::fs::create_dir_all(&dst);
-            if let Ok(entries) = std::fs::read_dir(pstore) {
+        // --- the supervisor's logs, which are on tmpfs and die with the boot ---
+        let logs_src = std::path::Path::new("/run/stormpump/logs");
+        if logs_src.is_dir() {
+            let dst = root.join("stormpump-logs");
+            std::fs::create_dir_all(&dst)?;
+            let mut n = 0;
+            if let Ok(entries) = std::fs::read_dir(logs_src) {
                 for e in entries.flatten() {
                     if std::fs::copy(e.path(), dst.join(e.file_name())).is_ok() {
-                        found += 1;
+                        n += 1;
                     }
                 }
             }
+            manifest.push(format!("stormpump-logs/ — {n} supervised workload log(s)"));
         }
-        if found > 0 {
-            manifest.push(format!(
-                "crash/ — {found} record(s) the kernel wrote on its way down in a previous boot"
-            ));
+
+        // --- the storage layer ---
+        //
+        // The slabs this node is serving, unless told otherwise. Reading them is
+        // the point of the exercise: an inventory is what says whether the volume
+        // someone is asking about exists at all.
+        let slabs: Vec<String> = if !slab_paths.is_empty() {
+            slab_paths.to_vec()
         } else {
-            // Said explicitly, because "no crash directory" and "a crash with
-            // nothing recorded" are very different findings and both look like
-            // an absent directory.
-            write(
-                "crash.txt",
-                if pstore.is_dir() {
-                    "/sys/fs/pstore is mounted and empty: no crash record from a previous boot\n"
-                } else {
-                    "/sys/fs/pstore is not mounted: this kernel keeps no crash record, so a \
-                     panic leaves nothing behind. Mount pstore to change that.\n"
-                },
-            )?;
-            manifest.push("crash.txt — whether this node can record a kernel crash at all".into());
-        }
-    }
+            crate::drive::handover::Record::read(hpath)
+                .map(|r| r.slabs)
+                .unwrap_or_default()
+        };
 
-    // --- the handover record, which says what this node was serving ---
-    let hpath = std::path::Path::new(crate::drive::handover::DEFAULT_PATH);
-    if let Ok(body) = std::fs::read_to_string(hpath) {
-        write("handover.json", &body)?;
-        manifest.push("handover.json — slabs and volumes the boot handed over".into());
-    }
-
-    // --- the supervisor's logs, which are on tmpfs and die with the boot ---
-    let logs_src = std::path::Path::new("/run/stormpump/logs");
-    if logs_src.is_dir() {
-        let dst = root.join("stormpump-logs");
-        std::fs::create_dir_all(&dst)?;
-        let mut n = 0;
-        if let Ok(entries) = std::fs::read_dir(logs_src) {
-            for e in entries.flatten() {
-                if std::fs::copy(e.path(), dst.join(e.file_name())).is_ok() {
-                    n += 1;
-                }
-            }
-        }
-        manifest.push(format!("stormpump-logs/ — {n} supervised workload log(s)"));
-    }
-
-    // --- the storage layer ---
-    //
-    // The slabs this node is serving, unless told otherwise. Reading them is
-    // the point of the exercise: an inventory is what says whether the volume
-    // someone is asking about exists at all.
-    let slabs: Vec<String> = if !slab_paths.is_empty() {
-        slab_paths.to_vec()
-    } else {
-        crate::drive::handover::Record::read(hpath)
-            .map(|r| r.slabs)
-            .unwrap_or_default()
-    };
-
-    if slabs.is_empty() {
-        write("volumes.txt", "no slab given and none in the handover record\n")?;
-        manifest.push("volumes.txt — (no slab to read)".into());
-    } else {
-        let mgr = open_slabs_and_restore(&slabs, meta).await?;
-        let mut names = mgr.list_volumes().await;
-        names.sort_by(|a, b| a.1.cmp(&b.1));
-
-        let mut inv = format!("slabs: {}\n\n", slabs.join(", "));
-        inv.push_str(&format!("{:<30} {:>10} {:>10}  {}\n", "volume", "size", "mapped", "id"));
-        for (id, name, size, used) in &names {
-            inv.push_str(&format!(
-                "{:<30} {:>10} {:>10}  {id}\n",
-                name,
-                crate::mgmt::config::human_size(*size),
-                crate::mgmt::config::human_size(*used),
-            ));
-        }
-        write("volumes.txt", &inv)?;
-        manifest.push(format!("volumes.txt — {} volume(s) in the slab", names.len()));
-
-        if !no_contents {
-            // Which volumes to copy out. The name is the only signal available
-            // without opening every filesystem, and it is the one the node's
-            // own convention already carries: a data container is where a
-            // workload keeps what it would otherwise lose.
-            let wanted: Vec<_> = names
-                .iter()
-                .filter(|(_, n, ..)| {
-                    let l = n.to_lowercase();
-                    (l.contains("log") || l.contains("data") || extra_volumes.contains(n))
-                        && !l.ends_with(".golden")
-                })
-                .collect();
-
-            let gathered = root.join("volumes");
-            std::fs::create_dir_all(&gathered)?;
-            let mut copied = 0usize;
-            for (id, name, ..) in wanted {
-                match gather_volume(&mgr, id, name, &gathered, max_file_mb).await {
-                    Ok(n) => {
-                        copied += 1;
-                        manifest.push(format!("volumes/{name}/ — {n} file(s)"));
-                    }
-                    Err(e) => {
-                        manifest.push(format!("volumes/{name}/ — not gathered: {e}"));
-                    }
-                }
-            }
-            println!("  gathered {copied} volume(s)");
-        }
-    }
-
-    // The index. Someone opening this directory should not have to guess what
-    // is in it or which file answers their question.
-    let mut index = String::from("stormblock must-gather\n\n");
-    for line in &manifest {
-        index.push_str(&format!("  {line}\n"));
-    }
-    index.push_str("\nEverything here was read without writing to the node.\n");
-    write("README.txt", &index)?;
-
-    println!("{}", index);
-    println!("bundle: {}", root.display());
-    println!("  tar it with: tar czf must-gather.tar.gz -C {} .", root.display());
-    Ok(())
-}
-
-/// Copy one volume's files into the bundle, read-only.
-#[cfg(target_os = "linux")]
-async fn gather_volume(
-    mgr: &crate::volume::VolumeManager,
-    id: &crate::volume::VolumeId,
-    name: &str,
-    into: &std::path::Path,
-    max_file_mb: u64,
-) -> anyhow::Result<usize> {
-    use crate::drive::ublk::UblkServer;
-
-    let dev = mgr
-        .get_volume(id)
-        .ok_or_else(|| anyhow::anyhow!("volume has no device"))?;
-    let dev_id = crate::drive::ublk::devices()?
-        .into_iter()
-        .max()
-        .map_or(0, |m| m + 1);
-
-    let (tx, rx) = tokio::sync::watch::channel(false);
-    let thread = std::thread::Builder::new()
-        .name(format!("gather-{dev_id}"))
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            let _ = rt.block_on(UblkServer::new(dev).with_dev_id(dev_id).run(rx));
-        })?;
-
-    let released = |tx: tokio::sync::watch::Sender<bool>, t: std::thread::JoinHandle<()>| {
-        let _ = tx.send(true);
-        let _ = t.join();
-    };
-
-    let ids = [dev_id];
-    let pending = tokio::task::spawn_blocking(move || {
-        crate::drive::ublk::wait_live(&ids, std::time::Duration::from_secs(30))
-    })
-    .await??;
-    if !pending.is_empty() {
-        released(tx, thread);
-        anyhow::bail!("/dev/ublkb{dev_id} never came up");
-    }
-
-    let mnt = std::path::Path::new("/run/stormblock/gather").join(name);
-    std::fs::create_dir_all(&mnt)?;
-    let fs = match mount_volume(&format!("/dev/ublkb{dev_id}"), &mnt, true) {
-        Ok(fs) => fs,
-        Err(e) => {
-            released(tx, thread);
-            return Err(e);
-        }
-    };
-    let _ = fs;
-
-    let dst = into.join(name);
-    let n = copy_tree(&mnt, &dst, max_file_mb * 1024 * 1024).unwrap_or(0);
-
-    let c = std::ffi::CString::new(mnt.to_string_lossy().as_ref())?;
-    // SAFETY: unmounting a path this process just mounted.
-    unsafe { libc::umount(c.as_ptr()) };
-    released(tx, thread);
-    Ok(n)
-}
-
-/// Copy a directory tree, skipping anything too big to be worth sending.
-///
-/// A must-gather that fills the disk it is written to has made the problem
-/// worse, so the cap is real and what it skipped is recorded in place of the
-/// file — the reader needs to know a log was there and was too large, which is
-/// itself a fact about the node.
-#[cfg(target_os = "linux")]
-fn copy_tree(from: &std::path::Path, to: &std::path::Path, max_bytes: u64) -> std::io::Result<usize> {
-    use std::io::Write;
-    std::fs::create_dir_all(to)?;
-    let mut n = 0;
-    for entry in std::fs::read_dir(from)?.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            if name == "lost+found" {
-                continue;
-            }
-            n += copy_tree(&path, &to.join(&name), max_bytes)?;
-        } else if meta.is_file() {
-            if meta.len() > max_bytes {
-                let mut f = std::fs::File::create(to.join(format!(
-                    "{}.skipped",
-                    name.to_string_lossy()
-                )))?;
-                writeln!(f, "{} bytes — over the must-gather limit", meta.len())?;
-                continue;
-            }
-            if std::fs::copy(&path, to.join(&name)).is_ok() {
-                n += 1;
-            }
-        }
-    }
-    Ok(n)
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn handle_must_gather(
-    _slab_paths: &[String],
-    _meta: Option<&str>,
-    _out: &str,
-    _extra_volumes: &[String],
-    _no_contents: bool,
-    _max_file_mb: u64,
-) -> anyhow::Result<()> {
-    anyhow::bail!("must-gather reads volumes through ublk, which is Linux-only")
-}
-
-/// `golden` — a filesystem image from a tar, without a mount.
-///
-/// This is the build step every node image needs, and it has been done with
-/// `mkfs.ext4`, a loop mount, `tar -x` and root. All three requirements come
-/// from using the kernel to write the filesystem; none of them are necessary,
-/// because the ext4 writer here can do it directly — which is exactly how the
-/// registry lays a container image's layers into a volume.
-async fn handle_golden(
-    out: &str,
-    size: &str,
-    label: Option<&str>,
-    tars: &[String],
-    whiteouts: bool,
-    fsck: bool,
-    read_only: bool,
-) -> anyhow::Result<()> {
-    use crate::fs::ext4::{Ext4Params, FsProfile};
-
-    let bytes = crate::mgmt::config::parse_size(size)
-        .map_err(|e| anyhow::anyhow!("--size {size}: {e}"))?;
-    let name = label
-        .map(|l| l.to_string())
-        .or_else(|| {
-            std::path::Path::new(out)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "golden".into());
-
-    // A block device is written in place; a file is made fresh.
-    //
-    // In place because the point of naming a device here is that the golden
-    // *is* the volume — attached from the appliance over NVMe/TCP, written
-    // once, sealed. A golden that has to be built as a file and then copied
-    // into a volume is a second full copy of every byte, and the copy is the
-    // thing worth removing: a disk is a map over goldens, so the goldens have
-    // to be volumes to be mapped.
-    //
-    // For a file, unlink first: a golden built over the remains of an older
-    // one inherits whatever that one had past the new end.
-    let on_device = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileTypeExt;
-            std::fs::metadata(out).map(|m| m.file_type().is_block_device()).unwrap_or(false)
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
-    };
-    let dev: Arc<dyn BlockDevice> = if on_device {
-        let dev = open_storage(out).await?;
-        let have = dev.capacity_bytes();
-        if have < bytes {
-            anyhow::bail!(
-                "{out} is {have} bytes and --size asks for {bytes}: a golden cannot be \
-                 larger than the volume it is written into"
-            );
-        }
-        if have > bytes {
-            // Not an error: a volume is often rounded up to a slot boundary.
-            // The filesystem is made at --size and the rest is left alone.
-            println!("  {name}: {out} is {have} bytes, formatting {bytes}");
-        }
-        dev
-    } else {
-        let _ = std::fs::remove_file(out);
-        Arc::new(crate::drive::filedev::FileDevice::open_with_capacity(out, bytes).await?)
-    };
-
-    let params = Ext4Params {
-        profile: FsProfile::Ext4,
-        label: name.clone(),
-        uuid: uuid::Uuid::new_v4(),
-        // Nothing will write to this, so it carries neither the machinery for
-        // surviving a write nor the space set aside for recovering from a full
-        // filesystem. Both would be inherited by every clone on every node.
-        journal: if read_only { Some(false) } else { None },
-        reserved_percent: if read_only { 0.0 } else { 5.0 },
-        ..Default::default()
-    };
-    let report = crate::fs::ext4::format(&dev, &params).await?;
-    println!(
-        "  {name}: {} blocks of {} bytes, {} inodes",
-        report.blocks, report.block_size, report.inodes
-    );
-
-    let mut files = 0u64;
-    for t in tars {
-        let src: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if t == "-" {
-            Box::new(tokio::io::stdin())
+        if slabs.is_empty() {
+            write("volumes.txt", "no slab given and none in the handover record\n")?;
+            manifest.push("volumes.txt — (no slab to read)".into());
         } else {
-            Box::new(tokio::fs::File::open(t).await?)
-        };
-        // Sniffed from the content, so a caller can hand over .tar or .tar.gz
-        // — or a pipe, where there is no name to go on — without saying which.
-        let comp = crate::serve::tarfs::parse_compression(None)
-            .map_err(|e| anyhow::anyhow!("{t}: {e}"))?;
-        let r =
-            crate::serve::tarfs::unpack(&dev, src, "/", comp, whiteouts).await?;
-        let n = r.files + r.directories + r.symlinks + r.hard_links + r.devices;
-        println!(
-            "  {name}: {} file(s), {} dir(s), {} link(s) from {t}",
-            r.files, r.directories, r.symlinks + r.hard_links
-        );
-        files += n as u64;
-    }
+            let mgr = open_slabs_and_restore(&slabs, meta).await?;
+            let mut names = mgr.list_volumes().await;
+            names.sort_by(|a, b| a.1.cmp(&b.1));
 
-    if fsck {
-        let check = crate::fs::ext4::check(&dev).await?;
-        if !check.is_clean() {
-            anyhow::bail!(
-                "{name} does not check out after {files} entries — {} problem(s); \
-                 not shipping a golden every clone would inherit",
-                check.problems.len()
-            );
-        }
-        println!("  {name}: checks out");
-    }
+            let mut inv = format!("slabs: {}\n\n", slabs.join(", "));
+            inv.push_str(&format!("{:<30} {:>10} {:>10}  {}\n", "volume", "size", "mapped", "id"));
+            for (id, name, size, used) in &names {
+                inv.push_str(&format!(
+                    "{:<30} {:>10} {:>10}  {id}\n",
+                    name,
+                    crate::mgmt::config::human_size(*size),
+                    crate::mgmt::config::human_size(*used),
+                ));
+            }
+            write("volumes.txt", &inv)?;
+            manifest.push(format!("volumes.txt — {} volume(s) in the slab", names.len()));
 
-    dev.flush().await?;
-    println!(
-        "built: {out} ({}, {files} entries)",
-        crate::mgmt::config::human_size(bytes)
-    );
-    Ok(())
-}
+            if !no_contents {
+                // Which volumes to copy out. The name is the only signal available
+                // without opening every filesystem, and it is the one the node's
+                // own convention already carries: a data container is where a
+                // workload keeps what it would otherwise lose.
+                let wanted: Vec<_> = names
+                    .iter()
+                    .filter(|(_, n, ..)| {
+                        let l = n.to_lowercase();
+                        (l.contains("log") || l.contains("data") || extra_volumes.contains(n))
+                            && !l.ends_with(".golden")
+                    })
+                    .collect();
 
-/// `attach` — open a slab and export, or list, what is in it.
-///
-/// Everything a node does with its storage happens through a volume it has
-/// already opened, which is fine until the node will not boot. Then the disk
-/// is a slab full of volumes and there is nothing that can look inside one:
-/// not `mount`, which sees an extent store rather than a filesystem, and not
-/// the engine, which only opens the volumes its own configuration names. This
-/// is the door — the same code paths the boot uses, pointed anywhere.
-#[cfg(target_os = "linux")]
-#[allow(clippy::too_many_arguments)]
-async fn handle_attach(
-    slab_paths: &[String],
-    meta: Option<&str>,
-    volumes: &[String],
-    all: bool,
-    mount_at: Option<&str>,
-    read_only: bool,
-    force: bool,
-) -> anyhow::Result<()> {
-    use crate::drive::ublk::UblkServer;
-
-    let mgr = open_slabs_and_restore(slab_paths, meta).await?;
-
-    // Listing and attaching are the same command, because when a node will not
-    // boot the first question is what is on the disk at all, and having to
-    // know a volume's name before being allowed to ask is the wrong way round.
-    let mut names = mgr.list_volumes().await;
-    names.sort_by(|a, b| a.1.cmp(&b.1));
-
-    if volumes.is_empty() && !all {
-        println!("{} volume(s) in {}:", names.len(), slab_paths.join(", "));
-        for (id, name, size, used) in &names {
-            println!(
-                "  {:<28} {:>10} {:>10} mapped  {id}",
-                name,
-                crate::mgmt::config::human_size(*size),
-                crate::mgmt::config::human_size(*used),
-            );
-        }
-        println!("\nAttach one with --volume <name>, or all of them with --all.");
-        return Ok(());
-    }
-
-    let wanted: Vec<(crate::volume::VolumeId, String)> = if all {
-        names.iter().map(|(id, n, ..)| (*id, n.clone())).collect()
-    } else {
-        let mut v = Vec::new();
-        for sel in volumes {
-            let id = resolve_boot_volume(&mgr, sel).await?;
-            let name = names
-                .iter()
-                .find(|(i, ..)| *i == id)
-                .map(|(_, n, ..)| n.clone())
-                .unwrap_or_else(|| sel.clone());
-            v.push((id, name));
-        }
-        v
-    };
-
-    // Whoever is already serving this volume is still serving it. Two writers
-    // on one volume corrupt it, and the corruption is silent — each believes
-    // its own copy-on-write mapping — so the check is on by default and the
-    // override has to be typed.
-    if !force && !read_only {
-        let live = crate::drive::ublk::devices()?;
-        let mut busy = Vec::new();
-        for id in &live {
-            if let Some(pid) = crate::drive::ublk::server_pid(*id)? {
-                if pid > 0 && pid != std::process::id() as i32 {
-                    busy.push(format!("/dev/ublkb{id} (server {pid})"));
+                let gathered = root.join("volumes");
+                std::fs::create_dir_all(&gathered)?;
+                let mut copied = 0usize;
+                for (id, name, ..) in wanted {
+                    match gather_volume(&mgr, id, name, &gathered, max_file_mb).await {
+                        Ok(n) => {
+                            copied += 1;
+                            manifest.push(format!("volumes/{name}/ — {n} file(s)"));
+                        }
+                        Err(e) => {
+                            manifest.push(format!("volumes/{name}/ — not gathered: {e}"));
+                        }
+                    }
                 }
+                println!("  gathered {copied} volume(s)");
             }
         }
-        if !busy.is_empty() {
-            anyhow::bail!(
-                "this node is already serving {} — attaching writable would put two \
-                 writers on one volume, which corrupts it silently. Use --ro to look, \
-                 or --force if you know the other server is not touching what you want.",
-                busy.join(", ")
-            );
+
+        // The index. Someone opening this directory should not have to guess what
+        // is in it or which file answers their question.
+        let mut index = String::from("stormblock must-gather\n\n");
+        for line in &manifest {
+            index.push_str(&format!("  {line}\n"));
         }
+        index.push_str("\nEverything here was read without writing to the node.\n");
+        write("README.txt", &index)?;
+
+        println!("{}", index);
+        println!("bundle: {}", root.display());
+        println!("  tar it with: tar czf must-gather.tar.gz -C {} .", root.display());
+        Ok(())
     }
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let mut threads = Vec::new();
-    let mut attached: Vec<(u32, String)> = Vec::new();
-    let base = crate::drive::ublk::devices()?.into_iter().max().map_or(0, |m| m + 1);
+    /// Copy one volume's files into the bundle, read-only.
+    #[cfg(target_os = "linux")]
+    async fn gather_volume(
+        mgr: &crate::volume::VolumeManager,
+        id: &crate::volume::VolumeId,
+        name: &str,
+        into: &std::path::Path,
+        max_file_mb: u64,
+    ) -> anyhow::Result<usize> {
+        use crate::drive::ublk::UblkServer;
 
-    for (i, (id, name)) in wanted.iter().enumerate() {
-        let Some(dev) = mgr.get_volume(id) else {
-            eprintln!("  {name}: no such volume");
-            continue;
-        };
-        let dev_id = base + i as u32;
-        let rx = shutdown_rx.clone();
-        let label = name.clone();
+        let dev = mgr
+            .get_volume(id)
+            .ok_or_else(|| anyhow::anyhow!("volume has no device"))?;
+        let dev_id = crate::drive::ublk::devices()?
+            .into_iter()
+            .max()
+            .map_or(0, |m| m + 1);
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
         let thread = std::thread::Builder::new()
-            .name(format!("ublk-attach-{dev_id}"))
+            .name(format!("gather-{dev_id}"))
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("runtime");
-                let server = UblkServer::new(dev).with_dev_id(dev_id);
-                if let Err(e) = rt.block_on(server.run(rx)) {
-                    tracing::error!("attach {label} on /dev/ublkb{dev_id}: {e}");
-                }
+                let _ = rt.block_on(UblkServer::new(dev).with_dev_id(dev_id).run(rx));
             })?;
-        threads.push(thread);
-        attached.push((dev_id, name.clone()));
+
+        let released = |tx: tokio::sync::watch::Sender<bool>, t: std::thread::JoinHandle<()>| {
+            let _ = tx.send(true);
+            let _ = t.join();
+        };
+
+        let ids = [dev_id];
+        let pending = tokio::task::spawn_blocking(move || {
+            crate::drive::ublk::wait_live(&ids, std::time::Duration::from_secs(30))
+        })
+        .await??;
+        if !pending.is_empty() {
+            released(tx, thread);
+            anyhow::bail!("/dev/ublkb{dev_id} never came up");
+        }
+
+        let mnt = std::path::Path::new("/run/stormblock/gather").join(name);
+        std::fs::create_dir_all(&mnt)?;
+        let fs = match mount_volume(&format!("/dev/ublkb{dev_id}"), &mnt, true) {
+            Ok(fs) => fs,
+            Err(e) => {
+                released(tx, thread);
+                return Err(e);
+            }
+        };
+        let _ = fs;
+
+        let dst = into.join(name);
+        let n = copy_tree(&mnt, &dst, max_file_mb * 1024 * 1024).unwrap_or(0);
+
+        let c = std::ffi::CString::new(mnt.to_string_lossy().as_ref())?;
+        // SAFETY: unmounting a path this process just mounted.
+        unsafe { libc::umount(c.as_ptr()) };
+        released(tx, thread);
+        Ok(n)
     }
 
-    // Give the devices a moment to appear before anything tries to mount one.
-    let ids: Vec<u32> = attached.iter().map(|(d, _)| *d).collect();
-    let _ = tokio::task::spawn_blocking({
-        let ids = ids.clone();
-        move || crate::drive::ublk::wait_live(&ids, std::time::Duration::from_secs(30))
-    })
-    .await?;
-
-    let mut mounted: Vec<String> = Vec::new();
-    for (dev_id, name) in &attached {
-        let path = format!("/dev/ublkb{dev_id}");
-        match mount_at {
-            None => println!("  {name:<28} {path}"),
-            Some(dir) => {
-                let target = std::path::Path::new(dir).join(name);
-                std::fs::create_dir_all(&target)?;
-                match mount_volume(&path, &target, read_only) {
-                    Ok(fs) => {
-                        println!(
-                            "  {name:<28} {path} -> {} ({fs}{})",
-                            target.display(),
-                            if read_only { ", ro" } else { "" }
-                        );
-                        mounted.push(target.to_string_lossy().into_owned());
-                    }
-                    // Not fatal, and worth being precise about: a volume that
-                    // holds no filesystem is a perfectly good thing to attach,
-                    // and the block device is still there to look at.
-                    Err(e) => println!("  {name:<28} {path} (not mounted: {e})"),
+    /// Copy a directory tree, skipping anything too big to be worth sending.
+    ///
+    /// A must-gather that fills the disk it is written to has made the problem
+    /// worse, so the cap is real and what it skipped is recorded in place of the
+    /// file — the reader needs to know a log was there and was too large, which is
+    /// itself a fact about the node.
+    #[cfg(target_os = "linux")]
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path, max_bytes: u64) -> std::io::Result<usize> {
+        use std::io::Write;
+        std::fs::create_dir_all(to)?;
+        let mut n = 0;
+        for entry in std::fs::read_dir(from)?.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                if name == "lost+found" {
+                    continue;
+                }
+                n += copy_tree(&path, &to.join(&name), max_bytes)?;
+            } else if meta.is_file() {
+                if meta.len() > max_bytes {
+                    let mut f = std::fs::File::create(to.join(format!(
+                        "{}.skipped",
+                        name.to_string_lossy()
+                    )))?;
+                    writeln!(f, "{} bytes — over the must-gather limit", meta.len())?;
+                    continue;
+                }
+                if std::fs::copy(&path, to.join(&name)).is_ok() {
+                    n += 1;
                 }
             }
         }
+        Ok(n)
     }
 
-    println!("\nAttached {}. Ctrl+C to release.", attached.len());
-    tokio::signal::ctrl_c().await?;
-
-    for m in mounted.iter().rev() {
-        let c = std::ffi::CString::new(m.as_str()).unwrap_or_default();
-        // SAFETY: unmounting a path this process mounted.
-        if unsafe { libc::umount(c.as_ptr()) } != 0 {
-            eprintln!("could not unmount {m}: {}", std::io::Error::last_os_error());
-        }
+    #[cfg(not(target_os = "linux"))]
+    async fn handle_must_gather(
+        _slab_paths: &[String],
+        _meta: Option<&str>,
+        _out: &str,
+        _extra_volumes: &[String],
+        _no_contents: bool,
+        _max_file_mb: u64,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("must-gather reads volumes through ublk, which is Linux-only")
     }
-    let _ = shutdown_tx.send(true);
-    let stuck = join_ublk_threads(threads, std::time::Duration::from_secs(10));
-    if stuck > 0 {
-        eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
-    }
-    Ok(())
-}
 
-/// Mount a block device without being told what is on it.
-///
-/// There is no `blkid` here and no reason to need one: the kernel refuses a
-/// filesystem it does not recognise, so trying the handful this node can
-/// produce and reporting which one worked is both the probe and the mount.
-#[cfg(target_os = "linux")]
-fn mount_volume(
-    dev: &str,
-    target: &std::path::Path,
-    read_only: bool,
-) -> anyhow::Result<&'static str> {
-    let src = std::ffi::CString::new(dev)?;
-    let dst = std::ffi::CString::new(target.to_string_lossy().as_ref())?;
-    let flags = if read_only { libc::MS_RDONLY } else { 0 };
-    let mut last = 0;
-    for fs in ["ext4", "erofs", "vfat", "xfs", "ext2"] {
-        let t = std::ffi::CString::new(fs)?;
-        // SAFETY: all four pointers are valid NUL-terminated strings.
-        let rc = unsafe {
-            libc::mount(src.as_ptr(), dst.as_ptr(), t.as_ptr(), flags, std::ptr::null())
-        };
-        if rc == 0 {
-            return Ok(fs);
-        }
-        last = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    }
-    anyhow::bail!("no filesystem the kernel recognises ({})", std::io::Error::from_raw_os_error(last))
-}
+    /// `golden` — a filesystem image from a tar, without a mount.
+    ///
+    /// This is the build step every node image needs, and it has been done with
+    /// `mkfs.ext4`, a loop mount, `tar -x` and root. All three requirements come
+    /// from using the kernel to write the filesystem; none of them are necessary,
+    /// because the ext4 writer here can do it directly — which is exactly how the
+    /// registry lays a container image's layers into a volume.
+    async fn handle_golden(
+        out: &str,
+        size: &str,
+        label: Option<&str>,
+        tars: &[String],
+        whiteouts: bool,
+        fsck: bool,
+        read_only: bool,
+    ) -> anyhow::Result<()> {
+        use crate::fs::ext4::{Ext4Params, FsProfile};
 
-#[cfg(not(target_os = "linux"))]
-#[allow(clippy::too_many_arguments)]
-async fn handle_attach(
-    _slab_paths: &[String],
-    _meta: Option<&str>,
-    _volumes: &[String],
-    _all: bool,
-    _mount_at: Option<&str>,
-    _read_only: bool,
-    _force: bool,
-) -> anyhow::Result<()> {
-    anyhow::bail!("attach exports volumes through ublk, which is Linux-only")
-}
+        let bytes = crate::mgmt::config::parse_size(size)
+            .map_err(|e| anyhow::anyhow!("--size {size}: {e}"))?;
+        let name = label
+            .map(|l| l.to_string())
+            .or_else(|| {
+                std::path::Path::new(out)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "golden".into());
 
-/// Whether [`seed_data_half`] runs without being asked.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SeedWhen {
-    /// The data slab was laid this boot and its records are routed to it.
-    Always,
-    /// Only with `STORMBLOCK_SEED_DATA` set.
-    Asked,
-}
-
-/// Take the local disk for this boot: lay it (or update its system half),
-/// register its slabs with `mgr` and seed the data half (#118). `boot-local`
-/// calls it before exporting anything; a test drives it the same way (#239).
-///
-/// `Ok(None)`: the disk already holds everything this boot would copy.
-#[cfg(target_os = "linux")]
-pub(crate) async fn take_local_disk(
-    mgr: &mut crate::volume::VolumeManager,
-    disk: &str,
-    local_tier: &str,
-    local_disk_force: bool,
-) -> anyhow::Result<Option<crate::drive::handover::FlowOver>> {
-    Ok(take_local_disk_for(mgr, disk, local_tier, local_disk_force, None).await?.0)
-}
-
-/// The "already up to date" test of [`take_local_disk_for`]: the system half
-/// holds every volume this boot would copy, by id. Never with
-/// `STORMBLOCK_RELAY_SYSTEM_HALF=1` (#244), which the caller checks first.
-fn holds_everything(want: &std::collections::HashSet<uuid::Uuid>, have: &std::collections::HashSet<uuid::Uuid>) -> bool {
-    !want.is_empty() && want.iter().all(|id| have.contains(id))
-}
-
-/// [`take_local_disk`], naming the release's root volume (`root`), whose
-/// `/etc/stormblock/data-volumes` and `/etc/os-release` an install over a
-/// node's disk reads (#311). Also returns what the install did with the
-/// node's data half, when it kept one.
-#[cfg(target_os = "linux")]
-pub(crate) async fn take_local_disk_for(
-    mgr: &mut crate::volume::VolumeManager,
-    disk: &str,
-    local_tier: &str,
-    local_disk_force: bool,
-    root: Option<&str>,
-) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
-    let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let dest_dev: Arc<dyn BlockDevice> =
-        open_storage(disk).await?;
-    let mut layout =
-        crate::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
-    layout.slot_size = mgr.slot_size();
-    layout.tier = tier;
-    // The table in the drive's own sector size: firmware parses a GPT
-    // in the medium's block size, and `FileDevice` reports 4096 for
-    // every drive (#123). A file has none, and follows the device.
-    layout.lba = crate::drive::filedev::logical_sector_size(disk);
-
-    // **A drive that is already this node's is updated, not replaced.**
-    //
-    // A reinstall is "boot a fresh image and flow over onto the disk
-    // the last install used", and that disk carries two things: the
-    // goldens, which this boot exists to replace, and the data slab,
-    // which holds the node's CA key and its ServiceAccount signing key
-    // and cannot be made again. Laying a fresh table destroys the
-    // second to refresh the first; refusing the drive leaves the node
-    // running from the appliance for the rest of its life. Neither is
-    // an install.
-    //
-    // The partition types say which half is which — that is what they
-    // are for (#88) — so the system half is formatted afresh, the data
-    // half is opened and left alone, and the node boots normally with
-    // the identity it already had. No force, because nothing is
-    // destroyed that an install is not meant to destroy.
-    //
-    // **Force or not** (#311, owner 2026-10-06: an install never wipes data;
-    // only the system half of the system drive). `--local-disk-force` still
-    // answers for a drive whose data slab is not part of a node layout (an
-    // abandoned install), never for a node's data half.
-    if crate::image::local::node_layout(&dest_dev).await?.is_some() {
-        // **And if it is already up to date, do nothing at all.**
+        // A block device is written in place; a file is made fresh.
         //
-        // A node that netboots regularly would otherwise reformat its
-        // own system half and re-copy every golden on every boot —
-        // destroying a working local half to rebuild the same bytes,
-        // and running from the appliance for the minutes that takes,
-        // each time.
+        // In place because the point of naming a device here is that the golden
+        // *is* the volume — attached from the appliance over NVMe/TCP, written
+        // once, sealed. A golden that has to be built as a file and then copied
+        // into a volume is a second full copy of every byte, and the copy is the
+        // thing worth removing: a disk is a map over goldens, so the goldens have
+        // to be volumes to be mapped.
         //
-        // By volume id, which is what a migration preserves: the
-        // flow-over moves a volume's extents, it does not make a new
-        // volume, so a system half that has already had this image
-        // flowed onto it holds the same ids. A new build makes new
-        // volumes and this comes out false, which is what should
-        // happen.
-        //
-        // Conservative in the direction that costs least: a wrong
-        // "not up to date" reformats and re-copies, which is wasteful;
-        // a wrong "up to date" leaves the node booting from the
-        // appliance. Neither loses anything, and only a superset
-        // counts as up to date.
-        let want: std::collections::HashSet<uuid::Uuid> = mgr
-            .list_volumes()
-            .await
-            .into_iter()
-            .map(|(id, ..)| id.0)
-            .collect();
-        let have = crate::image::local::system_slab_volumes(&dest_dev)
-            .await
-            .unwrap_or(None);
-        // And only a disk that can boot on its own counts: one laid
-        // before local boot existed holds every golden and has no
-        // boot area, and the shortcut would leave it that way (#123).
-        let boot_ready =
-            crate::image::local::boot_ready(&dest_dev, &layout).await;
-        // The boot already tried this disk and its root would not come up
-        // (#244): `/init` says so, and the system half is laid again from
-        // the image whatever the ids say — the same ids over broken bytes
-        // are what sent it here. The data half is kept as in any install.
-        let relay = std::env::var("STORMBLOCK_RELAY_SYSTEM_HALF").is_ok_and(|v| v.trim() == "1");
-        if relay {
-            println!(
-                "Flow-over: {disk}'s own root did not come up this boot — laying its system \
-                 half again from the image, whatever it holds (#244)"
-            );
-        }
-        if !boot_ready {
-            println!(
-                "Flow-over: {disk} has no room to boot on its own (no boot area, or a \
-                 table firmware cannot read) — laying the system half again"
-            );
-        }
-        if let Some(have) = have.filter(|_| boot_ready && !relay) {
-            if holds_everything(&want, &have) {
-                println!(
-                    "Flow-over: {disk} already holds all {} volume(s) this boot would \
-                     copy — nothing to do",
-                    want.len()
-                );
-                println!(
-                    "Flow-over: leaving it as it stands; the node boots from it next \
-                     time, which is what the local-slab probe is for."
-                );
-                return Ok((None, None));
+        // For a file, unlink first: a golden built over the remains of an older
+        // one inherits whatever that one had past the new end.
+        let on_device = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                std::fs::metadata(out).map(|m| m.file_type().is_block_device()).unwrap_or(false)
             }
-            let missing = want.iter().filter(|id| !have.contains(id)).count();
-            println!(
-                "Flow-over: {disk} holds {} of the {} volume(s) this boot carries; {} \
-                 to copy",
-                want.len() - missing,
-                want.len(),
-                missing
-            );
-        }
-        println!(
-            "Flow-over: {disk} is already this node's — replacing the system half, \
-             keeping the data half (#311)"
-        );
-        // Everything that can refuse, before anything is written: the data
-        // half's records must read and every leg they name must be in it.
-        let release: std::collections::HashSet<String> =
-            mgr.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
-        let plan = crate::image::install::plan(&dest_dev, &release)
-            .await
-            .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
-        let policy = match root {
-            Some(r) => crate::image::stage::read_policy(mgr, r).await.unwrap_or_else(|e| {
-                println!("Install: the release's {} not read ({e}); every data volume is kept", crate::image::stage::POLICY_FILE);
-                Default::default()
-            }),
-            None => Default::default(),
+            #[cfg(not(unix))]
+            {
+                false
+            }
         };
-        let version = match root {
-            Some(r) => match mgr.find_volume(r).await.and_then(|id| mgr.get_volume(&id)) {
-                Some(dev) => crate::fs::files::read_file(&dev, "/etc/os-release")
+        let dev: Arc<dyn BlockDevice> = if on_device {
+            let dev = open_storage(out).await?;
+            let have = dev.capacity_bytes();
+            if have < bytes {
+                anyhow::bail!(
+                    "{out} is {have} bytes and --size asks for {bytes}: a golden cannot be \
+                     larger than the volume it is written into"
+                );
+            }
+            if have > bytes {
+                // Not an error: a volume is often rounded up to a slot boundary.
+                // The filesystem is made at --size and the rest is left alone.
+                println!("  {name}: {out} is {have} bytes, formatting {bytes}");
+            }
+            dev
+        } else {
+            let _ = std::fs::remove_file(out);
+            Arc::new(crate::drive::filedev::FileDevice::open_with_capacity(out, bytes).await?)
+        };
+
+        let params = Ext4Params {
+            profile: FsProfile::Ext4,
+            label: name.clone(),
+            uuid: uuid::Uuid::new_v4(),
+            // Nothing will write to this, so it carries neither the machinery for
+            // surviving a write nor the space set aside for recovering from a full
+            // filesystem. Both would be inherited by every clone on every node.
+            journal: if read_only { Some(false) } else { None },
+            reserved_percent: if read_only { 0.0 } else { 5.0 },
+            ..Default::default()
+        };
+        let report = crate::fs::ext4::format(&dev, &params).await?;
+        println!(
+            "  {name}: {} blocks of {} bytes, {} inodes",
+            report.blocks, report.block_size, report.inodes
+        );
+
+        let mut files = 0u64;
+        for t in tars {
+            let src: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if t == "-" {
+                Box::new(tokio::io::stdin())
+            } else {
+                Box::new(tokio::fs::File::open(t).await?)
+            };
+            // Sniffed from the content, so a caller can hand over .tar or .tar.gz
+            // — or a pipe, where there is no name to go on — without saying which.
+            let comp = crate::serve::tarfs::parse_compression(None)
+                .map_err(|e| anyhow::anyhow!("{t}: {e}"))?;
+            let r =
+                crate::serve::tarfs::unpack(&dev, src, "/", comp, whiteouts).await?;
+            let n = r.files + r.directories + r.symlinks + r.hard_links + r.devices;
+            println!(
+                "  {name}: {} file(s), {} dir(s), {} link(s) from {t}",
+                r.files, r.directories, r.symlinks + r.hard_links
+            );
+            files += n as u64;
+        }
+
+        if fsck {
+            let check = crate::fs::ext4::check(&dev).await?;
+            if !check.is_clean() {
+                anyhow::bail!(
+                    "{name} does not check out after {files} entries — {} problem(s); \
+                     not shipping a golden every clone would inherit",
+                    check.problems.len()
+                );
+            }
+            println!("  {name}: checks out");
+        }
+
+        dev.flush().await?;
+        println!(
+            "built: {out} ({}, {files} entries)",
+            crate::mgmt::config::human_size(bytes)
+        );
+        Ok(())
+    }
+
+    /// `attach` — open a slab and export, or list, what is in it.
+    ///
+    /// Everything a node does with its storage happens through a volume it has
+    /// already opened, which is fine until the node will not boot. Then the disk
+    /// is a slab full of volumes and there is nothing that can look inside one:
+    /// not `mount`, which sees an extent store rather than a filesystem, and not
+    /// the engine, which only opens the volumes its own configuration names. This
+    /// is the door — the same code paths the boot uses, pointed anywhere.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_attach(
+        slab_paths: &[String],
+        meta: Option<&str>,
+        volumes: &[String],
+        all: bool,
+        mount_at: Option<&str>,
+        read_only: bool,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        use crate::drive::ublk::UblkServer;
+
+        let mgr = open_slabs_and_restore(slab_paths, meta).await?;
+
+        // Listing and attaching are the same command, because when a node will not
+        // boot the first question is what is on the disk at all, and having to
+        // know a volume's name before being allowed to ask is the wrong way round.
+        let mut names = mgr.list_volumes().await;
+        names.sort_by(|a, b| a.1.cmp(&b.1));
+
+        if volumes.is_empty() && !all {
+            println!("{} volume(s) in {}:", names.len(), slab_paths.join(", "));
+            for (id, name, size, used) in &names {
+                println!(
+                    "  {:<28} {:>10} {:>10} mapped  {id}",
+                    name,
+                    crate::mgmt::config::human_size(*size),
+                    crate::mgmt::config::human_size(*used),
+                );
+            }
+            println!("\nAttach one with --volume <name>, or all of them with --all.");
+            return Ok(());
+        }
+
+        let wanted: Vec<(crate::volume::VolumeId, String)> = if all {
+            names.iter().map(|(id, n, ..)| (*id, n.clone())).collect()
+        } else {
+            let mut v = Vec::new();
+            for sel in volumes {
+                let id = resolve_boot_volume(&mgr, sel).await?;
+                let name = names
+                    .iter()
+                    .find(|(i, ..)| *i == id)
+                    .map(|(_, n, ..)| n.clone())
+                    .unwrap_or_else(|| sel.clone());
+                v.push((id, name));
+            }
+            v
+        };
+
+        // Whoever is already serving this volume is still serving it. Two writers
+        // on one volume corrupt it, and the corruption is silent — each believes
+        // its own copy-on-write mapping — so the check is on by default and the
+        // override has to be typed.
+        if !force && !read_only {
+            let live = crate::drive::ublk::devices()?;
+            let mut busy = Vec::new();
+            for id in &live {
+                if let Some(pid) = crate::drive::ublk::server_pid(*id)? {
+                    if pid > 0 && pid != std::process::id() as i32 {
+                        busy.push(format!("/dev/ublkb{id} (server {pid})"));
+                    }
+                }
+            }
+            if !busy.is_empty() {
+                anyhow::bail!(
+                    "this node is already serving {} — attaching writable would put two \
+                     writers on one volume, which corrupts it silently. Use --ro to look, \
+                     or --force if you know the other server is not touching what you want.",
+                    busy.join(", ")
+                );
+            }
+        }
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut threads = Vec::new();
+        let mut attached: Vec<(u32, String)> = Vec::new();
+        let base = crate::drive::ublk::devices()?.into_iter().max().map_or(0, |m| m + 1);
+
+        for (i, (id, name)) in wanted.iter().enumerate() {
+            let Some(dev) = mgr.get_volume(id) else {
+                eprintln!("  {name}: no such volume");
+                continue;
+            };
+            let dev_id = base + i as u32;
+            let rx = shutdown_rx.clone();
+            let label = name.clone();
+            let thread = std::thread::Builder::new()
+                .name(format!("ublk-attach-{dev_id}"))
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime");
+                    let server = UblkServer::new(dev).with_dev_id(dev_id);
+                    if let Err(e) = rt.block_on(server.run(rx)) {
+                        tracing::error!("attach {label} on /dev/ublkb{dev_id}: {e}");
+                    }
+                })?;
+            threads.push(thread);
+            attached.push((dev_id, name.clone()));
+        }
+
+        // Give the devices a moment to appear before anything tries to mount one.
+        let ids: Vec<u32> = attached.iter().map(|(d, _)| *d).collect();
+        let _ = tokio::task::spawn_blocking({
+            let ids = ids.clone();
+            move || crate::drive::ublk::wait_live(&ids, std::time::Duration::from_secs(30))
+        })
+        .await?;
+
+        let mut mounted: Vec<String> = Vec::new();
+        for (dev_id, name) in &attached {
+            let path = format!("/dev/ublkb{dev_id}");
+            match mount_at {
+                None => println!("  {name:<28} {path}"),
+                Some(dir) => {
+                    let target = std::path::Path::new(dir).join(name);
+                    std::fs::create_dir_all(&target)?;
+                    match mount_volume(&path, &target, read_only) {
+                        Ok(fs) => {
+                            println!(
+                                "  {name:<28} {path} -> {} ({fs}{})",
+                                target.display(),
+                                if read_only { ", ro" } else { "" }
+                            );
+                            mounted.push(target.to_string_lossy().into_owned());
+                        }
+                        // Not fatal, and worth being precise about: a volume that
+                        // holds no filesystem is a perfectly good thing to attach,
+                        // and the block device is still there to look at.
+                        Err(e) => println!("  {name:<28} {path} (not mounted: {e})"),
+                    }
+                }
+            }
+        }
+
+        println!("\nAttached {}. Ctrl+C to release.", attached.len());
+        tokio::signal::ctrl_c().await?;
+
+        for m in mounted.iter().rev() {
+            let c = std::ffi::CString::new(m.as_str()).unwrap_or_default();
+            // SAFETY: unmounting a path this process mounted.
+            if unsafe { libc::umount(c.as_ptr()) } != 0 {
+                eprintln!("could not unmount {m}: {}", std::io::Error::last_os_error());
+            }
+        }
+        let _ = shutdown_tx.send(true);
+        let stuck = join_ublk_threads(threads, std::time::Duration::from_secs(10));
+        if stuck > 0 {
+            eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
+        }
+        Ok(())
+    }
+
+    /// Mount a block device without being told what is on it.
+    ///
+    /// There is no `blkid` here and no reason to need one: the kernel refuses a
+    /// filesystem it does not recognise, so trying the handful this node can
+    /// produce and reporting which one worked is both the probe and the mount.
+    #[cfg(target_os = "linux")]
+    fn mount_volume(
+        dev: &str,
+        target: &std::path::Path,
+        read_only: bool,
+    ) -> anyhow::Result<&'static str> {
+        let src = std::ffi::CString::new(dev)?;
+        let dst = std::ffi::CString::new(target.to_string_lossy().as_ref())?;
+        let flags = if read_only { libc::MS_RDONLY } else { 0 };
+        let mut last = 0;
+        for fs in ["ext4", "erofs", "vfat", "xfs", "ext2"] {
+            let t = std::ffi::CString::new(fs)?;
+            // SAFETY: all four pointers are valid NUL-terminated strings.
+            let rc = unsafe {
+                libc::mount(src.as_ptr(), dst.as_ptr(), t.as_ptr(), flags, std::ptr::null())
+            };
+            if rc == 0 {
+                return Ok(fs);
+            }
+            last = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        }
+        anyhow::bail!("no filesystem the kernel recognises ({})", std::io::Error::from_raw_os_error(last))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_attach(
+        _slab_paths: &[String],
+        _meta: Option<&str>,
+        _volumes: &[String],
+        _all: bool,
+        _mount_at: Option<&str>,
+        _read_only: bool,
+        _force: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("attach exports volumes through ublk, which is Linux-only")
+    }
+
+    /// Whether [`seed_data_half`] runs without being asked.
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SeedWhen {
+        /// The data slab was laid this boot and its records are routed to it.
+        Always,
+        /// Only with `STORMBLOCK_SEED_DATA` set.
+        Asked,
+    }
+
+    /// Take the local disk for this boot: lay it (or update its system half),
+    /// register its slabs with `mgr` and seed the data half (#118). `boot-local`
+    /// calls it before exporting anything; a test drives it the same way (#239).
+    ///
+    /// `Ok(None)`: the disk already holds everything this boot would copy.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn take_local_disk(
+        mgr: &mut crate::volume::VolumeManager,
+        disk: &str,
+        local_tier: &str,
+        local_disk_force: bool,
+    ) -> anyhow::Result<Option<crate::drive::handover::FlowOver>> {
+        Ok(take_local_disk_for(mgr, disk, local_tier, local_disk_force, None).await?.0)
+    }
+
+    /// The "already up to date" test of [`take_local_disk_for`]: the system half
+    /// holds every volume this boot would copy, by id. Never with
+    /// `STORMBLOCK_RELAY_SYSTEM_HALF=1` (#244), which the caller checks first.
+    fn holds_everything(want: &std::collections::HashSet<uuid::Uuid>, have: &std::collections::HashSet<uuid::Uuid>) -> bool {
+        !want.is_empty() && want.iter().all(|id| have.contains(id))
+    }
+
+    /// [`take_local_disk`], naming the release's root volume (`root`), whose
+    /// `/etc/stormblock/data-volumes` and `/etc/os-release` an install over a
+    /// node's disk reads (#311). Also returns what the install did with the
+    /// node's data half, when it kept one.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn take_local_disk_for(
+        mgr: &mut crate::volume::VolumeManager,
+        disk: &str,
+        local_tier: &str,
+        local_disk_force: bool,
+        root: Option<&str>,
+    ) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
+        let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let dest_dev: Arc<dyn BlockDevice> =
+            open_storage(disk).await?;
+        let mut layout =
+            crate::image::local::LocalLayout::for_drive(dest_dev.capacity_bytes());
+        layout.slot_size = mgr.slot_size();
+        layout.tier = tier;
+        // The table in the drive's own sector size: firmware parses a GPT
+        // in the medium's block size, and `FileDevice` reports 4096 for
+        // every drive (#123). A file has none, and follows the device.
+        layout.lba = crate::drive::filedev::logical_sector_size(disk);
+
+        // **A drive that is already this node's is updated, not replaced.**
+        //
+        // A reinstall is "boot a fresh image and flow over onto the disk
+        // the last install used", and that disk carries two things: the
+        // goldens, which this boot exists to replace, and the data slab,
+        // which holds the node's CA key and its ServiceAccount signing key
+        // and cannot be made again. Laying a fresh table destroys the
+        // second to refresh the first; refusing the drive leaves the node
+        // running from the appliance for the rest of its life. Neither is
+        // an install.
+        //
+        // The partition types say which half is which — that is what they
+        // are for (#88) — so the system half is formatted afresh, the data
+        // half is opened and left alone, and the node boots normally with
+        // the identity it already had. No force, because nothing is
+        // destroyed that an install is not meant to destroy.
+        //
+        // **Force or not** (#311, owner 2026-10-06: an install never wipes data;
+        // only the system half of the system drive). `--local-disk-force` still
+        // answers for a drive whose data slab is not part of a node layout (an
+        // abandoned install), never for a node's data half.
+        if crate::image::local::node_layout(&dest_dev).await?.is_some() {
+            // **And if it is already up to date, do nothing at all.**
+            //
+            // A node that netboots regularly would otherwise reformat its
+            // own system half and re-copy every golden on every boot —
+            // destroying a working local half to rebuild the same bytes,
+            // and running from the appliance for the minutes that takes,
+            // each time.
+            //
+            // By volume id, which is what a migration preserves: the
+            // flow-over moves a volume's extents, it does not make a new
+            // volume, so a system half that has already had this image
+            // flowed onto it holds the same ids. A new build makes new
+            // volumes and this comes out false, which is what should
+            // happen.
+            //
+            // Conservative in the direction that costs least: a wrong
+            // "not up to date" reformats and re-copies, which is wasteful;
+            // a wrong "up to date" leaves the node booting from the
+            // appliance. Neither loses anything, and only a superset
+            // counts as up to date.
+            let want: std::collections::HashSet<uuid::Uuid> = mgr
+                .list_volumes()
+                .await
+                .into_iter()
+                .map(|(id, ..)| id.0)
+                .collect();
+            let have = crate::image::local::system_slab_volumes(&dest_dev)
+                .await
+                .unwrap_or(None);
+            // And only a disk that can boot on its own counts: one laid
+            // before local boot existed holds every golden and has no
+            // boot area, and the shortcut would leave it that way (#123).
+            let boot_ready =
+                crate::image::local::boot_ready(&dest_dev, &layout).await;
+            // The boot already tried this disk and its root would not come up
+            // (#244): `/init` says so, and the system half is laid again from
+            // the image whatever the ids say — the same ids over broken bytes
+            // are what sent it here. The data half is kept as in any install.
+            let relay = std::env::var("STORMBLOCK_RELAY_SYSTEM_HALF").is_ok_and(|v| v.trim() == "1");
+            if relay {
+                println!(
+                    "Flow-over: {disk}'s own root did not come up this boot — laying its system \
+                     half again from the image, whatever it holds (#244)"
+                );
+            }
+            if !boot_ready {
+                println!(
+                    "Flow-over: {disk} has no room to boot on its own (no boot area, or a \
+                     table firmware cannot read) — laying the system half again"
+                );
+            }
+            if let Some(have) = have.filter(|_| boot_ready && !relay) {
+                if holds_everything(&want, &have) {
+                    println!(
+                        "Flow-over: {disk} already holds all {} volume(s) this boot would \
+                         copy — nothing to do",
+                        want.len()
+                    );
+                    println!(
+                        "Flow-over: leaving it as it stands; the node boots from it next \
+                         time, which is what the local-slab probe is for."
+                    );
+                    return Ok((None, None));
+                }
+                let missing = want.iter().filter(|id| !have.contains(id)).count();
+                println!(
+                    "Flow-over: {disk} holds {} of the {} volume(s) this boot carries; {} \
+                     to copy",
+                    want.len() - missing,
+                    want.len(),
+                    missing
+                );
+            }
+            println!(
+                "Flow-over: {disk} is already this node's — replacing the system half, \
+                 keeping the data half (#311)"
+            );
+            // Everything that can refuse, before anything is written: the data
+            // half's records must read and every leg they name must be in it.
+            let release: std::collections::HashSet<String> =
+                mgr.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
+            let plan = crate::image::install::plan(&dest_dev, &release)
+                .await
+                .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
+            let policy = match root {
+                Some(r) => crate::image::stage::read_policy(mgr, r).await.unwrap_or_else(|e| {
+                    println!("Install: the release's {} not read ({e}); every data volume is kept", crate::image::stage::POLICY_FILE);
+                    Default::default()
+                }),
+                None => Default::default(),
+            };
+            let version = match root {
+                Some(r) => match mgr.find_volume(r).await.and_then(|id| mgr.get_volume(&id)) {
+                    Some(dev) => crate::fs::files::read_file(&dev, "/etc/os-release")
+                        .await
+                        .ok()
+                        .and_then(|b| crate::image::install::version_id(&b)),
+                    None => None,
+                },
+                None => None,
+            }
+            .unwrap_or_else(|| "new".into());
+            let previous = match root {
+                Some(r) => volume_file_on_slabs(&[disk.to_string()], r, "/etc/os-release")
                     .await
                     .ok()
                     .and_then(|b| crate::image::install::version_id(&b)),
                 None => None,
-            },
-            None => None,
-        }
-        .unwrap_or_else(|| "new".into());
-        let previous = match root {
-            Some(r) => volume_file_on_slabs(&[disk.to_string()], r, "/etc/os-release")
+            }
+            .unwrap_or_else(|| "previous".into());
+            println!(
+                "Install: {previous} → {version} on {disk}: {} volume(s) in the data half, kept",
+                plan.volumes.len()
+            );
+            let laid = crate::image::local::update_system_slab(dest_dev, &layout)
                 .await
-                .ok()
-                .and_then(|b| crate::image::install::version_id(&b)),
-            None => None,
+                .map_err(|e| anyhow::anyhow!("updating the system slab on {disk}: {e}"))?;
+            let data_id = laid.data.slab_id();
+            let system_id = laid.system.slab_id();
+            let bulk_id = laid.bulk.as_ref().map(|b| b.slab_id());
+            println!(
+                "Flow-over: {disk} updated — data slab {data_id} kept ({}), system slab \
+                 {system_id} replaced ({})",
+                crate::mgmt::config::human_size(laid.data_bytes),
+                crate::mgmt::config::human_size(laid.system_bytes),
+            );
+            mgr.registry().write().await.add(laid.system);
+            // The node's data half, adopted: its records into this manager, and
+            // each name the release also uses settled by the release's policy.
+            let report =
+                crate::image::install::adopt(mgr, laid.data, laid.bulk, &plan, &policy, &version, &previous)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("keeping the data half on {disk}: {e}"))?;
+            for k in &report.kept {
+                println!("Install: {k} — the node's, kept");
+            }
+            for (n, to) in &report.aside {
+                println!("Install: {n} — the release's from now on; the node's kept as {to}");
+            }
+            for m in &report.migrations {
+                println!("Install: {} — to migrate from {} with {} (stormupdate runs it)", m.volume, m.node_volume, m.hook);
+            }
+            // The records go where the extents go, now that this manager holds
+            // the data half's own records as well as the release's: a persist
+            // writes both, and replaces nothing it did not read.
+            let mut first = vec![data_id, system_id];
+            first.extend(bulk_id);
+            mgr.keep_metadata_in_first(&first);
+            mgr.persist().await;
+            // What the release keeps of its own data half (volumes it adds, ones
+            // it replaces, its blanks) moves onto this disk in the background, as
+            // on a fresh install (#285).
+            let flow = crate::drive::handover::FlowOver {
+                disk: disk.to_string(),
+                system_slab: system_id.0.to_string(),
+                data_slab: data_id.0.to_string(),
+                data_flow: true,
+            };
+            println!(
+                "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
+            );
+            return Ok((Some(flow), Some(report)));
         }
-        .unwrap_or_else(|| "previous".into());
-        println!(
-            "Install: {previous} → {version} on {disk}: {} volume(s) in the data half, kept",
-            plan.volumes.len()
-        );
-        let laid = crate::image::local::update_system_slab(dest_dev, &layout)
+
+        // The target is about to be formatted. An operator supplies a path,
+        // and a path proves nothing about what is on the device — so ask the
+        // device (#88). A reinstall is exactly "boot a fresh image and flow
+        // over onto the disk the previous install was on", and that disk is
+        // where this node's CA and its ServiceAccount signing key live.
+        if let Some(what) = data_slab_on(disk).await? {
+            // The override exists because the guard cannot tell a live
+            // identity from a dead one.
+            //
+            // A drive carrying a data slab from an install that was
+            // abandoned — interrupted mid-migration, corrupted, replaced
+            // — looks exactly like a drive carrying the identity of a
+            // node that is running. The guard refuses both, forever, and
+            // no sequence of boots recovers the drive: zeroing a header
+            // is not something a node does to itself, and every policy
+            // the survey offers is still refused right here.
+            //
+            // `--local-disk-force` is that sequence, and it is
+            // deliberately not a policy. `assimilate=any` is a statement
+            // about a fleet; this is a statement about one drive that
+            // somebody has looked at. It names what it destroys first.
+            if !local_disk_force {
+                anyhow::bail!(
+                    "refusing to format {disk} for flow-over: {what}. That partition holds \
+                     this node's identity — its CA key and its ServiceAccount signing key — \
+                     and nothing can mint it again. Point --local-disk at the system \
+                     partition, at a drive that carries no data slab, or pass \
+                     --local-disk-force if that identity is spent and you mean to destroy it"
+                );
+            }
+            println!("Flow-over: {what} — destroying it, as --local-disk-force was given.");
+            tracing::warn!("flow-over: --local-disk-force overrides the identity guard: {what}");
+        }
+        // Both halves, each onto a slab of its own role.
+        //
+        // This formatted the whole device as one slab — which takes
+        // `SlabRole`'s default, System — and then drained only the non-data
+        // slabs onto it. So the goldens came local and the *writes* did not:
+        // every log line, every claim and every byte of `stormcos-state`
+        // still landed in a clone on the appliance, for the life of the node.
+        // One node can afford that. Twenty write to one appliance.
+        //
+        // The layout is the image's own, for the image's own reason: an
+        // install replaces the system end and leaves the data end alone, and
+        // the two are told apart from the partition table (#88).
+        let laid = crate::image::local::lay_node_slabs(dest_dev, &layout)
             .await
-            .map_err(|e| anyhow::anyhow!("updating the system slab on {disk}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
         let data_id = laid.data.slab_id();
         let system_id = laid.system.slab_id();
         let bulk_id = laid.bulk.as_ref().map(|b| b.slab_id());
         println!(
-            "Flow-over: {disk} updated — data slab {data_id} kept ({}), system slab \
-             {system_id} replaced ({})",
+            "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({}){}",
             crate::mgmt::config::human_size(laid.data_bytes),
             crate::mgmt::config::human_size(laid.system_bytes),
+            match bulk_id {
+                Some(b) => format!(", bulk slab {b} ({}, 8 MiB extents)", crate::mgmt::config::human_size(laid.bulk_bytes)),
+                None => String::new(),
+            },
         );
-        mgr.registry().write().await.add(laid.system);
-        // The node's data half, adopted: its records into this manager, and
-        // each name the release also uses settled by the release's policy.
-        let report =
-            crate::image::install::adopt(mgr, laid.data, laid.bulk, &plan, &policy, &version, &previous)
-                .await
-                .map_err(|e| anyhow::anyhow!("keeping the data half on {disk}: {e}"))?;
-        for k in &report.kept {
-            println!("Install: {k} — the node's, kept");
-        }
-        for (n, to) in &report.aside {
-            println!("Install: {n} — the release's from now on; the node's kept as {to}");
-        }
-        for m in &report.migrations {
-            println!("Install: {} — to migrate from {} with {} (stormupdate runs it)", m.volume, m.node_volume, m.hook);
-        }
-        // The records go where the extents go, now that this manager holds
-        // the data half's own records as well as the release's: a persist
-        // writes both, and replaces nothing it did not read.
-        let mut first = vec![data_id, system_id];
-        first.extend(bulk_id);
-        mgr.keep_metadata_in_first(&first);
-        mgr.persist().await;
-        // What the release keeps of its own data half (volumes it adds, ones
-        // it replaces, its blanks) moves onto this disk in the background, as
-        // on a fresh install (#285).
-        let flow = crate::drive::handover::FlowOver {
+
+        // The system half only, and not from here. **Do not migrate a
+        // live data slab, and do not migrate anything from a process
+        // that is about to be killed.**
+        //
+        // Migrating the data slab was tried on hardware and it corrupts:
+        // the flow-over moves extents out from under mounted, actively
+        // written filesystems, and the data slab is exactly the half
+        // being written — logs, state, claims. Within a minute the node
+        // reported
+        //
+        //   EXT4-fs error (device ublkb26): __ext4_find_entry:
+        //       checksumming directory block 0
+        //   capturing state: no ext2/3/4 superblock found (magic 0x0000)
+        //
+        // and stormdrive was in a restart loop. Goldens survive it
+        // because nothing writes to them; a data volume does not.
+        //
+        // Migrating the *system* half from here is safe and still wrong,
+        // because this process does not live long enough to finish. It is
+        // the initramfs engine: twenty-six seconds after it laid these
+        // slabs the successor adopted its ublk devices, and `switch_root`
+        // had already deleted the filesystem its binary came from. The
+        // copy is minutes. Every run of it was killed part-way, leaving a
+        // slab that is real, incomplete and unable to boot the node —
+        // which is precisely the shape the local-slab probe now has to
+        // reject on the next boot.
+        //
+        // So the long-lived process does the long-running job. This lays
+        // the structure, which is fast and bounded, and writes down what
+        // it laid; the engine that adopts the devices moves the extents
+        // at its leisure and is still there when they land.
+        let mut flow = crate::drive::handover::FlowOver {
             disk: disk.to_string(),
             system_slab: system_id.0.to_string(),
             data_slab: data_id.0.to_string(),
-            data_flow: true,
+            data_flow: false,
         };
+        {
+            let mut reg = mgr.registry().write().await;
+            reg.add(laid.data);
+            reg.add(laid.system);
+            if let Some(b) = laid.bulk {
+                reg.add(b);
+            }
+        }
+        // **The records go where the extents go.** The slabs just laid
+        // keep metadata of their own, and this manager was only ever
+        // writing into the slabs it opened, which are the appliance
+        // clone's. So a seeded data half had its extents on the drive and
+        // its records on a clone the next boot never attaches, and the
+        // engine that adopted the boot died on
+        //
+        //   Error: volume 'stormcert-data' not found in slab metadata
+        //
+        // Safe here, and only here: both slabs were formatted a moment
+        // ago and hold nothing a persist could overwrite. The update path
+        // above keeps a data slab that holds this node's records, and
+        // writing this manager's view of it would replace them.
+        let mut first = vec![data_id, system_id];
+        first.extend(bulk_id);
+        mgr.keep_metadata_in_first(&first);
+        // **The data half moves in the background** (#285), like the system
+        // half: the engine that adopts this boot empties the appliance's data
+        // slabs into this one after the goldens, while the volumes on them are
+        // mounted and written. Seeding it here, before anything is exported,
+        // held the whole boot: 166 s of the Dell's 352 s install (11.79). It was
+        // done here because moving a written slab corrupted it — the race the
+        // slot fence closed (#239) — and the sources are quarantined from the
+        // handover on, so a write to an extent still on the appliance goes to
+        // this disk and the flow-over leaves it be. `STORMBLOCK_SEED_DATA_SYNC`
+        // seeds it here, as before.
+        if std::env::var_os("STORMBLOCK_SEED_DATA_SYNC").is_some() {
+            seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
+        } else {
+            flow.data_flow = true;
+            println!(
+                "Flow-over: the data half moves onto {disk} in the background, after the system half (#285)"
+            );
+        }
         println!(
             "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
         );
-        return Ok((Some(flow), Some(report)));
+        Ok((Some(flow), None))
     }
 
-    // The target is about to be formatted. An operator supplies a path,
-    // and a path proves nothing about what is on the device — so ask the
-    // device (#88). A reinstall is exactly "boot a fresh image and flow
-    // over onto the disk the previous install was on", and that disk is
-    // where this node's CA and its ServiceAccount signing key live.
-    if let Some(what) = data_slab_on(disk).await? {
-        // The override exists because the guard cannot tell a live
-        // identity from a dead one.
+    /// Put the writable half on the local disk, **now**, before anything is
+    /// exported.
+    ///
+    /// The flow-over moves the goldens and deliberately does not move the data
+    /// slab, because migrating a slab while a filesystem on it is being written
+    /// corrupts it — tried on hardware, and within a minute the node reported
+    /// `EXT4-fs error (device ublkb26): __ext4_find_entry: checksumming directory
+    /// block 0` with its state store's superblock gone. That reasoning is sound
+    /// and it left a hole: the data half was then never populated at all, so a
+    /// drive that had flowed over held `stormpump` and every golden and none of
+    /// `stormcert-data`, `stormcos-state`, `registry-data` or the logs. The node
+    /// attached its own disk, restored 75 volumes, dropped 5712 extent mappings
+    /// pointing into the appliance's slabs, and died on
+    ///
+    /// ```text
+    /// Error: volume 'stormcert-data' not found in slab metadata
+    /// ```
+    ///
+    /// The window where copying it *is* safe is this one. `boot-local` has
+    /// attached the slabs and resolved the volumes, and it has not exported a
+    /// single ublk device yet — so nothing is mounted, no filesystem is open, and
+    /// not one byte has been written to any of these volumes this boot. It is the
+    /// same argument the migration comment already makes for where the writable
+    /// volumes belong; this is that place.
+    ///
+    /// Synchronous on purpose. It is the difference between a node that boots from
+    /// its own disk next time and one that asks the appliance forever, and it is
+    /// bounded — the data half is logs and state, not goldens.
+    ///
+    /// **Only into an empty data half.** A data slab that holds volumes holds this
+    /// node's identity, and copying over it would destroy a CA key that cannot be
+    /// minted again. Empty is the whole test, and it is asked of the drive rather
+    /// than assumed from which code path got here.
+    #[cfg(target_os = "linux")]
+    async fn seed_data_half(
+        mgr: &crate::volume::VolumeManager,
+        dest: crate::drive::slab::SlabId,
+        disk: &str,
+        when: SeedWhen,
+    ) -> anyhow::Result<()> {
+        // Every map in memory while the seed walks them (#158).
+        let _pin = crate::volume::gem::pin_resident(mgr.gem()).await?;
+        // Its own handle on the drive. The one the caller had was consumed laying
+        // the slabs, and reading a partition table is cheap next to what follows.
+        let dev: Arc<dyn BlockDevice> =
+            open_storage(disk).await?;
+        // **On for a data half laid this boot, and asked-for otherwise.**
         //
-        // A drive carrying a data slab from an install that was
-        // abandoned — interrupted mid-migration, corrupted, replaced
-        // — looks exactly like a drive carrying the identity of a
-        // node that is running. The guard refuses both, forever, and
-        // no sequence of boots recovers the drive: zeroing a header
-        // is not something a node does to itself, and every policy
-        // the survey offers is still refused right here.
+        // It was off everywhere, because the records did not survive: the manager
+        // persisted its map only to the metadata slabs it chose when it opened,
+        // which are the appliance's, and the local slabs were registered
+        // afterwards. So the engine that adopted the boot opened the drive,
+        // restored 68 volumes, and every data volume was missing:
         //
-        // `--local-disk-force` is that sequence, and it is
-        // deliberately not a policy. `assimilate=any` is a statement
-        // about a fleet; this is a statement about one drive that
-        // somebody has looked at. It names what it destroys first.
-        if !local_disk_force {
-            anyhow::bail!(
-                "refusing to format {disk} for flow-over: {what}. That partition holds \
-                 this node's identity — its CA key and its ServiceAccount signing key — \
-                 and nothing can mint it again. Point --local-disk at the system \
-                 partition, at a drive that carries no data slab, or pass \
-                 --local-disk-force if that identity is spent and you mean to destroy it"
-            );
-        }
-        println!("Flow-over: {what} — destroying it, as --local-disk-force was given.");
-        tracing::warn!("flow-over: --local-disk-force overrides the identity guard: {what}");
-    }
-    // Both halves, each onto a slab of its own role.
-    //
-    // This formatted the whole device as one slab — which takes
-    // `SlabRole`'s default, System — and then drained only the non-data
-    // slabs onto it. So the goldens came local and the *writes* did not:
-    // every log line, every claim and every byte of `stormcos-state`
-    // still landed in a clone on the appliance, for the life of the node.
-    // One node can afford that. Twenty write to one appliance.
-    //
-    // The layout is the image's own, for the image's own reason: an
-    // install replaces the system end and leaves the data end alone, and
-    // the two are told apart from the partition table (#88).
-    let laid = crate::image::local::lay_node_slabs(dest_dev, &layout)
-        .await
-        .map_err(|e| anyhow::anyhow!("laying slabs on {disk}: {e}"))?;
-    let data_id = laid.data.slab_id();
-    let system_id = laid.system.slab_id();
-    let bulk_id = laid.bulk.as_ref().map(|b| b.slab_id());
-    println!(
-        "Flow-over: {disk} laid out — data slab {data_id} ({}), system slab {system_id} ({}){}",
-        crate::mgmt::config::human_size(laid.data_bytes),
-        crate::mgmt::config::human_size(laid.system_bytes),
-        match bulk_id {
-            Some(b) => format!(", bulk slab {b} ({}, 8 MiB extents)", crate::mgmt::config::human_size(laid.bulk_bytes)),
-            None => String::new(),
-        },
-    );
-
-    // The system half only, and not from here. **Do not migrate a
-    // live data slab, and do not migrate anything from a process
-    // that is about to be killed.**
-    //
-    // Migrating the data slab was tried on hardware and it corrupts:
-    // the flow-over moves extents out from under mounted, actively
-    // written filesystems, and the data slab is exactly the half
-    // being written — logs, state, claims. Within a minute the node
-    // reported
-    //
-    //   EXT4-fs error (device ublkb26): __ext4_find_entry:
-    //       checksumming directory block 0
-    //   capturing state: no ext2/3/4 superblock found (magic 0x0000)
-    //
-    // and stormdrive was in a restart loop. Goldens survive it
-    // because nothing writes to them; a data volume does not.
-    //
-    // Migrating the *system* half from here is safe and still wrong,
-    // because this process does not live long enough to finish. It is
-    // the initramfs engine: twenty-six seconds after it laid these
-    // slabs the successor adopted its ublk devices, and `switch_root`
-    // had already deleted the filesystem its binary came from. The
-    // copy is minutes. Every run of it was killed part-way, leaving a
-    // slab that is real, incomplete and unable to boot the node —
-    // which is precisely the shape the local-slab probe now has to
-    // reject on the next boot.
-    //
-    // So the long-lived process does the long-running job. This lays
-    // the structure, which is fast and bounded, and writes down what
-    // it laid; the engine that adopts the devices moves the extents
-    // at its leisure and is still there when they land.
-    let mut flow = crate::drive::handover::FlowOver {
-        disk: disk.to_string(),
-        system_slab: system_id.0.to_string(),
-        data_slab: data_id.0.to_string(),
-        data_flow: false,
-    };
-    {
-        let mut reg = mgr.registry().write().await;
-        reg.add(laid.data);
-        reg.add(laid.system);
-        if let Some(b) = laid.bulk {
-            reg.add(b);
-        }
-    }
-    // **The records go where the extents go.** The slabs just laid
-    // keep metadata of their own, and this manager was only ever
-    // writing into the slabs it opened, which are the appliance
-    // clone's. So a seeded data half had its extents on the drive and
-    // its records on a clone the next boot never attaches, and the
-    // engine that adopted the boot died on
-    //
-    //   Error: volume 'stormcert-data' not found in slab metadata
-    //
-    // Safe here, and only here: both slabs were formatted a moment
-    // ago and hold nothing a persist could overwrite. The update path
-    // above keeps a data slab that holds this node's records, and
-    // writing this manager's view of it would replace them.
-    let mut first = vec![data_id, system_id];
-    first.extend(bulk_id);
-    mgr.keep_metadata_in_first(&first);
-    // **The data half moves in the background** (#285), like the system
-    // half: the engine that adopts this boot empties the appliance's data
-    // slabs into this one after the goldens, while the volumes on them are
-    // mounted and written. Seeding it here, before anything is exported,
-    // held the whole boot: 166 s of the Dell's 352 s install (11.79). It was
-    // done here because moving a written slab corrupted it — the race the
-    // slot fence closed (#239) — and the sources are quarantined from the
-    // handover on, so a write to an extent still on the appliance goes to
-    // this disk and the flow-over leaves it be. `STORMBLOCK_SEED_DATA_SYNC`
-    // seeds it here, as before.
-    if std::env::var_os("STORMBLOCK_SEED_DATA_SYNC").is_some() {
-        seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
-    } else {
-        flow.data_flow = true;
-        println!(
-            "Flow-over: the data half moves onto {disk} in the background, after the system half (#285)"
-        );
-    }
-    println!(
-        "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
-    );
-    Ok((Some(flow), None))
-}
-
-/// Put the writable half on the local disk, **now**, before anything is
-/// exported.
-///
-/// The flow-over moves the goldens and deliberately does not move the data
-/// slab, because migrating a slab while a filesystem on it is being written
-/// corrupts it — tried on hardware, and within a minute the node reported
-/// `EXT4-fs error (device ublkb26): __ext4_find_entry: checksumming directory
-/// block 0` with its state store's superblock gone. That reasoning is sound
-/// and it left a hole: the data half was then never populated at all, so a
-/// drive that had flowed over held `stormpump` and every golden and none of
-/// `stormcert-data`, `stormcos-state`, `registry-data` or the logs. The node
-/// attached its own disk, restored 75 volumes, dropped 5712 extent mappings
-/// pointing into the appliance's slabs, and died on
-///
-/// ```text
-/// Error: volume 'stormcert-data' not found in slab metadata
-/// ```
-///
-/// The window where copying it *is* safe is this one. `boot-local` has
-/// attached the slabs and resolved the volumes, and it has not exported a
-/// single ublk device yet — so nothing is mounted, no filesystem is open, and
-/// not one byte has been written to any of these volumes this boot. It is the
-/// same argument the migration comment already makes for where the writable
-/// volumes belong; this is that place.
-///
-/// Synchronous on purpose. It is the difference between a node that boots from
-/// its own disk next time and one that asks the appliance forever, and it is
-/// bounded — the data half is logs and state, not goldens.
-///
-/// **Only into an empty data half.** A data slab that holds volumes holds this
-/// node's identity, and copying over it would destroy a CA key that cannot be
-/// minted again. Empty is the whole test, and it is asked of the drive rather
-/// than assumed from which code path got here.
-#[cfg(target_os = "linux")]
-async fn seed_data_half(
-    mgr: &crate::volume::VolumeManager,
-    dest: crate::drive::slab::SlabId,
-    disk: &str,
-    when: SeedWhen,
-) -> anyhow::Result<()> {
-    // Every map in memory while the seed walks them (#158).
-    let _pin = crate::volume::gem::pin_resident(mgr.gem()).await?;
-    // Its own handle on the drive. The one the caller had was consumed laying
-    // the slabs, and reading a partition table is cheap next to what follows.
-    let dev: Arc<dyn BlockDevice> =
-        open_storage(disk).await?;
-    // **On for a data half laid this boot, and asked-for otherwise.**
-    //
-    // It was off everywhere, because the records did not survive: the manager
-    // persisted its map only to the metadata slabs it chose when it opened,
-    // which are the appliance's, and the local slabs were registered
-    // afterwards. So the engine that adopted the boot opened the drive,
-    // restored 68 volumes, and every data volume was missing:
-    //
-    //   Error: volume 'stormcert-data' not found in slab metadata
-    //     (have: ... every golden and every *-logs, and none of the rest)
-    //
-    // The fresh-lay path now names the local slabs as metadata slabs, first,
-    // before calling this, so the records land beside the extents (#118).
-    // Leaving the data half on the appliance is what made every write to a
-    // -data volume vanish at the next boot, because the appliance side is a
-    // clone that the next boot claims afresh.
-    //
-    // A data slab kept from an earlier install is different. It holds this
-    // node's records, and seeding into it before those are adopted over the
-    // fresh clone's volumes of the same names would move extents that nothing
-    // records. That is the upgrade path, and until it exists it is `Asked`.
-    let asked = std::env::var("STORMBLOCK_SEED_DATA").is_ok();
-    let refused = std::env::var("STORMBLOCK_NO_SEED_DATA").is_ok();
-    if refused || (when == SeedWhen::Asked && !asked) {
-        println!(
-            "Flow-over: leaving the data half where it is — writes stay on the appliance{}",
-            if refused { " (STORMBLOCK_NO_SEED_DATA)" } else { "" }
-        );
-        return Ok(());
-    }
-
-    // Per volume, not per slab.
-    //
-    // "Empty, or leave it alone" was too blunt by exactly one case, and it is
-    // the case this node was in. The local data half is registered with the
-    // engine from the boot that laid it, so ordinary allocation put *some*
-    // volumes on it — twenty of them — while the ones the command line mounts
-    // stayed on the appliance. A slab-wide test called that occupied and
-    // skipped it, and the probe went on refusing the drive for seven missing
-    // volumes, boot after boot, with the fix sitting behind a guard that would
-    // never open.
-    //
-    // A volume already on this slab is this node's and is not touched. A
-    // volume that is not here cannot be overwritten by being copied here,
-    // because there is nothing of it here to overwrite. That is the whole
-    // safety argument, and it holds per volume, which is the granularity the
-    // danger actually has.
-    let have = match crate::image::local::data_slab_volumes(&dev).await {
-        Ok(Some(have)) => have,
-        // Cannot say. An unanswerable question about identity is answered by
-        // doing nothing: the node runs its writes on the appliance, which is
-        // slower and is not destructive.
-        Ok(None) | Err(_) => {
+        //   Error: volume 'stormcert-data' not found in slab metadata
+        //     (have: ... every golden and every *-logs, and none of the rest)
+        //
+        // The fresh-lay path now names the local slabs as metadata slabs, first,
+        // before calling this, so the records land beside the extents (#118).
+        // Leaving the data half on the appliance is what made every write to a
+        // -data volume vanish at the next boot, because the appliance side is a
+        // clone that the next boot claims afresh.
+        //
+        // A data slab kept from an earlier install is different. It holds this
+        // node's records, and seeding into it before those are adopted over the
+        // fresh clone's volumes of the same names would move extents that nothing
+        // records. That is the upgrade path, and until it exists it is `Asked`.
+        let asked = std::env::var("STORMBLOCK_SEED_DATA").is_ok();
+        let refused = std::env::var("STORMBLOCK_NO_SEED_DATA").is_ok();
+        if refused || (when == SeedWhen::Asked && !asked) {
             println!(
-                "Flow-over: cannot read the data half of {disk} - leaving it alone; \
-                 writes stay on the appliance"
+                "Flow-over: leaving the data half where it is — writes stay on the appliance{}",
+                if refused { " (STORMBLOCK_NO_SEED_DATA)" } else { "" }
             );
             return Ok(());
         }
-    };
-    if !have.is_empty() {
-        println!(
-            "Flow-over: the data half of {disk} already holds {} volume(s); those stay as they are",
-            have.len()
-        );
-    }
 
-    let sources: Vec<crate::drive::slab::SlabId> = {
-        let reg = mgr.registry().read().await;
-        reg.iter()
-            .filter(|(id, s)| s.is_data() && **id != dest)
-            .map(|(id, _)| *id)
-            .collect()
-    };
-    if sources.is_empty() {
-        println!("Flow-over: no data slab to copy from; writes stay where they are");
-        return Ok(());
-    }
-
-    // The work is decided before any of it is done.
-    //
-    // The old loop asked the map for "an extent still on the source" and
-    // repeated until there were none, which cannot express "all but these".
-    // Listing first, filtering by volume, then moving what is left says
-    // exactly what will happen and lets it be counted before it starts.
-    let todo: Vec<(crate::volume::VolumeId, u64)> = {
-        let gem = mgr.gem().read().await;
-        sources
-            .iter()
-            .flat_map(|s| gem.slab_extents(*s))
-            .filter(|(vol, _, _)| !have.contains(&vol.0))
-            .map(|(vol, vext, _)| (vol, vext))
-            .collect()
-    };
-    if todo.is_empty() {
-        println!("Flow-over: the data half of {disk} has everything this boot would copy");
-        return Ok(());
-    }
-    // By uuid, because VolumeId is an identity and deliberately not ordered.
-    let volumes: std::collections::HashSet<uuid::Uuid> =
-        todo.iter().map(|(vol, _)| vol.0).collect();
-    let volumes = volumes.len();
-    println!(
-        "Flow-over: seeding the data half of {disk} - {} volume(s), {} extent(s)",
-        volumes,
-        todo.len()
-    );
-
-    let engine = crate::placement::PlacementEngine::new();
-    let started = std::time::Instant::now();
-    let (mut moved, mut failed) = (0u64, 0u64);
-    // The drain's cadence, for the same reason (see `drain::run`).
-    const SEED_PERSIST_EVERY: u32 = 64;
-    let mut since_persist = 0u32;
-    for (vol, vext) in todo {
-        // Under the slot fence, like every move (#239). Nothing is exported
-        // yet, so nothing contends for it; it is what a move is made of.
-        let Some(leg) = mgr.gem().read().await.lookup(vol, vext).map(|l| l.primary()) else {
-            continue;
+        // Per volume, not per slab.
+        //
+        // "Empty, or leave it alone" was too blunt by exactly one case, and it is
+        // the case this node was in. The local data half is registered with the
+        // engine from the boot that laid it, so ordinary allocation put *some*
+        // volumes on it — twenty of them — while the ones the command line mounts
+        // stayed on the appliance. A slab-wide test called that occupied and
+        // skipped it, and the probe went on refusing the drive for seven missing
+        // volumes, boot after boot, with the fix sitting behind a guard that would
+        // never open.
+        //
+        // A volume already on this slab is this node's and is not touched. A
+        // volume that is not here cannot be overwritten by being copied here,
+        // because there is nothing of it here to overwrite. That is the whole
+        // safety argument, and it holds per volume, which is the granularity the
+        // danger actually has.
+        let have = match crate::image::local::data_slab_volumes(&dev).await {
+            Ok(Some(have)) => have,
+            // Cannot say. An unanswerable question about identity is answered by
+            // doing nothing: the node runs its writes on the appliance, which is
+            // slower and is not destructive.
+            Ok(None) | Err(_) => {
+                println!(
+                    "Flow-over: cannot read the data half of {disk} - leaving it alone; \
+                     writes stay on the appliance"
+                );
+                return Ok(());
+            }
         };
-        // A shared slot moves once, for every map that names it.
-        if leg.slab_id == dest {
-            moved += 1;
-            continue;
+        if !have.is_empty() {
+            println!(
+                "Flow-over: the data half of {disk} already holds {} volume(s); those stay as they are",
+                have.len()
+            );
         }
-        let fence = crate::volume::fence::exclusive(leg).await;
-        {
-        let mut gem = mgr.gem().write().await;
-        let mut reg = mgr.registry().write().await;
-        match engine.migrate_leg_fenced(&mut gem, &mut reg, vol, vext, leg.slab_id, Some(dest), &fence).await {
-            Ok(_) => moved += 1,
-            Err(e) => {
-                failed += 1;
-                tracing::error!("seeding the data half: extent {vol:?}/{vext}: {e}");
-                // Giving up is safe and leaves a data half with holes, which
-                // the local-slab probe rejects - the node boots from the
-                // appliance rather than from an identity that is missing
-                // pieces.
-                if failed > 8 {
-                    anyhow::bail!(
-                        "gave up seeding the data half of {disk} after {failed} failures; \
-                         {moved} extent(s) had moved"
-                    );
+
+        let sources: Vec<crate::drive::slab::SlabId> = {
+            let reg = mgr.registry().read().await;
+            reg.iter()
+                .filter(|(id, s)| s.is_data() && **id != dest)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        if sources.is_empty() {
+            println!("Flow-over: no data slab to copy from; writes stay where they are");
+            return Ok(());
+        }
+
+        // The work is decided before any of it is done.
+        //
+        // The old loop asked the map for "an extent still on the source" and
+        // repeated until there were none, which cannot express "all but these".
+        // Listing first, filtering by volume, then moving what is left says
+        // exactly what will happen and lets it be counted before it starts.
+        let todo: Vec<(crate::volume::VolumeId, u64)> = {
+            let gem = mgr.gem().read().await;
+            sources
+                .iter()
+                .flat_map(|s| gem.slab_extents(*s))
+                .filter(|(vol, _, _)| !have.contains(&vol.0))
+                .map(|(vol, vext, _)| (vol, vext))
+                .collect()
+        };
+        if todo.is_empty() {
+            println!("Flow-over: the data half of {disk} has everything this boot would copy");
+            return Ok(());
+        }
+        // By uuid, because VolumeId is an identity and deliberately not ordered.
+        let volumes: std::collections::HashSet<uuid::Uuid> =
+            todo.iter().map(|(vol, _)| vol.0).collect();
+        let volumes = volumes.len();
+        println!(
+            "Flow-over: seeding the data half of {disk} - {} volume(s), {} extent(s)",
+            volumes,
+            todo.len()
+        );
+
+        let engine = crate::placement::PlacementEngine::new();
+        let started = std::time::Instant::now();
+        let (mut moved, mut failed) = (0u64, 0u64);
+        // The drain's cadence, for the same reason (see `drain::run`).
+        const SEED_PERSIST_EVERY: u32 = 64;
+        let mut since_persist = 0u32;
+        for (vol, vext) in todo {
+            // Under the slot fence, like every move (#239). Nothing is exported
+            // yet, so nothing contends for it; it is what a move is made of.
+            let Some(leg) = mgr.gem().read().await.lookup(vol, vext).map(|l| l.primary()) else {
+                continue;
+            };
+            // A shared slot moves once, for every map that names it.
+            if leg.slab_id == dest {
+                moved += 1;
+                continue;
+            }
+            let fence = crate::volume::fence::exclusive(leg).await;
+            {
+            let mut gem = mgr.gem().write().await;
+            let mut reg = mgr.registry().write().await;
+            match engine.migrate_leg_fenced(&mut gem, &mut reg, vol, vext, leg.slab_id, Some(dest), &fence).await {
+                Ok(_) => moved += 1,
+                Err(e) => {
+                    failed += 1;
+                    tracing::error!("seeding the data half: extent {vol:?}/{vext}: {e}");
+                    // Giving up is safe and leaves a data half with holes, which
+                    // the local-slab probe rejects - the node boots from the
+                    // appliance rather than from an identity that is missing
+                    // pieces.
+                    if failed > 8 {
+                        anyhow::bail!(
+                            "gave up seeding the data half of {disk} after {failed} failures; \
+                             {moved} extent(s) had moved"
+                        );
+                    }
                 }
             }
+            }
+            // Durable map first, then the source slots it no longer names.
+            //
+            // The locks are dropped above so the persist can take what it needs.
+            // Doing this as it goes, rather than only at the end, is what makes an
+            // interruption harmless: the most a crash can cost is one batch's
+            // worth of leaked slot, and never a volume that points at a slot the
+            // slab has already freed — a source is freed only after the map that
+            // stopped naming it is durable, and until then the slot table's newer
+            // generation is what a restore takes.
+            //
+            // **In batches, not per extent.** Per extent was 3301 whole-map
+            // writes to four metadata slabs, two of them on a spinning drive,
+            // each flushed: 382.6 s on the R230, past the boot's 300 s wait for
+            // the root, so PID 1 gave up and dropped to a shell one minute before
+            // the seeding it was waiting for finished (#118).
+            since_persist += 1;
+            if since_persist >= SEED_PERSIST_EVERY {
+                since_persist = 0;
+                mgr.persist().await;
+                let mut reg = mgr.registry().write().await;
+                engine.release_owed(&mut reg).await;
+            }
         }
-        }
-        // Durable map first, then the source slots it no longer names.
-        //
-        // The locks are dropped above so the persist can take what it needs.
-        // Doing this as it goes, rather than only at the end, is what makes an
-        // interruption harmless: the most a crash can cost is one batch's
-        // worth of leaked slot, and never a volume that points at a slot the
-        // slab has already freed — a source is freed only after the map that
-        // stopped naming it is durable, and until then the slot table's newer
-        // generation is what a restore takes.
-        //
-        // **In batches, not per extent.** Per extent was 3301 whole-map
-        // writes to four metadata slabs, two of them on a spinning drive,
-        // each flushed: 382.6 s on the R230, past the boot's 300 s wait for
-        // the root, so PID 1 gave up and dropped to a shell one minute before
-        // the seeding it was waiting for finished (#118).
-        since_persist += 1;
-        if since_persist >= SEED_PERSIST_EVERY {
-            since_persist = 0;
-            mgr.persist().await;
+        mgr.persist().await;
+        {
             let mut reg = mgr.registry().write().await;
             engine.release_owed(&mut reg).await;
         }
-    }
-    mgr.persist().await;
-    {
-        let mut reg = mgr.registry().write().await;
-        engine.release_owed(&mut reg).await;
-    }
-    println!(
-        "Flow-over: data half seeded - {moved} extent(s) onto {disk} in {:.1}s{}",
-        started.elapsed().as_secs_f64(),
-        if failed > 0 { format!(", {failed} failed") } else { String::new() }
-    );
-    Ok(())
-}
-
-/// Move every extent on `sources` onto `dest`, one per lock cycle, while the
-/// volumes on them are mounted and written (#239).
-///
-/// Each extent is taken under the slot fence: the move waits for the I/O on
-/// that slot to finish, keeps new I/O out while it copies and rewrites the
-/// maps, and an I/O that looked the slot up meanwhile finds the copy. Without
-/// it a write landing after the copy was lost, and a copy-on-write reading
-/// the source after it was freed — discarded, so zeros on the appliance's
-/// thin clone — wrote those zeros into the clone: `cni-bin`'s root directory
-/// on 11.56, which Cilium was filling while this ran.
-///
-/// The map is made durable (`persist`) before the sources it no longer
-/// names are freed, after every extent. The sources are quarantined for new
-/// allocations, and stay so once empty. `None` when it gave up: more than 16
-/// extents that would not move (the quarantine is lifted).
-#[cfg(target_os = "linux")]
-/// Quarantine the slabs a flow-over empties: every system slab but the one
-/// it fills. Nothing new is placed on them, and a write to an extent still on
-/// one goes to a fresh slot on a slab that stays (`ThinVolumeHandle`'s
-/// relocate-on-write) rather than in place.
-///
-/// They are the appliance's per-boot clone. A boot cut short before the
-/// flow-over reaches an extent resumes from a fresh, pristine clone, so
-/// whatever was written in place there is gone at the next boot — while the
-/// copy-on-writes, which already land locally, are kept. A filesystem then
-/// reads a directory naming an inode its inode table never got (#239: the
-/// first free inodes of cadvisor, stormlb, vmimages, stormvm and stormimds on
-/// 11.57; hubble-relay's on 11.50). So this is set as soon as the boot knows
-/// a flow-over is coming, in the engine that laid the disk and again in the
-/// one that adopts it, before either serves a write.
-pub(crate) async fn quarantine_flow_sources(
-    mgr: &crate::volume::VolumeManager,
-    flow: &crate::drive::handover::FlowOver,
-) {
-    let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(crate::drive::slab::SlabId) else {
-        return;
-    };
-    // The data half too, when it moves in the background (#285).
-    let data_dest = if flow.data_flow {
-        uuid::Uuid::parse_str(&flow.data_slab).ok().map(crate::drive::slab::SlabId)
-    } else {
-        None
-    };
-    let (sources, data_sources): (Vec<_>, Vec<_>) = {
-        let mut reg = mgr.registry().write().await;
-        let sources: Vec<_> =
-            reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect();
-        let data_sources: Vec<_> = match data_dest {
-            Some(dd) => reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect(),
-            None => Vec::new(),
-        };
-        for s in sources.iter().chain(&data_sources) {
-            reg.set_quarantined(*s, true);
-        }
-        (sources, data_sources)
-    };
-    if !sources.is_empty() || !data_sources.is_empty() {
         println!(
-            "Flow-over: {} appliance slab(s) quarantined — writes to what is still on them go to {}",
-            sources.len() + data_sources.len(),
-            flow.disk
+            "Flow-over: data half seeded - {moved} extent(s) onto {disk} in {:.1}s{}",
+            started.elapsed().as_secs_f64(),
+            if failed > 0 { format!(", {failed} failed") } else { String::new() }
         );
-        // And the disk names what is still to come (#258), written now: a
-        // power cut before the first extent moves must leave a disk that
-        // says what it is missing, not one that looks like somebody else's.
-        if !sources.is_empty() {
-            mgr.record_flow_over(dest, sources);
-        }
-        if let (Some(dd), false) = (data_dest, data_sources.is_empty()) {
-            mgr.record_flow_over(dd, data_sources);
-        }
-        mgr.persist().await;
+        Ok(())
     }
-}
 
-/// The longest a flow-over waits between two moves for foreground I/O
-/// (#269). It waits as long as the last move took — the copy and the persist
-/// after it — so a node doing its own I/O gets about half its disk; on a disk
-/// whose flushes take seconds (server3), the move does too, and so the cap is
-/// seconds as well.
-const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// How long the node's volume I/O must be still before a successor's
-/// flow-over starts (#278).
-const FLOW_BOOT_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The most a successor's flow-over waits for the node's boot (#278):
-/// `STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 90 by default, 0 = no wait.
-fn flow_boot_grace() -> std::time::Duration {
-    let secs = std::env::var("STORMBLOCK_FLOW_BOOT_GRACE_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(90);
-    std::time::Duration::from_secs(secs)
-}
-
-/// Wait for the node's boot before moving anything (#278).
-///
-/// A successor starts its flow-over the moment it has adopted the devices,
-/// which is when the node above it boots: stormpump starts every unit,
-/// fastetcd and the apiserver read their state. On the Dell's SMR disk a
-/// reboot during the flow-over took stormpump 15 s instead of 8 and the
-/// apiserver 30 s instead of 15: the boot's reads queued behind the moves,
-/// and the per-move yield (#269) gives back one move's time, not the boot.
-/// So the first move waits until volume I/O (`FOREGROUND_IO`) has been
-/// still for `quiet`, or until `max` has passed — a node that never goes
-/// quiet still gets its flow-over. Answers how long it waited and whether
-/// the node went quiet.
-async fn wait_for_boot_quiet(max: std::time::Duration, quiet: std::time::Duration) -> (std::time::Duration, bool) {
-    use std::sync::atomic::Ordering::Relaxed;
-    let start = tokio::time::Instant::now();
-    if max.is_zero() {
-        return (std::time::Duration::ZERO, false);
+    /// Move every extent on `sources` onto `dest`, one per lock cycle, while the
+    /// volumes on them are mounted and written (#239).
+    ///
+    /// Each extent is taken under the slot fence: the move waits for the I/O on
+    /// that slot to finish, keeps new I/O out while it copies and rewrites the
+    /// maps, and an I/O that looked the slot up meanwhile finds the copy. Without
+    /// it a write landing after the copy was lost, and a copy-on-write reading
+    /// the source after it was freed — discarded, so zeros on the appliance's
+    /// thin clone — wrote those zeros into the clone: `cni-bin`'s root directory
+    /// on 11.56, which Cilium was filling while this ran.
+    ///
+    /// The map is made durable (`persist`) before the sources it no longer
+    /// names are freed, after every extent. The sources are quarantined for new
+    /// allocations, and stay so once empty. `None` when it gave up: more than 16
+    /// extents that would not move (the quarantine is lifted).
+    #[cfg(target_os = "linux")]
+    /// Quarantine the slabs a flow-over empties: every system slab but the one
+    /// it fills. Nothing new is placed on them, and a write to an extent still on
+    /// one goes to a fresh slot on a slab that stays (`ThinVolumeHandle`'s
+    /// relocate-on-write) rather than in place.
+    ///
+    /// They are the appliance's per-boot clone. A boot cut short before the
+    /// flow-over reaches an extent resumes from a fresh, pristine clone, so
+    /// whatever was written in place there is gone at the next boot — while the
+    /// copy-on-writes, which already land locally, are kept. A filesystem then
+    /// reads a directory naming an inode its inode table never got (#239: the
+    /// first free inodes of cadvisor, stormlb, vmimages, stormvm and stormimds on
+    /// 11.57; hubble-relay's on 11.50). So this is set as soon as the boot knows
+    /// a flow-over is coming, in the engine that laid the disk and again in the
+    /// one that adopts it, before either serves a write.
+    pub(crate) async fn quarantine_flow_sources(
+        mgr: &crate::volume::VolumeManager,
+        flow: &crate::drive::handover::FlowOver,
+    ) {
+        let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(crate::drive::slab::SlabId) else {
+            return;
+        };
+        // The data half too, when it moves in the background (#285).
+        let data_dest = if flow.data_flow {
+            uuid::Uuid::parse_str(&flow.data_slab).ok().map(crate::drive::slab::SlabId)
+        } else {
+            None
+        };
+        let (sources, data_sources): (Vec<_>, Vec<_>) = {
+            let mut reg = mgr.registry().write().await;
+            let sources: Vec<_> =
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect();
+            let data_sources: Vec<_> = match data_dest {
+                Some(dd) => reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect(),
+                None => Vec::new(),
+            };
+            for s in sources.iter().chain(&data_sources) {
+                reg.set_quarantined(*s, true);
+            }
+            (sources, data_sources)
+        };
+        if !sources.is_empty() || !data_sources.is_empty() {
+            println!(
+                "Flow-over: {} appliance slab(s) quarantined — writes to what is still on them go to {}",
+                sources.len() + data_sources.len(),
+                flow.disk
+            );
+            // And the disk names what is still to come (#258), written now: a
+            // power cut before the first extent moves must leave a disk that
+            // says what it is missing, not one that looks like somebody else's.
+            if !sources.is_empty() {
+                mgr.record_flow_over(dest, sources);
+            }
+            if let (Some(dd), false) = (data_dest, data_sources.is_empty()) {
+                mgr.record_flow_over(dd, data_sources);
+            }
+            mgr.persist().await;
+        }
     }
-    let step = quiet.min(std::time::Duration::from_millis(500)).max(std::time::Duration::from_millis(1));
-    let mut seen = crate::volume::thin::FOREGROUND_IO.load(Relaxed);
-    let mut still_since = start;
-    loop {
-        let now = tokio::time::Instant::now();
-        if now.duration_since(still_since) >= quiet {
-            return (now.duration_since(start), true);
+
+    /// The longest a flow-over waits between two moves for foreground I/O
+    /// (#269). It waits as long as the last move took — the copy and the persist
+    /// after it — so a node doing its own I/O gets about half its disk; on a disk
+    /// whose flushes take seconds (server3), the move does too, and so the cap is
+    /// seconds as well.
+    const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// How long the node's volume I/O must be still before a successor's
+    /// flow-over starts (#278).
+    const FLOW_BOOT_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The most a successor's flow-over waits for the node's boot (#278):
+    /// `STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 90 by default, 0 = no wait.
+    fn flow_boot_grace() -> std::time::Duration {
+        let secs = std::env::var("STORMBLOCK_FLOW_BOOT_GRACE_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(90);
+        std::time::Duration::from_secs(secs)
+    }
+
+    /// Wait for the node's boot before moving anything (#278).
+    ///
+    /// A successor starts its flow-over the moment it has adopted the devices,
+    /// which is when the node above it boots: stormpump starts every unit,
+    /// fastetcd and the apiserver read their state. On the Dell's SMR disk a
+    /// reboot during the flow-over took stormpump 15 s instead of 8 and the
+    /// apiserver 30 s instead of 15: the boot's reads queued behind the moves,
+    /// and the per-move yield (#269) gives back one move's time, not the boot.
+    /// So the first move waits until volume I/O (`FOREGROUND_IO`) has been
+    /// still for `quiet`, or until `max` has passed — a node that never goes
+    /// quiet still gets its flow-over. Answers how long it waited and whether
+    /// the node went quiet.
+    async fn wait_for_boot_quiet(max: std::time::Duration, quiet: std::time::Duration) -> (std::time::Duration, bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let start = tokio::time::Instant::now();
+        if max.is_zero() {
+            return (std::time::Duration::ZERO, false);
         }
-        if now.duration_since(start) >= max {
-            return (now.duration_since(start), false);
-        }
-        tokio::time::sleep(step).await;
-        let cur = crate::volume::thin::FOREGROUND_IO.load(Relaxed);
-        if cur != seen {
-            seen = cur;
-            still_since = tokio::time::Instant::now();
+        let step = quiet.min(std::time::Duration::from_millis(500)).max(std::time::Duration::from_millis(1));
+        let mut seen = crate::volume::thin::FOREGROUND_IO.load(Relaxed);
+        let mut still_since = start;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now.duration_since(still_since) >= quiet {
+                return (now.duration_since(start), true);
+            }
+            if now.duration_since(start) >= max {
+                return (now.duration_since(start), false);
+            }
+            tokio::time::sleep(step).await;
+            let cur = crate::volume::thin::FOREGROUND_IO.load(Relaxed);
+            if cur != seen {
+                seen = cur;
+                still_since = tokio::time::Instant::now();
+            }
         }
     }
-}
 
-pub(crate) async fn flow_system_half<P, F>(
-    gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
-    registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
-    sources: &[crate::drive::slab::SlabId],
-    dest: crate::drive::slab::SlabId,
-    persist: P,
-    remaining: Option<&std::sync::atomic::AtomicI64>,
-) -> Option<(u64, u64)>
-where
-    P: Fn() -> F,
-    F: std::future::Future<Output = ()>,
-{
-    flow_slabs(gem, registry, sources, dest, persist, remaining, 0).await
-}
-
-/// Extents with a leg on any of `sources`: what a flow-over of them has left.
-pub(crate) async fn extents_on(
-    gem: &tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>,
-    sources: &[crate::drive::slab::SlabId],
-) -> usize {
-    let _pin = match crate::volume::gem::pin_resident(gem).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("flow-over: loading extent maps: {e}");
-            return usize::MAX;
-        }
-    };
-    let g = gem.read().await;
-    sources
-        .iter()
-        .map(|s| g.slab_extents(*s).iter().filter(|(_, _, loc)| loc.leg_on(*s).is_some()).count())
-        .sum()
-}
-
-/// [`flow_system_half`] for any half: `sources` into `dest`, with `extra`
-/// extents still to come after this run counted in `remaining` (#285: the
-/// data half after the system half, so the count never dips to 0 between).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn flow_slabs<P, F>(
-    gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
-    registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
-    sources: &[crate::drive::slab::SlabId],
-    dest: crate::drive::slab::SlabId,
-    persist: P,
-    remaining: Option<&std::sync::atomic::AtomicI64>,
-    extra: usize,
-) -> Option<(u64, u64)>
-where
-    P: Fn() -> F,
-    F: std::future::Future<Output = ()>,
-{
-    use crate::placement::PlacementError;
-    // Every map in memory for the whole flow (#158): it walks them all.
-    let _pin = match crate::volume::gem::pin_resident(gem).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("flow-over: loading extent maps: {e}");
-            return None;
-        }
-    };
-    let engine = crate::placement::PlacementEngine::new();
-    let (mut moved, mut failed) = (0u64, 0u64);
-    // Looks that found the extent changed under them, in a row. An extent
-    // that keeps changing is being written as fast as it can be looked at;
-    // past this it counts as one that would not move.
-    let mut again = 0u32;
-    // Nothing new lands on a source while it is emptied, the way a drain
-    // quarantines its drive: a copy-on-write in the meantime takes a slot on
-    // the local disk, not one more on the appliance for this loop to chase —
-    // or to leave behind once it has finished.
+    pub(crate) async fn flow_system_half<P, F>(
+        gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
+        registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
+        sources: &[crate::drive::slab::SlabId],
+        dest: crate::drive::slab::SlabId,
+        persist: P,
+        remaining: Option<&std::sync::atomic::AtomicI64>,
+    ) -> Option<(u64, u64)>
+    where
+        P: Fn() -> F,
+        F: std::future::Future<Output = ()>,
     {
-        let mut r = registry.write().await;
-        for s in sources {
-            r.set_quarantined(*s, true);
-        }
+        flow_slabs(gem, registry, sources, dest, persist, remaining, 0).await
     }
-    let give_up = || async {
-        let mut r = registry.write().await;
-        for s in sources {
-            r.set_quarantined(*s, false);
-        }
-    };
-    // What is left, for `/api/v1/health` (#260): the extents with a leg on
-    // a source, counted from the lists this loop reads anyway. Sources not
-    // reached yet keep their count from the start; nothing lands on them
-    // meanwhile (quarantined above).
-    let mut later: Vec<usize> = {
+
+    /// Extents with a leg on any of `sources`: what a flow-over of them has left.
+    pub(crate) async fn extents_on(
+        gem: &tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>,
+        sources: &[crate::drive::slab::SlabId],
+    ) -> usize {
+        let _pin = match crate::volume::gem::pin_resident(gem).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("flow-over: loading extent maps: {e}");
+                return usize::MAX;
+            }
+        };
         let g = gem.read().await;
         sources
             .iter()
             .map(|s| g.slab_extents(*s).iter().filter(|(_, _, loc)| loc.leg_on(*s).is_some()).count())
-            .collect()
-    };
-    let report = |n: usize| {
-        if let Some(r) = remaining {
-            r.store((n + extra) as i64, std::sync::atomic::Ordering::Relaxed);
+            .sum()
+    }
+
+    /// [`flow_system_half`] for any half: `sources` into `dest`, with `extra`
+    /// extents still to come after this run counted in `remaining` (#285: the
+    /// data half after the system half, so the count never dips to 0 between).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn flow_slabs<P, F>(
+        gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
+        registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
+        sources: &[crate::drive::slab::SlabId],
+        dest: crate::drive::slab::SlabId,
+        persist: P,
+        remaining: Option<&std::sync::atomic::AtomicI64>,
+        extra: usize,
+    ) -> Option<(u64, u64)>
+    where
+        P: Fn() -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        use crate::placement::PlacementError;
+        // Every map in memory for the whole flow (#158): it walks them all.
+        let _pin = match crate::volume::gem::pin_resident(gem).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("flow-over: loading extent maps: {e}");
+                return None;
+            }
+        };
+        let engine = crate::placement::PlacementEngine::new();
+        let (mut moved, mut failed) = (0u64, 0u64);
+        // Looks that found the extent changed under them, in a row. An extent
+        // that keeps changing is being written as fast as it can be looked at;
+        // past this it counts as one that would not move.
+        let mut again = 0u32;
+        // Nothing new lands on a source while it is emptied, the way a drain
+        // quarantines its drive: a copy-on-write in the meantime takes a slot on
+        // the local disk, not one more on the appliance for this loop to chase —
+        // or to leave behind once it has finished.
+        {
+            let mut r = registry.write().await;
+            for s in sources {
+                r.set_quarantined(*s, true);
+            }
         }
-    };
-    report(later.iter().sum());
-    let mut foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
-    let mut last_move = std::time::Duration::ZERO;
-    for (i, &source) in sources.iter().enumerate() {
-        later[i] = 0;
-        let after: usize = later.iter().sum();
-        // What is on the source, taken once per pass (#155: finding it walks
-        // every map) and worked through; a pass that leaves anything behind
-        // (an extent that changed under it) is followed by another.
-        let mut batch: std::collections::VecDeque<(crate::volume::VolumeId, u64, crate::volume::gem::Leg)> =
-            Default::default();
-        // Moves made by the pass under way, and whether it had anything.
-        let (mut pass_moved, mut pass_had) = (0u64, false);
-        loop {
-            // Which slot, under the map's read lock only: the fence is waited
-            // for with no lock held, since an I/O holding it may be waiting
-            // for the map.
-            if batch.is_empty() {
-                // A pass that found extents and moved none: they all changed
-                // under it. Past 64 such passes in a row, that counts as one
-                // that would not move.
-                if pass_had && pass_moved == 0 {
-                    again += 1;
-                    if again >= 64 {
+        let give_up = || async {
+            let mut r = registry.write().await;
+            for s in sources {
+                r.set_quarantined(*s, false);
+            }
+        };
+        // What is left, for `/api/v1/health` (#260): the extents with a leg on
+        // a source, counted from the lists this loop reads anyway. Sources not
+        // reached yet keep their count from the start; nothing lands on them
+        // meanwhile (quarantined above).
+        let mut later: Vec<usize> = {
+            let g = gem.read().await;
+            sources
+                .iter()
+                .map(|s| g.slab_extents(*s).iter().filter(|(_, _, loc)| loc.leg_on(*s).is_some()).count())
+                .collect()
+        };
+        let report = |n: usize| {
+            if let Some(r) = remaining {
+                r.store((n + extra) as i64, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        report(later.iter().sum());
+        let mut foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
+        let mut last_move = std::time::Duration::ZERO;
+        for (i, &source) in sources.iter().enumerate() {
+            later[i] = 0;
+            let after: usize = later.iter().sum();
+            // What is on the source, taken once per pass (#155: finding it walks
+            // every map) and worked through; a pass that leaves anything behind
+            // (an extent that changed under it) is followed by another.
+            let mut batch: std::collections::VecDeque<(crate::volume::VolumeId, u64, crate::volume::gem::Leg)> =
+                Default::default();
+            // Moves made by the pass under way, and whether it had anything.
+            let (mut pass_moved, mut pass_had) = (0u64, false);
+            loop {
+                // Which slot, under the map's read lock only: the fence is waited
+                // for with no lock held, since an I/O holding it may be waiting
+                // for the map.
+                if batch.is_empty() {
+                    // A pass that found extents and moved none: they all changed
+                    // under it. Past 64 such passes in a row, that counts as one
+                    // that would not move.
+                    if pass_had && pass_moved == 0 {
+                        again += 1;
+                        if again >= 64 {
+                            again = 0;
+                            failed += 1;
+                            tracing::error!("flow-over: extents on {source:?} keep changing under the move");
+                            if failed > 16 {
+                                give_up().await;
+                                return None;
+                            }
+                        }
+                    } else {
                         again = 0;
+                    }
+                    let g = gem.read().await;
+                    batch = g
+                        .slab_extents(source)
+                        .into_iter()
+                        .filter_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
+                        .collect();
+                    (pass_moved, pass_had) = (0, !batch.is_empty());
+                }
+                report(batch.len() + after);
+                let Some((vol, vext, leg)) = batch.pop_front() else { break };
+                // Foreground first (#269): when a volume has been read or written
+                // since the last move, give the disk back for as long as that move
+                // took (capped) before the next. An idle node moves at full speed.
+                if crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed) != foreground {
+                    tokio::time::sleep(last_move.min(FLOW_YIELD_MAX)).await;
+                }
+                foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
+                let started = std::time::Instant::now();
+                let fence = crate::volume::fence::exclusive(leg).await;
+                // The copy holds only the fence on this slot; the map and the
+                // registry are taken to allocate and to publish (#269). Holding
+                // them for the copy stalled every volume's I/O and every API call
+                // behind each of the 7528 extents of the Dell's install.
+                let res = engine
+                    .migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence)
+                    .await;
+                drop(fence);
+                match res {
+                    Ok(_) => {
+                        moved += 1;
+                        pass_moved += 1;
+                    }
+                    // The extent changed since the pass listed it (a
+                    // copy-on-write took it, a discard freed it, another map's
+                    // move took the slot): the next pass lists it again if it
+                    // is still on the source.
+                    Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. }) => {
+                        continue;
+                    }
+                    Err(e) => {
                         failed += 1;
-                        tracing::error!("flow-over: extents on {source:?} keep changing under the move");
+                        tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
+                        // A handful of bad extents is a disk worth giving up
+                        // on, and giving up leaves the node exactly where it
+                        // was: running from the appliance.
                         if failed > 16 {
+                            // The node goes on running from the appliance.
                             give_up().await;
                             return None;
                         }
                     }
-                } else {
-                    again = 0;
                 }
-                let g = gem.read().await;
-                batch = g
-                    .slab_extents(source)
-                    .into_iter()
-                    .filter_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
-                    .collect();
-                (pass_moved, pass_had) = (0, !batch.is_empty());
+                // The map, then the slots it no longer names. Same order and
+                // same reason as the data half: this runs for minutes on a
+                // machine that can lose power at any point in them, and a slot
+                // table that has run ahead of the map is a volume with a hole in
+                // it.
+                persist().await;
+                let mut r = registry.write().await;
+                engine.release_owed(&mut r).await;
+                drop(r);
+                // The whole move: the copy, and the flushes of the persist after
+                // it, which on a spinning disk are most of it (#269).
+                last_move = started.elapsed();
             }
-            report(batch.len() + after);
-            let Some((vol, vext, leg)) = batch.pop_front() else { break };
-            // Foreground first (#269): when a volume has been read or written
-            // since the last move, give the disk back for as long as that move
-            // took (capped) before the next. An idle node moves at full speed.
-            if crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed) != foreground {
-                tokio::time::sleep(last_move.min(FLOW_YIELD_MAX)).await;
-            }
-            foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
-            let started = std::time::Instant::now();
-            let fence = crate::volume::fence::exclusive(leg).await;
-            // The copy holds only the fence on this slot; the map and the
-            // registry are taken to allocate and to publish (#269). Holding
-            // them for the copy stalled every volume's I/O and every API call
-            // behind each of the 7528 extents of the Dell's install.
-            let res = engine
-                .migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence)
-                .await;
-            drop(fence);
-            match res {
-                Ok(_) => {
-                    moved += 1;
-                    pass_moved += 1;
-                }
-                // The extent changed since the pass listed it (a
-                // copy-on-write took it, a discard freed it, another map's
-                // move took the slot): the next pass lists it again if it
-                // is still on the source.
-                Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. }) => {
-                    continue;
-                }
-                Err(e) => {
-                    failed += 1;
-                    tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
-                    // A handful of bad extents is a disk worth giving up
-                    // on, and giving up leaves the node exactly where it
-                    // was: running from the appliance.
-                    if failed > 16 {
-                        // The node goes on running from the appliance.
-                        give_up().await;
-                        return None;
-                    }
-                }
-            }
-            // The map, then the slots it no longer names. Same order and
-            // same reason as the data half: this runs for minutes on a
-            // machine that can lose power at any point in them, and a slot
-            // table that has run ahead of the map is a volume with a hole in
-            // it.
-            persist().await;
-            let mut r = registry.write().await;
-            engine.release_owed(&mut r).await;
-            drop(r);
-            // The whole move: the copy, and the flushes of the persist after
-            // it, which on a spinning disk are most of it (#269).
-            last_move = started.elapsed();
         }
+        report(0);
+        Some((moved, failed))
     }
-    report(0);
-    Some((moved, failed))
-}
 
-/// Move the goldens onto the disk the boot laid out, in the background.
-///
-/// Only the system half, and only ever the system half. A data slab is being
-/// written the whole time it is mounted — logs, state, claims — and moving its
-/// extents out from under a live filesystem corrupted every one of them on the
-/// first machine it was tried on.
-///
-/// "The goldens survive it because nothing writes to them" was only half
-/// true. The system half holds clones that are written too (`cni-bin`, the
-/// `-logs` volumes), and every clone reads its golden's slots. The corruption
-/// was the move racing the I/O, not the writing itself. The slot fence closes
-/// that race (#239, see [`flow_system_half`]); the data half still moves only
-/// before anything is exported.
-///
-/// One extent per lock cycle, so root I/O interleaves with the copy instead of
-/// stalling behind the whole migration.
-#[cfg(target_os = "linux")]
-fn spawn_flow_over(
-    state: &Arc<AppState>,
-    flow: crate::drive::handover::FlowOver,
-    then_local_boot: Option<(String, Vec<String>)>,
-    install: Option<crate::drive::handover::InstallTicket>,
-) {
-    use crate::drive::slab::SlabId;
+    /// Move the goldens onto the disk the boot laid out, in the background.
+    ///
+    /// Only the system half, and only ever the system half. A data slab is being
+    /// written the whole time it is mounted — logs, state, claims — and moving its
+    /// extents out from under a live filesystem corrupted every one of them on the
+    /// first machine it was tried on.
+    ///
+    /// "The goldens survive it because nothing writes to them" was only half
+    /// true. The system half holds clones that are written too (`cni-bin`, the
+    /// `-logs` volumes), and every clone reads its golden's slots. The corruption
+    /// was the move racing the I/O, not the writing itself. The slot fence closes
+    /// that race (#239, see [`flow_system_half`]); the data half still moves only
+    /// before anything is exported.
+    ///
+    /// One extent per lock cycle, so root I/O interleaves with the copy instead of
+    /// stalling behind the whole migration.
+    #[cfg(target_os = "linux")]
+    fn spawn_flow_over(
+        state: &Arc<AppState>,
+        flow: crate::drive::handover::FlowOver,
+        then_local_boot: Option<(String, Vec<String>)>,
+        install: Option<crate::drive::handover::InstallTicket>,
+    ) {
+        use crate::drive::slab::SlabId;
 
-    let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(SlabId) else {
-        tracing::warn!(
-            "flow-over: the handover names system slab {} on {}, which is not a uuid — \
-             the goldens stay on the appliance",
-            flow.system_slab,
-            flow.disk
-        );
-        return;
-    };
-    let gem_arc = state.gem.clone();
-    let reg_arc = state.slab_registry.clone();
-    let flow_remaining = state.flow_over_remaining.clone();
-    // Weak, so a migration in flight cannot keep the whole engine alive past
-    // a shutdown that is trying to end.
-    let state_for_persist = Arc::downgrade(state);
-    tokio::spawn(async move {
-        // Every slab that is not a data slab and is not the destination. On a
-        // node that has just adopted, that is the appliance's system slab —
-        // the local one is registered too, and migrating it into itself would
-        // be a long way of doing nothing.
-        let sources: Vec<SlabId> = {
-            let reg = reg_arc.read().await;
-            reg.iter()
-                .filter(|(id, s)| !s.is_data() && **id != dest)
-                .map(|(id, _)| *id)
-                .collect()
-        };
-        // The disk boots on its own once it holds everything — and only then.
-        // An install the appliance asked for is done at that point, and only
-        // at that point (#148): `local` on a disk that cannot boot would
-        // leave the machine nothing to boot.
-        let local_boot = |job: Option<(String, Vec<String>)>| async move {
-            let booted = match job {
-                Some((disk, sources)) => match run_local_boot(&disk, &sources).await {
-                    Ok(bootable) => bootable,
-                    Err(e) => {
-                        println!("Local boot: {disk}: {e}");
-                        tracing::warn!("local boot on {disk}: {e}");
-                        false
-                    }
-                },
-                None => false,
-            };
-            match install {
-                Some(t) if booted => report_installed(t).await,
-                Some(t) => println!(
-                    "Install: not reported done to {} - the disk does not boot on its own; \
-                     the intent stays install",
-                    t.boothost
-                ),
-                None => {}
-            }
-        };
-        // And the data half, after the goldens, when this boot did not seed
-        // it before exporting (#285): the appliance's data slabs into the
-        // local data slab, while the volumes on them are written.
-        let data_dest = if flow.data_flow { uuid::Uuid::parse_str(&flow.data_slab).ok().map(SlabId) } else { None };
-        let data: Option<(SlabId, Vec<SlabId>)> = match data_dest {
-            Some(dd) => {
-                let reg = reg_arc.read().await;
-                Some((dd, reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect()))
-            }
-            None => None,
-        };
-        let data_left = match &data {
-            Some((_, ds)) if !ds.is_empty() => extents_on(&gem_arc, ds).await,
-            _ => 0,
-        };
-        if sources.is_empty() && data_left == 0 {
-            flow_remaining.store(0, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!("flow-over: nothing left to move onto {}", flow.disk);
-            local_boot(then_local_boot).await;
-            return;
-        }
-        println!(
-            "Flow-over: moving {} slab(s) onto {} in the background{}",
-            sources.len() + data.as_ref().map(|(_, d)| d.len()).unwrap_or(0),
-            flow.disk,
-            if data_left > 0 { format!(" (the data half, {data_left} extent(s), after the system half)") } else { String::new() }
-        );
-        // The node boots first (#278); what is left is reported meanwhile,
-        // so a settle check (#260) does not read the wait as done.
-        let grace = flow_boot_grace();
-        if !grace.is_zero() {
-            let left = extents_on(&gem_arc, &sources).await + data_left;
-            flow_remaining.store(left as i64, std::sync::atomic::Ordering::Relaxed);
-            let (waited, quiet) = wait_for_boot_quiet(grace, FLOW_BOOT_QUIET).await;
-            println!(
-                "Flow-over: starting after {:.1}s ({})",
-                waited.as_secs_f64(),
-                if quiet {
-                    format!("the node's volume I/O was still for {}s", FLOW_BOOT_QUIET.as_secs())
-                } else {
-                    format!("the boot grace of {}s ran out", grace.as_secs())
-                }
-            );
-        }
-        // Detached (#269): the manager is held only to take the records, so
-        // the API does not wait behind the flushes of a persist that runs
-        // after every extent moved.
-        let persist = || async {
-            if let Some(state) = state_for_persist.upgrade() {
-                crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
-            }
-        };
-        let (mut moved, mut failed) = (0u64, 0u64);
-        if !sources.is_empty() {
-            let Some((m, f)) =
-                flow_slabs(&gem_arc, &reg_arc, &sources, dest, persist, Some(&*flow_remaining), data_left).await
-            else {
-                tracing::error!(
-                    "flow-over: too many failures — abandoning {}; the node keeps running from \
-                     the appliance",
-                    flow.disk
-                );
-                return;
-            };
-            moved += m;
-            failed += f;
-        }
-        if let Some((data_dest, data_sources)) = data.filter(|(_, d)| !d.is_empty()) {
-            let started = std::time::Instant::now();
-            let Some((m, f)) =
-                flow_slabs(&gem_arc, &reg_arc, &data_sources, data_dest, persist, Some(&*flow_remaining), 0).await
-            else {
-                tracing::error!(
-                    "flow-over: too many failures in the data half — abandoning {}; its writes \
-                     go on landing on it, and the rest stays on the appliance",
-                    flow.disk
-                );
-                return;
-            };
-            println!(
-                "Flow-over: data half moved - {m} extent(s) onto {} in {:.1}s, in the background (#285)",
-                flow.disk,
-                started.elapsed().as_secs_f64()
-            );
-            moved += m;
-            failed += f;
-        }
-        tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
-        println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
-        if failed == 0 {
-            local_boot(then_local_boot).await;
-        } else {
-            println!(
-                "Local boot: {} is left unbootable — {failed} extent(s) did not move, and a \
-                 disk that boots into incomplete slabs is worse than one that netboots",
+        let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(SlabId) else {
+            tracing::warn!(
+                "flow-over: the handover names system slab {} on {}, which is not a uuid — \
+                 the goldens stay on the appliance",
+                flow.system_slab,
                 flow.disk
             );
-        }
-    });
-}
-
-#[cfg(target_os = "linux")]
-async fn handle_adopt_ublk(
-    slab_paths: &[String],
-    volumes: &[String],
-    meta: Option<&str>,
-    api: Option<&str>,
-    data_dir: Option<&str>,
-    config_path: &str,
-) -> anyhow::Result<()> {
-    use crate::drive::ublk::UblkServer;
-
-    // What to adopt: the incumbent's own record, unless told otherwise.
-    //
-    // The kernel knows the devices exist and who serves them; only the server
-    // that created them knows which volume is behind each. It writes that
-    // down, so a handover needs no arguments at all — and cannot be given a
-    // list that is short by one, which leaves the devices left off it mounted
-    // with no server and the node unable to restart the engine, because its
-    // own root is among them.
-    let record = crate::drive::handover::Record::read(std::path::Path::new(
-        crate::drive::handover::DEFAULT_PATH,
-    ));
-
-    let from_record = record.as_ref().map(|r| r.volumes_in_device_order());
-    let volumes: &[String] = if !volumes.is_empty() {
-        if let Some(recorded) = from_record.as_deref() {
-            if recorded != volumes {
-                // Explicit wins — someone may be recovering a node by hand —
-                // but disagreeing with the incumbent is worth saying out loud,
-                // because the usual cause is a list that has drifted.
-                tracing::warn!(
-                    "the volumes given differ from what the previous server recorded \
-                     ({} given, {} recorded): using the ones given",
-                    volumes.len(),
-                    recorded.len()
-                );
-            }
-        }
-        volumes
-    } else {
-        match from_record.as_deref() {
-            Some(v) if !v.is_empty() => {
-                tracing::info!("adopting {} volume(s) from the handover record", v.len());
-                v
-            }
-            _ => anyhow::bail!(
-                "nothing to adopt: no volumes were given and no handover record at {} \
-                 — the server being taken over is older than the record, so name its \
-                 volumes with --volume, in device order",
-                crate::drive::handover::DEFAULT_PATH
-            ),
-        }
-    };
-
-    let slab_paths: &[String] = if !slab_paths.is_empty() {
-        slab_paths
-    } else {
-        match record.as_ref().map(|r| r.slabs.as_slice()) {
-            Some(s) if !s.is_empty() => s,
-            _ => anyhow::bail!(
-                "no slab given and none in the handover record at {}",
-                crate::drive::handover::DEFAULT_PATH
-            ),
-        }
-    };
-    let meta = meta.or(record.as_ref().and_then(|r| r.meta.as_deref()));
-
-    // Lock this process into RAM before anything else.
-    //
-    // The engine is about to stop the server that is exporting **its own
-    // root**. Between that moment and the end of recovery there is no backing
-    // store for this binary: a page fault on code not yet resident would wait
-    // for a device this process is on its way to serving, and wait forever.
-    // Locking first makes the window survivable — the pages cannot be
-    // reclaimed while it is open.
-    //
-    // Best effort: a node where mlockall is refused still works, it is simply
-    // relying on those pages happening to stay resident.
-    // SAFETY: mlockall takes flags and touches nothing of ours.
-    let locked = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } == 0;
-    if locked {
-        tracing::info!("adopt: locked into memory for the handover");
-    } else {
-        tracing::warn!(
-            "adopt: could not lock memory ({}) — the handover relies on this \
-             binary's pages staying resident",
-            std::io::Error::last_os_error()
-        );
-    }
-
-    // The incumbent stands down before anything is adopted. The kernel runs
-    // one server per device, so this is the handover's first step rather than
-    // an afterthought — and the kernel is asked who the incumbent is, because
-    // it is the only party that actually knows.
-    // Device n serves the nth volume of the record: the ids are known
-    // without reading anything from the slabs.
-    let dev_ids: Vec<u32> = (0..volumes.len() as u32).collect();
-
-    // Refuse a handover that would abandon devices.
-    //
-    // Standing a server down stops every device that server has, not the ones
-    // named here. A list that is short by one leaves that device mounted with
-    // nothing behind it, and every I/O to it returns EIO — which is how a node
-    // came up having adopted its root and lost its data volume, reporting
-    // "Adopted 4 device(s)" and then failing to write to /data.
-    //
-    // The kernel knows which devices exist and who serves them, so this is
-    // checkable before anything is stopped rather than discoverable afterwards.
-    let orphans = crate::drive::ublk::also_served_by(&dev_ids)?;
-    if !orphans.is_empty() {
-        let names: Vec<String> =
-            orphans.iter().map(|id| format!("/dev/ublkb{id}")).collect();
-        anyhow::bail!(
-            "the server being taken over also serves {} — adopting only the {} volume(s) \
-             named here would leave {} with no server at all, mounted and returning EIO. \
-             Name every volume it serves, in device order.",
-            names.join(", "),
-            dev_ids.len(),
-            if orphans.len() == 1 { "it" } else { "them" }
-        );
-    }
-
-    // Stand the incumbent down and wait for it to be gone, THEN read the
-    // slabs (#171). ublk recovery holds every device's I/O in the gap.
-    // The disks the slabs are opened from, kept for the pallet reads (#314).
-    let opened_disks: Arc<std::sync::Mutex<OpenedDisks>> = Default::default();
-    let (mgr, serving, adopted_ids) = crate::drive::handover::take_over(
-        || async {
-            let ids = dev_ids.clone();
-            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                let pids = crate::drive::ublk::stand_down(&ids, std::time::Duration::from_secs(15))?;
-                crate::drive::ublk::wait_exited(&pids, std::time::Duration::from_secs(30));
-                Ok(())
-            })
-            .await??;
-            Ok(())
-        },
-        || async {
-            let (mut mgr, _, disks) = open_slabs_with_disks(slab_paths, meta, false).await?;
-            *opened_disks.lock().unwrap() = disks;
-
-            // The drive this boot laid keeps the records first, as it does in the
-            // engine that laid it (#118). The slabs open in handover order, appliance
-            // first, and a volume with no extents yet is recorded in the first
-            // metadata slab of its role. A PVC created and not yet written would
-            // otherwise exist only on a clone the next boot does not attach.
-            if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.as_ref()) {
-                let local: Vec<crate::drive::slab::SlabId> = [&flow.data_slab, &flow.system_slab]
-                    .into_iter()
-                    .filter_map(|s| uuid::Uuid::parse_str(s).ok())
-                    .map(crate::drive::slab::SlabId)
-                    .filter(|id| mgr.is_metadata_slab(id))
-                    .collect();
-                if !local.is_empty() {
-                    mgr.keep_metadata_in_first(&local);
+            return;
+        };
+        let gem_arc = state.gem.clone();
+        let reg_arc = state.slab_registry.clone();
+        let flow_remaining = state.flow_over_remaining.clone();
+        // Weak, so a migration in flight cannot keep the whole engine alive past
+        // a shutdown that is trying to end.
+        let state_for_persist = Arc::downgrade(state);
+        tokio::spawn(async move {
+            // Every slab that is not a data slab and is not the destination. On a
+            // node that has just adopted, that is the appliance's system slab —
+            // the local one is registered too, and migrating it into itself would
+            // be a long way of doing nothing.
+            let sources: Vec<SlabId> = {
+                let reg = reg_arc.read().await;
+                reg.iter()
+                    .filter(|(id, s)| !s.is_data() && **id != dest)
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+            // The disk boots on its own once it holds everything — and only then.
+            // An install the appliance asked for is done at that point, and only
+            // at that point (#148): `local` on a disk that cannot boot would
+            // leave the machine nothing to boot.
+            let local_boot = |job: Option<(String, Vec<String>)>| async move {
+                let booted = match job {
+                    Some((disk, sources)) => match run_local_boot(&disk, &sources).await {
+                        Ok(bootable) => bootable,
+                        Err(e) => {
+                            println!("Local boot: {disk}: {e}");
+                            tracing::warn!("local boot on {disk}: {e}");
+                            false
+                        }
+                    },
+                    None => false,
+                };
+                match install {
+                    Some(t) if booted => report_installed(t).await,
+                    Some(t) => println!(
+                        "Install: not reported done to {} - the disk does not boot on its own; \
+                         the intent stays install",
+                        t.boothost
+                    ),
+                    None => {}
                 }
-                // Before anything is served, not when the flow-over starts.
-                quarantine_flow_sources(&mgr, flow).await;
+            };
+            // And the data half, after the goldens, when this boot did not seed
+            // it before exporting (#285): the appliance's data slabs into the
+            // local data slab, while the volumes on them are written.
+            let data_dest = if flow.data_flow { uuid::Uuid::parse_str(&flow.data_slab).ok().map(SlabId) } else { None };
+            let data: Option<(SlabId, Vec<SlabId>)> = match data_dest {
+                Some(dd) => {
+                    let reg = reg_arc.read().await;
+                    Some((dd, reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect()))
+                }
+                None => None,
+            };
+            let data_left = match &data {
+                Some((_, ds)) if !ds.is_empty() => extents_on(&gem_arc, ds).await,
+                _ => 0,
+            };
+            if sources.is_empty() && data_left == 0 {
+                flow_remaining.store(0, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!("flow-over: nothing left to move onto {}", flow.disk);
+                local_boot(then_local_boot).await;
+                return;
             }
-
-            // Resolve every volume before serving any. The incumbent is gone by
-            // now, so a name that does not resolve leaves the devices held in
-            // recovery with no server — loud, and retryable by running this
-            // again — where half-adopting a set would serve some queues and
-            // not others.
-            let mut serving: Vec<(u32, String, Arc<dyn BlockDevice>)> = Vec::new();
-            // Which volume each adopted device is, for the API's "in use" (#138).
-            let mut adopted_ids: Vec<(u32, uuid::Uuid)> = Vec::new();
-            for (i, selector) in volumes.iter().enumerate() {
-                let id = resolve_boot_volume(&mgr, selector).await?;
-                adopted_ids.push((i as u32, id.0));
-                let name = mgr
-                    .get_volume_handle(&id)
-                    .expect("resolved volume exists")
-                    .name()
-                    .await;
-                let dev = mgr.get_volume(&id).expect("resolved volume exists");
-                serving.push((i as u32, name, dev));
-            }
-
-            for (dev_id, name, dev) in &serving {
+            println!(
+                "Flow-over: moving {} slab(s) onto {} in the background{}",
+                sources.len() + data.as_ref().map(|(_, d)| d.len()).unwrap_or(0),
+                flow.disk,
+                if data_left > 0 { format!(" (the data half, {data_left} extent(s), after the system half)") } else { String::new() }
+            );
+            // The node boots first (#278); what is left is reported meanwhile,
+            // so a settle check (#260) does not read the wait as done.
+            let grace = flow_boot_grace();
+            if !grace.is_zero() {
+                let left = extents_on(&gem_arc, &sources).await + data_left;
+                flow_remaining.store(left as i64, std::sync::atomic::Ordering::Relaxed);
+                let (waited, quiet) = wait_for_boot_quiet(grace, FLOW_BOOT_QUIET).await;
                 println!(
-                    "  adopting /dev/ublkb{dev_id} ← {name} ({})",
-                    crate::mgmt::config::human_size(dev.capacity_bytes())
+                    "Flow-over: starting after {:.1}s ({})",
+                    waited.as_secs_f64(),
+                    if quiet {
+                        format!("the node's volume I/O was still for {}s", FLOW_BOOT_QUIET.as_secs())
+                    } else {
+                        format!("the boot grace of {}s ran out", grace.as_secs())
+                    }
                 );
             }
-            Ok((mgr, serving, adopted_ids))
+            // Detached (#269): the manager is held only to take the records, so
+            // the API does not wait behind the flushes of a persist that runs
+            // after every extent moved.
+            let persist = || async {
+                if let Some(state) = state_for_persist.upgrade() {
+                    crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
+                }
+            };
+            let (mut moved, mut failed) = (0u64, 0u64);
+            if !sources.is_empty() {
+                let Some((m, f)) =
+                    flow_slabs(&gem_arc, &reg_arc, &sources, dest, persist, Some(&*flow_remaining), data_left).await
+                else {
+                    tracing::error!(
+                        "flow-over: too many failures — abandoning {}; the node keeps running from \
+                         the appliance",
+                        flow.disk
+                    );
+                    return;
+                };
+                moved += m;
+                failed += f;
+            }
+            if let Some((data_dest, data_sources)) = data.filter(|(_, d)| !d.is_empty()) {
+                let started = std::time::Instant::now();
+                let Some((m, f)) =
+                    flow_slabs(&gem_arc, &reg_arc, &data_sources, data_dest, persist, Some(&*flow_remaining), 0).await
+                else {
+                    tracing::error!(
+                        "flow-over: too many failures in the data half — abandoning {}; its writes \
+                         go on landing on it, and the rest stays on the appliance",
+                        flow.disk
+                    );
+                    return;
+                };
+                println!(
+                    "Flow-over: data half moved - {m} extent(s) onto {} in {:.1}s, in the background (#285)",
+                    flow.disk,
+                    started.elapsed().as_secs_f64()
+                );
+                moved += m;
+                failed += f;
+            }
+            tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
+            println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
+            if failed == 0 {
+                local_boot(then_local_boot).await;
+            } else {
+                println!(
+                    "Local boot: {} is left unbootable — {failed} extent(s) did not move, and a \
+                     disk that boots into incomplete slabs is worse than one that netboots",
+                    flow.disk
+                );
+            }
+        });
+    }
+
+    /// Test hook (#190): fail the first N restores of `adopt-ublk`, after the
+    /// stand-down, before anything is read. For `ci-adopt-retry-verify.sh`.
+    const ADOPT_TEST_FAIL_RESTORES: &str = "STORMBLOCK_ADOPT_TEST_FAIL_RESTORES";
+
+    /// Where `adopt-ublk` says it gave up with the devices held (#190).
+    pub const ADOPT_FAILED_PATH: &str = "/run/stormblock/adopt-failed.json";
+
+    /// `adopt-ublk`'s exit status when it gave up after the incumbent exited:
+    /// every device is held in recovery with no server, and running adopt-ublk
+    /// again is what takes them (EX_TEMPFAIL).
+    pub const ADOPT_HELD_EXIT: i32 = 75;
+
+    /// Give up loudly (#190): the console, the log, a record the boot unit and
+    /// an operator can read, and exit 75. The devices are left held: stopping
+    /// them would turn every read on the root into EIO, while held they wait for
+    /// the next adopt-ublk, which takes them as it would from an incumbent.
+    #[cfg(target_os = "linux")]
+    fn adopt_failed(why: &str, dev_ids: &[u32]) -> ! {
+        let devices: Vec<String> = dev_ids.iter().map(|id| format!("/dev/ublkb{id}")).collect();
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let record = serde_json::json!({
+            "at": at,
+            "error": why,
+            "devices_held": devices,
+            "exit": ADOPT_HELD_EXIT,
+            "next": "run `stormblock adopt-ublk` again: it takes the held devices",
+        });
+        let path = std::path::Path::new(ADOPT_FAILED_PATH);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let written = serde_json::to_vec_pretty(&record)
+            .map_err(std::io::Error::other)
+            .and_then(|b| std::fs::write(path, b));
+        let msg = format!(
+            "FATAL: adopt-ublk gave up: {why}. The previous server has exited, so {} {} held \
+             with no server — the root included; reads wait, nothing fails. Run adopt-ublk again \
+             to take them ({}). Exit {ADOPT_HELD_EXIT}.",
+            devices.join(", "),
+            if devices.len() == 1 { "is" } else { "are" },
+            match written {
+                Ok(()) => format!("recorded in {ADOPT_FAILED_PATH}"),
+                Err(e) => format!("{ADOPT_FAILED_PATH} not written: {e}"),
+            }
+        );
+        println!("{msg}");
+        eprintln!("{msg}");
+        tracing::error!("{msg}");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(ADOPT_HELD_EXIT)
+    }
+
+    /// A successful adopt clears an earlier one's failure record.
+    #[cfg(target_os = "linux")]
+    fn adopt_succeeded() {
+        if std::fs::remove_file(ADOPT_FAILED_PATH).is_ok() {
+            println!("adopt: the devices an earlier adopt-ublk left held are served again");
+        }
+    }
+
+    /// What `adopt-ublk` checks before it stands the incumbent down (#190), and
+    /// the slab paths to restore from. After the stand-down nothing ublk-backed
+    /// answers until this process serves it, so every local path the restore
+    /// reads must be on memory or a non-ublk disk — `--meta`, a slab in a file,
+    /// a slab device — and a fabric host name is resolved now (the resolver
+    /// reads `/etc`, on the root). Refusing here is safe: the incumbent serves on.
+    #[cfg(target_os = "linux")]
+    async fn adopt_preflight(slab_paths: &[String], meta: Option<&str>) -> anyhow::Result<Vec<String>> {
+        use crate::drive::backing::backing;
+        let check = |what: &str, path: &str| -> anyhow::Result<()> {
+            let b = backing(std::path::Path::new(path))
+                .map_err(|e| anyhow::anyhow!("{what} {path}: cannot tell what it is stored on: {e}"))?;
+            if !b.is_safe() {
+                anyhow::bail!(
+                    "{what} {path} is on {b}: after the stand-down nothing ublk-backed answers until \
+                     this process serves it, so reading it would hang the handover. Put it on tmpfs \
+                     or a disk of its own. The current server keeps serving."
+                );
+            }
+            Ok(())
+        };
+        if let Some(m) = meta {
+            check("--meta", m)?;
+        }
+        let mut out = Vec::with_capacity(slab_paths.len());
+        for p in slab_paths {
+            if is_nvme_tcp_uri(p) {
+                let mut spec = crate::drive::nvmeof_dev::NvmeTcpSpec::parse(p)
+                    .ok_or_else(|| anyhow::anyhow!("malformed nvme-tcp URI: {p}"))?;
+                if spec.addr.parse::<std::net::SocketAddr>().is_err() {
+                    let addr = tokio::net::lookup_host(spec.addr.as_str())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{p}: cannot resolve {}: {e}", spec.addr))?
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{p}: {} resolves to nothing", spec.addr))?;
+                    println!("adopt: {} is {addr} (resolved before the stand-down)", spec.addr);
+                    spec.addr = addr.to_string();
+                    out.push(spec.uri());
+                    continue;
+                }
+            } else if !is_fabric_uri(p) {
+                check("slab", p)?;
+            }
+            out.push(p.clone());
+        }
+        Ok(out)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn handle_adopt_ublk(
+        slab_paths: &[String],
+        volumes: &[String],
+        meta: Option<&str>,
+        api: Option<&str>,
+        data_dir: Option<&str>,
+        config_path: &str,
+    ) -> anyhow::Result<()> {
+        use crate::drive::ublk::UblkServer;
+
+        // What to adopt: the incumbent's own record, unless told otherwise.
+        //
+        // The kernel knows the devices exist and who serves them; only the server
+        // that created them knows which volume is behind each. It writes that
+        // down, so a handover needs no arguments at all — and cannot be given a
+        // list that is short by one, which leaves the devices left off it mounted
+        // with no server and the node unable to restart the engine, because its
+        // own root is among them.
+        let record = crate::drive::handover::Record::read(std::path::Path::new(
+            crate::drive::handover::DEFAULT_PATH,
+        ));
+
+        let from_record = record.as_ref().map(|r| r.volumes_in_device_order());
+        let volumes: &[String] = if !volumes.is_empty() {
+            if let Some(recorded) = from_record.as_deref() {
+                if recorded != volumes {
+                    // Explicit wins — someone may be recovering a node by hand —
+                    // but disagreeing with the incumbent is worth saying out loud,
+                    // because the usual cause is a list that has drifted.
+                    tracing::warn!(
+                        "the volumes given differ from what the previous server recorded \
+                         ({} given, {} recorded): using the ones given",
+                        volumes.len(),
+                        recorded.len()
+                    );
+                }
+            }
+            volumes
+        } else {
+            match from_record.as_deref() {
+                Some(v) if !v.is_empty() => {
+                    tracing::info!("adopting {} volume(s) from the handover record", v.len());
+                    v
+                }
+                _ => anyhow::bail!(
+                    "nothing to adopt: no volumes were given and no handover record at {} \
+                     — the server being taken over is older than the record, so name its \
+                     volumes with --volume, in device order",
+                    crate::drive::handover::DEFAULT_PATH
+                ),
+            }
+        };
+
+        let slab_paths: &[String] = if !slab_paths.is_empty() {
+            slab_paths
+        } else {
+            match record.as_ref().map(|r| r.slabs.as_slice()) {
+                Some(s) if !s.is_empty() => s,
+                _ => anyhow::bail!(
+                    "no slab given and none in the handover record at {}",
+                    crate::drive::handover::DEFAULT_PATH
+                ),
+            }
+        };
+        let meta = meta.or(record.as_ref().and_then(|r| r.meta.as_deref()));
+
+        // Lock this process into RAM before anything else.
+        //
+        // The engine is about to stop the server that is exporting **its own
+        // root**. Between that moment and the end of recovery there is no backing
+        // store for this binary: a page fault on code not yet resident would wait
+        // for a device this process is on its way to serving, and wait forever.
+        // Locking first makes the window survivable — the pages cannot be
+        // reclaimed while it is open.
+        //
+        // Best effort: a node where mlockall is refused still works, it is simply
+        // relying on those pages happening to stay resident.
+        // SAFETY: mlockall takes flags and touches nothing of ours.
+        let locked = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } == 0;
+        if locked {
+            tracing::info!("adopt: locked into memory for the handover");
+        } else {
+            tracing::warn!(
+                "adopt: could not lock memory ({}) — the handover relies on this \
+                 binary's pages staying resident",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // The incumbent stands down before anything is adopted. The kernel runs
+        // one server per device, so this is the handover's first step rather than
+        // an afterthought — and the kernel is asked who the incumbent is, because
+        // it is the only party that actually knows.
+        // Device n serves the nth volume of the record: the ids are known
+        // without reading anything from the slabs.
+        let dev_ids: Vec<u32> = (0..volumes.len() as u32).collect();
+
+        // Refuse a handover that would abandon devices.
+        //
+        // Standing a server down stops every device that server has, not the ones
+        // named here. A list that is short by one leaves that device mounted with
+        // nothing behind it, and every I/O to it returns EIO — which is how a node
+        // came up having adopted its root and lost its data volume, reporting
+        // "Adopted 4 device(s)" and then failing to write to /data.
+        //
+        // The kernel knows which devices exist and who serves them, so this is
+        // checkable before anything is stopped rather than discoverable afterwards.
+        let orphans = crate::drive::ublk::also_served_by(&dev_ids)?;
+        if !orphans.is_empty() {
+            let names: Vec<String> =
+                orphans.iter().map(|id| format!("/dev/ublkb{id}")).collect();
+            anyhow::bail!(
+                "the server being taken over also serves {} — adopting only the {} volume(s) \
+                 named here would leave {} with no server at all, mounted and returning EIO. \
+                 Name every volume it serves, in device order.",
+                names.join(", "),
+                dev_ids.len(),
+                if orphans.len() == 1 { "it" } else { "them" }
+            );
+        }
+
+        // Everything the restore will read, checked while the incumbent still
+        // serves (#190): from the stand-down until this process serves the
+        // devices, nothing on them answers — a read there is a hang, not an error.
+        let restore_paths = adopt_preflight(slab_paths, meta).await?;
+        let slab_paths_given = slab_paths;
+        let slab_paths: &[String] = &restore_paths;
+
+        // Stand the incumbent down and wait for it to be gone, THEN read the
+        // slabs (#171). ublk recovery holds every device's I/O in the gap; a
+        // restore that fails there is retried (#190).
+        // The disks the slabs are opened from, kept for the pallet reads (#314).
+        let opened_disks: Arc<std::sync::Mutex<OpenedDisks>> = Default::default();
+        let mut fail_restores: u32 = std::env::var(ADOPT_TEST_FAIL_RESTORES)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let taken = crate::drive::handover::take_over_retrying(
+            || async {
+                let ids = dev_ids.clone();
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let pids = crate::drive::ublk::stand_down(&ids, std::time::Duration::from_secs(15))?;
+                    crate::drive::ublk::wait_exited(&pids, std::time::Duration::from_secs(30));
+                    Ok(())
+                })
+                .await??;
+                Ok(())
+            },
+            || {
+                // A test's injected failure (ci-adopt-retry-verify.sh).
+                let inject = fail_restores > 0;
+                fail_restores = fail_restores.saturating_sub(1);
+                let (opened_disks, record) = (&opened_disks, &record);
+                async move {
+                if inject {
+                    anyhow::bail!("{ADOPT_TEST_FAIL_RESTORES}: an injected restore failure");
+                }
+                let (mut mgr, _, disks) = open_slabs_with_disks(slab_paths, meta, false).await?;
+                *opened_disks.lock().unwrap() = disks;
+
+                // The drive this boot laid keeps the records first, as it does in the
+                // engine that laid it (#118). The slabs open in handover order, appliance
+                // first, and a volume with no extents yet is recorded in the first
+                // metadata slab of its role. A PVC created and not yet written would
+                // otherwise exist only on a clone the next boot does not attach.
+                if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.as_ref()) {
+                    let local: Vec<crate::drive::slab::SlabId> = [&flow.data_slab, &flow.system_slab]
+                        .into_iter()
+                        .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                        .map(crate::drive::slab::SlabId)
+                        .filter(|id| mgr.is_metadata_slab(id))
+                        .collect();
+                    if !local.is_empty() {
+                        mgr.keep_metadata_in_first(&local);
+                    }
+                    // Before anything is served, not when the flow-over starts.
+                    quarantine_flow_sources(&mgr, flow).await;
+                }
+
+                // Resolve every volume before serving any. The incumbent is gone by
+                // now, so a name that does not resolve leaves the devices held in
+                // recovery with no server — loud, and retryable by running this
+                // again — where half-adopting a set would serve some queues and
+                // not others.
+                let mut serving: Vec<(u32, String, Arc<dyn BlockDevice>)> = Vec::new();
+                // Which volume each adopted device is, for the API's "in use" (#138).
+                let mut adopted_ids: Vec<(u32, uuid::Uuid)> = Vec::new();
+                for (i, selector) in volumes.iter().enumerate() {
+                    let id = resolve_boot_volume(&mgr, selector).await?;
+                    adopted_ids.push((i as u32, id.0));
+                    let name = mgr
+                        .get_volume_handle(&id)
+                        .expect("resolved volume exists")
+                        .name()
+                        .await;
+                    let dev = mgr.get_volume(&id).expect("resolved volume exists");
+                    serving.push((i as u32, name, dev));
+                }
+
+                for (dev_id, name, dev) in &serving {
+                    println!(
+                        "  adopting /dev/ublkb{dev_id} ← {name} ({})",
+                        crate::mgmt::config::human_size(dev.capacity_bytes())
+                    );
+                }
+                Ok((mgr, serving, adopted_ids))
+            }
+        },
+        crate::drive::handover::RestoreRetry::from_env(),
+        |attempt, e, next| match next {
+            Some(wait) => {
+                println!(
+                    "adopt: restore attempt {attempt} failed ({e:#}); every ublk device is held \
+                     with no server — trying again in {}s",
+                    wait.as_secs_f32()
+                );
+                tracing::error!("adopt: restore attempt {attempt} failed: {e:#}");
+            }
+            None => tracing::error!("adopt: restore attempt {attempt} failed, giving up: {e:#}"),
         },
     )
-    .await?;
+    .await;
+    let (mgr, serving, adopted_ids) = match taken {
+        Ok(v) => v,
+        Err(crate::drive::handover::TakeOverError::StandDown(e)) => return Err(e),
+        Err(e) => adopt_failed(&e.to_string(), &dev_ids),
+    };
+    let slab_paths = slab_paths_given;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut threads = Vec::new();
@@ -5891,12 +6054,16 @@ async fn handle_adopt_ublk(
     if live == 0 {
         let _ = shutdown_tx.send(true);
         join_ublk_threads(threads, std::time::Duration::from_secs(10));
-        anyhow::bail!(
-            "adopted none of {} device(s) — the errors above are the reason; the root \
-             filesystem is still served by whoever had it before this ran",
-            dev_ids.len()
+        // The incumbent is gone (#171): nobody serves them now.
+        adopt_failed(
+            &format!(
+                "adopted none of {} device(s) — the errors above are the reason",
+                dev_ids.len()
+            ),
+            &dev_ids,
         );
     }
+    adopt_succeeded();
     if live < threads.len() {
         tracing::warn!(
             "adopted {live} of {} device(s); the rest are named in the errors above",

@@ -201,7 +201,7 @@ impl Record {
 /// incumbent's shutdown rewrote slot-table sectors from its own, older copy.
 /// Nothing showed until a restore after a power cut. The cost of this order
 /// is that a successor that then fails to restore leaves the devices held in
-/// recovery with no server, which is loud, rather than silently wrong.
+/// recovery with no server: [`take_over_retrying`] is what pays it (#190).
 pub async fn take_over<T, SD, SDF, R, RF>(stand_down: SD, restore: R) -> anyhow::Result<T>
 where
     SD: FnOnce() -> SDF,
@@ -211,6 +211,186 @@ where
 {
     stand_down().await?;
     restore().await
+}
+
+/// How long a restore after the stand-down is retried (#190).
+#[derive(Debug, Clone, Copy)]
+pub struct RestoreRetry {
+    /// Give up once this much has passed since the first attempt.
+    pub budget: std::time::Duration,
+    /// The first wait; doubled after every failure, up to `max_wait`.
+    pub first_wait: std::time::Duration,
+    pub max_wait: std::time::Duration,
+}
+
+/// `STORMBLOCK_ADOPT_RESTORE_SECS`: seconds to keep retrying (default 120).
+pub const RESTORE_SECS_ENV: &str = "STORMBLOCK_ADOPT_RESTORE_SECS";
+
+impl RestoreRetry {
+    /// The node's: two minutes (an appliance or a link coming back), waits
+    /// from 1 s doubling to 15 s.
+    pub fn from_env() -> Self {
+        let secs = std::env::var(RESTORE_SECS_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(120);
+        RestoreRetry {
+            budget: std::time::Duration::from_secs(secs),
+            first_wait: std::time::Duration::from_secs(1),
+            max_wait: std::time::Duration::from_secs(15),
+        }
+    }
+}
+
+/// Why a handover did not complete.
+#[derive(Debug)]
+pub enum TakeOverError {
+    /// The incumbent was not stood down: it still serves, nothing is lost.
+    StandDown(anyhow::Error),
+    /// The incumbent is gone and every restore failed: the devices are held
+    /// in recovery with no server until something adopts them.
+    Restore { attempts: u32, last: anyhow::Error },
+}
+
+impl std::fmt::Display for TakeOverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TakeOverError::StandDown(e) => write!(f, "standing the incumbent down: {e:#}"),
+            TakeOverError::Restore { attempts, last } => {
+                write!(f, "restore failed {attempts} time(s) after the incumbent exited: {last:#}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TakeOverError {}
+
+/// [`take_over`], with the restore retried (#190). The incumbent is gone
+/// once the stand-down returns, so a restore that fails leaves the node's
+/// devices — its root among them — with no server. What fails there is
+/// usually passing (the appliance's target, a link), so it is tried again
+/// with backoff for `retry.budget`, every failure said through `report`
+/// (attempt number, error, the wait before the next); after that the error
+/// says so and the caller fails loudly.
+pub async fn take_over_retrying<T, SD, SDF, R, RF>(
+    stand_down: SD,
+    mut restore: R,
+    retry: RestoreRetry,
+    mut report: impl FnMut(u32, &anyhow::Error, Option<std::time::Duration>),
+) -> Result<T, TakeOverError>
+where
+    SD: FnOnce() -> SDF,
+    SDF: std::future::Future<Output = anyhow::Result<()>>,
+    R: FnMut() -> RF,
+    RF: std::future::Future<Output = anyhow::Result<T>>,
+{
+    stand_down().await.map_err(TakeOverError::StandDown)?;
+    let start = std::time::Instant::now();
+    let mut wait = retry.first_wait;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match restore().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let left = retry.budget.saturating_sub(start.elapsed());
+                if left.is_zero() {
+                    report(attempts, &e, None);
+                    return Err(TakeOverError::Restore { attempts, last: e });
+                }
+                let next = wait.min(left);
+                report(attempts, &e, Some(next));
+                tokio::time::sleep(next).await;
+                wait = (wait * 2).min(retry.max_wait);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    fn quick(budget_ms: u64) -> RestoreRetry {
+        RestoreRetry {
+            budget: Duration::from_millis(budget_ms),
+            first_wait: Duration::from_millis(5),
+            max_wait: Duration::from_millis(20),
+        }
+    }
+
+    /// #190: a restore that fails after the stand-down is tried again, and
+    /// the incumbent is stood down once.
+    #[tokio::test]
+    async fn a_restore_that_fails_twice_is_retried_until_it_succeeds() {
+        let downs = AtomicU32::new(0);
+        let tries = AtomicU32::new(0);
+        let mut reported = Vec::new();
+        let got = take_over_retrying(
+            || async {
+                downs.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || async {
+                if tries.fetch_add(1, Ordering::SeqCst) < 2 {
+                    anyhow::bail!("appliance not answering")
+                }
+                Ok(7)
+            },
+            quick(5_000),
+            |n, _, next| reported.push((n, next.is_some())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, 7);
+        assert_eq!(downs.load(Ordering::SeqCst), 1, "stood down once");
+        assert_eq!(tries.load(Ordering::SeqCst), 3);
+        assert_eq!(reported, vec![(1, true), (2, true)], "every failure said, with a next try");
+    }
+
+    /// Past the budget it gives up and says how often it tried: the caller
+    /// fails loudly with the devices still held.
+    #[tokio::test]
+    async fn a_restore_that_never_succeeds_gives_up_after_the_budget() {
+        let t0 = std::time::Instant::now();
+        let mut last = None;
+        let e = take_over_retrying(
+            || async { Ok(()) },
+            || async { Err::<(), _>(anyhow::anyhow!("no slab")) },
+            quick(100),
+            |n, _, next| last = Some((n, next)),
+        )
+        .await
+        .unwrap_err();
+        let TakeOverError::Restore { attempts, last: why } = e else { panic!("{e}") };
+        assert!(attempts >= 3, "retried: {attempts}");
+        assert!(why.to_string().contains("no slab"));
+        assert_eq!(last, Some((attempts, None)), "the last failure says there is no next try");
+        assert!(t0.elapsed() >= Duration::from_millis(100));
+        assert!(t0.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A stand-down that fails is not a restore failure: the incumbent still
+    /// serves, and no restore is tried.
+    #[tokio::test]
+    async fn a_failed_stand_down_restores_nothing() {
+        let tries = AtomicU32::new(0);
+        let e = take_over_retrying(
+            || async { anyhow::bail!("ublk control refused") },
+            || async {
+                tries.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            quick(100),
+            |_, _, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, TakeOverError::StandDown(_)));
+        assert_eq!(tries.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[cfg(test)]
