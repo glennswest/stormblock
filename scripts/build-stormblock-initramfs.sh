@@ -2513,6 +2513,11 @@ if [ "$BOOT_MODE" = "local" ]; then
         rescue_shell
     fi
 
+    # Everything from here to the engine's start runs again when a local
+    # disk's root does not come up and the boot falls back to the claimed
+    # image (#244, `root_fallback` below): the survey decides the disk
+    # afresh, and the mounts are numbered for the image that boots.
+    launch_local() {
     # Diskless: this machine's slab is a namespace on the appliance, and which
     # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
     # on the service tag. The firmware made the same claim a stage earlier to
@@ -3101,6 +3106,15 @@ if [ "$BOOT_MODE" = "local" ]; then
         ${VOLUME:+--volume "$VOLUME"} \
         $WR_ARGS >> "$ENGINE_LOG" 2>&1 &
     ROOTDEV=/dev/ublkb0
+    }
+    # The disk this boot's root comes from, when it is a local one: what a
+    # root that does not come up falls back from (#244).
+    LOCAL_ROOT_SLAB=""
+    case "$SLAB" in
+    ""|*://*) ;;
+    *) [ -z "$HOOK_DECIDED" ] && LOCAL_ROOT_SLAB="$SLAB" ;;
+    esac
+    launch_local
 else
     mkdir -p /run/stormblock
     : > "$ENGINE_LOG"
@@ -3112,6 +3126,7 @@ fi
 STORMBLOCK_PID=$!
 # The engine's output on the console as it comes (and kept in the log).
 tail -n +1 -f "$ENGINE_LOG" 2>/dev/null &
+FOLLOW_PID=$!
 
 # Long enough for a first boot that is also doing work.
 #
@@ -3140,6 +3155,7 @@ tail -n +1 -f "$ENGINE_LOG" 2>/dev/null &
 # wait ends when the root appears or the engine dies, and the deadline only
 # bounds an engine that is alive and stuck — generously, since a first boot's
 # copy grows with what the node stores.
+wait_root() {
 echo "Waiting for root device $ROOTDEV..."
 TIMEOUT=${ROOT_TIMEOUT:-1800}
 WAITED=0
@@ -3157,6 +3173,8 @@ while [ ! -b "$ROOTDEV" ] && [ $TIMEOUT -gt 0 ]; do
         echo "  still waiting for $ROOTDEV (${WAITED}s) - the engine is alive; a first boot may be copying to local disk" ;;
     esac
 done
+}
+wait_root
 
 # --- BEGIN engine report (covered by tests/initramfs-no-appliance.sh)
 # What the engine said last, repeated where it is read: after the FATAL, not
@@ -3170,6 +3188,81 @@ engine_report() { # lines
     fi
 }
 # --- END engine report
+
+# --- BEGIN root fallback (covered by tests/initramfs-root-fallback.sh)
+# A local disk whose root does not come up (#244). server1 on 11.56: the
+# disk was held - the release the appliance assigns, by volume id - so it
+# booted, and its root would not mount (`erofs: cannot find valid erofs
+# superblock`): the boot stopped at a shell with the release one claim away.
+#
+# Once per boot, when this boot came from a local disk (not a hook's
+# decision), an appliance is known and the machine's name is not a guess
+# (#249: a guessed name's image may be another machine's): stop the engine,
+# boot the image claimed for this machine, and install it over the disk the
+# way a release it does not hold is installed. Its system half is laid
+# again whatever the ids say (`STORMBLOCK_RELAY_SYSTEM_HALF`); its data half
+# is kept (#311). A second failure stops as before. Answers 0 when a new
+# engine is running, 1 (with why) when this boot does not fall back.
+ROOT_FALLBACK_DONE=""
+# Running, as opposed to gone or exited and not yet waited for: `kill -0`
+# answers yes for a zombie, and nothing here waits for the engine.
+pid_alive() { # pid
+    _st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null) || return 1
+    [ -n "$_st" ] && [ "${_st%% *}" != Z ]
+}
+root_fallback() { # why
+    echo "ROOT FAILED: $1"
+    if [ -n "$ROOT_FALLBACK_DONE" ]; then
+        echo "  already the fallback this boot - stopping here"; return 1
+    fi
+    if [ "${BOOT_MODE:-}" != local ] || [ -z "${LOCAL_ROOT_SLAB:-}" ]; then
+        echo "  this root was not a local disk's - nothing to fall back to"; return 1
+    fi
+    if [ -z "${BOOTHOST:-}" ]; then
+        echo "  no appliance (${BOOTHOST_WHY:-none was found}) - nothing to fall back to"; return 1
+    fi
+    if identity_guessed 2>/dev/null; then
+        echo "  NOT FALLING BACK: $BOOTTAG is a guess from SMBIOS, and its image may be another"
+        echo "  machine's (#249)"
+        return 1
+    fi
+    ROOT_FALLBACK_DONE=1
+    if [ -z "${CLAIMED:-}" ] && ! boothost_claim; then
+        echo "  $BOOTHOST gave this machine no image - stopping here"; return 1
+    fi
+    case "$LOCAL_ROOT_SLAB" in
+    /dev/nvme*p[0-9]*) INSTALL_OVER="${LOCAL_ROOT_SLAB%p[0-9]*}" ;;
+    /dev/sd*[0-9])     INSTALL_OVER="${LOCAL_ROOT_SLAB%%[0-9]*}" ;;
+    *)                 INSTALL_OVER="$LOCAL_ROOT_SLAB" ;;
+    esac
+    echo "  FALLING BACK: booting the image $BOOTHOST assigns ($CLAIMED) and installing"
+    echo "  it over $INSTALL_OVER: its system half laid again, its data half kept (#244, #311)"
+    # The engine that served the failed root stands down first: its devices
+    # go (SIGTERM tears the ublk exports down, #105), and the new engine
+    # numbers its own from 0.
+    kill "$STORMBLOCK_PID" 2>/dev/null
+    _w=0
+    while pid_alive "$STORMBLOCK_PID" && [ $_w -lt 15 ]; do sleep 1; _w=$((_w + 1)); done
+    kill -9 "$STORMBLOCK_PID" 2>/dev/null
+    _w=0
+    while [ -e "$ROOTDEV" ] && [ $_w -lt 15 ]; do sleep 1; _w=$((_w + 1)); done
+    [ -e "$ROOTDEV" ] && echo "  WARNING: $ROOTDEV is still there after the engine stopped"
+    kill "$FOLLOW_PID" 2>/dev/null
+    unset STORMBLOCK_RESUME_SOURCE
+    export STORMBLOCK_RELAY_SYSTEM_HALF=1
+    SLAB="$CLAIMED"
+    LOCAL_ROOT_SLAB=""
+    launch_local
+    STORMBLOCK_PID=$!
+    tail -n +1 -f "$ENGINE_LOG" 2>/dev/null &
+    FOLLOW_PID=$!
+    return 0
+}
+# --- END root fallback
+
+if [ ! -b "$ROOTDEV" ]; then
+    root_fallback "root device $ROOTDEV did not appear" && wait_root
+fi
 
 if [ ! -b "$ROOTDEV" ]; then
     sleep 1   # the follower's last lines first
@@ -3199,8 +3292,14 @@ if [ -n "$OVERLAY" ]; then
     #   rd.stormblock.overlay=/dev/ublkb1    pre-formatted writable volume
     echo "Overlay root: lower=$ROOTDEV upper=$OVERLAY"
     mkdir -p /run/stormblock/lower /run/stormblock/rw
-    mount_root "$ROOTDEV" /run/stormblock/lower \
-        || { echo "FATAL: Failed to mount overlay lower"; rescue_shell; }
+    if ! mount_root "$ROOTDEV" /run/stormblock/lower; then
+        if root_fallback "$ROOTDEV would not mount" && wait_root && [ -b "$ROOTDEV" ]; then
+            mount_root "$ROOTDEV" /run/stormblock/lower \
+                || { echo "FATAL: Failed to mount overlay lower (the claimed image too)"; rescue_shell; }
+        else
+            echo "FATAL: Failed to mount overlay lower"; rescue_shell
+        fi
+    fi
 
     case "$OVERLAY" in
         tmpfs|tmpfs:*)
@@ -3223,8 +3322,16 @@ if [ -n "$OVERLAY" ]; then
         /sysroot \
         || { echo "FATAL: Failed to mount overlay root"; rescue_shell; }
 else
-    mount_root "$ROOTDEV" /sysroot \
-        || { echo "FATAL: Failed to mount root"; rescue_shell; }
+    if ! mount_root "$ROOTDEV" /sysroot; then
+        # A root that is there and will not mount (#244).
+        if root_fallback "$ROOTDEV would not mount" && wait_root && [ -b "$ROOTDEV" ]; then
+            echo "Root device ready: $ROOTDEV (the claimed image)"
+            mount_root "$ROOTDEV" /sysroot \
+                || { echo "FATAL: Failed to mount root (the claimed image too)"; rescue_shell; }
+        else
+            echo "FATAL: Failed to mount root"; rescue_shell
+        fi
+    fi
 fi
 
 if [ "$BOOT_MODE" = "iscsi" ]; then
