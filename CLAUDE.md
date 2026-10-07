@@ -172,6 +172,36 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Live migration of a VM disk: ANA, epoch at the target (2026-10-06, #83, P3) — IN PROGRESS
+
+Item 3 (durable export table) was done in 2603646. Item 2 now has its
+contract: stormstorage#33 settled #6's leg attach contract (epoch on attach,
+412 stale, fence revokes lower-epoch attachments, per host, persisted).
+Item 1 (ANA) is the target's alone. Cross-node multipath works through the
+per-volume serve subsystems (`<prefix>:vol-<uuid>`, NSID 1: one NQN per
+volume on every node); the shared and per-host subsystems name the node.
+- [ ] target: a namespace removal drains (revoked flag + in-flight count,
+      checked right before the device op, after any R2T data): a removed
+      namespace's commands fail Invalid Namespace, and the removal returns
+      only once nothing in flight can still land
+- [ ] target ANA: CMIC (multi-port, multi-ctrl, ANA), OAES ANA change,
+      ANATT/ANACAP/ANAGRPMAX/NANAGRPID/MNAN, NMIC shared + ANAGRPID in
+      Identify NS, log page 0x0C (groups by state: 1 optimized, 2
+      non-optimized, 3 inaccessible, 4 persistent loss, 5 change), ANA change
+      AEN, I/O on a non-serving state fails with the path status (SCT 3);
+      per-volume state process-wide (every subsystem serving it); a cntlid
+      range per node (`[nvmeof] cntlid_min/max`) so two nodes' controllers
+      of one subsystem never collide
+- [ ] API: `GET/PUT /api/v1/volumes/{id}/ana {state}`, kept in
+      `<data_dir>/ana.json` (a node told "inaccessible" stays so across a
+      restart)
+- [ ] /v1 epoch (#6's contract): `epoch` on attach (412 stale; absent after
+      a fence = 412), attachment records with epoch on the volume, fence
+      revokes lower-epoch attachments before answering (namespace out of the
+      host's subsystem, drained; shared namespace released; ublk removed);
+      an attach that raced a fence undoes itself
+- [ ] tests (target units, HTTP, Linux kernel multipath in QEMU), docs, CHANGELOG
+
 ### A ready fstemplate whose sealed volume is gone (2026-10-06, #281, P1) — DONE (golden-stormblock-ae10dc337da8)
 
 rustkube-node#140: every claim of `pvc-ext4j-64m` failed (404 `volume … not
