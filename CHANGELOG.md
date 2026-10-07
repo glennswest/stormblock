@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **feat:** #303 (stormcos#300): the engine handover says where its time goes. A unit's first I/O waits for `Adopted N device(s)`: 5.4 s for stormcert-init on the Dell and 5.7 s on pve, and on a reboot from the Dell's HDD the incumbent let go about 21 s after `adopting 64 volume(s)`.
+  - **Timing lines:** `[adopt +T s] … (Δ s)` for every step (stand-down asked, devices quiesced, incumbent exited, each slab path attached and its slabs opened with their slot count, records read, restored, devices live again). The incumbent's stop prints `[boot-local stop +T s]` (devices released, metadata persisted).
+  - **Handover state:** `/run/stormblock/handover-state.json` is `adopting` from just before the stand-down and `serving` (with `took_ms`) once the devices are live, so a supervisor can hold units instead of letting them block in D state (stormpump).
+  - **Not done:** reading the slabs before the incumbent lets go (the issue's ask 2) is the order the owner ruled out on #171 (rule 8), so it is put to the owner on #303.
+  - **Test:** `ci-adopt-retry-verify.sh` `timing` step (QEMU, real ublk).
 - **perf:** #302 (stormcos#300): the initramfs mounts the container volumes in parallel. They were mounted one at a time at ~130–200 ms each, which cost 8.6–10.5 s of every boot for 63 volumes on the Dell.
   - **Order:** in waves by mount-point depth, so a mount point inside another is never mounted before its parent. At most `STORM_MOUNT_PARALLEL` (16) run at once.
   - **Devices:** waited for once for the whole list (`STORM_MOUNT_WAIT`, 15 s), not up to 15 s per entry.
