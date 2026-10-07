@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **perf:** #278: a successor's flow-over lets the node boot first. The first move waits until the node's volume I/O has been still for 10 s, or 90 s at most (`STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 0 = no wait). `flow_over_remaining` is reported during the wait.
+  - **Why:** on the Dell (SMR disk), a reboot during the flow-over ran stormpump in 15.1 s instead of 7.9 and the apiserver in 30.2 s instead of 15.3 (11.88). The per-move yield (#269) gives back one move's time, not a boot.
+  - **The first-boot regression this issue was opened for is gone since 11.82** (the reopened-#269 work). pvetest1 reaches the apiserver in 63–109 s against 223 s on 11.73 and 334 s on 11.78; the Dell is at 165–179 s against 325 s on 11.79.
 - **docs:** #257: #239's fix checked against stormcentral's 11.88 install runs. On pvetest1 and pvetest2 (a fresh install, a power cut mid flow-over, a resume from a fresh clone) the serial logs have no ext4 errors. Not checked: the e2fsck of the service clones after the flow-over, which needs stormcentral#503. The work plan records it.
 
 ### 2026-10-06

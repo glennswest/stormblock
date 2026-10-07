@@ -314,6 +314,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds a **kept** data half (the update path) | policy decides |
 | `STORMBLOCK_SLOT_CACHE_MB` | bound of each slab's cache of slot table pages; nothing else of the table is kept in memory (#155) | `16` |
+| `STORMBLOCK_FLOW_BOOT_GRACE_SECS` | the most a successor's flow-over waits for the node's boot: until volume I/O is still for 10 s (#278) | `90`; `0` starts at once |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
 | `STORMBLOCK_BOOT_TAG` | this machine's name for that claim; the initramfs exports the name it resolved (#259) | the firmware's `StormBootTag` EFI variable, else SMBIOS serial, else SMBIOS UUID (#249) |
@@ -1428,8 +1429,12 @@ fence while it copies; the extent map and the registry are taken just to
 allocate and to publish, so the API (claims, clones, listings) and other
 volumes' I/O are not queued behind the copies. Between moves the flow-over
 gives the disk back to foreground I/O: when any volume was read or written
-since the last move, it waits as long as that move took (at most 250 ms). An
-idle node moves at full speed. `GET /api/v1/health` reports what is left
+since the last move, it waits as long as that move took (at most 2 s). An
+idle node moves at full speed. And it lets the node boot first (#278): the
+first move waits until volume I/O has been still for 10 s, or 90 s at most
+(`STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 0 = no wait). Before this, a reboot
+during the flow-over on an SMR disk took stormpump and the apiserver twice
+as long. `GET /api/v1/health` reports what is left, the wait included
 (`flow_over_remaining`, #260).
 
 **A flow-over cut short is finished, not lost.** If the power goes while
