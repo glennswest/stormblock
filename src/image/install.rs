@@ -21,6 +21,7 @@
 //! | | migrate `<hook>` | renamed `<name>@<old>`, kept; the migration listed | keeps the name |
 //! | only in the release | — | — | keeps the name |
 //! | only on the node (a PVC, a VM disk) | — | adopted as it is | — |
+//! | the same id on both (the release the disk held, installed again) | — | keeps the name, id and bytes, whatever the policy | its copy deleted before the node's is adopted (#244) |
 //!
 //! Nothing of the node's is deleted. What the release keeps of its own moves
 //! onto the node's data slab in the background (`FlowOver::data_flow`), as on
@@ -256,6 +257,27 @@ pub async fn adopt(
         }
     }
 
+    // The same id on both sides (#244): the release the disk already held,
+    // installed again — a root that would not come up, an install ticket
+    // over the same release. One id is one volume, and adopting keeps the
+    // record already known, the claim's fresh copy: the node's bytes would
+    // be left unmapped, and freed by the next GC. So the claim's copy goes
+    // first and the node's record is the one adopted. A sealed one (a
+    // golden) is the same bytes on both sides and stays one volume. Two
+    // volumes cannot share an id, so the policy cannot set the node's aside
+    // here: re-installing the release it runs is a repair, and the node's
+    // data is kept.
+    let mut same_id: HashSet<VolumeId> = HashSet::new();
+    for (node_id, name, sealed) in &plan.volumes {
+        if *sealed || mgr.get_volume(node_id).is_none() || mgr.is_sealed(node_id) {
+            continue;
+        }
+        mgr.delete_volume(*node_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("the claim's copy of the node's {name} ({}) could not be dropped: {e}", node_id.0))?;
+        same_id.insert(*node_id);
+    }
+
     let mut found = vec![crate::drive::discover::FoundSlab { label: "data".into(), slab: data }];
     if let Some(b) = bulk {
         found.push(crate::drive::discover::FoundSlab { label: "bulk".into(), slab: b });
@@ -272,6 +294,10 @@ pub async fn adopt(
         ..Default::default()
     };
     for (node_id, name, _) in &plan.volumes {
+        if same_id.contains(node_id) {
+            report.kept.push(name.clone());
+            continue;
+        }
         let Some(&(rel_id, rel_sealed)) = release.get(name) else { continue };
         if rel_id == *node_id {
             // One volume: the release's and the node's are the same id.
