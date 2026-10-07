@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #174 (found by stormblock-registry's long test): concurrent export persists raced on one `exports.tmp`. `POST /serve/v1/exports` and `/volumes` answered 500 (`rename exports.tmp -> exports.json: No such file or directory`), could leave the table with another writer's bytes, and leaked volumes.
+  - **Unique temporary files:** `serve::wiring::write_atomic` writes a file of its own (`<file>.<pid>.<seq>.tmp`), removed on failure. The engine's own `exports.json` now goes through it too.
+  - **One persist at a time:** both export persists run one at a time, with the table read under the lock, so an older snapshot never lands on a newer one.
+  - **No half-made exports:** a failed export is undone (its wiring row and export entry removed), so a retry does not make a second one.
+  - **No leaked volumes:** `POST /serve/v1/volumes {export: true}` deletes the volume it made when the export fails.
+  - **Tests:** `integration_serve_mounted::concurrent_exports_all_persist` (16 at once: all 201, all 16 on disk, no `.tmp` left) and `a_volume_whose_export_fails_is_not_left_behind`.
 - **fix:** #205 (found by stormuefi's installed-node test): `local-boot`'s ladder dropped the proven boot pallet and re-armed a failed one.
   - **Ranking:** the pallets a disk already carries are now ranked by boot state first: proven (`successful`), then candidate (tries left), then exhausted (no tries, never proven). After that by `(priority, version)`. A failed pallet that keeps priority 14 no longer outranks the proven one at 13.
   - **Eviction:** `evictable` drops exhausted pallets first and never the last proven one.

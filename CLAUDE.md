@@ -172,6 +172,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Concurrent export persists no longer race (2026-10-07, #174) — DONE
+
+stormblock-registry's long test: `rename exports.tmp -> exports.json: ENOENT`
+under concurrent `/serve/v1` exports, and leaked volumes.
+- [x] `write_atomic`: a temporary file per write, removed on failure; the
+      engine's `exports.json` through it too
+- [x] both export persists serialised (static lock, snapshot under it)
+- [x] a failed export undone (row + entry); a volume created for an export
+      that failed is deleted
+- [x] tests: 16 concurrent exports, a failing persist leaves nothing;
+      serve/export/wiring tests on dev 69/69
+
 ### local-boot keeps the proven boot pallet, drops the failed one (2026-10-07, #205) — DONE
 
 stormuefi's installed-node test: after B failed 3 times and A was marked
