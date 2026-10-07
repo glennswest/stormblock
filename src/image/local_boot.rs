@@ -175,7 +175,8 @@ pub async fn lay_local_boot_ranked(
     let active: Option<[u8; 32]> = match rank {
         BootRank::Top => None,
         BootRank::BelowActive => {
-            let mut local = boot_pallets(&mgr, |d| d == 0).await;
+            // What stormuefi boots: the top pallet it does not skip (#205).
+            let mut local: Vec<_> = boot_pallets(&mgr, |d| d == 0).await.into_iter().filter(|p| boot_state(p) > 0).collect();
             local.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
             match local.first() {
                 Some(p) => Some(digest(&mgr, p).await?),
@@ -190,6 +191,9 @@ pub async fn lay_local_boot_ranked(
     for p in &wanted {
         wanted_digests.push(digest(&mgr, p).await?);
     }
+    // The pallets copied by this run: the only ones given a fresh count of
+    // tries (#205).
+    let mut fresh: Vec<[u8; 32]> = Vec::new();
 
     for (src, want) in wanted.iter().zip(wanted_digests.iter()) {
         let mut have = HashSet::new();
@@ -204,6 +208,7 @@ pub async fn lay_local_boot_ranked(
             match mgr.copy_pallet(src.id, 0).await {
                 Ok(_) => {
                     report.copied.push(describe(src));
+                    fresh.push(*want);
                     break;
                 }
                 Err(crate::pallet::PalletError::NoSpace { .. }) => {
@@ -240,7 +245,7 @@ pub async fn lay_local_boot_ranked(
     let mut order: Vec<[u8; 32]> = Vec::new();
     order.extend(active);
     order.extend(wanted_digests.iter().copied().filter(|d| Some(*d) != active));
-    let (ladder, removed) = rerank(&disk, &mgr, &order).await?;
+    let (ladder, removed) = rerank(&disk, &mgr, &order, &fresh).await?;
     report.ladder = ladder;
     report.removed.extend(removed);
 
@@ -253,26 +258,29 @@ pub async fn lay_local_boot_ranked(
 }
 
 /// Order the disk's boot pallets: those in `first` (by manifest digest) on
-/// top in that order, then the rest by their own order, removing past
-/// [`LOCAL_KEEP`] any that `first` does not name. Returns the ladder and what
-/// was removed.
+/// top in that order, then the rest — proven, then candidates, then
+/// exhausted, each by `(priority, version)` (#205) — removing past
+/// [`LOCAL_KEEP`] any that `first` does not name. Only a pallet in `fresh`
+/// (copied by this run) has its tries reset; one already on the disk keeps
+/// the loader's count. Returns the ladder and what was removed.
 async fn rerank(
     disk: &Arc<dyn BlockDevice>,
     mgr: &PalletManager,
     first: &[[u8; 32]],
+    fresh: &[[u8; 32]],
 ) -> Result<(Vec<(String, u64, u8)>, Vec<String>)> {
     let mut local = boot_pallets(mgr, |d| d == 0).await;
-    let mut ranked: Vec<(usize, PalletLocation)> = Vec::new();
+    let mut ranked: Vec<(usize, PalletLocation, bool)> = Vec::new();
     for p in local.drain(..) {
         let d = digest(mgr, &p).await?;
         let rank = first.iter().position(|w| *w == d).unwrap_or(usize::MAX);
-        ranked.push((rank, p));
+        ranked.push((rank, p, fresh.contains(&d)));
     }
-    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.order_key().cmp(&a.1.order_key())));
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(keep_key(&b.1).cmp(&keep_key(&a.1))));
     let mut gpt = Gpt::read(disk).await?;
     let mut keep = Vec::new();
     let mut removed = Vec::new();
-    for (i, (rank, p)) in ranked.iter().enumerate() {
+    for (i, (rank, p, fresh)) in ranked.iter().enumerate() {
         if i >= LOCAL_KEEP && *rank == usize::MAX {
             gpt.remove(p.entry_index)?;
             removed.push(describe(p));
@@ -280,7 +288,7 @@ async fn rerank(
         }
         let mut a = p.attributes;
         a.priority = LOCAL_TOP.saturating_sub(keep.len() as u8).max(1);
-        if !a.successful && a.tries_left == 0 {
+        if *fresh && !a.successful && a.tries_left == 0 {
             a.tries_left = DEFAULT_TRIES;
         }
         gpt.entries[p.entry_index].attributes = a.to_u64();
@@ -328,7 +336,7 @@ pub async fn raise_local_boot(
     if !found {
         return Err(ImageError::Spec(format!("{disk_path} has no boot pallet with that manifest digest")));
     }
-    Ok(rerank(&disk, &mgr, &[top]).await?.0)
+    Ok(rerank(&disk, &mgr, &[top], &[]).await?.0)
 }
 
 /// The first ESP among the sources: `(device, start, len)` in bytes.
@@ -369,6 +377,27 @@ async fn reserve_esp(disk: &Arc<dyn BlockDevice>, len: u64) -> Result<usize> {
     Ok(i)
 }
 
+/// What a boot pallet's attributes say about it (#205), best first:
+/// 2 proven (`successful`), 1 a candidate (tries left), 0 exhausted (no
+/// tries and never proven: stormuefi skips it — the loader's count is the one
+/// record that the release failed).
+fn boot_state(p: &PalletLocation) -> u8 {
+    if p.attributes.successful {
+        2
+    } else if p.attributes.tries_left > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// The order pallets the disk already carries are kept in, best first: by
+/// boot state, then by `(priority, version)`. A release that failed every
+/// attempt never outranks one the node proved good, whatever its priority.
+fn keep_key(p: &PalletLocation) -> (u8, (u8, u64)) {
+    (boot_state(p), p.order_key())
+}
+
 async fn boot_pallets(mgr: &PalletManager, on: impl Fn(usize) -> bool) -> Vec<PalletLocation> {
     mgr.store()
         .scan()
@@ -384,14 +413,19 @@ async fn digest(mgr: &PalletManager, p: &PalletLocation) -> Result<[u8; 32]> {
 }
 
 /// The lowest-ranked local boot pallet that is not one of `wanted`, if there
-/// is more than one local boot pallet to choose from.
+/// is more than one local boot pallet to choose from. Exhausted ones go
+/// first, and the last proven one never goes (#205).
 async fn evictable(mgr: &PalletManager, wanted: &[[u8; 32]]) -> Result<Option<PalletLocation>> {
     let mut local = boot_pallets(mgr, |d| d == 0).await;
     if local.is_empty() {
         return Ok(None);
     }
-    local.sort_by_key(|p| p.order_key());
+    let proven = local.iter().filter(|p| boot_state(p) == 2).count();
+    local.sort_by_key(keep_key);
     for p in local {
+        if boot_state(&p) == 2 && proven <= 1 {
+            continue;
+        }
         if !wanted.contains(&digest(mgr, &p).await?) {
             return Ok(Some(p));
         }
@@ -715,6 +749,73 @@ mod tests {
         let labels: Vec<(String, u8)> =
             local.iter().map(|p| (p.version_label.clone(), p.attributes.priority)).collect();
         assert_eq!(labels, vec![("C".to_string(), LOCAL_TOP), ("B".to_string(), LOCAL_TOP - 1)]);
+    }
+
+    /// Set a laid pallet's boot state on the disk, as stormuefi and
+    /// `pallet successful` would.
+    async fn set_state(dev: &Arc<dyn BlockDevice>, path: &str, label: &str, tries: u8, ok: bool) {
+        let mut store = PalletStore::new(Vec::new());
+        store.add_drive(path, dev.clone());
+        let mgr = PalletManager::new(store);
+        let p = mgr.list().await.into_iter().find(|p| p.version_label == label).expect(label);
+        let mut gpt = Gpt::read(dev).await.unwrap();
+        let mut a = p.attributes;
+        a.tries_left = tries;
+        a.successful = ok;
+        gpt.entries[p.entry_index].attributes = a.to_u64();
+        gpt.write(dev).await.unwrap();
+    }
+
+    async fn states(dev: &Arc<dyn BlockDevice>, path: &str) -> Vec<(String, u8, u8, bool)> {
+        let mut store = PalletStore::new(Vec::new());
+        store.add_drive(path, dev.clone());
+        let mgr = PalletManager::new(store);
+        let mut local = mgr.list().await;
+        local.sort_by_key(|p| std::cmp::Reverse(p.attributes.priority));
+        local
+            .iter()
+            .map(|p| (p.version_label.clone(), p.attributes.priority, p.attributes.tries_left, p.attributes.successful))
+            .collect()
+    }
+
+    /// #205, stormuefi's installed-node test: A then B laid; B failed every
+    /// try (exhausted), A booted and was marked successful. Laying C keeps
+    /// the proven A as C's fallback and drops the failed B — and does not
+    /// give B its tries back.
+    #[tokio::test]
+    async fn the_proven_pallet_stays_and_the_failed_one_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dpath, ddev) = node_disk(&dir).await;
+        for tag in ["A", "B"] {
+            let (ipath, idev) = image(&dir, &format!("{tag}.img"), tag).await;
+            lay_local_boot(&dpath, ddev.clone(), vec![(ipath, idev)]).await.unwrap();
+        }
+        set_state(&ddev, &dpath, "B", 0, false).await;
+        set_state(&ddev, &dpath, "A", 0, true).await;
+        let (ipath, idev) = image(&dir, "C.img", "C").await;
+        let r = lay_local_boot(&dpath, ddev.clone(), vec![(ipath, idev)]).await.unwrap();
+        assert!(r.removed.iter().any(|x| x.contains("B")), "the failed B goes: {r:?}");
+        let st = states(&ddev, &dpath).await;
+        assert_eq!(st.len(), 2, "{st:?}");
+        assert_eq!((st[0].0.as_str(), st[0].1, st[0].3), ("C", LOCAL_TOP, false), "{st:?}");
+        assert!(st[0].2 > 0, "C is a candidate: {st:?}");
+        assert_eq!((st[1].0.as_str(), st[1].1, st[1].3), ("A", LOCAL_TOP - 1, true), "A, proven, is C's fallback: {st:?}");
+    }
+
+    /// An exhausted pallet the disk keeps (nothing better to keep) stays
+    /// exhausted: the loader's count is not undone.
+    #[tokio::test]
+    async fn an_exhausted_pallet_is_not_rearmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dpath, ddev) = node_disk(&dir).await;
+        let (apath, adev) = image(&dir, "A.img", "A").await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(apath, adev)]).await.unwrap();
+        set_state(&ddev, &dpath, "A", 0, false).await;
+        let (bpath, bdev) = image(&dir, "B.img", "B").await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(bpath, bdev)]).await.unwrap();
+        let st = states(&ddev, &dpath).await;
+        assert_eq!(st.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), vec!["B", "A"], "{st:?}");
+        assert_eq!((st[1].2, st[1].3), (0, false), "A still exhausted: {st:?}");
     }
 
     /// stormuefi scans every device. When a node netboots, the image it
