@@ -172,20 +172,27 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A write to a just-moved extent lost on a cut before the persist (2026-10-06, #277, P1) — IN PROGRESS
+### A write to a just-moved extent lost on a cut before the persist (2026-10-06, #277, P1) — FIX IN, close pending (paused for P0 #311)
 
 By reading: `move_slot` and `migrate_leg_unlocked` allocate the destination
 at the source's generation while `rewrite_legs` bumps the map's by one. A cut
 between a write+fsync to the moved extent (in place on the destination, its
 entry published by the fsync) and the next persist leaves two slots at equal
 generations; restore keeps the record's, the source: the write is gone.
-- [ ] test in `integration_power_cut` (both formats): move extent 0, write,
-      fsync, cut before any persist, restore from the slabs alone; fails today
-- [ ] a moved primary is allocated at `generation + 1` (= the map's after
-      `rewrite_legs`) in both paths; a mirror or parity leg keeps its
-      generation (they tie by design: #316)
-- [ ] durability.md rule, CHANGELOG; full nextest; follow-up issue for
-      mirror/parity legs moved in place (filed: #316)
+- [x] test `integration_power_cut::a_write_to_an_extent_just_moved_survives_
+      a_cut_before_the_persist` (+ `_in_format_v2`): fails with
+      `MOVE_SAME_GEN_277=1` (block 0 reads its pre-move value, not 77), passes
+      with the fix (f74491f)
+- [x] a moved primary is allocated at `generation + 1` (= the map's after
+      `rewrite_legs`), `PlacementEngine::moved_generation`, both paths; a
+      mirror or parity leg keeps its generation (they tie by design: #316)
+- [x] durability.md rule 5, CHANGELOG? (NOT YET: add the entry), #316 filed
+- [x] targeted on dev: 50/50 (power cuts, placement, flow-over, drain,
+      migrate); full nextest at eba4123: 939/941 = #134 and
+      `a_flow_over_copy_holds_no_lock_the_node_needs` (#297/#305 flake,
+      but it goes through `migrate_leg_unlocked`)
+- [ ] LEFT: run that test alone ×5 on dev to confirm it is the flake; add the
+      CHANGELOG entry; close #277 with the verification comment
 
 ### Optional mount entries `?vol:path` (2026-10-06, #288, P1) — DONE
 
