@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **docs:** removed references to the CoreOS trademark (owner); the Ignition interface name `opt/com.coreos/config` stays where Ignition requires it
 - **fix:** #308 (stormcos#92): a flush that reaches a mirror's failed drive degrades that leg instead of failing the volume. On the 160-drive shelf, a `mirror:2` volume's flush right after one of its drives was failed returned EIO (`flushing the filesystem: device I/O failed`), and health still said `healthy`. `flush` returned the first slab's sync error for every volume. The write path already marks a failing leg's slab failed and goes on, but a flush that is the first I/O to reach a dead drive did not: on 160 drives the writes before it usually land elsewhere (2 of 4 shelf runs), and on 8 drives they hit it first (4 of 4 passed).
   - **Fix:** on a redundant volume, a media error from a slab's sync now puts that slab in the volume's failed set (the volume is `degraded`) and the flush completes on the other legs. It fails only when something is no longer readable. An unreplicated volume's flush error is still the volume's.
   - **Test:** `thin::tests::a_flush_to_a_failed_leg_degrades_the_mirror_not_the_volume` (emulated drives, as stormcos#92 runs them).

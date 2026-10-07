@@ -142,7 +142,7 @@ The existing `/init` script already parses these. No changes needed.
 
 ### Phase 1: Test with kexec (no firmware change)
 
-Use the existing CoreOS + kexec approach but with the stormblock-initramfs. This validates the entire iSCSI → ublk → mount → switch_root flow on real hardware without touching firmware.
+Use the existing kexec approach but with the stormblock-initramfs. This validates the entire iSCSI → ublk → mount → switch_root flow on real hardware without touching firmware.
 
 **This is what we have today.** The `stormblock-boot-server2-spec.md` covers this.
 
