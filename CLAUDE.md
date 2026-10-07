@@ -172,6 +172,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The stall watchdog's task dump panicked a ublk device's runtime (2026-10-07, #334, P0) — IN PROGRESS
+
+Dell 11.91 under rustkube-node's `medium` suite: `ublk-adopt-36` panicked
+`RefCell already borrowed` (tokio current_thread/mod.rs:723), then :9090
+stopped answering. Found by reading tokio 1.53.1: requests stalled > 10 s, so
+the watchdog (#269) ran `task_dump`, which spawns `dump()` on every
+registered runtime — the ublk-adopt/-export current-thread runtimes too. On a
+current-thread runtime `dump()` holds the core's RefCell while it polls each
+task in trace mode; our I/O futures are not tokio's, so tracing runs them,
+and a task that finishes and releases a tokio lock wakes another on the same
+runtime: `schedule()` borrows the core again → panic. That device's server
+thread dies and its I/O hangs. The multi-thread (API) runtime traces with
+the core taken out and the workers parked: not affected.
+- [ ] `task_dump` never dumps a current-thread runtime (names it, says why;
+      /debug/threads still shows its threads)
+- [ ] test: a current-thread runtime with a task that, traced, releases a
+      tokio Mutex another task waits on; registered; task_dump leaves it
+      running. Fails without the fix (checked on a throwaway branch)
+- [ ] docs (debug), CHANGELOG
+
 ### Health says whether the node runs from local or remote slabs (2026-10-07, #322, P1) — DONE
 
 stormcentral#353: C2NR0Q2 passed "local boot" and "fresh slab" while running
