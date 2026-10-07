@@ -172,6 +172,50 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Install keeps the data half: only the system half is re-laid (2026-10-06, #311, P0) — IN PROGRESS
+
+Owner (2026-10-06, the #1 rule for installs): an install touches the system
+drive only, and only its system half; the data slab and every data volume
+are adopted, not recreated; the release's keep/replace/migrate policy (#122)
+applies; a failure never falls back to a wipe (stop and report, data
+untouched). Reverses #261's install = wipe (7eaa520).
+
+Found reading: the update path (`take_local_disk`, a disk with both halves,
+no force) is half built. `boot-local` resolves its exports from the claimed
+image *before* the disk is taken, and the kept data slab is registered
+without its records ("adopting them … is the upgrade path, which is not built
+yet"), so the node ran fresh data volumes from the appliance beside unread
+old ones of the same names (stormcos#236).
+
+Plan:
+- [ ] engine `image::local::adopt_data_half` (in `take_local_disk`'s update
+      path, all checks before `update_system_slab` writes anything): read the
+      kept data/bulk slabs' records and the release's policy
+      (`/etc/stormblock/data-volumes`, unlisted data = keep); refuse (data
+      untouched) when a kept volume has a leg outside the data half or the
+      records cannot be read. Then: keep = the node's volume (same id, same
+      name), the image's fresh clone deleted; replace/migrate = the node's
+      renamed `<name>@<old release>` and kept, the image's takes the name;
+      new = the image's; a sealed golden of another id = the node's renamed
+      aside (its clones still name it by id). The data slab's records are
+      adopted into the manager, metadata routed to the local slabs, and what
+      is left of the image's data half flows in (`data_flow`). Migrations
+      listed for stormupdate (handover record → generations file)
+- [ ] `boot-local`: take the local disk before the exports are resolved, so
+      the mounts name the kept volumes
+- [ ] `/init`: an install over a disk with a data slab is never `force`d
+      (probe `INSTALL_OVER`, `slab holds` 1, the install ticket); console
+      `INSTALL: replacing the system half of <disk>; its data half is kept`.
+      A lone data slab with no system half is left alone (said so)
+- [ ] tests: install N, node writes `state` (keep), `logs` (replace) and a
+      volume no release names (a PVC); an extra drive with known bytes;
+      install N+1 over it: every byte checked after the install, after the
+      flow-over and from the disk alone; the extra drive untouched; a kept
+      volume with a leg in the system half stops the install, data
+      untouched. Initramfs tests (boot-hook) updated
+- [ ] docs (boot-hooks.md, staging.md, durability/README), CHANGELOG; answer
+      stormcentral#462's question on #311 (same id and name)
+
 ### A write to a just-moved extent lost on a cut before the persist (2026-10-06, #277, P1) — FIX IN, close pending (paused for P0 #311)
 
 By reading: `move_slot` and `migrate_leg_unlocked` allocate the destination
