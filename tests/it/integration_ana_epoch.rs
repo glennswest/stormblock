@@ -150,7 +150,7 @@ async fn a_volumes_ana_state_is_reported_announced_and_enforced() {
     assert_eq!(ns[30] & 1, 1, "NMIC: shared");
     assert_eq!(u32::from_le_bytes(ns[92..96].try_into().unwrap()), 1, "group 1: optimized");
     let groups = ana_groups(&admin.get_log_page(0x0C, 4096).await.unwrap());
-    assert_eq!(groups.len(), 5);
+    assert_eq!(groups.len(), 4, "no empty change group");
     assert_eq!(groups[0], (1, 0x01, vec![nsid]));
     assert!(groups.iter().all(|g| g.1 != 0), "every descriptor has a state");
 

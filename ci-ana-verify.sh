@@ -131,7 +131,7 @@ say "guest initramfs: busybox, nvme-cli, nvme-tcp"
 I="$W/initrd"
 mkdir -p "$I"/{bin,sbin,dev,proc,sys,run,tmp,etc/nvme,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
-for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed basename cut tr sort od; do
+for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed basename cut tr sort od timeout; do
     ln -sf busybox "$I/bin/$a"
 done
 cp "$NVME" "$I/bin/nvme"
@@ -195,7 +195,7 @@ nvme connect -t tcp -a 10.0.2.2 -s $PORT_A -n "$SHARED" --hostnqn "$H1" >/tmp/o 
 nvme connect -t tcp -a 10.0.2.2 -s $PORT_B -n "$SHARED" --hostnqn "$H1" >/tmp/o 2>&1 || r connect-b "FAIL ($(head -1 /tmp/o))"
 sleep 2
 heads=$(ls -d /sys/block/nvme*n* 2>/dev/null | grep -v 'c[0-9]*n' | wc -l)
-H=$(ls -d /sys/block/nvme*n* 2>/dev/null | grep -v 'c[0-9]*n' | head -1 | xargs basename 2>/dev/null)
+H=$(basename "$(ls -d /sys/block/nvme*n* 2>/dev/null | grep -v 'c[0-9]*n' | head -1)")
 paths=$(ls -d /sys/class/nvme/nvme*/nvme*c*n* 2>/dev/null | wc -l)
 echo "GUEST head /dev/$H, $heads head(s), $paths path(s)"
 [ "$heads" = 1 ] && [ "$paths" = 2 ] && r one-head-two-paths PASS || r one-head-two-paths "FAIL ($heads heads, $paths paths)"
@@ -237,12 +237,17 @@ done
 echo "GUEST leg /dev/$L"
 dd if=/tmp/p1 of=/dev/$L bs=4096 count=4 oflag=direct 2>/dev/null && r leg-write-before-fence PASS || r leg-write-before-fence FAIL
 sync_point fence
-ok=0
+# Fenced = the block device is gone, or a write to it fails or never
+# completes. (A dd to a vanished node would make a plain file: check -b.)
+how=""
 for _ in $(seq 1 50); do
-    dd if=/tmp/p1 of=/dev/$L bs=4096 count=1 oflag=direct 2>/dev/null || { ok=1; break; }
+    if [ ! -b /dev/$L ]; then how="namespace gone"; break; fi
+    timeout 5 dd if=/tmp/p1 of=/dev/$L bs=4096 count=1 oflag=direct 2>/dev/null
+    rc=$?
+    [ $rc = 0 ] || { how="write failed (rc $rc)"; break; }
     sleep 0.2
 done
-[ $ok = 1 ] && r leg-write-after-fence-fails PASS || r leg-write-after-fence-fails FAIL
+[ -n "$how" ] && r leg-write-after-fence-fails "PASS ($how)" || r leg-write-after-fence-fails FAIL
 echo "GUEST dmesg (nvme):"
 dmesg | grep -i nvme | tail -25
 echo "GUEST done"

@@ -185,18 +185,29 @@ pub fn change_count() -> u64 {
 /// The ANA log page for namespaces `(nsid, state)`, `len` bytes from `offset`.
 ///
 /// Header (16 bytes): change count, group count. Then one 32-byte
-/// descriptor per group — ID, NSID count, change count, state — each
+/// descriptor per group — groups 1 to 4 always, the `change` group only
+/// while a namespace is in it: Linux counts a `change` descriptor whatever
+/// it lists, arms its ANATT timer, and resets the controller when the timer
+/// runs out (found by `ci-ana-verify.sh`) — ID, NSID count, change count, state — each
 /// followed by its NSIDs in ascending order (Linux walks them against its
 /// sorted namespace list). `rgo` (Return Groups Only) leaves the NSIDs out.
 pub fn log_page(namespaces: &[(u32, AnaState)], rgo: bool, offset: usize, len: usize) -> Vec<u8> {
     let chgcnt = change_count();
+    let groups: Vec<(AnaState, Vec<u32>)> = AnaState::ALL
+        .into_iter()
+        .map(|state| {
+            let mut nsids: Vec<u32> =
+                namespaces.iter().filter(|(_, s)| *s == state).map(|(n, _)| *n).collect();
+            nsids.sort_unstable();
+            (state, nsids)
+        })
+        .filter(|(state, nsids)| *state != AnaState::Change || !nsids.is_empty())
+        .collect();
     let mut page = Vec::with_capacity(16 + GROUPS as usize * 32 + namespaces.len() * 4);
     page.extend_from_slice(&chgcnt.to_le_bytes());
-    page.extend_from_slice(&(GROUPS as u16).to_le_bytes());
+    page.extend_from_slice(&(groups.len() as u16).to_le_bytes());
     page.extend_from_slice(&[0u8; 6]);
-    for state in AnaState::ALL {
-        let mut nsids: Vec<u32> = namespaces.iter().filter(|(_, s)| *s == state).map(|(n, _)| *n).collect();
-        nsids.sort_unstable();
+    for (state, nsids) in groups {
         let mut desc = [0u8; 32];
         desc[0..4].copy_from_slice(&state.group().to_le_bytes());
         let listed = if rgo { 0 } else { nsids.len() as u32 };
@@ -239,7 +250,7 @@ mod tests {
     #[test]
     fn log_page_groups_namespaces_by_state_in_nsid_order() {
         let page = log_page(
-            &[(7, AnaState::Inaccessible), (3, AnaState::Optimized), (1, AnaState::Optimized)],
+            &[(7, AnaState::Inaccessible), (3, AnaState::Optimized), (1, AnaState::Optimized), (9, AnaState::Change)],
             false,
             0,
             4096,
@@ -266,12 +277,29 @@ mod tests {
         // Groups 4 and 5 follow, every state nonzero (Linux refuses a zero).
         assert_eq!(page[124 + 16], 0x04);
         assert_eq!(page[156 + 16], 0x0F);
+        assert_eq!(u32::from_le_bytes(page[188..192].try_into().unwrap()), 9);
         assert_eq!(page.len(), 4096);
     }
 
     #[test]
+    fn an_empty_change_group_is_not_reported() {
+        // Linux arms its ANATT timer for any `change` descriptor and resets
+        // the controller when it runs out.
+        let page = log_page(&[(1, AnaState::Optimized)], false, 0, 4096);
+        assert_eq!(u16::from_le_bytes([page[8], page[9]]), 4);
+        let mut off = 16;
+        for g in 1..=4u32 {
+            assert_eq!(u32::from_le_bytes(page[off..off + 4].try_into().unwrap()), g);
+            let n = u32::from_le_bytes(page[off + 4..off + 8].try_into().unwrap()) as usize;
+            assert_ne!(page[off + 16], 0x0F);
+            off += 32 + n * 4;
+        }
+        assert!(page[off..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
     fn return_groups_only_lists_no_nsids() {
-        let page = log_page(&[(1, AnaState::Optimized)], true, 0, 16 + 5 * 32);
+        let page = log_page(&[(1, AnaState::Optimized)], true, 0, 16 + 4 * 32);
         assert_eq!(u32::from_le_bytes(page[20..24].try_into().unwrap()), 0);
         assert_eq!(u32::from_le_bytes(page[48..52].try_into().unwrap()), 2, "next descriptor follows directly");
     }
