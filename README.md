@@ -1038,6 +1038,17 @@ template claims **and nothing on this node is serving**, and `DELETE` on the
 same path reclaims them; clones are named by their consumer, so they are never
 in that set.
 
+**A ready template whose sealed volume is gone is `broken`, not `ready`**
+(#281). At startup the engine checks every ready template. It seals the
+volume again when it is there and unsealed, and marks the template broken
+when the volume is missing (a delete cut short, a reclaim, a store restored
+onto a slab seeded again), was never recorded, or will not seal. The listing
+also looks for the volume on every read. A broken template lists as
+`"state": "broken"` with `"broken": "<why>"`. A clone or claim of it answers
+409 `fstemplate <name> is broken: <why>. It is not sealed and cannot be
+cloned; delete it and mint it again`. Deleting it and creating it again
+makes it whole.
+
 Formats do not queue. No lock is held across a format, a check or a stamp, and
 the formatter takes `&self` so one format fans out across block groups.
 Measured on a Fedora 6.17.1 host: one 256 MiB template formats and seals in
