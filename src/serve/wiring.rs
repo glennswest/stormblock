@@ -369,6 +369,41 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// #174: writers at once on one path. With one fixed `<file>.tmp` they
+    /// renamed it away under each other (ENOENT) or truncated each other's
+    /// bytes. Each write now has its own temporary file: every one succeeds,
+    /// the file ends holding one writer's whole table, and no temporary file
+    /// is left.
+    #[test]
+    fn concurrent_writers_each_land_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exports.json");
+        let threads: Vec<_> = (0..16)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let body = vec![b'a' + t as u8; 64 * 1024];
+                    (0..50).map(|_| write_atomic(&path, &body).map_err(|e| e.to_string())).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for t in threads {
+            for r in t.join().unwrap() {
+                r.expect("every write succeeds");
+            }
+        }
+        let got = std::fs::read(&path).unwrap();
+        assert_eq!(got.len(), 64 * 1024);
+        assert!(got.iter().all(|b| *b == got[0]), "one writer's whole table");
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
     /// The transport a fresh export gets when nobody says otherwise.
     #[test]
     fn default_transport_is_nvme() {
