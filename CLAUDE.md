@@ -172,21 +172,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A network-booted node lists and verifies its boot pallet (2026-10-07, #314, P3) — IN PROGRESS
+### A network-booted node lists and verifies its boot pallet (2026-10-07, #314, P3) — DONE
 
 sectionsystems#7 verifies the boot pallet through the node's engine
-(`GET /api/v1/pallets/{stormuefi.pallet}`, `POST …/verify`). `/pallets` is
+(`GET /api/v1/pallets/{stormuefi.pallet}`, `POST …/verify`). `/pallets` was
 built from `state.drives` only, and `adopt-ublk` (the node's engine, netbooted
 or not) registers no drives: the disks its slabs were opened from — the
-claimed clone's `nvme-tcp://` namespace, or the local disk — are in no store.
+claimed clone's `nvme-tcp://` namespace, or the local disk — were in no store.
 The issue's option 1, read-only:
-- [ ] `open_slabs_resuming` also hands back the disk device each slab path was
-      opened from; `adopt-ublk` keeps them as `AppState.boot_disks`
-- [ ] `/pallets` reads (list, status, chain, get, verify) see `drives` +
-      `boot_disks`; every write verb sees `drives` only (a shared clone's
-      pallets are never activated, marked or moved: 404 there)
-- [ ] test: a node disk with slabs + a boot pallet, opened as adopt-ublk
-      does, GET/verify answer, activate does not; docs, CHANGELOG
+- [x] `open_slabs_with_disks` (what `open_slabs_resuming` wraps) hands back
+      the disk each slab path was opened from; `adopt-ublk` keeps them as
+      `AppState.boot_disks` (`set_boot_disks`)
+- [x] `/pallets` reads (list, status, chain, get, verify) see `drives` +
+      `boot_disks`; every write verb sees `drives` only (404 on a boot disk)
+- [x] test `forge_mode_tests::a_netbooted_node_lists_and_verifies_the_boot_
+      pallet_it_booted` (appliance serves a release disk over NVMe/TCP, the
+      node claims and opens it, GET/verify ok, activate/successful/DELETE 404)
+      on dev; docs/pallets.md §9, README, CHANGELOG
+- Not on a live node: needs a stormcos release with this engine; then
+  sectionsystems#7's check on a netbooted node
 
 ### Concurrent export persists no longer race (2026-10-07, #174) — DONE
 
