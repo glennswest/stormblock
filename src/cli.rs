@@ -2697,7 +2697,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
 
             println!("\nublk devices ready. Press Ctrl+C to stop.");
-            tokio::signal::ctrl_c().await?;
+            StopSignal::new()?.wait().await?;
             println!("Shutting down...");
 
             // Signal all ublk servers to stop, and wait — bounded (#105).
@@ -2724,7 +2724,7 @@ pub async fn run() -> anyhow::Result<()> {
 
             // Keep running until Ctrl+C
             println!("\nPress Ctrl+C to stop");
-            tokio::signal::ctrl_c().await?;
+            StopSignal::new()?.wait().await?;
             println!("Shutting down...");
         }
 
@@ -3090,7 +3090,41 @@ pub async fn run() -> anyhow::Result<()> {
         open_slabs_with_disks(slab_paths, meta, resume).await.map(|(m, r, _)| (m, r))
     }
 
-    /// The disk each slab path was opened from, as the engine holds it (#314).
+    /// A stop: SIGINT, or SIGTERM — what a supervisor sends (#144). Created
+/// before the wait so a SIGTERM in between is queued for it rather than
+/// taking the default action (the process dying mid-way with nothing torn
+/// down and nothing saved).
+pub(crate) struct StopSignal {
+    #[cfg(unix)]
+    term: tokio::signal::unix::Signal,
+}
+
+impl StopSignal {
+    pub(crate) fn new() -> anyhow::Result<Self> {
+        Ok(StopSignal {
+            #[cfg(unix)]
+            term: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+        })
+    }
+
+    /// Wait for one; answers which.
+    pub(crate) async fn wait(&mut self) -> anyhow::Result<&'static str> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                r = tokio::signal::ctrl_c() => { r?; Ok("SIGINT") }
+                _ = self.term.recv() => Ok("SIGTERM"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await?;
+            Ok("SIGINT")
+        }
+    }
+}
+
+/// The disk each slab path was opened from, as the engine holds it (#314).
     type OpenedDisks = Vec<(String, Arc<dyn BlockDevice>)>;
 
     /// Keep the disks the slabs were opened from as the state's boot disks:
@@ -4472,7 +4506,7 @@ pub async fn run() -> anyhow::Result<()> {
         }
 
         println!("\nAttached {}. Ctrl+C to release.", attached.len());
-        tokio::signal::ctrl_c().await?;
+        StopSignal::new()?.wait().await?;
 
         for m in mounted.iter().rev() {
             let c = std::ffi::CString::new(m.as_str()).unwrap_or_default();
@@ -6005,6 +6039,10 @@ pub async fn run() -> anyhow::Result<()> {
         Err(crate::drive::handover::TakeOverError::StandDown(e)) => return Err(e),
         Err(e) => adopt_failed(&e.to_string(), &dev_ids),
     };
+    // From here on a SIGTERM (a supervisor's stop, or the next adopt-ublk
+    // standing this one down) is an orderly stop, not the default action
+    // (#144).
+    let mut stop = StopSignal::new()?;
     let slab_paths = slab_paths_given;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -6076,6 +6114,7 @@ pub async fn run() -> anyhow::Result<()> {
     // the block below, where the volume manager still exists.
     let mut state_store_final: Option<Arc<crate::state::StateStore>> = None;
     let mut data_dir_final: Option<String> = None;
+    let mut state_final: Option<Arc<AppState>> = None;
 
     // The management API, in this process, over the manager that owns the
     // slab. There is nowhere else to put it: one writer per volume means a
@@ -6292,6 +6331,7 @@ pub async fn run() -> anyhow::Result<()> {
             });
         }
 
+        state_final = Some(state.clone());
         tokio::spawn(async move {
             if let Err(e) = mgmt::start_management_server(state).await {
                 tracing::error!("management API error: {e}");
@@ -6300,21 +6340,62 @@ pub async fn run() -> anyhow::Result<()> {
         println!("  management API on {addr}");
     }
 
-    tokio::signal::ctrl_c().await?;
+    let sig = stop.wait().await?;
+    // An orderly stop (#144), within the ~10 s a supervisor (and a successor
+    // standing this one down) waits. The devices are released for recovery
+    // at once — never stopped: they outlive this process, and whoever comes
+    // next adopts them — while the state and the metadata are written, each
+    // bounded, side by side.
+    println!(
+        "adopt: {sig}: releasing {} ublk device(s) for recovery; final state capture and metadata",
+        threads.len()
+    );
+    tracing::info!("adopt: {sig} — stopping");
+    let _ = shutdown_tx.send(true);
+    let release = tokio::task::spawn_blocking(move || {
+        join_ublk_threads(threads, std::time::Duration::from_secs(10))
+    });
     // Once more on the way down: a node asked to stop should not lose the last
     // thing it was told.
-    if let (Some(store), Some(dir)) = (state_store_final.clone(), data_dir_final.as_deref()) {
-        match store.capture_from(std::path::Path::new(dir)).await {
-            Ok(n) if n > 0 => tracing::info!("captured {n} state file(s) before stopping"),
-            Ok(_) => {}
-            Err(e) => tracing::error!("capturing state before stopping: {e}"),
+    let capture = async {
+        if let (Some(store), Some(dir)) = (state_store_final.clone(), data_dir_final.as_deref()) {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                store.capture_from(std::path::Path::new(dir)),
+            )
+            .await
+            {
+                Ok(Ok(n)) => {
+                    println!("adopt: final state capture: {n} file(s) written");
+                    tracing::info!("captured {n} state file(s) before stopping");
+                }
+                Ok(Err(e)) => tracing::error!("capturing state before stopping: {e}"),
+                Err(_) => tracing::error!("capturing state before stopping: not done within 10s"),
+            }
         }
-    }
-    let _ = shutdown_tx.send(true);
-    let stuck = join_ublk_threads(threads, std::time::Duration::from_secs(10));
+    };
+    let persist = async {
+        if let Some(state) = state_final.as_ref() {
+            let flushed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let vm = state.volume_manager.lock().await;
+                vm.persist().await;
+            })
+            .await;
+            match flushed {
+                Ok(()) => tracing::info!("volume metadata flushed"),
+                Err(_) => tracing::warn!(
+                    "volume metadata not flushed within 10s — something still holds the manager. \
+                     Each slab's own copy stands, which is what adoption reads."
+                ),
+            }
+        }
+    };
+    let ((), (), stuck) = tokio::join!(capture, persist, release);
+    let stuck = stuck.unwrap_or(0);
     if stuck > 0 {
         eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
     }
+    println!("adopt: stopped");
     Ok(())
 }
 

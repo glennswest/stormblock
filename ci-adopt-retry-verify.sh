@@ -18,6 +18,11 @@
 #   refused    adopt-ublk told to read a slab on /dev/ublkb0: refused before
 #              the stand-down, and the server it would have replaced still
 #              serves
+#   sigterm-handover  (#144) the adopter the next one stands down gets
+#              SIGTERM and stops in order (exit 0); the next one serves
+#   sigterm-capture   (#144) a file written to the engine's state dir just
+#              before SIGTERM is in the next adopter's: only the final
+#              state capture can have put it there
 #
 # Needs: cargo, qemu-system-x86_64, /boot/vmlinuz-$(uname -r) and its
 # ublk_drv module, a static busybox and curl. Run on dev through sc-build:
@@ -88,7 +93,7 @@ log() { sed "s/^/LOG $1: /" "$2" | tail -${3:-12}; }
 # Running, not a zombie: this shell is PID 1 and reaps only what it waits for.
 alive() { [ -r /proc/$1/stat ] && ! grep -q '^[0-9]* ([^)]*) Z' /proc/$1/stat; }
 
-( sleep ${WATCHDOG:-240}
+( sleep ${WATCHDOG:-360}
   echo "WATCHDOG fired"
   for l in /run/*.log; do log "${l##*/}" "$l" 15; done
   ps | sed 's/^/PS /'
@@ -118,6 +123,11 @@ dev=$(api -X POST http://127.0.0.1:9091/api/v1/volumes/$id/attach -d '{"transpor
 dd if=/dev/urandom of=/tmp/pat bs=1M count=4 2>/dev/null
 dd if=/tmp/pat of=$dev bs=1M count=4 oflag=direct 2>/dev/null
 api -X DELETE http://127.0.0.1:9091/api/v1/volumes/$id/attach >/dev/null
+# The engine's own state volume (#144): an ext4 blank, cloned under its name.
+api -X POST http://127.0.0.1:9091/api/v1/fstemplates -d '{"name":"stateblank","size":"16M"}' >/dev/null \
+    || { r setup "FAIL (state blank)"; log daemon /run/daemon.log; poweroff -f; }
+api -X POST http://127.0.0.1:9091/api/v1/volumes -d '{"name":"stormblock-state","from_template":"stateblank"}' >/dev/null \
+    || { r setup "FAIL (state volume)"; log daemon /run/daemon.log; poweroff -f; }
 kill -TERM $d; wait $d
 echo "GUEST volume root ($id) written; daemon stopped"
 
@@ -201,7 +211,42 @@ else
 fi
 grep -h "is on ublk device" /run/adopt-d.log | head -1 | sed 's/^/GUEST refused: /'
 
-kill -TERM $c 2>/dev/null
+# 7. sigterm-handover (#144): the adopter stood down by the next one gets
+#    SIGTERM and stops in order (exit 0, devices released, not deleted); the
+#    next one serves the same bytes.
+stormblock adopt-ublk --api 127.0.0.1:9095 --data-dir /run/eng1 > /run/adopt-e.log 2>&1 &
+e=$!
+wait $c; crc=$?
+for i in $(seq 1 200); do grep -q "Adopted" /run/adopt-e.log && break; alive $e || break; sleep 0.1; done
+for i in $(seq 1 100); do curl -s -m 2 http://127.0.0.1:9095/api/v1/health >/dev/null && break; sleep 0.2; done
+dd if=/dev/ublkb0 of=/tmp/re bs=1M count=4 iflag=direct 2>/dev/null
+if [ "$crc" = 0 ] && grep -q "adopt: SIGTERM" /run/adopt-c.log && grep -q "adopt: stopped" /run/adopt-c.log \
+   && alive $e && cmp -s /tmp/pat /tmp/re; then
+    r sigterm-handover PASS
+else
+    r sigterm-handover "FAIL (old adopter exit $crc)"; log adopt-c /run/adopt-c.log 10; log adopt-e /run/adopt-e.log 10
+fi
+
+# 8. sigterm-capture (#144): what the engine wrote just before a SIGTERM is
+#    in its state volume for the next one — only the final capture puts it
+#    there (the periodic one runs every 10 s).
+echo "written at $(cut -d' ' -f1 /proc/uptime)" > /run/eng1/marker-144
+kill -TERM $e
+wait $e; erc=$?
+stormblock adopt-ublk --api 127.0.0.1:9096 --data-dir /run/eng2 > /run/adopt-f.log 2>&1 &
+f=$!
+for i in $(seq 1 200); do grep -q "Adopted" /run/adopt-f.log && break; alive $f || break; sleep 0.1; done
+dd if=/dev/ublkb0 of=/tmp/rf bs=1M count=4 iflag=direct 2>/dev/null
+grep -h "final state capture" /run/adopt-e.log | sed 's/^/GUEST sigterm: /'
+if [ "$erc" = 0 ] && cmp -s /run/eng1/marker-144 /run/eng2/marker-144 && [ -b /dev/ublkb0 ] \
+   && alive $f && cmp -s /tmp/pat /tmp/rf; then
+    r sigterm-capture PASS
+else
+    r sigterm-capture "FAIL (exit $erc, marker $([ -e /run/eng2/marker-144 ] && echo restored || echo missing))"
+    log adopt-e /run/adopt-e.log 15; log adopt-f /run/adopt-f.log 15
+fi
+
+kill -TERM $f 2>/dev/null; wait $f
 echo "GUEST done"
 poweroff -f
 EOF
@@ -217,7 +262,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -drive file="$W/a.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG|PS|WATCHDOG)|panick'
 
-for m in incumbent-serves retry give-up rerun refused; do
+for m in incumbent-serves retry give-up rerun refused sigterm-handover sigterm-capture; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi

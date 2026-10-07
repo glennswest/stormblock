@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #144: `adopt-ublk` (every node's engine) stops in order on SIGTERM. It waited for SIGINT only, so the SIGTERM a supervisor sends (stormpump on shutdown), and the one the next `adopt-ublk` sends to stand it down, killed it by the default action. It skipped the final state capture, losing up to 10 s of engine state on every stop, and never tore its ublk threads down.
+  - **On SIGINT or SIGTERM:** the devices are released for recovery at once (never stopped: they outlive the process and the next adopter takes them). The final state capture and a metadata persist run side by side, each bounded to 10 s, so a stop stays within ~10 s.
+  - **Same fix elsewhere:** `boot-iscsi` and the volume attach command waited for SIGINT only too; they now use the same `StopSignal`.
+  - **Tests:** `ci-adopt-retry-verify.sh` gains two steps on a real kernel's ublk:
+    - an adopter stood down by the next one exits 0 after "adopt: SIGTERM", and the next one serves the same bytes;
+    - a file written to the engine's state dir just before SIGTERM is in the next adopter's restored state dir, which only the final capture can have done.
 - **fix:** #232: `/v1` no longer reports a plaintext volume as encrypted. `POST /v1/volumes {"encrypted": true}` was stored and returned `encrypted: true`, and nothing in the engine encrypts. A StorageClass asking for encryption at rest was told it had it.
   - **Refused:** `encrypted: true` now answers **422** `{code: "unsupported"}` with a message naming #74, and nothing is created. The check comes before the name-idempotency check, so an existing plaintext volume of that name is never handed back. stormblock-csi's client maps 422 to InvalidArgument, so `CreateVolume` fails with that message.
   - **Reported false:** every volume reports `encrypted: false`. One an earlier engine recorded as encrypted reads back false, with a warning naming it, and the next persist writes that back.

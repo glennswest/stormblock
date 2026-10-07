@@ -172,6 +172,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### adopt-ublk stops in order on SIGTERM (2026-10-07, #144, P1) — IN PROGRESS
+
+It waited for SIGINT only; stormpump's stop and a successor's stand-down are
+SIGTERM, so it died by the default action: no final state capture (up to
+10 s lost), no ublk teardown. Adopted devices are recoverable, so an orderly
+stop releases them (never STOP/DEL) and a handover is unchanged.
+- [x] `StopSignal` (SIGINT | SIGTERM), registered once the take-over
+      succeeded; on a stop: release the devices, final capture and a bounded
+      metadata persist side by side (≤ ~10 s); boot-iscsi and the attach
+      command use it too
+- [ ] `ci-adopt-retry-verify.sh` +2 (handover by SIGTERM exits 0 and the
+      next serves; a file written just before SIGTERM survives into the next
+      adopter); README, CHANGELOG
+
 ### `installed` from the first boot off the local disk (2026-10-07, #220, P1) — WAITING ON THE OWNER
 
 Owner on #148: the install is proven by the host booting from its own disk;
