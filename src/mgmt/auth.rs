@@ -430,7 +430,10 @@ pub async fn require_token(
     };
     let class = crate::serve::api::classify(&method, &path, req.uri().query());
     let is_admin = presented.is_some() && presented.as_deref() == auth.admin_token.as_deref();
-    let is_node = presented.as_deref() == Some(api_token);
+    // A client certificate the node CA verified (#203) is the node token's
+    // tier: ordinary verbs, not destructive ones.
+    let cert = req.extensions().get::<super::tls::ClientCert>().cloned();
+    let is_node = presented.as_deref() == Some(api_token) || cert.is_some();
     let destructive = match class {
         Class::Public => return next.run(req).await,
         Class::Ordinary => false,
@@ -476,11 +479,17 @@ pub async fn require_token(
         tracing::warn!("refused {} {}: {why}", rec.method, rec.path);
         refused(&rec.path, code, &why)
     };
+    let node_who = match (&cert, presented.as_deref() == Some(api_token)) {
+        (_, true) => "node-token".to_string(),
+        (Some(c), false) => format!("client-cert:{}", c.fingerprint),
+        (None, false) => String::new(),
+    };
+    let other_bearer = presented.is_some() && !is_admin && presented.as_deref() != Some(api_token);
     if is_admin {
         rec.who = "admin-token".into();
         rec.decision = "allowed".into();
-    } else if is_node {
-        rec.who = "node-token".into();
+    } else if is_node && !other_bearer {
+        rec.who = node_who;
         if !auth.audit_only {
             return refuse(rec, StatusCode::UNAUTHORIZED, crate::serve::api::NEEDS_ADMIN.to_string());
         }

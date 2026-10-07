@@ -327,6 +327,13 @@ pub struct ManagementConfig {
     pub listen_addr: String,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// The node CA (PEM) a client certificate is verified against (#203).
+    /// With it, the HTTPS listener asks every client for a certificate; one
+    /// the CA issued is a credential at the node token's tier. A client
+    /// without one still connects (a token, a health probe). Needs
+    /// `tls_cert`/`tls_key`. The pair and this CA are re-read when their
+    /// files change.
+    pub tls_client_ca: Option<String>,
     pub data_dir: Option<String>,
     /// Bearer token required on **every** management request
     /// (`Authorization: Bearer <token>`), except the public probes listed in
@@ -452,6 +459,7 @@ impl Default for ManagementConfig {
             listen_addr: "0.0.0.0:9090".to_string(),
             tls_cert: None,
             tls_key: None,
+            tls_client_ca: None,
             data_dir: None,
             api_token: None,
             admin_token: None,
@@ -918,6 +926,14 @@ impl StormBlockConfig {
             (Some(_), None) => anyhow::bail!("tls_cert requires tls_key to also be set"),
             (None, Some(_)) => anyhow::bail!("tls_key requires tls_cert to also be set"),
             (None, None) => {} // No TLS, fine
+        }
+        if let Some(ca) = &self.management.tls_client_ca {
+            if self.management.tls_cert.is_none() {
+                anyhow::bail!("tls_client_ca needs tls_cert and tls_key: client certificates are asked for over TLS only");
+            }
+            if !Path::new(ca).exists() {
+                anyhow::bail!("TLS client CA file not found: {ca}");
+            }
         }
 
         // Check for port conflicts

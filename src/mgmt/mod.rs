@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod discovery;
 pub mod ublk_export;
 pub mod debug;
+pub mod tls;
 pub mod raid_sets;
 #[cfg(feature = "nvmeof")]
 pub mod nvme_hosts;
@@ -34,8 +35,6 @@ use crate::volume::{VolumeManager, GlobalExtentMap};
 
 use config::StormBlockConfig;
 
-use rustls::ServerConfig;
-use tokio_rustls::TlsAcceptor;
 
 /// Information about an opened drive, stored in AppState.
 pub struct DriveInfo {
@@ -537,31 +536,48 @@ impl AppState {
     }
 }
 
-/// Load TLS configuration from PEM cert and key files.
-fn load_tls_config(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConfig> {
-    let cert_file = std::fs::File::open(cert_path)
-        .map_err(|e| anyhow::anyhow!("failed to open TLS cert '{}': {e}", cert_path))?;
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| anyhow::anyhow!("failed to open TLS key '{}': {e}", key_path))?;
-
-    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
-        .collect::<Result<_, _>>()
-        .map_err(|e| anyhow::anyhow!("failed to parse TLS certs: {e}"))?;
-    if certs.is_empty() {
-        anyhow::bail!("no certificates found in {cert_path}");
+/// Serve `router` over TLS on `listener` (#203). Each connection takes the
+/// reloader's current acceptor; a client certificate the node CA verified is
+/// put on every request of that connection as [`tls::ClientCert`].
+pub async fn serve_tls(
+    listener: TcpListener,
+    router: axum::Router,
+    reloader: Arc<tls::Reloader>,
+) -> anyhow::Result<()> {
+    loop {
+        let (tcp_stream, _peer) = listener.accept().await?;
+        let acceptor = reloader.acceptor();
+        let app = router.clone();
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(tcp_stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("TLS handshake failed: {e}");
+                    return;
+                }
+            };
+            let cert = tls::client_cert(&tls_stream);
+            let io = hyper_util::rt::TokioIo::new(tls_stream);
+            let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let app = app.clone();
+                let cert = cert.clone();
+                async move {
+                    use tower::Service;
+                    let mut svc = app;
+                    let mut req = req.map(axum::body::Body::new);
+                    // Never from the client: only what the handshake proved.
+                    req.extensions_mut().remove::<tls::ClientCert>();
+                    if let Some(c) = cert {
+                        req.extensions_mut().insert(c);
+                    }
+                    Ok::<_, std::convert::Infallible>(svc.call(req).await.unwrap())
+                }
+            });
+            let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .serve_connection(io, service)
+                .await;
+        });
     }
-
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
-        .map_err(|e| anyhow::anyhow!("failed to parse TLS key: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {key_path}"))?;
-
-    crate::http::ensure_crypto_provider();
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| anyhow::anyhow!("invalid TLS configuration: {e}"))?;
-
-    Ok(config)
 }
 
 /// Start the management REST API server.
@@ -635,43 +651,24 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
         &state.config.management.tls_cert,
         &state.config.management.tls_key,
     ) {
-        let tls_config = load_tls_config(cert_path, key_path)?;
-        let acceptor = TlsAcceptor::from(Arc::new(tls_config));
-        tracing::info!("Management API listening on {listen_addr} (HTTPS)");
+        let reloader = Arc::new(tls::Reloader::new(tls::TlsFiles {
+            cert: cert_path.into(),
+            key: key_path.into(),
+            client_ca: state.config.management.tls_client_ca.as_ref().map(Into::into),
+        })?);
+        match &state.config.management.tls_client_ca {
+            Some(ca) => tracing::info!(
+                "Management API listening on {listen_addr} (HTTPS; a client certificate from {ca} is a credential)"
+            ),
+            None => tracing::info!("Management API listening on {listen_addr} (HTTPS)"),
+        }
         // Readiness asks whether this is listening, and only this code knows.
         // Set through the serving context when there is one — a node that is
         // not serving /serve/v1 has nobody to tell.
         if let Some(ctx) = state.serve.get() {
             ctx.status.set(&ctx.status.mgmt_listening, true);
         }
-
-        loop {
-            let (tcp_stream, _peer) = listener.accept().await?;
-            let acceptor = acceptor.clone();
-            let app = router.clone();
-            tokio::spawn(async move {
-                let tls_stream = match acceptor.accept(tcp_stream).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::debug!("TLS handshake failed: {e}");
-                        return;
-                    }
-                };
-                let io = hyper_util::rt::TokioIo::new(tls_stream);
-                let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                    let app = app.clone();
-                    async move {
-                        use tower::Service;
-                        let mut svc = app;
-                        let req = req.map(axum::body::Body::new);
-                        Ok::<_, std::convert::Infallible>(svc.call(req).await.unwrap())
-                    }
-                });
-                let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection(io, service)
-                    .await;
-            });
-        }
+        serve_tls(listener, router, reloader).await?;
     } else {
         tracing::info!("Management API listening on {listen_addr} (HTTP)");
         // Readiness asks whether this is listening, and only this code knows.
