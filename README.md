@@ -342,6 +342,7 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 | `discovery_disabled` | `false` | no UDP multicast beacon (239.255.42.99:7447) |
 | `beacon_secs`, `peer_stale_secs` | `5`, `30` | discovery timing |
 | `ublk_transport` | `true` | offer ublk for a local attach; per request, `"transport": "nvme_tcp"` asks for the network instead |
+| `nvme_cntlid_range` | `[1, 65519]` | NVMe controller IDs every target of this node hands out; nodes that may serve one volume to a multipath host need ranges that do not overlap (#83, `docs/migration.md`) |
 
 **`[[drives]]`** `path` — a device, partition, file or `nvme-tcp://`/`iscsi://` URI;
 or `kind = "emulated"`, `size = "1P"`, `backing = "<dir>"` (optional), `name`
@@ -503,7 +504,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | surface | for |
 |---|---|
 | `/api/v1/drives`, `/arrays`, `/shelves`, `/spares`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt), RAID sets (create, `assemble`, members `{slot}/fail` and `/replace`, `scrub`, `rebuild` rate), shelf layout, hot spares, slabs and the pool (`durability`, `{id}/slots`, `{id}/upgrade` to metadata format 2, #158), GC, rebuild queue |
-| `/api/v1/volumes` | volumes: create, clone, seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
+| `/api/v1/volumes` | volumes: create (`id` to take a given one, #83), clone, `ana` (the NVMe ANA state here, #83), seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach, fsck, files, cidata, import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route |
 | `/api/v1/erasures` | secure delete (#286): the node's level, slots waiting, volumes being erased, and the audit record of every finished erase (`erasures.json`). `DELETE /api/v1/volumes/{id}?erase=once\|dod3\|dod7` asks for more than the default |
 | `/api/v1/forge` | this node as its site's forge (#272): `PUT` the `[nvmeof]` settings (`listen_addr`, `nqn`, `allowed_hosts`, `allow_any_host`, `require_dhchap`, `boothost_host_nqn`; admin token) starts the shared NVMe/TCP target live and keeps them in `forge.json`, served again at every start; `DELETE` (admin) stops accepting and keeps the node off (`forge.json` = `{"enabled": false}`), so its default does not turn it back on at the next start (#287); `GET` says `state` (`on`/`off`) and `from` (`default`, `persisted` or `config`), plus `source` (`default`, `api` or `config`). On a node (`adopt-ublk`) forge mode is on by default; on the daemon it is off unless kept. A target the command line or `--config` set up answers `409` |
 | `/api/v1/boothost` | boot hosts by DNS name: list (`?unnamed=1`: booted the default, not named yet, #200), find by name or alias, `PUT {aliases}`, `POST …/rename` (#199); `PUT/DELETE …/tpm` (admin) and `GET …/attestation` (#216) |
@@ -1085,6 +1086,25 @@ curl -X POST http://node:9090/v1/volumes/<clone-id>/reset
 Reset is refused while the volume is attached, since its contents cannot
 change under a live host.
 
+### A disk served from two nodes: ANA and the epoch (#83)
+
+A volume served from two nodes on one subsystem NQN, at one NSID and under
+one id (`POST /api/v1/volumes {"id": …}` on the second node) is one multipath
+namespace to a Linux host. Each node says how to use its path with
+`PUT /api/v1/volumes/{id}/ana {"state": "optimized" | "non_optimized" |
+"inaccessible" | "persistent_loss" | "change"}`. Connected hosts get an ANA
+change notice and move their I/O, with no unmount. I/O on a path that does
+not serve fails with the path status, and the host retries elsewhere. The
+state is kept in `ana.json` across a restart. Give the nodes disjoint
+`[management] nvme_cntlid_range`s.
+
+`/v1` attaches carry the volume's `epoch`; a stale one, or none once the
+volume has been fenced, is refused with 412. `POST /v1/volumes/{id}/fence`
+takes every attachment below the new epoch away before it answers: the
+namespace leaves the host's subsystem, and a write already waiting for its
+data is refused. Details, and what was checked with the Linux kernel:
+`docs/migration.md`.
+
 ### Multiple connections per iSCSI session (MC/S)
 
 An iSCSI session can carry several TCP connections, so an iSCSI-only consumer
@@ -1637,13 +1657,15 @@ What earlier docs described and the code does not do, each with its issue:
   (#240).
 - **`/v1` `encrypted: true`** is stored and reported; nothing is encrypted
   (#232).
-- **`/v1` replication (`prestage`, `fence`/`promote`, `dual-attach`)** is
+- **`/v1` replication (`prestage`, `promote`, `dual-attach`)** is
   control-plane state only. `prestage` records `Resyncing{0%}`, and nothing
   copies to the peer, so a slave never reaches `in_sync`
   (stormblock-csi#29). By the owner's decision (#179, b), cross-node mirroring
   is stormstorage's RAID heads': the head builds the mirror over NVMe/TCP legs
   from the engines' dedicated arrays, and keeps the slave in sync (#5, #7 →
-  stormstorage#33). The engine's part is epoch fencing on leg attaches (#6).
+  stormstorage#33). The engine's part is built: an attach carries the epoch,
+  and a `fence` takes the fenced attachments' data path away before it
+  answers (#83, #6; `docs/migration.md`).
 - **Per-volume 512-byte LBA** (#228) is built and verified, but no release uses
   it yet: whether a release is one disk at 512 or two volumes is the owner's
   call (#233), and whether to keep the capability at all is #248.
@@ -1658,6 +1680,7 @@ What earlier docs described and the code does not do, each with its issue:
 |---|---|
 | `docs/auth.md` | who may call a node's API; the boot claim; host goldens |
 | `docs/nvme-access.md` | who may connect over NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP, goldens write-protected (#210) |
+| `docs/migration.md` | moving a disk between nodes: NVMe ANA (states, notices, multipath across nodes) and the `/v1` epoch enforced at the target (#83, #6) |
 | `docs/erase.md` | secure delete: freed slots overwritten before reuse, levels, the audit record, what it does not do on flash, crypto-erase (design) (#286) |
 | `docs/durability.md` | what survives a power cut: slot entries after their data, frees made durable before reuse, recovery from stale records, the handover order, a flow-over cut short |
 | `docs/redundancy.md` | per-volume redundancy, failure domains, health, resync, automatic rebuild, drain, whole-disk goldens and import |

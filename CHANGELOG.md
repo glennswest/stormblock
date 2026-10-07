@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **feat:** #83: moving a VM disk between nodes, on the engine's side (`docs/migration.md`).
+  - **NVMe ANA:** Identify reports ANA (CMIC, OAES bit 11, ANATT, ANACAP, five groups by state, NN = MNAN = 1024; NMIC shared and ANAGRPID per namespace). Log page 0x0C is served, and a change sends an ANA change notice to every connected host of every subsystem that serves the volume. I/O on an `inaccessible`, `persistent_loss` or `change` path fails with the path status (SCT 3), which a multipath host fails over on.
+  - **API:** `GET/PUT /api/v1/volumes/{id}/ana {state}` sets and reads the state. It is kept in `<data_dir>/ana.json`, written before it is applied.
+  - **Controller IDs:** `[management] nvme_cntlid_range` gives a node's targets disjoint controller IDs, so a host can reach one subsystem through two nodes. `POST /api/v1/volumes` takes an `id`, so a volume served from two nodes carries one NGUID.
+  - **Tests:** `integration_ana_epoch`; `ci-ana-verify.sh` has a QEMU guest kernel follow a move between two engines with native multipath.
+- **feat (BREAKING for callers that leave it out after a fence):** #83 item 2 / #6, the contract set on stormstorage#33.
+  - **Attach:** `/v1` attach takes `epoch`. An epoch other than the volume's, or no epoch once the volume has been fenced, gets `412 stale_epoch`. Attachments are recorded on the volume with their epoch (`attachments` on `GET /v1/volumes/{id}`).
+  - **Fence:** `fence` takes away every attachment below the new epoch before it answers (`revoked`): the namespace leaves the host's subsystem (or the shared one), or the ublk device goes. An attach that raced a fence undoes itself and answers 412. A dual-attach `commit` keeps the target's attachment, and `abort` revokes it.
+  - **Namespace removal** now returns only once nothing in flight can still land: a command waiting for its R2T data is refused, and one at the device is waited for.
 - **fix:** #281 (rustkube-node#140): a `ready` fstemplate whose sealed volume is gone is no longer `ready`. Such a store had outlived its volume: a delete cut short, a reclaim, a store restored onto a slab seeded again.
   - **At startup** (`template::verify_ready`, after the formats a previous run left): a template whose volume is there but unsealed is sealed again. One whose volume is missing, or was never recorded, or will not seal, is marked `broken` (`FsTemplate.broken`, persisted).
   - **The listing** reports `state: broken` and the reason, and it looks for the volume each time.
