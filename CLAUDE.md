@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Delete with `scrub=used` (2026-10-07, #313, P1) — IN PROGRESS
+### Delete with `scrub=used` (2026-10-07, #313, P1) — DONE
 
 Owner (2026-10-06): data removal is "overwrite only what's used, once",
 everywhere (reset #312, registry cleanup stormblock-registry#70, user
@@ -180,14 +180,17 @@ deletes). Already true since #286: a delete marks every slot whose last
 reference goes `Erasing`, the eraser overwrites it once (the node's default)
 and discards it on flash, then frees it; copy-on-write aware; every local
 delete path. Missing: the word, and the report.
-- [ ] `?scrub=used` on `DELETE /api/v1/volumes/{id}` and
+- [x] `?scrub=used` on `DELETE /api/v1/volumes/{id}` and
       `/serve/v1/volumes/{id}`: at least `once`; answers 200 `{volume,
       scrub: {level, slots, bytes}}` (the slots this delete queued, counted
       at retire under the registry lock). Without it, 204 as before.
       Completion: the volume's record in `GET /api/v1/erasures`
-- [ ] tests (a clone sharing its golden's slots: only its own scrubbed; the
+- [x] tests (a clone sharing its golden's slots: only its own scrubbed; the
       golden's delete then scrubs the rest; bytes overwritten on the device);
       docs/erase.md, README, CHANGELOG; tell #312 and registry#70
+- Verified on a build VM at 643cdef: the new HTTP test and every #286 erase
+  test; full nextest 987/987. `/serve/v1`'s `scrub` is the same call, not
+  driven over HTTP by a test. Told #312 and stormblock-registry#70
 
 ### A flush to a failed mirror leg degrades it (2026-10-07, #308, P1) — DONE
 
