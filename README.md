@@ -354,6 +354,7 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 |---|---|---|
 | `listen_addr` | `0.0.0.0:9090` | API address (an IP, not a hostname) |
 | `tls_cert`, `tls_key` | — | HTTPS; both or neither |
+| `tls_client_ca` | — | the node CA: a client certificate it issued is a credential at the node token's tier (#203, [docs/auth.md](docs/auth.md#tls)); asked for, not required; needs `tls_cert`/`tls_key`. The pair and the CA are re-read when renewed |
 | `data_dir` | — | durable state (see *Files* below); also the default serve directory and token-file location |
 | `api_token` | — | bearer token for every request but the probes and the boot claim |
 | `admin_token` | — | if set, destructive verbs need this one instead |

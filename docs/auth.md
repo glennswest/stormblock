@@ -376,13 +376,43 @@ served to that machine's NQNs alone. See [nvme-access.md](nvme-access.md)
 
 The token is a bearer credential: on plain HTTP it is readable by anything on
 the path, and replayable. `management.tls_cert` and `management.tls_key` turn
-the same listener into HTTPS (rustls), and a node that is reachable from
-anywhere but its own machine wants both.
+the same listener into HTTPS (rustls). `adopt-ublk` does this too, from its
+`--config`. A node that is reachable from anywhere but its own machine wants
+both. On stormcos these are the node's stormcert serving pair (its name, its
+address, 127.0.0.1) from tier-0 (stormcos#81's rule: every API on a node is
+TLS from a stormcert pair).
+
+**A client certificate is a credential (#203).** With
+`management.tls_client_ca` (the node CA, PEM), the listener asks every client
+for a certificate and verifies it against that CA:
+
+| the client presents | result |
+|---|---|
+| a certificate the node CA issued | the **node token's tier**: every ordinary verb and attestation reads, with no token on the wire. A destructive verb still needs the admin token or a reviewed Kubernetes bearer (#274); with `admin_gate = audit` it is allowed and recorded. The audit log names it `client-cert:sha256:<16 hex>`. |
+| a certificate from any other CA | refused in the handshake; no HTTP answer at all |
+| no certificate | as before: the token, or a public probe (`/api/v1/health`) |
+
+A certificate is asked for, never required, so a kubelet probe and a caller
+that has only the token still connect. A caller holding both a certificate and
+a bearer is judged by the bearer when the bearer is the admin token or a
+Kubernetes token (a destructive verb is reviewed as that bearer), and by the
+certificate otherwise.
+
+**Renewal.** stormcert renews the pair. The listener looks at the pair's and
+the CA's modification times at most every 5 s, as connections arrive. A set
+that loads is used from the next connection on, with no restart. A set that
+does not load (a renewal half-written) is logged and the previous one is kept.
+
+Not done here: callers switching to `https://` with the node CA and a
+client pair is theirs, and the pair and settings in the node's config are
+stormcos's (stormcos#81).
 
 ## Where it lives in the code
 
 * `src/mgmt/auth.rs` — resolution (config → environment → token file → mint),
   the middleware the whole router is wrapped in, and the boot line.
+* `src/mgmt/tls.rs` — the TLS pair, the node CA a client certificate is
+  verified against, and the reload when they are renewed (#203).
 * `src/serve/api.rs` — `decide`, `is_public`, `is_destructive`: the check
   itself, in one place, so `/api/v1`, `/v1`, `/serve/v1` and the kube surface
   cannot answer differently.
