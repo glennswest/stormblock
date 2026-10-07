@@ -172,6 +172,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Console: WARN and the stage lines only; the record in a file (2026-10-07, #243, P1) — IN PROGRESS
+
+Owner (server8's VGA): "the info messages we need to turn off to the
+console. Overload". The engine's stderr reaches every console: in the
+initramfs through `/init`'s follower, on the node through stormpump's echo.
+- [ ] node modes (`boot-local`, `adopt-ublk`, `boot-iscsi`): the record
+      (INFO, or `RUST_LOG`, or `stormblock.log=` on the kernel line) goes to
+      `/run/stormblock/stormblock.log` (`STORMBLOCK_LOG_FILE`; `/run` moves
+      into the real root, so one file for the boot); stderr, which is the
+      console, WARN (`STORMBLOCK_CONSOLE_LOG`, `stormblock.console_log=`);
+      the stage lines are println! and still show. Other commands unchanged
+- [ ] `unauthorized …` warns: one per minute, then a count
+- [ ] `/init`'s engine report names the record; tests; README, CHANGELOG
+
 ### A stormupdate reboot or rollback reads as the same release (2026-10-07, #265, P1) — WAITS ON stormupdate#3
 
 Engine side done in #122 (staged goldens keep the release's ids; N's set
