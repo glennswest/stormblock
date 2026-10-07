@@ -1703,8 +1703,9 @@ What earlier docs described and the code does not do, each with its issue:
 - **The slot fence (#239)** covers thin, mirrored and copy-on-write I/O; parity
   stripes and the StormFS chunk/versioned paths are not fenced against a move
   (#240).
-- **`/v1` `encrypted: true`** is stored and reported; nothing is encrypted
-  (#232).
+- **Encryption at rest** is not built (#74). `/v1` refuses `encrypted:
+  true` with 422 `unsupported` and reports every volume `encrypted: false`
+  (#232: it used to be stored and reported while nothing was encrypted).
 - **`/v1` replication (`prestage`, `promote`, `dual-attach`)** is
   control-plane state only. `prestage` records `Resyncing{0%}`, and nothing
   copies to the peer, so a slave never reaches `in_sync`

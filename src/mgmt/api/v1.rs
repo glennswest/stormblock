@@ -281,6 +281,9 @@ pub enum V1Error {
     StaleEpoch(Epoch),
     OutOfSpace(String),
     BadRequest(String),
+    /// A request this engine cannot honour as asked (#232): 422
+    /// `unsupported`, never a success that pretends.
+    Unsupported(String),
     /// Kept because it names this contract's 401 body; the check that raises
     /// it is `mgmt::auth::require_token`, which builds the same envelope for
     /// any `/v1` path.
@@ -311,6 +314,7 @@ impl IntoResponse for V1Error {
             ),
             V1Error::OutOfSpace(m) => (StatusCode::INSUFFICIENT_STORAGE, "out_of_space", m, None),
             V1Error::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m, None),
+            V1Error::Unsupported(m) => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported", m, None),
             V1Error::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
@@ -324,6 +328,11 @@ impl IntoResponse for V1Error {
 }
 
 type V1Result<T> = Result<Json<T>, V1Error>;
+
+/// Why `encrypted: true` is refused (#232).
+pub const ENCRYPTION_UNSUPPORTED: &str = "encrypted: true is not supported: this engine does not \
+    encrypt volumes at rest (stormblock#74 is the design, not built; #232). Create the volume \
+    without encryption, or use a storage class that does not ask for it";
 
 // ---------------------------------------------------------------------------
 // State
@@ -486,6 +495,19 @@ impl V1State {
         state.local_topology = config.management.topology.clone();
         state.persist_path = persist_path;
         state.mark_persisted();
+        // A volume an earlier engine recorded `encrypted: true` never was
+        // (#232). Report what is true; the next persist writes it back.
+        for rec in state.volumes.values_mut() {
+            if rec.vol.encrypted {
+                tracing::warn!(
+                    "v1 volume {} ({}) was recorded encrypted: true by an earlier engine; it holds \
+                     plaintext (nothing here encrypts, #232) and is reported encrypted: false",
+                    rec.vol.name,
+                    rec.vol.id
+                );
+                rec.vol.encrypted = false;
+            }
+        }
         state
     }
 
@@ -1136,6 +1158,13 @@ async fn create_volume(
     // check: a request naming a class that does not exist is malformed whether
     // or not a volume by that name is already here.
     validate_qos_class(req.qos_class.as_ref())?;
+    // Nothing in this engine encrypts (#232): a volume that said it was
+    // encrypted held plaintext. Refused until #74's design is built — before
+    // the idempotency check too, so an earlier volume of the name is never
+    // handed back as the answer to a request for encryption.
+    if req.encrypted {
+        return Err(V1Error::Unsupported(ENCRYPTION_UNSUPPORTED.to_string()));
+    }
 
     let mut v1 = state.v1.lock().await;
     v1.expire_windows(now_ms());
@@ -1288,7 +1317,8 @@ async fn create_volume(
         epoch: 1,
         replicas,
         health: VolumeHealth::Healthy,
-        encrypted: req.encrypted,
+        // Refused above when asked for (#232).
+        encrypted: false,
         qos_class: req.qos_class,
         bandwidth_class: req.bandwidth_class,
         attachments: Vec::new(),

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #232: `/v1` no longer reports a plaintext volume as encrypted. `POST /v1/volumes {"encrypted": true}` was stored and returned `encrypted: true`, and nothing in the engine encrypts. A StorageClass asking for encryption at rest was told it had it.
+  - **Refused:** `encrypted: true` now answers **422** `{code: "unsupported"}` with a message naming #74, and nothing is created. The check comes before the name-idempotency check, so an existing plaintext volume of that name is never handed back. stormblock-csi's client maps 422 to InvalidArgument, so `CreateVolume` fails with that message.
+  - **Reported false:** every volume reports `encrypted: false`. One an earlier engine recorded as encrypted reads back false, with a warning naming it, and the next persist writes that back.
+  - **Tests:** `integration_v1_api::v1_encrypted_true_is_refused_and_creates_nothing` and `v1_a_volume_recorded_encrypted_reads_back_false`.
 - **feat:** #203: a node-CA client certificate is a credential on the management API. `tls_cert`/`tls_key` already served :9090 over HTTPS; what was missing is the owner's other half (stormcos#81): clients authenticating with a certificate instead of sending a token.
   - **`[management] tls_client_ca`:** the HTTPS listener asks for a client certificate and verifies it against the node CA. It is asked for, not required, so token callers and probes still connect. A certificate from the node CA counts at the node token's tier: ordinary verbs and attestation reads. A destructive verb still needs the admin token or a reviewed Kubernetes bearer (#274). Such calls are audited as `client-cert:sha256:<16 hex>`. A certificate from another CA is refused in the handshake.
   - **Renewal:** the pair and the CA are re-read when their files change (checked at most every 5 s, as connections arrive). A set that does not load is logged and the previous one kept (`mgmt::tls::Reloader`).

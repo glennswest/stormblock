@@ -1058,3 +1058,71 @@ async fn v1_snapshot_of_a_remote_master_is_not_ready() {
 
     server.abort();
 }
+
+/// #232: nothing in the engine encrypts, so `encrypted: true` is refused —
+/// 422 `unsupported`, nothing created — rather than stored and reported on a
+/// volume that holds plaintext. Not even an existing volume of the name is
+/// handed back as the answer.
+#[tokio::test]
+async fn v1_encrypted_true_is_refused_and_creates_nothing() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state(&dir).await;
+    let (base, server) = start_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let mut req = create_req("secret", 16 * 1024 * 1024, 0);
+    req["encrypted"] = json!(true);
+    let (status, body) = post(&client, format!("{base}/v1/volumes"), req.clone()).await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], "unsupported", "{body}");
+    assert!(body["message"].as_str().unwrap().contains("does not encrypt"), "{body}");
+    let list: Value = client.get(format!("{base}/v1/volumes")).send().await.unwrap().json().await.unwrap();
+    assert!(!list.to_string().contains("secret"), "nothing created: {list}");
+    assert!(
+        state.volume_manager.lock().await.find_volume("secret").await.is_none(),
+        "no engine volume behind it"
+    );
+
+    // The same name without encryption is created, says false…
+    let (status, body) =
+        post(&client, format!("{base}/v1/volumes"), create_req("secret", 16 * 1024 * 1024, 0)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["encrypted"], false);
+    // …and asking for it encrypted again is still refused, not idempotently
+    // answered with the plaintext one.
+    let (status, body) = post(&client, format!("{base}/v1/volumes"), req).await;
+    assert_eq!(status, 422, "{body}");
+
+    // `encrypted: false` (what the contract's create fixture sends) works.
+    let mut plain = create_req("plain", 16 * 1024 * 1024, 0);
+    plain["encrypted"] = json!(false);
+    let (status, body) = post(&client, format!("{base}/v1/volumes"), plain).await;
+    assert_eq!(status, 200, "{body}");
+    server.abort();
+}
+
+/// A volume an earlier engine recorded `encrypted: true` is reported false
+/// after a restart (#232): it never was encrypted.
+#[tokio::test]
+async fn v1_a_volume_recorded_encrypted_reads_back_false() {
+    let dir = TempDir::new().unwrap();
+    let data = dir.path().join("engine");
+    std::fs::create_dir_all(&data).unwrap();
+    let mut config = StormBlockConfig::default();
+    config.management.node_name = Some("w1".to_string());
+    config.management.data_dir = Some(data.display().to_string());
+
+    // What an older engine left: the contract's volume, encrypted: true.
+    use stormblock::mgmt::api::v1::{V1State, Volume, VolumeRec};
+    let vol: Volume =
+        serde_json::from_str(include_str!("../../contract/volume.json")).expect("the contract's volume");
+    assert!(vol.encrypted, "the fixture says encrypted");
+    let id = vol.id.clone();
+    let mut old = V1State::default();
+    old.volumes.insert(id.clone(), VolumeRec { vol, local_id: None, source_local: None });
+    std::fs::write(data.join("v1_state.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+
+    let again = V1State::from_config(&config);
+    let v = &again.volumes.get(&id).expect("restored").vol;
+    assert!(!v.encrypted, "reported as it is: not encrypted");
+}

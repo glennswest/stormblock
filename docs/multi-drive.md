@@ -179,7 +179,8 @@ no CSI. CSI (stormblock-csi, `/v1`) exists only for third-party drivers.
 * stormblock-csi, for third-party use, reads `stormblock.io/qosClass`,
   `stormblock.io/bandwidthClass`, `stormblock.io/encrypted` and
   `stormblock.io/replicaSlaves`, and `/v1` volume create has no redundancy
-  field.
+  field. `encrypted: true` is refused (422 `unsupported`, #232): nothing
+  encrypts.
 * The engine already accepts `redundancy` on `POST /api/v1/volumes` and
   `POST /api/v1/fstemplates`, and **a clone inherits its golden's policy**.
 
