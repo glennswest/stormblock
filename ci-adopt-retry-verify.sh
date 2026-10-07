@@ -104,7 +104,8 @@ data_dir = "/run/sb"
 node_name = "ci-adopt"
 discovery_disabled = true
 EOT
-stormblock --config /run/sb.toml --data-dir /run/sb --no-iscsi > /run/daemon.log 2>&1 &
+# The node token may format a slab here (#274's gate, audit mode).
+STORMBLOCK_ADMIN_GATE=audit stormblock --config /run/sb.toml --data-dir /run/sb --no-iscsi > /run/daemon.log 2>&1 &
 d=$!
 for i in $(seq 1 100); do api http://127.0.0.1:9091/api/v1/health >/dev/null 2>&1 && break; sleep 0.2; done
 api -X POST http://127.0.0.1:9091/api/v1/slabs -d '{"device_path":"/dev/vda","role":"system"}' >/dev/null \
