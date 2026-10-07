@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A ready fstemplate whose sealed volume is gone (2026-10-06, #281, P1) — IN PROGRESS
+### A ready fstemplate whose sealed volume is gone (2026-10-06, #281, P1) — DONE (golden-stormblock-ae10dc337da8)
 
 rustkube-node#140: every claim of `pvc-ext4j-64m` failed (404 `volume … not
 found`, or 500 `has no sealed snapshot`) while the template listed `ready`.
@@ -185,8 +185,9 @@ found`, or 500 `has no sealed snapshot`) while the template listed `ready`.
 - [x] clone/claim check the volume first: 409 `fstemplate … is broken: … It
       is not sealed and cannot be cloned; delete it and mint it again` ("is
       not sealed" kept for rustkube-node e3ca68d's re-mint)
-- [ ] test `integration_fstemplates::a_ready_template_whose_volume_is_gone_…`
-      on dev; docs; rustkube-node told
+- [x] test `integration_fstemplates::a_ready_template_whose_volume_is_gone_…`
+      on dev; full nextest at 3af8e7c 945/945; README, CHANGELOG;
+      rustkube-node#140 told (match `is broken` / `state: broken`)
 
 ### Install keeps the data half: only the system half is re-laid (2026-10-06, #311, P0) — DONE (golden-stormblock-3fed70dce709, stormcos#353)
 
