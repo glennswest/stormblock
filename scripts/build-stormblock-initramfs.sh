@@ -2468,7 +2468,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                 guess) ;;
                 1)
                     echo "  INSTALL: a release $SLAB does not hold - booting the claimed image;"
-                    echo "  every slab on its disk, system and data, will be wiped and laid fresh (#261)"
+                    echo "  the system half of its disk is laid again, its data half kept (#311)"
                     # The disk, not the partition the cmdline named.
                     case "$SLAB" in
                     /dev/nvme*p[0-9]*) INSTALL_OVER="${SLAB%p[0-9]*}" ;;
@@ -2700,35 +2700,37 @@ if [ "$BOOT_MODE" = "local" ]; then
             echo "  an install was requested: the local disk is taken whatever it carries"
         fi
     fi
-    # Install = wipe; the same release = recovery (#261, owner 2026-10-02:
-    # "We should not be updating at boot time like that, it should be a wipe.
-    # An update is done from a running system, not a half-ass install.").
+    # An install lays the system half again and keeps the data half; the same
+    # release is a recovery (#311, owner 2026-10-06: "How can you wipe a
+    # production node data?" - superseding #261's install = wipe).
     #
     # This boot runs from the image it claimed, and a local drive may carry
     # this node's data slab. Which release that drive holds decides, with or
     # without a boot intent from the appliance:
     #
-    #   another release (`slab holds` exit 1), or the probe ruled the disk an
-    #       install (`INSTALL_OVER`): an INSTALL. Everything on the disk is
-    #       laid fresh - system slab and data slab - with `--local-disk-force`.
-    #       Nothing of the old release is kept or merged: an old data slab
-    #       lacks the new release's data volumes (stormcos#236, 11.68:
-    #       kubelet-data) and its records are another release's.
+    #   another release (`slab holds` exit 1), the probe ruled the disk an
+    #       install (`INSTALL_OVER`), or the appliance asked for an install:
+    #       an INSTALL. With a data slab on the disk, never `force`d:
+    #       `boot-local` lays the system half again and adopts the data half,
+    #       and the release's /etc/stormblock/data-volumes says what happens to
+    #       each data volume it names (keep, replace, migrate; #122). A
+    #       release that adds a data volume brings it (stormcos#236's
+    #       kubelet-data). With no data slab, the drive is laid fresh.
     #   the same release (0), or the same release cut short (3, a power cut
     #       during the install's flow-over, #258/#259): RECOVERY. The disk is
     #       kept, its data half untouched.
-    #   cannot say (2): neither. Wiping on a doubt loses a node's data, and
-    #       keeping would merge an unknown release with this one, so every
-    #       local drive is left alone this boot and it runs from the appliance.
+    #   cannot say (2): neither. Every local drive is left alone this boot
+    #       and it runs from the appliance.
     #
     # Updating a running node to a new release is stormupdate's (stormupdate#1):
     # it stages the new volumes and reboots, and that boot is a same-release
-    # boot. No release change is decided here.
+    # boot.
     #
     # With no data slab anywhere and no intent stated (#236), a drive is laid
     # fresh (forced) as well: there is nothing to keep, and a partition table
     # from an abandoned install must not stop it. An intent of `install` (the
-    # ticket) wipes whatever is there; `off` on this machine still means no.
+    # ticket) lays fresh only a drive with no data slab; `off` on this machine
+    # still means no.
     SURVEY_SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
     SURVEY_SYS="${STORM_SYS_BLOCK:-/sys/block}"
     SURVEY_DEV="${STORM_DEV:-/dev}"
@@ -2823,6 +2825,24 @@ if [ "$BOOT_MODE" = "local" ]; then
         *) RELEASE_ON=unknown ;;
         esac
     }
+    # An install never wipes data (#311, owner 2026-10-06): it touches the
+    # system drive only, and only its system half. A disk that carries a data
+    # slab is installed over without `force`: `boot-local` lays the system half
+    # again and adopts the data half, the release's keep/replace/migrate policy
+    # deciding each data volume it names. `force` is left for a drive with no
+    # data slab on it.
+    has_data_slab() { # disk -> 0 when it carries a stormblock data slab
+        "$SURVEY_SB" slab list "$1" 2>/dev/null | grep -q "role=data"
+    }
+    INSTALL_KEEP=""
+    install_keeping() { # disk why
+        INSTALL_OVER="$1"
+        INSTALL_KEEP=1
+        INSTALL_FRESH=1
+        ASSIMILATE=any
+        echo "  INSTALL: $1 $2 - laying its system half again for this"
+        echo "  release; its data half is kept, every volume on it adopted (#311)"
+    }
     INSTALL_FRESH=""
     KEPT=""
     RELEASE_ON=""
@@ -2830,24 +2850,28 @@ if [ "$BOOT_MODE" = "local" ]; then
         :
     elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
        && [ "${ASSIMILATE:-}" = force ]; then
-        INSTALL_FRESH=1
+        if [ -n "${INSTALL_OVER:-}" ] && has_data_slab "$INSTALL_OVER"; then
+            install_keeping "$INSTALL_OVER" "is to be installed (asked by the appliance)"
+        elif KEPT=$(local_data_slab); then
+            install_keeping "$KEPT" "is to be installed (asked by the appliance)"
+        else
+            INSTALL_FRESH=1
+        fi
     elif [ -n "${CLAIMED:-}" ] && [ "$SLAB" = "$CLAIMED" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
             echo "  booting the claimed image, and rd.stormblock.assimilate=off: no local drive is touched"
+        elif [ -n "${INSTALL_OVER:-}" ] && has_data_slab "$INSTALL_OVER"; then
+            install_keeping "$INSTALL_OVER" "does not hold the claimed release"
         elif [ -n "${INSTALL_OVER:-}" ]; then
             ASSIMILATE=force
             INSTALL_FRESH=1
-            echo "  INSTALL: $INSTALL_OVER does not hold the claimed release - wiping it,"
-            echo "  system and data slab both, and laying the release fresh (#261)"
+            echo "  INSTALL: $INSTALL_OVER does not hold the claimed release and carries no data"
+            echo "  slab - laying the release fresh on it"
         elif KEPT=$(local_data_slab); then
             release_on "$KEPT"
             case "$RELEASE_ON" in
             another)
-                INSTALL_OVER="$KEPT"
-                ASSIMILATE=force
-                INSTALL_FRESH=1
-                echo "  INSTALL: $KEPT holds another release than the one claimed - wiping it,"
-                echo "  system and data slab both, and laying the release fresh (#261)"
+                install_keeping "$KEPT" "holds another release than the one claimed"
                 ;;
             same)
                 echo "  RECOVERY: $KEPT holds the release claimed - kept, its data half untouched (#261)"
@@ -2874,6 +2898,10 @@ if [ "$BOOT_MODE" = "local" ]; then
     if [ -n "$INSTALL_FRESH" ] && [ -n "${INSTALL_OVER:-}" ] && [ -e "$INSTALL_OVER" ]; then
         LOCAL_DISK="$INSTALL_OVER"
         echo "  installing over $INSTALL_OVER, the disk this machine booted from until now"
+    fi
+    if [ -n "$INSTALL_KEEP" ] && [ -z "$LOCAL_DISK" ]; then
+        echo "  $INSTALL_OVER is not here to install over - every local drive is left alone"
+        ASSIMILATE=held
     fi
     case "${ASSIMILATE:-any}" in
     off) echo "  rd.stormblock.assimilate=off: leaving every local drive alone" ;;
@@ -2977,6 +3005,16 @@ if [ "$BOOT_MODE" = "local" ]; then
         # partition typed as a data slab, and refused it. Setting the flag
         # only where the survey *saw* a slab left the common case, a drive
         # with a partition table from an abandoned install, still stuck.
+        # Never over a data slab (#311): whatever path chose this drive, a
+        # node's data half is not destroyed by an install. Without force a
+        # drive with both halves has its system half laid again; one with a
+        # data slab alone is refused by `boot-local`, and the node runs from
+        # the appliance with the drive untouched.
+        if [ "$ASSIMILATE" = force ] && [ -n "$LOCAL_DISK" ] && has_data_slab "$LOCAL_DISK"; then
+            echo "  $LOCAL_DISK carries a data slab - not destroying it: an install"
+            echo "  never wipes data (#311); its system half is laid again, the data kept"
+            ASSIMILATE=any
+        fi
         if [ "$ASSIMILATE" = force ] && [ -n "$LOCAL_DISK" ]; then
             FORCE_LOCAL=1
             echo "  policy is 'force': whatever $LOCAL_DISK carries will be destroyed"

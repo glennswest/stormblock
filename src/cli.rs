@@ -4516,6 +4516,21 @@ pub(crate) async fn take_local_disk(
     local_tier: &str,
     local_disk_force: bool,
 ) -> anyhow::Result<Option<crate::drive::handover::FlowOver>> {
+    Ok(take_local_disk_for(mgr, disk, local_tier, local_disk_force, None).await?.0)
+}
+
+/// [`take_local_disk`], naming the release's root volume (`root`), whose
+/// `/etc/stormblock/data-volumes` and `/etc/os-release` an install over a
+/// node's disk reads (#311). Also returns what the install did with the
+/// node's data half, when it kept one.
+#[cfg(target_os = "linux")]
+pub(crate) async fn take_local_disk_for(
+    mgr: &mut crate::volume::VolumeManager,
+    disk: &str,
+    local_tier: &str,
+    local_disk_force: bool,
+    root: Option<&str>,
+) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
     let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
     let dest_dev: Arc<dyn BlockDevice> =
         open_storage(disk).await?;
@@ -4544,9 +4559,12 @@ pub(crate) async fn take_local_disk(
     // half is opened and left alone, and the node boots normally with
     // the identity it already had. No force, because nothing is
     // destroyed that an install is not meant to destroy.
-    if !local_disk_force
-        && crate::image::local::node_layout(&dest_dev).await?.is_some()
-    {
+    //
+    // **Force or not** (#311, owner 2026-10-06: an install never wipes data;
+    // only the system half of the system drive). `--local-disk-force` still
+    // answers for a drive whose data slab is not part of a node layout (an
+    // abandoned install), never for a node's data half.
+    if crate::image::local::node_layout(&dest_dev).await?.is_some() {
         // **And if it is already up to date, do nothing at all.**
         //
         // A node that netboots regularly would otherwise reformat its
@@ -4598,7 +4616,7 @@ pub(crate) async fn take_local_disk(
                     "Flow-over: leaving it as it stands; the node boots from it next \
                      time, which is what the local-slab probe is for."
                 );
-                return Ok(None);
+                return Ok((None, None));
             }
             let missing = want.iter().filter(|id| !have.contains(id)).count();
             println!(
@@ -4611,44 +4629,91 @@ pub(crate) async fn take_local_disk(
         }
         println!(
             "Flow-over: {disk} is already this node's — replacing the system half, \
-             keeping the data half"
+             keeping the data half (#311)"
+        );
+        // Everything that can refuse, before anything is written: the data
+        // half's records must read and every leg they name must be in it.
+        let plan = crate::image::install::plan(&dest_dev)
+            .await
+            .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
+        let policy = match root {
+            Some(r) => crate::image::stage::read_policy(mgr, r).await.unwrap_or_else(|e| {
+                println!("Install: the release's {} not read ({e}); every data volume is kept", crate::image::stage::POLICY_FILE);
+                Default::default()
+            }),
+            None => Default::default(),
+        };
+        let version = match root {
+            Some(r) => match mgr.find_volume(r).await.and_then(|id| mgr.get_volume(&id)) {
+                Some(dev) => crate::fs::files::read_file(&dev, "/etc/os-release")
+                    .await
+                    .ok()
+                    .and_then(|b| crate::image::install::version_id(&b)),
+                None => None,
+            },
+            None => None,
+        }
+        .unwrap_or_else(|| "new".into());
+        let previous = match root {
+            Some(r) => volume_file_on_slabs(&[disk.to_string()], r, "/etc/os-release")
+                .await
+                .ok()
+                .and_then(|b| crate::image::install::version_id(&b)),
+            None => None,
+        }
+        .unwrap_or_else(|| "previous".into());
+        println!(
+            "Install: {previous} → {version} on {disk}: {} volume(s) in the data half, kept",
+            plan.volumes.len()
         );
         let laid = crate::image::local::update_system_slab(dest_dev, &layout)
             .await
             .map_err(|e| anyhow::anyhow!("updating the system slab on {disk}: {e}"))?;
         let data_id = laid.data.slab_id();
         let system_id = laid.system.slab_id();
+        let bulk_id = laid.bulk.as_ref().map(|b| b.slab_id());
         println!(
             "Flow-over: {disk} updated — data slab {data_id} kept ({}), system slab \
              {system_id} replaced ({})",
             crate::mgmt::config::human_size(laid.data_bytes),
             crate::mgmt::config::human_size(laid.system_bytes),
         );
+        mgr.registry().write().await.add(laid.system);
+        // The node's data half, adopted: its records into this manager, and
+        // each name the release also uses settled by the release's policy.
+        let report =
+            crate::image::install::adopt(mgr, laid.data, laid.bulk, &plan, &policy, &version, &previous)
+                .await
+                .map_err(|e| anyhow::anyhow!("keeping the data half on {disk}: {e}"))?;
+        for k in &report.kept {
+            println!("Install: {k} — the node's, kept");
+        }
+        for (n, to) in &report.aside {
+            println!("Install: {n} — the release's from now on; the node's kept as {to}");
+        }
+        for m in &report.migrations {
+            println!("Install: {} — to migrate from {} with {} (stormupdate runs it)", m.volume, m.node_volume, m.hook);
+        }
+        // The records go where the extents go, now that this manager holds
+        // the data half's own records as well as the release's: a persist
+        // writes both, and replaces nothing it did not read.
+        let mut first = vec![data_id, system_id];
+        first.extend(bulk_id);
+        mgr.keep_metadata_in_first(&first);
+        mgr.persist().await;
+        // What the release keeps of its own data half (volumes it adds, ones
+        // it replaces, its blanks) moves onto this disk in the background, as
+        // on a fresh install (#285).
         let flow = crate::drive::handover::FlowOver {
             disk: disk.to_string(),
             system_slab: system_id.0.to_string(),
             data_slab: data_id.0.to_string(),
-            // The kept data half is not moved here at all (below).
-            data_flow: false,
+            data_flow: true,
         };
-        {
-            let mut reg = mgr.registry().write().await;
-            reg.add(laid.data);
-            reg.add(laid.system);
-            if let Some(b) = laid.bulk {
-                reg.add(b);
-            }
-        }
-        // Not seeded by default. The data slab kept here holds this
-        // node's records, and adopting them over the fresh clone's
-        // volumes of the same names is the upgrade path, which is not
-        // built yet. Seeding without it would move extents onto the
-        // drive and record them nowhere.
-        seed_data_half(&mgr, data_id, disk, SeedWhen::Asked).await?;
         println!(
             "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
         );
-        return Ok(Some(flow));
+        return Ok((Some(flow), Some(report)));
     }
 
     // The target is about to be formatted. An operator supplies a path,
@@ -4794,7 +4859,7 @@ pub(crate) async fn take_local_disk(
     println!(
         "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
     );
-    Ok(Some(flow))
+    Ok((Some(flow), None))
 }
 
 /// Put the writable half on the local disk, **now**, before anything is
@@ -5891,6 +5956,24 @@ async fn handle_adopt_ublk(
             Some((disk, sources))
         });
         let install = record.as_ref().and_then(|r| r.install.clone());
+        // An install that kept this node's data half (#311): the release it
+        // installed, and the migrations it left, for stormupdate.
+        if let (Some(rep), Some(d)) = (record.as_ref().and_then(|r| r.installed.clone()), data_dir) {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let gens = crate::image::install::generations_after(&rep, at);
+            match gens.save(std::path::Path::new(d)) {
+                Ok(()) => println!(
+                    "Install: {} recorded as this node's release ({} kept, {} to migrate)",
+                    rep.version,
+                    rep.kept.len(),
+                    rep.migrations.len()
+                ),
+                Err(e) => tracing::warn!("install: the release generations not written in {d}: {e}"),
+            }
+        }
         if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.clone()) {
             spawn_flow_over(&state, flow, local_boot, install);
         } else if let Some((disk, sources)) = local_boot {
@@ -6208,6 +6291,62 @@ async fn handle_boot_local(
         .name()
         .await;
 
+    // A local disk, taken before anything else is resolved (#311).
+    // Optional zeroboot flow-over: migrate extents to a local disk in the
+    //    background, one extent per lock cycle so root I/O keeps flowing.
+    // What this boot laid down and did not fill, for the handover record
+    // below. `None` on a node with no local disk, and on one whose disk was
+    // refused — in both cases the successor has nothing to flow into and the
+    // node runs from the appliance, which is what it did before any of this.
+    let mut laid_flow_over: Option<crate::drive::handover::FlowOver> = None;
+    let mut local_boot_disk: Option<String> = None;
+    // What an install over this node's disk did with its data half (#311).
+    let mut installed: Option<crate::image::install::Report> = None;
+    if let Some(disk) = local_disk.filter(|_| !check) {
+        // Flow-over is an optimisation, and an optimisation may not decide
+        // whether a node boots.
+        //
+        // **Before the exports are resolved** (#311): an install over this
+        // node's disk keeps its data half, and the volumes it mounts are then
+        // the node's, by name, not the claimed image's fresh ones.
+        //
+        // Every one of these steps can fail for a reason that has nothing to
+        // do with the root filesystem: the drive already carries a data slab,
+        // it is smaller than a slab needs, it has developed a fault. The root
+        // is already attached and serving by this point — from the appliance,
+        // which is exactly where it lived before any of this existed. Failing
+        // the whole boot for it costs a node that was otherwise fine.
+        //
+        // It did. `refusing to format /dev/sda for flow-over` propagated out
+        // of `boot-local`, so `/dev/ublkb0` was never exported and the boot
+        // ended as
+        //
+        //     FATAL: root device /dev/ublkb0 not found after 30s
+        //     Dropping to shell...
+        //
+        // — a failure that names the root device and says nothing about the
+        // local disk, for a node whose root was reachable the whole time.
+        let flow_over =
+            take_local_disk_for(&mut mgr, disk, local_tier, local_disk_force, Some(&root_name)).await;
+        match flow_over {
+            Ok((f, report)) => {
+                laid_flow_over = f;
+                installed = report;
+                // Laid, updated or already current: the disk carries this
+                // node's layout, and the successor makes it bootable.
+                local_boot_disk = Some(disk.to_string());
+            }
+            // Said plainly, and on the console, because this is the one line
+            // that explains why a node that was going to run locally is
+            // running from the appliance instead.
+            Err(e) => {
+                println!("Flow-over: not taking {disk} — {e}");
+                println!("Flow-over: the node boots from the appliance, unaffected.");
+                tracing::warn!("flow-over disabled for {disk}: {e}");
+            }
+        }
+    }
+
     let mut exports: Vec<(u32, String, Arc<dyn BlockDevice>)> = vec![(
         0,
         root_name.clone(),
@@ -6252,54 +6391,7 @@ async fn handle_boot_local(
         return Ok(());
     }
 
-    // 4. Optional zeroboot flow-over: migrate extents to a local disk in the
-    //    background, one extent per lock cycle so root I/O keeps flowing.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    // What this boot laid down and did not fill, for the handover record
-    // below. `None` on a node with no local disk, and on one whose disk was
-    // refused — in both cases the successor has nothing to flow into and the
-    // node runs from the appliance, which is what it did before any of this.
-    let mut laid_flow_over: Option<crate::drive::handover::FlowOver> = None;
-    let mut local_boot_disk: Option<String> = None;
-    if let Some(disk) = local_disk {
-        // Flow-over is an optimisation, and an optimisation may not decide
-        // whether a node boots.
-        //
-        // Every one of these steps can fail for a reason that has nothing to
-        // do with the root filesystem: the drive already carries a data slab,
-        // it is smaller than a slab needs, it has developed a fault. The root
-        // is already attached and serving by this point — from the appliance,
-        // which is exactly where it lived before any of this existed. Failing
-        // the whole boot for it costs a node that was otherwise fine.
-        //
-        // It did. `refusing to format /dev/sda for flow-over` propagated out
-        // of `boot-local`, so `/dev/ublkb0` was never exported and the boot
-        // ended as
-        //
-        //     FATAL: root device /dev/ublkb0 not found after 30s
-        //     Dropping to shell...
-        //
-        // — a failure that names the root device and says nothing about the
-        // local disk, for a node whose root was reachable the whole time.
-        let flow_over =
-            take_local_disk(&mut mgr, disk, local_tier, local_disk_force).await;
-        match flow_over {
-            Ok(f) => {
-                laid_flow_over = f;
-                // Laid, updated or already current: the disk carries this
-                // node's layout, and the successor makes it bootable.
-                local_boot_disk = Some(disk.to_string());
-            }
-            // Said plainly, and on the console, because this is the one line
-            // that explains why a node that was going to run locally is
-            // running from the appliance instead.
-            Err(e) => {
-                println!("Flow-over: not taking {disk} — {e}");
-                println!("Flow-over: the node boots from the appliance, unaffected.");
-                tracing::warn!("flow-over disabled for {disk}: {e}");
-            }
-        }
-    }
 
     // Write down what the next server will need. See drive::handover: the
     // kernel remembers the device but not the volume behind it, and two
@@ -6353,6 +6445,7 @@ async fn handle_boot_local(
                 .collect(),
             flow_over: laid_flow_over.clone(),
             local_boot: local_boot_disk.clone(),
+            installed: installed.clone(),
             // An install the appliance asked for is done when this disk is
             // (#148) — only when there is a flow-over to finish. With none,
             // the intent stays `install` and the next boot tries again.

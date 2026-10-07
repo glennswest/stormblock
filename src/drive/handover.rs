@@ -150,6 +150,12 @@ pub struct Record {
     /// appliance, which sets the machine's intent back to `local`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install: Option<InstallTicket>,
+    /// What an install over this node's disk did with its data half (#311):
+    /// the release installed, the volumes kept, set aside and to migrate. The
+    /// successor writes it into the node's release generations for
+    /// stormupdate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<crate::image::install::Report>,
 }
 
 impl Record {
@@ -218,6 +224,7 @@ mod tests {
             flow_over: None,
             local_boot: None,
             install: None,
+            installed: None,
             devices: vec![
                 Device { dev_id: 0, volume: "stormpump".into() },
                 Device { dev_id: 2, volume: "sbregistry".into() },

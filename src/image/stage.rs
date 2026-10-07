@@ -121,6 +121,11 @@ pub struct Migration {
     pub hook: String,
     /// The release's volume, staged: `<volume>@<version>` until activate.
     pub staged: String,
+    /// Where the node's data is, when not under `volume`: after an install
+    /// (#311) the release's volume has the plain name (`staged` = `volume`)
+    /// and the node's is set aside as `<volume>@<previous>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// One release generation on this node.
@@ -296,7 +301,7 @@ async fn read_image(image: &Arc<dyn BlockDevice>) -> anyhow::Result<(VolumeManag
 }
 
 /// The release's policy file, read from its root volume `root`.
-async fn read_policy(image_vm: &VolumeManager, root: &str) -> anyhow::Result<HashMap<String, Policy>> {
+pub(crate) async fn read_policy(image_vm: &VolumeManager, root: &str) -> anyhow::Result<HashMap<String, Policy>> {
     let Some(id) = image_vm.find_volume(root).await else {
         anyhow::bail!("the release has no root volume {root}");
     };
@@ -494,7 +499,7 @@ pub async fn stage(
         }
         if let Policy::Migrate { hook } = &effective {
             if local_names.contains(&v.name) {
-                gen.migrations.push(Migration { volume: v.name.clone(), hook: hook.clone(), staged: staged_name.clone() });
+                gen.migrations.push(Migration { volume: v.name.clone(), hook: hook.clone(), staged: staged_name.clone(), node: None });
             }
         }
         item.staged_as = Some(staged_name);
