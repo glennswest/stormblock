@@ -183,9 +183,9 @@ generations; restore keeps the record's, the source: the write is gone.
       fsync, cut before any persist, restore from the slabs alone; fails today
 - [ ] a moved primary is allocated at `generation + 1` (= the map's after
       `rewrite_legs`) in both paths; a mirror or parity leg keeps its
-      generation (they tie by design, see the follow-up)
+      generation (they tie by design: #316)
 - [ ] durability.md rule, CHANGELOG; full nextest; follow-up issue for
-      mirror/parity legs moved in place
+      mirror/parity legs moved in place (filed: #316)
 
 ### Optional mount entries `?vol:path` (2026-10-06, #288, P1) — DONE
 

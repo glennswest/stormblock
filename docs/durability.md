@@ -64,6 +64,17 @@ tests run on.
 
    `adopt_slabs` (a daemon taking over the slabs on its drives) uses the
    same reconciliation, over every drive's slabs at once.
+
+   **A moved primary is a generation newer** (#277). A move (flow-over,
+   drain, rebalance) allocates the new slot at the extent's generation + 1,
+   the generation the map takes. Until the persist that records the move, the
+   record names the source; a write to the extent lands in place on the new
+   slot, and its fsync publishes that slot's entry. At one generation the two
+   slots tied and the record's (the source) won, so a cut there lost an
+   acknowledged write; now the slot table is newer and restore takes the new
+   slot. With no write since the move the two hold the same bytes. A mirror
+   or parity leg keeps its generation (legs are told from a stale copy by
+   sharing it): that window is still open for them, #316.
 6. **WRITE_ZEROES is a promise.** On a thin volume it leaves unmapped extents
    unmapped and writes zeros into mapped ones. A failure is reported as EIO.
    Before, it was a discard: that ignored partial ranges and answered success
@@ -153,6 +164,11 @@ tests run on.
     read what it held then, or something written since. Before the fix, 182
     of the 300 lost data.
   * `a_stale_record_and_several_cow_generations_recover`.
+  * `a_write_to_an_extent_just_moved_survives_a_cut_before_the_persist`
+    (both formats, rule 5, #277): two extents moved the way the flow-over
+    moves them, one written and fsync'd, a cut before any persist, a restore
+    from the slabs alone. With the old rule (`MOVE_SAME_GEN_277=1`) the write
+    reads as the value from before the move.
 * `tests/integration_handover_order.rs` (rule 8):
   `the_successor_maps_what_the_incumbent_allocated_in_the_window`, and
   `restoring_before_the_incumbent_is_gone_misses_the_window` showing the old
