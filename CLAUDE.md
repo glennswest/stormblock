@@ -191,6 +191,9 @@ device wait is per entry.
   volumes at 0.3 s each: 0.63 s, not 6), every other initramfs test under
   both, the generated /init parses under both. Not on metal: the Dell's
   `mounted` span on a stormcos release with this initramfs
+- Golden NOT staged: `component stage stormblock` at 2dcfab0 failed twice
+  on the platform (`[platform abort]`, exit 255, stormcentral#362). Request
+  it again once that is fixed
 
 ### adopt-ublk stops in order on SIGTERM (2026-10-07, #144, P1) — DONE
 
