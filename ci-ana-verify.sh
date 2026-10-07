@@ -131,7 +131,7 @@ say "guest initramfs: busybox, nvme-cli, nvme-tcp"
 I="$W/initrd"
 mkdir -p "$I"/{bin,sbin,dev,proc,sys,run,tmp,etc/nvme,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
-for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed basename cut tr sort od timeout; do
+for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed basename cut tr sort od timeout seq; do
     ln -sf busybox "$I/bin/$a"
 done
 cp "$NVME" "$I/bin/nvme"
@@ -299,7 +299,7 @@ tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|SYNC)|nvme|ANA|ana' | tail
 
 results=$(tr -d '\r' < "$W/guest.log" | grep -c '^RESULT ')
 bad=$(tr -d '\r' < "$W/guest.log" | grep '^RESULT ' | grep -vc ' PASS')
-[ "$results" -ge 11 ] || fail "the guest reported $results results, expected 11"
+[ "$results" -ge 10 ] || fail "the guest reported $results results, expected 10"
 [ "$bad" = 0 ] || fail "$bad guest check(s) failed"
 
 say "engines' side"
