@@ -107,7 +107,7 @@ for sh in sh "busybox sh"; do
 $DEV/ublkb41 /data/sub
 $DEV/ublkb40 /data
 "
-    order=$(grep -E '^(start|end) ' "$WORK/log" | tr '\n' ' ')
+    order=$(grep -E '^(start|end) ' "$WORK/log" | sed "s|$WORK/sysroot||" | tr '\n' ' ')
     check "parent before child before grandchild" \
         "start /data end /data start /data/sub end /data/sub start /data/sub/deeper end /data/sub/deeper " "$order"
 
