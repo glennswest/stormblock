@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Health says whether the node runs from local or remote slabs (2026-10-07, #322, P1) — IN PROGRESS
+### Health says whether the node runs from local or remote slabs (2026-10-07, #322, P1) — DONE
 
 stormcentral#353: C2NR0Q2 passed "local boot" and "fresh slab" while running
 entirely from a forge clone (#268). Ask: the open `/api/v1/health` says
@@ -180,12 +180,16 @@ where the node's slabs are. Not the remote URI: health is unauthenticated,
 and the URI (forge's address, the clone's subsystem NQN, the host NQN; boot
 hosts connect with no secret, #210) is what attaching the machine's boot
 clone takes.
-- [ ] `slabs`: `diskless`, `system`/`data` = local|remote|mixed|none (by
+- [x] `slabs`: `diskless`, `system`/`data` = local|remote|mixed|none (by
       where the volumes' legs are), and each slab: role, source, local
       device or remote transport, volumes with legs on it. Never waits:
       computed with try_read, cached 10 s; no remote slab registered = all
       local with nothing counted (forge, a disk-booted node)
-- [ ] tests; README (health), auth.md; tell stormcentral#353
+- [x] tests; README (health), auth.md; tell stormcentral#353
+- Verified on a build VM at 7d66a33: full nextest 990/990, incl. the #314
+  netboot test's node over NVMe/TCP (`diskless`, `remote`, no URI/NQN/address
+  in the body) and a local node (`local`). Not on metal: a stormcos release
+  with this engine; then stormcentral#353 fails a diskless install
 
 ### Delete with `scrub=used` (2026-10-07, #313, P1) — DONE
 
