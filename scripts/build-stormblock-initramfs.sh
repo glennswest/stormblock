@@ -3186,6 +3186,11 @@ engine_report() { # lines
     else
         echo "  (it wrote nothing)"
     fi
+    # The console gets the engine's warnings and stage lines; everything it
+    # logged is in its record (#243).
+    _rec="${STORM_ENGINE_RECORD:-/run/stormblock/stormblock.log}"
+    [ -s "$_rec" ] && echo "  Everything it logged, INFO included: $_rec"
+    return 0
 }
 # --- END engine report
 

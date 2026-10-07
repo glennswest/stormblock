@@ -194,7 +194,7 @@ contains "no os-release says so" "unknown" "$(release '')"
 
 # ---------------------------------------------------------------------------
 echo "engine report:"
-report() ( ENGINE_LOG="$1"; . "$WORK/report.sh"; engine_report 25 )
+report() ( ENGINE_LOG="$1"; STORM_ENGINE_RECORD="${2:-$WORK/no-record}"; . "$WORK/report.sh"; engine_report 25 )
 i=1; : > "$WORK/engine.log"
 while [ $i -le 40 ]; do echo "line $i" >> "$WORK/engine.log"; i=$((i + 1)); done
 echo "Error: volume 'kubelet-data' not found in slab metadata" >> "$WORK/engine.log"
@@ -203,5 +203,9 @@ contains "the engine's last error is repeated" "| Error: volume 'kubelet-data' n
 check "with its last 25 lines" 26 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
 : > "$WORK/empty.log"
 contains "an engine that wrote nothing is said" "(it wrote nothing)" "$(report "$WORK/empty.log")"
+echo "INFO stormblock::drive::ublk: ublk device /dev/ublkb14 released" > "$WORK/record.log"
+out=$(report "$WORK/engine.log" "$WORK/record.log")
+contains "the record is named when there is one (#243)" "Everything it logged, INFO included: $WORK/record.log" "$out"
+check "and only then" 27 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
 
 [ "$fail" = 0 ] && echo "all no-appliance cases pass" || { echo "FAILURES"; exit 1; }
