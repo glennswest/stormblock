@@ -13,8 +13,10 @@
 //! cut on any drive that honours FLUSH. [`CrashDevice::crash_with`] also tears
 //! writes (#191): a kept write lands only in part — a prefix of its blocks, or
 //! any subset of them — the way a drive cut mid-write may leave it. Writes
-//! tear at the device's block (4096 bytes, as a 4Kn drive's atomic unit),
-//! never inside one. What it cannot prove: firmware that lies about FLUSH.
+//! tear at the drive's atomic unit: its 4096-byte block (a 4Kn drive), or 512
+//! bytes with [`CrashDevice::with_atomic_unit`] (a drive with 512-byte
+//! sectors, where even one 4 KiB write can land in part); never inside one.
+//! What it cannot prove: firmware that lies about FLUSH.
 
 use std::sync::Mutex;
 
@@ -29,17 +31,22 @@ use super::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType};
 pub enum Tear {
     /// Every kept write lands whole.
     None,
-    /// With this probability a kept write of more than one block lands only
-    /// as its first n blocks (1 ≤ n < its blocks): a drive writing in order.
+    /// With this probability a kept write of more than one atomic unit lands
+    /// only as its first n units (1 ≤ n < its units): a drive writing in order.
     Prefix(f64),
-    /// With this probability a kept write of more than one block lands as a
-    /// random subset of its blocks: a drive completing out of order.
+    /// With this probability a kept write of more than one atomic unit lands
+    /// as a random subset of its units: a drive completing out of order.
     Scatter(f64),
 }
 
 pub struct CrashDevice {
     id: DeviceId,
     block: u32,
+    /// What a write tears at (#191): the device's block unless set — a 4Kn
+    /// drive's atomic unit; 512 for a drive with 512-byte sectors.
+    atomic: usize,
+    /// Writes the crash that made this device tore.
+    torn: usize,
     state: Mutex<State>,
 }
 
@@ -69,6 +76,8 @@ impl CrashDevice {
                 wwn: String::new(),
             },
             block: 4096,
+            atomic: 4096,
+            torn: 0,
             state: Mutex::new(State { view: image.clone(), durable: image, cached: Vec::new(), flushes: 0 }),
         }
     }
@@ -86,7 +95,8 @@ impl CrashDevice {
         let st = self.state.lock().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut image = st.durable.clone();
-        let block = self.block as usize;
+        let block = self.atomic;
+        let mut torn = 0;
         for (off, data) in &st.cached {
             if !rng.gen_bool(keep) {
                 continue;
@@ -110,13 +120,32 @@ impl CrashDevice {
                 }
                 _ => vec![true; pieces.len()],
             };
+            if kept.iter().any(|k| !k) {
+                torn += 1;
+            }
             for ((a, b), k) in pieces.into_iter().zip(kept) {
                 if k {
                     image[a..b].copy_from_slice(&data[a - off..b - off]);
                 }
             }
         }
-        CrashDevice::from_image(image)
+        let mut after = CrashDevice::from_image(image);
+        after.atomic = self.atomic;
+        after.torn = torn;
+        after
+    }
+
+    /// Tear at `bytes` rather than the block (#191): 512 is a drive whose
+    /// sectors are 512 bytes, where even one 4 KiB write can land in part.
+    pub fn with_atomic_unit(mut self, bytes: usize) -> Self {
+        assert!(bytes > 0 && self.block as usize % bytes == 0);
+        self.atomic = bytes;
+        self
+    }
+
+    /// How many writes the crash that made this device tore.
+    pub fn torn_writes(&self) -> usize {
+        self.torn
     }
 
     /// Writes waiting in the cache.

@@ -54,10 +54,18 @@ fn value_of(idx: u64, b: &[u8]) -> Result<u64, String> {
     }
     let i = u64::from_le_bytes(b[..8].try_into().unwrap());
     let v = u64::from_le_bytes(b[8..16].try_into().unwrap());
-    if i != idx || block(i, v) != b {
+    if i != idx || block(i, v)[..b.len()] != *b {
         return Err(format!("block {idx} holds garbage (claims index {i}, value {v})"));
     }
     Ok(v)
+}
+
+/// The value of each 512-byte sector of a block (#191). A consumer's 4 KiB
+/// write the drive cut part-way holds sectors of the old value and the new:
+/// that is the consumer's to sort out (it did not flush), as long as every
+/// sector is one of the values the block may hold.
+fn sector_values(idx: u64, b: &[u8]) -> Result<HashSet<u64>, String> {
+    b.chunks(512).map(|s| value_of(idx, s)).collect()
 }
 
 fn blank_value(idx: u64) -> u64 {
@@ -73,9 +81,9 @@ enum Allowed {
     Any,
 }
 
-async fn trial(seed: u64, version: u32, tear: Tear) -> Result<(), String> {
+async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<usize, String> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024));
+    let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024).with_atomic_unit(atomic));
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
         .with_role(SlabRole::Data)
         .with_version(version)
@@ -157,6 +165,7 @@ async fn trial(seed: u64, version: u32, tear: Tear) -> Result<(), String> {
     // The power goes.
     let keep = rng.gen_range(0.0..1.0);
     let after = Arc::new(dev.crash_with(seed, keep, tear));
+    let torn = after.torn_writes();
     let slab = Slab::open(after.clone() as Arc<dyn BlockDevice>).await.map_err(|e| format!("reopen: {e}"))?;
     let mut vm2 = VolumeManager::new(SLOT);
     vm2.add_slab(slab).await;
@@ -167,30 +176,36 @@ async fn trial(seed: u64, version: u32, tear: Tear) -> Result<(), String> {
     let mut buf = vec![0u8; BLOCK as usize];
     for i in 0..BLOCKS {
         rv.read(i * BLOCK, &mut buf).await.map_err(|e| format!("read block {i}: {e}"))?;
-        let v = value_of(i, &buf).map_err(|e| format!("seed {seed}: {e}"))?;
+        // Whole blocks, unless the drive can tear inside one (#191).
+        let vs = if atomic < BLOCK as usize {
+            sector_values(i, &buf)
+        } else {
+            value_of(i, &buf).map(|v| HashSet::from([v]))
+        }
+        .map_err(|e| format!("seed {seed} ({tear:?}, atomic {atomic}): {e}"))?;
         match &allowed[&i] {
-            Allowed::Values(s) if !s.contains(&v) => {
+            Allowed::Values(s) if !vs.is_subset(s) => {
                 return Err(format!(
-                    "seed {seed} (keep {keep:.2}, {tear:?}, {ops} ops): block {i} reads {v}, allowed {:?}",
+                    "seed {seed} (keep {keep:.2}, {tear:?}, atomic {atomic}, {ops} ops): block {i} reads {vs:?}, allowed {:?}",
                     s
                 ))
             }
             _ => {}
         }
     }
-    Ok(())
+    Ok(torn)
 }
 
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_at_any_point() {
-    power_cuts(1, Tear::None).await;
+    power_cuts(1, Tear::None, 4096).await;
 }
 
 /// The same 300 cuts over a slab in format v2 (#158): the volume records are
 /// a log of changes and a copy-on-write tree, not two whole copies.
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_at_any_point_in_format_v2() {
-    power_cuts(2, Tear::None).await;
+    power_cuts(2, Tear::None, 4096).await;
 }
 
 /// #191: the same cuts, with half the kept multi-block writes torn — only
@@ -199,31 +214,50 @@ async fn fsynced_writes_survive_a_power_cut_at_any_point_in_format_v2() {
 /// such writes, and must survive it.
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_that_tears_writes() {
-    power_cuts(1, Tear::Prefix(0.5)).await;
+    power_cuts(1, Tear::Prefix(0.5), 4096).await;
 }
 
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_that_tears_writes_in_format_v2() {
-    power_cuts(2, Tear::Prefix(0.5)).await;
+    power_cuts(2, Tear::Prefix(0.5), 4096).await;
 }
 
 /// #191: torn out of order — any subset of a write's blocks landed.
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_that_scatters_writes() {
-    power_cuts(1, Tear::Scatter(0.5)).await;
+    power_cuts(1, Tear::Scatter(0.5), 4096).await;
 }
 
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_that_scatters_writes_in_format_v2() {
-    power_cuts(2, Tear::Scatter(0.5)).await;
+    power_cuts(2, Tear::Scatter(0.5), 4096).await;
 }
 
-async fn power_cuts(version: u32, tear: Tear) {
+/// #191 on a drive with 512-byte sectors: any 512-byte sector of any kept
+/// write may be missing, so even a single 4 KiB slot-table page or record
+/// block can land in part.
+#[tokio::test]
+async fn fsynced_writes_survive_a_power_cut_that_tears_sectors() {
+    power_cuts(1, Tear::Scatter(0.5), 512).await;
+}
+
+#[tokio::test]
+async fn fsynced_writes_survive_a_power_cut_that_tears_sectors_in_format_v2() {
+    power_cuts(2, Tear::Scatter(0.5), 512).await;
+}
+
+async fn power_cuts(version: u32, tear: Tear, atomic: usize) {
     let mut failures = Vec::new();
+    let mut torn = 0usize;
     for seed in 0..300u64 {
-        if let Err(e) = trial(seed, version, tear).await {
-            failures.push(e);
+        match trial(seed, version, tear, atomic).await {
+            Ok(n) => torn += n,
+            Err(e) => failures.push(e),
         }
+    }
+    println!("{tear:?} at {atomic} bytes: {torn} write(s) torn over 300 cuts");
+    if tear != Tear::None {
+        assert!(torn > 0, "the cuts tore no write: the test exercised nothing");
     }
     assert!(
         failures.is_empty(),
