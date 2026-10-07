@@ -171,6 +171,34 @@ is true of a reboot as much as an install. Until intents can be used:
 Once the appliance states intents, the marker is not written and the intent
 decides (`install` = fresh; keeping data is #234's `upgrade`).
 
+### A local root that does not come up (#244)
+
+A disk that holds the release, by volume id, boots — and its root can still
+fail: server1 on 11.56 got `erofs: cannot find valid erofs superblock` and
+stopped at a shell, with the release one claim away. Now, **once per boot**,
+when `/dev/ublkb0` never appears or the root will not mount, `/init` falls
+back. It does so only when all of these hold:
+- the root came from a local disk, not from a hook's decision or a claimed
+  image;
+- an appliance is known;
+- the machine's name is not a guess (#249).
+
+The fallback:
+- says `ROOT FAILED: …` and `FALLING BACK: …` on every console;
+- stops the engine (SIGTERM, which tears its ublk devices down, then
+  SIGKILL after 15 s) and waits for the root device to go;
+- boots the image claimed for this machine, claiming one if this boot has
+  none yet;
+- installs it over the disk (`INSTALL_OVER` = the disk, not the partition)
+  the way a release the disk does not hold is installed, with
+  `STORMBLOCK_RELAY_SYSTEM_HALF=1`. The engine then lays the system half
+  again even though the ids say it is up to date, and adopts the data half
+  as in any install (#311).
+
+A volume the node and the claimed image share by id (the same release) keeps
+the node's bytes; the claim's copy is dropped. A second failure, or a boot
+that does not qualify, stops at the shell as before, and says why.
+
 ### Whose image: the name the firmware claimed on (#249)
 
 `/init` claims as the machine **stormbootx claimed as**, not as whatever it
@@ -235,7 +263,7 @@ on it is not garbage. Three cases, and they get three answers:
 | the drive | what happens |
 |---|---|
 | this node's own layout — a data half and a system half | **kept** when it holds the release claimed (recovery: the system half is re-laid only if it cannot boot on its own, the data half is opened and kept); when it holds another release, its **system half is laid again and its data half adopted** (#311: an install never wipes data). |
-| the same, already holding what this boot carries, and able to boot on its own | **nothing at all.** The system half's own record is read offline and compared by volume id; if it already holds everything this boot would copy, it is left exactly as it is and the node boots from it. An update that has nothing to update must not reformat a working half and re-copy the same bytes. |
+| the same, already holding what this boot carries, and able to boot on its own | **nothing at all** — except after a root that would not come up (#244, `STORMBLOCK_RELAY_SYSTEM_HALF`), when the system half is laid again. The system half's own record is read offline and compared by volume id; if it already holds everything this boot would copy, it is left exactly as it is and the node boots from it. An update that has nothing to update must not reformat a working half and re-copy the same bytes. |
 | a lone data slab | refused. That is an install abandoned part-way, and it is indistinguishable from a live node's identity. `/init` never forces it (#311); `--local-disk-force` by hand is the deliberate act for a drive whose identity is spent. |
 | a lone system slab | **taken** under `any` and `force` (no identity lives on it; fresh slabs are laid over it), left alone under `blank`. |
 
