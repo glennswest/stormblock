@@ -363,7 +363,14 @@ GPT (in the drive's own sector size)
   extents leaves the disk unbootable on purpose.
 - **One ladder: the A/B an upgrade writes.** A new release's boot pallet goes
   in at priority 14, the previous one drops to 13 as its fallback, and older
-  ones are removed. It is the same GPT-attribute ladder
+  ones are removed. Which pallet is "the previous one" goes by boot state first
+  (#205): a **proven** one (`successful`) above a candidate (tries left) above
+  an **exhausted** one (no tries, never proven, which stormuefi skips), then by
+  priority and version. So a release that failed every try never outranks the
+  one the node proved good. It is dropped first, both from the ladder and to
+  make room, and the last proven pallet is never evicted. Only a pallet copied
+  by this run gets a fresh count of tries; one already on the disk keeps the
+  loader's count. It is the same GPT-attribute ladder
   (`priority`/`tries`/`successful`) that `pallet activate|successful|rollback`
   drives. Staging B on a *running* node and marking a boot successful once it
   is healthy belong to the upgrade work (#122), not here.

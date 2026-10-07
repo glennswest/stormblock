@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #205 (found by stormuefi's installed-node test): `local-boot`'s ladder dropped the proven boot pallet and re-armed a failed one.
+  - **Ranking:** the pallets a disk already carries are now ranked by boot state first: proven (`successful`), then candidate (tries left), then exhausted (no tries, never proven). After that by `(priority, version)`. A failed pallet that keeps priority 14 no longer outranks the proven one at 13.
+  - **Eviction:** `evictable` drops exhausted pallets first and never the last proven one.
+  - **Tries:** they are reset only on a pallet copied by this run, so the loader's count, the one record that a release failed, is kept.
+  - **Staged releases:** the "pallet the disk boots now", which a staged release goes below (#122), is the top pallet stormuefi does not skip.
+  - **Tests:** `local_boot::tests::the_proven_pallet_stays_and_the_failed_one_goes` (the issue's A/B/C scenario: C on top, A proven below it, B gone) and `an_exhausted_pallet_is_not_rearmed`.
 - **docs:** #234 closed, superseded: there is no `upgrade` boot intent. The owner ruled on 2026-10-02 that a release change is not decided at boot; the update path is staging on the running node (#122, stormupdate#3). Since #311, an `install` keeps the data half. The descriptions of `install` as "takes the disk with force" are corrected in `docs/auth.md`, `docs/boot-hooks.md`, the README and `BootIntent::Install`.
 - **feat:** #204 (stormbootx#23): a boothost claim of a name no host has, carrying the machine's `mac` (and `serial`), reaches the host the machine already is instead of making a new one.
   - **Finding the host:** by its MAC, else by the serial when an operator made it one of that host's aliases. An assignment named by a serial never counts, since blades share chassis serials.

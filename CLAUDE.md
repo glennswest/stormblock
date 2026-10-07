@@ -172,6 +172,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### local-boot keeps the proven boot pallet, drops the failed one (2026-10-07, #205) — DONE
+
+stormuefi's installed-node test: after B failed 3 times and A was marked
+successful, laying C removed A and re-armed B. `rerank`/`evictable` ordered by
+`(priority, version)` only and reset tries on every exhausted pallet.
+- [x] `boot_state` (proven > candidate > exhausted) before `order_key` in
+      `rerank` and `evictable`; the last proven pallet never evicted; tries
+      reset only on pallets copied this run (`fresh`); `BelowActive` goes
+      below the top non-exhausted pallet
+- [x] tests: the issue's scenario, an exhausted pallet not re-armed; every
+      local_boot test and #122's staging tests on dev (12/12); docs/images.md,
+      README (known fault removed), CHANGELOG
+
 ### A claim by an unknown name with a known MAC reaches that host (2026-10-07, #204, P1) — DONE
 
 stormbootx#23 claims `boothost/<first DNS label>` with `{mac, serial}`; an
