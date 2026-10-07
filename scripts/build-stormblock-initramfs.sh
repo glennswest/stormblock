@@ -3378,24 +3378,82 @@ fi
 # A volume that will not mount is reported and skipped rather than fatal: one
 # container that cannot start is worth less than a node that does not boot, and
 # the supervisor says which one is missing.
+# --- BEGIN container mounts (covered by tests/initramfs-container-mounts.sh)
+# In parallel (#302): they were mounted one at a time, ~130-200 ms each, 8.6-
+# 10.5 s of every boot for 63 volumes (stormcos#300). Each entry is its own
+# ublk device and its own mount point, so nothing orders them but nesting: a
+# mount point inside another is mounted in a later wave than its parent
+# (waves by depth), never over it. At most STORM_MOUNT_PARALLEL at once. The
+# devices are waited for once, for the whole list. `-t ext4` first (every
+# list volume is ext4 today, and probing tries erofs and the rest first), a
+# probing mount if that fails (an XFS volume).
 if [ -n "$MOUNT_MAP" ]; then
     echo "Mounting container volumes..."
-    printf '%s' "$MOUNT_MAP" | while read -r mdev mmnt; do
-        [ -z "$mdev" ] && continue
-        n=0
-        while [ ! -b "$mdev" ] && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
-        if [ ! -b "$mdev" ]; then
-            echo "  WARNING: $mdev never appeared; $mmnt will be empty"
-            continue
-        fi
-        mkdir -p "/sysroot$mmnt"
-        if mount "$mdev" "/sysroot$mmnt" 2>/dev/null; then
-            echo "  mounted: $mdev -> $mmnt"
-        else
-            echo "  WARNING: $mdev would not mount at $mmnt"
-        fi
+    _cm_root="${STORM_SYSROOT:-/sysroot}"
+    _cm_par="${STORM_MOUNT_PARALLEL:-16}"
+    _cm_wait="${STORM_MOUNT_WAIT:-15}"
+    _cm_mount="${STORM_MOUNT:-mount}"
+    _cm_dt="${STORM_DEV_TEST:--b}"
+    _cm_dir="${STORM_RUN:-/run}/stormblock-mounts"
+    mkdir -p "$_cm_dir"
+    printf '%s\n' "$MOUNT_MAP" | awk 'NF >= 2 { print $1, $2 }' > "$_cm_dir/list"
+    _cm_t0=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+
+    # Every device, once: present, or the wait has run out.
+    _cm_n=0
+    while :; do
+        _cm_missing=0
+        while read -r mdev mmnt; do
+            [ "$_cm_dt" "$mdev" ] || _cm_missing=$((_cm_missing + 1))
+        done < "$_cm_dir/list"
+        [ "$_cm_missing" -eq 0 ] && break
+        [ "$_cm_n" -ge "$_cm_wait" ] && break
+        sleep 1
+        _cm_n=$((_cm_n + 1))
     done
+
+    # The ones present, by depth (the number of / in the mount point).
+    : > "$_cm_dir/present"
+    while read -r mdev mmnt; do
+        if [ "$_cm_dt" "$mdev" ]; then
+            echo "$mdev $mmnt" >> "$_cm_dir/present"
+        else
+            echo "  WARNING: $mdev never appeared; $mmnt will be empty"
+        fi
+    done < "$_cm_dir/list"
+    awk '{ d = gsub("/", "/", $2); print d, $1, $2 }' "$_cm_dir/present" \
+        | sort -n -k1,1 > "$_cm_dir/waves"
+
+    cm_one() { # dev mountpoint
+        mkdir -p "$_cm_root$2"
+        if $_cm_mount -t ext4 "$1" "$_cm_root$2" 2>/dev/null \
+            || $_cm_mount "$1" "$_cm_root$2" 2>/dev/null; then
+            echo "  mounted: $1 -> $2"
+        else
+            echo "  WARNING: $1 would not mount at $2"
+        fi
+    }
+    # Named pids: this shell is PID 1, and a bare `wait` would wait for the
+    # engine too.
+    _cm_jobs=""; _cm_run=0; _cm_depth=""; _cm_total=0
+    while read -r depth mdev mmnt; do
+        if [ "$depth" != "$_cm_depth" ] || [ "$_cm_run" -ge "$_cm_par" ]; then
+            [ -n "$_cm_jobs" ] && wait $_cm_jobs
+            _cm_jobs=""; _cm_run=0; _cm_depth="$depth"
+        fi
+        cm_one "$mdev" "$mmnt" &
+        _cm_jobs="$_cm_jobs $!"
+        _cm_run=$((_cm_run + 1))
+        _cm_total=$((_cm_total + 1))
+    done < "$_cm_dir/waves"
+    [ -n "$_cm_jobs" ] && wait $_cm_jobs
+    _cm_t1=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+    if [ -n "$_cm_t0" ] && [ -n "$_cm_t1" ]; then
+        echo "  $_cm_total volume(s) mounted in $(awk -v a="$_cm_t0" -v b="$_cm_t1" 'BEGIN { printf "%.1f", b - a }') s ($_cm_par at a time)"
+    fi
+    rm -rf "$_cm_dir"
 fi
+# --- END container mounts
 
 if [ -n "$WRITABLE_MAP" ]; then
     echo "Registering writable thin volumes in fstab..."

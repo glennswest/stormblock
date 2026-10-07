@@ -1543,8 +1543,13 @@ Bounded waits, overridable in the environment (for tests): `STORM_NETDEV_WAIT`
 (15 s, late netdevs, #250), `STORM_LINK_WAIT` (10 s, carrier on the uplinks),
 `STORM_NTP_WAIT` (3 s per NTP attempt, #251), and `STORM_BOOTHOST_WAIT`. That
 last one is 90 s: how long a boothost the network names is asked again before
-the boot goes on without an appliance (#294). The kernel passes an unknown
-`KEY=value` on its command line to `/init` as an environment variable.
+the boot goes on without an appliance (#294). `STORM_MOUNT_WAIT` (15 s) is
+how long the mount list's devices are waited for, once for the whole list.
+The list is mounted in parallel (#302), at most `STORM_MOUNT_PARALLEL` (16) at
+a time, in waves by mount-point depth so a nested mount point never comes
+before its parent. Each volume is tried as ext4 first, then with a probing
+mount. The kernel passes an unknown `KEY=value` on its command line to
+`/init` as an environment variable.
 
 **With no appliance** (#294) the boot says so and why. A local disk missing
 a volume the release mounts stops the boot with a FATAL naming the volume and

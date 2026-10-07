@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **perf:** #302 (stormcos#300): the initramfs mounts the container volumes in parallel. They were mounted one at a time at ~130–200 ms each, which cost 8.6–10.5 s of every boot for 63 volumes on the Dell.
+  - **Order:** in waves by mount-point depth, so a mount point inside another is never mounted before its parent. At most `STORM_MOUNT_PARALLEL` (16) run at once.
+  - **Devices:** waited for once for the whole list (`STORM_MOUNT_WAIT`, 15 s), not up to 15 s per entry.
+  - **Type:** `-t ext4` first (a bare `mount` probed erofs and others first), then a probing mount if that fails, so XFS volumes still mount.
+  - **Output:** the same `mounted:` and `WARNING:` lines, plus one line with the count and the time.
+  - **Tests:** `tests/initramfs-container-mounts.sh`, with stubbed mount and devices. Covered: all mounted, in parallel, bounded, nested order, XFS fallback, a bad volume warned, missing devices waited for once, a late device mounted.
 - **fix:** #144: `adopt-ublk` (every node's engine) stops in order on SIGTERM. It waited for SIGINT only, so the SIGTERM a supervisor sends (stormpump on shutdown), and the one the next `adopt-ublk` sends to stand it down, killed it by the default action. It skipped the final state capture, losing up to 10 s of engine state on every stop, and never tore its ublk threads down.
   - **On SIGINT or SIGTERM:** the devices are released for recovery at once (never stopped: they outlive the process and the next adopter takes them). The final state capture and a metadata persist run side by side, each bounded to 10 s, so a stop stays within ~10 s.
   - **Same fix elsewhere:** `boot-iscsi` and the volume attach command waited for SIGINT only too; they now use the same `StopSignal`.
