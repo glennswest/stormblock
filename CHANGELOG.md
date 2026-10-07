@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **docs:** #265: status. #122's stage/activate/rollback tests were re-run on dev at b30cecf: 4/4. The check on real hardware waits for stormupdate#3 and a stormcos release that carries the #122 engine.
 - **feat:** #244: a local root that does not come up falls back to the claimed image instead of stopping at a shell. The root may never appear, or may fail to mount (server1 11.56: `erofs: cannot find valid erofs superblock`).
   - **When:** once per boot; when the root came from a local disk (no hook decided it); when an appliance is known; and when the name is not a guess (#249).
   - **What it does:** `/init` stops the engine and boots the claimed image (claiming one if needed). It installs that image over the disk, its system half laid again (`STORMBLOCK_RELAY_SYSTEM_HALF=1` bypasses the "already up to date" shortcut) and its data half kept (#311). The console says `ROOT FAILED` / `FALLING BACK`, or why it did not fall back.
