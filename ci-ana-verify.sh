@@ -69,6 +69,7 @@ engine() {
     cat > "$W/$n/stormblock.toml" <<EOF
 [management]
 api_token = "$TOKEN"
+admin_token = "$TOKEN"
 listen_addr = "127.0.0.1:$mgmt"
 data_dir = "$W/$n/data"
 node_name = "ci-ana-$n"
