@@ -85,6 +85,23 @@ tests run on.
    stands the incumbent down, waits for its process to exit, then restores
    (`handover::take_over`). Reading first left the incumbent's last
    allocations out of the successor's map, with their slots looking free.
+   The cost is a gap in which nothing serves the devices, root included
+   (#190), and three rules cover it:
+   - Before the stand-down (while refusing still leaves the incumbent
+     serving), every local path the restore reads (`--meta`, a slab file or
+     device) must be on memory or a disk that is not ublk
+     (`drive::backing`). An overlay counts as ublk. A fabric host name is
+     resolved then, because the resolver reads `/etc`. In the gap, such a
+     read would not fail but wait for the server that is doing the reading.
+   - A restore that fails in the gap is retried with backoff
+     (`handover::take_over_retrying`: 1 s doubling to 15 s, for
+     `STORMBLOCK_ADOPT_RESTORE_SECS`, default 120). Each failure is said
+     on the console.
+   - Giving up (or adopting no device) is loud and leaves the devices
+     held. adopt-ublk writes `/run/stormblock/adopt-failed.json`, prints a
+     FATAL and exits **75**. Held devices make reads wait instead of fail,
+     and the next `adopt-ublk` takes them as it would from an incumbent
+     (and removes the record).
 9. **A flow-over cut short is finished, not lost** — either half (#285: the
    data half moves in the background too, quarantined and recorded on the
    local data slab like the system half on the system slab). When the local records

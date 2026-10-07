@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #190: `adopt-ublk` no longer leaves a node hung when its restore fails after the incumbent has exited. Since #171 the restore runs after the stand-down, and a failure there left every ublk device, root included, with no server, and nothing retried or reported it.
+  - **Checked before the stand-down:** every local path the restore reads (`--meta`, a slab file or device) must be on memory or a disk that is not ublk (`drive::backing`, from `/proc/self/mountinfo` and sysfs). An overlay is treated as ublk. Such a read in the gap does not fail; it waits for the server doing the reading. A refusal leaves the incumbent serving. An `nvme-tcp://` host name is resolved there too, because the resolver reads `/etc`.
+  - **No relative meta dir:** with no `--meta`, a fabric URI no longer gets a "meta beside the slab" directory. That path was relative and was created in the cwd, the root.
+  - **Retried:** a restore that fails after the stand-down is tried again with backoff (`handover::take_over_retrying`: 1 s doubling to 15 s, for `STORMBLOCK_ADOPT_RESTORE_SECS`, default 120). Each failure is printed on the console.
+  - **Then loud:** giving up, or adopting no device at all, writes `/run/stormblock/adopt-failed.json` (error, devices held, what to do next), prints a FATAL on the console and exits **75**. The devices stay held, so reads wait rather than fail, and the next `adopt-ublk` takes them and removes the record. The old message "the root is still served by whoever had it" was false since #171 and is gone.
+  - **Tests:** `handover::retry_tests` (3) and `backing::tests` (2). `ci-adopt-retry-verify.sh` runs a real kernel's ublk in QEMU with a volume served by `boot-local`:
+    - two failed restores (test hook `STORMBLOCK_ADOPT_TEST_FAIL_RESTORES`), then the device is taken, and a read started in the gap gets the right bytes;
+    - every restore failing gives exit 75, the record, and the device held with a read waiting;
+    - a second `adopt-ublk` takes the device, and the waiting read completes with the right bytes;
+    - a slab on `/dev/ublkb0` is refused before the stand-down while the server keeps serving.
 - **fix:** #314 (sectionsystems#7): a network-booted node could not verify its boot pallet. `/api/v1/pallets` was built from the engine's drives, and `adopt-ublk` (every node's engine) registers none, so the claimed clone's GPT, which carries the boot pallet, was in no store.
   - **Boot disks:** the disk each slab path was opened from (the claimed clone's `nvme-tcp://` namespace, or the local disk) is kept as `AppState.boot_disks`.
   - **Reads only:** list, `status`, `chain`, `GET /{id}` and `POST /{id}/verify` see the drives and the boot disks. Every write verb sees the drives only, so a pallet on a shared clone is never activated, marked, moved or deleted (404).

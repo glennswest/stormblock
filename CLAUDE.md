@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### adopt-ublk: a restore that fails after the incumbent exited (2026-10-07, #190, P1) — IN PROGRESS
+### adopt-ublk: a restore that fails after the incumbent exited (2026-10-07, #190, P1) — DONE
 
 Since v19.2.1 (#171) `adopt-ublk` stands the incumbent down, waits for it to
 exit, then restores. A restore that fails there leaves every ublk device,
@@ -188,22 +188,26 @@ so. And "restore touches nothing ublk-backed" was only stated. By reading:
 - "adopted none … the root is still served by whoever had it" is false since
   #171: nobody serves it
 Plan:
-- [ ] before the stand-down (the incumbent still serving, so refusing is
+- [x] before the stand-down (the incumbent still serving, so refusing is
       safe): every local path the restore reads (`meta`, file slabs) must
       not be on a ublk-backed or unknown (overlay) filesystem; fabric host
       names resolved to addresses then; no cwd-relative meta for a fabric URI
-- [ ] restore retried with backoff (1 s doubling to 15 s) for
+- [x] restore retried with backoff (1 s doubling to 15 s) for
       `STORMBLOCK_ADOPT_RESTORE_SECS` (120); each failure on the console
-- [ ] giving up (restore, or no device adopted): `/run/stormblock/adopt-failed.json`
+- [x] giving up (restore, or no device adopted): `/run/stormblock/adopt-failed.json`
       (what, why, the devices held), a FATAL on the console, exit 75 — the
       devices stay held in recovery so running adopt-ublk again takes them;
       the marker removed on success
-- [ ] tests: take_over retry units; `ci-adopt-retry-verify.sh` (QEMU, real
+- [x] tests: take_over retry units; `ci-adopt-retry-verify.sh` (QEMU, real
       ublk): restore fails twice then adopts, I/O blocked in the gap
       completes; never succeeds → exit 75 + marker, devices held, a second
       adopt-ublk takes them and the data reads back; a meta dir on the ublk
       device refused before the stand-down. Docs, CHANGELOG; stormcos issue
       (the boot unit restarts adopt-ublk on 75)
+- Verified on dev: `ci-adopt-retry-verify.sh` ALL PASS (kernel 7.2.8);
+  the retry, backing and handover tests. Not on metal: needs a stormcos
+  release with this engine; stormcos's boot unit should run adopt-ublk
+  again on exit 75 (filed)
 
 ### A network-booted node lists and verifies its boot pallet (2026-10-07, #314, P3) — DONE
 
