@@ -9313,7 +9313,20 @@ mod forge_mode_tests {
         layout.lba = Some(4096);
         layout.boot_bytes = 32 * MIB;
         layout.bulk = false;
-        crate::image::local::lay_node_slabs(disk.clone(), &layout).await.unwrap();
+        let laid = crate::image::local::lay_node_slabs(disk.clone(), &layout).await.unwrap();
+        {
+            // A volume on it, so its slabs carry records as a release's do.
+            let mut m = VolumeManager::new(MIB);
+            let ids = vec![laid.system.slab_id(), laid.data.slab_id()];
+            m.add_slab(laid.system).await;
+            m.add_slab(laid.data).await;
+            m.persist_to_slabs(ids);
+            let root = m.create_volume_any("stormpump", 4 * MIB).await.unwrap();
+            let h = m.get_volume(&root).unwrap();
+            h.write(0, &vec![7u8; 4096]).await.unwrap();
+            h.flush().await.unwrap();
+            m.persist().await;
+        }
         let kernel = b"vmlinuz 11.89 ".repeat(30_000);
         let pallet_id = {
             let mut store = PalletStore::new(Vec::new());
