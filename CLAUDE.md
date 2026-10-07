@@ -172,17 +172,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### /v1 refuses `encrypted: true`: nothing encrypts (2026-10-07, #232, P1) — IN PROGRESS
+### /v1 refuses `encrypted: true`: nothing encrypts (2026-10-07, #232, P1) — DONE
 
 `POST /v1/volumes {"encrypted": true}` was stored and reported `encrypted:
 true` on plaintext. Until #74's design (per-volume DEK, dm-crypt at the node)
 is built: refuse it, report false.
-- [ ] `V1Error::Unsupported` → 422 `{code: "unsupported"}` (stormblock-csi's
+- [x] `V1Error::Unsupported` → 422 `{code: "unsupported"}` (stormblock-csi's
       client maps 400/422 to InvalidArgument: `CreateVolume` fails with the
       message); checked before anything is allocated or looked up by name
-- [ ] a persisted volume recorded `encrypted: true` reads back false, said
+- [x] a persisted volume recorded `encrypted: true` reads back false, said
       at startup (and written back at the next persist)
-- [ ] tests; README "Not built", CHANGELOG; stormblock-csi told
+- [x] tests; README "Not built", CHANGELOG; stormblock-csi told
+- Verified on a build VM at 6131382: both new tests, every contract_v1_wire
+  test; full nextest 984/985 (`integration_forge::a_node_is_a_forge_by_
+  default…`, 1/1 alone: a port race). stormblock-csi#48
 
 ### The management API over TLS, a node-CA client certificate as a credential (2026-10-07, #203, P1) — DONE
 
