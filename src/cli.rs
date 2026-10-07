@@ -7581,28 +7581,35 @@ file = "{state}"
         assert!(report.aside.contains(&("logs".into(), "logs@11.90".into())), "{report:?}");
         assert!(report.migrations.is_empty());
 
-        let check = |m: &VolumeManager, when: &'static str| {
-            let (state_before, logs_before, pvc_bytes, n1_svc, n1_logs) =
-                (state_before.clone(), logs_before.clone(), pvc_bytes.clone(), n1_svc.clone(), n1_logs.clone());
-            async move {
-                assert_eq!(m.find_volume("state").await, Some(state_id), "{when}: the node's state, by its id");
-                assert_eq!(volume_bytes(m, "state").await.unwrap(), state_before, "{when}: state");
-                assert_eq!(m.find_volume("logs@11.90").await, Some(logs_id), "{when}: the node's logs, aside");
-                assert_eq!(volume_bytes(m, "logs@11.90").await.unwrap(), logs_before, "{when}: the node's logs");
-                assert_eq!(volume_bytes(m, "logs").await.unwrap()[..n1_logs.len()], n1_logs[..], "{when}: logs, N+1's");
-                assert_eq!(m.find_volume("pvc-default-db").await, Some(pvc), "{when}: the PVC, by its id");
-                assert_eq!(volume_bytes(m, "pvc-default-db").await.unwrap(), pvc_bytes, "{when}: the PVC");
-                assert!(m.find_volume("kubelet-data").await.is_some(), "{when}: the volume N+1 adds");
-                assert_eq!(volume_bytes(m, "svc").await.unwrap()[..n1_svc.len()], n1_svc[..], "{when}: svc, N+1's");
-                // One volume to a name.
-                let mut names: Vec<String> = m.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
-                let all = names.len();
-                names.sort();
-                names.dedup();
-                assert_eq!(names.len(), all, "{when}: a name answered by two volumes: {names:?}");
-            }
-        };
-        check(&mgr, "after the install").await;
+        struct Expect {
+            state_id: crate::volume::VolumeId,
+            logs_id: crate::volume::VolumeId,
+            pvc: crate::volume::VolumeId,
+            state_before: Vec<u8>,
+            logs_before: Vec<u8>,
+            pvc_bytes: Vec<u8>,
+            n1_svc: Vec<u8>,
+            n1_logs: Vec<u8>,
+        }
+        async fn check(m: &VolumeManager, when: &str, e: &Expect) {
+            assert_eq!(m.find_volume("state").await, Some(e.state_id), "{when}: the node's state, by its id");
+            assert_eq!(volume_bytes(m, "state").await.unwrap(), e.state_before, "{when}: state");
+            assert_eq!(m.find_volume("logs@11.90").await, Some(e.logs_id), "{when}: the node's logs, aside");
+            assert_eq!(volume_bytes(m, "logs@11.90").await.unwrap(), e.logs_before, "{when}: the node's logs");
+            assert_eq!(volume_bytes(m, "logs").await.unwrap()[..e.n1_logs.len()], e.n1_logs[..], "{when}: logs, N+1's");
+            assert_eq!(m.find_volume("pvc-default-db").await, Some(e.pvc), "{when}: the PVC, by its id");
+            assert_eq!(volume_bytes(m, "pvc-default-db").await.unwrap(), e.pvc_bytes, "{when}: the PVC");
+            assert!(m.find_volume("kubelet-data").await.is_some(), "{when}: the volume N+1 adds");
+            assert_eq!(volume_bytes(m, "svc").await.unwrap()[..e.n1_svc.len()], e.n1_svc[..], "{when}: svc, N+1's");
+            // One volume to a name.
+            let mut names: Vec<String> = m.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
+            let all = names.len();
+            names.sort();
+            names.dedup();
+            assert_eq!(names.len(), all, "{when}: a name answered by two volumes: {names:?}");
+        }
+        let e = Expect { state_id, logs_id, pvc, state_before, logs_before, pvc_bytes, n1_svc, n1_logs };
+        check(&mgr, "after the install", &e).await;
         super::quarantine_flow_sources(&mgr, &flow).await;
         drop(mgr);
 
@@ -7619,16 +7626,16 @@ file = "{state}"
                 reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
             )
         };
-        check(&succ, "after the handover").await;
+        check(&succ, "after the handover", &e).await;
         super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
         super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
         succ.persist().await;
-        check(&succ, "after the flow-over").await;
+        check(&succ, "after the flow-over", &e).await;
         drop(succ);
 
         // The disk alone, as the next boot opens it.
         let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
-        check(&alone, "from the disk alone").await;
+        check(&alone, "from the disk alone", &e).await;
         drop(alone);
         let l = super::open_storage(&disk).await.unwrap();
         let i = super::open_storage(&image_n1).await.unwrap();
