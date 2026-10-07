@@ -10,9 +10,11 @@
 //! and every HDD does.
 //!
 //! What it proves: code that is correct against this device survives a power
-//! cut on any drive that honours FLUSH. What it cannot prove: torn sectors
-//! within one write (every write here is atomic), and firmware that lies
-//! about FLUSH.
+//! cut on any drive that honours FLUSH. [`CrashDevice::crash_with`] also tears
+//! writes (#191): a kept write lands only in part — a prefix of its blocks, or
+//! any subset of them — the way a drive cut mid-write may leave it. Writes
+//! tear at the device's block (4096 bytes, as a 4Kn drive's atomic unit),
+//! never inside one. What it cannot prove: firmware that lies about FLUSH.
 
 use std::sync::Mutex;
 
@@ -21,6 +23,19 @@ use rand::{Rng, SeedableRng};
 use uuid::Uuid;
 
 use super::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType};
+
+/// How a power cut tears the writes it keeps (#191).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tear {
+    /// Every kept write lands whole.
+    None,
+    /// With this probability a kept write of more than one block lands only
+    /// as its first n blocks (1 ≤ n < its blocks): a drive writing in order.
+    Prefix(f64),
+    /// With this probability a kept write of more than one block lands as a
+    /// random subset of its blocks: a drive completing out of order.
+    Scatter(f64),
+}
 
 pub struct CrashDevice {
     id: DeviceId,
@@ -60,14 +75,45 @@ impl CrashDevice {
 
     /// Cut the power: a new device holding the durable image plus a random
     /// subset of the writes still in the cache (each kept with probability
-    /// `keep`). `seed` makes it repeatable.
+    /// `keep`), every one whole. `seed` makes it repeatable.
     pub fn crash(&self, seed: u64, keep: f64) -> CrashDevice {
+        self.crash_with(seed, keep, Tear::None)
+    }
+
+    /// [`crash`](Self::crash), with the kept writes torn as `tear` says
+    /// (#191).
+    pub fn crash_with(&self, seed: u64, keep: f64, tear: Tear) -> CrashDevice {
         let st = self.state.lock().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut image = st.durable.clone();
+        let block = self.block as usize;
         for (off, data) in &st.cached {
-            if rng.gen_bool(keep) {
-                image[*off as usize..*off as usize + data.len()].copy_from_slice(data);
+            if !rng.gen_bool(keep) {
+                continue;
+            }
+            let off = *off as usize;
+            // The write's pieces, at the device's block boundaries.
+            let mut pieces = Vec::new();
+            let mut at = off;
+            while at < off + data.len() {
+                let end = ((at / block + 1) * block).min(off + data.len());
+                pieces.push((at, end));
+                at = end;
+            }
+            let kept: Vec<bool> = match tear {
+                Tear::Prefix(p) if pieces.len() > 1 && rng.gen_bool(p) => {
+                    let n = rng.gen_range(1..pieces.len());
+                    (0..pieces.len()).map(|i| i < n).collect()
+                }
+                Tear::Scatter(p) if pieces.len() > 1 && rng.gen_bool(p) => {
+                    (0..pieces.len()).map(|_| rng.gen_bool(0.5)).collect()
+                }
+                _ => vec![true; pieces.len()],
+            };
+            for ((a, b), k) in pieces.into_iter().zip(kept) {
+                if k {
+                    image[a..b].copy_from_slice(&data[a - off..b - off]);
+                }
             }
         }
         CrashDevice::from_image(image)
@@ -162,5 +208,40 @@ mod tests {
         let after = d.crash(1, 1.0);
         after.read(0, &mut b).await.unwrap();
         assert!(b[4096..].iter().all(|&x| x == 2));
+    }
+
+    /// #191: a kept multi-block write may land in part, at block boundaries
+    /// only: a prefix, or any subset; never inside a block.
+    #[tokio::test]
+    async fn a_kept_write_may_land_torn_at_block_boundaries() {
+        let d = CrashDevice::new(1 << 20);
+        let data: Vec<u8> = (0..8u8).flat_map(|i| vec![i + 1; 4096]).collect();
+        d.write(4096, &data).await.unwrap();
+        let blocks = |dev: &CrashDevice| {
+            let st = dev.state.lock().unwrap();
+            (1..9).map(|b| st.view[b * 4096..(b + 1) * 4096].to_vec()).collect::<Vec<_>>()
+        };
+        let (mut prefixes, mut scatters) = (0, 0);
+        for seed in 0..64 {
+            let p = blocks(&d.crash_with(seed, 1.0, Tear::Prefix(1.0)));
+            let n = p.iter().take_while(|b| b[0] != 0).count();
+            assert!((1..8).contains(&n), "a torn prefix keeps 1..8 of 8 blocks, kept {n}");
+            for (i, b) in p.iter().enumerate() {
+                let want = if i < n { (i + 1) as u8 } else { 0 };
+                assert!(b.iter().all(|&x| x == want), "block {i} torn inside");
+            }
+            prefixes += 1;
+            let s = blocks(&d.crash_with(seed, 1.0, Tear::Scatter(1.0)));
+            for (i, b) in s.iter().enumerate() {
+                assert!(b.iter().all(|&x| x == 0) || b.iter().all(|&x| x == (i + 1) as u8), "block {i} torn inside");
+            }
+            if s.iter().any(|b| b[0] == 0) && s.iter().skip_while(|b| b[0] != 0).any(|b| b[0] != 0) {
+                scatters += 1; // a hole before a kept block: not a prefix
+            }
+        }
+        assert_eq!(prefixes, 64);
+        assert!(scatters > 0, "scatter tears out of order");
+        // Untorn, the write is whole.
+        assert!(blocks(&d.crash_with(0, 1.0, Tear::None)).iter().enumerate().all(|(i, b)| b[0] == (i + 1) as u8));
     }
 }

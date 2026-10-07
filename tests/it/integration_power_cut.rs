@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
-use stormblock::drive::crashdev::CrashDevice;
+use stormblock::drive::crashdev::{CrashDevice, Tear};
 use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
 use stormblock::drive::BlockDevice;
 use stormblock::placement::topology::StorageTier;
@@ -73,7 +73,7 @@ enum Allowed {
     Any,
 }
 
-async fn trial(seed: u64, version: u32) -> Result<(), String> {
+async fn trial(seed: u64, version: u32, tear: Tear) -> Result<(), String> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024));
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
@@ -156,7 +156,7 @@ async fn trial(seed: u64, version: u32) -> Result<(), String> {
 
     // The power goes.
     let keep = rng.gen_range(0.0..1.0);
-    let after = Arc::new(dev.crash(seed, keep));
+    let after = Arc::new(dev.crash_with(seed, keep, tear));
     let slab = Slab::open(after.clone() as Arc<dyn BlockDevice>).await.map_err(|e| format!("reopen: {e}"))?;
     let mut vm2 = VolumeManager::new(SLOT);
     vm2.add_slab(slab).await;
@@ -171,7 +171,7 @@ async fn trial(seed: u64, version: u32) -> Result<(), String> {
         match &allowed[&i] {
             Allowed::Values(s) if !s.contains(&v) => {
                 return Err(format!(
-                    "seed {seed} (keep {keep:.2}, {ops} ops): block {i} reads {v}, allowed {:?}",
+                    "seed {seed} (keep {keep:.2}, {tear:?}, {ops} ops): block {i} reads {v}, allowed {:?}",
                     s
                 ))
             }
@@ -183,20 +183,45 @@ async fn trial(seed: u64, version: u32) -> Result<(), String> {
 
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_at_any_point() {
-    power_cuts(1).await;
+    power_cuts(1, Tear::None).await;
 }
 
 /// The same 300 cuts over a slab in format v2 (#158): the volume records are
 /// a log of changes and a copy-on-write tree, not two whole copies.
 #[tokio::test]
 async fn fsynced_writes_survive_a_power_cut_at_any_point_in_format_v2() {
-    power_cuts(2).await;
+    power_cuts(2, Tear::None).await;
 }
 
-async fn power_cuts(version: u32) {
+/// #191: the same cuts, with half the kept multi-block writes torn — only
+/// their first blocks landed, as a drive writing in order leaves them when the
+/// power goes mid-write. The volume records and the slot-table pages are
+/// such writes, and must survive it.
+#[tokio::test]
+async fn fsynced_writes_survive_a_power_cut_that_tears_writes() {
+    power_cuts(1, Tear::Prefix(0.5)).await;
+}
+
+#[tokio::test]
+async fn fsynced_writes_survive_a_power_cut_that_tears_writes_in_format_v2() {
+    power_cuts(2, Tear::Prefix(0.5)).await;
+}
+
+/// #191: torn out of order — any subset of a write's blocks landed.
+#[tokio::test]
+async fn fsynced_writes_survive_a_power_cut_that_scatters_writes() {
+    power_cuts(1, Tear::Scatter(0.5)).await;
+}
+
+#[tokio::test]
+async fn fsynced_writes_survive_a_power_cut_that_scatters_writes_in_format_v2() {
+    power_cuts(2, Tear::Scatter(0.5)).await;
+}
+
+async fn power_cuts(version: u32, tear: Tear) {
     let mut failures = Vec::new();
     for seed in 0..300u64 {
-        if let Err(e) = trial(seed, version).await {
+        if let Err(e) = trial(seed, version, tear).await {
             failures.push(e);
         }
     }

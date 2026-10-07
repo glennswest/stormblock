@@ -172,6 +172,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### CrashDevice tears writes (2026-10-07, #191, P2) — IN PROGRESS
+
+From #171: `CrashDevice` kept or dropped each unflushed write whole; a drive
+can persist part of a multi-block write. Torn at the device's atomic unit
+(its 4096-byte block, as a 4Kn drive): inside a block would only show a
+consumer's unflushed 4 KiB write torn, which is its journal's business.
+- [ ] `Tear`: `Prefix(p)` (the first n blocks of a kept write, the issue's
+      model) and `Scatter(p)` (any subset, out-of-order completion);
+      `crash_with(seed, keep, tear)`; `crash` unchanged
+- [ ] the 300-cut power-cut test under each, in metadata formats v1 and v2:
+      the record copies and slot-table sectors must survive it
+- [ ] durability.md (what the simulation shows), CHANGELOG
+
 ### Import refuses an XFS dirty log or an ext4 pending journal (2026-10-07, #198, P2) — DONE
 
 An image taken from a running or crashed system walked clean and was sealed:
