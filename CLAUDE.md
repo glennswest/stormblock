@@ -172,6 +172,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Forge 13.7.0 → ≥ v20 (2026-10-06, #235, P1) — WAITING ON THE OWNER
+
+No code left here: the intent route shipped in v20.0.0. Forge still answers
+13.7.0. The owner approved an in-place upgrade on 2026-09-28, then said on
+2026-10-01 "no forge upgrade — forge is recreated" (stormcentral#210). Asked
+on #235 (needs-owner): upgrade in place, or close as superseded. Noted
+there: format 2 is the default since #158 (44fc8e3), so an upgraded forge's
+slabs migrate to v2 and only the VM snapshot rolls back. The upgrade is a
+root step on the VM host, not this session's.
+
 ### /serve/v1 served every /api/v1 export on an open portal (2026-10-06, #217, P0) — DONE
 
 By reading, confirmed: reconcile step 1a wires every NVMe/iSCSI entry of
