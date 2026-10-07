@@ -72,7 +72,7 @@ fn yes() -> bool {
 /// A filesystem the image carries that was recognised and does not read is
 /// an image nothing will boot: fail rather than seal it, unless the caller
 /// asked not to verify.
-fn verdict(spec: &ImportSpec, found: &[crate::fs::survey::FoundFs]) -> Result<(), String> {
+pub(crate) fn verdict(spec: &ImportSpec, found: &[crate::fs::survey::FoundFs]) -> Result<(), String> {
     if !spec.verify {
         return Ok(());
     }

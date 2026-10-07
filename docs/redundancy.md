@@ -417,8 +417,22 @@ v5 checksum on the way). The status lists them:
 
 A filesystem that is recognised and does not read fails the import: an
 image nothing will boot should not become a golden every VM clones.
-`"verify": false` keeps it anyway, still listing what was found, without the
-walk. Measured on dev: the Rocky 9 GenericCloud image (646 MB qcow2, 1.2 GB
+
+**Neither does one that was not cleanly unmounted** (#198). Each entry has a
+`log` field:
+- `clean`;
+- for XFS: `dirty`, `external` or `unreadable`;
+- for ext4: `needs_recovery` (RECOVER set).
+
+Anything but `clean` fails verification. What is on disk may be stale until
+a mount replays the log, so what the engine surveyed is not what the guest
+would see. An external XFS log cannot be read here, so it cannot be verified
+(fio.xfs.rs#17). On rare occasions a clean XFS log is read as dirty
+(fio.xfs.rs#16), and the error says so.
+
+`"verify": false` keeps any of these anyway, still listing what was found,
+without the walk. Sealing an engine XFS volume is refused too while its log
+is not clean. Measured on dev: the Rocky 9 GenericCloud image (646 MB qcow2, 1.2 GB
 written) imports, walks and seals in 19 s. `xfs_repair -n` passes on that root
 partition, and `xfs_db` counts 34,306 inodes in use against the walk's 37,473
 entries (hard links are entries of one inode). A whole volume that is itself

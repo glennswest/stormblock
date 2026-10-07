@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #198: an imported image that was not cleanly unmounted no longer passes verification. `fio-xfs` never read the XFS log, and the import ignored ext4's RECOVER flag, so an image taken from a running or crashed system walked clean and was sealed, though Linux replays it on first mount and the guest sees something other than what was surveyed.
+  - **fio-xfs v0.3.0** (fio.xfs.rs#6) reads the log.
+  - **Survey:** each filesystem in the import's survey has a `log` field: `clean`; for XFS `dirty`, `external` or `unreadable`; for ext4 `needs_recovery`. Anything else fails verification unless `"verify": false`.
+    - An external XFS log is not verifiable (fio.xfs.rs#17).
+    - A dirty XFS log's error notes that a clean one is on rare occasions read as dirty (fio.xfs.rs#16).
+  - **Seal:** sealing an XFS volume is also refused while its log is not clean.
+  - **Tests:** `fs::survey::tests`:
+    - an engine-made XFS reads clean and seals;
+    - with its log made dirty by hand (records after the unmount record, as fio-xfs's own fixture), it reads `dirty`, fails the import's verdict (passes with `verify: false`) and is refused a seal;
+    - an ext4 with RECOVER reads `needs_recovery` and fails the verdict.
 - **perf:** #338 (stormpump#107, rustkube-node#95): a flush with nothing to make durable returns at once. A fresh 64Mi claim spent 553–878 ms in its ext4 mount on a warm node, because every ublk FLUSH ran a device-wide sync of each slab the volume touches, queued behind any other volume's sync.
   - **How:** each volume counts the writes, discards and write-zeroes that have finished on it (when each returns, failed or dropped included), and a successful flush records the count it started from. A flush with nothing finished since touches no device. Durability rule 13.
   - **What it changes:** a write still in flight is not owed by a running flush, and makes the next flush a full one. A handle's first flush is always full.

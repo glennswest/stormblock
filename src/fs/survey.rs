@@ -44,6 +44,11 @@ pub struct FoundFs {
     /// What walking it found, when it was walked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub walked: Option<Walked>,
+    /// Its log or journal (#198): `clean`; for XFS `dirty`, `external` or
+    /// `unreadable`; for ext4 `needs_recovery`. Anything but `clean` is not
+    /// what a mount would show: Linux replays it first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
     /// Why it could not be read, if it could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -69,6 +74,28 @@ fn pretty_name(os_release: &[u8]) -> Option<String> {
 
 async fn read_xfs(dev: &Arc<dyn BlockDevice>, walk: bool, f: &mut FoundFs) {
     use super::xfs;
+    // The log first (#198): a filesystem not cleanly unmounted reads, as it
+    // stands on disk, as something older than what a mount shows.
+    match xfs::log_state(dev).await {
+        Ok(state) => {
+            f.log = Some(xfs::log_name(&state).to_string());
+            if let Some(why) = xfs::log_problem(&state) {
+                f.error = Some(match state {
+                    // fio.xfs.rs#16: on rare occasions a clean log reads dirty.
+                    fio_xfs::LogState::Dirty { .. } => format!(
+                        "{why} (mount it once, or unmount it cleanly, and import again; on rare \
+                         occasions a clean log is read as dirty, fio.xfs.rs#16)"
+                    ),
+                    _ => why,
+                });
+                return;
+            }
+        }
+        Err(e) => {
+            f.error = Some(format!("reading the log: {e}"));
+            return;
+        }
+    }
     match xfs::read_file(dev, "/etc/os-release").await {
         Ok(Some(b)) => f.os = pretty_name(&b),
         Ok(None) => {}
@@ -154,6 +181,7 @@ async fn one(dev: Arc<dyn BlockDevice>, walk: bool, partition: Option<(u32, Stri
             label: String::new(),
             os: None,
             walked: None,
+            log: None,
             error: None,
         };
         match super::xfs::read_layout(&dev).await {
@@ -177,8 +205,19 @@ async fn one(dev: Arc<dyn BlockDevice>, walk: bool, partition: Option<(u32, Stri
             label: l.label.clone(),
             os: None,
             walked: None,
+            log: Some(if l.needs_recovery { "needs_recovery" } else { "clean" }.into()),
             error: None,
         };
+        // A pending journal replay (#198): what is on disk may be stale
+        // until a mount replays it.
+        if l.needs_recovery {
+            f.error = Some(
+                "the journal needs recovery (RECOVER is set): the filesystem was not cleanly \
+                 unmounted, and what is on disk may be stale until a mount replays the journal"
+                    .into(),
+            );
+            return Some(f);
+        }
         read_ext4(&dev, walk, &mut f).await;
         return Some(f);
     }
@@ -225,5 +264,112 @@ mod tests {
         assert_eq!(pretty_name(r).as_deref(), Some("Rocky Linux 9.4 (Blue Onyx)"));
         assert_eq!(pretty_name(b"NAME=Alpine\n").as_deref(), Some("Alpine"));
         assert_eq!(pretty_name(b"ID=x\n"), None);
+    }
+
+    async fn scratch(name: &str, bytes: u64) -> (Arc<dyn BlockDevice>, String) {
+        let path = std::env::temp_dir()
+            .join(format!("stormblock-survey-198-{name}-{}.bin", uuid::Uuid::new_v4().simple()));
+        let path = path.to_str().unwrap().to_string();
+        let dev = crate::drive::filedev::FileDevice::open_with_capacity(&path, bytes).await.unwrap();
+        (Arc::new(dev), path)
+    }
+
+    fn import_spec(verify: bool) -> crate::image::import::ImportSpec {
+        serde_json::from_value(serde_json::json!({"name": "img", "file": "/x", "verify": verify})).unwrap()
+    }
+
+    /// Leave an XFS log as a system that was not cleanly unmounted does: an
+    /// unmount record, then transactions after it (fio-xfs's own fixture).
+    async fn dirty_the_xfs_log(dev: &Arc<dyn BlockDevice>) {
+        let mut sb = vec![0u8; 512];
+        dev.read(0, &mut sb).await.unwrap();
+        let be32 = |o: usize| u32::from_be_bytes(sb[o..o + 4].try_into().unwrap()) as u64;
+        let (block, ag_blocks, log_blocks) = (be32(4), be32(84), be32(96));
+        let log_start = u64::from_be_bytes(sb[48..56].try_into().unwrap());
+        let ag_log = sb[124] as u64;
+        let at = ((log_start >> ag_log) * ag_blocks + (log_start & ((1 << ag_log) - 1))) * block;
+        let mut log = vec![0u8; (log_blocks * block) as usize];
+        let bb = 512usize;
+        let mut record = |log: &mut Vec<u8>, at: usize, data: usize, unmount: bool, tail: u64| {
+            let h = at * bb;
+            log[h..h + 4].copy_from_slice(&0xFEED_BABEu32.to_be_bytes());
+            log[h + 4..h + 8].copy_from_slice(&1u32.to_be_bytes());
+            log[h + 8..h + 12].copy_from_slice(&2u32.to_be_bytes());
+            log[h + 12..h + 16].copy_from_slice(&((data * bb) as u32).to_be_bytes());
+            log[h + 16..h + 24].copy_from_slice(&(1u64 << 32 | at as u64).to_be_bytes());
+            log[h + 24..h + 32].copy_from_slice(&(1u64 << 32 | tail).to_be_bytes());
+            log[h + 40..h + 44].copy_from_slice(&(if unmount { 1u32 } else { 3 }).to_be_bytes());
+            log[h + 320..h + 324].copy_from_slice(&32768u32.to_be_bytes());
+            for i in 1..=data {
+                let d = (at + i) * bb;
+                log[d..d + 4].copy_from_slice(&1u32.to_be_bytes());
+                if i == 1 && unmount {
+                    log[d + 9] = 0x20;
+                }
+            }
+        };
+        record(&mut log, 0, 1, true, 0);
+        let mut at_bb = 2;
+        while at_bb < 50 {
+            let data = (50 - at_bb).min(8) - 1;
+            record(&mut log, at_bb, data, false, 2);
+            at_bb += data + 1;
+        }
+        dev.write(at, &log).await.unwrap();
+        dev.flush().await.unwrap();
+    }
+
+    /// #198: an engine-made XFS reads clean and seals; the same filesystem
+    /// with a dirty log is reported `dirty`, fails the import's verification
+    /// (passes with `verify: false`) and is refused a seal.
+    #[tokio::test]
+    async fn an_xfs_with_a_dirty_log_fails_verification_and_the_seal() {
+        let (dev, path) = scratch("xfs", 320 * 1024 * 1024).await;
+        crate::fs::xfs::format(&dev, &crate::fs::xfs::XfsParams::default()).await.unwrap();
+        let found = survey(&dev, true).await;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].log.as_deref(), Some("clean"), "{:?}", found[0]);
+        assert!(found[0].error.is_none(), "{:?}", found[0]);
+        assert!(crate::image::import::verdict(&import_spec(true), &found).is_ok());
+        assert!(crate::fs::xfs::seal_blockers(&dev).await.unwrap().is_empty(), "a fresh XFS seals");
+
+        dirty_the_xfs_log(&dev).await;
+        assert!(matches!(
+            crate::fs::xfs::log_state(&dev).await.unwrap(),
+            fio_xfs::LogState::Dirty { .. }
+        ));
+        let found = survey(&dev, true).await;
+        assert_eq!(found[0].log.as_deref(), Some("dirty"));
+        let err = found[0].error.clone().unwrap();
+        assert!(err.contains("the log is dirty") && err.contains("fio.xfs.rs#16"), "{err}");
+        let v = crate::image::import::verdict(&import_spec(true), &found).unwrap_err();
+        assert!(v.contains("the log is dirty") && v.contains("\"verify\": false"), "{v}");
+        assert!(crate::image::import::verdict(&import_spec(false), &found).is_ok(), "verify false takes it as it is");
+        let blockers = crate::fs::xfs::seal_blockers(&dev).await.unwrap();
+        assert!(blockers.iter().any(|b| b.contains("the log is dirty")), "{blockers:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #198, ext4: a pending journal replay (RECOVER) fails verification.
+    #[tokio::test]
+    async fn an_ext4_needing_recovery_fails_verification() {
+        let (dev, path) = scratch("ext4", 128 * 1024 * 1024).await;
+        crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+        let found = survey(&dev, true).await;
+        assert_eq!(found[0].log.as_deref(), Some("clean"));
+        assert!(found[0].error.is_none(), "{:?}", found[0]);
+        {
+            use mkfs_ext4::features::IncompatFeatures;
+            let target = crate::fs::ext4::VolumeDevice::opaque(dev.clone());
+            let mut fs = mkfs_ext4::fs::Filesystem::open(target).await.unwrap();
+            fs.superblock_mut().feature_incompat |= IncompatFeatures::RECOVER;
+            fs.flush_superblock().await.unwrap();
+        }
+        let found = survey(&dev, true).await;
+        assert_eq!(found[0].log.as_deref(), Some("needs_recovery"));
+        let v = crate::image::import::verdict(&import_spec(true), &found).unwrap_err();
+        assert!(v.contains("the journal needs recovery"), "{v}");
+        assert!(crate::image::import::verdict(&import_spec(false), &found).is_ok());
+        let _ = std::fs::remove_file(path);
     }
 }

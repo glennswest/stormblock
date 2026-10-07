@@ -338,7 +338,47 @@ pub async fn seal_blockers(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<Vec<Str
     if l.needs_repair {
         out.push("the filesystem is marked NEEDSREPAIR".to_string());
     }
+    // A log that is not clean (#198): what is on disk may be stale until a
+    // mount replays it, and every clone would start from it.
+    if let Some(why) = log_problem(&log_state(dev).await?) {
+        out.push(why);
+    }
     Ok(out)
+}
+
+/// The log as it stands (#198), read without refusing a dirty one.
+pub async fn log_state(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<fio_xfs::LogState> {
+    let vol = fio_xfs::Volume::open_norecovery(XfsDevice::opaque(dev.clone())).await?;
+    Ok(vol.log_state().clone())
+}
+
+/// The log state's name, as an import reports it.
+pub fn log_name(s: &fio_xfs::LogState) -> &'static str {
+    match s {
+        fio_xfs::LogState::Clean => "clean",
+        fio_xfs::LogState::Dirty { .. } => "dirty",
+        fio_xfs::LogState::External => "external",
+        fio_xfs::LogState::Unreadable(_) => "unreadable",
+    }
+}
+
+/// Why the filesystem cannot be read as it stands on disk, if it cannot
+/// (#198). An external log is on a device this cannot see, so whether it is
+/// clean is not known (fio.xfs.rs#17): not verifiable.
+pub fn log_problem(s: &fio_xfs::LogState) -> Option<String> {
+    match s {
+        fio_xfs::LogState::Clean => None,
+        fio_xfs::LogState::Dirty { head, tail } => Some(format!(
+            "the log is dirty (head {head}, tail {tail}): the filesystem was not cleanly unmounted, \
+             and what is on disk may be stale until a mount replays the log"
+        )),
+        fio_xfs::LogState::External => Some(
+            "the log is on an external device, which cannot be read here: whether the filesystem \
+             was cleanly unmounted is not known"
+                .to_string(),
+        ),
+        fio_xfs::LogState::Unreadable(why) => Some(format!("the log cannot be read: {why}")),
+    }
 }
 
 /// What walking a filesystem found.
