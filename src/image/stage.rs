@@ -4,7 +4,8 @@
 //! system, never by an install at boot; a release may mark each data volume
 //! **keep**, **replace** or **migrate** (a hook the release ships); and the
 //! boot after activating is decided by the appliance's assignment, which
-//! stormupdate re-points to N+1 first (2A), so install = wipe stays as it is.
+//! stormupdate re-points to N+1 first (2A). An install keeps the data half
+//! and applies the same policy file (#311, `image::install`).
 //!
 //! **Stage** reads N+1's published image (an `http://` URL, by `Range`, or any
 //! device) and copies into the node's own slabs, with nothing of N touched:

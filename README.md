@@ -1313,12 +1313,14 @@ finished, i.e. do its records place no extent on a slab that is not on the
 drive (#239)? Exit 0 held, 1 not held (a golden missing), 2 cannot say, 3
 the same release with its flow-over cut short (boot the drive: the engine
 finishes the move, #258). `/init` uses it to tell an install from a reboot — on a disk it can boot,
-and on one it cannot but which carries this node's data slab. Install = wipe
-(#261): another release (1) wipes the whole disk, system and data slab, and
-lays the claimed release fresh; the same release (0, 3) is recovery and keeps
-the disk; cannot say (2) leaves every local drive alone. A boot never updates
-a disk to a new release while keeping its data half: that is stormupdate's, on
-the running node (`docs/boot-hooks.md`, "An install without an intent").
+and on one it cannot but which carries this node's data slab. An install
+keeps the data half (#311, superseding #261's install = wipe): another release
+(1) lays the disk's system half again and adopts its data half, every volume
+keeping its id and name unless the release's `/etc/stormblock/data-volumes`
+says replace or migrate (the node's then set aside as `<name>@<old>`); the
+same release (0, 3) is recovery and keeps the disk; cannot say (2) leaves
+every local drive alone. An install that cannot keep everything stops with
+the disk untouched (`docs/boot-hooks.md`).
 
 Every slab this engine formats reserves a region for that record — `slab
 format`, `POST /api/v1/slabs` and the pool-growth path alike, sized from the

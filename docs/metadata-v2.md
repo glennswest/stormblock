@@ -127,9 +127,10 @@ on first open"), and as built:
 - A slab with no metadata region keeps a v1 header: it holds no record, and
   v1 reads it fine below 4 Gi slots.
 - Rollback: an engine before #158 refuses a v2 slab. A stormcos install lays
-  fresh slabs (install = wipe, #261), so nodes come to v2 by installing; a
-  long-lived node or the forge migrates in place and cannot go back to an
-  older engine without a reinstall (forge: a VM snapshot, as for v20).
+  the system slab fresh and keeps the data slab (#311), which migrates in
+  place at its first persist; a node, like the forge, then cannot go back to
+  an older engine without losing its data half (forge: a VM snapshot, as for
+  v20).
 
 ## As built (stages A and B)
 

@@ -76,7 +76,7 @@ Then N+1's boot pallet goes on top. The renames are checked before any is made, 
 
 ## Why the boot after it keeps the disk
 
-Since #261, a boot whose claim is another release than the disk holds wipes the disk. `slab holds <disk> <claimed image>` decides, and it compares the image's goldens by id with the disk's sealed volumes.
+A boot whose claim is another release than the disk holds is an install: it lays the system half again and keeps the data half (#311, which replaced #261's wipe). `slab holds <disk> <claimed image>` decides, and it compares the image's goldens by id with the disk's sealed volumes. A staged update is still the way to change release without losing the system half's own volumes.
 
 - **After activate:** N+1's goldens are on the disk under their own ids, and stormupdate has re-pointed the assignment to N+1. The boot claims N+1, the disk holds it, and the node boots its disk with N+1's names.
 - **After a rollback:** N's goldens are still there, so a claim of N is held too (#265).

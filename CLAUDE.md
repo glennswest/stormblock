@@ -235,8 +235,8 @@ generations; restore keeps the record's, the source: the write is gone.
       migrate); full nextest at eba4123: 939/941 = #134 and
       `a_flow_over_copy_holds_no_lock_the_node_needs` (#297/#305 flake,
       but it goes through `migrate_leg_unlocked`)
-- [ ] LEFT: run that test alone ×5 on dev to confirm it is the flake; add the
-      CHANGELOG entry; close #277 with the verification comment
+- [x] that test alone ×5 on dev at eba4123: 5/5 (0.16–1.4 s): the flake
+- [ ] LEFT: the CHANGELOG entry; close #277 with the verification comment
 
 ### Optional mount entries `?vol:path` (2026-10-06, #288, P1) — DONE
 
