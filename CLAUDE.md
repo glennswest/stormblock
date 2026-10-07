@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Install keeps the data half: only the system half is re-laid (2026-10-06, #311, P0) — IN PROGRESS
+### Install keeps the data half: only the system half is re-laid (2026-10-06, #311, P0) — DONE (golden-stormblock-3fed70dce709, stormcos#353)
 
 Owner (2026-10-06, the #1 rule for installs): an install touches the system
 drive only, and only its system half; the data slab and every data volume
@@ -188,7 +188,7 @@ yet"), so the node ran fresh data volumes from the appliance beside unread
 old ones of the same names (stormcos#236).
 
 Plan:
-- [ ] engine `image::local::adopt_data_half` (in `take_local_disk`'s update
+- [x] engine `image::install` (`plan`, `adopt`) (in `take_local_disk`'s update
       path, all checks before `update_system_slab` writes anything): read the
       kept data/bulk slabs' records and the release's policy
       (`/etc/stormblock/data-volumes`, unlisted data = keep); refuse (data
@@ -201,20 +201,26 @@ Plan:
       adopted into the manager, metadata routed to the local slabs, and what
       is left of the image's data half flows in (`data_flow`). Migrations
       listed for stormupdate (handover record → generations file)
-- [ ] `boot-local`: take the local disk before the exports are resolved, so
+- [x] `boot-local`: take the local disk before the exports are resolved, so
       the mounts name the kept volumes
-- [ ] `/init`: an install over a disk with a data slab is never `force`d
+- [x] `/init`: an install over a disk with a data slab is never `force`d
       (probe `INSTALL_OVER`, `slab holds` 1, the install ticket); console
       `INSTALL: replacing the system half of <disk>; its data half is kept`.
       A lone data slab with no system half is left alone (said so)
-- [ ] tests: install N, node writes `state` (keep), `logs` (replace) and a
+- [x] tests: install N, node writes `state` (keep), `logs` (replace) and a
       volume no release names (a PVC); an extra drive with known bytes;
       install N+1 over it: every byte checked after the install, after the
       flow-over and from the disk alone; the extra drive untouched; a kept
       volume with a leg in the system half stops the install, data
       untouched. Initramfs tests (boot-hook) updated
-- [ ] docs (boot-hooks.md, staging.md, durability/README), CHANGELOG; answer
+- [x] docs (boot-hooks.md, staging.md, durability/README), CHANGELOG; answer
       stormcentral#462's question on #311 (same id and name)
+- Verified on dev: both install tests; every initramfs test under sh and
+  busybox sh; full nextest at fa6706d 942/944 (#134, the qcow2 deadline,
+  #173 class); cluster checks. Golden golden-stormblock-3fed70dce709
+  (stormcos#353). #317 filed (default_role prefers System). Not on metal: a
+  stormcos release with this engine + initramfs installing over a running
+  node (stormcentral#462's standing gate)
 
 ### A write to a just-moved extent lost on a cut before the persist (2026-10-06, #277, P1) — FIX IN, close pending (paused for P0 #311)
 
