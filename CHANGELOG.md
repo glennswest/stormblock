@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **docs:** #284: forge mode is a day-2 switch. `PUT/DELETE /api/v1/forge` is called by stormcluster's day-2 operation (stormcluster#16); nothing chooses it at install, and stormcos#82's install-config carries no forge role. CLAUDE.md's #272 entry said otherwise and is corrected, and the README's `/api/v1/forge` row now says who calls it. `docs/auth.md` and `docs/boot-hooks.md` never made the claim.
 - **perf:** #278: a successor's flow-over lets the node boot first. The first move waits until the node's volume I/O has been still for 10 s, or 90 s at most (`STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 0 = no wait). `flow_over_remaining` is reported during the wait.
   - **Why:** on the Dell (SMR disk), a reboot during the flow-over ran stormpump in 15.1 s instead of 7.9 and the apiserver in 30.2 s instead of 15.3 (11.88). The per-move yield (#269) gives back one move's time, not a boot.
   - **The first-boot regression this issue was opened for is gone since 11.82** (the reopened-#269 work). pvetest1 reaches the apiserver in 63–109 s against 223 s on 11.73 and 334 s on 11.78; the Dell is at 165–179 s against 325 s on 11.79.

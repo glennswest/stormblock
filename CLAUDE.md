@@ -909,8 +909,10 @@ stormcos at build time.
 
 ### Forge mode turned on per node, kept by the engine (2026-10-03, #272, P1) — DONE
 
-For stormcos#187: one image, the forge role chosen at install, no argv or
-mount change on the stormcos side. Owner's preferred shape (option 1):
+For stormcos#187: one image, forge mode switched on a running node, no argv
+or mount change on the stormcos side. Owner's preferred shape (option 1).
+Every mode is a day-2 choice (owner, relayed on #272; #284): nothing is
+chosen at install, and stormcos#82's install-config carries no forge role:
 - [x] `GET/PUT/DELETE /api/v1/forge` (`mgmt/forge.rs`, `api/forge.rs`;
       PUT and DELETE need the admin token): PUT starts the shared target live
       (bound before it is published) and keeps the settings in
@@ -924,7 +926,8 @@ mount change on the stormcos side. Owner's preferred shape (option 1):
 - [x] tests `integration_forge` (3), `forge_mode_is_set_by_the_admin`; full
       nextest on dev 874/874, `--features cluster` checks. Docs (README,
       auth.md), CHANGELOG
-- Not on a node yet: stormcos#82's install-config apply makes the PUT
+- The caller is stormcluster's day-2 operation (stormcluster#16), not an
+  install. Since #287 a node is forge by default; `DELETE` turns it off
 
 ### Forge mode on a stormcos node: adopt-ublk serves NVMe/TCP (2026-10-03, #206, P1) — DONE
 
