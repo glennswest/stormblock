@@ -4599,13 +4599,24 @@ pub(crate) async fn take_local_disk_for(
         // boot area, and the shortcut would leave it that way (#123).
         let boot_ready =
             crate::image::local::boot_ready(&dest_dev, &layout).await;
+        // The boot already tried this disk and its root would not come up
+        // (#244): `/init` says so, and the system half is laid again from
+        // the image whatever the ids say — the same ids over broken bytes
+        // are what sent it here. The data half is kept as in any install.
+        let relay = std::env::var("STORMBLOCK_RELAY_SYSTEM_HALF").is_ok_and(|v| v.trim() == "1");
+        if relay {
+            println!(
+                "Flow-over: {disk}'s own root did not come up this boot — laying its system \
+                 half again from the image, whatever it holds (#244)"
+            );
+        }
         if !boot_ready {
             println!(
                 "Flow-over: {disk} has no room to boot on its own (no boot area, or a \
                  table firmware cannot read) — laying the system half again"
             );
         }
-        if let Some(have) = have.filter(|_| boot_ready) {
+        if let Some(have) = have.filter(|_| boot_ready && !relay) {
             if !want.is_empty() && want.iter().all(|id| have.contains(id)) {
                 println!(
                     "Flow-over: {disk} already holds all {} volume(s) this boot would \
@@ -7711,6 +7722,93 @@ file = "{state}"
         let h = crate::image::local::release_held(&l, &i).await;
         assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "N+1 held: {h:?}");
         assert_eq!(std::fs::read(&extra).unwrap(), extra_bytes, "the second drive");
+    }
+
+    /// #244: a disk that holds the release by id but whose root will not
+    /// come up. Taken again with the same release, the shortcut leaves it as
+    /// it is ("already holds all"), and the next boot fails the same way.
+    /// With `STORMBLOCK_RELAY_SYSTEM_HALF=1` — what `/init` exports when it
+    /// falls back from a root that did not mount — the system half is laid
+    /// again from the image: the root reads the image's bytes from the disk
+    /// alone, and the node's data keeps every byte under its id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_held_disk_whose_root_fails_is_laid_again_keeping_its_data() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, image_n, ..) = release_fixture(mkfs, &dir).await;
+
+        // The node's data, and a root broken under its own id.
+        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let state = node.find_volume("state").await.unwrap();
+        {
+            let v = node.get_volume(&state).unwrap();
+            v.write(4096, &[0x51; 8192]).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        let root = node.find_volume("stormpump").await.unwrap();
+        node.unseal_volume(root).await.unwrap();
+        {
+            let v = node.get_volume(&root).unwrap();
+            v.write(0, &[0u8; 65536]).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        node.seal_volume(root, None).await.unwrap();
+        node.persist().await;
+        let state_before = volume_bytes(&node, "state").await.unwrap();
+        drop(node);
+
+        let claim = |n: &str| {
+            let c = dir.path().join(n).display().to_string();
+            std::fs::copy(&image_n, &c).unwrap();
+            c
+        };
+        // The same release, claimed again: held, so nothing is done.
+        let c1 = claim("claim-again-1.raw");
+        let (mut mgr, _) = super::open_slabs_resuming(&[c1.clone()], None, true).await.unwrap();
+        let image_root = volume_bytes(&mgr, "stormpump").await.unwrap();
+        assert_ne!(image_root[..65536], [0u8; 65536][..]);
+        std::env::remove_var("STORMBLOCK_RELAY_SYSTEM_HALF");
+        let (flow, _) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await.unwrap();
+        assert!(flow.is_none(), "held by id: the shortcut leaves the broken root as it is");
+        drop(mgr);
+
+        // The fallback: laid again from the image.
+        let c2 = claim("claim-again-2.raw");
+        let (mut mgr, _) = super::open_slabs_resuming(&[c2.clone()], None, true).await.unwrap();
+        std::env::set_var("STORMBLOCK_RELAY_SYSTEM_HALF", "1");
+        let r = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await;
+        std::env::remove_var("STORMBLOCK_RELAY_SYSTEM_HALF");
+        let (flow, report) = r.unwrap();
+        let flow = flow.expect("the system half laid again");
+        assert!(report.is_some(), "the data half kept, as in any install (#311)");
+        assert_eq!(volume_bytes(&mgr, "state").await.unwrap(), state_before, "the node's state");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+
+        let (succ, _) = super::open_slabs_resuming(&[c2.clone(), flow.disk.clone()], None, true).await.unwrap();
+        let (sys_dest, data_dest) = (
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
+        );
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+        drop(succ);
+
+        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        assert_eq!(volume_bytes(&alone, "stormpump").await.unwrap(), image_root, "the root, the image's again");
+        assert_eq!(alone.find_volume("state").await, Some(state), "the node's state, by its id");
+        assert_eq!(volume_bytes(&alone, "state").await.unwrap(), state_before, "the node's state, every byte");
     }
 
     /// #311: an install never falls back to a wipe. A volume the node made in
