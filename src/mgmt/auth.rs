@@ -448,7 +448,7 @@ pub async fn require_token(
         if is_admin || is_node {
             return next.run(req).await;
         }
-        tracing::warn!("unauthorized {} {}", method, path);
+        crate::serve::api::note_unauthorized(&format!("{method} {path}"));
         return unauthorized(&path, crate::serve::api::MISSING_TOKEN);
     }
 
@@ -541,11 +541,13 @@ async fn attestation_reader(
     next: Next,
 ) -> Response {
     let Some(bearer) = presented else {
-        tracing::warn!("unauthorized GET {path}");
+        crate::serve::api::note_unauthorized(&format!("GET {path}"));
         return unauthorized(path, crate::serve::api::MISSING_TOKEN);
     };
     let Some(kube) = state.kube_auth.as_ref() else {
-        tracing::warn!("unauthorized GET {path}: not a token of this node, and no Kubernetes bearer is reviewed here");
+        crate::serve::api::note_unauthorized(&format!(
+            "GET {path}: not a token of this node, and no Kubernetes bearer is reviewed here"
+        ));
         return unauthorized(path, crate::serve::api::MISSING_TOKEN);
     };
     use super::kubeauth::Review;

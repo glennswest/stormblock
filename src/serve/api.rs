@@ -444,6 +444,63 @@ pub fn decide(
     }
 }
 
+/// One warning a minute for refused requests (#243).
+///
+/// stormstorage polling without its token put `unauthorized GET …` on every
+/// console every 15 s. The first refusal in a minute is said; the rest are
+/// counted, and the count is said with the first refusal of the next minute
+/// ("N more … in the last 60s, the last …"). Each one is in the record at
+/// DEBUG.
+pub struct RefusalLimiter {
+    window: std::time::Duration,
+    started: Option<std::time::Instant>,
+    counted: u64,
+    last: String,
+}
+
+impl RefusalLimiter {
+    pub const fn new(window: std::time::Duration) -> Self {
+        RefusalLimiter { window, started: None, counted: 0, last: String::new() }
+    }
+
+    /// A refusal of `what` at `now`: the lines to warn.
+    pub fn note(&mut self, now: std::time::Instant, what: &str) -> Vec<String> {
+        match self.started {
+            Some(t) if now.duration_since(t) < self.window => {
+                self.counted += 1;
+                self.last = what.to_string();
+                Vec::new()
+            }
+            _ => {
+                let mut out = Vec::new();
+                if self.counted > 0 {
+                    out.push(format!(
+                        "{} more unauthorized request(s) in the last {}s, the last {}",
+                        self.counted,
+                        self.window.as_secs(),
+                        self.last
+                    ));
+                }
+                out.push(format!("unauthorized {what}"));
+                self.started = Some(now);
+                self.counted = 0;
+                out
+            }
+        }
+    }
+}
+
+/// Say a refused request, at most once a minute (see [`RefusalLimiter`]).
+pub fn note_unauthorized(what: &str) {
+    static LIMITER: std::sync::Mutex<RefusalLimiter> =
+        std::sync::Mutex::new(RefusalLimiter::new(std::time::Duration::from_secs(60)));
+    tracing::debug!("unauthorized {what}");
+    let lines = LIMITER.lock().unwrap_or_else(|e| e.into_inner()).note(std::time::Instant::now(), what);
+    for l in lines {
+        tracing::warn!("{l}");
+    }
+}
+
 pub async fn require_token(
     State(auth): State<Arc<AuthConfig>>,
     req: Request,
@@ -454,7 +511,7 @@ pub async fn require_token(
     match decide(&auth, req.method(), &path, req.uri().query(), presented.as_deref()) {
         Ok(()) => next.run(req).await,
         Err(msg) => {
-            tracing::warn!("unauthorized {} {}", req.method(), path);
+            note_unauthorized(&format!("{} {}", req.method(), path));
             (StatusCode::UNAUTHORIZED, Json(json!({ "error": msg, "code": 401 })))
                 .into_response()
         }
@@ -1291,6 +1348,28 @@ async fn trim_volume(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refusals_are_said_once_a_minute_then_counted() {
+        let t0 = std::time::Instant::now();
+        let mut l = super::RefusalLimiter::new(std::time::Duration::from_secs(60));
+        assert_eq!(l.note(t0, "GET /api/v1/volumes"), vec!["unauthorized GET /api/v1/volumes".to_string()]);
+        for i in 1..=3u64 {
+            assert!(l.note(t0 + std::time::Duration::from_secs(15 * i), "GET /api/v1/arrays").is_empty());
+        }
+        assert_eq!(
+            l.note(t0 + std::time::Duration::from_secs(61), "GET /api/v1/drives"),
+            vec![
+                "3 more unauthorized request(s) in the last 60s, the last GET /api/v1/arrays".to_string(),
+                "unauthorized GET /api/v1/drives".to_string(),
+            ]
+        );
+        // A quiet minute after a single one: no count to say.
+        assert_eq!(
+            l.note(t0 + std::time::Duration::from_secs(200), "POST /x"),
+            vec!["unauthorized POST /x".to_string()]
+        );
+    }
+
     use super::*;
 
     /// Liveness and readiness must answer without a token under *both*

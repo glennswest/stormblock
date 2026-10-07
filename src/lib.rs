@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod drain;
 pub mod rebuild;
 pub mod http;
+pub mod logging;
 pub mod image;
 pub mod pallet;
 pub mod placement;
