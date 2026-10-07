@@ -193,8 +193,9 @@ make durable the writes completed before it was issued.
   still pays; the clean ones (the pre-flush, barriers before any write) do
   not. stormpump's per-step timing on the next probe says how much
 - Verified on a build VM at eb63634: the three new tests 3/3 each; full
-  nextest 994/994 (16 power-cut/durability/crash tests among them). Not on
-  metal: stormpump's mount timing on a release with this engine
+  nextest 994/994 (16 power-cut/durability/crash tests among them). Golden
+  golden-stormblock-7b7707f4cbed (stormcos#353). Not on metal: stormpump's
+  mount timing on a release with this engine
 
 ### The stall watchdog's task dump panicked a ublk device's runtime (2026-10-07, #334, P0) — DONE
 
