@@ -387,30 +387,40 @@ mod tests {
         }
     }
 
-    /// #334: a ublk device's current-thread runtime, with an I/O task (A)
-    /// holding a tokio Mutex and a task (B) about to wait on it. The
-    /// watchdog's dump is queued while the runtime is busy; B is woken
-    /// behind it and A's I/O completes underneath. Tracing that runtime
-    /// polls B (it waits on the Mutex, idle again), then A: A's I/O is done,
-    /// it releases the Mutex and wakes B, and the wake re-enters the
-    /// scheduler while the dump holds its core — `RefCell already borrowed`
-    /// (tokio current_thread/mod.rs:723, the Dell's line). The panic cuts
-    /// A's release short and loses B's wake: the I/O never finishes and its
-    /// waiters wait for ever, the Dell's hung API. With nothing traced, A
-    /// finishes when its I/O wakes it, and B gets the Mutex.
+    /// #334: a ublk device's current-thread runtime. An I/O task (A) holds a
+    /// tokio Mutex that an older task (B) waits on; A's I/O completes
+    /// underneath, and the watchdog's dump comes before A is woken. Tracing
+    /// polls every task, oldest first: B (still waiting, idle again), then A,
+    /// which finds its I/O done, releases the Mutex and wakes B — a wake that
+    /// re-enters the scheduler while the dump holds its core: `RefCell
+    /// already borrowed` (tokio current_thread/mod.rs:723, the Dell's line).
+    /// The panic cuts A short and loses B's wake: the I/O never finishes and
+    /// its waiters wait for ever, the Dell's hung API. With nothing traced,
+    /// A finishes when its I/O wakes it, and B gets the Mutex.
     #[test]
     fn a_task_dump_leaves_a_current_thread_runtime_running() {
         let io = Io::default();
-        let go = Arc::new(tokio::sync::Notify::new());
-        let (pause, stop) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();
         let (said, heard) = std::sync::mpsc::channel::<&'static str>();
-        let (io2, go2, pause2, stop2) = (io.clone(), go.clone(), pause.clone(), stop.clone());
+        let (ready_tx, ready) = std::sync::mpsc::channel::<()>();
+        let (io2, stop2) = (io.clone(), stop.clone());
         let device = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             tx.send(rt.handle().clone()).unwrap();
             rt.block_on(async move {
                 let m = Arc::new(tokio::sync::Mutex::new(()));
+                let go = Arc::new(tokio::sync::Notify::new());
+                // B, spawned first (older): waits until A holds the Mutex.
+                let (m2, s2, go2) = (m.clone(), said.clone(), go.clone());
+                tokio::spawn(async move {
+                    go2.notified().await;
+                    let _g = m2.lock().await;
+                    s2.send("waiter woke").unwrap();
+                    std::future::pending::<()>().await;
+                });
+                tokio::task::yield_now().await;
+                // A: takes the Mutex, waits on its I/O.
                 let (m1, s1) = (m.clone(), said.clone());
                 tokio::spawn(async move {
                     let g = m1.lock_owned().await;
@@ -420,37 +430,24 @@ mod tests {
                     std::future::pending::<()>().await;
                 });
                 tokio::task::yield_now().await;
-                let (m2, s2) = (m.clone(), said.clone());
-                tokio::spawn(async move {
-                    go2.notified().await;
-                    let _g = m2.lock().await;
-                    s2.send("waiter woke").unwrap();
-                    std::future::pending::<()>().await;
-                });
-                tokio::task::yield_now().await;
+                // B now waits on the Mutex A holds.
+                go.notify_one();
+                for _ in 0..3 {
+                    tokio::task::yield_now().await;
+                }
+                ready_tx.send(()).unwrap();
                 while !stop2.load(Ordering::SeqCst) {
-                    if pause2.swap(false, Ordering::SeqCst) {
-                        // Busy: what is queued now waits behind.
-                        std::thread::sleep(Duration::from_millis(400));
-                    }
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             });
         });
         let h = rx.recv().unwrap();
+        ready.recv().unwrap();
         register_runtime("ublk-adopt-test (#334)", h.clone());
-        std::thread::sleep(Duration::from_millis(100));
 
-        pause.store(true, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(50));
-        let dumper = std::thread::spawn(|| {
-            let api = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-            api.block_on(task_dump(Duration::from_secs(5)))
-        });
-        std::thread::sleep(Duration::from_millis(100));
-        go.notify_one(); // B queued behind the dump
         io.complete(); // A's I/O done underneath; A not woken yet
-        let out = dumper.join().unwrap();
+        let api = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let out = api.block_on(task_dump(Duration::from_secs(5)));
         io.wake(); // now its completion wakes it, as io_uring's would
 
         let mut got = Vec::new();
