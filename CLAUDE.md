@@ -274,7 +274,7 @@ allocations), so it is not done here without the owner. Done here:
       README, CHANGELOG; stormpump#109 (hold units on the state)
 - Asked on #303 (needs-owner): A keep rule 8 (pre-attach only), B read
   ahead + reconcile, C decide after the Dell's timing lines (recommended).
-  The issue stays open. Golden not staged yet: stormcentral#362
+  The issue stays open. Its part is in golden-stormblock-65b6578787be
 
 ### The initramfs mounts the container volumes in parallel (2026-10-07, #302, P1) — DONE
 
@@ -295,10 +295,9 @@ device wait is per entry.
   volumes at 0.3 s each: 0.63 s, not 6), every other initramfs test under
   both, the generated /init parses under both. Not on metal: the Dell's
   `mounted` span on a stormcos release with this initramfs
-- Golden NOT staged: `component stage stormblock` failed on the platform at
-  2dcfab0 (twice) and at c7e32ac (`[platform in] …/stormd`, empty `[platform
-  abort]`, exit 255: stormcentral#362) — the stormblock step never ran. The
-  next golden carries #302, #303 and #308: request it once #362 is fixed
+- Golden: golden-stormblock-65b6578787be (stormcos#353), staged at 3372dde
+  once stormcentral#362 was fixed; carries #302, #303, #308, #313, #322 and
+  #334
 
 ### adopt-ublk stops in order on SIGTERM (2026-10-07, #144, P1) — DONE
 
