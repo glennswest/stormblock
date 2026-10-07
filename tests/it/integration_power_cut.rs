@@ -310,3 +310,87 @@ async fn read_block(vm: &VolumeManager, name: &str, idx: u64) -> Result<u64, Str
     v.read(idx * BLOCK, &mut b).await.unwrap();
     value_of(idx, &b)
 }
+
+/// #277: a write to an extent the flow-over (or a drain) has just moved,
+/// fsync'd, then the power goes before the persist that records the move.
+///
+/// The write went in place to the destination slot and the fsync published
+/// that slot's entry; the durable record still names the source. The two
+/// slots used to carry one generation, so restore kept the record's (the
+/// source) and the acknowledged write was gone. Restored from the slabs
+/// alone, the write must be there — and the rest of the moved extent, and a
+/// moved extent nobody wrote, must read what they held.
+#[tokio::test]
+async fn a_write_to_an_extent_just_moved_survives_a_cut_before_the_persist() {
+    write_after_move(stormblock::drive::slab::SLAB_VERSION).await;
+}
+
+#[tokio::test]
+async fn a_write_to_an_extent_just_moved_survives_a_cut_before_the_persist_in_format_v2() {
+    write_after_move(stormblock::drive::slab::SLAB_VERSION_2).await;
+}
+
+async fn write_after_move(version: u32) {
+    let fmt = |dev: &Arc<CrashDevice>| {
+        SlabFormat::new(SLOT, StorageTier::Hot)
+            .with_role(SlabRole::Data)
+            .with_version(version)
+            .with_auto_metadata(dev.capacity_bytes())
+    };
+    let src_dev = Arc::new(CrashDevice::new(32 * 1024 * 1024));
+    let dst_dev = Arc::new(CrashDevice::new(32 * 1024 * 1024));
+    let src = Slab::format_with(src_dev.clone() as Arc<dyn BlockDevice>, fmt(&src_dev)).await.unwrap();
+    let src_id = src.slab_id();
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_slab(src).await;
+    vm.persist_to_slab(src_id);
+
+    // A volume wholly on the source, recorded.
+    let v = vm.create_volume_any("sys", VOL).await.unwrap();
+    let h = vm.get_volume(&v).unwrap();
+    for i in 0..BLOCKS {
+        h.write(i * BLOCK, &block(i, blank_value(i))).await.unwrap();
+    }
+    h.flush().await.unwrap();
+    vm.persist().await;
+
+    // The destination arrives (the local disk of an install).
+    let dst = Slab::format_with(dst_dev.clone() as Arc<dyn BlockDevice>, fmt(&dst_dev)).await.unwrap();
+    let dst_id = dst.slab_id();
+    vm.add_slab(dst).await;
+    vm.persist_to_slabs(vec![dst_id, src_id]);
+    // The new slab's own record, before anything moves (as the install's
+    // first persist would write it).
+    vm.persist().await;
+
+    // Extents 0 and 1 move, the way the flow-over moves them.
+    let engine = stormblock::placement::PlacementEngine::new();
+    for e in 0..2u64 {
+        let leg = vm.gem().read().await.lookup(v, e).unwrap().primary();
+        assert_eq!(leg.slab_id, src_id);
+        let fence = stormblock::volume::fence::exclusive(leg).await;
+        engine.migrate_leg_unlocked(vm.gem(), vm.registry(), v, e, leg, dst_id, &fence).await.unwrap();
+    }
+    // A write to extent 0, in place on the destination, and its fsync. No
+    // persist: the records still name the source slots.
+    h.write(0, &block(0, 77)).await.unwrap();
+    h.flush().await.unwrap();
+
+    // The power goes on both drives, nothing unflushed kept.
+    let src_after = Arc::new(src_dev.crash(1, 0.0));
+    let dst_after = Arc::new(dst_dev.crash(2, 0.0));
+    let mut vm2 = VolumeManager::new(SLOT);
+    for d in [&dst_after, &src_after] {
+        vm2.add_slab(Slab::open(d.clone() as Arc<dyn BlockDevice>).await.unwrap()).await;
+    }
+    vm2.persist_to_slabs(vec![dst_id, src_id]);
+    vm2.restore().await.unwrap();
+
+    assert_eq!(read_block(&vm2, "sys", 0).await, Ok(77), "the fsync'd write to the moved extent");
+    for i in 1..BLOCKS {
+        assert_eq!(read_block(&vm2, "sys", i).await, Ok(blank_value(i)), "block {i}");
+    }
+    // The moved slot holds extent 0.
+    let id = vm2.find_volume("sys").await.unwrap();
+    assert_eq!(vm2.gem().read().await.lookup(id, 0).unwrap().primary().slab_id, dst_id);
+}

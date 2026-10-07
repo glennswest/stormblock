@@ -462,7 +462,18 @@ impl PlacementEngine {
             .map(|l| registry.domain_of(&l.slab_id))
             .collect();
         let new = self
-            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, dest_slab_id, fence)
+            .move_slot(
+                gem,
+                registry,
+                volume_id,
+                vext_idx,
+                old,
+                loc.ref_count,
+                Self::moved_generation(loc.generation, old == loc.primary()),
+                &others,
+                dest_slab_id,
+                fence,
+            )
             .await?;
         Ok(MigrateExtentResult {
             volume_id,
@@ -518,6 +529,29 @@ impl PlacementEngine {
     /// `vext_idx` is what the destination slot records as its extent — a
     /// parity leg records its tagged index.
     #[allow(clippy::too_many_arguments)]
+    /// The generation a moved leg's new slot is allocated at (#277).
+    ///
+    /// A moved primary takes `generation + 1`, which is what
+    /// [`GlobalExtentMap::rewrite_legs`] gives the map that names it. Until the
+    /// persist that records the move, the durable record names the source at
+    /// `generation`; a write to the extent lands in place on the new slot and
+    /// its fsync publishes the slot's entry. At equal generations restore kept
+    /// the record's slot, the source, and lost that write; one higher, the slot
+    /// table is provably newer and restore takes the new slot. Without a write
+    /// the two hold the same bytes, so either is right.
+    ///
+    /// A mirror or parity leg keeps its generation: the legs of an extent (or
+    /// of a stripe) are told apart from a stale copy by sharing one.
+    ///
+    /// `MOVE_SAME_GEN_277=1`: the old rule, for showing the test fails without it.
+    pub(crate) fn moved_generation(generation: u64, is_primary: bool) -> u64 {
+        if is_primary && std::env::var_os("MOVE_SAME_GEN_277").is_none() {
+            generation + 1
+        } else {
+            generation
+        }
+    }
+
     async fn move_slot(
         &self,
         gem: &mut GlobalExtentMap,
@@ -598,7 +632,8 @@ impl PlacementEngine {
         };
 
         // Allocate slot in destination slab, recorded as the same extent so
-        // the slot-table fallback agrees with the map.
+        // the slot-table fallback agrees with the map, at the generation the
+        // caller worked out for it (`moved_generation`, #277).
         let dest_slot = registry.get_mut(&dest_id)
             .ok_or(PlacementError::SlabNotFound(dest_id))?
             .allocate_deferred(volume_id, vext_idx, generation)
@@ -743,7 +778,7 @@ impl PlacementEngine {
             if loc.leg_on(old.slab_id) != Some(old) {
                 return Err(PlacementError::ExtentNotFound { volume_id, vext_idx });
             }
-            loc.generation
+            Self::moved_generation(loc.generation, old == loc.primary())
         };
 
         // The source's device and where the slot is on it, then no lock.
@@ -1193,7 +1228,18 @@ impl PlacementEngine {
         let tier = registry.get(&from_slab).ok_or(PlacementError::SlabNotFound(from_slab))?.tier();
         let dest = self.best_slab_apart_at(registry, tier, from_slab, &others, rung)?;
         let new = self
-            .move_slot(gem, registry, volume_id, vext_idx, old, loc.ref_count, loc.generation, &others, Some(dest), fence)
+            .move_slot(
+                gem,
+                registry,
+                volume_id,
+                vext_idx,
+                old,
+                loc.ref_count,
+                Self::moved_generation(loc.generation, old == loc.primary()),
+                &others,
+                Some(dest),
+                fence,
+            )
             .await?;
         Ok(MigrateExtentResult { volume_id, vext_idx, source_slab: old.slab_id, dest_slab: new.slab_id, dest_slot: new.slot_idx })
     }
