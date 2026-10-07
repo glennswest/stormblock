@@ -59,7 +59,10 @@ On the wire (NVMe 1.4 §8.20):
   NN = MNAN = 1024 (Linux sizes its ANA log buffer from MNAN). A discovery
   controller reports none of it.
 - Identify Namespace: NMIC bit 0 (shared), ANAGRPID = the state's group.
-- Log page 0x0C: all five groups, every one with its state, NSIDs ascending.
+- Log page 0x0C: groups 1 to 4 always, and the `change` group only while a
+  namespace is in it. Linux counts any `change` descriptor, arms its ANATT
+  timer and resets the controller when the timer runs out. Every group
+  carries its state, NSIDs ascending.
   `RGO` (LSP bit 0) is honoured.
 
 Groups are by state rather than per namespace so that the log page has a
