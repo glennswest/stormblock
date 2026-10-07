@@ -172,6 +172,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### `installed` from the first boot off the local disk (2026-10-07, #220, P1) — WAITING ON THE OWNER
+
+Owner on #148: the install is proven by the host booting from its own disk;
+the report comes from that boot. Today the successor posts `installed`
+(`report_installed`) once `run_local_boot` judges the disk bootable, before
+any boot from it, and that report is also what flips the intent to `local`.
+Found: the issue's "intent stays `install` until the local boot reports"
+loops: stormbootx installs again whenever the intent is `install`, and only
+`local` boots the disk. Asked on #220 (needs-owner, `stormcentral
+wait-owner`): **A** intent `local` once laid + boothost `install` state
+laid→booted, failure surfaced to stormcentral (recommended, engine-only);
+**B** A + automatic re-install after N min, K tries; **C** a `verify`
+intent in stormbootx. Same engine part in all three: the ticket written into
+the node's state on the disk; the first boot from local slabs only, no
+claim, posts `installed`. Independent of #221. Nothing built yet.
+
 ### /v1 refuses `encrypted: true`: nothing encrypts (2026-10-07, #232, P1) — DONE
 
 `POST /v1/volumes {"encrypted": true}` was stored and reported `encrypted:
