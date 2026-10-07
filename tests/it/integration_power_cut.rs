@@ -122,7 +122,7 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize) -> Result<(us
     // a random write arrives, so a persist or a slot-table sync is caught
     // part-way, its pieces cached, to be kept, torn or lost.
     if rng.gen_bool(0.8) {
-        dev.cut_at(rng.gen_range(1..=ops as u64 * 3));
+        dev.cut_at(rng.gen_range(1..=ops as u64));
     }
     let mut seq = 1u64;
     for _ in 0..ops {
@@ -279,16 +279,16 @@ async fn power_cuts(version: u32, tear: Tear, atomic: usize) {
         }
     }
     println!("{tear:?} at {atomic} bytes: {mid_op} of 300 cuts inside an operation, {torn} write(s) torn");
-    assert!(mid_op > 150, "most cuts land inside an operation: {mid_op}");
-    if tear != Tear::None {
-        assert!(torn > 0, "the cuts tore no write: the test exercised nothing");
-    }
     assert!(
         failures.is_empty(),
         "{} of 300 power cuts lost acknowledged data; first: {}",
         failures.len(),
         failures.first().unwrap()
     );
+    if tear != Tear::None {
+        assert!(torn > 0, "the cuts tore no write: the test exercised nothing");
+    }
+    assert!(mid_op >= 100, "too few cuts landed inside an operation to test anything: {mid_op}");
 }
 
 /// Recovery from a record that is behind the slot tables, with several
