@@ -151,7 +151,8 @@ call is logged as one `enforce` (the default) would refuse.
   word about the tag asked; the report can only lower `install` to `local`,
   and only for the clone a claim handed out under that `install`. Setting the
   intent, `PUT …/intent`, needs the token — the admin token when one is
-  configured, since `install` takes the machine's disk whatever it carries.
+  configured, since `install` lays the machine's system half again (its data
+  half is kept, #311).
 
 Everything else needs the token, `/metrics` included: a scrape names this
 node's volumes and says how full it is, which is a read of its state rather
@@ -250,7 +251,7 @@ reads *before* it claims:
 | intent | stormbootx does | then |
 |---|---|---|
 | `auto` (never set) | claims and boots the image | |
-| `install` | claims and boots; the initramfs takes the local disk with force (`--local-disk-force`) | once the flow-over is done and the disk boots on its own, the node reports it and the intent becomes `local` |
+| `install` | claims and boots; the initramfs installs over the local disk: its system half laid again, its data half kept (#311), or a fresh layout on a disk with no data slab | once the flow-over is done and the disk boots on its own, the node reports it and the intent becomes `local` |
 | `local` | boots the local disk at once: no claim, no clone | |
 
 ```

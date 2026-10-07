@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **docs:** #234 closed, superseded: there is no `upgrade` boot intent. The owner ruled on 2026-10-02 that a release change is not decided at boot; the update path is staging on the running node (#122, stormupdate#3). Since #311, an `install` keeps the data half. The descriptions of `install` as "takes the disk with force" are corrected in `docs/auth.md`, `docs/boot-hooks.md`, the README and `BootIntent::Install`.
 - **feat:** #204 (stormbootx#23): a boothost claim of a name no host has, carrying the machine's `mac` (and `serial`), reaches the host the machine already is instead of making a new one.
   - **Finding the host:** by its MAC, else by the serial when an operator made it one of that host's aliases. An assignment named by a serial never counts, since blades share chassis serials.
   - **A provisional `mac-<hex>` host** is renamed to the claimed name, its old name kept as an alias, golden and history moved.

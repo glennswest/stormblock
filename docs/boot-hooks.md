@@ -169,7 +169,9 @@ is true of a reboot as much as an install. Until intents can be used:
   release first, or use the `install` intent once the appliance serves them.
 
 Once the appliance states intents, the marker is not written and the intent
-decides (`install` = fresh; keeping data is #234's `upgrade`).
+decides. `install` re-lays the system half and keeps the data half (#311).
+There is no `upgrade` intent (#234, closed). A release change is not decided
+at boot: the update path is staging on the running node (#122, stormupdate).
 
 ### A local root that does not come up (#244)
 

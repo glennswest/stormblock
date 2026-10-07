@@ -248,9 +248,11 @@ pub enum BootIntent {
     /// Claim and boot the image, as a machine always has.
     #[default]
     Auto,
-    /// Claim, boot and take the local disk whatever it carries (the
-    /// initramfs's `--local-disk-force`). One-shot: set back to `local` once
-    /// the node reports the flow-over done.
+    /// Claim, boot and install over the local disk: its system half laid
+    /// again, its data half kept (#311); a disk with no data slab is laid
+    /// fresh. One-shot: set back to `local` once the node reports the
+    /// flow-over done. There is no `upgrade` (#234): a release change is
+    /// staged on the running node (#122), not decided at boot.
     Install,
     /// Boot the local disk at once: no claim, no clone.
     Local,

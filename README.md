@@ -886,8 +886,8 @@ See [docs/auth.md](docs/auth.md#boot-chain-attestation-and-the-tpm-mark-216-stor
 
 **Boot intent (#148).** Each host carries an intent its boot agent reads before
 it claims: `auto` (never set; claim and boot), `local` (boot the local disk, no
-claim), or `install` (claim, and the initramfs takes the local disk with
-force). `install` is one-shot: once the flow-over has moved everything and
+claim), or `install` (claim, and the initramfs installs over the local disk:
+its system half laid again, its data half kept, #311). `install` is one-shot: once the flow-over has moved everything and
 `local-boot` has laid the ESP and boot pallets and judged the disk bootable, the
 adopting engine reports it and the intent becomes `local`. That report comes
 from the installer's session, before the machine has booted from the disk; the
