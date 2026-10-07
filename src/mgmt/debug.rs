@@ -360,67 +360,102 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::AtomicBool;
-    use std::task::{Context, Poll};
+    use std::task::{Context, Poll, Waker};
 
-    /// Pending until `flag` is set, waking nobody: what an I/O future that
-    /// has completed underneath looks like when tracing polls it again.
-    struct Flag(Arc<AtomicBool>);
-    impl Future for Flag {
-        type Output = ();
-        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-            if self.0.load(Ordering::SeqCst) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
+    /// An I/O whose completion arrives from another thread: `fire` marks it
+    /// done and wakes its task, as an io_uring completion does.
+    #[derive(Clone, Default)]
+    struct Io(Arc<(AtomicBool, Mutex<Option<Waker>>)>);
+    impl Io {
+        fn fire(&self) {
+            self.0 .0.store(true, Ordering::SeqCst);
+            if let Some(w) = self.0 .1.lock().unwrap().take() {
+                w.wake();
             }
         }
     }
+    impl Future for Io {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 .0.load(Ordering::SeqCst) {
+                return Poll::Ready(());
+            }
+            *self.0 .1.lock().unwrap() = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
 
-    /// #334: a ublk device's current-thread runtime, with a task that, when
-    /// polled again, finishes and releases a tokio Mutex another task on the
-    /// same runtime waits on. The watchdog's dump must leave it running.
+    /// #334: a ublk device's current-thread runtime. An I/O task holds a
+    /// tokio Mutex another task waits on; its I/O completes (its task is
+    /// woken, queued) just after the watchdog's dump was queued. Tracing that
+    /// runtime would poll the I/O task inside the dump: it finishes, releases
+    /// the Mutex, the wake re-enters the scheduler, and the panic
+    /// (`RefCell already borrowed`, caught by the runtime) cuts the release
+    /// short and loses the waiter's wake. The I/O never completes and its
+    /// waiters wait for ever: the Dell's hung API. Both must go on.
     #[test]
     fn a_task_dump_leaves_a_current_thread_runtime_running() {
-        let (flag, stop) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let io = Io::default();
+        let (pause, stop) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let (tx, rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();
-        let (flag2, stop2) = (flag.clone(), stop.clone());
+        let (said, heard) = std::sync::mpsc::channel::<&'static str>();
+        let (io2, pause2, stop2) = (io.clone(), pause.clone(), stop.clone());
         let device = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             tx.send(rt.handle().clone()).unwrap();
             rt.block_on(async move {
                 let m = Arc::new(tokio::sync::Mutex::new(()));
-                let (m1, f1) = (m.clone(), flag2.clone());
+                let (m1, s1) = (m.clone(), said.clone());
                 tokio::spawn(async move {
                     let g = m1.lock_owned().await;
-                    Flag(f1).await;
+                    io2.await;
                     drop(g); // wakes the waiter below, on this runtime
+                    s1.send("io finished").unwrap();
                     std::future::pending::<()>().await;
                 });
                 tokio::task::yield_now().await;
-                let m2 = m.clone();
+                let (m2, s2) = (m.clone(), said.clone());
                 tokio::spawn(async move {
                     let _g = m2.lock().await;
+                    s2.send("waiter woke").unwrap();
                     std::future::pending::<()>().await;
                 });
                 tokio::task::yield_now().await;
-                // The I/O "completes" without waking its task.
-                flag2.store(true, Ordering::SeqCst);
                 while !stop2.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    if pause2.swap(false, Ordering::SeqCst) {
+                        // Busy: what is woken now queues up behind.
+                        std::thread::sleep(Duration::from_millis(400));
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             });
         });
         let h = rx.recv().unwrap();
         register_runtime("ublk-adopt-test (#334)", h.clone());
+        std::thread::sleep(Duration::from_millis(100));
 
-        let api = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-        let out = api.block_on(task_dump(Duration::from_secs(5)));
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(!device.is_finished(), "the device's runtime died during the dump:\n{out}");
+        // The runtime is busy; the dump is queued on it, then the I/O
+        // completes and wakes its task behind it.
+        pause.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+        let dumper = std::thread::spawn(|| {
+            let api = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+            api.block_on(task_dump(Duration::from_secs(5)))
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        io.fire();
+        let out = dumper.join().unwrap();
+
+        let mut got = Vec::new();
+        while let Ok(m) = heard.recv_timeout(Duration::from_millis(1500)) {
+            got.push(m);
+            if got.len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(got, vec!["io finished", "waiter woke"], "the I/O and its waiter must go on after a dump:\n{out}");
         assert!(out.contains("not dumped: a current-thread runtime"), "{out}");
-        // Still serving: it runs what it is given.
-        let ping = api.block_on(async { h.spawn(async { 7 }).await.unwrap() });
-        assert_eq!(ping, 7);
+        assert!(!device.is_finished());
 
         stop.store(true, Ordering::SeqCst);
         device.join().expect("the device's runtime ends cleanly");
