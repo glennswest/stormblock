@@ -286,6 +286,7 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
             seeded: Vec::new(),
             standing: None,
             formatting: false,
+            broken: None,
         });
         adopted += 1;
     }
@@ -294,19 +295,35 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
     }
 }
 
+/// A template as listed, its sealed volume looked for now (#281): a ready
+/// template whose volume has gone since the last check lists as broken.
+async fn live_json(state: &AppState, mut t: template::FsTemplate) -> serde_json::Value {
+    if t.state == template::TemplateState::Ready && t.broken.is_none() {
+        if let Some(src) = t.clone_source() {
+            if state.volume_manager.lock().await.get_volume(&src).is_none() {
+                t.broken = Some(format!("its sealed volume {} is missing", src.0));
+            }
+        }
+    }
+    t.json()
+}
+
 async fn list_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "list")
         .increment(1);
-    let store = state.fstemplates.lock().await;
-    let items: Vec<_> = store.templates.iter().map(|t| t.json()).collect();
+    let templates: Vec<template::FsTemplate> = state.fstemplates.lock().await.templates.clone();
+    let mut items = Vec::with_capacity(templates.len());
+    for t in templates {
+        items.push(live_json(&state, t).await);
+    }
     let count = items.len();
     Json(json!({ "items": items, "count": count }))
 }
 
 async fn get_template(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let store = state.fstemplates.lock().await;
-    match store.find(&id) {
-        Some(t) => Json(t.json()).into_response(),
+    let found = state.fstemplates.lock().await.find(&id).cloned();
+    match found {
+        Some(t) => Json(live_json(&state, t).await).into_response(),
         None => ApiError::not_found(format!("fstemplate {id} not found")),
     }
 }

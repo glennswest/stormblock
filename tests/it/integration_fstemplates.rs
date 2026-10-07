@@ -1454,3 +1454,90 @@ async fn a_qcow2_disk_image_imports_into_a_sealed_golden_and_clones_with_its_own
 
     server.abort();
 }
+
+/// #281 (rustkube-node#140): a `ready` template whose sealed volume is gone
+/// is not ready. Its store outlives the volume (here the volume is deleted
+/// under it, as a delete cut short or a reclaim would); after a restart — the
+/// store read back from the data directory and checked, as the engine does at
+/// startup — it lists as `broken` with the reason, every clone and claim of
+/// it answers one clear 409, and it can be deleted and minted again. A ready
+/// template whose volume is there but unsealed is re-sealed, not broken.
+#[tokio::test]
+async fn a_ready_template_whose_volume_is_gone_lists_broken_and_refuses_clones_clearly() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let gone = sealed_template(&state, "pvc-ext4j-64m").await;
+    let unsealed = sealed_template(&state, "pvc-unsealed").await;
+    let (gone_vol, unsealed_vol) = {
+        let s = state.fstemplates.lock().await;
+        (
+            VolumeId(s.get(&gone).unwrap().sealed_volume_id.unwrap()),
+            VolumeId(s.get(&unsealed).unwrap().sealed_volume_id.unwrap()),
+        )
+    };
+    {
+        let mut vm = state.volume_manager.lock().await;
+        vm.delete_volume(gone_vol).await.unwrap();
+        vm.unseal_volume(unsealed_vol).await.unwrap();
+    }
+    let (base, server) = start(state.clone()).await;
+    let c = reqwest::Client::new();
+    let list = |c: reqwest::Client, base: String| async move {
+        let v: serde_json::Value = c.get(format!("{base}/api/v1/fstemplates")).send().await.unwrap().json().await.unwrap();
+        v["items"].as_array().unwrap().clone()
+    };
+    let item = |items: &[serde_json::Value], name: &str| items.iter().find(|t| t["name"] == name).unwrap().clone();
+
+    // Before any check, the listing already looks for the volume.
+    let items = list(c.clone(), base.clone()).await;
+    assert_eq!(item(&items, "pvc-ext4j-64m")["state"], "broken", "{items:?}");
+
+    // Restart: the store from the data directory, checked as at startup.
+    *state.fstemplates.lock().await = stormblock::fs::TemplateStore::load(dir.path());
+    let broken = template::verify_ready(&state.volume_manager, &state.fstemplates).await;
+    assert_eq!(broken.len(), 1, "{broken:?}");
+    assert_eq!(broken[0].0, "pvc-ext4j-64m");
+
+    let items = list(c.clone(), base.clone()).await;
+    let t = item(&items, "pvc-ext4j-64m");
+    assert_eq!(t["state"], "broken");
+    assert!(t["broken"].as_str().unwrap().contains("missing"), "{t}");
+    let t = item(&items, "pvc-unsealed");
+    assert_eq!(t["state"], "ready", "an unsealed volume is sealed again: {t}");
+    assert!(t["broken"].is_null());
+    assert!(state.volume_manager.lock().await.is_sealed(&unsealed_vol));
+    // Kept: the store read again says broken too.
+    assert!(stormblock::fs::TemplateStore::load(dir.path()).get(&gone).unwrap().broken.is_some());
+
+    // One clear answer to a clone and to a claim: 409, saying why.
+    for path in [format!("{base}/api/v1/fstemplates/{gone}/clone"), format!("{base}/api/v1/fstemplates/pvc-ext4j-64m/claim")] {
+        let r = c.post(&path).json(&serde_json::json!({"name": "pvc-new"})).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 409, "{path}");
+        let body: serde_json::Value = r.json().await.unwrap();
+        let e = body["error"].as_str().unwrap();
+        assert!(e.contains("pvc-ext4j-64m is broken") && e.contains("missing"), "{e}");
+        // rustkube-node e3ca68d deletes and mints again on a 409 that says this.
+        assert!(e.contains("is not sealed"), "{e}");
+    }
+    // The repaired one clones.
+    let r = c
+        .post(format!("{base}/api/v1/fstemplates/{unsealed}/clone"))
+        .json(&serde_json::json!({"name": "pvc-fine"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+
+    // Deleted and minted again, it is whole.
+    let r = c.delete(format!("{base}/api/v1/fstemplates/{gone}")).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let again = sealed_template(&state, "pvc-ext4j-64m").await;
+    let r = c
+        .post(format!("{base}/api/v1/fstemplates/{again}/clone"))
+        .json(&serde_json::json!({"name": "pvc-new"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    server.abort();
+}

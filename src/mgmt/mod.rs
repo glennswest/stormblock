@@ -573,6 +573,13 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
                     Err(e) => tracing::warn!("fstemplate {name}: format not finished ({e}); rolled back — the next claim mints it afresh"),
                 }
             }
+            // And a ready template whose sealed volume is gone is not ready
+            // (#281).
+            for (name, why) in
+                crate::fs::template::verify_ready(&state.volume_manager, &state.fstemplates).await
+            {
+                tracing::warn!("fstemplate {name} is broken: {why}; a clone of it is refused until it is minted again");
+            }
         });
     }
 

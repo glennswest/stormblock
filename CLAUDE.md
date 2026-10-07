@@ -172,6 +172,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A ready fstemplate whose sealed volume is gone (2026-10-06, #281, P1) — IN PROGRESS
+
+rustkube-node#140: every claim of `pvc-ext4j-64m` failed (404 `volume … not
+found`, or 500 `has no sealed snapshot`) while the template listed `ready`.
+- [x] `FsTemplate.broken` (reason; beside `state`, so an older engine still
+      reads the store); listed as `state: broken` + `broken`; the listing
+      also looks for the volume live
+- [x] `verify_ready` at startup (after `resume_formats`): re-seal a volume
+      that is there and unsealed, mark broken when missing / not recorded /
+      will not seal, clear when whole
+- [x] clone/claim check the volume first: 409 `fstemplate … is broken: … It
+      is not sealed and cannot be cloned; delete it and mint it again` ("is
+      not sealed" kept for rustkube-node e3ca68d's re-mint)
+- [ ] test `integration_fstemplates::a_ready_template_whose_volume_is_gone_…`
+      on dev; docs; rustkube-node told
+
 ### Install keeps the data half: only the system half is re-laid (2026-10-06, #311, P0) — DONE (golden-stormblock-3fed70dce709, stormcos#353)
 
 Owner (2026-10-06, the #1 rule for installs): an install touches the system

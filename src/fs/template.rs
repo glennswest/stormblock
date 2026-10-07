@@ -314,6 +314,13 @@ pub struct FsTemplate {
     /// Unset for a template waiting on an external formatter.
     #[serde(default)]
     pub formatting: bool,
+    /// Why a `ready` template cannot be cloned, when it cannot (#281): its
+    /// sealed volume is gone, or was never recorded, or will not seal. Set by
+    /// [`verify_ready`] (at startup) and by a clone that finds it so; cleared
+    /// when the volume is back and sealed. Kept beside `state` rather than as
+    /// a state of its own, so an older engine still reads the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
     /// The template this one was built `FROM`, if any.
     ///
     /// Recorded for lineage, not for reads: a snapshot owns a complete extent
@@ -359,7 +366,9 @@ impl FsTemplate {
             "metadata_csum_seed": self.csum_seed,
             "label": self.label,
             "fs_uuid": self.fs_uuid,
-            "state": self.state.as_str(),
+            // A ready template that cannot be cloned says so (#281).
+            "state": if self.broken.is_some() { "broken" } else { self.state.as_str() },
+            "broken": self.broken,
             "formatting": self.formatting,
             "raw_volume_id": self.raw_volume_id,
             "sealed_volume_id": self.sealed_volume_id,
@@ -731,6 +740,7 @@ pub async fn create(
     let template = FsTemplate {
         standing: None,
         formatting: spec.format_in_core,
+        broken: None,
         id: Uuid::new_v4(),
         name: spec.name.clone(),
         fs: parent.as_ref().map(|p| p.fs).unwrap_or(spec.fs),
@@ -1603,22 +1613,17 @@ pub async fn clone_template(
             template.state.as_str()
         )));
     }
-    let source = template.clone_source().ok_or_else(|| {
-        TemplateError::Internal(format!("fstemplate {} has no sealed snapshot", template.name))
-    })?;
-
-    // A template restored from an older store may not have told the volume
-    // what it carries yet; the clone path reads it from the volume.
-    {
-        let mut m = vm.lock().await;
-        if m.get_volume(&source).is_some() {
-            if !m.is_sealed(&source) {
-                let _ = m.seal_volume(source, Some(template.fs_info())).await;
-            } else if m.fs_info(&source).is_none() {
-                let _ = m.set_fs_info(source, Some(template.fs_info())).await;
-            }
-        }
+    // Its sealed volume, there and sealed — checked now, not trusted from the
+    // store (#281). A template whose volume is gone answers one thing,
+    // every time, and is marked so the listing says it too.
+    if let Err(why) = check_sealed(vm, &template).await {
+        mark_broken(store, template.id, Some(why.clone())).await;
+        return Err(TemplateError::Conflict(broken_message(&template.name, &why)));
     }
+    if template.broken.is_some() {
+        mark_broken(store, template.id, None).await;
+    }
+    let source = template.clone_source().expect("check_sealed found it");
 
     let mut result = clone_volume(vm, source, spec).await?;
     result.template_id = Some(template.id);
@@ -1632,6 +1637,81 @@ pub async fn clone_template(
     }
 
     Ok(result)
+}
+
+/// Is `template`'s sealed volume there and sealed? Re-seals a volume that is
+/// there and unsealed (a store from before #76, or a volume unsealed by hand),
+/// and gives a volume its filesystem record when it has none. `Err` is why it
+/// cannot be cloned.
+async fn check_sealed(vm: &VmLock, template: &FsTemplate) -> std::result::Result<(), String> {
+    let Some(source) = template.clone_source() else {
+        return Err("no sealed volume is recorded for it".into());
+    };
+    let mut m = vm.lock().await;
+    if m.get_volume(&source).is_none() {
+        return Err(format!("its sealed volume {} is missing", source.0));
+    }
+    if !m.is_sealed(&source) {
+        m.seal_volume(source, Some(template.fs_info()))
+            .await
+            .map_err(|e| format!("its volume {} is not sealed and will not seal ({e})", source.0))?;
+        tracing::info!("fstemplate {}: its volume {} was not sealed; sealed it", template.name, source.0);
+    } else if m.fs_info(&source).is_none() {
+        let _ = m.set_fs_info(source, Some(template.fs_info())).await;
+    }
+    Ok(())
+}
+
+/// The clone refusal for a broken template: 409, and the same words every
+/// time. "is not sealed" is kept in it for rustkube-node e3ca68d, which
+/// deletes and mints a template again on a 409 that says so.
+pub fn broken_message(name: &str, why: &str) -> String {
+    format!(
+        "fstemplate {name} is broken: {why}. It is not sealed and cannot be cloned; \
+         delete it and mint it again (or restore its volume)"
+    )
+}
+
+async fn mark_broken(store: &StoreLock, id: Uuid, why: Option<String>) {
+    let mut s = store.lock().await;
+    if let Some(t) = s.get_mut(&id) {
+        if t.broken != why {
+            match &why {
+                Some(w) => tracing::warn!("fstemplate {} is broken: {w}", t.name),
+                None => tracing::info!("fstemplate {}: its sealed volume is back; no longer broken", t.name),
+            }
+            t.broken = why;
+            s.persist();
+        }
+    }
+}
+
+/// Check every `ready` template's sealed volume (#281): at startup, after
+/// the slabs are open and the formats a previous run left are finished. A
+/// store can outlive its volume — a delete cut short, a reclaim, a store
+/// restored onto a slab seeded again — and such a template listed `ready`
+/// while every clone of it failed. Each is re-sealed when its volume is there
+/// and unsealed, marked broken (with the reason, in the listing) when it is
+/// not, and cleared when it is whole again. Returns `(name, problem)` for
+/// every template broken after the check.
+pub async fn verify_ready(vm: &VmLock, store: &StoreLock) -> Vec<(String, String)> {
+    let ready: Vec<FsTemplate> =
+        store.lock().await.templates.iter().filter(|t| t.state == TemplateState::Ready).cloned().collect();
+    let mut broken = Vec::new();
+    for t in ready {
+        match check_sealed(vm, &t).await {
+            Ok(()) => {
+                if t.broken.is_some() {
+                    mark_broken(store, t.id, None).await;
+                }
+            }
+            Err(why) => {
+                mark_broken(store, t.id, Some(why.clone())).await;
+                broken.push((t.name, why));
+            }
+        }
+    }
+    broken
 }
 
 // ------------------------------------------------------------------ claims

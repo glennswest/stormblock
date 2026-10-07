@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **fix:** #281 (rustkube-node#140): a `ready` fstemplate whose sealed volume is gone is no longer `ready`. Such a store had outlived its volume: a delete cut short, a reclaim, a store restored onto a slab seeded again.
+  - **At startup** (`template::verify_ready`, after the formats a previous run left): a template whose volume is there but unsealed is sealed again. One whose volume is missing, or was never recorded, or will not seal, is marked `broken` (`FsTemplate.broken`, persisted).
+  - **The listing** reports `state: broken` and the reason, and it looks for the volume each time.
+  - **A clone or claim** of a broken template answers 409 `fstemplate <name> is broken: <why>. It is not sealed and cannot be cloned; delete it and mint it again`, instead of a 404 for a volume the caller never named or a 500. A template whose volume is back is cleared.
+  - **Test:** `integration_fstemplates::a_ready_template_whose_volume_is_gone_lists_broken_and_refuses_clones_clearly`
 - **fix:** #277: a fsync'd write to an extent the flow-over (or a drain or rebalance) had just moved could be lost if the power went before the next persist. The new slot was allocated at the source's generation while the map took one more (`rewrite_legs`), so restore saw two slots at one generation and kept the record's, the source. A moved primary is now allocated at `generation + 1` (`PlacementEngine::moved_generation`), and restore takes it. Mirror and parity legs keep their generation; their window is #316. Test: `integration_power_cut::a_write_to_an_extent_just_moved_survives_a_cut_before_the_persist` (both formats), which fails with `MOVE_SAME_GEN_277=1`
 - **BREAKING (fix, P0):** #311 (owner, 2026-10-06: "How can you wipe a production node data?"): an install keeps the node's data half. It lays only the system half of the system drive again, superseding #261's install = wipe.
   - **Engine** (`image::install`, `take_local_disk`'s update path, force or not): `boot-local` takes the local disk before it resolves what it mounts. It adopts the data and bulk slabs' records, so every volume keeps its id and name.
