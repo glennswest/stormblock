@@ -676,7 +676,7 @@ impl SlabSyncHandle {
 /// volume queued behind that: the node's I/O and its API stopped for as long
 /// as the flow-over kept flushing.
 pub async fn sync_registered(
-    registry: &tokio::sync::RwLock<super::slab_registry::SlabRegistry>,
+    registry: &crate::lockwatch::TrackedRwLock<super::slab_registry::SlabRegistry>,
     id: SlabId,
 ) -> DriveResult<()> {
     let handle = match registry.read().await.get(&id) {

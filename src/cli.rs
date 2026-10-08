@@ -8924,7 +8924,7 @@ file = "{state}"
         }
         let state_before = volume_bytes(&node, "state").await.unwrap();
         let logs_before = volume_bytes(&node, "logs").await.unwrap();
-        let node = tokio::sync::Mutex::new(node);
+        let node = crate::lockwatch::TrackedMutex::new(node);
 
         // Stage N+1 from its published image, over HTTP.
         let url = range_server(image_n1.clone()).await;
