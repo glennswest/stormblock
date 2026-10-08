@@ -335,6 +335,55 @@ pub struct ClaimRecord {
     pub golden: VolumeId,
     /// `boothost/<name>`'s version when it was claimed.
     pub assignment_version: u64,
+    /// The boot agent that claimed, as it described itself (#177,
+    /// stormbootx#90): `name`, `version`, `commit`, `media`,
+    /// `update_serial`, `update`. Kept as given, bounded (see
+    /// [`CLAIM_EXTRA_MAX`]); absent when the agent sent none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<serde_json::Value>,
+    /// The firmware inventory the agent sent with the claim (#177,
+    /// stormbootx#20): MACs, NIC drivers, storage controllers and disks.
+    /// Kept as given, bounded; absent when none was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<serde_json::Value>,
+}
+
+/// The most a claim's `agent` or `inventory` may take, serialized (#177).
+/// The claim is the one unauthenticated write: what it may leave behind is
+/// bounded, and an object larger than this is not kept (and said so).
+pub const CLAIM_EXTRA_MAX: usize = 16 * 1024;
+
+/// `v` when it is a JSON object no larger than [`CLAIM_EXTRA_MAX`].
+pub fn claim_extra(what: &str, v: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let v = v?;
+    if !v.is_object() {
+        tracing::warn!("boot claim: {what} is not an object; not kept");
+        return None;
+    }
+    let len = serde_json::to_string(&v).map(|s| s.len()).unwrap_or(usize::MAX);
+    if len > CLAIM_EXTRA_MAX {
+        tracing::warn!("boot claim: {what} is {len} bytes, over {CLAIM_EXTRA_MAX}; not kept");
+        return None;
+    }
+    Some(v)
+}
+
+impl ClaimRecord {
+    /// The record as a manager reads it (#177).
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "claimed_at": self.claimed_at,
+            "claimed_as": self.claimed_as,
+            "clone": self.clone.0,
+            "clone_name": self.clone_name,
+            "host_golden": self.host_golden.0,
+            "release": self.golden.0,
+            "assignment_version": self.assignment_version,
+            "host_nqns": self.host_nqns,
+            "agent": self.agent,
+            "inventory": self.inventory,
+        })
+    }
 }
 
 /// What reporting an install done did (#148).

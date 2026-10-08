@@ -130,6 +130,14 @@ pub(super) async fn body(state: &AppState, s: &Synonym, changed: Option<bool>) -
     if let Some(c) = changed {
         v["changed"] = json!(c);
     }
+    // A machine's assignment says what it last booted (#177): when it
+    // claimed, what it got, and the agent that asked.
+    if s.namespace == BOOTHOST_NS {
+        let store = state.synonyms.read().await;
+        if let Some(c) = store.host_of(&s.name).and_then(|h| store.host(&h)).and_then(|h| h.last_claim) {
+            v["last_claim"] = c.json();
+        }
+    }
     if let Some(id) = s.target.volume_id() {
         let vm = state.volume_manager.lock().await;
         match vm.get_volume_handle(&id) {
@@ -409,6 +417,13 @@ pub struct ClaimRequest {
     /// one of its aliases (#204). Never used to make a host.
     #[serde(default)]
     pub serial: Option<String>,
+    /// A boot claim's agent, as it describes itself (stormbootx#90): kept in
+    /// the host's last-claim record (#177), bounded.
+    #[serde(default)]
+    pub agent: Option<serde_json::Value>,
+    /// A boot claim's firmware inventory (stormbootx#20): kept the same way.
+    #[serde(default)]
+    pub inventory: Option<serde_json::Value>,
     /// The host NQN that will connect to the clone: it is served from that
     /// host's own subsystem, to that host alone (#210). Not read by a boot
     /// claim, which binds the clone to the boot host's own NQNs.
@@ -749,7 +764,11 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
     // A machine claiming its boot image is the one caller that arrives with
     // no credential, so its claim is a different, narrower verb (#107).
     if namespace == BOOTHOST_NS {
-        return claim_boothost(state, name, req.mac.as_deref(), req.serial.as_deref()).await;
+        let extra = (
+            synonym::claim_extra("agent", req.agent.clone()),
+            synonym::claim_extra("inventory", req.inventory.clone()),
+        );
+        return claim_boothost(state, name, req.mac.as_deref(), req.serial.as_deref(), extra).await;
     }
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(syn) = found else {
@@ -951,7 +970,13 @@ static BOOT_CLAIMS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// never another machine's. A claim of `boothost/default` with no MAC is
 /// refused — tag `default` would be one boot clone for every machine, each
 /// claim releasing the clone the last machine is running on.
-async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str>, serial: Option<&str>) -> Response {
+async fn claim_boothost(
+    state: Arc<AppState>,
+    claimed_as: &str,
+    mac: Option<&str>,
+    serial: Option<&str>,
+    (agent, inventory): (Option<serde_json::Value>, Option<serde_json::Value>),
+) -> Response {
     let _one_at_a_time = BOOT_CLAIMS.lock().await;
     let by_default = claimed_as.eq_ignore_ascii_case(DEFAULT_HOST);
     let mut named_claim: Option<synonym::NamedClaim> = None;
@@ -1199,6 +1224,8 @@ async fn claim_boothost(state: Arc<AppState>, claimed_as: &str, mac: Option<&str
             host_golden: golden,
             golden: release,
             assignment_version: assignment.version,
+            agent,
+            inventory,
         },
     );
     let out = json!({

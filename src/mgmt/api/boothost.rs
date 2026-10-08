@@ -104,11 +104,7 @@ async fn view(state: &AppState, h: &Host) -> serde_json::Value {
         // What its attestation must carry (#216), and its last boot claim.
         "tpm": tpm_word(h),
         "tpm_set_at": h.tpm_set_at,
-        "last_claim": h.last_claim.as_ref().map(|c| json!({
-            "clone": c.clone.0,
-            "claimed_at": c.claimed_at,
-            "claimed_as": c.claimed_as,
-        })),
+        "last_claim": h.last_claim.as_ref().map(|c| c.json()),
         "assignment": assignment,
         "host_golden": golden,
         "created_at": h.created_at,

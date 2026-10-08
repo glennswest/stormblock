@@ -187,6 +187,16 @@ defaults to XFS (stormcos#91).
       nvme0c0n3, the device is nvme0n3); fixed, not rerun. Then CHANGELOG,
       README
 
+### A boot claim leaves a record a manager can read (2026-10-08, #177) — IN PROGRESS
+
+#216 records `Host.last_claim` (clone, time, claimed-as, host NQNs, host
+golden, release, assignment version) but serves three fields of it, on
+`/api/v1/boothost/{name}` only.
+- [ ] the claim keeps the agent (stormbootx#90) and the firmware inventory
+      (stormbootx#20), as given, each bounded (16 KiB, the claim is open)
+- [ ] the whole record on `GET /api/v1/synonyms/boothost/<tag>` (and the
+      list) and `/api/v1/boothost/{name}`; test; docs
+
 ### /serve/v1 past 128 volumes: one listener, a subsystem per export (2026-10-08, #188, P2) — DONE
 
 Each serve NVMe export had a target and a port of its own out of a 128-port

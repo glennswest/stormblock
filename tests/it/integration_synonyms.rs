@@ -1580,3 +1580,79 @@ async fn an_attestation_states_the_boot_chain_the_engine_served() {
     assert_eq!(h["last_claim"]["clone"], clone.0.to_string());
     server.abort();
 }
+
+/// #177: a boot claim leaves a record a manager can read — when the machine
+/// last claimed, what it got (the release it was pointed at, the clone, the
+/// assignment's version) and the boot agent that asked (stormbootx#90), with
+/// its firmware inventory (stormbootx#20). On the assignment
+/// (`GET /api/v1/synonyms/boothost/<tag>`) and the host
+/// (`GET /api/v1/boothost/<name>`), and across a restart. An agent object
+/// past the bound is not kept, and the claim still succeeds.
+#[tokio::test]
+async fn a_claim_leaves_a_record_a_manager_can_read() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "HOST77", "volume": v1.to_string()}))
+        .send().await.unwrap();
+
+    let agent = serde_json::json!({"name": "stormbootx", "version": "0.20.0", "commit": "8f51155",
+        "media": "rustnic ixgbe@563ea8d", "update_serial": 5, "update": "serial:5"});
+    let inventory = serde_json::json!({"nics": [{"mac": "52:54:00:12:34:56", "driver": "ixgbe"}],
+        "disks": [{"controller": "mpt3sas", "model": "WDC WD20EFAX", "serial": "WD-X"}]});
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/HOST77/claim"))
+        .json(&serde_json::json!({"agent": agent, "inventory": inventory, "mac": "52:54:00:12:34:56"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+    let claim: serde_json::Value = resp.json().await.unwrap();
+
+    let get = |path: &str| {
+        let (client, url) = (client.clone(), format!("{base}{path}"));
+        async move { client.get(url).send().await.unwrap().json::<serde_json::Value>().await.unwrap() }
+    };
+    for path in ["/api/v1/synonyms/boothost/HOST77", "/api/v1/boothost/HOST77"] {
+        let v = get(path).await;
+        let c = &v["last_claim"];
+        assert!(c["claimed_at"].as_u64().unwrap() > 0, "{path}: {v}");
+        assert_eq!(c["release"], v1.to_string(), "{path}: what it was pointed at");
+        assert_eq!(c["clone"], claim["volume"]["id"], "{path}: what it got");
+        assert_eq!(c["claimed_as"], "HOST77");
+        assert_eq!(c["assignment_version"], 1);
+        assert_eq!(c["agent"], agent, "{path}: the agent, as given");
+        assert_eq!(c["inventory"], inventory, "{path}: the inventory, as given");
+    }
+    // The synonym listing carries it too.
+    let list = get("/api/v1/synonyms?namespace=boothost").await;
+    let item = list["items"].as_array().unwrap().iter().find(|i| i["name"] == "HOST77").unwrap();
+    assert_eq!(item["last_claim"]["clone"], claim["volume"]["id"]);
+
+    // An agent past the bound: the claim succeeds, the agent is not kept.
+    let huge = serde_json::json!({"name": "x".repeat(20_000)});
+    let resp = client
+        .post(format!("{base}/api/v1/synonyms/boothost/HOST77/claim"))
+        .json(&serde_json::json!({"agent": huge}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+    let second: serde_json::Value = resp.json().await.unwrap();
+    let v = get("/api/v1/boothost/HOST77").await;
+    assert_eq!(v["last_claim"]["clone"], second["volume"]["id"], "the record moves with every claim");
+    assert!(v["last_claim"]["agent"].is_null(), "an oversized agent is not kept: {}", v["last_claim"]);
+    server.abort();
+
+    // A restart keeps it.
+    let mut config = StormBlockConfig::default();
+    config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
+    let fresh = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let (reg, gem) = (fresh.registry().clone(), fresh.gem().clone());
+    let (base, server) = start(Arc::new(AppState::new(config, fresh, reg, gem))).await;
+    let v: serde_json::Value = client.get(format!("{base}/api/v1/boothost/HOST77")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["last_claim"]["clone"], second["volume"]["id"], "after a restart: {v}");
+    assert_eq!(v["last_claim"]["release"], v1.to_string());
+    server.abort();
+}
