@@ -3216,7 +3216,6 @@ pub async fn run() -> anyhow::Result<()> {
         resume: bool,
     ) -> anyhow::Result<(VolumeManager, Option<Resumed>, OpenedDisks)> {
         use std::path::{Path, PathBuf};
-        use crate::volume::MetadataStore;
 
         // 1. Open the slabs. A slab formatted by `image build` carries its own
         //    volumes.dat, so opening it is also how the metadata is found — an
@@ -3476,15 +3475,17 @@ pub async fn run() -> anyhow::Result<()> {
                         slab_paths.join(", ")
                     );
                 };
-                let store = MetadataStore::new(meta_dir.clone())?;
-                if !store.exists() {
+                // Either format: since #158 the directory keeps `metadata.v2`,
+                // and reading only v1's `volumes.dat` refused every such
+                // directory (the runtime tests, #222).
+                let Some(doc) = VolumeManager::load_data_dir(&meta_dir).await? else {
                     anyhow::bail!(
-                        "no volume metadata: none of the slab(s) {} carries any, and there is no volumes.dat in {}",
+                        "no volume metadata: none of the slab(s) {} carries any, and there is neither \
+                         metadata.v2 nor volumes.dat in {}",
                         slab_paths.join(", "),
                         meta_dir.display()
                     );
-                }
-                let doc = store.load()?;
+                };
                 if doc.arrays.is_empty() {
                     anyhow::bail!("metadata in {} records no arrays", meta_dir.display());
                 }

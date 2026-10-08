@@ -2900,6 +2900,20 @@ impl VolumeManager {
         }
     }
 
+    /// The record a data directory keeps, in either format: `metadata.v2`
+    /// when it is there (format 2 is the default since #158), else v1's
+    /// `volumes.dat`. `None` when the directory keeps neither.
+    pub async fn load_data_dir(dir: &std::path::Path) -> anyhow::Result<Option<metadata::VolumeMetadata>> {
+        if dir.join(persist_v2::DIR_FILE).exists() {
+            return Ok(persist_v2::load_dir(dir).await?);
+        }
+        let store = metadata::MetadataStore::new(dir.to_path_buf())?;
+        if store.exists() {
+            return Ok(Some(store.load()?));
+        }
+        Ok(None)
+    }
+
     /// Restore volumes from persisted metadata. No-op if no data_dir or no metadata file.
     pub async fn restore(&mut self) -> anyhow::Result<()> {
         // A data directory wins where there is one: it is the record a running
