@@ -4066,7 +4066,7 @@ mod redundancy_tests {
             let dev = FileDevice::open_with_capacity(d.join(n).to_str().unwrap(), 8 * 1024 * 1024).await.unwrap();
             let slab = Slab::format_with(
                 Arc::new(dev),
-                SlabFormat::new(slot, StorageTier::Hot).with_role(SlabRole::Data),
+                crate::drive::slab::SlabFormat::new(slot, StorageTier::Hot).with_role(SlabRole::Data),
             )
             .await
             .unwrap();
