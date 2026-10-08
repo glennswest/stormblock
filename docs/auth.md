@@ -139,8 +139,14 @@ call is logged as one `enforce` (the default) would refuse.
   under the deprecated `/mk/v1` prefix.
 * `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
   what the engine is doing when its API stops answering (#269). Read-only,
-  no volume data (function names, lock states, kernel stacks); a node has no
-  ssh and the supervisor asking holds no node token.
+  no volume data; a node has no ssh and the supervisor asking holds no node
+  token. Open does not mean all of it (#283): without the node or admin token
+  (or a node-CA client certificate) a request in flight is its method, age
+  and route family (`/api/v1/volumes/…`, never an id, a name or a boothost
+  tag), a remote slab's flushes are named by transport, the watchdog's
+  reports are their open summary, and threads have no kernel stacks. A task
+  dump pauses the runtime it traces, so `/debug/tasks` takes one at a time
+  and answers from it for 5 s.
 * `POST /api/v1/synonyms/boothost/<tag>/claim` — the boot claim, matched
   exactly (one method, that namespace, one path segment). The re-point beside
   it, `PUT /api/v1/synonyms/boothost/<tag>`, is what decides what a machine

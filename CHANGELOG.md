@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #283: `/debug` stays open, but an open caller sees counts and timings, not other callers' work.
+  - **Without the node or admin token** (or a node-CA client certificate), `/debug/stalls` shows each request in flight as its method, age and route family (`/api/v1/volumes/…`), never a volume id, name or boothost tag. A remote slab's flushes are named by transport, not by the URI attaching it takes. The watchdog's reports come as their open summary, and `/debug/threads` has no kernel stacks.
+  - **With a token,** the full view is unchanged. The auth layer marks such a request (`mgmt::auth::FullView`); on a node that enforces no token, every caller has the full view.
+  - **`/debug/tasks`:** takes one task dump at a time and answers from it for 5 s (`TASKS_FRESH`), so a loop of requests cannot pause the runtime over and over.
+  - **Tests:** `debug::view_tests` (route families, remote devices) and `integration_auth::debug_is_open_but_an_open_caller_sees_no_paths_and_cannot_force_dumps` (a held request's id absent from the open view and present in the token view; 12 concurrent `/debug/tasks` calls make one dump).
 - **feat:** #337: health names a ublk request that was never answered.
   - **Why:** on server3 (11.91), fastetcd's fdatasync did not return for 70 minutes while health said ok, and the engine could not say whether a FLUSH on its device was outstanding. The likely cause is #334, fixed in golden-stormblock-65b6578787be: under the same suite on the Dell, the stall watchdog's task dump panicked a ublk device's runtime and lost a wake. That device's requests then never completed.
   - **Now:** each ublk queue records when each tag's request was taken, and its op. `/api/v1/health` lists every request unanswered for 30 s or more (`ublk_stuck`: device, `/dev/ublkbN`, queue, tag, op, seconds), and the watchdog logs it every 30 s.

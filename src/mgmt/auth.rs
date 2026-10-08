@@ -398,6 +398,13 @@ fn admin_note(r: &Resolved) -> String {
     }
 }
 
+/// Marks a request whose caller may see the whole of an open route's answer
+/// (#283): the node or admin token, a node-CA client certificate, or any
+/// caller of a node that enforces no token. `/debug` shows others counts and
+/// timings only.
+#[derive(Debug, Clone, Copy)]
+pub struct FullView;
+
 /// The engine-wide middleware. Reads whatever the node resolved at startup, so
 /// a router built in a test with no resolution stays open and the served one
 /// never is.
@@ -410,7 +417,7 @@ fn admin_note(r: &Resolved) -> String {
 /// included.
 pub async fn require_token(
     State(state): State<Arc<AppState>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     use crate::serve::api::Class;
@@ -426,6 +433,7 @@ pub async fn require_token(
 
     // Open node: nothing is enforced (and nothing to audit against).
     let Some(api_token) = auth.api_token.as_deref() else {
+        req.extensions_mut().insert(FullView);
         return next.run(req).await;
     };
     let class = crate::serve::api::classify(&method, &path, req.uri().query());
@@ -435,7 +443,14 @@ pub async fn require_token(
     let cert = req.extensions().get::<super::tls::ClientCert>().cloned();
     let is_node = presented.as_deref() == Some(api_token) || cert.is_some();
     let destructive = match class {
-        Class::Public => return next.run(req).await,
+        Class::Public => {
+            // An open route answers anyone; one holding a token sees more
+            // of it (`/debug`, #283).
+            if is_admin || is_node {
+                req.extensions_mut().insert(FullView);
+            }
+            return next.run(req).await;
+        }
         Class::Ordinary => false,
         Class::Destructive => true,
         Class::VolumeDelete(id) => volume_delete_is_destructive(&state, &id).await,

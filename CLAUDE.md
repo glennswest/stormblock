@@ -172,6 +172,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### /debug open without a token: bounded and redacted (2026-10-08, #283, P2) — IN PROGRESS
+
+#269 opened /debug for a supervisor with no token; it showed other callers'
+paths (volume ids, boothost tags) and let anyone force task dumps. Kept
+open (the issue's reason holds), with:
+- [x] `auth::FullView` on a token holder's request to an open route; /debug
+      without it: route families, remote flush devices by transport, the
+      watchdog report's open summary, no thread stacks
+- [x] `/debug/tasks`: one dump at a time, answered from it for 5 s
+- [x] tests; docs (README, auth.md), CHANGELOG
+- [ ] full nextest on a build VM; golden; close
+
 ### Is a flush outstanding on fastetcd's volume? (2026-10-08, #337, P1) — DONE
 
 server3 11.91: fastetcd's fdatasync stuck 70+ min from 19:09:47Z, health

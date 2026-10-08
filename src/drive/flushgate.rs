@@ -69,6 +69,12 @@ fn flushes() -> &'static Mutex<VecDeque<Flush>> {
     F.get_or_init(Default::default)
 }
 
+/// A flush in the record, as if one had run (tests).
+#[cfg(test)]
+pub fn record_for_test(label: &str, took: Duration) {
+    record(label, took, 0);
+}
+
 fn record(label: &str, took: Duration, shared: u64) {
     let mut f = flushes().lock().unwrap_or_else(|e| e.into_inner());
     if f.len() >= KEEP {
@@ -80,6 +86,12 @@ fn record(label: &str, took: Duration, shared: u64) {
 /// The device flushes of the last `window`, per device: how many, p50, p99,
 /// max, and how many callers they were shared with.
 pub fn summary(window: Duration) -> String {
+    summary_view(window, true)
+}
+
+/// [`summary`]; without `full`, a device named by a URI (a remote slab) is
+/// given by its transport only (#283): the URI is what attaching it takes.
+pub fn summary_view(window: Duration, full: bool) -> String {
     let f = flushes().lock().unwrap_or_else(|e| e.into_inner());
     let recent: Vec<&Flush> = f.iter().filter(|x| x.at.elapsed() <= window).collect();
     let mut out = format!("device flushes in the last {}s: {}\n", window.as_secs(), recent.len());
@@ -87,12 +99,16 @@ pub fn summary(window: Duration) -> String {
     labels.sort();
     labels.dedup();
     for l in labels {
+        let shown = match l.split_once("://") {
+            Some((scheme, _)) if !full => format!("{scheme}:// (remote)"),
+            _ => l.to_string(),
+        };
         let mut ms: Vec<f64> = recent.iter().filter(|x| x.label == l).map(|x| x.took.as_secs_f64() * 1e3).collect();
         let shared: u64 = recent.iter().filter(|x| x.label == l).map(|x| x.shared).sum();
         ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let at = |p: f64| ms[((ms.len() as f64 - 1.0) * p).round() as usize];
         out.push_str(&format!(
-            "  {l}: {} flush(es), p50 {:.0} ms, p99 {:.0} ms, max {:.0} ms; {} caller(s) shared one\n",
+            "  {shown}: {} flush(es), p50 {:.0} ms, p99 {:.0} ms, max {:.0} ms; {} caller(s) shared one\n",
             ms.len(),
             at(0.5),
             at(0.99),

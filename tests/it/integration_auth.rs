@@ -270,3 +270,54 @@ async fn v1_keeps_its_error_envelope() {
 
     server.abort();
 }
+
+/// #283: `/debug` stays open, but without the token it shows route families,
+/// not paths, and a task dump is taken once for many callers.
+#[tokio::test]
+async fn debug_is_open_but_an_open_caller_sees_no_paths_and_cannot_force_dumps() {
+    use tokio::io::AsyncWriteExt;
+    let dir = TempDir::new().unwrap();
+    let state = state_with(&dir, config_with_token("sekrit")).await;
+    let (base, server) = serve(state).await;
+    let c = reqwest::Client::new();
+
+    // A request in flight whose path names something: its body never
+    // finishes arriving, so it waits in the handler.
+    let secret = "3f1c0de5-0283-4000-8000-5ec2e7da7a00";
+    let mut held = tokio::net::TcpStream::connect(base.trim_start_matches("http://")).await.unwrap();
+    held.write_all(
+        format!(
+            "POST /api/v1/volumes/{secret}/clone HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer sekrit\r\n\
+             Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{{\"name\":"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let open = c.get(format!("{base}/debug/stalls")).send().await.unwrap();
+    assert_eq!(open.status(), 200, "open, as #269 made it");
+    let open = open.text().await.unwrap();
+    assert!(!open.contains(secret), "the open view names no volume: {open}");
+    assert!(open.contains("POST /api/v1/volumes/…"), "only its route family: {open}");
+    assert!(open.contains("need the node token"), "and says what it leaves out: {open}");
+
+    let full = c.get(format!("{base}/debug/stalls")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
+    assert!(full.contains(&format!("/api/v1/volumes/{secret}/clone")), "the token sees the path: {full}");
+    drop(held);
+
+    // Many callers at once, then again at once: one dump answers them all.
+    let before = stormblock::mgmt::debug::TASK_DUMPS.load(std::sync::atomic::Ordering::Relaxed);
+    let calls: Vec<_> = (0..12).map(|_| c.get(format!("{base}/debug/tasks")).send()).collect();
+    for r in futures_util::future::join_all(calls).await {
+        assert_eq!(r.unwrap().status(), 200);
+    }
+    let after = stormblock::mgmt::debug::TASK_DUMPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(after - before, 1, "one task dump for twelve callers");
+
+    // Threads: names and states for anyone.
+    let t = c.get(format!("{base}/debug/threads")).send().await.unwrap().text().await.unwrap();
+    assert!(t.contains("thread(s)"), "{t}");
+    server.abort();
+}

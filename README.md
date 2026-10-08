@@ -506,7 +506,12 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   ublk device's current-thread runtime is named but never dumped, because
   tracing it while it serves I/O re-enters it and panics it (#334); `threads`: every OS
   thread, its state and kernel stack; `locks`: whether the volume manager,
-  the extent map and the slab registry are held.
+  the extent map and the slab registry are held. Without the node token
+  (#283): requests by method, age and route family (`/api/v1/volumes/…`, no
+  ids, names or tags), remote flush devices by transport, the watchdog's
+  reports as their open summary, threads without stacks. `tasks` takes one
+  dump at a time and answers from it for 5 s, so asking in a loop cannot
+  pause the runtime over and over.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.
