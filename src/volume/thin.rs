@@ -4201,7 +4201,7 @@ mod redundancy_tests {
         let first = {
             let mut g = gem.write().await;
             let mut r = reg.write().await;
-            engine.migrate_parity_leg_at(&mut g, &mut r, v.volume_id(), 0, p_slab, "drive").await
+            engine.migrate_parity_leg_at(&mut g, &mut r, v.volume_id(), 0, p_slab, "drive").await.map(|_| ())
         };
         gate.2.notify_one();
         writer.await.unwrap().unwrap();
@@ -4215,7 +4215,7 @@ mod redundancy_tests {
             // Once it is done, the move goes ahead.
             let mut g = gem.write().await;
             let mut r = reg.write().await;
-            engine.migrate_parity_leg_at(&mut g, &mut r, v.volume_id(), 0, p_slab, "drive").await.unwrap();
+            engine.migrate_parity_leg_at(&mut g, &mut r, v.volume_id(), 0, p_slab, "drive").await.map(|_| ()).unwrap();
         }
 
         let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
