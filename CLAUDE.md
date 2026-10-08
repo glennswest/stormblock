@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### FileDevice::write returned before the bytes were in the file (2026-10-07, #279) — IN PROGRESS
+### FileDevice::write returned before the bytes were in the file (2026-10-07, #279) — DONE
 
 Flaky in the full suite: `pressure::tests::an_existing_slab_on_a_source_is_
 adopted_with_its_data` (check() not Grew). Found: `FileDevice::write` is
@@ -180,11 +180,14 @@ seek + `write_all` on a `tokio::fs::File`, whose poll_write hands the write
 to the blocking pool and returns; that File orders its own later ops after
 it, but a second `FileDevice` on the path (the watcher's reopen) can read
 the file before it lands — under the suite's load the pool is busy.
-- [ ] `write` flushes the tokio File (no fsync): it returns once the bytes
+- [x] `write` flushes the tokio File (no fsync): it returns once the bytes
       are in the file
-- [ ] regression test: the blocking pool kept busy, the file read directly
+- [x] regression test: the blocking pool kept busy, the file read directly
       after `write` returns; fails without the fix (throwaway branch); the
       pressure test prints what check() returned; CHANGELOG
+- Verified on build VMs: the regression test fails 3/3 without the fix
+  (write 0) and passes 5/5 with it; the pressure test 40/40 alone; two full
+  suites 1004/1004. FileDevice is tests/development only: no golden
 
 ### CrashDevice tears writes; cuts inside an operation (2026-10-07, #191, P2) — DONE
 
