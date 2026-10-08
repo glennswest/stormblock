@@ -8607,14 +8607,18 @@ file = "{state}"
         assert_eq!(volume_bytes(&alone, "state").await.unwrap(), state_before, "the node's state, every byte");
     }
 
-    /// #311: an install never falls back to a wipe. A volume the node made in
-    /// the system half (no role asked, on a node with both halves) is not one
-    /// the release brings back: the install stops before writing anything,
-    /// and every byte of the disk is as it was. `--local-disk-force` does not
-    /// change that.
+    /// #349 (owner, 2026-10-08: "old system volumes are disposable;
+    /// partner/user apps/data are not"): what the node made in the system half
+    /// — a VM disk created with no role, a registry golden (sealed), media
+    /// recorded before origins were (unmarked) — is carried into the data
+    /// half by the install, byte for byte, the golden still sealed; an old
+    /// release's volume the new release does not name is dropped. Then from
+    /// the disk alone, after the flow-over: the carried volumes are there, in
+    /// the data half.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_install_that_would_lose_a_volume_stops_and_writes_nothing() {
+    async fn an_install_carries_the_nodes_system_half_volumes_and_drops_the_old_releases() {
         use crate::drive::slab::SlabRole;
+        use crate::volume::metadata::Origin;
         let Some(mkfs) = mkfs_ext4() else {
             eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
             return;
@@ -8622,57 +8626,83 @@ file = "{state}"
         let dir = tempfile::tempdir().unwrap();
         let (disk, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
         let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
-        let vm_disk = node
-            .create_volume_with("vm-disk-1", 8 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::System))
-            .await
-            .unwrap();
-        node.get_volume(&vm_disk).unwrap().write(0, &[0xD1; 65536]).await.unwrap();
-        node.get_volume(&vm_disk).unwrap().flush().await.unwrap();
+        assert_eq!(node.origin(&node.find_volume("svc").await.unwrap()), Origin::Release, "an image build lays the release's");
+        let mut made = Vec::new();
+        for (name, mark, seal, origin) in [
+            ("vm-disk-1", 0xD1u8, false, None),
+            ("img-0123456789ab-root", 0xD2, true, None),
+            ("media-old", 0xD3, true, Some(Origin::Unmarked)),
+            ("old-release-golden", 0xD4, true, Some(Origin::Release)),
+        ] {
+            let id = node
+                .create_volume_with(name, 8 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::System))
+                .await
+                .unwrap();
+            let v = node.get_volume(&id).unwrap();
+            v.write(0, &vec![mark; 8 * MIB as usize]).await.unwrap();
+            v.flush().await.unwrap();
+            if seal {
+                node.seal_volume(id, None).await.unwrap();
+            }
+            if let Some(o) = origin {
+                node.set_origin(id, o);
+            }
+            made.push((name, mark, seal, id));
+        }
+        assert_eq!(node.origin(&made[0].3), Origin::Node, "a create is the node's");
         node.persist().await;
         drop(node);
-        // The disk is 80 GiB and sparse: what it holds is its allocated
-        // ranges, and their bytes.
-        fn allocated(path: &str) -> Vec<(u64, u64, u64)> {
-            use std::hash::{Hash, Hasher};
-            use std::os::unix::fs::FileExt;
-            use std::os::unix::io::AsRawFd;
-            let f = std::fs::File::open(path).unwrap();
-            let len = f.metadata().unwrap().len() as i64;
-            let mut out = Vec::new();
-            let mut at = 0i64;
-            while at < len {
-                let start = unsafe { libc::lseek(f.as_raw_fd(), at, libc::SEEK_DATA) };
-                if start < 0 {
-                    break;
-                }
-                let end = unsafe { libc::lseek(f.as_raw_fd(), start, libc::SEEK_HOLE) }.max(start);
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                let mut buf = vec![0u8; 1 << 20];
-                let mut off = start as u64;
-                while off < end as u64 {
-                    let n = buf.len().min((end as u64 - off) as usize);
-                    f.read_exact_at(&mut buf[..n], off).unwrap();
-                    buf[..n].hash(&mut h);
-                    off += n as u64;
-                }
-                out.push((start as u64, end as u64, h.finish()));
-                at = end;
-            }
-            out
-        }
-        let before = allocated(&disk);
 
-        for force in [false, true] {
-            let claim = dir.path().join(format!("claim-{force}.raw")).display().to_string();
-            std::fs::copy(&image_n1, &claim).unwrap();
-            let (mut mgr, _) = super::open_slabs_resuming(&[claim], None, true).await.unwrap();
-            let err = super::take_local_disk_for(&mut mgr, &disk, "hot", force, Some("stormpump"))
-                .await
-                .expect_err("an install that would lose vm-disk-1");
-            let msg = err.to_string();
-            assert!(msg.contains("vm-disk-1") && msg.contains("untouched"), "force {force}: {msg}");
-            assert!(allocated(&disk) == before, "force {force}: the disk was written");
+        // Install N+1 over it, as a boot does.
+        let claim = dir.path().join("claim-n1.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
+            .await
+            .expect("the install carries the node's volumes rather than stopping");
+        let flow = flow.expect("laid");
+        let report = report.expect("an install report");
+        let mut carried = report.carried.clone();
+        carried.sort();
+        assert_eq!(carried, vec!["img-0123456789ab-root", "media-old", "vm-disk-1"], "{report:?}");
+        let data_slab = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        for (name, mark, seal, id) in &made[..3] {
+            assert_eq!(mgr.find_volume(name).await, Some(*id), "{name}: carried under its id");
+            assert_eq!(volume_bytes(&mgr, name).await.unwrap(), vec![*mark; 8 * MIB as usize], "{name}: every byte");
+            assert_eq!(mgr.is_sealed(id), *seal, "{name}: sealed as it was");
+            let g = mgr.gem().read().await;
+            let m = g.get_volume_map(id).expect("mapped");
+            assert!(m.all_legs().all(|l| l.slab_id == data_slab), "{name}: in the data half");
         }
+        assert_eq!(mgr.find_volume("old-release-golden").await, None, "the old release's own volume is dropped");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+
+        // The flow-over, then the disk alone.
+        let (succ, _) = super::open_slabs_resuming(&[claim.clone(), flow.disk.clone()], None, true).await.unwrap();
+        let (sys_dest, data_dest) = (
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
+            data_slab,
+        );
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+        drop(succ);
+        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        for (name, mark, seal, id) in &made[..3] {
+            assert_eq!(alone.find_volume(name).await, Some(*id), "{name}: from the disk alone");
+            assert_eq!(volume_bytes(&alone, name).await.unwrap(), vec![*mark; 8 * MIB as usize], "{name}: from the disk alone");
+            assert_eq!(alone.is_sealed(id), *seal);
+        }
+        assert_eq!(alone.find_volume("old-release-golden").await, None);
+        assert_eq!(alone.origin(&made[1].3), Origin::Node, "the origin travels with the volume");
     }
 
     /// #122: release N installed, the node running from its disk and writing
