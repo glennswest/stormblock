@@ -324,7 +324,7 @@ struct VolumeList {
 }
 
 /// What the listing reports that a persist does not move (#218), hashed.
-async fn listing_fingerprint(state: &AppState, vm: &VolumeManager, ctx: &super::usage::Context) -> u64 {
+async fn listing_fingerprint(state: &AppState, vm: &crate::volume::VolumeManager, ctx: &super::usage::Context) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     ctx.fingerprint(&mut h);
@@ -373,7 +373,7 @@ async fn listing_fingerprint(state: &AppState, vm: &VolumeManager, ctx: &super::
 /// The listing's generation (#218): the volume manager's plus how many times
 /// [`listing_fingerprint`] has changed. Both only ever grow, so the sum moves
 /// whenever either does.
-async fn listing_generation(state: &AppState, vm: &VolumeManager, ctx: &super::usage::Context) -> u64 {
+async fn listing_generation(state: &AppState, vm: &crate::volume::VolumeManager, ctx: &super::usage::Context) -> u64 {
     let fp = listing_fingerprint(state, vm, ctx).await;
     let bumps = {
         let mut s = state.listing_state.lock().unwrap();
