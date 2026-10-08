@@ -7934,18 +7934,21 @@ file = "{state}"
                 .collect();
 
             // The flow-over, system half then data half, until the power goes.
-            // A persist per window of 4 moves made at once (#331).
-            std::env::set_var("STORMBLOCK_FLOW_BATCH", "4");
-            // Each half ends in its own, maybe partial, window.
-            let windows = sys_n.div_ceil(4) + data_n.div_ceil(4);
-            let cut_after = ((windows as f64 * at) as u64).min(windows as u64 - 1);
-            let persists = std::sync::atomic::AtomicU64::new(0);
+            // A persist per window of 2 moves made at once (#331). The cut is
+            // by progress: at the first persist that finds at most the target
+            // left (and at least 4, so the cut is never past the end). A move
+            // of a slot a golden shares with its stamped clone drops two
+            // extents at once, so a window of 2 drops at most 4: it cannot
+            // jump from above the target to none. Counting windows could.
+            std::env::set_var("STORMBLOCK_FLOW_BATCH", "2");
+            let target = (((sys_n + data_n) as f64 * (1.0 - at)).round() as usize).max(4);
             let cut = tokio::sync::Notify::new();
+            let (sys_src, data_src) = (&sys_src, &data_src);
             let persist = || {
-                let c = persists.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 let (succ, cut) = (&succ, &cut);
                 async move {
-                    if c > cut_after {
+                    let left = super::extents_on(succ.gem(), sys_src).await + super::extents_on(succ.gem(), data_src).await;
+                    if left <= target {
                         cut.notify_one();
                         std::future::pending::<()>().await
                     }
@@ -7953,8 +7956,8 @@ file = "{state}"
                 }
             };
             let flow_both = async {
-                super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, persist, None, data_n).await;
-                super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, persist, None, 0).await
+                super::flow_slabs(succ.gem(), succ.registry(), sys_src, sys_dest, persist, None, data_n).await;
+                super::flow_slabs(succ.gem(), succ.registry(), data_src, data_dest, persist, None, 0).await
             };
             tokio::select! {
                 r = flow_both => panic!("{t}: the flow-over was meant to be cut: {r:?}"),
