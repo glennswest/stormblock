@@ -4002,6 +4002,75 @@ if [ -n "$MOUNT_MAP" ]; then
 fi
 # --- END container mounts
 
+# --- BEGIN system data (covered by tests/initramfs-system-data.sh)
+# The node's own record of itself (#355, stormcos docs/SYSTEM-DATA.md): the
+# `system-data` volume in the data half, which every install keeps and only a
+# node reset wipes. boot-local made it (when this boot has a local data half)
+# and exported it as one more ublk device, named in system-data.dev. Mounted
+# here, where it stays: /run survives the switch_root, and the services that
+# write their parts (stormpump, stormdrive) get it from there. The kernel
+# replays its journal at this mount, which is why the records are written
+# through it and not into the volume offline.
+#   config/           the release's mount list (mounts.release, its source)
+#   history/boots/    one record per boot: release, tag, cmdline, the disk
+#                     verdict and inventory (local-disk.json), the handover
+#   history/installs/ one record per boot that installed (the handover's
+#                     `installed`)
+SD_DEV_FILE="${STORM_SYSTEM_DATA_DEV:-/run/stormblock/system-data.dev}"
+SD_DIR="${STORM_SYSTEM_DATA_DIR:-/run/stormblock/system-data}"
+SD_KEEP="${STORM_SYSTEM_DATA_KEEP:-500}"
+SD_ROOT="${STORM_SYSTEM_DATA_ROOT:-/sysroot}"
+SD_RUN="${STORM_SYSTEM_DATA_RUN:-/run/stormblock}"
+SD_CMDLINE="${STORM_CMDLINE:-/proc/cmdline}"
+sd_json() { # file -> its contents, or null
+    if [ -s "$1" ]; then cat "$1"; else printf null; fi
+}
+sd_str() { # text -> a JSON string (quotes and backslashes dropped)
+    printf '"%s"' "$(printf '%s' "$1" | tr -d '"\\' | tr '\n\t' '  ')"
+}
+if [ -s "$SD_DEV_FILE" ]; then
+    sd_dev=$(head -1 "$SD_DEV_FILE")
+    _sw=0
+    while [ ! -b "$sd_dev" ] && [ "$_sw" -lt "${STORM_SYSTEM_DATA_WAIT:-15}" ]; do
+        sleep 1
+        _sw=$((_sw + 1))
+    done
+    mkdir -p "$SD_DIR"
+    if mount -t ext4 "$sd_dev" "$SD_DIR" 2>/tmp/sd.err; then
+        mkdir -p "$SD_DIR/config" "$SD_DIR/history/boots" "$SD_DIR/history/installs"
+        sd_at=$(date -u +%Y%m%dT%H%M%SZ)
+        sd_release=$(sed -n 's/^VERSION_ID=//p' "$SD_ROOT/etc/os-release" 2>/dev/null | tr -d '"' | head -1)
+        # The release's mount list, as this boot read it (#262, stormcos#259).
+        if [ -n "${MOUNTS:-}" ]; then
+            printf '%s\n' "$MOUNTS" | tr ',' '\n' > "$SD_DIR/config/mounts.release"
+            printf '%s\n' "${MOUNTS_FROM:-}" > "$SD_DIR/config/mounts.release.from"
+        fi
+        sd_boot="$SD_DIR/history/boots/$sd_at.json"
+        {
+            printf '{"at": "%s", "release": %s, "tag": %s, "cmdline": %s,\n' \
+                "$sd_at" "$(sd_str "$sd_release")" "$(sd_str "${BOOTTAG:-}")" "$(sd_str "$(cat "$SD_CMDLINE" 2>/dev/null)")"
+            printf ' "local_disk": %s,\n' "$(sd_json "$SD_RUN/local-disk.json")"
+            printf ' "handover": %s}\n' "$(sd_json "$SD_RUN/handover.json")"
+        } > "$sd_boot"
+        if grep -q '"installed"' "$SD_RUN/handover.json" 2>/dev/null; then
+            cp "$sd_boot" "$SD_DIR/history/installs/$sd_at.json"
+            echo "  system-data: install recorded ($sd_at, ${sd_release:-release unknown})"
+        fi
+        # The newest $SD_KEEP boot records.
+        _sn=$(ls "$SD_DIR/history/boots" 2>/dev/null | wc -l)
+        if [ "$_sn" -gt "$SD_KEEP" ]; then
+            ls "$SD_DIR/history/boots" | sort | head -n "$((_sn - SD_KEEP))" \
+                | while read -r _old; do rm -f "$SD_DIR/history/boots/$_old"; done
+        fi
+        sync
+        echo "  system-data: $sd_dev on $SD_DIR, boot recorded ($sd_at)"
+    else
+        echo "WARNING: system-data: $sd_dev would not mount on $SD_DIR ($(head -1 /tmp/sd.err)); this boot keeps no record (#355)"
+    fi
+fi
+# --- END system data
+
+
 if [ -n "$WRITABLE_MAP" ]; then
     echo "Registering writable thin volumes in fstab..."
     printf '%s' "$WRITABLE_MAP" | while read -r wdev wmnt; do

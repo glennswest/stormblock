@@ -6985,6 +6985,60 @@ async fn report_installed(ticket: crate::drive::handover::InstallTicket) {
     }
 }
 
+/// The node's kept record of itself (#355, stormcos `docs/SYSTEM-DATA.md`):
+/// config, install and boot history, drive history, assets, kernel logs. One
+/// volume in the data half, which every install keeps (#311, #349) and only
+/// a node reset wipes.
+pub(crate) const SYSTEM_DATA_VOLUME: &str = "system-data";
+/// Its size: thin, so it costs what is written.
+const SYSTEM_DATA_BYTES: u64 = 4 << 30;
+/// Where `boot-local` says which ublk device it is, for `/init` to mount.
+pub(crate) const SYSTEM_DATA_DEV_FILE: &str = "/run/stormblock/system-data.dev";
+
+/// `system-data`, made (ext4, in the data half) when this boot has a local
+/// data half and the volume is not there yet. `None` on a diskless boot: its
+/// data half is the appliance's clone, thrown away at the next boot.
+pub(crate) async fn ensure_system_data(
+    mgr: &mut crate::volume::VolumeManager,
+) -> anyhow::Result<Option<crate::volume::VolumeId>> {
+    use crate::drive::DriveType;
+    let local_data = {
+        let reg = mgr.registry().read().await;
+        reg.iter().any(|(id, s)| {
+            s.is_data()
+                && !reg.is_quarantined(id)
+                && !matches!(s.device().device_type(), DriveType::NvmeTcp | DriveType::Iscsi)
+        })
+    };
+    if let Some(id) = mgr.find_volume(SYSTEM_DATA_VOLUME).await {
+        return Ok(local_data.then_some(id));
+    }
+    if !local_data {
+        return Ok(None);
+    }
+    let id = mgr
+        .create_volume_with(
+            SYSTEM_DATA_VOLUME,
+            SYSTEM_DATA_BYTES,
+            crate::volume::CreateOptions::default().in_role(crate::drive::slab::SlabRole::Data),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("creating {SYSTEM_DATA_VOLUME}: {e}"))?;
+    let dev = mgr.get_volume(&id).ok_or_else(|| anyhow::anyhow!("{SYSTEM_DATA_VOLUME} has no device"))?;
+    let params = crate::fs::ext4::Ext4Params {
+        label: SYSTEM_DATA_VOLUME.to_string(),
+        uuid: uuid::Uuid::new_v4(),
+        assume_blank: true,
+        ..Default::default()
+    };
+    crate::fs::ext4::format(&dev, &params)
+        .await
+        .map_err(|e| anyhow::anyhow!("formatting {SYSTEM_DATA_VOLUME}: {e}"))?;
+    mgr.persist().await;
+    println!("system-data: made in the data half ({}, ext4)", crate::mgmt::config::human_size(SYSTEM_DATA_BYTES));
+    Ok(Some(id))
+}
+
 async fn handle_boot_local(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -7203,6 +7257,27 @@ async fn handle_boot_local(
         // write to an extent still on one lands on the local disk (#239).
         if let Some(f) = &laid_flow_over {
             quarantine_flow_sources(&mgr, f).await;
+        }
+        // The node's own record of itself (#355): made in the local data half
+        // after the quarantine (so its blocks land on this disk), exported
+        // after every other device (no index moves), mounted by /init.
+        match ensure_system_data(&mut mgr).await {
+            Ok(Some(id)) => {
+                let dev_id = exports.iter().map(|(d, _, _)| *d).max().map_or(0, |d| d + 1);
+                if let Some(vol) = mgr.get_volume(&id) {
+                    exports.push((dev_id, SYSTEM_DATA_VOLUME.to_string(), vol));
+                    let path = std::path::Path::new(SYSTEM_DATA_DEV_FILE);
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    if let Err(e) = std::fs::write(path, format!("/dev/ublkb{dev_id}\n")) {
+                        tracing::warn!("system-data: could not write {}: {e}", path.display());
+                    }
+                    println!("  /dev/ublkb{dev_id} ← {SYSTEM_DATA_VOLUME} (the node's record of itself, #355)");
+                }
+            }
+            Ok(None) => println!("system-data: no local data half this boot (diskless): none kept"),
+            Err(e) => eprintln!("WARNING: system-data: {e} — this boot keeps no record (#355)"),
         }
         let record = crate::drive::handover::Record {
             slabs,
@@ -7436,6 +7511,44 @@ async fn handle_migrate_boot(
 #[cfg(test)]
 mod tests {
     use super::note_no_intent;
+
+    /// #355: `system-data` is made in a local data half, as ext4, once; and
+    /// not at all when the only data half is on its way out (an appliance's,
+    /// quarantined) — a diskless boot keeps no record it would lose.
+    #[tokio::test]
+    async fn system_data_is_made_once_in_a_local_data_half() {
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        let dir = tempfile::tempdir().unwrap();
+        let slab_of = |name: &str| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                let dev: std::sync::Arc<dyn crate::drive::BlockDevice> = std::sync::Arc::new(
+                    crate::drive::filedev::FileDevice::open_with_capacity(&path, 512 << 20).await.unwrap(),
+                );
+                let fmt = SlabFormat::new(crate::volume::DEFAULT_EXTENT_SIZE, crate::placement::topology::StorageTier::Hot)
+                    .with_role(SlabRole::Data)
+                    .with_auto_metadata(dev.capacity_bytes());
+                Slab::format_with(dev, fmt).await.unwrap()
+            }
+        };
+        let mut mgr = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
+        let away = slab_of("away.slab").await;
+        let away_id = away.slab_id();
+        mgr.add_slab(away).await;
+        mgr.registry().write().await.set_quarantined(away_id, true);
+        assert_eq!(super::ensure_system_data(&mut mgr).await.unwrap(), None, "no local data half: none");
+        assert!(mgr.find_volume(super::SYSTEM_DATA_VOLUME).await.is_none());
+
+        mgr.add_slab(slab_of("local.slab").await).await;
+        let id = super::ensure_system_data(&mut mgr).await.unwrap().expect("made");
+        let dev = mgr.get_volume(&id).unwrap();
+        let layout = crate::fs::ext4::read_layout(&dev).await.expect("an ext4 filesystem");
+        assert_eq!(layout.label, super::SYSTEM_DATA_VOLUME);
+        assert_eq!(super::ensure_system_data(&mut mgr).await.unwrap(), Some(id), "made once, then kept");
+        let g = mgr.gem().read().await;
+        let legs: Vec<_> = g.get_volume_map(&id).map(|m| m.all_legs().map(|l| l.slab_id).collect()).unwrap_or_default();
+        assert!(!legs.is_empty() && legs.iter().all(|s| *s != away_id), "on the local data half only");
+    }
 
     /// #187 (#105): every systemd unit this repo ships stops the engine with
     /// time to spare. The engine's stop is the flush and the ublk teardown

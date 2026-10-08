@@ -402,3 +402,40 @@ BOOT_HOOKS="/path/to/zeroboot" ./scripts/build-stormblock-initramfs.sh
 this initramfs, so a glibc build fails at boot as `not found` — on a file that
 is plainly there, with the executable bit set, which is as misleading as an
 error gets. Static musl, or a shell script.
+
+## The node's record of itself: `system-data` (#355)
+
+stormcos's `docs/SYSTEM-DATA.md` (stormcos#456) gives the shape. stormblock's
+part is the volume and the install and boot records.
+
+- **The volume.** `boot-local` makes `system-data` (ext4, 4 GiB thin, in the
+  data half) when this boot has a local data half and the volume is not there
+  yet. It is made after the appliance's slabs are quarantined, so its blocks
+  land on the node's own disk. Every install keeps it (the data half is kept,
+  #311, #349); only a node reset wipes it. A diskless boot makes none, because
+  its data half is the appliance's clone, thrown away at the next boot.
+- **The device.** It is exported as one more ublk device, after every other
+  one, so no device index moves. Its path is written to
+  `/run/stormblock/system-data.dev`, and the successor adopts it with the rest
+  (the handover record names it).
+- **Mounted by `/init`** at `/run/stormblock/system-data`, after the container
+  mounts and before `switch_root`. `/run` survives the switch, so it stays
+  mounted there for the services that write their parts (stormpump's boot
+  timeline and kernel logs, stormdrive's drive history and assets). The
+  kernel replays its journal at this mount, which is why the records are
+  written through it, never into the volume offline.
+- **What `/init` writes:**
+  - `config/mounts.release`: the release's mount list as this boot read it
+    (`/etc/stormblock/mounts`, #262), and `config/mounts.release.from`, where
+    it came from. The kernel command line carries no mount list
+    (stormcos#259).
+  - `history/boots/<UTC time>.json`: one per boot, with `release` (the root's
+    `VERSION_ID`), `tag`, `cmdline`, `local_disk` (the disk verdict and the
+    storage inventory, #344, #345, #347) and `handover` (the slabs, devices
+    and flow-over). The newest 500 are kept.
+  - `history/installs/<UTC time>.json`: the same record, for a boot that
+    installed (its handover carries `installed`, the install report).
+- A mount that fails is a `WARNING:`; the boot goes on without a record.
+- The partner and customer classes (stormblock#356) are not split out here
+  yet. This volume is the system class.
+

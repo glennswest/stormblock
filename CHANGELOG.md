@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #355 (P0, stormcos#456): `system-data`, the node's kept record of itself.
+  - **The volume:** `boot-local` makes it (ext4, 4 GiB thin) in a local data half when it isn't there yet, and exports it after every other ublk device. Every install keeps it; a diskless boot makes none.
+  - **Mounted by `/init`** at `/run/stormblock/system-data` (which survives `switch_root`). It writes `config/mounts.release` (the release's mount list), `history/boots/<time>.json` (release, tag, cmdline, the disk verdict and storage inventory, the handover) and `history/installs/<time>.json` for a boot that installed, keeping the newest 500 boot records.
+  - **Mounts** come from `/etc/stormblock/mounts` (#262); stormcos#259 takes the command-line list away.
 - **feat:** #177: a boot claim leaves a record a manager can read.
   - **What it holds:** `last_claim` gives when the machine claimed and as what, what it got (clone, host golden, the release it was pointed at, the assignment's version), the host NQNs, and the boot agent's `agent` and `inventory` as sent with the claim (stormbootx#90, #20; each kept when a JSON object of at most 16 KiB).
   - **Where:** on `GET /api/v1/boothost/{name}` and its list (it showed three fields), and now also on `GET /api/v1/synonyms/boothost/<tag>` and the synonym list. Persisted.

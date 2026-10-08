@@ -187,6 +187,21 @@ defaults to XFS (stormcos#91).
       nvme0c0n3, the device is nvme0n3); fixed, not rerun. Then CHANGELOG,
       README
 
+### system-data: the node's kept record of itself (2026-10-08, #355, P0) — IN PROGRESS
+
+stormcos#456 / docs/SYSTEM-DATA.md. stormblock's part: make and mount
+`system-data` in the data half, write install and boot records; mounts from
+a file (#262 already; stormcos#259 drops the cmdline list).
+- [x] `ensure_system_data` (boot-local, after the quarantine: ext4, 4 GiB
+      thin, data half, only with a local data half); exported last;
+      `/run/stormblock/system-data.dev`
+- [x] `/init` `# --- BEGIN system data`: mounts it at
+      `/run/stormblock/system-data`; config/mounts.release, history/boots,
+      history/installs; keeps 500
+- [ ] tests (cli unit, tests/initramfs-system-data.sh), every initramfs test
+      under sh and busybox sh, /init parses; full nextest; golden. The
+      partner/customer split waits on #356
+
 ### A boot claim leaves a record a manager can read (2026-10-08, #177) — PAUSED for P0 #355 (back in line)
 
 #216 records `Host.last_claim` (clone, time, claimed-as, host NQNs, host
