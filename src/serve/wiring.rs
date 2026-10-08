@@ -250,13 +250,20 @@ impl WiringTable {
         // Cycling means a port is only revisited after the whole span has been
         // used, by which time nothing is left holding it. It costs nothing:
         // the range exists to be spread across.
-        let used: HashSet<u16> = self.exports.iter().map(|w| w.portal_port).collect();
+        // NVMe rows are subsystems of the one serve listener at
+        // `portal_base` (#188): no port of their own, so no cap but the
+        // node's. The cycling below is for iSCSI rows, which keep a portal
+        // each, and never hands out `portal_base`.
+        let mut used: HashSet<u16> = self.exports.iter().map(|w| w.portal_port).collect();
+        used.insert(portal_base);
         let span = portal_span.max(1) as u32;
         let from = self.next_portal.max(portal_base);
         let offset = u32::from(from.saturating_sub(portal_base)) % span;
-        let portal_port = (0..span)
-            .map(|i| portal_base.saturating_add(((offset + i) % span) as u16))
-            .find(|p| !used.contains(p))
+        let portal_port = if protocol == WireProto::Nvmeof {
+            Some(portal_base)
+        } else {
+            (0..span).map(|i| portal_base.saturating_add(((offset + i) % span) as u16)).find(|p| !used.contains(p))
+        }
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "per-export portal range {}..{} is exhausted ({} live) — raise STORMBLOCKMK_PORTAL_SPAN",

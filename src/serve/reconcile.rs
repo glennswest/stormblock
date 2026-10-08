@@ -277,9 +277,15 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         if row.protocol == WireProto::Nvmeof {
             match start_subsystem(ctx, &row, dev).await {
                 Ok(()) => {
+                    // The serve listener's port (#188): a row from before has a
+                    // port of its own, which nothing listens on any more.
+                    let port = ctx.nvme_listener.lock().await.as_ref().map(|l| l.port).unwrap_or(row.portal_port);
+                    let mut row = row.clone();
+                    row.portal_port = port;
                     let mut w = ctx.wiring.lock().await;
                     if let Some(r) = w.get_mut(&row.export_id) {
                         r.state = WireState::Active;
+                        r.portal_port = port;
                     }
                     drop(w);
                     // Record the NSID where a consumer can see it, the way
@@ -409,9 +415,11 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
             WireProto::Nvmeof => {
                 let subs = ctx.subsystems.lock().await;
                 match subs.get(&row.export_id) {
+                    // The subsystem, not the listener others share (#188):
+                    // it takes no new Connect, so 0 means finished.
                     Some(s) => {
-                        s.target.stop_accepting();
-                        Some(s.target.live_connections())
+                        s.sub.stop_accepting();
+                        Some(s.sub.live_connections())
                     }
                     // Nothing is attached to a target that no longer exists.
                     None => Some(0),
@@ -631,12 +639,42 @@ async fn stop_portal(ctx: &Arc<ServeContext>, export_id: &Uuid) {
     }
 }
 
-/// Bind and run a dedicated single-volume NVMe-oF subsystem for one export.
+/// The one serve NVMe/TCP listener every export is a subsystem of (#188),
+/// bound at `[serve] portal_base` the first time an export needs it. Its own
+/// (default) subsystem admits nobody: only an export's NQN is reachable on it.
 #[cfg(feature = "nvmeof")]
-///
-/// One subsystem NQN per volume, the volume as namespace 1, on its own port.
-/// The discovery log page advertises the routable address rather than the
-/// wildcard we bind, so a remote `nvme connect` works unchanged.
+async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Arc<NvmeofTarget>, u16)> {
+    let mut l = ctx.nvme_listener.lock().await;
+    if let Some(x) = l.as_ref() {
+        return Ok((x.target.clone(), x.port));
+    }
+    let port = ctx.cfg.portal_base;
+    let addr = SocketAddr::new(ctx.portal_bind_ip(), port);
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("binding the serve NVMe listener {addr}: {e}"))?;
+    let target = Arc::new(NvmeofTarget::new(NvmeofConfig {
+        listen_addr: addr,
+        nqn: format!("{}:serve", ctx.cfg.nqn_prefix),
+        advertised_addr: format!("{}:{}", ctx.cfg.advertise_addr, port).parse().ok(),
+        ..Default::default()
+    }));
+    target.default_subsystem().set_access(crate::target::nvmeof::HostAccess::none());
+    let runner = target.clone();
+    let reactor = ctx.reactor.clone();
+    let task = tokio::spawn(async move {
+        if let Err(e) = runner.run_with_listener(listener, &reactor).await {
+            tracing::error!("serve NVMe listener {addr} stopped: {e}");
+        }
+    });
+    tracing::info!("/serve/v1: NVMe/TCP exports on {addr}, one subsystem each (#188)");
+    *l = Some(crate::serve::ctx::NvmeListener { target: target.clone(), task, port });
+    Ok((target, port))
+}
+
+/// Serve one export as a subsystem of the serve listener (#188): one NQN per
+/// volume, the volume as namespace 1, the export's host access (#212).
+#[cfg(feature = "nvmeof")]
 async fn start_subsystem(
     ctx: &Arc<ServeContext>,
     row: &Wiring,
@@ -650,49 +688,36 @@ async fn start_subsystem(
         .nqn
         .clone()
         .ok_or_else(|| anyhow::anyhow!("nvme wiring row has no NQN"))?;
-
-    let addr = SocketAddr::new(ctx.portal_bind_ip(), row.portal_port);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?;
-
-    let target = Arc::new(NvmeofTarget::new(NvmeofConfig {
-        listen_addr: addr,
-        nqn: nqn.clone(),
-        advertised_addr: format!("{}:{}", ctx.cfg.advertise_addr, row.portal_port).parse().ok(),
-        ..Default::default()
-    }));
+    let (target, port) = nvme_listener(ctx).await?;
     // Who may connect (#212): the export's host, or any host where the node
-    // still allows it, or none. Set before the listener runs, so there is no
-    // moment it admits anyone it should not.
-    target.default_subsystem().set_access(match &row.host_nqn {
+    // still allows it, or none. Set before the namespace is there, so there
+    // is no moment it admits anyone it should not.
+    let access = match &row.host_nqn {
         Some(h) => crate::target::nvmeof::HostAccess::Hosts([(h.clone(), None)].into_iter().collect()),
         None if ctx.cfg.allow_any_host => crate::target::nvmeof::HostAccess::Any,
         None => crate::target::nvmeof::HostAccess::none(),
-    });
+    };
+    let sub = target.ensure_subsystem(&nqn, access.clone());
+    sub.set_access(access);
     // Namespace 1: the only namespace this subsystem will ever have.
-    target.add_namespace_dynamic(1, dev).await;
-
-    let runner = target.clone();
-    let reactor = ctx.reactor.clone();
-    let nqn_log = nqn.clone();
-    let task = tokio::spawn(async move {
-        if let Err(e) = runner.run_with_listener(listener, &reactor).await {
-            tracing::error!("nvme subsystem {addr} ({nqn_log}) stopped: {e}");
-        }
-    });
-
-    subs.insert(row.export_id, Subsystem { target, task, port: row.portal_port, nqn });
+    if !sub.add_namespace_at(1, dev.clone(), false).await && !sub.serves(dev.id().uuid).await {
+        target.remove_subsystem(&nqn);
+        anyhow::bail!("{nqn}: namespace 1 is another volume's");
+    }
+    subs.insert(row.export_id, Subsystem { sub, port, nqn });
     Ok(())
 }
 
-/// Stop an export's dedicated subsystem and release its port.
+/// Withdraw an export's subsystem: its namespace first (a removal waits for
+/// what is in flight, #83), then the subsystem.
 #[cfg(feature = "nvmeof")]
 async fn stop_subsystem(ctx: &Arc<ServeContext>, export_id: &Uuid) {
     if let Some(s) = ctx.subsystems.lock().await.remove(export_id) {
-        s.target.remove_namespace(1).await;
-        s.task.abort();
-        tracing::debug!("nvme subsystem {} ({}) stopped", s.port, s.nqn);
+        s.sub.remove_namespace(1).await;
+        if let Some(l) = ctx.nvme_listener.lock().await.as_ref() {
+            l.target.remove_subsystem(&s.nqn);
+        }
+        tracing::debug!("nvme subsystem {} on {} withdrawn", s.nqn, s.port);
     }
 }
 

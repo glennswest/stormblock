@@ -228,3 +228,79 @@ async fn a_node_that_allows_no_host_refuses_an_unbound_export_and_closes_old_one
     assert_eq!(r.status().as_u16(), 400);
     assert_eq!(s.ctx.state.volume_manager.lock().await.list_volumes().await.len(), count, "no orphan volume");
 }
+
+/// #188: every serve NVMe export is a subsystem of one listener, so a node
+/// serves far more than its port span (8 here) — 300 exports, each its own
+/// NQN on one port, each with its own volume. And a subsystem drains on its
+/// own: withdrawn while a host is attached, it serves that host, refuses a
+/// new Connect, and goes once the host lets go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_hundred_exports_share_one_listener_and_drain_one_by_one() {
+    let dir = TempDir::new().unwrap();
+    let s = serve(&dir, None, false).await;
+    let client = reqwest::Client::new();
+    let mut made: Vec<(Uuid, u16, String)> = Vec::new();
+    for i in 0..300u32 {
+        let id = s.ctx.state.volume_manager.lock().await.create_volume_any(&format!("v{i}"), 1 << 20).await.unwrap().0;
+        let (st, a) = export(&s, serde_json::json!({"volume_id": id, "protocol": "nvme-tcp"})).await;
+        assert_eq!(st, 201, "export {i}: {a}");
+        made.push((id, a["attach"]["port"].as_u64().unwrap() as u16, a["attach"]["nqn"].as_str().unwrap().to_string()));
+    }
+    let port = made[0].1;
+    assert!(made.iter().all(|m| m.1 == port), "every export on the one listener");
+    let nqns: std::collections::HashSet<&String> = made.iter().map(|m| &m.2).collect();
+    assert_eq!(nqns.len(), 300, "each its own subsystem");
+    // The first, a middle and the last each serve their own volume.
+    for k in [0usize, 150, 299] {
+        let (id, _, nqn) = &made[k];
+        let vol = s.ctx.state.volume_manager.lock().await.get_volume(&stormblock::volume::VolumeId(*id)).unwrap();
+        vol.write(0, &vec![k as u8 + 1; 4096]).await.unwrap();
+        let dev = NvmeofDevice::connect(&spec(port, nqn, H1)).await.expect("connect");
+        let mut back = vec![0u8; 4096];
+        dev.read(0, &mut back).await.unwrap();
+        assert_eq!(back, vec![k as u8 + 1; 4096], "export {k} serves its own volume");
+    }
+
+    // Drain one with a host attached.
+    let (_, _, nqn) = made[7].clone();
+    let held = NvmeofDevice::connect(&spec(port, &nqn, H1)).await.unwrap();
+    let mut b = vec![0u8; 4096];
+    held.read(0, &mut b).await.unwrap(); // its I/O connection is open
+    let eid = {
+        let w = s.ctx.wiring.lock().await;
+        w.exports.iter().find(|r| r.nqn.as_deref() == Some(nqn.as_str())).unwrap().export_id
+    };
+    let r = client.delete(format!("{}/serve/v1/exports/{eid}", s.api)).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    stormblock::serve::reconcile::pass(&s.ctx).await.unwrap();
+    let state = |s: &Serve| {
+        let ctx = s.ctx.clone();
+        async move { ctx.wiring.lock().await.exports.iter().find(|r| r.export_id == eid).map(|r| r.state) }
+    };
+    assert_eq!(state(&s).await, Some(stormblock::serve::wiring::WireState::Draining), "held: still draining");
+    held.read(0, &mut b).await.expect("the attached host is still served");
+    assert!(NvmeofDevice::connect(&spec(port, &nqn, H2)).await.is_err(), "a draining subsystem takes no one new");
+    drop(held);
+    for _ in 0..50 {
+        stormblock::serve::reconcile::pass(&s.ctx).await.unwrap();
+        if !matches!(state(&s).await, Some(stormblock::serve::wiring::WireState::Draining)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_ne!(state(&s).await, Some(stormblock::serve::wiring::WireState::Draining), "let go: withdrawn");
+    assert!(NvmeofDevice::connect(&spec(port, &nqn, H1)).await.is_err(), "withdrawn: gone");
+    // Its neighbours are untouched.
+    assert!(NvmeofDevice::connect(&spec(port, &made[8].2, H1)).await.is_ok());
+
+    // All of them go, and the listener holds only its own subsystem again.
+    let ids: Vec<Uuid> = s.ctx.wiring.lock().await.exports.iter().map(|r| r.export_id).collect();
+    for id in ids {
+        client.delete(format!("{}/serve/v1/exports/{id}", s.api)).send().await.unwrap();
+    }
+    for _ in 0..3 {
+        stormblock::serve::reconcile::pass(&s.ctx).await.unwrap();
+    }
+    let left = s.ctx.nvme_listener.lock().await.as_ref().unwrap().target.subsystems().len();
+    assert_eq!(left, 1, "only the listener's own subsystem is left");
+}

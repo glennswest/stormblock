@@ -37,16 +37,24 @@ pub struct Portal {
     pub iqn: String,
 }
 
-/// A running per-export NVMe-oF subsystem: its own NQN on its own port, with
-/// the volume as namespace 1. The NVMe counterpart of `Portal` — one
-/// subsystem per volume, so `nvme connect` reaches exactly one volume instead
-/// of discovering every namespace on a shared subsystem.
+/// A running per-export NVMe-oF subsystem: its own NQN, with the volume as
+/// namespace 1, so `nvme connect` reaches exactly one volume instead of
+/// discovering every namespace on a shared subsystem. Since #188 every one is
+/// a subsystem of the one serve listener (`[serve] portal_base`), not a
+/// target on a port of its own: a node is no longer capped at the port span.
 #[cfg(feature = "nvmeof")]
 pub struct Subsystem {
+    pub sub: Arc<crate::target::nvmeof::Subsystem>,
+    pub port: u16,
+    pub nqn: String,
+}
+
+/// The one NVMe/TCP listener every serve export is a subsystem of (#188).
+#[cfg(feature = "nvmeof")]
+pub struct NvmeListener {
     pub target: Arc<NvmeofTarget>,
     pub task: JoinHandle<()>,
     pub port: u16,
-    pub nqn: String,
 }
 
 pub struct ServeContext {
@@ -63,6 +71,9 @@ pub struct ServeContext {
     pub portals: Mutex<HashMap<Uuid, Portal>>,
     #[cfg(feature = "nvmeof")]
     pub subsystems: Mutex<HashMap<Uuid, Subsystem>>,
+    /// The serve NVMe listener, bound at the first NVMe export (#188).
+    #[cfg(feature = "nvmeof")]
+    pub nvme_listener: Mutex<Option<NvmeListener>>,
     /// The shared reactor pool (sized from cores, issue #8). Per-export
     /// targets run on it too — building a fresh single-core pool per portal
     /// would reintroduce exactly the bottleneck #8 removed.
@@ -126,6 +137,8 @@ impl ServeContext {
             portals: Mutex::new(HashMap::new()),
             #[cfg(feature = "nvmeof")]
             subsystems: Mutex::new(HashMap::new()),
+            #[cfg(feature = "nvmeof")]
+            nvme_listener: Mutex::new(None),
             reactor,
             drain_deadlines: Mutex::new(HashMap::new()),
             blocked_reported: Mutex::new(HashSet::new()),
