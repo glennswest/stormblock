@@ -960,6 +960,45 @@ impl GlobalExtentMap {
         legs
     }
 
+    /// Share `source_id`'s extents into `dest_id`, each at the virtual extent
+    /// `place` names for it (#362): what [`gather_into`](Self::gather_into)
+    /// does with an offset, for a destination where the source's extents are
+    /// not one contiguous run. Every mapped source extent must be in `place`.
+    /// `None`, changing nothing, for a source with parity groups: a stripe
+    /// cannot be renumbered extent by extent.
+    pub fn gather_remapped(
+        &mut self,
+        source_id: VolumeId,
+        dest_id: VolumeId,
+        place: &std::collections::HashMap<u64, u64>,
+    ) -> Option<Vec<Leg>> {
+        self.check(&dest_id);
+        self.check(&source_id);
+        let Some(source_map) = self.volumes.get(&source_id).cloned() else {
+            return Some(Vec::new());
+        };
+        if !source_map.parity.is_empty() {
+            return None;
+        }
+        let mut shared = super::extable::ExtentTable::new();
+        for (vext, loc) in source_map.extents.iter() {
+            let at = *place.get(&vext).expect("every mapped extent is placed");
+            shared.insert(at, loc);
+        }
+        shared.add_refs(1);
+        let mut legs = Vec::new();
+        for loc in shared.values() {
+            legs.extend(loc.legs());
+        }
+        self.volumes.entry(dest_id).or_default().extents.extend_from(&shared);
+        if let Some(src_map) = self.volumes.get_mut(&source_id) {
+            src_map.extents.add_refs(1);
+        }
+        self.touch_whole(source_id);
+        self.touch_whole(dest_id);
+        Some(legs)
+    }
+
     /// Number of tracked volumes.
     pub fn volume_count(&self) -> usize {
         self.volumes.len() + self.cold.len()

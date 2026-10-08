@@ -232,12 +232,26 @@ POST /api/v1/volumes/compose/slab
 A slab is formatted inside a fresh volume of `size`: superblock, metadata
 region, slot table. Then, for each golden in order, its slots are **taken
 explicitly** from that nested slab — a thin volume maps nothing until it is
-written, and nothing is going to be written — and the outer map is laid over
-them: the composed volume's extents at `data_offset + first_slot × slot` are
-the source volume's extents, shared by `share_into` like a pallet member. The
-nested slot size is the engine's, so a nested slot *is* an engine slot and the
-two maps line up by construction. The runs are checked contiguous; a gap would
-share the wrong slot and read as a different golden a slot in.
+written, and nothing is going to be written — **one for each extent its source
+maps**, and the outer map is laid over them: the nested golden's extent `v`
+sits in the k-th slot of its run when `v` is the source's k-th mapped extent,
+and the composed volume's extent at `data_offset + slot × slot_size` is the
+source's extent `v`, shared by `share_remapped` (`share_into` keeps the old,
+full layout for a source with parity, whose stripes cannot be renumbered).
+The nested slot size is the engine's, so a nested slot *is* an engine slot and
+the two maps line up by construction. The runs are checked contiguous.
+
+**Goldens are thin (#362).** A golden keeps its declared size and costs the
+slab the extents its source maps, not that size in slots. A blank is the case
+that matters: an ext4 blank is its metadata, so a ladder of templates up to
+16 TiB (stormcos#459) fits a slab of a few GiB, where taking every slot of
+the declared size refused a 4 GiB blank in 11.83 (stormcos#122). Its holes read
+as zeros, and its clones allocate on write like any thin clone. The slab's
+check counts the mapped extents: `golden '<name>' needs N slots (the extents it
+maps) and the slab has M left`. A report's `slots` is that count. Measured by
+`an_ext4_blank_is_placed_by_its_metadata_not_its_size`: a 64 GiB ext4 blank
+with its journal (a million slots of the test's 64 KiB) is placed in a 32 MiB
+slab, and the clone a node opens passes a full fsck.
 
 The golden is sealed with the filesystem the probe finds through the map,
 marked a template when asked (#100), and the first clone — `<name>`, what the

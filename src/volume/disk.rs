@@ -815,7 +815,9 @@ pub struct ComposedSlabVolume {
     pub id: Uuid,
     pub name: String,
     pub size_bytes: u64,
-    /// First slot of the slab this volume occupies, and how many.
+    /// First slot of the slab this volume occupies, and how many: one per
+    /// extent its source maps (#362), so a blank's are its metadata, not its
+    /// declared size. Contiguous from `first_slot`.
     pub first_slot: u64,
     pub slots: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -964,10 +966,35 @@ impl VolumeManager {
             let mut volumes = Vec::new();
             let mut free = total_slots;
             for p in &planned {
-                let slots = p.size / slot;
+                // Thin (#362): a golden takes a slot only for each extent its
+                // source maps. A blank's holes (a 16 TiB ext4 is tens of MiB
+                // of metadata) read as zeros either way; taking a slot for
+                // every extent of the declared size refused a ladder of
+                // blanks up to 16 TiB in a 16 GiB slab. A source with parity
+                // keeps the full contiguous run: its stripes cannot be
+                // renumbered extent by extent.
+                crate::volume::gem::ensure_resident(&self.gem, p.source)
+                    .await
+                    .map_err(|e| VolumeError::AllocatorError(format!("golden '{}': {e}", p.golden_name)))?;
+                let mapped: Option<Vec<u64>> = {
+                    let gem = self.gem.read().await;
+                    match gem.get_volume_map(&p.source) {
+                        Some(m) if !m.parity.is_empty() => None,
+                        Some(m) => {
+                            let mut k: Vec<u64> = m.extents.keys().collect();
+                            k.sort_unstable();
+                            Some(k)
+                        }
+                        None => Some(Vec::new()),
+                    }
+                };
+                let slots = match &mapped {
+                    Some(m) => m.len() as u64,
+                    None => p.size / slot,
+                };
                 if slots > free {
                     return Err(invalid(format!(
-                        "golden '{}' needs {slots} slots and the slab has {free} left of {total_slots}",
+                        "golden '{}' needs {slots} slots (the extents it maps) and the slab has {free} left of {total_slots}",
                         p.golden_name
                     )));
                 }
@@ -979,14 +1006,22 @@ impl VolumeManager {
 
                 // Take the golden's slots explicitly — a thin volume maps
                 // nothing until written, and nothing is going to be written.
+                // The nested golden's extent k is the source's extent at the
+                // same offset: the k-th mapped one when thin, k itself when not.
+                let nested_vext = |k: usize| -> u64 {
+                    match &mapped {
+                        Some(m) => m[k],
+                        None => k as u64,
+                    }
+                };
                 let run: Vec<u64> = {
                     let mut reg = nested.registry.write().await;
                     let s = reg
                         .get_mut(&slab_id)
                         .ok_or_else(|| VolumeError::AllocatorError("nested slab vanished".into()))?;
                     let mut run = Vec::with_capacity(slots as usize);
-                    for vext in 0..slots {
-                        run.push(s.allocate(gid, vext).await.map_err(VolumeError::Drive)?);
+                    for k in 0..slots as usize {
+                        run.push(s.allocate(gid, nested_vext(k)).await.map_err(VolumeError::Drive)?);
                     }
                     run
                 };
@@ -999,8 +1034,8 @@ impl VolumeManager {
                 }
                 {
                     let mut gem = nested.gem.write().await;
-                    for (vext, &s) in run.iter().enumerate() {
-                        gem.insert(gid, vext as u64, ExtentLocation::new(slab_id, s));
+                    for (k, &s) in run.iter().enumerate() {
+                        gem.insert(gid, nested_vext(k), ExtentLocation::new(slab_id, s));
                     }
                 }
                 {
@@ -1012,14 +1047,32 @@ impl VolumeManager {
 
                 // Now the outer map: the bytes of those nested slots are the
                 // source's slots. From here on the golden reads as its content.
-                let at = data_offset + run[0] as u64 * slot;
-                let comp = Component { source: p.source, at, span: p.size };
-                {
-                    let mut gem = self.gem.write().await;
-                    let mut reg = self.registry.write().await;
-                    compose::share_into(id, slot, &[comp], &mut gem, &mut reg).await?;
+                match &mapped {
+                    Some(m) => {
+                        // Each mapped source extent lands where its nested slot is.
+                        let base = data_offset / slot;
+                        let place: std::collections::HashMap<u64, u64> =
+                            m.iter().zip(&run).map(|(&v, &s)| (v, base + s)).collect();
+                        let mut gem = self.gem.write().await;
+                        let mut reg = self.registry.write().await;
+                        compose::share_remapped(id, p.source, &place, &mut gem, &mut reg)
+                            .await?
+                            .ok_or_else(|| VolumeError::AllocatorError(format!(
+                                "golden '{}': its source gained parity while composing",
+                                p.golden_name
+                            )))?;
+                        shared += m.len() as u64 * slot;
+                    }
+                    None => {
+                        let at = data_offset + run[0] * slot;
+                        let comp = Component { source: p.source, at, span: p.size };
+                        let mut gem = self.gem.write().await;
+                        let mut reg = self.registry.write().await;
+                        compose::share_into(id, slot, &[comp], &mut gem, &mut reg).await?;
+                        shared += align_up(p.source_bytes, slot);
+                    }
                 }
-                shared += align_up(p.source_bytes, slot);
+                let first_slot = run.first().copied().unwrap_or(0);
 
                 let fs = {
                     let vol = nested.get_volume(&gid).ok_or(VolumeError::VolumeNotFound(gid))?;
@@ -1033,7 +1086,7 @@ impl VolumeManager {
                     id: gid.0,
                     name: p.golden_name.clone(),
                     size_bytes: p.size,
-                    first_slot: run[0],
+                    first_slot,
                     slots,
                     clone_of: None,
                     template: p.template,
@@ -1068,7 +1121,7 @@ impl VolumeManager {
                         id: cid.0,
                         name: cname.clone(),
                         size_bytes: p.size,
-                        first_slot: run[0],
+                        first_slot,
                         slots,
                         clone_of: Some(gid.0),
                         template: false,
@@ -1562,6 +1615,143 @@ mod tests {
         bee.read(SLOT, &mut buf).await.unwrap();
         assert!(buf.iter().all(|&x| x == 0x42), "bee's second slot is b.blob's");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Open a composed slab the way a node does: its record, its volumes.
+    async fn open_composed(vm: &VolumeManager, id: VolumeId) -> VolumeManager {
+        let dev = vm.get_volume(&id).unwrap();
+        let slab = Slab::open(dev).await.unwrap();
+        let slab_id = slab.slab_id();
+        let mut node = VolumeManager::new(SLOT);
+        node.attach_slab(crate::raid::RaidArrayId(Uuid::new_v4()), slab).await.unwrap();
+        node.persist_to_slab(slab_id);
+        node.restore().await.unwrap();
+        node
+    }
+
+    /// #362: a golden takes a slot only for each extent its source maps. A
+    /// sparse golden declared at 1000 slots, with three extents written, goes
+    /// into a 48-slot slab: three slots, its holes read as zeros, its written
+    /// extents as the source's, and a clone writes into the holes.
+    #[tokio::test]
+    async fn a_sparse_golden_takes_only_the_slots_it_maps() {
+        let (mut vm, path) = manager().await;
+        let declared = 1000 * SLOT;
+        let blank = vm.create_volume_with("blank.blob", declared, Default::default()).await.unwrap();
+        {
+            let h = vm.get_volume_handle(&blank).unwrap();
+            for (ext, fill) in [(0u64, 0x51u8), (1, 0x52), (700, 0x53)] {
+                h.write(ext * SLOT, &vec![fill; SLOT as usize]).await.unwrap();
+            }
+        }
+        vm.seal_volume(blank, None).await.unwrap();
+        let dense = golden(&mut vm, "dense.blob", 2 * SLOT, 0x44).await;
+
+        let spec = SlabVolumeSpec {
+            name: "data-1".into(),
+            size: 48 * SLOT,
+            role: SlabRole::Data,
+            tier: StorageTier::Hot,
+            meta_bytes: None,
+            placement: None,
+            goldens: vec![
+                SlabGolden {
+                    name: "pvc-1000".into(),
+                    source: blank,
+                    golden_name: None,
+                    clone: None,
+                    clones: vec![],
+                    template: true,
+                    size: None,
+                },
+                SlabGolden {
+                    name: "dense".into(),
+                    source: dense,
+                    golden_name: None,
+                    clone: None,
+                    clones: vec![],
+                    template: false,
+                    size: None,
+                },
+            ],
+        };
+        let report = vm.compose_slab(spec).await.expect("a sparse golden fits by what it maps");
+        let g = &report.volumes[0];
+        assert_eq!(g.name, "pvc-1000.golden");
+        assert_eq!(g.slots, 3, "one slot per mapped extent");
+        assert_eq!(g.size_bytes, declared, "the declared size is kept");
+        assert_eq!(report.volumes[2].first_slot, g.first_slot + 3, "the next golden follows the 3");
+        assert_eq!(report.shared_bytes, 5 * SLOT);
+
+        let node = open_composed(&vm, VolumeId(report.id)).await;
+        let golden_id = node.find_volume("pvc-1000.golden").await.unwrap();
+        assert!(node.is_sealed(&golden_id));
+        let clone = node.get_volume(&node.find_volume("pvc-1000").await.unwrap()).unwrap();
+        assert_eq!(clone.capacity_bytes(), declared);
+        let mut buf = vec![0u8; 4096];
+        for (ext, fill) in [(0u64, 0x51u8), (1, 0x52), (700, 0x53), (5, 0), (999, 0)] {
+            clone.read(ext * SLOT + SLOT - 4096, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&x| x == fill), "extent {ext} reads {:#x}, not {fill:#x}", buf[0]);
+        }
+        clone.write(900 * SLOT, &vec![0x77u8; 4096]).await.expect("a clone writes into a hole");
+        clone.read(900 * SLOT, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 0x77));
+        let d = node.get_volume(&node.find_volume("dense").await.unwrap()).unwrap();
+        d.read(SLOT, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 0x44), "the golden after it reads as its own");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #362: a 64 GiB ext4 blank (a million slots at this test's slot size)
+    /// goes into a 32 MiB slab by the metadata it maps, and the clone a node
+    /// sees is a whole filesystem.
+    #[tokio::test]
+    async fn an_ext4_blank_is_placed_by_its_metadata_not_its_size() {
+        let dir = std::env::temp_dir().join("stormblock-disk-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.bin", Uuid::new_v4().simple())).to_str().unwrap().to_string();
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, 256 * 1024 * 1024).await.unwrap());
+        let mut vm = VolumeManager::new(SLOT);
+        vm.registry().write().await.add(Slab::format(dev, SLOT, StorageTier::Hot).await.unwrap());
+
+        let declared = 64u64 << 30;
+        let blank = vm.create_volume_with("ext4-64g.blob", declared, Default::default()).await.unwrap();
+        {
+            let h: Arc<dyn BlockDevice> = vm.get_volume_handle(&blank).unwrap();
+            crate::fs::ext4::format(&h, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+        }
+        vm.seal_volume(blank, None).await.unwrap();
+        let mapped = vm.get_volume_handle(&blank).unwrap().mapped().await / SLOT;
+        assert!(mapped < 512, "an ext4 blank maps its metadata only: {mapped} slots");
+
+        let spec = SlabVolumeSpec {
+            name: "data-1".into(),
+            size: 512 * SLOT,
+            role: SlabRole::Data,
+            tier: StorageTier::Hot,
+            meta_bytes: None,
+            placement: None,
+            goldens: vec![SlabGolden {
+                name: "pvc-ext4j-65536m".into(),
+                source: blank,
+                golden_name: None,
+                clone: None,
+                clones: vec![],
+                template: true,
+                size: None,
+            }],
+        };
+        let report = vm.compose_slab(spec).await.expect("a 64 GiB blank in a 32 MiB slab");
+        assert_eq!(report.volumes[0].slots, mapped);
+        println!("64 GiB ext4 blank: {mapped} slot(s) of {} KiB in the slab", SLOT / 1024);
+
+        let node = open_composed(&vm, VolumeId(report.id)).await;
+        let clone = node.get_volume(&node.find_volume("pvc-ext4j-65536m").await.unwrap()).unwrap();
+        assert_eq!(clone.capacity_bytes(), declared);
+        let fsck = crate::fs::ext4::check(&clone).await.expect("the clone is a whole filesystem");
+        assert!(fsck.is_clean(), "{fsck:?}");
         let _ = std::fs::remove_file(&path);
     }
 }

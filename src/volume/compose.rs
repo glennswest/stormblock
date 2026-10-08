@@ -92,6 +92,38 @@ pub(crate) async fn share_into(
     Ok(count)
 }
 
+/// Share `source`'s mapped extents into `dest`, each at the virtual extent
+/// `place` gives it (#362), raising the slabs' reference counts as
+/// [`share_into`] does. `Ok(None)`, changing nothing, for a source with
+/// parity groups.
+pub(crate) async fn share_remapped(
+    dest_id: VolumeId,
+    source: VolumeId,
+    place: &HashMap<u64, u64>,
+    gem: &mut GlobalExtentMap,
+    registry: &mut SlabRegistry,
+) -> Result<Option<usize>, VolumeError> {
+    let Some(legs) = gem.gather_remapped(source, dest_id, place) else {
+        return Ok(None);
+    };
+    let count = legs.len();
+    let mut shared: HashMap<SlabId, Vec<u64>> = HashMap::new();
+    for leg in legs {
+        shared.entry(leg.slab_id).or_default().push(leg.slot_idx);
+    }
+    for (slab_id, slots) in shared {
+        if let Some(slab) = registry.get_mut(&slab_id) {
+            slab.inc_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
+        } else {
+            tracing::warn!(
+                volume = %dest_id, slab = %slab_id, extents = slots.len(),
+                "slab not in registry while composing — its extents are unprotected"
+            );
+        }
+    }
+    Ok(Some(count))
+}
+
 /// Compose a volume from components, sharing their extents.
 ///
 /// `declared_size` fixes the composed volume's size; without one it is the end

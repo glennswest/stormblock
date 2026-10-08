@@ -181,6 +181,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### compose/slab places goldens thin (2026-10-08, #362, P0) — IN PROGRESS
+
+stormcos#459: blank templates up to 16 TiB in the image. `compose_slab`
+(forge's `compose/slab`, what stormcos and stormcentral compose releases
+with) took `size / slot` slots per golden. The image build, install,
+flow-over and stage already move mapped extents only.
+- [x] slots for the source's mapped extents only (`gem::gather_remapped`,
+      `compose::share_remapped`; the slot table records the source's
+      extent); parity sources keep the full run; cold source paged in
+- [x] tests: a sparse golden (1000 declared, 3 mapped) in a 48-slot slab;
+      a 64 GiB ext4 blank in a 32 MiB slab, fsck clean through a node's
+      open; docs (composed-disks.md), CHANGELOG
+- [ ] build VM: the tests, compose and image suites, full check; golden;
+      tell stormcos#459 (slab-fits.sh counts mapped extents)
+
 ### The engine didn't answer GET /api/v1/fstemplates within 30 s (2026-10-08, #358, P0) — DONE (golden-stormblock-e4154c4409d0), metal pending
 
 Dell 11.98 after a full flow-over; sbregistry's test-image builds failed twice.
