@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #177: a boot claim leaves a record a manager can read.
+  - **What it holds:** `last_claim` gives when the machine claimed and as what, what it got (clone, host golden, the release it was pointed at, the assignment's version), the host NQNs, and the boot agent's `agent` and `inventory` as sent with the claim (stormbootx#90, #20; each kept when a JSON object of at most 16 KiB).
+  - **Where:** on `GET /api/v1/boothost/{name}` and its list (it showed three fields), and now also on `GET /api/v1/synonyms/boothost/<tag>` and the synonym list. Persisted.
 - **feat:** #188: `/serve/v1` is no longer capped at 128 NVMe exports per node.
   - **One listener:** each export is now a subsystem (its own NQN, the volume as namespace 1, its host access) on one listener at `[serve] portal_base`. It used to be a target on its own port from a 128-port span.
   - **The drain, per subsystem:** the target gives every subsystem an accept gate and a live-connection count. A withdrawn export refuses new Connects and goes when its own connections end, which is the guarantee the per-port drain gave. iSCSI exports keep a port each.

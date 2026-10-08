@@ -943,6 +943,22 @@ is said explicitly. In the `boothost` and `hostgolden` namespaces, resolve,
 re-point, rollback and claim accept an alias; `DELETE` takes the exact name.
 Hosts are kept in `synonyms.json` (`hosts`) beside the synonyms they name.
 
+**What a machine last booted (#177).** Every boot claim leaves a record on
+the host, `last_claim`, which a manager reads on `GET /api/v1/boothost/{name}`
+(and its list) and on the assignment, `GET /api/v1/synonyms/boothost/<tag>`
+(and the synonym list). It holds:
+- `claimed_at`, `claimed_as` (the name, alias or `default` it claimed as);
+- what it got: `clone` and `clone_name`, `host_golden`, `release` (the
+  volume `boothost/<tag>` pointed at) and `assignment_version`;
+- `host_nqns` it was bound to;
+- the boot agent's `agent` and `inventory` as it sent them with the claim
+  (stormbootx#90: `name`, `version`, `commit`, `media`, `update_serial`,
+  `update`; stormbootx#20: MACs, NIC drivers, storage controllers and disks).
+
+Each of `agent` and `inventory` is kept only when it is a JSON object of at
+most 16 KiB, since the claim is the one open write. The record is persisted
+and survives a restart.
+
 **Attestation and the TPM mark (#216).** Each host carries `tpm: required |
 none` (unset = none), set by an admin or the platform (`PUT
 /api/v1/boothost/{name}/tpm`, destructive: the node token cannot downgrade
