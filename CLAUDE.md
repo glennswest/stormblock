@@ -39,7 +39,7 @@ caps long's waves).
 
 ## Build
 ```bash
-sc-build 'cargo nextest run --locked'                               # the routine check
+sc-build 'cargo nextest run --locked && sh ci-runtime-tests.sh'    # the routine check (#222)
 sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl'  # meant for goldens
 sc-build 'cargo check --locked --features cluster'                   # the Raft layer, opt-in
 ```
@@ -53,9 +53,12 @@ The golden itself is built by stormcos's `deploy/build-goldens.sh` with
   every test its own process, so tests that bind ports or set globals cannot
   interfere. `cargo nextest run` builds the lib, bins and tests, not examples.
 - `tests-runtime/` holds the **runtime tests**: they drive the built binary
-  (`STORMBLOCK_BIN`), a kernel device or privileges. They are not part of the
-  routine check: `STORMBLOCK_BIN=<binary> cargo test -p stormblock-runtime-tests`.
-  Nothing runs them today (#222).
+  (`STORMBLOCK_BIN`), a kernel device or privileges. `ci-runtime-tests.sh`
+  (part of the routine check, #222) builds the commit's binary and runs every
+  one that needs no root; the `#[ignore]`d ones are listed, not run:
+  `ublk_resize` (root, ublk_drv: #342), `external_iscsi`/`iscsi_blockdev` (an
+  external iSCSI target: #343). The build VMs have no cargo-nextest
+  (stormcentral#534): `cargo install cargo-nextest --locked` in the job.
 - `src/main.rs` is a wrapper; the command line is `stormblock::cli`, compiled
   and tested once as part of the library.
 
@@ -132,7 +135,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (formats every run, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
 - `src/cli.rs` — CLI, the daemon, and every subcommand (`open_slabs_resuming`: a flow-over cut short claims a fresh clone, #171); `src/main.rs` only calls `stormblock::cli::run` (#209)
 - `test/` — `stormblock-test`, the test container: short/medium/long suites that run the engine of the same commit in the pod (#139)
-- `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209, not run anywhere yet: #222)
+- `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222)
 
 ## Current State
 **v20.0.0** (2026-09-28): boot intent (#148), the build/test split (#209,
@@ -149,7 +152,7 @@ being emptied (#239, durability rules 10–11); and in the initramfs: every
 mlx4_en and late netdevs (#250), the NTP clock step (#251). 99k lines in `src/`, 12k
 in `tests/it/`, 3.5k in `tests-runtime/`, ~920 tests, plus the test container
 crate (`test/`). The full suite (nextest) passes on dev apart from #134 when
-the box is busy; #120 is now in `tests-runtime/`, which nothing runs (#222).
+the box is busy; #120 is now in `tests-runtime/`, run by `ci-runtime-tests.sh` (#222).
 v20.0.0 was cut at the owner's request on #148 (2026-09-28); the forge rollout
 (settings, rollback = VM snapshot only) is answered there. #171 (power-cut
 durability) is closed: the on-metal acceptance passed on 2026-09-27 (C2NR0Q2,
@@ -170,6 +173,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 ---
 
 ## TODO — Implementation Roadmap
+
+### tests-runtime/ has a gate (2026-10-08, #222) — IN PROGRESS
+
+Since #209 the eight runtime tests ran nowhere, the flow-over resume
+regression test (#171/#172) among them.
+- [x] `ci-runtime-tests.sh`: the commit's binary, `STORMBLOCK_BIN`, every
+      non-ignored test; the ignored listed. Routine check is now `cargo
+      nextest run --locked && sh ci-runtime-tests.sh`
+- [x] engine_e2e no longer passes by skipping without `STORMBLOCK_BIN`
+- [x] filed #342 (ublk_resize in a QEMU guest), #343 (iSCSI tests need an
+      external target)
+- [ ] run it on a build VM; fix what fails; README, CHANGELOG
+
+### Default claim with a serial (2026-10-08, #202) — WAITING ON THE OWNER
+
+Matching a host *named* by the serial (the issue's proposal) puts all eight
+MicroCloud blades on `boothost/S11075924402016` (#249). Asked on #202
+(needs-owner): A as proposed, B #204's rule (an operator-set alias only;
+recommended), C a named host only while it has no MAC alias. Nothing built.
 
 ### /serve/v1 exports bound to one host (2026-10-08, #212) — IN PROGRESS
 

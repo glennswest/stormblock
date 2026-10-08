@@ -144,8 +144,10 @@ sc-build 'cargo check --locked --features cluster'           # the Raft layer, o
 **Tests** (#209). `tests/it/` is one in-process integration-test binary, each
 former file a module; cargo-nextest gives every test its own process.
 `tests-runtime/` (crate `stormblock-runtime-tests`) holds the tests that need
-the built binary (`STORMBLOCK_BIN`), a kernel device or privileges; they are
-outside the routine check, and today nothing runs them (#222). `src/main.rs` is
+the built binary (`STORMBLOCK_BIN`), a kernel device or privileges.
+`ci-runtime-tests.sh` runs every one that needs no root against the commit's
+binary, as part of the routine check (#222); `ublk_resize` (#342) and the two
+tests that need an external iSCSI target (#343) are listed, not run. `src/main.rs` is
 a wrapper around `stormblock::cli`. The `ci-*.sh` scripts run whole scenarios on
 dev (`sc-build 'bash ci-….sh'`), e.g. `ci-nvme-hosts-verify.sh`: the Linux
 kernel as NVMe/TCP initiator, unprivileged, in QEMU (#210).
