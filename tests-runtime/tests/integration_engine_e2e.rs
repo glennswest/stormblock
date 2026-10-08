@@ -8,7 +8,7 @@
 //! made obsolete. Tests that agree with each other prove nothing; this one
 //! runs the real thing.
 //!
-//! Skipped unless `STORMBLOCK_BIN` names a built binary, so it costs nothing
+//! Needs `STORMBLOCK_BIN` naming a built binary (ci-runtime-tests.sh, #222);
 //! in an ordinary `cargo test`:
 //!
 //! ```text
@@ -97,16 +97,20 @@ async fn start(bin: &str, role: &str) -> Engine {
     panic!("engine did not come up");
 }
 
-fn bin() -> Option<String> {
-    let b = std::env::var("STORMBLOCK_BIN").ok()?;
-    std::path::Path::new(&b).exists().then_some(b)
+/// The binary under test (#222): required, like every other runtime test.
+/// A test that skipped when it was unset passed without running anything.
+fn bin() -> String {
+    let b = std::env::var("STORMBLOCK_BIN")
+        .expect("STORMBLOCK_BIN must name the stormblock binary under test (ci-runtime-tests.sh sets it)");
+    assert!(std::path::Path::new(&b).exists(), "STORMBLOCK_BIN={b} does not exist");
+    b
 }
 
 /// The request every consumer actually sends — a name and a size — against a
 /// node that has storage and adopted it at startup.
 #[tokio::test]
 async fn a_plain_create_works_on_a_node_that_has_slabs() {
-    let Some(bin) = bin() else { return };
+    let bin = bin();
     for role in ["system", "data"] {
         let e = start(&bin, role).await;
         let client = reqwest::Client::new();
@@ -143,7 +147,7 @@ async fn a_plain_create_works_on_a_node_that_has_slabs() {
 /// A node with no storage at all says so, instead of naming a parameter.
 #[tokio::test]
 async fn a_node_with_no_slabs_says_that_rather_than_naming_a_parameter() {
-    let Some(bin) = bin() else { return };
+    let bin = bin();
     let dir = TempDir::new().unwrap();
     let data = dir.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
