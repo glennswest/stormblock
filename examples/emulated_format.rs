@@ -1,4 +1,5 @@
-//! An ext4 template formatted in core on emulated drives, memory store
+//! An ext4 template created as the API creates one (format in core, then
+//! seal, which checks it end to end) on emulated drives, memory store
 //! against directory backing (#300, stormcos#92): the time, and for the
 //! directory store where it goes (calls and seconds per filesystem
 //! operation, `drive::emulated::dir_stats`).
@@ -30,11 +31,13 @@ async fn one(size: u64, backing: Option<&str>, tag: &str) -> anyhow::Result<f64>
         let slab = Slab::format_with(dev, SlabFormat::new(MIB, StorageTier::Hot).with_auto_metadata(256 << 40)).await?;
         vm.add_slab(slab).await;
     }
-    let id = vm.create_volume_any("tmpl", size).await?;
-    let vol = vm.get_volume(&id).unwrap();
+    // What `POST /api/v1/fstemplates` runs: create, format in core, seal
+    // (which checks the filesystem end to end).
+    let vm = tokio::sync::Mutex::new(vm);
+    let store = tokio::sync::Mutex::new(stormblock::fs::template::TemplateStore::default());
     let _ = dir_stats::take();
     let t = Instant::now();
-    stormblock::fs::ext4::format(&vol, &stormblock::fs::ext4::Ext4Params::default()).await?;
+    stormblock::fs::template::create(&vm, &store, &stormblock::fs::template::TemplateSpec::new("tmpl", size)).await?;
     Ok(t.elapsed().as_secs_f64())
 }
 
