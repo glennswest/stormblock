@@ -61,6 +61,11 @@ pub struct Plan {
     /// The old release's own system volumes this release no longer names:
     /// dropped with the system half, as an install drops them (#349).
     pub dropped: Vec<String>,
+    /// Release volumes the data half records with extents outside it (#369):
+    /// system class, laid again with the system half — never kept as data,
+    /// never a reason to refuse. Dropped from the data half after it is
+    /// adopted.
+    pub release_strays: Vec<(VolumeId, String)>,
 }
 
 /// What an install did with the node's data half, for the console, the
@@ -87,6 +92,10 @@ pub struct Report {
     /// (#349): a registry golden, held media, a volume made with no role.
     #[serde(default)]
     pub carried: Vec<String>,
+    /// The old release's volumes the data half recorded with extents outside
+    /// it (#369), dropped from it: they come back with the release.
+    #[serde(default)]
+    pub release_dropped: Vec<String>,
 }
 
 /// A migration an install leaves for stormupdate (#122's `migrate`).
@@ -155,6 +164,7 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
     let mut volumes = Vec::new();
     let mut seen = HashSet::new();
     let mut outside: Vec<String> = Vec::new();
+    let mut release_strays: Vec<(VolumeId, String)> = Vec::new();
     for slab in std::iter::once(&data).chain(bulk.as_ref()) {
         if !slab.has_metadata_region() {
             anyhow::bail!("slab {} keeps no volume records: what it holds cannot be told, so it is not installed over", slab.slab_id());
@@ -174,6 +184,15 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
                 .flat_map(|l| l.legs().collect::<Vec<_>>())
                 .chain(v.parity.values().flat_map(|g| g.legs.clone()));
             let away = legs.filter(|l| !half.contains(&l.slab_id)).count();
+            // The release's own (#369): cilium, coredns and the rest, laid
+            // by an earlier install and recorded here too. System class:
+            // the system half they live in is laid again, and they come
+            // back with the release. Only the node's and unmarked volumes
+            // are data that laying the system half would lose.
+            if away > 0 && v.origin == crate::volume::metadata::Origin::Release {
+                release_strays.push((v.id, v.name));
+                continue;
+            }
             if away > 0 {
                 outside.push(format!("{} ({away} extent(s))", v.name));
             }
@@ -211,7 +230,14 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
         }
         carry.sort_by(|a, b| a.1.cmp(&b.1));
         dropped.sort();
-        return Ok(Plan { data_slab: data.slab_id(), bulk_slab: bulk.as_ref().map(|b| b.slab_id()), volumes, carry, dropped });
+        return Ok(Plan {
+            data_slab: data.slab_id(),
+            bulk_slab: bulk.as_ref().map(|b| b.slab_id()),
+            volumes,
+            carry,
+            dropped,
+            release_strays,
+        });
     }
     Ok(Plan {
         data_slab: data.slab_id(),
@@ -219,6 +245,7 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
         volumes,
         carry: Vec::new(),
         dropped: Vec::new(),
+        release_strays,
     })
 }
 
@@ -299,6 +326,15 @@ pub async fn adopt(
         same_id.insert(*node_id);
     }
 
+    // A release stray the claim holds itself (same id) is the claim's; the
+    // others are dropped once the data half is adopted (#369).
+    let strays: Vec<(VolumeId, String)> = plan
+        .release_strays
+        .iter()
+        .filter(|(id, _)| mgr.get_volume(id).is_none())
+        .cloned()
+        .collect();
+
     let mut found = vec![crate::drive::discover::FoundSlab { label: "data".into(), slab: data }];
     if let Some(b) = bulk {
         found.push(crate::drive::discover::FoundSlab { label: "bulk".into(), slab: b });
@@ -314,6 +350,18 @@ pub async fn adopt(
         adopted: adopted.volumes.len() + adopted.already_known,
         ..Default::default()
     };
+    for (id, name) in strays {
+        if mgr.get_volume(&id).is_none() {
+            continue;
+        }
+        match mgr.delete_volume(id).await {
+            Ok(()) => {
+                tracing::info!("install: {name} is the old release's (#369): laid again with the system half, its data-half record dropped");
+                report.release_dropped.push(name);
+            }
+            Err(e) => tracing::warn!("install: the old release's {name} could not be dropped from the data half: {e}"),
+        }
+    }
     for (node_id, name, _) in &plan.volumes {
         if same_id.contains(node_id) {
             report.kept.push(name.clone());

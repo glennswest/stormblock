@@ -181,6 +181,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### An install refused the release's own volumes as data (2026-10-08, #369, P0) — IN PROGRESS
+
+Dell 11.99 over 11.98: plan refused cilium, cilium-operator, hubble-relay,
+coredns (+ .golden) as "data volume(s) with extents outside the data half";
+the node stayed diskless. They are release volumes (11.98's boot from the
+claim marked them `release`), recorded in the data slab with legs in the
+system half. Not #362 (forge composes; the disk was laid by 11.98).
+- [x] plan: an `origin = release` volume with legs outside the data half is
+      a release stray, not data; adopt drops its data-half record
+      (`release_dropped`); node/unmarked volumes still refused
+- [x] test `a_release_volume_with_extents_outside_the_data_half_does_not_stop_an_install`
+- [ ] build VM; golden; how the data slab came to record them (the boot's
+      "record's slot now belongs to …; mapping dropped" lines on the Dell's
+      own disk are a second finding: shared slots' owners after a move)
+
 ### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — IN PROGRESS
 
 The Dell: `GET /volumes` 10–58 s behind the manager mutex; a clone ~60 s.

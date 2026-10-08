@@ -8817,6 +8817,69 @@ file = "{state}"
     /// release's volume the new release does not name is dropped. Then from
     /// the disk alone, after the flow-over: the carried volumes are there, in
     /// the data half.
+    /// #369: the Dell (11.99 over 11.98) stayed diskless. The data half's
+    /// records held the old release's cilium, coredns and the rest, with
+    /// extents in the system half, and the install refused them as data it
+    /// would lose. A release volume is system class: the install goes on and
+    /// drops its data-half record (it comes back with the release). A volume
+    /// the node made in the same place is still refused, named.
+    #[tokio::test]
+    async fn a_release_volume_with_extents_outside_the_data_half_does_not_stop_an_install() {
+        use crate::drive::slab::SlabRole;
+        use crate::volume::metadata::Origin;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        for (name, origin, installs) in [("cilium-old", Origin::Release, true), ("vm-disk-stray", Origin::Node, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (disk, _image_n, image_n1, ..) = release_fixture(mkfs.clone(), &dir).await;
+            let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+            let id = node
+                .create_volume_with(name, 8 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::System))
+                .await
+                .unwrap();
+            let v = node.get_volume(&id).unwrap();
+            v.write(0, &vec![0x69u8; 8 * MIB as usize]).await.unwrap();
+            v.flush().await.unwrap();
+            node.set_origin(id, origin);
+            // One extent of it in the data half, the rest in the system half:
+            // what the Dell's data half recorded.
+            let data_slab = {
+                let reg = node.registry().read().await;
+                reg.iter().find(|(_, s)| s.is_data()).map(|(id, _)| *id).unwrap()
+            };
+            {
+                let mut gem = node.gem().write().await;
+                let mut reg = node.registry().write().await;
+                crate::placement::PlacementEngine::new()
+                    .migrate_extent(&mut gem, &mut reg, id, 0, Some(data_slab))
+                    .await
+                    .unwrap();
+            }
+            node.persist().await;
+            drop(node);
+
+            let claim = dir.path().join("claim-n1.raw").display().to_string();
+            std::fs::copy(&image_n1, &claim).unwrap();
+            let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+            let r = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await;
+            if installs {
+                let (flow, report) = r.unwrap_or_else(|e| panic!("{name}: the install refused a release volume: {e}"));
+                assert!(flow.is_some(), "{name}: laid");
+                let report = report.expect("an install report");
+                assert_eq!(report.release_dropped, vec![name.to_string()], "{report:?}");
+                assert_eq!(mgr.find_volume(name).await, None, "{name}: dropped, it comes back with the release");
+            } else {
+                let e = match r {
+                    Ok(_) => panic!("{name}: a volume the node made, outside the data half, must stop the install"),
+                    Err(e) => e.to_string(),
+                };
+                assert!(e.contains(name) && e.contains("outside the data half"), "{e}");
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_install_carries_the_nodes_system_half_volumes_and_drops_the_old_releases() {
         use crate::drive::slab::SlabRole;
