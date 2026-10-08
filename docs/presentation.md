@@ -197,9 +197,9 @@ clock). Full suite green on dev apart from a timing test on a loaded box (#134).
   Fixed in v19.1.4–v19.2.2: slot entries after their data, the handover
   order, a flow-over cut short. On metal: 5 hard power cuts, 1500 of 1500
   objects kept (v19.2.1, 2026-09-27). The flow-over cut on metal is #172.
-- **The golden is held.** Since v17 the API is closed by default, and the
-  engine's clients have to present a token first (#107; stormcentral#30,
-  stormcos#89, and one issue per client). When to release it: #194.
+- **Closed by default, and shipped.** Since v17 the API is closed by
+  default (#107); releases since 11.55 carry such an engine. Only forge still
+  runs an old one (13.7.0, #235).
 - **Security**: the `/serve/v1` reconciler serves every export, host-bound
   ones included, on a portal any host can reach (#217, P0);
   CHAP in the config file is ignored, so a CHAP-configured

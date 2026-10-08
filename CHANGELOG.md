@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **docs:** #254 (stormcos#65's pass): stale pointers corrected.
+  - **Block size:** release disks are composed at 4096 with a `-S 4096` FAT16 ESP (owner, #233), not at 512. The old firmware failures were a FAT32-labelled ESP. The per-volume 512 LBA stays as a supported option (#248). Updated in the README and `docs/composed-disks.md`.
+  - **Golden:** it is no longer "held since v17". Releases since 11.55 ship it, and only forge runs an old engine (CLAUDE.md, `docs/presentation.md`).
+  - **Composed disks:** releases are composed by stormcentral; stormcos's `compose-release.py` only makes a base. Release disks boot over NVMe/TCP, so the "not done" line about that is gone.
+  - **Other pointers:** `sbregistry image` is what calls the engine (`docs/layering.md`). Marking a boot successful is stormcos's `boot-ok.sh` (`docs/images.md`). The test container's missing token is stormcentral#133, not stormcos#89 (README, `test/`).
 - **fix:** #240: the slot fence covers parity stripes and StormFS chunk frees.
   - **Parity:** a parity volume's write (read-modify-write), discard, stripe verify and resync now hold every member and parity leg of the stripe shared, after the stripe lock, for the whole operation (`fenced_stripe`; the map is re-read until it names the same slots). A drain's parity-leg move (`migrate_parity_leg_at`, which only tries the fence) finds them busy instead of copying a parity leg and letting it go while a write folds its delta into it. Parity reads fence the stripe too, and let it go before taking the stripe lock to reconstruct.
   - **StormFS:** `chunk::free` looks its extents up and unmaps them under one map write lock. Before, a move that published between the read-locked lookup and the unmap had its new slot leaked and the slot it replaced freed a second time. `versioned::commit` already did everything under the write locks, and neither does device I/O on a mapped slot, so neither needs the fence.

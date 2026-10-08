@@ -11,7 +11,7 @@
 #   node:     read-only GET /api/v1/health on STORM_NODE:9090, the node's own
 #             engine (public). Not answering is a skip. With
 #             STORM_STORMBLOCK_TOKEN set (a Secret, when the runner has the
-#             node's token — stormcos#89), also a read of its volumes and
+#             node's token — stormcentral#133), also a read of its volumes and
 #             slabs; without it that check is a skip.
 #   external: none
 #   resources: medium needs ~1.5 GiB and long ~8 GiB of the results volume,

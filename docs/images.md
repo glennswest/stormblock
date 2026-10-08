@@ -372,8 +372,9 @@ GPT (in the drive's own sector size)
   by this run gets a fresh count of tries; one already on the disk keeps the
   loader's count. It is the same GPT-attribute ladder
   (`priority`/`tries`/`successful`) that `pallet activate|successful|rollback`
-  drives. Staging B on a *running* node and marking a boot successful once it
-  is healthy belong to the upgrade work (#122), not here.
+  drives. Marking a boot successful once the node is healthy is stormcos's
+  (`deploy/node/boot-ok.sh`: `POST /api/v1/pallets/{id}/successful`); staging
+  B on a *running* node is #122's ([docs/staging.md](staging.md)).
 - **The attached image outranks the disk.** stormuefi scans every device, so a
   node that netboots a new release also sees its disk's copy of the old one.
   The disk's ladder therefore starts at 14, one below the 15 an image publishes

@@ -177,11 +177,16 @@ was laid in. A pallet's extent table counts in the same unit, so
 `compose/pallet` takes the same `lba`. Other sizes (1024, 2048) are still
 accepted for a table and the disk is then presented at 4096, as before.
 
-**What firmware reads is 512.** A 4096-byte ESP is `NOT_FOUND` to AMI Aptio 4
-(server1 over stormbootx) and "no bootable option or device" to OVMF on a pve
-virtio disk forced to 4096. A disk firmware boots from — ESP and boot pallet —
-is composed at `"lba": 512`; everything the kernel alone reads (the slabs,
-every volume inside them, PVCs) stays 4096. A 512 volume is 512e: its storage
+**A release disk is composed at 4096** (owner, #233: one volume, not a
+512 boot volume beside 4096 slabs). stormcentral composes it with `"lba":
+4096` and a FAT16 ESP formatted `-S 4096` (stormcos#188); OVMF loads it
+(stormbootx `tests/esp-ovmf.sh`), and server1 (AMI Aptio 4) booted 11.56 that
+way through stormbootx, which bridges older firmware (stormbootx#37). The
+early failures — `NOT_FOUND` on Aptio 4, "no bootable option or device" on
+OVMF — came from an ESP labelled FAT32, not from the 4096 sector size.
+
+**512 stays available** (#228, kept by #248) for media that needs it: a disk
+composed at `"lba": 512` is presented at 512. A 512 volume is 512e: its storage
 is 4096-byte slots underneath, ublk reports a 4096-byte physical block, and a
 sub-4K write is a read-modify-write. Over NVMe/TCP the kernel sees 512/512
 (the namespace does not claim atomic 4K writes, which is what Linux would
@@ -191,12 +196,12 @@ need to report a larger physical block).
 the kernel and firmware compare it with the device's: a 512-sector FAT image
 on a disk presented at 4096-byte LBAs is called vfat by `blkid` and refused
 by `mount` with "can't read superblock", and firmware's FAT driver makes the
-same comparison. Format the ESP for the disk it lands in — `mkfs.vfat -S 512`
-for a 512 disk (FAT16, 64 MiB), `-S 4096` for a 4096 one, where FAT16 needs at
-least 64 MiB for its 4085-cluster floor. `ci-compose-disk-verify.sh` found
+same comparison. Format the ESP for the disk it lands in — `-S 4096` for a
+4096 disk (what a release uses), where FAT16 needs at least 64 MiB for its
+4085-cluster floor, and `mkfs.vfat -S 512` for a 512 one. `ci-compose-disk-verify.sh` found
 this; the first ESP it built mounted only after it was reformatted.
 
-**`ci-boot512-verify.sh` is the check that counts** (unprivileged, on dev):
+**`ci-boot512-verify.sh` checks the 512 option** (unprivileged, on dev):
 it composes a 512 disk of a 512-sector ESP holding stormuefi and a boot pallet
 holding the host's kernel, clones it, and then (1) the host's kernel in QEMU
 connects over NVMe/TCP with nvme-cli, sees the clone at 512 and a plain
@@ -294,16 +299,13 @@ a ublk block device, and hands it to tools that are not ours:
   `POST /api/v1/volumes/compose`, `…/compose/pallet`, `…/compose/disk` and
   `…/compose/slab`.
 - **`image build` still lays pallets and slabs as bytes.** It is the file
-  path; a release is composed instead (stormcos's `deploy/compose-release.py`
-  runs `compose/pallet`, `compose/slab` and `compose/disk` from the same
-  `image.toml`). Making `image build` itself compose when its output is a
+  path; a release is composed instead, by stormcentral (`src/releases.rs`:
+  `compose/pallet`, `compose/slab` and `compose/disk`). stormcos's
+  `deploy/compose-release.py` makes only a base (stormcos `docs/goldens.md`). Making `image build` itself compose when its output is a
   volume on an engine would leave one code path.
 - **An ESP is imported as a golden**, built elsewhere (`mkfs.vfat` +
   `mcopy`, or `image build`'s FAT writer through the library). Building one
   from a directory over HTTP is not there.
-- **No node has yet booted a full stormcos from a composed disk over
-  NVMe/TCP.** The OVMF stage above proves firmware and a boot loader read the
-  disk; it does not run a stormcos kernel to a shell.
 - **GPT goldens are never swept.** Deleting a disk leaves its layout's head
   and tail in place, deliberately: every other disk of that layout shares
   them, as pallets share `kernel.golden`. A layout only becomes unused when a

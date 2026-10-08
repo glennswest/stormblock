@@ -160,9 +160,8 @@ flow-over resume of v19.2.2 has not met metal yet; that check is #172. The READM
 `slab holds`, boot-time files, stormcos#65's corrections #242); the docs in `docs/` were checked against it and the
 superseded ones moved to `docs/history/`. What earlier docs promised and the code does not do is
 listed in the README's "Not built, or not wired" with its issues (#159–#170, #205–#248).
-The golden has been held since v17 for the token rollout to the engine's
-clients (#107; stormcentral#30, stormcos#89 and the rest); when to release
-it is the owner's call, #194.
+The v17+ engine (closed by default, #107) ships in releases since 11.55
+(golden-stormblock-296e38521d4c first); only forge still runs 13.7.0 (#235).
 
 For special runtime testing that needs its own machine, spin up a VM with
 terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
@@ -171,6 +170,12 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 ---
 
 ## TODO — Implementation Roadmap
+
+### Stale doc pointers from stormcos#65's pass (2026-10-08, #254, P2) — DONE
+
+- [x] each of the issue's seven claims checked against the other repos'
+      origin/main; README, composed-disks, layering, images, presentation,
+      test/ comments and this file corrected; CHANGELOG
 
 ### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — WAITING ON THE OWNER
 
@@ -2052,8 +2057,8 @@ Engine piece, needed by any shape of the split: **a per-volume LBA**.
       512 ESP; OVMF boots the clone as a pve-style virtio disk → stormuefi →
       kernel with the pallet's cmdline. ALL PASS
 - [x] docs (composed-disks.md, README), CHANGELOG
-- [ ] owner: one release disk at 512, or the two-volume split? (asked on
-      #228); stormcos compose-release.py follows either way (filed)
+- [x] owner (#233): one release disk at 4096; the per-volume LBA kept as a
+      supported capability (#248)
 - [ ] not verified: server1 (Aptio 4) and a real pve VM — the owner's
       acceptance, after stormcos composes a release at 512
 
@@ -2233,7 +2238,7 @@ exit 0/1/2, results under `/results`, no machine assumptions, Job in the
 run's own namespace. Pattern: stormd's `test/` (runs its binary in the pod).
 
 Design: the node's engine is closed (v17) and a Job has no token for it
-(stormcos#89), so:
+(stormcentral#133), so:
 - **node**: `GET /api/v1/health` on `STORM_NODE:9090` (public) — up, version,
   auth; unreachable = skip. The authenticated node checks run only with
   `STORM_STORMBLOCK_TOKEN`, else skip (not pass).

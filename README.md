@@ -174,8 +174,9 @@ on loopback. It drives it through its API with the token it mints, and reads
 and writes volumes with the engine's own userspace NVMe/TCP initiator. No
 privileges, devices or tools are needed, so it runs the same on every machine
 (`requires: []`). The node's own engine gets the public health probe on
-`STORM_NODE:9090`. Its authenticated checks need `STORM_STORMBLOCK_TOKEN`
-(stormcos#89) and are a *skip* without it.
+`STORM_NODE:9090`. Its authenticated checks need `STORM_STORMBLOCK_TOKEN`,
+which stormcentral's test runner does not hand a Job yet (stormcentral#133),
+and are a *skip* without it.
 
 | suite | budget | what |
 |---|---|---|
@@ -684,17 +685,19 @@ curl -X POST http://node:9090/api/v1/exports \
 # → {"nqn":"nqn.…:host:1f2e…","port":4420,"nsid":1,"dhchap_secret":"DHHC-1:01:…:",…}
 ```
 
-### Block size: 512 for what firmware reads, 4096 for the rest
+### Block size: 4096, or 512 when a volume asks
 
 Every volume is presented at 4096-byte logical blocks unless it says 512
 (`lba` on `POST /api/v1/volumes`, and on `POST /api/v1/volumes/compose/disk`,
 which presents the disk at the LBA its GPT was written in). Clones inherit it;
-every volume response reports it. Firmware's GPT and FAT drivers are
-dependable at 512 — a 4096-byte ESP does not boot on AMI Aptio 4 or on OVMF
-over a pve virtio disk — so boot media is composed at 512 with a 512-sector
-ESP (`mkfs.vfat -S 512`); the slabs and everything the kernel alone reads stay
-4096 (#228, [docs/composed-disks.md](docs/composed-disks.md)). A 512 volume is
-512e underneath. The size is persisted in the volume record (metadata V9; a
+every volume response reports it. A release disk is one volume at 4096 (owner,
+#233): stormcentral composes it at `"lba": 4096` with a FAT16 ESP formatted
+`-S 4096` (stormcos#188), and OVMF and server1's firmware boot it through
+stormbootx (old firmware is bridged by stormbootx#37). The failure that once
+looked like "firmware cannot read a 4K ESP" was a FAT32-labelled ESP. The
+512 option stays, supported and tested (#228, #248), for media that needs it
+([docs/composed-disks.md](docs/composed-disks.md)). A 512 volume is 512e
+underneath. The size is persisted in the volume record (metadata V9; a
 payload with no 512 volume is still written as V8, so older engines read it).
 
 ### Read-write, read-only, and sealed
@@ -1759,9 +1762,9 @@ What earlier docs described and the code does not do, each with its issue:
   stormstorage#33). The engine's part is built: an attach carries the epoch,
   and a `fence` takes the fenced attachments' data path away before it
   answers (#83, #6; `docs/migration.md`).
-- **Per-volume 512-byte LBA** (#228) is built and verified, but no release uses
-  it yet: whether a release is one disk at 512 or two volumes is the owner's
-  call (#233), and whether to keep the capability at all is #248.
+- **Per-volume 512-byte LBA** (#228) is built and verified, and kept as a
+  supported capability (#248), but no release uses it: a release is one disk
+  at 4096 (owner, #233).
 - **Smaller known faults**: ublk attach polls device readiness with a blocking
   sleep under the export lock (#231); the volume listing's `generation` does not
   move on attach, detach or slab state (#218).

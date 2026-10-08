@@ -136,7 +136,8 @@ at build time, exactly like the golden itself.
 This was the argument for a build tool that owns "produce an artifact from an
 image", with the target as a parameter. It became `stormblock image
 build|convert|inspect|formats|lay-node|local-boot` and `/api/v1/images/*`;
-`sbregistry build-image` posts its specs to the engine.
+`sbregistry image` posts its specs to the engine (`sbregistry build-image`
+writes a local ext4 file and calls no engine).
 
 ### What this replaces (2026-08-19)
 

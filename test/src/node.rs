@@ -1,5 +1,5 @@
 //! Checks of the node's own engine (`STORM_NODE:9090`). Its API is closed
-//! (v17) and a Job is handed no token (stormcos#89), so only the public
+//! (v17) and a Job is handed no token (stormcentral#133), so only the public
 //! health probe is always possible; the rest needs `STORM_STORMBLOCK_TOKEN`.
 
 use std::time::Duration;
@@ -55,7 +55,7 @@ pub async fn health(env: &Env) -> Outcome {
 /// With a token: the node's engine lists its volumes and slabs.
 pub async fn inventory(env: &Env) -> Outcome {
     let (Some(node), Some(token)) = (env.node.as_deref(), env.node_token.as_deref()) else {
-        return Err(Why::Skip("no STORM_STORMBLOCK_TOKEN for the node's engine (stormcos#89)".into()));
+        return Err(Why::Skip("no STORM_STORMBLOCK_TOKEN for the node's engine (stormcentral#133)".into()));
     };
     let b = base(node);
     let (s, vols) = get(&format!("{b}/api/v1/volumes"), Some(token)).await?;
