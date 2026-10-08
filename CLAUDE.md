@@ -172,6 +172,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — WAITING ON THE OWNER
+
+The intent half is gone: #265 settled by #122's 2A, and stormupdate (b4cc7e0)
+sets no intent. Instead it re-points `boothost/<tag>` on forge itself (`PUT
+…/synonyms/boothost/<tag>`, an ordinary verb), using a copy of forge's node
+token (`agent_cfg.appliance_token_file`). That is the exposure #247 was filed
+for, on another verb. Asked on #247 (needs-owner): **A** retarget to a
+per-host secret from the claim (hashed on `Host`, rotated per claim) that
+authorises only re-point to a sealed volume, rollback and intent `local` for
+that host (recommended); **B** close as superseded; **C** settle the
+credential on stormupdate/stormcentral's side. Nothing built yet.
+
 ### The slot fence on parity stripes and StormFS (2026-10-08, #240) — DONE
 
 - [x] `fenced_stripe` (members + parity legs, re-read until stable) after the
