@@ -1684,7 +1684,7 @@ mod tests {
         assert_eq!(report.volumes[2].first_slot, g.first_slot + 3, "the next golden follows the 3");
         assert_eq!(report.shared_bytes, 5 * SLOT);
 
-        let node = open_composed(&vm, VolumeId(report.id)).await;
+        let mut node = open_composed(&vm, VolumeId(report.id)).await;
         let golden_id = node.find_volume("pvc-1000.golden").await.unwrap();
         assert!(node.is_sealed(&golden_id));
         let clone = node.get_volume(&node.find_volume("pvc-1000").await.unwrap()).unwrap();
@@ -1694,8 +1694,12 @@ mod tests {
             clone.read(ext * SLOT + SLOT - 4096, &mut buf).await.unwrap();
             assert!(buf.iter().all(|&x| x == fill), "extent {ext} reads {:#x}, not {fill:#x}", buf[0]);
         }
-        clone.write(900 * SLOT, &vec![0x77u8; 4096]).await.expect("a clone writes into a hole");
-        clone.read(900 * SLOT, &mut buf).await.unwrap();
+        // A claim is a clone of the golden (the template's own clone is the
+        // blank and stays sealed); it writes into a hole like any thin clone.
+        let claim = node.create_snapshot(golden_id, "pvc-claim").await.unwrap();
+        let claim = node.get_volume(&claim).unwrap();
+        claim.write(900 * SLOT, &vec![0x77u8; 4096]).await.expect("a clone writes into a hole");
+        claim.read(900 * SLOT, &mut buf).await.unwrap();
         assert!(buf.iter().all(|&x| x == 0x77));
         let d = node.get_volume(&node.find_volume("dense").await.unwrap()).unwrap();
         d.read(SLOT, &mut buf).await.unwrap();
