@@ -7023,7 +7023,7 @@ async fn handle_boot_local(
     // what the next release no longer names, and carries what the node made.
     // Only a boot from the claim alone: a resumed flow-over also holds the
     // node's own disk, marked when its install began.
-    if !resumed && !slab_paths.is_empty() && slab_paths.iter().all(|p| is_fabric_uri(p)) {
+    if resumed.is_none() && !slab_paths.is_empty() && slab_paths.iter().all(|p| is_fabric_uri(p)) {
         let n = mgr.mark_all(crate::volume::metadata::Origin::Release);
         tracing::info!("{n} volume(s) of the claimed release image marked as the release's (#349)");
     }

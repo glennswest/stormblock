@@ -698,6 +698,7 @@ async fn compose_volume(
         sealed: false,
         lba: vm.lba(&id).unwrap_or(crate::volume::Lba::DEFAULT),
         extent_size: vm.get_volume_handle(&id).map(|h| h.extent_size()).unwrap_or(0),
+        origin: vm.origin(&id).as_str(),
         access: crate::volume::Access::ReadWrite.to_string(),
         writable: true,
         role: vm
@@ -913,6 +914,7 @@ async fn create_volume(
                 sealed: false,
                 lba: vm.lba(&vol_id).unwrap_or(crate::volume::Lba::DEFAULT),
                 extent_size: vm.get_volume_handle(&vol_id).map(|h| h.extent_size()).unwrap_or(0),
+                origin: vm.origin(&vol_id).as_str(),
                 access: crate::volume::Access::ReadWrite.to_string(),
                 writable: true,
                 // What it was actually placed in, which is not always what
