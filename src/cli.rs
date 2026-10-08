@@ -7530,9 +7530,12 @@ file = "{logs}"
             vol.write(k * MIB + 4096, &vec![0xA0 + k as u8; 8192]).await.unwrap();
         }
         vol.flush().await.unwrap();
-        // Cut the move about half way: the persist after the Nth extent
-        // never comes back, and the move is dropped there.
-        let n = (total / 2) as u64;
+        // Cut the move about half way: the persist after the Nth window
+        // never comes back, and the move is dropped there. Windows of 4
+        // (#331), so half way falls between two of them; the moves of a
+        // window run at once as they do on a node.
+        std::env::set_var("STORMBLOCK_FLOW_BATCH", "4");
+        let n = (total / 2 / 4).max(1) as u64;
         let persists = std::sync::atomic::AtomicU64::new(0);
         let cut = tokio::sync::Notify::new();
         let persist = || {
@@ -7849,7 +7852,9 @@ file = "{state}"
                 .collect();
 
             // The flow-over, system half then data half, until the power goes.
-            let cut_after = ((sys_n + data_n) as f64 * at) as u64;
+            // A persist per window of 4 moves made at once (#331).
+            std::env::set_var("STORMBLOCK_FLOW_BATCH", "4");
+            let cut_after = ((sys_n + data_n) as f64 * at / 4.0) as u64;
             let persists = std::sync::atomic::AtomicU64::new(0);
             let cut = tokio::sync::Notify::new();
             let persist = || {

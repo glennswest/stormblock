@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **perf/fix:** #331: the slot fence is one lock per slot in use, not 4096 hashed shards.
+  - **Problem:** with the shards, two unrelated slots waited for each other. With the flow-over's 8 moves at once, the model's in-process appliance served a move's NVMe/TCP read from a slot in the shard the move held, so the move waited on itself and the flow-over hung (seen once, after 256 moves).
+  - **Now:** a lock is made when a slot is first held and dropped with its last guard, in 64 tables.
+  - **Tests:** `fence::tests::two_slots_never_wait_for_each_other_and_nothing_is_kept`. The two flow-over cut tests cut between windows of 4.
 - **perf:** #331: the flow-over moves extents in windows.
   - **Before:** one extent at a time, a full persist (every slab flushed, local and remote) after each, and a sleep as long as the whole previous move whenever any volume I/O had run.
   - **Now:** windows of up to 64 extents (`STORMBLOCK_FLOW_BATCH`), with a slot shared by a golden and its clones moved once. Up to 8 move at once (`STORMBLOCK_FLOW_PARALLEL`), each holding only its slot's fence for the copy. Then one persist, then the release of their source slots. A source slot is still freed only after the map naming its copy is durable (durability rule 10).
