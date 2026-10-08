@@ -278,7 +278,9 @@ async fn v1_keeps_its_error_envelope() {
 async fn debug_is_open_but_an_open_caller_sees_no_paths_and_cannot_force_dumps() {
     use tokio::io::AsyncWriteExt;
     let dir = TempDir::new().unwrap();
-    let state = state_with(&dir, config_with_token("sekrit")).await;
+    let mut config = config_with_token("sekrit");
+    config.management.admin_token = Some("root".to_string());
+    let state = state_with(&dir, config).await;
     let (base, server) = serve(state).await;
     let c = reqwest::Client::new();
 
@@ -308,20 +310,23 @@ async fn debug_is_open_but_an_open_caller_sees_no_paths_and_cannot_force_dumps()
     assert!(full.contains(&format!("/api/v1/volumes/{secret}/clone")), "the token sees the path: {full}");
     drop(held);
 
-    // Dumps are the admin's, on demand (#365): nobody else can force one.
+    // Dumps are the admin's, on demand (#365): nobody else can force one,
+    // not even with the node token.
     for p in ["/debug/tasks", "/debug/threads"] {
         let r = c.get(format!("{base}{p}")).send().await.unwrap();
         assert_eq!(r.status(), 401, "{p} without a token");
+        let r = c.get(format!("{base}{p}")).bearer_auth("sekrit").send().await.unwrap();
+        assert!(r.status() == 401 || r.status() == 403, "{p} with the node token: {}", r.status());
     }
     // Many callers at once, then again at once: one dump answers them all.
     let before = stormblock::mgmt::debug::TASK_DUMPS.load(std::sync::atomic::Ordering::Relaxed);
-    let calls: Vec<_> = (0..12).map(|_| c.get(format!("{base}/debug/tasks")).bearer_auth("sekrit").send()).collect();
+    let calls: Vec<_> = (0..12).map(|_| c.get(format!("{base}/debug/tasks")).bearer_auth("root").send()).collect();
     for r in futures_util::future::join_all(calls).await {
         assert_eq!(r.unwrap().status(), 200);
     }
     let after = stormblock::mgmt::debug::TASK_DUMPS.load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(after - before, 1, "one task dump for twelve callers");
-    let t = c.get(format!("{base}/debug/threads")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
+    let t = c.get(format!("{base}/debug/threads")).bearer_auth("root").send().await.unwrap().text().await.unwrap();
     assert!(t.contains("thread(s)"), "{t}");
     server.abort();
 }
