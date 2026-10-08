@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The data classes as designed, and how they're built (2026-10-08, #356, P0) — IN PROGRESS
+### The data classes as designed, and how they're built (2026-10-08, #356, P0) — DONE; the build is #361 (needs-owner)
 
 Owner: the design had partner and customer (and system) with their own
 partitions; review the history and write it down in one place. Found: kinds
@@ -192,12 +192,14 @@ system replaced, others kept. Not in the design: demote/reset, factory wipe
 (owner's rules on stormcos#456, #312). Built: two halves (slab role
 system|data, volume origin #349), no class split; `vendor`/`user` are enum
 values nothing writes.
-- [ ] `docs/data-classes.md`: each class (kind, partition, app data, owner and
+- [x] `docs/data-classes.md`: each class (kind, partition, app data, owner and
       signer, install / demote-reset / factory wipe), where `system-data`
-      fits, designed-not-built, built-differently, the questions
-- [ ] pallets.md §2.5 (`data`, `vendor`, `user`), the stale #62 note;
+      fits, designed-not-built, built-differently, the questions (4fff4dd)
+- [x] pallets.md §2.5 (`data`, `vendor`, `user`), the stale #62 note;
       boot-hooks.md; README; CHANGELOG
-- [ ] the build of the split as its own issue, with the owner's questions
+- [x] the build of the split as its own issue, with the owner's questions:
+      #361 (needs-owner: one slab per class? which service state survives a
+      demote? factory wipe? existing volumes? who sets the class?)
 
 ### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — PAUSED for P0 #349 (back in line)
 
