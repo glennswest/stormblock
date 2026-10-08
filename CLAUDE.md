@@ -190,9 +190,14 @@ netbooted install over NVMe/TCP to an in-process appliance, 1530 extents,
       on its own read served in-process) → fence one lock per slot (f77d029);
       cut tests cut between windows of 4
 - [x] NVMe/TCP initiator: 4 I/O connections, not one (e93f08b)
-- [ ] model numbers for both; full nextest; a model with ~20k extents (the
-      per-move publish sweeps every map, #155); golden; real hardware
-      (a blade or the Dell): `flow_over_remaining` and the breakdown lines
+- [x] model on build VMs (extents/h, idle node / with a foreground writer):
+      before 34k / 35k; windows 185k (with writer; idle hung); + exact fence
+      1.29M / 370k; + 4 queues 0.9M / 346k (1 queue 0.19M–1.29M / 420k: the
+      VM's flush cost swamps it over loopback). 6000 extents, 300 goldens:
+      185k / 336k (persist = the VM disk's flush, 0.7 s a window). Full
+      nextest at e93f08b 1006/1006; flow/install/fence/nvmeof at daaad9c 88/88
+- [ ] golden; real hardware (a blade or the Dell): `flow_over_remaining`
+      and the breakdown lines on the next install
 
 ### Emulated directory backing, mkfs-ext4 off v3.0.0 (2026-10-07, #300, P2) — PARKED (master: #331 first)
 
