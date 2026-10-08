@@ -8847,7 +8847,8 @@ file = "{state}"
             // what the Dell's data half recorded.
             let data_slab = {
                 let reg = node.registry().read().await;
-                reg.iter().find(|(_, s)| s.is_data()).map(|(id, _)| *id).unwrap()
+                let found = reg.iter().find(|(_, s)| s.is_data()).map(|(id, _)| *id).unwrap();
+                found
             };
             {
                 let mut gem = node.gem().write().await;
