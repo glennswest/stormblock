@@ -71,7 +71,7 @@ async fn run(dir: &str, buffered: bool, parallel: usize, in_flight: usize) -> an
         s
     };
     let touched = vm.distrust_slab(lost).await;
-    let volumes = Arc::new(tokio::sync::Mutex::new(vm));
+    let volumes = Arc::new(stormblock::lockwatch::TrackedMutex::new(vm));
     let rb = Rebuilds::new(
         volumes.clone(),
         &RebuildConfig { parallel, extents_in_flight: in_flight, ..Default::default() },

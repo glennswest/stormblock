@@ -33,7 +33,7 @@ async fn one(size: u64, backing: Option<&str>, tag: &str) -> anyhow::Result<f64>
     }
     // What `POST /api/v1/fstemplates` runs: create, format in core, seal
     // (which checks the filesystem end to end).
-    let vm = tokio::sync::Mutex::new(vm);
+    let vm = stormblock::lockwatch::TrackedMutex::new(vm);
     let store = tokio::sync::Mutex::new(stormblock::fs::template::TemplateStore::default());
     let _ = dir_stats::take();
     let t = Instant::now();

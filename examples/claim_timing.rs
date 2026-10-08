@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let slab = Slab::format(Arc::new(dev), DEFAULT_SLOT_SIZE, StorageTier::Hot).await?;
     let mut mgr = VolumeManager::new(DEFAULT_SLOT_SIZE);
     mgr.add_slab(slab).await;
-    let vm: Arc<VmLock> = Arc::new(tokio::sync::Mutex::new(mgr));
+    let vm: Arc<VmLock> = Arc::new(stormblock::lockwatch::TrackedMutex::new(mgr));
     let store = Arc::new(tokio::sync::Mutex::new(TemplateStore::in_memory()));
 
     println!("claim timing — slot {} KiB, {repeats} repeats per step\n", DEFAULT_SLOT_SIZE / 1024);

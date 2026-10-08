@@ -18,7 +18,7 @@ use stormblock::fs::template::{self, ClaimSpec, FsKind, TemplateSpec, TemplateSt
 use stormblock::raid::RaidArrayId;
 use stormblock::volume::{VolumeId, VolumeManager};
 
-async fn dump(vm: &tokio::sync::Mutex<VolumeManager>, id: VolumeId, path: &str) -> anyhow::Result<()> {
+async fn dump(vm: &stormblock::lockwatch::TrackedMutex<VolumeManager>, id: VolumeId, path: &str) -> anyhow::Result<()> {
     use std::io::{Seek, SeekFrom, Write};
     let dev = vm.lock().await.get_volume(&id).expect("volume");
     let size = dev.capacity_bytes();
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let dev = FileDevice::open_with_capacity(&slab, (mib + 512) << 20).await?;
     let mut vm = VolumeManager::new(1 << 20);
     vm.add_backing_device(RaidArrayId(uuid::Uuid::new_v4()), Arc::new(dev)).await;
-    let vm = Arc::new(tokio::sync::Mutex::new(vm));
+    let vm = Arc::new(stormblock::lockwatch::TrackedMutex::new(vm));
     let store = Arc::new(tokio::sync::Mutex::new(TemplateStore::in_memory()));
 
     let spec = TemplateSpec { fs: FsKind::Xfs, label: "blank".into(), ..TemplateSpec::new("xfs-blank", mib << 20) };

@@ -300,7 +300,7 @@ async fn main() {
         .expect("creating the slab backing file");
     let mut vm = VolumeManager::new(SLOT);
     vm.add_backing_device(RaidArrayId(uuid::Uuid::new_v4()), Arc::new(dev)).await;
-    let vm = Arc::new(tokio::sync::Mutex::new(vm));
+    let vm = Arc::new(stormblock::lockwatch::TrackedMutex::new(vm));
 
     // ---- cold: every write allocates ----
     // A fresh volume per depth, so each point genuinely allocates rather than
