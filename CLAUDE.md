@@ -181,6 +181,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The data classes as designed, and how they're built (2026-10-08, #356, P0) — IN PROGRESS
+
+Owner: the design had partner and customer (and system) with their own
+partitions; review the history and write it down in one place. Found: kinds
+`vendor` (8) and `user` (9) and the pallet's hard allocation boundary
+(f94effa, 2026-08-23, pallets.md §2.5–2.8); stormcos#20's System /
+Integrator / Customer / Updates crates (owner, signer, lifecycle); install =
+system replaced, others kept. Not in the design: demote/reset, factory wipe
+(owner's rules on stormcos#456, #312). Built: two halves (slab role
+system|data, volume origin #349), no class split; `vendor`/`user` are enum
+values nothing writes.
+- [ ] `docs/data-classes.md`: each class (kind, partition, app data, owner and
+      signer, install / demote-reset / factory wipe), where `system-data`
+      fits, designed-not-built, built-differently, the questions
+- [ ] pallets.md §2.5 (`data`, `vendor`, `user`), the stale #62 note;
+      boot-hooks.md; README; CHANGELOG
+- [ ] the build of the split as its own issue, with the owner's questions
+
 ### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — PAUSED for P0 #349 (back in line)
 
 #147 checked XFS with xfsprogs on files only. Needed before any PVC class
