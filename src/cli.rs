@@ -7854,7 +7854,9 @@ file = "{state}"
             // The flow-over, system half then data half, until the power goes.
             // A persist per window of 4 moves made at once (#331).
             std::env::set_var("STORMBLOCK_FLOW_BATCH", "4");
-            let cut_after = ((sys_n + data_n) as f64 * at / 4.0) as u64;
+            // Each half ends in its own, maybe partial, window.
+            let windows = sys_n.div_ceil(4) + data_n.div_ceil(4);
+            let cut_after = ((windows as f64 * at) as u64).min(windows as u64 - 1);
             let persists = std::sync::atomic::AtomicU64::new(0);
             let cut = tokio::sync::Notify::new();
             let persist = || {
