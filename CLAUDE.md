@@ -182,7 +182,7 @@ quarantined slabs, drains and rebuilds changed the listing behind a 304.
 - [x] found: the usage context missed #210's per-host subsystems (a
       host-bound attach was not `in_use`): added
 - [x] test; README, CHANGELOG
-- [x] on a build VM: integration_placement 4/4; full nextest at 3c9b4a0+
+- [x] on a build VM: integration_placement 4/4; full nextest at d7108b0
       1022/1022
 
 ### The handover record carries the incumbent's engine version (2026-10-08, #189) — DONE
