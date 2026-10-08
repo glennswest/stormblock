@@ -5904,10 +5904,46 @@ pub async fn run() -> anyhow::Result<()> {
                 Some((_, ds)) if !ds.is_empty() => extents_on(&gem_arc, ds).await,
                 _ => 0,
             };
+            // What the node stops depending on once everything has moved
+            // (#358): the appliance's slabs, reached over the network. A local
+            // slab is never retired here, whatever list it is in.
+            let retire: Vec<SlabId> = {
+                let reg = reg_arc.read().await;
+                sources
+                    .iter()
+                    .chain(data.iter().flat_map(|(_, d)| d.iter()))
+                    .filter(|id| {
+                        reg.get(id).is_some_and(|s| {
+                            matches!(
+                                s.device().device_type(),
+                                crate::drive::DriveType::NvmeTcp | crate::drive::DriveType::Iscsi
+                            )
+                        })
+                    })
+                    .copied()
+                    .collect()
+            };
+            let retire_sources = {
+                let state_for_persist = state_for_persist.clone();
+                move |retire: Vec<SlabId>| async move {
+                    let Some(state) = state_for_persist.upgrade() else { return };
+                    for id in retire {
+                        match state.volume_manager.lock().await.retire_drained_slab(id).await {
+                            Ok(true) => println!(
+                                "Flow-over: slab {} (the appliance's) is no longer used; persists no longer flush it (#358)",
+                                id.0
+                            ),
+                            Ok(false) => tracing::info!("flow-over: slab {} still holds something; kept", id.0),
+                            Err(e) => tracing::warn!("flow-over: slab {}: {e}", id.0),
+                        }
+                    }
+                }
+            };
             if sources.is_empty() && data_left == 0 {
                 flow_remaining.store(0, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!("flow-over: nothing left to move onto {}", flow.disk);
                 local_boot(then_local_boot).await;
+                retire_sources(retire).await;
                 return;
             }
             println!(
@@ -5980,6 +6016,7 @@ pub async fn run() -> anyhow::Result<()> {
             println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
             if failed == 0 {
                 local_boot(then_local_boot).await;
+                retire_sources(retire).await;
             } else {
                 println!(
                     "Local boot: {} is left unbootable — {failed} extent(s) did not move, and a \

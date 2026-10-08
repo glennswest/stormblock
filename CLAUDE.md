@@ -195,7 +195,18 @@ deletes queued ahead each time.
       caller holds the manager) in `/debug/locks` and the watchdog's captures
 - [x] test `the_template_listing_answers_while_the_volume_manager_is_held`;
       unit tests; README, CHANGELOG
-- [ ] build VM: the new tests, integration_fstemplates, debug, full check
+- [x] build VM at f2f9dbf: the listing test, integration_fstemplates, debug
+      and volume units 29/29
+- Live on the Dell (master, 20:4xZ): `POST /api/v1/fstemplates` has held the
+  manager 3.5 h; :9090 no longer accepts. By reading: the NVMe/TCP initiator
+  has no timeout at all, and a finished flow-over's remote slabs stay
+  registered, so every persist flushes them under the manager's lock
+- [x] every NVMe/TCP command and connect bounded (`io_timeout`, 30 s), TCP
+      keepalive; test through a proxy that goes silent
+- [x] a complete flow-over retires its remote sources
+      (`retire_drained_slab`); unit test
+- [ ] build VM: the new tests, nvmeof, flow-over, fstemplates; full check;
+      golden
 - Left as it was: the 25 manager methods still persist under the lock (the
   rest of #269's fix, a bigger change); other reads that take the lock wait
   behind them as before

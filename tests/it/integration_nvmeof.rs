@@ -266,3 +266,79 @@ async fn a_slab_on_an_nvme_tcp_namespace_opens_in_either_format() {
         server.abort();
     }
 }
+
+/// #358: a command on a connection that went silent (the peer gone with no
+/// FIN or RST) waited forever. On the Dell a persist's flush to the
+/// appliance's slab never returned, and it held the volume manager for
+/// hours. Through a proxy that stops forwarding mid-connection, a flush now
+/// fails within the timeout, and the next I/O reconnects and works.
+#[tokio::test]
+async fn a_command_on_a_connection_that_went_silent_fails_in_bounded_time_and_the_next_reconnects() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    std::env::set_var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS", "2");
+
+    let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
+    let (target, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+
+    // A proxy that can go silent: it keeps every socket open and moves nothing.
+    let frozen = Arc::new(AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = listener.local_addr().unwrap();
+    let f = frozen.clone();
+    let proxy_task = tokio::spawn(async move {
+        loop {
+            let Ok((down, _)) = listener.accept().await else { return };
+            let Ok(up) = tokio::net::TcpStream::connect(target).await else { continue };
+            let (dr, dw) = down.into_split();
+            let (ur, uw) = up.into_split();
+            for (mut from, mut to, f) in [
+                (Box::new(dr) as Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box::new(uw) as Box<dyn tokio::io::AsyncWrite + Unpin + Send>, f.clone()),
+                (Box::new(ur), Box::new(dw), f.clone()),
+            ] {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    loop {
+                        while f.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        let n = match from.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        while f.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        if to.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        }
+    });
+
+    let uri = format!("nvme-tcp://{proxy}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev = open_one_drive(&uri).await.expect("attach through the proxy");
+    dev.write(0, &vec![0x11u8; 4096]).await.unwrap();
+    dev.flush().await.unwrap();
+
+    frozen.store(true, Ordering::SeqCst);
+    let t0 = std::time::Instant::now();
+    let r = tokio::time::timeout(std::time::Duration::from_secs(20), dev.flush())
+        .await
+        .expect("a flush on a silent connection must not wait forever");
+    let took = t0.elapsed();
+    assert!(r.is_err(), "a flush nobody answered reported success");
+    assert!(took >= std::time::Duration::from_millis(1500), "gave up too early: {took:?}");
+    assert!(took < std::time::Duration::from_secs(10), "bounded by the 2 s timeout, took {took:?}");
+
+    frozen.store(false, Ordering::SeqCst);
+    dev.write(4096, &vec![0x22u8; 4096]).await.expect("the next write reconnects");
+    let mut back = vec![0u8; 8192];
+    dev.read(0, &mut back).await.unwrap();
+    assert!(back[..4096].iter().all(|b| *b == 0x11) && back[4096..].iter().all(|b| *b == 0x22));
+    proxy_task.abort();
+    server.abort();
+}

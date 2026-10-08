@@ -216,21 +216,60 @@ struct Conn {
     cid: u16,
 }
 
+/// How long one NVMe/TCP command may take before the connection is given up
+/// (#358): `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, default 30 s, Linux's
+/// `nvme_core.io_timeout`. With no bound a command on a connection that died
+/// without a FIN or RST (the target restarted, a link went) waited forever.
+/// A persist waited with it, holding the volume manager, and the Dell's API
+/// stopped answering for hours. A timeout drops the connection, the command
+/// fails like any other I/O error, and the next one reconnects.
+pub fn io_timeout() -> std::time::Duration {
+    static T: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        let secs = std::env::var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(30);
+        std::time::Duration::from_secs(secs)
+    })
+}
+
+/// A command (or a connect) bounded by [`io_timeout`].
+async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = io::Result<T>>) -> io::Result<T> {
+    match tokio::time::timeout(io_timeout(), fut).await {
+        Ok(r) => r,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("NVMe-TCP {what}: no answer within {}s; the connection is dropped", io_timeout().as_secs()),
+        )),
+    }
+}
+
 impl Conn {
     /// TCP connect + ICReq/ICResp + Fabric Connect for `qid`, and
     /// DH-HMAC-CHAP when the target asks for it.
     async fn establish(spec: &NvmeTcpSpec, qid: u16) -> io::Result<Self> {
         let (addr, nqn, host_nqn) = (spec.addr.as_str(), spec.nqn.as_str(), spec.effective_host_nqn());
-        let stream = TcpStream::connect(addr).await?;
+        let stream = bounded("connect", async { TcpStream::connect(addr).await }).await?;
         stream.set_nodelay(true)?;
+        // A dead peer is noticed while idle too, not only by a command's
+        // timeout: probes after 10 s idle, every 5 s, 3 tries (#358).
+        let ka = socket2::TcpKeepalive::new()
+            .with_time(std::time::Duration::from_secs(10))
+            .with_interval(std::time::Duration::from_secs(5))
+            .with_retries(3);
+        if let Err(e) = socket2::SockRef::from(&stream).set_tcp_keepalive(&ka) {
+            tracing::debug!("NVMe-TCP {addr}: TCP keepalive not set: {e}");
+        }
         let (reader, writer) = stream.into_split();
         let mut conn = Conn {
             reader: BufReader::new(reader),
             writer: BufWriter::new(writer),
             cid: 1,
         };
-        conn.ic_handshake().await?;
-        let dw0 = conn.fabric_connect_as(nqn, host_nqn, qid).await?;
+        bounded("handshake", conn.ic_handshake()).await?;
+        let dw0 = bounded("connect command", conn.fabric_connect_as(nqn, host_nqn, qid)).await?;
         if dw0 & crate::target::nvmeof::CONNECT_AUTHREQ_ATR != 0 {
             let key = spec.effective_dhchap().ok_or_else(|| {
                 io::Error::new(
@@ -238,7 +277,7 @@ impl Conn {
                     format!("{nqn} requires DH-HMAC-CHAP for {host_nqn}, and no secret was given"),
                 )
             })?;
-            conn.authenticate(&key, host_nqn, nqn).await?;
+            bounded("authentication", conn.authenticate(&key, host_nqn, nqn)).await?;
         }
         Ok(conn)
     }
@@ -563,10 +602,9 @@ impl NvmeofDevice {
         let mut admin = Conn::establish(spec, 0)
             .await
             .map_err(DriveError::Io)?;
-        let ctrl = admin.identify(CNS_CONTROLLER, 0).await.map_err(DriveError::Io)?;
+        let ctrl = bounded("identify", admin.identify(CNS_CONTROLLER, 0)).await.map_err(DriveError::Io)?;
         let (serial, model) = decode_identify_ctrl(&ctrl);
-        let ns = admin
-            .identify(CNS_NAMESPACE, spec.nsid)
+        let ns = bounded("identify", admin.identify(CNS_NAMESPACE, spec.nsid))
             .await
             .map_err(DriveError::Io)?;
         let (nsze, block_size) = decode_identify_ns(&ns).ok_or_else(|| {
@@ -676,7 +714,7 @@ impl NvmeofDevice {
             let chunk = (buf.len() - done).min(MAX_CHUNK);
             let slba = (offset + done as u64) / bs;
             let nlb = (chunk as u64 / bs) as u16;
-            let data = conn.io_read(self.spec.nsid, slba, nlb, chunk).await?;
+            let data = bounded("read", conn.io_read(self.spec.nsid, slba, nlb, chunk)).await?;
             buf[done..done + chunk].copy_from_slice(&data);
             done += chunk;
         }
@@ -690,7 +728,7 @@ impl NvmeofDevice {
             let chunk = (buf.len() - done).min(MAX_CHUNK);
             let slba = (offset + done as u64) / bs;
             let nlb = (chunk as u64 / bs) as u16;
-            conn.io_write(self.spec.nsid, slba, nlb, &buf[done..done + chunk]).await?;
+            bounded("write", conn.io_write(self.spec.nsid, slba, nlb, &buf[done..done + chunk])).await?;
             done += chunk;
         }
         Ok(done)
@@ -797,7 +835,7 @@ impl BlockDevice for NvmeofDevice {
         let nsid = self.spec.nsid;
         let mut guard = self.lock_conn().await?;
         let conn = guard.as_mut().expect("lock_conn established");
-        if let Err(e) = conn.io_flush(nsid).await {
+        if let Err(e) = bounded("flush", conn.io_flush(nsid)).await {
             *guard = None;
             return Err(DriveError::Io(e));
         }
@@ -817,7 +855,7 @@ impl BlockDevice for NvmeofDevice {
             let nlb = blocks.min(u32::MAX as u64) as u32;
             let mut guard = self.lock_conn().await?;
             let conn = guard.as_mut().expect("lock_conn established");
-            if let Err(e) = conn.io_deallocate(nsid, slba, nlb).await {
+            if let Err(e) = bounded("deallocate", conn.io_deallocate(nsid, slba, nlb)).await {
                 *guard = None;
                 return Err(DriveError::Io(e));
             }

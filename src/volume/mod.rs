@@ -1010,6 +1010,36 @@ impl VolumeManager {
         Ok(slab_id)
     }
 
+    /// Forget a flow-over's source slab once nothing is left on it (#358).
+    ///
+    /// The appliance's clone (over NVMe/TCP) stayed registered after a
+    /// complete flow-over, so every persist on the node went on flushing it,
+    /// and writing records to it, for the rest of the boot. That made the
+    /// node's metadata durability depend on a connection it no longer
+    /// needed. On the Dell one such flush never returned and held the volume
+    /// manager for hours. Refused (`Ok(false)`) while any volume still has a
+    /// leg there. The slab itself is left as it is: it is the appliance's
+    /// per-boot clone, released by the next claim.
+    pub async fn retire_drained_slab(&mut self, slab: SlabId) -> Result<bool, VolumeError> {
+        if !self.volumes_on_slab(slab).await.is_empty() {
+            return Ok(false);
+        }
+        if self.registry.write().await.remove(&slab).is_none() {
+            return Ok(false);
+        }
+        self.metadata_slabs.retain(|s| *s != slab);
+        self.records_on_slab.lock().unwrap_or_else(|e| e.into_inner()).remove(&slab);
+        {
+            let mut f = self.flowing_into.lock().unwrap_or_else(|e| e.into_inner());
+            for (_, sources) in f.iter_mut() {
+                sources.retain(|s| *s != slab);
+            }
+            f.retain(|(_, sources)| !sources.is_empty());
+        }
+        self.persist().await;
+        Ok(true)
+    }
+
     /// Forget an array's slab: refused while any volume is pinned to it or
     /// has a leg there, since removing it would take their data (#150).
     pub async fn remove_array(&mut self, array_id: &RaidArrayId) -> Result<(), VolumeError> {
@@ -4021,6 +4051,46 @@ mod redundancy_tests {
         assert_eq!(mgr.volume_role(&id), Some(SlabRole::Data), "the half it can live in");
         let v = mgr.get_volume(&id).unwrap();
         v.write(0, &[7u8; 4096]).await.expect("an empty data volume takes writes after a restart");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #358: a slab nothing has a leg on is taken out of the manager (no
+    /// persist touches it again); one that still holds an extent is kept.
+    #[tokio::test]
+    async fn a_drained_slab_is_retired_and_a_used_one_is_kept() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let mut ids = Vec::new();
+        for n in ["a.bin", "b.bin"] {
+            let dev = FileDevice::open_with_capacity(d.join(n).to_str().unwrap(), 8 * 1024 * 1024).await.unwrap();
+            let slab = Slab::format_with(
+                Arc::new(dev),
+                SlabFormat::new(slot, StorageTier::Hot).with_role(SlabRole::Data),
+            )
+            .await
+            .unwrap();
+            ids.push(slab.slab_id());
+            mgr.add_slab(slab).await;
+        }
+        let vol = mgr.create_volume_any("v", 1 << 20).await.unwrap();
+        mgr.get_volume(&vol).unwrap().write(0, &[9u8; 4096]).await.unwrap();
+        let used: Vec<bool> = {
+            let mut u = Vec::new();
+            for id in &ids {
+                u.push(!mgr.volumes_on_slab(*id).await.is_empty());
+            }
+            u
+        };
+        assert_eq!(used.iter().filter(|u| **u).count(), 1, "one extent, on one slab");
+        for (id, used) in ids.iter().zip(&used) {
+            let retired = mgr.retire_drained_slab(*id).await.unwrap();
+            assert_eq!(retired, !used, "slab {}: used {used}", id.0);
+            assert_eq!(mgr.registry().read().await.get(id).is_some(), *used);
+        }
+        let mut back = vec![0u8; 4096];
+        mgr.get_volume(&vol).unwrap().read(0, &mut back).await.unwrap();
+        assert!(back.iter().all(|b| *b == 9), "the volume reads on");
         let _ = std::fs::remove_dir_all(&d);
     }
 

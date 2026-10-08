@@ -65,7 +65,12 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   files (tests and development only). Like the `O_DIRECT` device, the
   `nvme-tcp://` initiator takes I/O that is not whole blocks: it reads the
   covering blocks, and read-modify-writes them under one hold of its
-  connection (#301). Drives open and close at runtime
+  connection (#301). Every NVMe/TCP command and connect is bounded
+  (`STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, 30 s) and its sockets carry TCP
+  keepalive: a connection that went silent fails the command, is dropped,
+  and the next command reconnects (#358). Once a flow-over has moved
+  everything, the appliance's slabs are taken out of the engine, so no
+  persist flushes them again (#358). Drives open and close at runtime
   (`POST /api/v1/drives`), carry their identity (serial, WWN) and labels
   (`shelf`, `bay`, `hba` from stormdrive), and can be drained and reported
   failing over HTTP.
@@ -339,6 +344,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
 | `STORMBLOCK_DHCHAP_SECRET` | the DH-HMAC-CHAP secret (`DHHC-1:…`) the engine's NVMe/TCP initiator answers with when a target asks and the drive was given none (`dhchap_secret`, #213) (#210) | no secret: a target that requires one refuses |
+| `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS` | how long one NVMe/TCP command (or connect) of the engine's initiator may take before the connection is dropped and the command fails (#358) | `30`, like Linux's `nvme_core.io_timeout` |
 | `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator`; when `boot-local` claims a fresh clone to resume a flow-over, `nqn.2026-09.lo.storm:host-<tag>` |
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds a **kept** data half (the update path) | policy decides |
