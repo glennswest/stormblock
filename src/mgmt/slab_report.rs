@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::drive::slab::SlabId;
 use crate::drive::DriveType;
@@ -42,6 +42,59 @@ pub struct SlabReport {
     /// The same for the data half.
     pub data: &'static str,
     pub items: Vec<SlabItem>,
+    /// What this boot did with the machine's own disk (#344): taken, or the
+    /// drive carrying slabs that was not taken and why, or none. A node that
+    /// is `diskless` with its slabs on its own drive names the drive and the
+    /// reason here, instead of a bare `remote`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_disk: Option<LocalDisk>,
+}
+
+/// The boot's verdict on the machine's own disk (#344), written to
+/// [`LOCAL_DISK_PATH`] by the initramfs's survey and by `boot-local`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LocalDisk {
+    /// `taken`, `refused` (a drive with slabs that was not taken), `failed`
+    /// (taken, and `boot-local` could not use it) or `none`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `initramfs` (the survey) or `boot-local`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+}
+
+/// Where the boot writes [`LocalDisk`]: `/run` survives the switch_root.
+pub const LOCAL_DISK_PATH: &str = "/run/stormblock/local-disk.json";
+
+fn local_disk_path() -> std::path::PathBuf {
+    std::env::var_os("STORMBLOCK_LOCAL_DISK_REPORT")
+        .map(Into::into)
+        .unwrap_or_else(|| LOCAL_DISK_PATH.into())
+}
+
+/// The boot's verdict, if it wrote one.
+pub fn read_local_disk() -> Option<LocalDisk> {
+    let text = std::fs::read_to_string(local_disk_path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Write the verdict (atomically; a warning when it cannot be).
+pub fn write_local_disk(note: &LocalDisk) {
+    let path = local_disk_path();
+    let write = || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(note).unwrap_or_default())?;
+        std::fs::rename(&tmp, &path)
+    };
+    if let Err(e) = write() {
+        tracing::warn!("could not record the local disk's state in {}: {e}", path.display());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -97,6 +150,7 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
             system: half(false),
             data: half(true),
             items,
+            local_disk: None,
         };
     };
     let fact = |id: &SlabId| slabs.iter().find(|s| s.id == *id);
@@ -123,7 +177,7 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
     let any_local = vols
         .iter()
         .any(|v| v.iter().any(|id| fact(id).is_some_and(|s| s.remote.is_none())));
-    SlabReport { diskless: !any_local, system: half(false), data: half(true), items }
+    SlabReport { diskless: !any_local, system: half(false), data: half(true), items, local_disk: None }
 }
 
 /// The report now, without waiting: `None` when the registry or the extent
@@ -178,7 +232,8 @@ pub fn for_health(state: &crate::mgmt::AppState) -> Option<SlabReport> {
         }
     }
     match snapshot(&state.slab_registry, &state.gem) {
-        Some(r) => {
+        Some(mut r) => {
+            r.local_disk = read_local_disk();
             *cache = Some((Instant::now(), r.clone()));
             Some(r)
         }
@@ -241,5 +296,39 @@ mod tests {
         let none = build(&[], None);
         assert!(none.diskless);
         assert_eq!((none.system, none.data), ("none", "none"));
+    }
+
+    /// #344: the boot's verdict on the machine's own disk is read back and
+    /// carried in the report: a diskless node names the drive and the reason.
+    #[test]
+    fn the_local_disk_verdict_is_read_and_reported() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("local-disk.json");
+        // The process-wide override: only this module reads it.
+        std::env::set_var("STORMBLOCK_LOCAL_DISK_REPORT", &path);
+        assert_eq!(read_local_disk(), None, "no verdict written: none reported");
+        // As the initramfs writes it.
+        std::fs::write(
+            &path,
+            r#"{"state": "refused", "drive": "/dev/sda", "reason": "behind a SAS expander (a disk shelf, #273)", "from": "initramfs"}"#,
+        )
+        .unwrap();
+        let note = read_local_disk().expect("the survey's verdict");
+        assert_eq!((note.state.as_str(), note.drive.as_deref()), ("refused", Some("/dev/sda")));
+        let mut r = build(&[slab(1, false, true), slab(2, true, true)], Some(&vols(&[&[1], &[2]])));
+        r.local_disk = Some(note);
+        let j = serde_json::to_value(&r).unwrap();
+        assert_eq!(j["diskless"], true);
+        assert_eq!(j["local_disk"]["drive"], "/dev/sda");
+        assert!(j["local_disk"]["reason"].as_str().unwrap().contains("expander"));
+        // As boot-local writes it.
+        write_local_disk(&LocalDisk {
+            state: "failed".into(),
+            drive: Some("/dev/sda".into()),
+            reason: Some("Input/output error".into()),
+            from: Some("boot-local".into()),
+        });
+        assert_eq!(read_local_disk().unwrap().state, "failed");
+        std::env::remove_var("STORMBLOCK_LOCAL_DISK_REPORT");
     }
 }

@@ -174,6 +174,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The Dell runs diskless with its slabs on sda (2026-10-08, #344, P0) — IN PROGRESS
+
+11.95 on C2NR0Q2: health `diskless`, both halves nvme-tcp, sda laid
+(EFI + both slabs). No serial capture (SOL refused). By reading: with no
+`rd.stormblock.slab=` and no boot intent, the survey's #273 rule took any
+drive with `device/enclosure_device:*` for a shelf; stormdrive puts sda in
+bay 4 by SES, so the R230's own backplane is an enclosure.
+`local_data_slab` skipped it ("no local drive carries a data slab"), then
+`may_take` refused it: the node claimed and ran from forge, silently.
+Owner (on #344): the flow-over is mandatory; a node that cannot take its
+disk fails loudly and names the drive.
+- [ ] a shelf = behind a SAS expander (a shelf's IOMs are expanders); an
+      SES enclosure alone is the machine's own backplane
+- [ ] `/run/stormblock/local-disk.json`: the survey's verdict (taken, or the
+      drive with slabs refused and why, or none) + a console WARNING;
+      boot-local writes taken/failed; adopt-ublk warns; health
+      `slabs.local_disk {state, drive, reason}`
+- [ ] tests (boot-hook: the Dell's own bay, the verdicts; slab_report
+      unit); README, CHANGELOG; golden; tell stormcentral/stormdrive
+
 ### /v1: promote and expiry tear down the data path; expiry on time (2026-10-08, #195) — IN PROGRESS
 
 Promote and a dual-attach window's auto-abort dropped attachment records and

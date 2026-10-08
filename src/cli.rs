@@ -6430,6 +6430,18 @@ pub async fn run() -> anyhow::Result<()> {
         );
     }
     println!("Adopted {live} device(s). Serving until Ctrl+C.");
+    // Running from the appliance although the machine's own drive carries
+    // slabs is the fault to name (#344): on the console, as the boot said it.
+    if let Some(note) = crate::mgmt::slab_report::read_local_disk() {
+        if matches!(note.state.as_str(), "refused" | "failed") {
+            eprintln!(
+                "WARNING: adopt: this node runs from the appliance; its own drive {} was {}: {} (#344)",
+                note.drive.as_deref().unwrap_or("?"),
+                note.state,
+                note.reason.as_deref().unwrap_or("no reason recorded")
+            );
+        }
+    }
 
     // Held out here so the capture on the way down can reach them; set inside
     // the block below, where the volume manager still exists.
@@ -7027,14 +7039,29 @@ async fn handle_boot_local(
                 // Laid, updated or already current: the disk carries this
                 // node's layout, and the successor makes it bootable.
                 local_boot_disk = Some(disk.to_string());
+                crate::mgmt::slab_report::write_local_disk(&crate::mgmt::slab_report::LocalDisk {
+                    state: "taken".into(),
+                    drive: Some(disk.to_string()),
+                    reason: None,
+                    from: Some("boot-local".into()),
+                });
             }
             // Said plainly, and on the console, because this is the one line
             // that explains why a node that was going to run locally is
-            // running from the appliance instead.
+            // running from the appliance instead. And kept for health (#344):
+            // the flow-over onto the node's own disk is mandatory, so a node
+            // that runs diskless names the drive and the reason.
             Err(e) => {
                 println!("Flow-over: not taking {disk} — {e}");
                 println!("Flow-over: the node boots from the appliance, unaffected.");
+                eprintln!("WARNING: this node runs from the appliance: {disk} could not be taken: {e} (#344)");
                 tracing::warn!("flow-over disabled for {disk}: {e}");
+                crate::mgmt::slab_report::write_local_disk(&crate::mgmt::slab_report::LocalDisk {
+                    state: "failed".into(),
+                    drive: Some(disk.to_string()),
+                    reason: Some(e.to_string()),
+                    from: Some("boot-local".into()),
+                });
             }
         }
     }

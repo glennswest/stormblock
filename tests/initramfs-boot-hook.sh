@@ -616,13 +616,17 @@ echo "drives this install may take (#273):"
 
 # Several drives: name|kind, kind one of
 #   blank       an internal drive, all zeros, no slab
-#   shelf       a blank drive in an SES enclosure (a NetApp shelf)
+#   shelf       a blank drive in a NetApp shelf: an SES enclosure behind a SAS
+#               expander (a shelf's IOMs are expanders)
 #   expander    a blank drive behind a SAS expander
+#   bay         a blank drive in the server's own SES backplane, no expander
+#               (the Dell R230's bays on its mpt3sas HBA, #344)
+#   baylayout   this node's own layout, in such a bay
 #   stormraid   an internal drive with a stormraid superblock
 #   foreign     an internal drive with a partition table (bytes in its first MiB)
 #   tail        an internal drive with data in its last MiB only (md 1.0, ZFS)
 #   layout      this node's own layout (data and system slab)
-#   datashelf   a stormblock data slab, in a shelf
+#   datashelf   a stormblock data slab, in a shelf (behind an expander)
 survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
     (
         set +e
@@ -633,26 +637,28 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
         for spec in "$@"; do
             n="${spec%%|*}"; kind="${spec#*|}"
             case "$kind" in
-            expander) mkdir -p "$real/port-0:0/expander-0:0/$n"; ln -s "$real/port-0:0/expander-0:0/$n" "$sys/$n" ;;
+            expander|shelf|datashelf) mkdir -p "$real/port-0:0/expander-0:0/$n"; ln -s "$real/port-0:0/expander-0:0/$n" "$sys/$n" ;;
             *) mkdir -p "$sys/$n" ;;
             esac
             echo 0 > "$sys/$n/removable"; echo 8192 > "$sys/$n/size"
             dd if=/dev/zero of="$dev/$n" bs=1048576 count=4 2>/dev/null
             echo "/dev/$n: not a slab (bad slab magic)" > "$ans/$n"
             case "$kind" in
-            shelf|datashelf) mkdir -p "$sys/$n/device/enclosure_device:Slot 03" ;;
+            shelf|datashelf|bay|baylayout) mkdir -p "$sys/$n/device/enclosure_device:Slot 03" ;;
             esac
             case "$kind" in
             stormraid) printf 'STORMRD1' | dd of="$dev/$n" conv=notrunc 2>/dev/null ;;
             foreign) printf '\125\252' | dd of="$dev/$n" bs=1 seek=510 conv=notrunc 2>/dev/null ;;
             tail) printf 'a92b4efc' | dd of="$dev/$n" bs=1 seek=$((4 * 1048576 - 4096)) conv=notrunc 2>/dev/null ;;
-            layout) printf '%s\n' "$DATA_ONLY" "$SYS_HALF" > "$ans/$n" ;;
+            layout|baylayout) printf '%s\n' "$DATA_ONLY" "$SYS_HALF" > "$ans/$n" ;;
             datashelf) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
             esac
         done
         STORM_STORMBLOCK="$SVSTUB"; STORM_SYS_BLOCK="$sys"; SURVEY_ANSWERS="$ans"; STORM_DEV="$dev"
         export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS STORM_DEV
         STORM_NO_INTENT="${NOINTENT:-$WORK/no-marker}"; export STORM_NO_INTENT
+        STORM_LOCAL_DISK_REPORT="$WORK/local-disk.json"; export STORM_LOCAL_DISK_REPORT
+        rm -f "$STORM_LOCAL_DISK_REPORT"
         SLAB_NAMED="${NAMED:-}"; ALLOW_EXTERNAL="${EXTERNAL:-}"
         SLAB="${BOOTING:-nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1}"
         CLAIMED="${CLAIMED_T:-}"
@@ -697,6 +703,33 @@ check "none named, 'force': a shelf drive with a data slab is still left" "" \
     "$(survey_m force sdb\|datashelf)"
 check "rd.stormblock.allow-external=1: a blank drive in an enclosure is taken" "/dev/sdb" \
     "$(EXTERNAL=1 survey_m any sdb\|shelf)"
+
+echo "the machine's own disk, and what the boot says about it (#344):"
+ld() { tr -d '\n' < "$WORK/local-disk.json" 2>/dev/null; }
+# The Dell on 11.95: no drive named, no boot intent, its own layout in a bay
+# of its own SES backplane. It was taken for a shelf and the node ran from
+# forge with its slabs on sda.
+NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
+check "the Dell: its own layout in its own SES bay is installed over, data kept" "/dev/sda" \
+    "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|baylayout)"
+case "$(ld)" in *'"state": "taken"'*'"drive": "/dev/sda"'*) check "  and the verdict is taken, sda" yes yes ;;
+*) check "  and the verdict is taken, sda: $(ld)" yes no ;; esac
+check "the same release in its own bay: kept (recovery)" "/dev/sda" \
+    "$(STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey_m any sda\|baylayout)"
+NOINTENT=""
+check "a blank drive in the server's own SES bay is taken" "/dev/sdb" "$(survey_m any sdb\|bay)"
+# A drive with slabs left alone says which and why, and the console says it.
+check "a data slab in a shelf is left" "" "$(survey_m force sdb\|datashelf)"
+case "$(ld)" in *'"state": "refused"'*'"drive": "/dev/sdb"'*'SAS expander'*) check "  the verdict names the drive and the shelf" yes yes ;;
+*) check "  the verdict names the drive and the shelf: $(ld)" yes no ;; esac
+grep -q "WARNING: this node runs from the appliance although /dev/sdb" "$WORK/msurvey.log" \
+    && check "  and the console says it" yes yes || check "  and the console says it" yes no
+check "cannot tell which release: left alone" "" \
+    "$(STUB_HOLDS=2 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout)"
+case "$(ld)" in *'"state": "refused"'*'cannot tell which release'*) check "  the verdict says why" yes yes ;;
+*) check "  the verdict says why: $(ld)" yes no ;; esac
+check "no drive with slabs: the verdict is none" "" "$(survey_m any sdc\|foreign)"
+case "$(ld)" in *'"state": "none"'*) check "  none" yes yes ;; *) check "  none: $(ld)" yes no ;; esac
 
 [ "$fail" -eq 0 ] && echo "all boot hook, probe, identity, takeable and survey checks passed"
 exit "$fail"

@@ -3030,9 +3030,13 @@ if [ "$BOOT_MODE" = "local" ]; then
     #
     #   1. The drive rd.stormblock.slab= names, when it is on this machine,
     #      is the only one. Every other drive is left alone and said so.
-    #   2. A drive behind a SAS expander or in an SES enclosure - a disk
-    #      shelf - is never taken by the scan (rd.stormblock.allow-external=1
-    #      for a server whose own bays sit behind one).
+    #   2. A drive behind a SAS expander - a disk shelf - is never taken by
+    #      the scan (rd.stormblock.allow-external=1 for a server whose own
+    #      bays sit behind one). Not every SES enclosure: a server's own
+    #      hot-plug backplane is one too (the Dell R230's bays on its
+    #      mpt3sas HBA, #344), and treating it as a shelf left the Dell
+    #      running diskless from forge with its slabs on sda. A shelf's
+    #      drives are always behind its IOMs' expanders.
     #   3. "Nobody's" means blank: its first and last MiB are zeros. Anything
     #      else - a partition table, a stormraid member, md, LVM, ZFS, a
     #      filesystem - is somebody's, and left.
@@ -3051,10 +3055,30 @@ if [ "$BOOT_MODE" = "local" ]; then
     drive_external() { # /sys/block/X -> 0 when the drive is in a shelf
         [ "${ALLOW_EXTERNAL:-}" = 1 ] && return 1
         case "$(readlink -f "$1" 2>/dev/null)" in */expander-*) return 0 ;; esac
-        for _e in "$1"/device/enclosure_device:*; do
-            [ -e "$_e" ] && return 0
-        done
         return 1
+    }
+    # What this boot did with the machine's own disk (#344), for the engine's
+    # health once the node runs: `taken` (the disk chosen), `refused` (a
+    # drive carrying stormblock slabs that was not taken, and why), or
+    # `none` (no local drive carries slabs). A node that runs diskless with
+    # slabs on its own drive says which drive and why, never a bare
+    # `remote`. /run survives switch_root; boot-local updates it when it
+    # takes the disk or fails to.
+    LD_REPORT="${STORM_LOCAL_DISK_REPORT:-/run/stormblock/local-disk.json}"
+    LD_DRIVE=""
+    LD_WHY=""
+    ld_refused() { # dev why -> remembered when dev carries stormblock slabs
+        [ -n "$LD_DRIVE" ] && return 0
+        "$SURVEY_SB" slab list "$1" 2>/dev/null | grep -q ": slab \|role=" || return 0
+        LD_DRIVE="$1"
+        LD_WHY="$2"
+    }
+    ld_write() { # state drive reason
+        mkdir -p "$(dirname "$LD_REPORT")" 2>/dev/null
+        _r=$(printf '%s' "$3" | tr '"\\\n' "'' ")
+        printf '{"state": "%s", "drive": %s, "reason": %s, "from": "initramfs"}\n' "$1" \
+            "$( [ -n "$2" ] && printf '"%s"' "$2" || printf null)" \
+            "$( [ -n "$_r" ] && printf '"%s"' "$_r" || printf null)" > "$LD_REPORT" 2>/dev/null || true
     }
     drive_signature() { # dev /sys/block/X -> what it carries; nothing when blank
         _got=$(dd if="$1" bs=1048576 count=1 2>/dev/null | wc -c)
@@ -3079,11 +3103,13 @@ if [ "$BOOT_MODE" = "local" ]; then
     may_take() { # /sys/block/X dev -> 0 when rules 1 and 2 allow the drive
         if [ -n "$NAMED_DISK" ] && [ "${1##*/}" != "$NAMED_DISK" ]; then
             echo "  $2 is not the drive rd.stormblock.slab= names (/dev/$NAMED_DISK) - leaving it (#273)"
+            ld_refused "$2" "not the drive rd.stormblock.slab= names (/dev/$NAMED_DISK)"
             return 1
         fi
         if drive_external "$1"; then
-            echo "  $2 is in an external enclosure (a disk shelf) - leaving it (#273;"
+            echo "  $2 is behind a SAS expander (a disk shelf) - leaving it (#273;"
             echo "  rd.stormblock.allow-external=1 if this machine's own bays are)"
+            ld_refused "$2" "behind a SAS expander (a disk shelf, #273); rd.stormblock.allow-external=1 if it is this machine's own bay"
             return 1
         fi
         return 0
@@ -3151,6 +3177,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     elif [ -n "${CLAIMED:-}" ] && [ "$SLAB" = "$CLAIMED" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
             echo "  booting the claimed image, and rd.stormblock.assimilate=off: no local drive is touched"
+            KEPT=$(local_data_slab) && ld_refused "$KEPT" "rd.stormblock.assimilate=off"
         elif [ -n "${INSTALL_OVER:-}" ] && has_data_slab "$INSTALL_OVER"; then
             install_keeping "$INSTALL_OVER" "does not hold the claimed release"
         elif [ -n "${INSTALL_OVER:-}" ]; then
@@ -3175,6 +3202,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                 ASSIMILATE=held
                 echo "  LEFT ALONE: cannot tell which release $KEPT holds - neither wiped nor"
                 echo "  merged; every local drive is left alone and this boot runs from the appliance (#261)"
+                ld_refused "$KEPT" "cannot tell which release it holds (slab holds: ${R_OUT:-no answer})"
                 ;;
             esac
         elif [ -e "${STORM_NO_INTENT:-/run/stormblock/no-intent}" ]; then
@@ -3268,7 +3296,8 @@ if [ "$BOOT_MODE" = "local" ]; then
                         echo "  $dev carries system slabs only - no identity on it; this node will take it"
                         break
                     fi
-                    echo "  $dev is already a stormblock slab - leaving it" ;;
+                    echo "  $dev is already a stormblock slab - leaving it"
+                    ld_refused "$dev" "carries stormblock slabs that rd.stormblock.assimilate=$ASSIMILATE does not take" ;;
                 *)
                     # Not a stormblock slab: taken only when blank (#273).
                     # `force` may still clear the drive the command line
@@ -3317,6 +3346,19 @@ if [ "$BOOT_MODE" = "local" ]; then
         ;;
     *) echo "  unknown rd.stormblock.assimilate='$ASSIMILATE' (off|blank|any|force)" ;;
     esac
+    # The verdict, for the engine's health (#344). A drive with slabs that
+    # this boot leaves alone is said loudly: the flow-over onto the node's own
+    # disk is mandatory (owner, 2026-10-08), and a node quietly running from
+    # forge with its slabs on its own drive is the failure to name.
+    if [ -n "$LOCAL_DISK" ]; then
+        ld_write taken "$LOCAL_DISK" ""
+    elif [ -n "$LD_DRIVE" ]; then
+        ld_write refused "$LD_DRIVE" "$LD_WHY"
+        echo "WARNING: this node runs from the appliance although $LD_DRIVE carries"
+        echo "WARNING: stormblock slabs: $LD_WHY (#344)"
+    else
+        ld_write none "" "no local drive carries stormblock slabs"
+    fi
     # --- END assimilate survey
 
     # --- BEGIN hook takeable (covered by tests/initramfs-boot-hook.sh)
