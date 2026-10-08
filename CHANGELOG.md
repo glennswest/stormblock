@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #253: the initramfs reads stormbootx's `StormBootClock` EFI variable.
+  - **`synced:<server>`:** logged as `clock: firmware synced from <server>`, and the NTP step is skipped (up to `STORM_NTP_WAIT` s saved per try). It runs anyway if the clock still reads before the image's build date, or with `rd.stormblock.ntp=always`.
+  - **`unsynced`:** logged as `clock: firmware did not sync`, and the step runs as before.
+  - **Absent:** behaves as before.
+  - **`/run/stormblock/clock`:** one line saying how the clock was set (`firmware <server>`, `ntp <server>`, `build-date`, `unset`), for the node.
+  - **Tests:** 7 cases added to `tests/initramfs-clock.sh` (synced, unsynced, absent, stale synced clock, always, a malformed value, the floor recorded).
 - **fix:** #231: a ublk attach no longer blocks an async worker, or the export table, while its device comes up.
   - **Before:** `UblkExportManager::ensure` polled with `std::thread::sleep`, up to 1 s for the kernel's id and then up to 5 s for the block device, on a runtime worker and holding `ublk_exports`. Every other attach, and every request that reads the export table (volume listings, health, usage), waited behind it.
   - **Now:** `ublk_export::attach` begins under the lock: it answers an existing export, waits for an attach of the same volume already under way, or starts a server and records it pending. It then waits asynchronously (`wait_ready`, same bounds and the same checks: an id assigned, the node present, nothing mounted on it) on a task of its own with no lock held, and finishes under the lock: the export is recorded, or its server is taken down. A caller that gives up leaves nothing half made.

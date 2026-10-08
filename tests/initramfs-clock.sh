@@ -96,6 +96,13 @@ run() {
     if [ -n "${4:-}" ]; then echo "$4" > "$WORK/ntp.$n"; else rm -f "$WORK/ntp.$n"; fi
     echo "100.42 50.0" > "$WORK/uptime"
     echo "$BUILT" > "$WORK/built"
+    # stormbootx's StormBootClock: four attribute bytes, then the value (#253).
+    rm -rf "$WORK/efi.$n"; mkdir -p "$WORK/efi.$n"
+    if [ -n "$STUB_FW_CLOCK" ]; then
+        { printf '\006\000\000\000'; printf '%s' "$STUB_FW_CLOCK"; } \
+            > "$WORK/efi.$n/StormBootClock-ab361f54-0166-44a4-a088-1ac22e98ab76"
+    fi
+    rm -f "$WORK/state.$n"
     OUT=$(
         PATH="$BIN:$PATH" CLK="$WORK/clk.$n" STUB_LOG="$WORK/log.$n" \
         STUB_NTP_TIME="$NOW" STUB_NTP_OK="$STUB_NTP_OK" \
@@ -103,19 +110,21 @@ run() {
         STUB_DATE_SET_FAIL="$STUB_DATE_SET_FAIL" NTP_MODE="$NTP_MODE" \
         STORM_NTP_WAIT="$STORM_NTP_WAIT" \
         STORM_UPTIME="$WORK/uptime" STORM_NTP_SERVERS="$WORK/ntp.$n" \
-        STORM_BUILD_DATE="$WORK/built" \
-        sh -c '. "$1"; clock_step "$2"' sh "$WORK/clock.sh" "$3"
+        STORM_BUILD_DATE="$WORK/built" STORM_EFIVARS="$WORK/efi.$n" \
+        STORM_CLOCK_STATE="$WORK/state.$n" \
+        sh -c '. "$1"; clock_step "$2"' sh "$WORK/clock.sh" "$3" 2>&1
     )
     CLOCK=$(cat "$WORK/clk.$n")
     NTPD=$(cat "$WORK/log.$n.ntpd" 2>/dev/null | tr '\n' '|')
     HW=$(cat "$WORK/log.$n.hwclock" 2>/dev/null || true)
     WAIT=$(cat "$WORK/log.$n.timeout" 2>/dev/null | tr '\n' ' ')
+    STATE=$(cat "$WORK/state.$n" 2>/dev/null || true)
     reset
 }
 # The knobs a case sets, back to their defaults after every run.
 reset() {
     STUB_NTP_OK=""; STUB_NTP_QUIET=""; STUB_NO_RTC=""; STUB_DATE_SET_FAIL=""
-    NTP_MODE=""; STORM_NTP_WAIT=3
+    NTP_MODE=""; STORM_NTP_WAIT=3; STUB_FW_CLOCK=""
 }
 reset
 
@@ -191,6 +200,45 @@ check "the wait passed to timeout" "1 1 " "$WAIT"
 echo "a clock that cannot be set"
 STUB_DATE_SET_FAIL=1; STUB_NTP_OK=; run noset $Y2000 192.168.11.30/24
 has "says it could not" "could not be set" "$OUT"
+
+echo "#253: the firmware synced: logged, not stepped again"
+STUB_FW_CLOCK="synced:10.0.0.7"; STUB_NTP_OK=10.0.0.5; run fwsync $NOW 192.168.11.30/24 10.0.0.5
+has "says the firmware synced and from where" "clock: firmware synced from 10.0.0.7" "$OUT"
+check "ntpd not run" "" "$NTPD"
+check "no wait spent" "" "$WAIT"
+check "clock as the firmware left it" $NOW "$CLOCK"
+check "kept for the node" "firmware 10.0.0.7" "$STATE"
+
+echo "#253: the firmware did not sync: logged, stepped as before"
+STUB_FW_CLOCK="unsynced"; STUB_NTP_OK=10.0.0.5; run fwunsync $Y2000 192.168.11.30/24 10.0.0.5
+has "says the firmware did not sync" "clock: firmware did not sync" "$OUT"
+check "clock stepped" $NOW "$CLOCK"
+check "kept for the node" "ntp 10.0.0.5" "$STATE"
+
+echo "#253: no variable (not booted by stormbootx): as before, nothing said of it"
+STUB_NTP_OK=10.0.0.5; run fwnone $Y2000 192.168.11.30/24 10.0.0.5
+hasnt "nothing about the firmware" "firmware" "$OUT"
+check "clock stepped" $NOW "$CLOCK"
+
+echo "#253: synced, but the clock reads before the build date: stepped anyway"
+STUB_FW_CLOCK="synced:10.0.0.7"; STUB_NTP_OK=10.0.0.5; run fwstale $Y2000 192.168.11.30/24 10.0.0.5
+has "says why it steps" "before this image was built: stepping it" "$OUT"
+check "clock stepped" $NOW "$CLOCK"
+
+echo "#253: synced, rd.stormblock.ntp=always: stepped anyway"
+NTP_MODE=always; STUB_FW_CLOCK="synced:10.0.0.7"; STUB_NTP_OK=10.0.0.5; run fwalways $((NOW - 60)) 192.168.11.30/24 10.0.0.5
+has "says so" "stepped again anyway" "$OUT"
+check "ntpd run once" "-n -q -d -p 10.0.0.5|" "$NTPD"
+check "clock stepped" $NOW "$CLOCK"
+
+echo "#253: a value stormbootx would not set is ignored"
+STUB_FW_CLOCK='synced:$(reboot)'; STUB_NTP_OK=10.0.0.5; run fwbad $Y2000 192.168.11.30/24 10.0.0.5
+has "says it is ignored" "ignoring StormBootClock" "$OUT"
+check "stepped as without it" $NOW "$CLOCK"
+
+echo "#253: nothing answers and the floor is taken: kept as such"
+STUB_NTP_OK=; run fwfloor $Y2000 192.168.11.30/24 10.0.0.5
+check "kept for the node" "build-date" "$STATE"
 
 echo "the whole /init still parses"
 sed -n "/^cat > \"\$INITRD_DIR\/init\" << 'INITSCRIPT'/,/^INITSCRIPT/p" "$GEN" | sed '1d;$d' > "$WORK/init"

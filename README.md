@@ -1564,6 +1564,7 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.mount=<vol>:<path>,…` | the root volume's `/etc/stormblock/mounts` | volumes `/init` exports and mounts itself, for a PID 1 that is not systemd. **Without it on the line, `/init` reads the list from the root volume** of the slab it boots: `/etc/stormblock/mounts`, one `<vol>:<path>` per line, `#` comments, read with `slab cat` before anything is exported (#262). A list on the line does not fit: x86 caps the line at 2048 bytes and the EFI stub truncates it and boots anyway (11.68 mounted nothing). The line still works, and wins, for older images. **An entry starting with `?`** (`?cilium:/p/cilium`) is optional (#288): mounted when the slab has the volume, left out when it does not (the console says `optional, not in this release`), never counted missing by the local-disk probe, so one list serves every flavor of a release. Whether the slab has it is read with `slab volumes`; a slab that cannot list its volumes leaves its optional entries out and says so. Plain entries stay required |
 | `rd.stormblock.bond=` | `off` | `active-backup` or `802.3ad` to bond the fastest uplinks |
 | `rd.stormblock.ntp=off` | on | skip the NTP step (the build-date floor still applies, #251) |
+| `rd.stormblock.ntp=always` | — | step from NTP even when stormbootx says it synced the clock (#253) |
 | `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`, which formats its target, #162) |
 | `ip=<addr>::<gw>:<mask>…` | DHCP | a static address for the uplink; `ip=dhcp` or none means DHCP (a static address declared elsewhere is overridden by DHCP, #229) |
 | `console=` | — | every one that exists gets the boot messages (#237) |
@@ -1682,6 +1683,15 @@ The X9 blades have no RTC battery, so after a power cut the kernel starts in
   (`/etc/stormblock/build-date`, from `SOURCE_DATE_EPOCH` or the build's
   clock) is set to it, with a loud warning. The RTC is not written with that
   guess. The boot never waits for the time.
+- stormbootx (v0.12.0+) says in the volatile EFI variable `StormBootClock`
+  whether it set the RTC from NTP (#253): `synced:<server>` is logged as
+  `clock: firmware synced from <server>` and the NTP step is skipped (saving
+  up to `STORM_NTP_WAIT` s per try), unless the clock still reads before the
+  build date or `rd.stormblock.ntp=always`; `unsynced` is logged as
+  `clock: firmware did not sync` and the step runs as before; absent (not
+  booted by stormbootx) changes nothing. How the clock was set is kept in
+  `/run/stormblock/clock`: `firmware <server>`, `ntp <server>`,
+  `build-date` or `unset`.
 
 The node's `timesync` (stormcos) keeps the clock after this.
 `tests/initramfs-clock.sh` pins the block against stubs.

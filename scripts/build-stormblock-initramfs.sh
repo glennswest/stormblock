@@ -1798,6 +1798,14 @@ fi
 # A step is written to the RTC, so the next boot of a machine that has one
 # starts right. Without a step, a clock before this image was built is
 # certainly wrong, and the build date is a better guess than 2000.
+#
+# stormbootx (v0.12.0+) sets the RTC from NTP itself and says so in a volatile
+# EFI variable, StormBootClock (`synced:<server>` or `unsynced`; absent when
+# not chain-loaded by it) (#253). When it synced, the clock is not stepped a
+# second time, which saves up to STORM_NTP_WAIT seconds per try — unless the
+# clock still reads before this image was built, which no synced clock can,
+# or rd.stormblock.ntp=always asks for the step anyway. How the clock was set
+# is kept in /run/stormblock/clock, one line, for the node.
 NTP_FALLBACK="${STORM_NTP_FALLBACK:-162.159.200.1 216.239.35.0}"
 NTP_WAIT="${STORM_NTP_WAIT:-3}"
 # Wall-clock seconds less uptime: changes only when the clock is set, so the
@@ -1819,10 +1827,45 @@ clock_try() {
     [ -n "$CLOCK_FROM" ] || CLOCK_FROM=$(echo "$*" | tr ' ' ',')
     return 0
 }
+# What stormbootx said about the clock: "synced <server>", "unsynced" or
+# nothing (#253).
+clock_firmware() {
+    _f="${EFIVARS:-${STORM_EFIVARS:-/sys/firmware/efi/efivars}}/StormBootClock-${STORMBOOT_GUID:-ab361f54-0166-44a4-a088-1ac22e98ab76}"
+    [ -r "$_f" ] || return 0
+    _v=$(tail -c +5 "$_f" 2>/dev/null | tr -d '\000\n\r ')
+    case "$_v" in
+        unsynced) echo unsynced ;;
+        synced:*[!A-Za-z0-9._:-]*) echo "  ignoring StormBootClock: '$_v' is not a server" >&2 ;;
+        synced:?*) echo "synced ${_v#synced:}" ;;
+        "") ;;
+        *) echo "  ignoring StormBootClock: '$_v'" >&2 ;;
+    esac
+}
+clock_note() { # one line: how this boot's clock was set, for the node (#253)
+    _st="${STORM_CLOCK_STATE:-/run/stormblock/clock}"
+    mkdir -p "$(dirname "$_st")" 2>/dev/null
+    echo "$*" > "$_st" 2>/dev/null || true
+}
 clock_step() { # $1 = the node's address, empty when there is no network
     CLOCK_FROM=""
     _stepped=""
     _dhcp=$(cat "${STORM_NTP_SERVERS:-/run/ntp-servers}" 2>/dev/null)
+    _fw=$(clock_firmware)
+    _fwfloor=$(cat "${STORM_BUILD_DATE:-/etc/stormblock/build-date}" 2>/dev/null)
+    case "$_fw" in
+        synced\ *)
+            echo "clock: firmware synced from ${_fw#synced } ($(date -u '+%Y-%m-%d %H:%M:%S') UTC)"
+            case "$_fwfloor" in ''|*[!0-9]*) _fwfloor=0 ;; esac
+            if [ "${NTP_MODE:-}" = always ]; then
+                echo "  stepped again anyway (rd.stormblock.ntp=always)"
+            elif [ "$(date +%s)" -lt "$_fwfloor" ]; then
+                echo "  WARNING: but the clock reads before this image was built: stepping it"
+            else
+                clock_note "firmware ${_fw#synced }"
+                return 0
+            fi ;;
+        unsynced) echo "clock: firmware did not sync" ;;
+    esac
     case "${NTP_MODE:-}:$1" in
         off:*|0:*|no:*) echo "Clock: not stepped (rd.stormblock.ntp=$NTP_MODE)" ;;
         *:)             echo "Clock: not stepped (no network)" ;;
@@ -1834,6 +1877,7 @@ clock_step() { # $1 = the node's address, empty when there is no network
                 _d=$(( $(clock_base) - _before ))
                 [ "$_d" -ge 0 ] && _d="+$_d"
                 echo "clock stepped by $_d s from $CLOCK_FROM ($(date -u '+%Y-%m-%d %H:%M:%S') UTC)"
+                clock_note "ntp $CLOCK_FROM"
                 if hwclock -w -u >/dev/null 2>&1; then
                     echo "  RTC written (UTC)"
                 else
@@ -1845,12 +1889,14 @@ clock_step() { # $1 = the node's address, empty when there is no network
             fi ;;
     esac
     [ -n "$_stepped" ] && return 0
+    clock_note "unset"
     _floor=$(cat "${STORM_BUILD_DATE:-/etc/stormblock/build-date}" 2>/dev/null)
     case "$_floor" in ''|*[!0-9]*) return 0 ;; esac
     _now=$(date +%s)
     [ "$_now" -lt "$_floor" ] || return 0
     _was=$(date -u -d "@$_now" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$_now")
     if date -u -s "@$_floor" >/dev/null 2>&1; then
+        clock_note "build-date"
         echo "WARNING: ************************************************************"
         echo "WARNING: CLOCK WAS $_was UTC, BEFORE THIS IMAGE WAS BUILT."
         echo "WARNING: SET TO THE BUILD DATE $(date -u '+%Y-%m-%d %H:%M:%S') UTC - NOT THE REAL TIME."
