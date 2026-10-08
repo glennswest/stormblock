@@ -1458,6 +1458,30 @@ same release (0, 3) is recovery and keeps the disk; cannot say (2) leaves
 every local drive alone. An install that cannot keep everything stops with
 the disk untouched (`docs/boot-hooks.md`).
 
+**Old system volumes are disposable; the node's are not (#349, owner).**
+Every volume records where it came from: `origin` is `release`, `node` or
+`unmarked`, and is shown on every volume.
+- `release` is what a release laid. `image build` marks it, and `boot-local`
+  marks everything in the release image it claimed, whatever the engine that
+  composed it recorded. Staged copies (#122) are `release` too.
+- `node` is everything the engine creates, clones, imports or templates.
+- `unmarked` is a volume recorded before origins were.
+
+At an install, the system half's volumes the new release does not name
+(other than `name@version` generations) are sorted:
+- an old release's (`release`) are dropped with the system half;
+- the node's and unmarked ones, sealed or not (a registry golden, held
+  media, a VM disk made with no `role`) are **carried**. Every extent still
+  on the old system slab moves into the data slab before the system half is
+  laid again, keeping the volume's id, its sharing and its record, and the
+  data half adopts them like any data volume.
+
+The console says `carried into the data half` or `dropped with the system
+half` for each, and the install report lists `carried`. A data half without
+room, or a carried volume with parity in the system half, stops the install
+before anything moves. The origin is carried in format v2's volume header,
+after the fields older engines read, so they skip it. Format v1 records none.
+
 Every slab this engine formats reserves a region for that record — `slab
 format`, `POST /api/v1/slabs` and the pool-growth path alike, sized from the
 device. It used to be `data` slabs alone, on the reasoning that outliving

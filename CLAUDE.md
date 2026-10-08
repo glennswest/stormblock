@@ -187,19 +187,30 @@ defaults to XFS (stormcos#91).
       nvme0c0n3, the device is nvme0n3); fixed, not rerun. Then CHANGELOG,
       README
 
-### Install drops sealed non-release volumes in the system half (2026-10-08, #349, P0) — WAITING ON THE OWNER (ask 2)
+### Install drops sealed non-release volumes in the system half (2026-10-08, #349, P0) — DONE here (owner: C)
 
 stormblock-registry#104: registry goldens and held media made with no role
-sit sealed in the system half; `install::plan` skips sealed volumes, so the
-next install drops them.
-- [x] ask 1: `role` on `POST /api/v1/volumes/import` has worked since #93
-      (`ImportSpec.role`); the route's doc now names it; test
+sit sealed in the system half; `install::plan` skipped sealed volumes, so the
+next install dropped them. Owner (2026-10-08): old system volumes are
+disposable; partner/user apps and data are not.
+- [x] ask 1: `role` on `POST /api/v1/volumes/import` has worked since #93;
+      the route's doc names it; test
       `integration_fstemplates::an_import_with_role_data_lands_in_the_data_half`
-- [ ] ask 2: no provenance on a record, so a dropped release golden and a
-      node-made golden look alike. Asked on #349 (needs-owner): A stop on all
-      (blocks flavor switches), B carry into the data half, C mark origin
-      release|node and drop/carry by it, unmarked carried (recommended), D
-      the release lists what it retires
+- [x] `Origin` (release|node|unmarked) on every volume, in the v2 header
+      after the fields older readers decode (`decode_from_slice` leaves
+      trailing bytes: no reader change needed first); creates are `node`;
+      image build, the claimed release image at boot-local and staged copies
+      `release`; `origin` on every volume response
+- [x] install: unnamed system-half volumes of an old release dropped; the
+      node's and unmarked ones carried into the data slab (`install::carry`,
+      ids and sharing kept) before the system half is laid again; refused
+      before anything moves when the data half has no room or parity is in
+      the system half
+- [x] test `install_tests::an_install_carries_the_nodes_system_half_volumes_
+      and_drops_the_old_releases` (replaces #311's stop test), metav2
+      origin test; install/stage/metav2 32/32 on a build VM
+- Owner's install rules 3–5 (the system drive is known, never guessed;
+  prove its identity; the 100-drive test) are #351
 
 ### Shelves by position (2026-10-08, #347, P0, owner corrects #344) — DONE here, metal pending
 

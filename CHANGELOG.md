@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #349 (P0, stormblock-registry#104): an install dropped sealed volumes the node had made in the system half (registry goldens, held media) without a word.
+  - **Origin on every volume:** `release`, `node` or `unmarked`. `image build`, the claimed release image at `boot-local` and staged copies are `release`; everything the engine creates is `node`. It is carried in format v2's volume header after the fields older engines read (they skip it), and shown on every volume as `origin`.
+  - **The install:** of the system-half volumes the new release doesn't name, an old release's are dropped, and the node's and unmarked ones (sealed or not) are carried. Their extents move into the data slab, keeping id, sharing and record, before the system half is laid again. It is reported as `carried` on the console and in the report.
+  - **When it stops instead:** no room in the data half, or parity in the system half, stops the install before anything moves.
+  - **Also:** `role` on `POST /api/v1/volumes/import` (working since #93) is now named in the route's doc and covered by a test.
 - **fix:** #347 (P0, owner's correction to #344): every SES enclosure is a shelf, and the system disk is chosen by the shelf's position.
   - **The model:** shelves are internal, front, rear or external, each with its own id (the enclosure's logical id), position and bays. Shelf membership is never a reason to refuse a drive.
   - **The rule:** the system half goes on the machine's own shelves (internal, front, rear) unnamed. An external shelf's drives are taken only when `rd.stormblock.slab=` names them.
