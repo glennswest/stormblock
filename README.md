@@ -331,7 +331,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
-| `STORMBLOCK_DHCHAP_SECRET` | the DH-HMAC-CHAP secret (`DHHC-1:…`) the engine's NVMe/TCP initiator answers with when a target asks and the drive's spec carries none (#210) | no secret: a target that requires one refuses |
+| `STORMBLOCK_DHCHAP_SECRET` | the DH-HMAC-CHAP secret (`DHHC-1:…`) the engine's NVMe/TCP initiator answers with when a target asks and the drive was given none (`dhchap_secret`, #213) (#210) | no secret: a target that requires one refuses |
 | `STORMBLOCK_HOST_NQN` | host NQN the NVMe/TCP initiator connects as | `nqn.2024.io.stormblock:initiator`; when `boot-local` claims a fresh clone to resume a flow-over, `nqn.2026-09.lo.storm:host-<tag>` |
 | `STORMBLOCK_ENGINE` | `image build --engine` (engine holding `volume:` goldens) | — |
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds a **kept** data half (the update path) | policy decides |
@@ -375,7 +375,25 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 
 **`[[drives]]`** `path` — a device, partition, file or `nvme-tcp://`/`iscsi://` URI;
 or `kind = "emulated"`, `size = "1P"`, `backing = "<dir>"` (optional), `name`
-(optional) for an emulated drive (#208, below).
+(optional) for an emulated drive (#208, below). An `nvme-tcp://` drive whose
+target requires DH-HMAC-CHAP of its host takes `dhchap_secret = "DHHC-1:…"`,
+or better `dhchap_secret_file = "<path>"` (one line, read at startup), so the
+secret stays out of this file (#213). Either one on a drive that is not
+`nvme-tcp://` is refused at startup; so is giving both.
+
+**A drive's DH-HMAC-CHAP secret** (#213) goes beside its path and never in
+it, because a path is logged, listed and persisted. Over HTTP it is
+`POST /api/v1/drives {"path": "nvme-tcp://…?hostnqn=<host>", "dhchap_secret":
+"DHHC-1:…"}`.
+- The secret is handed to the initiator and kept with the open drive, which
+  reconnects with it.
+- It is never echoed in a response, a listing, an error or a log line, and
+  never written to disk. The engine keeps no record of API-opened drives, so
+  a caller (a RAID head) registers them again after a restart, secret
+  included.
+- `GET /api/v1/drives` reports `"dhchap": true` for such a drive.
+- A wrong secret, or none, is a 400 from the target's refusal. A secret for a
+  path that is not `nvme-tcp://` is a 400 too.
 
 **`[iscsi]`** (`iscsi`) — `max_connections` (`4`, MC/S per session) is used;
 `listen_addr`, `target_name`, `chap_user`, `chap_secret` are not (see above).
@@ -1794,8 +1812,7 @@ What earlier docs described and the code does not do, each with its issue:
   backend since #209; `aws-lc-sys` is gone).
 - **NVMe/TCP access** (#210, `docs/nvme-access.md`): `/serve/v1`'s own
   subsystems admit any host (#212). Since #217 it serves only its own
-  exports; an `nvme-tcp://` drive cannot be given a
-  DH-HMAC-CHAP secret except through the environment (#213).
+  exports.
 - **The slot fence (#239)** covers thin, mirrored and copy-on-write I/O; parity
   stripes and the StormFS chunk/versioned paths are not fenced against a move
   (#240).

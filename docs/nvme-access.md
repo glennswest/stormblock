@@ -133,6 +133,14 @@ nvme connect -t tcp -a 10.0.0.5 -s 4420 -n nqn.…:host:1f2e… \
 - The engine's own initiator (`nvme-tcp://` drives, `image build`'s golden
   reader) answers with the secret its spec carries, or
   `$STORMBLOCK_DHCHAP_SECRET`. A secret never goes in a URI.
+- A drive's own secret (#213) goes beside its path:
+  - over HTTP, `POST /api/v1/drives {path, dhchap_secret}`;
+  - in config, `[[drives]] dhchap_secret` or `dhchap_secret_file`.
+
+  It is kept with the open drive (reconnects use it) and never echoed or
+  written down; `GET /api/v1/drives` says `dhchap: true`. This is how a RAID
+  head attaches a leg whose host was given a secret by the leg's engine
+  (`dhchap: true` on its attach).
 - Wire format and every HMAC input are Linux's
   (`drivers/nvme/{common,host,target}/auth.c`); the HMAC is pinned by RFC 4231
   vectors.

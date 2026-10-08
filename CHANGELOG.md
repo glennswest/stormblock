@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #213: an `nvme-tcp://` drive takes a DH-HMAC-CHAP secret beside its path, never in it.
+  - **How it is given:** `POST /api/v1/drives {path, dhchap_secret}` over HTTP; `[[drives]] dhchap_secret` or `dhchap_secret_file` in config.
+  - **Where it lives:** the secret goes to the initiator and stays with the open drive, which reconnects with it. It is never echoed (responses, listings, errors), its `Debug` is redacted, it is never serialized, and it is never written to disk.
+  - **Reporting:** `GET /api/v1/drives` shows `dhchap: true`.
+  - **Refusals:** a secret for anything but `nvme-tcp://` is a 400 over HTTP and an error at startup; so is giving both `dhchap_secret` and `dhchap_secret_file`.
+  - **Tests:** `integration_nvme_hosts::a_drive_whose_host_has_a_secret_is_opened_with_it` covers the drive opened with its secret, data through it, no secret / a wrong / a malformed one refused, and nothing echoed. `a_drive_secret_is_read_and_never_shown` covers the config side.
 - **feat:** #229: the initramfs applies the node's declared static boot-NIC address instead of `ip=dhcp`.
   - **Where it reads it:** before the network, `/init` finds the local `stormcos-state` volume: on the drive `rd.stormblock.slab=` names, else on the first internal, non-removable disk (never a shelf drive, #273). It copies `/config/stormcos.toml` and `/config/install-node.toml` with `slab cat`.
   - **What it applies:** `[network]` is read as stormpump's `plan_for` reads it. A `static` declaration on an exact, present port with carrier puts its addresses, gateway, MTU, DNS and domain on `stormbr0`, and no DHCP is sent. A `dhcp` declaration on a named port makes that port the first one tried. Anything else (a missing port, no carrier, a pattern, no prefix) is reported and the boot falls back to DHCP.

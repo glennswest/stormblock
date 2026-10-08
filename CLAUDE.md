@@ -171,6 +171,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A DH-HMAC-CHAP secret for nvme-tcp:// drives (2026-10-08, #213) — DONE
+
+- [x] `drive::open_one_drive_with_secret` (refused for anything not
+      nvme-tcp://); `config::Secret` (Debug redacted, never serialized);
+      `[[drives]] dhchap_secret | dhchap_secret_file`; `POST /api/v1/drives
+      {dhchap_secret}`; `DriveInfo.dhchap` → `dhchap: true` on GET. Nothing
+      on disk: the engine keeps no record of API-opened drives
+- [x] tests: `integration_nvme_hosts::a_drive_whose_host_has_a_secret_is_
+      opened_with_it`, `config::…::a_drive_secret_is_read_and_never_shown`;
+      README, nvme-access.md, CHANGELOG
+- [x] on a build VM at dd7cc9b: nvme_hosts 13/13, mgmt_api 12/12, config
+      20/20; full nextest 1019/1020 (#333's port race). nextest is not on
+      the build VM template (stormcentral#534): installed in the job
+
 ### A declared static boot-NIC address wins over `ip=dhcp` (2026-10-08, #229) — DONE
 
 stormcos keeps `ip=dhcp` on every release's command line (stormcos#182: one
