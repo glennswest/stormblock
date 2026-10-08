@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #212: `/serve/v1` exports bound to one host.
+  - **`host_nqn`:** accepted on `POST /serve/v1/exports` and on a `/serve/v1/volumes` create with `export`. The export's own subsystem then admits that host alone, and discovery on its portal shows it to that host only. The host is kept on the wiring row and returned with the export.
+  - **`[serve] allow_any_host`:** default `true`, today's behaviour: an export naming no host admits any host, said at start. `false` refuses such an export and closes rows from before host binding.
 - **fix:** #218: the volume listing's `generation` moves on what changes without a metadata persist.
   - **What moves it:** attach and detach on every transport (mounts included), slab presence, quarantine and failure, drains, the rebuild queue, RAID member states and owners. A mirror that trusted the `304` from `?since=N` / `If-None-Match` missed these before.
   - **How:** a fingerprint of those inputs is taken on each listing request. The generation is the volume manager's plus the number of times the fingerprint changed, so it only ever grows.

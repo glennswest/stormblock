@@ -204,5 +204,16 @@ host binding). An export made through `/api/v1/exports` stays the engine's:
 The engine, for its part, does not restore serve's exports (NSID 1 of their
 own subsystem) onto its shared subsystem at start.
 
-Not covered here: `/serve/v1`'s own per-volume subsystems still admit any
-host (#212).
+**`/serve/v1`'s own subsystems, bound to a host (#212).** Each serve export
+is a subsystem of its own on its own portal.
+- `POST /serve/v1/exports {volume_id, protocol: "nvme-tcp", host_nqn}` (and a
+  `/serve/v1/volumes` create with `export: true, host_nqn`) binds the export
+  to that host. Its subsystem admits that NQN alone, and discovery on the
+  portal shows it to that host only. The host is kept on the wiring row, so a
+  restart serves it the same way, and the export's JSON names it.
+- An export that names no host admits any host while `[serve]
+  allow_any_host` is on. That is the default, and the engine says so with a
+  warning at start.
+- With `allow_any_host = false`, such an export is refused (400), and a row
+  from before host binding is wired admitting no host.
+- `host_nqn` is for `nvme-tcp` exports; an iSCSI export taking one is a 400.

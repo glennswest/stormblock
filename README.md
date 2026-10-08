@@ -423,6 +423,7 @@ namespace; set `false` where the drives are the engine's pool) is used;
 | `nqn`, `nqn_prefix` | `nqn.2026-08.lo.storm:shared`, `nqn.2026-08.lo.storm` | per-volume subsystems are `<nqn_prefix>:vol-<uuid>` |
 | `drain_grace_secs` | `120` | a withdrawn export drains this long before its LUN is pulled |
 | `reconcile_secs` | `2` | reconciler tick |
+| `allow_any_host` | `true` | an NVMe export that names no `host_nqn` admits any host (said at start); `false` refuses it and closes rows from before host binding (#212, `docs/nvme-access.md`) |
 | `orphan_export_grace_secs` | `300` | an export naming a missing volume is withdrawn after this; 0 = never |
 | `reap_secs`, `reap_apply`, `reap_min_age_secs`, `reap_max_per_pass` | `600`, `true`, `900`, `64` | template debris reaper |
 
@@ -1811,9 +1812,10 @@ What earlier docs described and the code does not do, each with its issue:
   two subsystem schemes are live at once (#98).
 - **"No C dependencies"** was never true: TLS brings in `ring` (the only
   backend since #209; `aws-lc-sys` is gone).
-- **NVMe/TCP access** (#210, `docs/nvme-access.md`): `/serve/v1`'s own
-  subsystems admit any host (#212). Since #217 it serves only its own
-  exports.
+- **NVMe/TCP access** (#210, `docs/nvme-access.md`): a `/serve/v1` export
+  that names no `host_nqn` still admits any host while `[serve]
+  allow_any_host` is on, the default (#212). Since #217 it serves only its
+  own exports.
 - **The slot fence (#239)** covers thin, mirrored and copy-on-write I/O; parity
   stripes and the StormFS chunk/versioned paths are not fenced against a move
   (#240).
