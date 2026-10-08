@@ -172,6 +172,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Emulated directory backing, mkfs-ext4 off v3.0.0 (2026-10-07, #300, P2) — PARKED (master: #331 first)
+
+Part 2 (mkfs-ext4 v4.1.0 for 256 TiB / 1 PiB in core) is blocked on a
+fio-ext4 release that pins it (fio.ext4.rs#10, commented): one tag for both,
+or two copies of mkfs-ext4. Part 1 measured at HEAD with
+`examples/emulated_format` (the API's template create: format + seal) and
+`drive::emulated::dir_stats` (calls/time per directory-store operation):
+64G 0.5/0.7 s, 128G 0.8/1.2, 256G 1.4/2.1, 512G 2.9/5.7, 1T 5.7/11.6
+(memory/directory) — linear, no remove/rescan/punch; the >180 s at 1T of
+the report (08b6d72, through the HTTP API with the watchdog) does not
+reproduce in-process. A 2T/4T/16T run was started when parked (result not
+read). Next: read that run; reproduce through the daemon's HTTP API (the
+heartbeat stall); then the issue's asks (handle cache, running stored count
+instead of `dir_stored` rescans).
+
 ### FileDevice::write returned before the bytes were in the file (2026-10-07, #279) — DONE
 
 Flaky in the full suite: `pressure::tests::an_existing_slab_on_a_source_is_
