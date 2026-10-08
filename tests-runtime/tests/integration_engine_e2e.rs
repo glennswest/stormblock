@@ -24,7 +24,35 @@ use tempfile::TempDir;
 struct Engine {
     child: Child,
     base: String,
+    client: reqwest::Client,
     _dir: TempDir,
+}
+
+/// A client carrying the node token the engine minted into its data dir. The
+/// API is closed by default (#107); these tests predate that and sent nothing,
+/// so every call answered 401 — found on their first run (#222).
+fn authed(data: &std::path::Path) -> reqwest::Client {
+    let token = std::fs::read_to_string(data.join("api_token")).expect("the engine mints api_token into its data dir");
+    let mut h = reqwest::header::HeaderMap::new();
+    h.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", token.trim()).parse().unwrap(),
+    );
+    reqwest::Client::builder().default_headers(h).build().unwrap()
+}
+
+/// Wait for the engine to answer its open health route.
+async fn wait_up(base: &str) -> bool {
+    let client = reqwest::Client::new();
+    for _ in 0..100 {
+        if let Ok(r) = client.get(format!("{base}/api/v1/health")).send().await {
+            if r.status().is_success() {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
 }
 
 impl Drop for Engine {
@@ -87,14 +115,9 @@ async fn start(bin: &str, role: &str) -> Engine {
         .expect("spawn engine");
 
     let base = format!("http://127.0.0.1:{mgmt}");
-    let client = reqwest::Client::new();
-    for _ in 0..100 {
-        if client.get(format!("{base}/api/v1/slabs")).send().await.is_ok() {
-            return Engine { child, base, _dir: dir };
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("engine did not come up");
+    assert!(wait_up(&base).await, "engine did not come up");
+    let client = authed(&data);
+    Engine { child, base, client, _dir: dir }
 }
 
 /// The binary under test (#222): required, like every other runtime test.
@@ -113,7 +136,7 @@ async fn a_plain_create_works_on_a_node_that_has_slabs() {
     let bin = bin();
     for role in ["system", "data"] {
         let e = start(&bin, role).await;
-        let client = reqwest::Client::new();
+        let client = &e.client;
 
         // The drive's slab was adopted at startup, without being formatted
         // again — that is what makes a plain create placeable.
@@ -169,16 +192,8 @@ async fn a_node_with_no_slabs_says_that_rather_than_naming_a_parameter() {
         .spawn()
         .unwrap();
     let base = format!("http://127.0.0.1:{mgmt}");
-    let client = reqwest::Client::new();
-    let mut up = false;
-    for _ in 0..100 {
-        if client.get(format!("{base}/api/v1/slabs")).send().await.is_ok() {
-            up = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(up, "engine did not come up");
+    assert!(wait_up(&base).await, "engine did not come up");
+    let client = authed(&data);
 
     let resp = client
         .post(format!("{base}/api/v1/volumes"))
