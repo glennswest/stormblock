@@ -172,6 +172,28 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Flow-over as fast as the hardware allows (2026-10-07, #331, P0) — IN PROGRESS
+
+Owner: 20x today's rate is the direction, not a test; make it as fast as the
+hardware allows, measured on real hardware (a blade or the Dell). The hours
+on pvetest were the pve host's shared QLC NVMe (owner), not stormblock: no
+bisect. Model: `cli::forge_mode_tests::flow_over_rate_model` (ignored; a
+netbooted install over NVMe/TCP to an in-process appliance, 1530 extents,
+`FLOW_MODEL_FOREGROUND`), on a build VM.
+- [x] instrument: `flow-over: N moved in Ts (X/h): yield, fence, copy,
+      persist, release` every 100 moves (f13e685). Baseline 35k/h: yield
+      80 s + persist 66 s of 157 s, copy 11 s (persists count as foreground
+      I/O, so it yielded even on an idle node)
+- [x] windows of 64, 8 moves at once, one persist per window, yield a
+      quarter (a734678): 185k/h with a foreground writer (5.3x)
+- [x] found: a hang with no foreground writer (fence shards: a move waited
+      on its own read served in-process) → fence one lock per slot (f77d029);
+      cut tests cut between windows of 4
+- [x] NVMe/TCP initiator: 4 I/O connections, not one (e93f08b)
+- [ ] model numbers for both; full nextest; a model with ~20k extents (the
+      per-move publish sweeps every map, #155); golden; real hardware
+      (a blade or the Dell): `flow_over_remaining` and the breakdown lines
+
 ### Emulated directory backing, mkfs-ext4 off v3.0.0 (2026-10-07, #300, P2) — PARKED (master: #331 first)
 
 Part 2 (mkfs-ext4 v4.1.0 for 256 TiB / 1 PiB in core) is blocked on a
