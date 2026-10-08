@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A worker panic left the engine alive and silent (2026-10-08, #368, P0) — IN PROGRESS
+### A worker panic left the engine alive and silent (2026-10-08, #368, P0) — DONE (golden-stormblock-501f2106e220)
 
 Dell 11.98: tokio `state.rs:120 next.is_notified()` 4 s after the
 watchdog's capture (a task dump of the API runtime), then nothing: no log,
@@ -193,9 +193,9 @@ the dead worker, so the watchdog went quiet too.
 - [x] task dumps off unless `STORMBLOCK_TASK_DUMP=1`; no timed dumps (#365)
 - [x] runtime test `a_panic_in_the_daemon_aborts_it_and_says_why`
       (`STORMBLOCK_TEST_PANIC_AFTER_MS`); README, CHANGELOG
-- [ ] build VM: check.sh with #362/#365; golden; comment on #368
+- [x] check.sh at a297f5a ALL PASS (nextest 1044/1044, runtime test); golden golden-stormblock-501f2106e220 (stormcos#462)
 
-### The engine's logging: lock holders named, no dump floods (2026-10-08, #365, P0 owner, ahead of everything) — IN PROGRESS
+### The engine's logging: lock holders named, no dump floods (2026-10-08, #365, P0 owner) — DONE (golden-stormblock-501f2106e220)
 
 Dell: 21,191 lines dropped by stormcast's limiter, the watchdog's 220-thread
 dumps every few seconds the flood, the task bodies naming holders dropped.
@@ -207,11 +207,11 @@ dumps every few seconds the flood, the task bodies naming holders dropped.
 - [x] per-request line (caller, peer, status, ms, lock wait); abandoned said
 - [x] tests: lockwatch units (named, cancelled waiter, panic), integration
       `a_lock_holder_and_its_waiters_are_named`, debug auth test updated
-- [ ] build VM: check.sh; golden; stormcast issue (never drop WARN/ERROR or
-      `lock:`/`stall:` lines; report drop counts); comment on #365
+- [x] check.sh at a297f5a ALL PASS; golden golden-stormblock-501f2106e220
+      (stormcos#462); stormcast#13 (the limiter); closed
 - #362's check was running when this came in; #362 itself is pushed
 
-### compose/slab places goldens thin (2026-10-08, #362, P0) — IN PROGRESS
+### compose/slab places goldens thin (2026-10-08, #362, P0) — DONE (golden-stormblock-501f2106e220)
 
 stormcos#459: blank templates up to 16 TiB in the image. `compose_slab`
 (forge's `compose/slab`, what stormcos and stormcentral compose releases
@@ -223,8 +223,8 @@ flow-over and stage already move mapped extents only.
 - [x] tests: a sparse golden (1000 declared, 3 mapped) in a 48-slot slab;
       a 64 GiB ext4 blank in a 32 MiB slab, fsck clean through a node's
       open; docs (composed-disks.md), CHANGELOG
-- [ ] build VM: the tests, compose and image suites, full check; golden;
-      tell stormcos#459 (slab-fits.sh counts mapped extents)
+- [x] check.sh ALL PASS (64 GiB ext4 blank = 159 slots of 64 KiB); golden
+      golden-stormblock-501f2106e220 (stormcos#462)
 
 ### The engine didn't answer GET /api/v1/fstemplates within 30 s (2026-10-08, #358, P0) — DONE (golden-stormblock-e4154c4409d0), metal pending
 
