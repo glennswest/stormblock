@@ -57,7 +57,7 @@ use super::files::{self, SeedFile};
 /// The volume manager, shared. Every entry point here locks it for as short a
 /// window as the operation allows and **never across a format or a check** —
 /// that is what lets many templates be built at once rather than one at a time.
-pub type VmLock = tokio::sync::Mutex<VolumeManager>;
+pub type VmLock = crate::lockwatch::TrackedMutex<VolumeManager>;
 /// The template store, shared.
 pub type StoreLock = tokio::sync::Mutex<TemplateStore>;
 
@@ -1968,7 +1968,7 @@ mod tests {
         // Arc'd because the paths under test spawn: a take mints the
         // replacement behind the caller, and a task cannot borrow.
         (
-            Arc::new(tokio::sync::Mutex::new(vm)),
+            Arc::new(crate::lockwatch::TrackedMutex::new(vm)),
             Arc::new(tokio::sync::Mutex::new(TemplateStore::in_memory())),
             p,
         )

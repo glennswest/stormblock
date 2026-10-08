@@ -538,28 +538,38 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   returned. Left out when there is none; `status` stays `ok`. The watchdog
   logs the same list (WARN) every 30 s while it lasts.
   A booting node asks this of every candidate address before it has a token.
-- `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
-  public, read-only, no volume data (#269): what the engine is doing when its
-  API stops answering. `stalls`: requests in flight and the last watchdog
-  reports (a request waiting over 10 s is logged with a capture, from an OS
-  thread that works when the async runtime is stuck); `tasks`: every async
-  task of the API's runtime with the `.await` it is parked on (a tokio task
-  dump: the build sets `--cfg tokio_unstable` in `.cargo/config.toml`). Each
-  ublk device's current-thread runtime is named but never dumped, because
-  tracing it while it serves I/O re-enters it and panics it (#334); `threads`: every OS
-  thread, its state and kernel stack; `locks`: whether the volume manager,
-  the extent map and the slab registry are held, and every metadata persist
-  in progress (generation, phase, age, slabs, and whether its caller holds
-  the volume manager, as every create, clone, delete and seal does), so a
-  stall behind the manager says what it waits on (#358); the watchdog's
-  captures carry the same. Without the node token
-  (#283): requests by method, age and route family (`/api/v1/volumes/…`, no
-  ids, names or tags), remote flush devices by transport, the watchdog's
-  reports as their open summary, threads without stacks. `tasks` takes one
-  dump at a time and answers from it for 5 s, so asking in a loop cannot
-  pause the runtime over and over. `stalls` also names every zoned or drive-managed
-  SMR disk the engine opened (#282: `queue/zoned`, else the model on the
-  makers' published SMR lists), which is also said at WARN when it is opened.
+- `GET /debug/stalls` and `/debug/locks` — public, read-only, no volume data
+  (#269, #365): what the engine is doing when its API stops answering.
+  `locks`: every engine-wide lock (the volume manager, the slab registry,
+  the extent map) that is held or waited on, with **its holder by name** (an
+  API request as `GET /api/v1/volumes (req 42)`, or a named task: `the
+  flow-over`, `the eraser`, `rebuild of volume …`, `the serve reconciler`),
+  how long, and its waiters; and every metadata persist in progress
+  (generation, phase, age, slabs, whether its caller holds the volume
+  manager, #358). `stalls`: requests in flight and the last watchdog lines.
+  The watchdog (an OS thread that works when the async runtime is stuck)
+  writes **one line per stalled request** (over 10 s, again every 30 s):
+  the request, how long, and each lock it waits on with that lock's holder,
+  age and waiters (`stall: GET /api/v1/volumes (req 42) for 23s: waits on the
+  volume manager: held 41.2s by POST /api/v1/volumes/…/clone (req 39); 6
+  waiting, …`). It never dumps threads or tasks on a timer (#365: on the Dell
+  those dumps were the flood the log path dropped 21,191 lines of, the
+  holders among them). Every lock hold or wait over 1 s is logged when it
+  ends, with its holder (`lock: the volume manager was held 3.2s by …`,
+  WARN over 10 s). Without the node token (#283) requests are named by
+  route family (`/api/v1/volumes/…`), never an id, a name or a tag.
+- `GET /debug/tasks`, `/debug/threads` — **the admin's only** (#365), on
+  demand: every async task of the API's runtime with the `.await` it is
+  parked on (a tokio task dump: the build sets `--cfg tokio_unstable` in
+  `.cargo/config.toml`; one dump at a time, answering for 5 s), and every OS
+  thread with its state and kernel stack. Each ublk device's
+  current-thread runtime is named but never dumped (#334). `stalls` also
+  names every zoned or drive-managed SMR disk the engine opened (#282).
+- Every API request ends with one line (#365): `api: <method> <path>
+  <status> <ms>ms lock-wait <ms>ms caller <admin|node|client-cert|bearer|
+  anonymous|open> peer <addr> req <id>`, INFO (WARN at 5xx or over 10 s;
+  health probes, `/metrics` and `/debug` at DEBUG). A request whose caller
+  went away first is said too (`abandoned by its caller after Ns`).
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.

@@ -564,8 +564,8 @@ mod tests {
         let slab = Slab::format(backing, 1 << 20, StorageTier::Hot).await.unwrap();
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::RwLock::new(registry));
-        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
         let vol = ThinVolume::new("blank-ext4-64M".to_string(), 64 << 20, 1 << 20);
         let handle: Arc<dyn BlockDevice> = Arc::new(ThinVolumeHandle::new(
             vol,

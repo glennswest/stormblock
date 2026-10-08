@@ -97,7 +97,7 @@ pub struct RunningView {
 
 /// The eraser: its log and the task that drains the queue.
 pub struct Eraser {
-    registry: Arc<RwLock<SlabRegistry>>,
+    registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     path: Option<PathBuf>,
     running: std::sync::Mutex<HashMap<VolumeId, Running>>,
     finished: std::sync::Mutex<Vec<Erasure>>,
@@ -113,7 +113,7 @@ fn unix_now() -> u64 {
 
 impl Eraser {
     /// An eraser over `registry`, keeping its log in `data_dir` when given.
-    pub fn new(registry: Arc<RwLock<SlabRegistry>>, data_dir: Option<PathBuf>) -> Arc<Self> {
+    pub fn new(registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>, data_dir: Option<PathBuf>) -> Arc<Self> {
         let path = data_dir.map(|d| d.join("erasures.json"));
         let finished = path
             .as_ref()
@@ -132,7 +132,7 @@ impl Eraser {
     /// Start the task. It runs until the process ends.
     pub fn spawn(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let me = self.clone();
-        tokio::spawn(async move { me.run().await })
+        tokio::spawn(crate::lockwatch::named("the eraser", async move { me.run().await }))
     }
 
     /// Look for work now rather than at the next idle tick.

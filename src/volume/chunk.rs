@@ -312,8 +312,8 @@ pub struct AllocRequest {
 /// allocation would leave StormFS to work out which of its chunks exist.
 pub async fn allocate(
     map: &mut ChunkMap,
-    gem: &Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-    registry: &Arc<tokio::sync::RwLock<SlabRegistry>>,
+    gem: &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     req: &AllocRequest,
 ) -> Result<Vec<ChunkExtent>, ChunkError> {
     if req.count == 0 {
@@ -503,8 +503,8 @@ pub struct FreeOutcome {
 /// discard granularity: a partial slot still holds bytes outside the range.
 pub async fn free(
     map: &mut ChunkMap,
-    gem: &Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-    registry: &Arc<tokio::sync::RwLock<SlabRegistry>>,
+    gem: &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     extents: &[ChunkExtent],
     slot_size: u64,
     release_ownership: bool,
@@ -640,7 +640,7 @@ pub struct ExtentMapReport {
 /// Report the mapping for one volume, for `fsck` to reconcile against.
 pub async fn extent_map(
     map: &ChunkMap,
-    gem: &Arc<tokio::sync::RwLock<GlobalExtentMap>>,
+    gem: &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     volume: VolumeId,
     slot_size: u64,
     virtual_size: u64,
@@ -787,8 +787,8 @@ mod tests {
         tier: StorageTier,
         bytes: u64,
     ) -> (
-        Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-        Arc<tokio::sync::RwLock<SlabRegistry>>,
+        Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         String,
     ) {
         let dir = std::env::temp_dir().join("stormblock-chunk-test");
@@ -805,8 +805,8 @@ mod tests {
         reg.add(slab);
 
         (
-            Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
-            Arc::new(tokio::sync::RwLock::new(reg)),
+            Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
+            Arc::new(crate::lockwatch::TrackedRwLock::new(reg)),
             path,
         )
     }

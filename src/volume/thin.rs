@@ -419,8 +419,8 @@ pub struct ThinVolumeHandle {
     virtual_size: AtomicU64,
     id: VolumeId,
     slot_size: u64,
-    gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-    registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
+    gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     placement: PlacementPolicy,
     redundancy: std::sync::RwLock<RedundancyPolicy>,
     /// Slabs a write (or read) has failed on. Persisted with the volume.
@@ -494,8 +494,8 @@ impl Lba {
 impl ThinVolumeHandle {
     pub fn new(
         vol: ThinVolume,
-        gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-        registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
+        gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         placement: PlacementPolicy,
     ) -> Self {
         Self::with_redundancy(vol, gem, registry, placement, RedundancyPolicy::none())
@@ -503,8 +503,8 @@ impl ThinVolumeHandle {
 
     pub fn with_redundancy(
         vol: ThinVolume,
-        gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-        registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
+        gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         placement: PlacementPolicy,
         redundancy: RedundancyPolicy,
     ) -> Self {
@@ -971,12 +971,12 @@ impl ThinVolumeHandle {
     }
 
     /// Get the shared GEM reference.
-    pub fn gem(&self) -> &Arc<tokio::sync::RwLock<GlobalExtentMap>> {
+    pub fn gem(&self) -> &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>> {
         &self.gem
     }
 
     /// Get the shared SlabRegistry reference.
-    pub fn registry(&self) -> &Arc<tokio::sync::RwLock<SlabRegistry>> {
+    pub fn registry(&self) -> &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>> {
         &self.registry
     }
 
@@ -3156,8 +3156,8 @@ mod tests {
 
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::RwLock::new(registry));
-        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
         let vol = ThinVolume::new("test-vol".to_string(), 128 * 1024 * 1024, slot_size);
         let handle = Arc::new(ThinVolumeHandle::new(
@@ -3471,8 +3471,8 @@ mod tests {
         let slab = Slab::format(dev, 4096, StorageTier::Hot).await.unwrap();
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::RwLock::new(registry));
-        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
         let mk = |name: &str| {
             Arc::new(ThinVolumeHandle::new(
                 ThinVolume::new(name.to_string(), 4 * 1024 * 1024, 4096),
@@ -3649,7 +3649,7 @@ mod redundancy_tests {
     use crate::drive::slab::Slab;
     use crate::volume::gem::GlobalExtentMap;
 
-    type Shared<T> = Arc<tokio::sync::RwLock<T>>;
+    type Shared<T> = Arc<crate::lockwatch::TrackedRwLock<T>>;
 
     /// `n` slabs, each on its own file — so each is its own failure domain.
     async fn setup_slabs(n: usize, slot_size: u64) -> (Shared<GlobalExtentMap>, Shared<SlabRegistry>, Vec<SlabId>, Vec<String>) {
@@ -3670,8 +3670,8 @@ mod redundancy_tests {
             paths.push(path_str);
         }
         (
-            Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
-            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
+            Arc::new(crate::lockwatch::TrackedRwLock::new(registry)),
             ids,
             paths,
         )
@@ -3963,8 +3963,8 @@ mod redundancy_tests {
             names.push(name);
         }
         (
-            Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
-            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
+            Arc::new(crate::lockwatch::TrackedRwLock::new(registry)),
             ids,
             names,
         )
@@ -4179,8 +4179,8 @@ mod redundancy_tests {
             let dev: Arc<dyn BlockDevice> = Arc::new(Gated(Arc::new(dev), gate.clone()));
             registry.add(Slab::format(dev, slot, StorageTier::Hot).await.unwrap());
         }
-        let gem: Shared<GlobalExtentMap> = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
-        let reg: Shared<SlabRegistry> = Arc::new(tokio::sync::RwLock::new(registry));
+        let gem: Shared<GlobalExtentMap> = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
+        let reg: Shared<SlabRegistry> = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
         let v = volume(&gem, &reg, "raid5:2+1", slot);
         let a = pattern(1, slot as usize);
         let b = pattern(2, slot as usize);

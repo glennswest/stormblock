@@ -179,7 +179,7 @@ impl VolumeMove {
 /// and the target holds a verified copy of its contents at the new size. The
 /// caller repoints its consumer and then calls [`commit`].
 pub async fn start(
-    vm: &tokio::sync::Mutex<VolumeManager>,
+    vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
     spec: &MoveSpec,
 ) -> Result<VolumeMove> {
     if spec.target_name.trim().is_empty() {
@@ -262,7 +262,7 @@ pub async fn start(
 
 /// Create the target, format it, copy into it, and check it.
 async fn copy_into_new_volume(
-    vm: &tokio::sync::Mutex<VolumeManager>,
+    vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
     spec: &MoveSpec,
     from: VolumeId,
     layout: &ext4::Ext4Layout,
@@ -285,7 +285,7 @@ async fn copy_into_new_volume(
 }
 
 async fn fill_target(
-    vm: &tokio::sync::Mutex<VolumeManager>,
+    vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
     spec: &MoveSpec,
     from: VolumeId,
     target: VolumeId,
@@ -491,7 +491,7 @@ impl fio_ext4::tar::Source for ChannelSource {
 /// repointed, so this is never automatic. Until it is called the source is
 /// intact and the move can still be undone by pointing back at it.
 pub async fn commit(
-    vm: &tokio::sync::Mutex<VolumeManager>,
+    vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
     mv: &mut VolumeMove,
 ) -> Result<()> {
     if mv.state != MoveState::ReadyToCommit {
@@ -522,7 +522,7 @@ pub async fn commit(
 /// Give up on a move: delete the target and the rollback snapshot, keep the
 /// source exactly as it was.
 pub async fn abort(
-    vm: &tokio::sync::Mutex<VolumeManager>,
+    vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
     mv: &mut VolumeMove,
 ) -> Result<()> {
     if mv.state != MoveState::ReadyToCommit {
@@ -549,7 +549,7 @@ mod tests {
     use crate::fs::files::SeedFile;
     use crate::raid::RaidArrayId;
 
-    type VmLock = tokio::sync::Mutex<VolumeManager>;
+    type VmLock = crate::lockwatch::TrackedMutex<VolumeManager>;
 
     async fn node(bytes: u64) -> (VmLock, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -557,7 +557,7 @@ mod tests {
         let dev = FileDevice::open_with_capacity(path.to_str().unwrap(), bytes).await.unwrap();
         let mut vm = VolumeManager::new(1024 * 1024);
         vm.add_backing_device(RaidArrayId(Uuid::new_v4()), Arc::new(dev)).await;
-        (tokio::sync::Mutex::new(vm), dir)
+        (crate::lockwatch::TrackedMutex::new(vm), dir)
     }
 
     /// A formatted volume carrying a small tree, with content worth checking.

@@ -252,8 +252,8 @@ impl VolumePresence {
 }
 
 pub struct VolumeManager {
-    gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-    registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
+    gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     volumes: HashMap<VolumeId, Arc<ThinVolumeHandle>>,
     /// The ids in `volumes`, for readers that must not wait on the manager.
     present: VolumePresence,
@@ -361,8 +361,8 @@ impl VolumeManager {
     /// smaller values like 4096 for tests).
     pub fn new(slot_size: u64) -> Self {
         VolumeManager {
-            gem: Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
-            registry: Arc::new(tokio::sync::RwLock::new(SlabRegistry::new())),
+            gem: Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
+            registry: Arc::new(crate::lockwatch::TrackedRwLock::new(SlabRegistry::new())),
             volumes: HashMap::new(),
             array_slabs: HashMap::new(),
             slot_size,
@@ -389,8 +389,8 @@ impl VolumeManager {
     pub fn with_data_dir(slot_size: u64, data_dir: PathBuf) -> std::io::Result<Self> {
         let store = MetadataStore::new(data_dir)?;
         Ok(VolumeManager {
-            gem: Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
-            registry: Arc::new(tokio::sync::RwLock::new(SlabRegistry::new())),
+            gem: Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
+            registry: Arc::new(crate::lockwatch::TrackedRwLock::new(SlabRegistry::new())),
             volumes: HashMap::new(),
             array_slabs: HashMap::new(),
             slot_size,
@@ -2107,7 +2107,7 @@ impl VolumeManager {
     }
 
     /// Get the shared GEM.
-    pub fn gem(&self) -> &Arc<tokio::sync::RwLock<GlobalExtentMap>> {
+    pub fn gem(&self) -> &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>> {
         &self.gem
     }
 
@@ -2139,7 +2139,7 @@ impl VolumeManager {
     }
 
     /// Get the shared SlabRegistry.
-    pub fn registry(&self) -> &Arc<tokio::sync::RwLock<SlabRegistry>> {
+    pub fn registry(&self) -> &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>> {
         &self.registry
     }
 
@@ -2183,7 +2183,7 @@ impl VolumeManager {
     /// behind a caller that persists over and over: the flow-over persists
     /// after every extent it moves, and on server3's spinning disk each
     /// persist was several flushes of seconds each.
-    pub async fn persist_detached(vm: &tokio::sync::Mutex<VolumeManager>) {
+    pub async fn persist_detached(vm: &crate::lockwatch::TrackedMutex<VolumeManager>) {
         let (registry, written, on_slab, durability, records) = {
             let g = vm.lock().await;
             let generation = g.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -2689,7 +2689,7 @@ impl VolumeManager {
     /// since the last flush, after the records were taken and before they are
     /// written, so every slot they name that had been written is durable.
     async fn sync_then_write(
-        registry: &Arc<tokio::sync::RwLock<SlabRegistry>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         written: &tokio::sync::Mutex<u64>,
         on_slab: &std::sync::Mutex<HashMap<SlabId, u64>>,
         mut records: Records,

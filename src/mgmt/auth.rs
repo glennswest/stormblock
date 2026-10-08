@@ -431,8 +431,13 @@ pub async fn require_token(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string());
 
+    // Who is calling, for the request's log line (#365).
+    let slot = req.extensions().get::<crate::mgmt::debug::CallerSlot>().cloned();
     // Open node: nothing is enforced (and nothing to audit against).
     let Some(api_token) = auth.api_token.as_deref() else {
+        if let Some(s) = &slot {
+            s.set("open");
+        }
         req.extensions_mut().insert(FullView);
         return next.run(req).await;
     };
@@ -442,6 +447,19 @@ pub async fn require_token(
     // tier: ordinary verbs, not destructive ones.
     let cert = req.extensions().get::<super::tls::ClientCert>().cloned();
     let is_node = presented.as_deref() == Some(api_token) || cert.is_some();
+    if let Some(s) = &slot {
+        s.set(if is_admin {
+            "admin"
+        } else if presented.as_deref() == Some(api_token) {
+            "node"
+        } else if cert.is_some() {
+            "client-cert"
+        } else if presented.is_some() {
+            "bearer"
+        } else {
+            "anonymous"
+        });
+    }
     let destructive = match class {
         Class::Public => {
             // An open route answers anyone; one holding a token sees more

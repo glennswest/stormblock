@@ -174,30 +174,30 @@ pub struct BootDiskResult {
     /// Provisioned partitions with their volumes.
     pub partitions: Vec<ProvisionedPartition>,
     /// Shared slab registry.
-    pub registry: Arc<RwLock<SlabRegistry>>,
+    pub registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     /// Shared Global Extent Map.
-    pub gem: Arc<RwLock<GlobalExtentMap>>,
+    pub gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
 }
 
 /// Orchestrates creating a multi-volume partitioned disk on an iSCSI backing device.
 pub struct IscsiBootManager {
-    registry: Arc<RwLock<SlabRegistry>>,
-    gem: Arc<RwLock<GlobalExtentMap>>,
+    registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+    gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
 }
 
 impl IscsiBootManager {
     /// Create a new boot manager with fresh registry and GEM.
     pub fn new() -> Self {
         IscsiBootManager {
-            registry: Arc::new(RwLock::new(SlabRegistry::new())),
-            gem: Arc::new(RwLock::new(GlobalExtentMap::new())),
+            registry: Arc::new(crate::lockwatch::TrackedRwLock::new(SlabRegistry::new())),
+            gem: Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
         }
     }
 
     /// Create a boot manager with existing registry and GEM.
     pub fn with_state(
-        registry: Arc<RwLock<SlabRegistry>>,
-        gem: Arc<RwLock<GlobalExtentMap>>,
+        registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+        gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     ) -> Self {
         IscsiBootManager { registry, gem }
     }

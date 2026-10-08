@@ -397,7 +397,7 @@ async fn create_template(
     // anyone is still listening.
     let created = {
         let state = state.clone();
-        tokio::spawn(async move { template::create(&state.volume_manager, &state.fstemplates, &spec).await })
+        crate::lockwatch::spawn_inheriting(async move { template::create(&state.volume_manager, &state.fstemplates, &spec).await })
             .await
             .unwrap_or_else(|e| Err(template::TemplateError::Internal(format!("template create task: {e}"))))
     };

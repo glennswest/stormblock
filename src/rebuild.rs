@@ -141,7 +141,7 @@ struct Inner {
 }
 
 pub struct Rebuilds {
-    volumes: Arc<tokio::sync::Mutex<VolumeManager>>,
+    volumes: Arc<crate::lockwatch::TrackedMutex<VolumeManager>>,
     throttle: Arc<Throttle>,
     automatic: AtomicBool,
     parallel: AtomicUsize,
@@ -157,7 +157,7 @@ fn now() -> u64 {
 }
 
 impl Rebuilds {
-    pub fn new(volumes: Arc<tokio::sync::Mutex<VolumeManager>>, cfg: &RebuildConfig) -> Arc<Self> {
+    pub fn new(volumes: Arc<crate::lockwatch::TrackedMutex<VolumeManager>>, cfg: &RebuildConfig) -> Arc<Self> {
         Arc::new(Rebuilds {
             volumes,
             throttle: Arc::new(Throttle::new(cfg.max_bytes_per_sec)),
@@ -433,7 +433,7 @@ impl Rebuilds {
                 Self::settle_job(&mut g, id);
             }
             let me = self.clone();
-            tokio::spawn(async move { me.run_one(vol, cancel).await });
+            tokio::spawn(crate::lockwatch::named(format!("rebuild of volume {}", vol.0), async move { me.run_one(vol, cancel).await }));
         }
     }
 
@@ -588,7 +588,7 @@ mod tests {
         let touched = vm.distrust_slab(lost).await;
         assert!(touched.len() >= 4, "most volumes have a member on a: {touched:?}");
         let gem = vm.gem().clone();
-        let volumes = Arc::new(tokio::sync::Mutex::new(vm));
+        let volumes = Arc::new(crate::lockwatch::TrackedMutex::new(vm));
         let rb = Rebuilds::new(volumes.clone(), &RebuildConfig { parallel: 3, ..Default::default() });
         let job = rb.start("drive a failed".into(), Some("a".into()), touched.clone()).await;
         tokio::time::timeout(std::time::Duration::from_secs(30), rb.wait(job)).await.expect("the rebuild finishes");
@@ -655,7 +655,7 @@ mod tests {
             s
         };
         vm.distrust_slab(lost).await;
-        let volumes = Arc::new(tokio::sync::Mutex::new(vm));
+        let volumes = Arc::new(crate::lockwatch::TrackedMutex::new(vm));
         // One at a time: `start` promotes the first of the queue before it
         // returns, so the job already shows which one that was.
         let rb = Rebuilds::new(volumes.clone(), &RebuildConfig { parallel: 1, ..Default::default() });
@@ -690,7 +690,7 @@ mod tests {
             .unwrap();
         vm.get_volume(&id).unwrap().write(0, &[1u8; 4096]).await.unwrap();
         vm.distrust_slab(ida).await;
-        let volumes = Arc::new(tokio::sync::Mutex::new(vm));
+        let volumes = Arc::new(crate::lockwatch::TrackedMutex::new(vm));
         let rb = Rebuilds::new(volumes.clone(), &RebuildConfig::default());
         let job = rb.start("test".into(), None, vec![id]).await;
         tokio::time::timeout(std::time::Duration::from_secs(30), rb.wait(job)).await.unwrap();

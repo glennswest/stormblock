@@ -103,9 +103,9 @@ impl Drains {
         &mut self,
         drive: String,
         slabs: Vec<SlabId>,
-        gem: Arc<RwLock<GlobalExtentMap>>,
-        registry: Arc<RwLock<SlabRegistry>>,
-        volumes: Arc<tokio::sync::Mutex<VolumeManager>>,
+        gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+        volumes: Arc<crate::lockwatch::TrackedMutex<VolumeManager>>,
     ) -> Arc<RwLock<DrainStatus>> {
         let status = Arc::new(RwLock::new(DrainStatus {
             drive: drive.clone(),
@@ -120,9 +120,9 @@ impl Drains {
         }));
         let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
         let st = status.clone();
-        tokio::spawn(async move {
+        tokio::spawn(crate::lockwatch::named(format!("the drain of drive {drive}"), async move {
             run(slabs, gem, registry, volumes, st, cancel_rx).await;
-        });
+        }));
         self.by_drive.insert(drive, Drain { status: status.clone(), cancel });
         status
     }
@@ -135,8 +135,8 @@ impl Drains {
 /// pointing at a slot that has been reused. The drain persisted and never
 /// paid, so a drained slab kept every slot it had ever held and never emptied.
 async fn persist_then_release(
-    volumes: &Arc<tokio::sync::Mutex<VolumeManager>>,
-    registry: &Arc<RwLock<SlabRegistry>>,
+    volumes: &Arc<crate::lockwatch::TrackedMutex<VolumeManager>>,
+    registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     engine: &PlacementEngine,
 ) {
     volumes.lock().await.persist().await;
@@ -154,9 +154,9 @@ fn remaining_on(gem: &GlobalExtentMap, slabs: &[SlabId]) -> u64 {
 
 async fn run(
     slabs: Vec<SlabId>,
-    gem: Arc<RwLock<GlobalExtentMap>>,
-    registry: Arc<RwLock<SlabRegistry>>,
-    volumes: Arc<tokio::sync::Mutex<VolumeManager>>,
+    gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+    volumes: Arc<crate::lockwatch::TrackedMutex<VolumeManager>>,
     status: Arc<RwLock<DrainStatus>>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -374,7 +374,7 @@ mod tests {
         let legs_on_a_before = gem.read().await.slab_extents(ida).len();
         assert!(legs_on_a_before > 0, "something landed on a");
 
-        let volumes = Arc::new(tokio::sync::Mutex::new(vm));
+        let volumes = Arc::new(crate::lockwatch::TrackedMutex::new(vm));
         let mut drains = Drains::default();
         let status = drains.start("a.bin".into(), vec![ida], gem.clone(), registry.clone(), volumes.clone());
         for _ in 0..500 {

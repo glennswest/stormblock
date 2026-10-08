@@ -181,6 +181,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The engine's logging: lock holders named, no dump floods (2026-10-08, #365, P0 owner, ahead of everything) — IN PROGRESS
+
+Dell: 21,191 lines dropped by stormcast's limiter, the watchdog's 220-thread
+dumps every few seconds the flood, the task bodies naming holders dropped.
+- [x] `src/lockwatch.rs`: TrackedMutex/TrackedRwLock for the volume manager,
+      slab registry, extent map; task-local activity (request id + route, or
+      a task name); holds/waits > 1 s logged; snapshot; guard-cleared
+- [x] watchdog: one line per stall, holder named; no timed dumps;
+      /debug/tasks, /debug/threads admin-only; /debug/locks from the records
+- [x] per-request line (caller, peer, status, ms, lock wait); abandoned said
+- [x] tests: lockwatch units (named, cancelled waiter, panic), integration
+      `a_lock_holder_and_its_waiters_are_named`, debug auth test updated
+- [ ] build VM: check.sh; golden; stormcast issue (never drop WARN/ERROR or
+      `lock:`/`stall:` lines; report drop counts); comment on #365
+- #362's check was running when this came in; #362 itself is pushed
+
 ### compose/slab places goldens thin (2026-10-08, #362, P0) — IN PROGRESS
 
 stormcos#459: blank templates up to 16 TiB in the image. `compose_slab`

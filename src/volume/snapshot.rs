@@ -360,7 +360,7 @@ mod tests {
 
     async fn setup_volume_for_snapshot(
         slot_size: u64,
-    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::RwLock<GlobalExtentMap>>, Arc<tokio::sync::RwLock<SlabRegistry>>, Vec<String>) {
+    ) -> (Arc<ThinVolumeHandle>, Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>, Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-snap-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -389,8 +389,8 @@ mod tests {
 
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::RwLock::new(registry));
-        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
         let vol = ThinVolume::new("source".to_string(), 128 * 1024 * 1024, slot_size);
         let handle = Arc::new(ThinVolumeHandle::new(

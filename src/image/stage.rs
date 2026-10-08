@@ -320,7 +320,7 @@ pub(crate) async fn read_policy(image_vm: &VolumeManager, root: &str) -> anyhow:
 
 /// Delete a generation's volumes, children first. Volumes already gone are
 /// skipped; one in use stops it.
-pub async fn delete_generation(vm: &tokio::sync::Mutex<VolumeManager>, gen: &Generation) -> anyhow::Result<usize> {
+pub async fn delete_generation(vm: &crate::lockwatch::TrackedMutex<VolumeManager>, gen: &Generation) -> anyhow::Result<usize> {
     let mut n = 0;
     let mine: HashSet<VolumeId> = gen.volumes.iter().map(|v| v.id).collect();
     for v in gen.volumes.iter().rev() {
@@ -392,7 +392,7 @@ pub struct StageOptions {
 /// documentation). Returns the generation (complete) and the plan. The
 /// caller saves the generation, before (incomplete) and after.
 pub async fn stage(
-    vm: &tokio::sync::Mutex<VolumeManager>,
+    vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
     image: Arc<dyn BlockDevice>,
     opts: &StageOptions,
     progress: &Progress,

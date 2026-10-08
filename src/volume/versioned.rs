@@ -240,8 +240,8 @@ pub struct CommitOutcome {
 /// makes that hold across a crash as well as across a race.
 pub async fn commit(
     versions: &mut VersionMap,
-    gem: &Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-    registry: &Arc<tokio::sync::RwLock<SlabRegistry>>,
+    gem: &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     req: &CommitRequest,
 ) -> Result<CommitOutcome, CommitError> {
     if req.len == 0 {
@@ -511,8 +511,8 @@ mod tests {
     // ---- commits against a real slab ------------------------------------
 
     struct Rig {
-        gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-        registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
+        gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         path: String,
     }
 
@@ -533,8 +533,8 @@ mod tests {
         reg.add(slab);
 
         Rig {
-            gem: Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new())),
-            registry: Arc::new(tokio::sync::RwLock::new(reg)),
+            gem: Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
+            registry: Arc::new(crate::lockwatch::TrackedRwLock::new(reg)),
             path,
         }
     }

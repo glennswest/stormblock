@@ -254,7 +254,7 @@ pub struct ColdMap {
 
 /// Load `id`'s map if it is not in memory. A no-op for a resident (or
 /// absent) map.
-pub async fn ensure_resident(gem: &tokio::sync::RwLock<GlobalExtentMap>, id: VolumeId) -> std::io::Result<()> {
+pub async fn ensure_resident(gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>, id: VolumeId) -> std::io::Result<()> {
     let pager = {
         let g = gem.read().await;
         if !g.is_cold(&id) {
@@ -282,14 +282,14 @@ impl Drop for Pin {
 /// Every map in memory, kept there while the pin is held: what a walk of
 /// every map that holds no manager lock takes first (a flow-over, GC, a
 /// drain, a rebuild). Pinned before loading, so nothing leaves between.
-pub async fn pin_resident(gem: &tokio::sync::RwLock<GlobalExtentMap>) -> std::io::Result<Pin> {
+pub async fn pin_resident(gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>) -> std::io::Result<Pin> {
     let pin = gem.read().await.pin();
     ensure_all_resident(gem).await?;
     Ok(pin)
 }
 
 /// Load every map not in memory: what a walk of every map needs.
-pub async fn ensure_all_resident(gem: &tokio::sync::RwLock<GlobalExtentMap>) -> std::io::Result<()> {
+pub async fn ensure_all_resident(gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>) -> std::io::Result<()> {
     let ids = gem.read().await.cold_ids();
     for id in ids {
         ensure_resident(gem, id).await?;

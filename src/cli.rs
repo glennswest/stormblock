@@ -3738,10 +3738,10 @@ pub async fn run() -> anyhow::Result<()> {
                     tracing::error!("serving context was already set — not starting a second one");
                     return;
                 }
-                tokio::spawn(crate::serve::reconcile::run(ctx.clone()));
+                tokio::spawn(crate::lockwatch::named("the serve reconciler", crate::serve::reconcile::run(ctx.clone())));
                 tracing::debug!("export reconciler running every {reconcile_secs}s");
                 if reap_secs > 0 {
-                    tokio::spawn(crate::serve::reap::run(ctx));
+                    tokio::spawn(crate::lockwatch::named("the serve reaper", crate::serve::reap::run(ctx)));
                     tracing::debug!("template reaper running every {reap_secs}s");
                 }
             }
@@ -5450,8 +5450,8 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     pub(crate) async fn flow_system_half<P, F>(
-        gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
-        registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
+        gem: &Arc<crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>>,
         sources: &[crate::drive::slab::SlabId],
         dest: crate::drive::slab::SlabId,
         persist: P,
@@ -5466,7 +5466,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     /// Extents with a leg on any of `sources`: what a flow-over of them has left.
     pub(crate) async fn extents_on(
-        gem: &tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>,
+        gem: &crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>,
         sources: &[crate::drive::slab::SlabId],
     ) -> usize {
         let _pin = match crate::volume::gem::pin_resident(gem).await {
@@ -5488,8 +5488,8 @@ pub async fn run() -> anyhow::Result<()> {
     /// data half after the system half, so the count never dips to 0 between).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn flow_slabs<P, F>(
-        gem: &Arc<tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>>,
-        registry: &Arc<tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>>,
+        gem: &Arc<crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>>,
         sources: &[crate::drive::slab::SlabId],
         dest: crate::drive::slab::SlabId,
         persist: P,
@@ -5851,7 +5851,7 @@ pub async fn run() -> anyhow::Result<()> {
         // Weak, so a migration in flight cannot keep the whole engine alive past
         // a shutdown that is trying to end.
         let state_for_persist = Arc::downgrade(state);
-        tokio::spawn(async move {
+        tokio::spawn(crate::lockwatch::named("the flow-over", async move {
             // Every slab that is not a data slab and is not the destination. On a
             // node that has just adopted, that is the appliance's system slab —
             // the local one is registered too, and migrating it into itself would
@@ -6024,7 +6024,7 @@ pub async fn run() -> anyhow::Result<()> {
                     flow.disk
                 );
             }
-        });
+        }));
     }
 
     /// Test hook (#190): fail the first N restores of `adopt-ublk`, after the

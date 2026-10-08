@@ -148,8 +148,8 @@ async fn provision_volumes_on_file_slab() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(RwLock::new(registry));
-    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
+    let registry = Arc::new(stormblock::lockwatch::TrackedRwLock::new(registry));
+    let gem = Arc::new(stormblock::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
     // Parse and resolve layout for 50 MB
     let mut layout = BootDiskLayout::parse("root:30M,swap:10M,home:rest").unwrap();

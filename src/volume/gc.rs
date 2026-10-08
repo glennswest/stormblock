@@ -336,8 +336,8 @@ impl From<&GcReport> for GcSummary {
 
 /// Run one pass, taking the locks in the engine's canonical order.
 pub async fn run_once(
-    gem: &std::sync::Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-    registry: &std::sync::Arc<tokio::sync::RwLock<SlabRegistry>>,
+    gem: &std::sync::Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: &std::sync::Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     opts: GcOptions,
 ) -> GcReport {
     // Maps not in memory are read from their stores, one at a time, and
@@ -382,8 +382,8 @@ pub async fn run_once(
 /// Returns a handle holding the most recent summary, so the API can report
 /// when the collector last ran and what it found.
 pub fn spawn(
-    gem: std::sync::Arc<tokio::sync::RwLock<GlobalExtentMap>>,
-    registry: std::sync::Arc<tokio::sync::RwLock<SlabRegistry>>,
+    gem: std::sync::Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+    registry: std::sync::Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     cfg: crate::mgmt::config::GcConfig,
 ) -> std::sync::Arc<tokio::sync::RwLock<Option<GcSummary>>> {
     let last = std::sync::Arc::new(tokio::sync::RwLock::new(None));

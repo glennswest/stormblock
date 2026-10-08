@@ -158,7 +158,7 @@ async fn persists_at_once_land_in_the_order_they_were_taken() {
         let id = vm.create_volume_any(&format!("v{i}"), VOL).await.unwrap();
         vols.push((i, id));
     }
-    let vm = Arc::new(tokio::sync::Mutex::new(vm));
+    let vm = Arc::new(stormblock::lockwatch::TrackedMutex::new(vm));
     let mut want: HashMap<(u8, u64), u8> = HashMap::new();
     for gen in 1..=6u8 {
         let mut tasks = Vec::new();

@@ -85,7 +85,7 @@ impl PoolUsage {
     }
 
     /// Sample the registry.
-    pub async fn sample(registry: &Arc<RwLock<SlabRegistry>>) -> PoolUsage {
+    pub async fn sample(registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>) -> PoolUsage {
         let reg = registry.read().await;
         let mut by_tier: std::collections::BTreeMap<String, TierUsage> = Default::default();
         let (mut total_bytes, mut free_bytes) = (0u64, 0u64);
@@ -233,7 +233,7 @@ pub fn under_pressure(usage: &PoolUsage, high_water_pct: f64) -> bool {
 /// The watcher's own state: which sources are left, and what happened last.
 pub struct PressureWatcher {
     cfg: PressureConfig,
-    registry: Arc<RwLock<SlabRegistry>>,
+    registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     slot_size: u64,
     /// Sources not yet claimed. Popped from the front; a failed claim is
     /// dropped rather than put back, so one bad path costs one attempt.
@@ -245,7 +245,7 @@ pub struct PressureWatcher {
 impl PressureWatcher {
     pub fn new(
         cfg: PressureConfig,
-        registry: Arc<RwLock<SlabRegistry>>,
+        registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         slot_size: u64,
     ) -> Self {
         let remaining = cfg.sources.iter().cloned().collect();
@@ -414,7 +414,7 @@ impl PressureWatcher {
 /// Run the watcher in the background, returning the status it keeps current.
 pub fn spawn(
     cfg: PressureConfig,
-    registry: Arc<RwLock<SlabRegistry>>,
+    registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     slot_size: u64,
 ) -> Arc<RwLock<Option<PressureStatus>>> {
     let status = Arc::new(RwLock::new(None));
@@ -472,7 +472,7 @@ mod tests {
     }
 
     /// A slab-backed pool, so the accounting is read off real slabs.
-    async fn pool(slabs: usize, slot: u64, bytes: u64) -> (Arc<RwLock<SlabRegistry>>, TempDirs) {
+    async fn pool(slabs: usize, slot: u64, bytes: u64) -> (Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>, TempDirs) {
         let dir = tempfile::TempDir::new().unwrap();
         let mut reg = SlabRegistry::new();
         for i in 0..slabs {
@@ -480,7 +480,7 @@ mod tests {
             let dev = FileDevice::open_with_capacity(path.to_str().unwrap(), bytes).await.unwrap();
             reg.add(Slab::format(Arc::new(dev), slot, StorageTier::Hot).await.unwrap());
         }
-        (Arc::new(RwLock::new(reg)), TempDirs(vec![dir]))
+        (Arc::new(crate::lockwatch::TrackedRwLock::new(reg)), TempDirs(vec![dir]))
     }
 
     struct TempDirs(Vec<tempfile::TempDir>);

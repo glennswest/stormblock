@@ -272,7 +272,8 @@ async fn v1_keeps_its_error_envelope() {
 }
 
 /// #283: `/debug` stays open, but without the token it shows route families,
-/// not paths, and a task dump is taken once for many callers.
+/// not paths; task and thread dumps are the admin's alone (#365), and a task
+/// dump is taken once for many callers.
 #[tokio::test]
 async fn debug_is_open_but_an_open_caller_sees_no_paths_and_cannot_force_dumps() {
     use tokio::io::AsyncWriteExt;
@@ -307,17 +308,62 @@ async fn debug_is_open_but_an_open_caller_sees_no_paths_and_cannot_force_dumps()
     assert!(full.contains(&format!("/api/v1/volumes/{secret}/clone")), "the token sees the path: {full}");
     drop(held);
 
+    // Dumps are the admin's, on demand (#365): nobody else can force one.
+    for p in ["/debug/tasks", "/debug/threads"] {
+        let r = c.get(format!("{base}{p}")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "{p} without a token");
+    }
     // Many callers at once, then again at once: one dump answers them all.
     let before = stormblock::mgmt::debug::TASK_DUMPS.load(std::sync::atomic::Ordering::Relaxed);
-    let calls: Vec<_> = (0..12).map(|_| c.get(format!("{base}/debug/tasks")).send()).collect();
+    let calls: Vec<_> = (0..12).map(|_| c.get(format!("{base}/debug/tasks")).bearer_auth("sekrit").send()).collect();
     for r in futures_util::future::join_all(calls).await {
         assert_eq!(r.unwrap().status(), 200);
     }
     let after = stormblock::mgmt::debug::TASK_DUMPS.load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(after - before, 1, "one task dump for twelve callers");
-
-    // Threads: names and states for anyone.
-    let t = c.get(format!("{base}/debug/threads")).send().await.unwrap().text().await.unwrap();
+    let t = c.get(format!("{base}/debug/threads")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
     assert!(t.contains("thread(s)"), "{t}");
+    server.abort();
+}
+
+/// #365: who holds a lock and who waits on it is named. A background task
+/// holds the volume manager; `GET /api/v1/volumes` waits on it; `/debug/locks`
+/// names the holder, how long, and the waiting request (by route family in
+/// the open view), and the request ends with its lock wait counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lock_holder_and_its_waiters_are_named() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with(&dir, config_with_token("sekrit")).await;
+    let (base, server) = serve(state.clone()).await;
+    let c = reqwest::Client::new();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let vm = state.volume_manager.clone();
+    let holder = tokio::spawn(stormblock::lockwatch::named("template build pvc-16t", async move {
+        let _g = vm.lock().await;
+        let _ = rx.await;
+    }));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let c2 = c.clone();
+    let b2 = base.clone();
+    let waiting = tokio::spawn(async move {
+        c2.get(format!("{b2}/api/v1/volumes/3f1c0de5-0283-4000-8000-5ec2e7da7a00")).bearer_auth("sekrit").send().await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let full = c.get(format!("{base}/debug/locks")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
+    assert!(full.contains("the volume manager: held"), "{full}");
+    assert!(full.contains("by template build pvc-16t"), "the holder is named: {full}");
+    assert!(full.contains("1 waiting") && full.contains("GET /api/v1/volumes/3f1c0de5"), "the waiter is named: {full}");
+    let open = c.get(format!("{base}/debug/locks")).send().await.unwrap().text().await.unwrap();
+    assert!(open.contains("by template build pvc-16t"), "{open}");
+    assert!(!open.contains("3f1c0de5"), "the open view names no volume: {open}");
+
+    tx.send(()).unwrap();
+    holder.await.unwrap();
+    let r = waiting.await.unwrap().unwrap();
+    assert!(r.status().as_u16() == 404 || r.status().is_success(), "{}", r.status());
+    let after = c.get(format!("{base}/debug/locks")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
+    assert!(!after.contains("template build"), "a released lock leaves nothing behind: {after}");
     server.abort();
 }

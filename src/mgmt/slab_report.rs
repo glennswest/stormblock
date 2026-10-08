@@ -214,8 +214,8 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
 /// The report now, without waiting: `None` when the registry or the extent
 /// map is busy (the caller falls back to the last one).
 pub fn snapshot(
-    registry: &tokio::sync::RwLock<crate::drive::slab_registry::SlabRegistry>,
-    gem: &tokio::sync::RwLock<crate::volume::gem::GlobalExtentMap>,
+    registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+    gem: &crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>,
 ) -> Option<SlabReport> {
     let facts: Vec<SlabFact> = {
         let reg = registry.try_read().ok()?;

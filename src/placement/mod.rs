@@ -759,8 +759,8 @@ impl PlacementEngine {
     /// longer names it is on disk.
     pub async fn migrate_leg_unlocked(
         &self,
-        gem: &tokio::sync::RwLock<GlobalExtentMap>,
-        registry: &tokio::sync::RwLock<SlabRegistry>,
+        gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>,
+        registry: &crate::lockwatch::TrackedRwLock<SlabRegistry>,
         volume_id: VolumeId,
         vext_idx: u64,
         old: Leg,
@@ -1522,7 +1522,7 @@ mod tests {
 
     async fn setup_test_env(
         slot_size: u64,
-    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::RwLock<GlobalExtentMap>>, Arc<tokio::sync::RwLock<SlabRegistry>>, PlacementEngine, Vec<String>) {
+    ) -> (Arc<ThinVolumeHandle>, Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>, Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>, PlacementEngine, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-placement-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1551,8 +1551,8 @@ mod tests {
 
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::RwLock::new(registry));
-        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
         let vol = ThinVolume::new("source".to_string(), 32 * 1024 * 1024, slot_size);
         let vol_handle = Arc::new(ThinVolumeHandle::new(
@@ -2034,8 +2034,8 @@ mod tests {
             ids.push(slab.slab_id());
             registry.add(slab);
         }
-        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
-        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
 
         // Only a and b exist as far as placement is concerned: quarantine c.
         registry.write().await.set_quarantined(ids[2], true);

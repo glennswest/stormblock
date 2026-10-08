@@ -356,7 +356,7 @@ mod tests {
     /// Set up a source volume on RAID 1 with small slot sizes for testing.
     async fn setup_volume(
         slot_size: u64,
-    ) -> (Arc<ThinVolumeHandle>, Arc<tokio::sync::RwLock<GlobalExtentMap>>, Arc<tokio::sync::RwLock<SlabRegistry>>, Vec<String>) {
+    ) -> (Arc<ThinVolumeHandle>, Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>, Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>, Vec<String>) {
         let test_id = uuid::Uuid::new_v4().simple().to_string();
         let dir = std::env::temp_dir().join("stormblock-cold-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -385,8 +385,8 @@ mod tests {
 
         let mut registry = SlabRegistry::new();
         registry.add(slab);
-        let registry = Arc::new(tokio::sync::RwLock::new(registry));
-        let gem = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
         let vol = ThinVolume::new("source".to_string(), 32 * 1024 * 1024, slot_size);
         let handle = Arc::new(ThinVolumeHandle::new(

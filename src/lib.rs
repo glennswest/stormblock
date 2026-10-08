@@ -15,6 +15,7 @@ pub mod drain;
 pub mod rebuild;
 pub mod http;
 pub mod logging;
+pub mod lockwatch;
 pub mod image;
 pub mod pallet;
 pub mod placement;

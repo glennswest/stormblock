@@ -53,8 +53,6 @@ use crate::mgmt::AppState;
 pub const STALL_AFTER: Duration = Duration::from_secs(10);
 /// A stall still going is logged again this often.
 const REPORT_AGAIN: Duration = Duration::from_secs(30);
-/// At most one full capture (tasks, threads) per this interval.
-const CAPTURE_EVERY: Duration = Duration::from_secs(60);
 /// How many watchdog reports are kept for `/debug/stalls`.
 const KEEP_REPORTS: usize = 8;
 /// How long one task dump answers `/debug/tasks` (#283).
@@ -63,6 +61,8 @@ pub const TASKS_FRESH: Duration = Duration::from_secs(5);
 struct InFlight {
     method: String,
     path: String,
+    /// Its activity name: what the lock records call it (#365).
+    name: Arc<str>,
     since: Instant,
     reported: Option<Instant>,
 }
@@ -109,29 +109,92 @@ pub fn register_runtime(name: impl Into<String>, handle: tokio::runtime::Handle)
     r.push((name.into(), handle));
 }
 
-struct Registered(u64);
+struct Registered {
+    id: u64,
+    name: Arc<str>,
+    since: Instant,
+    done: bool,
+}
 
 impl Drop for Registered {
     fn drop(&mut self) {
-        inflight().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        inflight().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        if !self.done {
+            // The client went away (or timed out) before the answer: said, so
+            // a caller's "no answer within 30s" has its other half here.
+            tracing::info!(
+                "api: {} abandoned by its caller after {:.1}s",
+                self.name,
+                self.since.elapsed().as_secs_f64()
+            );
+        }
     }
 }
 
-/// Middleware: every request is registered while it is being served. A
-/// request a client gave up on is removed when its future is dropped.
-pub async fn track(req: Request, next: Next) -> Response {
+/// Who called, as the credential check found it (#365): `admin`, `node`,
+/// `client-cert`, `kube`, `anonymous`, or `open` on a node that enforces no
+/// token. Set by `auth::require_token`, read for the request's log line.
+#[derive(Clone, Default)]
+pub struct CallerSlot(pub Arc<Mutex<&'static str>>);
+
+impl CallerSlot {
+    pub fn set(&self, who: &'static str) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = who;
+    }
+    fn get(&self) -> &'static str {
+        let w = *self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if w.is_empty() { "anonymous" } else { w }
+    }
+}
+
+/// A probe asked over and over by supervisors: its line is DEBUG, so a
+/// health check every second does not bury what happens.
+fn is_probe(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/health" | "/serve/v1/health" | "/serve/v1/ready" | "/mk/v1/health" | "/mk/v1/ready" | "/metrics"
+    ) || path.starts_with("/debug/")
+}
+
+/// Middleware: every request is registered while it is being served, runs
+/// under its own activity name (`GET /api/v1/volumes (req 42)`), so a lock it
+/// holds or waits on names it (#365), and ends with one line: method, path,
+/// status, caller, peer, total time and time spent waiting on locks. A
+/// request a client gave up on is removed when its future is dropped, and
+/// said so.
+pub async fn track(mut req: Request, next: Next) -> Response {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let name: Arc<str> = format!("{method} {path} (req {id})").into();
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.to_string())
+        .unwrap_or_else(|| "-".into());
+    let caller = CallerSlot::default();
+    req.extensions_mut().insert(caller.clone());
+    let since = Instant::now();
     inflight().lock().unwrap_or_else(|e| e.into_inner()).insert(
         id,
-        InFlight {
-            method: req.method().to_string(),
-            path: req.uri().path().to_string(),
-            since: Instant::now(),
-            reported: None,
-        },
+        InFlight { method: method.clone(), path: path.clone(), name: name.clone(), since, reported: None },
     );
-    let _guard = Registered(id);
-    next.run(req).await
+    let guard = Registered { id, name: name.clone(), since, done: false };
+    let activity = crate::lockwatch::Activity::new(name.clone());
+    let resp = crate::lockwatch::scope(activity.clone(), next.run(req)).await;
+    let mut guard = guard;
+    guard.done = true;
+    let status = resp.status().as_u16();
+    let ms = since.elapsed().as_secs_f64() * 1000.0;
+    let wait = activity.lock_wait().as_secs_f64() * 1000.0;
+    if is_probe(&path) && status < 400 {
+        tracing::debug!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms caller {} peer {peer} req {id}", caller.get());
+    } else if status >= 500 || ms >= STALL_AFTER.as_secs_f64() * 1000.0 {
+        tracing::warn!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms caller {} peer {peer} req {id}", caller.get());
+    } else {
+        tracing::info!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms caller {} peer {peer} req {id}", caller.get());
+    }
+    resp
 }
 
 /// The open diagnostic routes.
@@ -211,8 +274,8 @@ pub fn route_family(path: &str) -> String {
     out
 }
 
-async fn locks_route(State(state): State<Arc<AppState>>) -> Response {
-    text(locks(&state))
+async fn locks_route(full: Option<axum::Extension<crate::mgmt::auth::FullView>>) -> Response {
+    text(locks_view(full.is_some()))
 }
 
 /// The zoned or drive-managed SMR disks this engine opened (#282): their
@@ -248,27 +311,51 @@ fn in_flight_view(over: Duration, full: bool) -> String {
     out
 }
 
-/// Whether the engine's three big locks are held, right now.
-pub fn locks(state: &AppState) -> String {
-    let held = |b: bool| if b { "free" } else { "HELD" };
-    let vm = state.volume_manager.try_lock().is_ok();
-    let gem_w = state.gem.try_write().is_ok();
-    let gem_r = state.gem.try_read().is_ok();
-    let reg_w = state.slab_registry.try_write().is_ok();
-    let reg_r = state.slab_registry.try_read().is_ok();
-    let mut out = format!(
-        "volume manager (mutex): {}\n\
-         extent map (rwlock): write {} / read {}\n\
-         slab registry (rwlock): write {} / read {}\n\
-         (a read that is HELD means a writer holds it or is queued for it)\n",
-        held(vm),
-        held(gem_w),
-        held(gem_r),
-        held(reg_w),
-        held(reg_r),
-    );
+/// Who holds the engine's locks and who waits on them, right now (#365):
+/// one line per lock that is held or waited on, from the lock records
+/// (`lockwatch`), and the metadata persists in progress. The open view names
+/// requests by route family, never an id (#283).
+pub fn locks(_state: &AppState) -> String {
+    locks_view(true)
+}
+
+pub fn locks_view(full: bool) -> String {
+    let mut out = String::new();
+    let snap = crate::lockwatch::snapshot();
+    let mut any = false;
+    for v in snap {
+        if v.holders.is_empty() && v.waiters.is_empty() {
+            continue;
+        }
+        any = true;
+        let v = if full { v } else { redact_view(v) };
+        out.push_str(&crate::lockwatch::line(&v));
+        out.push('\n');
+    }
+    if !any {
+        out.push_str("locks: none held, none waited on\n");
+    }
     out.push_str(&persists_view(&crate::volume::persists_in_progress()));
     out
+}
+
+/// An activity name as the open view shows it: a request's path by route
+/// family; a task's name as it is.
+pub fn redact_who(who: &str) -> String {
+    let mut parts = who.splitn(3, ' ');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(m), Some(p), rest) if p.starts_with('/') => {
+            format!("{m} {}{}", route_family(p), rest.map(|r| format!(" {r}")).unwrap_or_default())
+        }
+        _ => who.to_string(),
+    }
+}
+
+fn redact_view(mut v: crate::lockwatch::LockView) -> crate::lockwatch::LockView {
+    for p in v.holders.iter_mut().chain(v.waiters.iter_mut()) {
+        p.who = redact_who(&p.who).into();
+    }
+    v
 }
 
 /// The metadata persists running now (#358). A create, clone, delete or seal
@@ -397,7 +484,6 @@ pub fn start(state: Arc<AppState>) {
     }
     start_instant();
     register_runtime("api", tokio::runtime::Handle::current());
-    let handle = tokio::runtime::Handle::current();
     tokio::spawn(async {
         loop {
             HEARTBEAT.store(since_start_ms(), Ordering::Relaxed);
@@ -405,7 +491,6 @@ pub fn start(state: Arc<AppState>) {
         }
     });
     let spawned = std::thread::Builder::new().name("api-watchdog".into()).spawn(move || {
-        let mut last_capture: Option<Instant> = None;
         let mut starved_since: Option<Instant> = None;
         let mut last_ublk: Option<Instant> = None;
         loop {
@@ -436,19 +521,20 @@ pub fn start(state: Arc<AppState>) {
             } else if !starved {
                 starved_since = None;
             }
-            // Which stalls to report now: (whole, open) for each.
-            let due: Vec<(String, String)> = {
+            // One line per stall (#365): the request, how long, and what it
+            // waits behind: each lock it waits on, with its holder and how
+            // long, and the waiters. No thread or task dump on a timer: on a
+            // struggling node it was itself the load, and its 200-line bursts
+            // got the explaining lines dropped (21,191 on the Dell). Dumps
+            // are `/debug/tasks` and `/debug/threads`, admin only.
+            let due: Vec<(Arc<str>, String, String, f64)> = {
                 let mut m = inflight().lock().unwrap_or_else(|e| e.into_inner());
                 m.values_mut()
                     .filter(|r| r.since.elapsed() >= STALL_AFTER)
                     .filter(|r| r.reported.map(|t| t.elapsed() >= REPORT_AGAIN).unwrap_or(true))
                     .map(|r| {
                         r.reported = Some(Instant::now());
-                        let age = r.since.elapsed().as_secs_f64();
-                        (
-                            format!("{} {} ({age:.0}s)", r.method, r.path),
-                            format!("{} {} ({age:.0}s)", r.method, route_family(&r.path)),
-                        )
+                        (r.name.clone(), r.method.clone(), r.path.clone(), r.since.elapsed().as_secs_f64())
                     })
                     .collect()
             };
@@ -456,41 +542,63 @@ pub fn start(state: Arc<AppState>) {
             if due.is_empty() && !runtime_report {
                 continue;
             }
-            // The whole report and its open summary (#283), built side by side.
-            let head = |full: bool| {
-                let what = if due.is_empty() {
-                    "the API runtime stopped running tasks".to_string()
-                } else {
-                    let list: Vec<&str> = due.iter().map(|(w, o)| if full { w.as_str() } else { o.as_str() }).collect();
-                    format!("{} request(s) stalled: {}", due.len(), list.join(", "))
+            let snap = crate::lockwatch::snapshot();
+            let mut full_lines = Vec::new();
+            let mut open_lines = Vec::new();
+            for (name, method, path, age) in &due {
+                let waits_on: Vec<&crate::lockwatch::LockView> =
+                    snap.iter().filter(|v| v.waiters.iter().any(|w| &w.who == name)).collect();
+                let held: Vec<&crate::lockwatch::LockView> =
+                    snap.iter().filter(|v| v.holders.iter().any(|h| &h.who == name)).collect();
+                let behind = |redact: bool| -> String {
+                    let mut parts: Vec<String> = waits_on
+                        .iter()
+                        .map(|v| {
+                            let v = if redact { redact_view((*v).clone()) } else { (*v).clone() };
+                            format!("waits on {}", crate::lockwatch::line(&v))
+                        })
+                        .collect();
+                    for v in &held {
+                        parts.push(format!("holds the {}", v.lock));
+                    }
+                    if parts.is_empty() {
+                        let busy: Vec<String> = snap
+                            .iter()
+                            .filter(|v| !v.holders.is_empty())
+                            .map(|v| {
+                                let v = if redact { redact_view(v.clone()) } else { v.clone() };
+                                crate::lockwatch::line(&v)
+                            })
+                            .collect();
+                        parts.push(if busy.is_empty() {
+                            "waits on no tracked lock (I/O, or a lock not tracked)".to_string()
+                        } else {
+                            format!("waits on no tracked lock; held now: {}", busy.join("; "))
+                        });
+                    }
+                    parts.join("; ")
                 };
-                let mut h = format!("API watchdog at +{:.0}s: {what}\n", start_instant().elapsed().as_secs_f64());
-                if starved {
-                    h.push_str(&format!(
-                        "the API runtime has not run its heartbeat for {:.1}s: a worker is blocked synchronously\n",
-                        beat_age as f64 / 1000.0
-                    ));
-                }
-                h.push_str(&in_flight_view(STALL_AFTER, full));
-                h.push_str(&locks(&state));
-                h.push_str(&crate::drive::flushgate::summary_view(Duration::from_secs(60), full));
-                h
-            };
-            let mut rep = head(true);
-            let open = head(false);
-            let capture = last_capture.map(|t| t.elapsed() >= CAPTURE_EVERY).unwrap_or(true);
-            if capture {
-                last_capture = Some(Instant::now());
-                if !starved {
-                    rep.push_str("\n");
-                    rep.push_str(&handle.block_on(task_dump(Duration::from_secs(5))));
-                }
-                rep.push_str("\n");
-                rep.push_str(&threads());
+                full_lines.push(format!("stall: {name} for {age:.0}s: {}", behind(false)));
+                open_lines.push(format!(
+                    "stall: {method} {} for {age:.0}s: {}",
+                    route_family(path),
+                    behind(true)
+                ));
             }
-            // To the log in one piece, and kept for /debug/stalls.
-            tracing::warn!("{rep}");
-            eprintln!("{rep}");
+            if runtime_report {
+                let l = format!(
+                    "stall: the API runtime has not run its heartbeat for {:.1}s: a worker is blocked synchronously; {}",
+                    beat_age as f64 / 1000.0,
+                    snap.iter().filter(|v| !v.holders.is_empty()).map(crate::lockwatch::line).collect::<Vec<_>>().join("; ")
+                );
+                full_lines.push(l.clone());
+                open_lines.push(l);
+            }
+            for l in &full_lines {
+                tracing::warn!("{l}");
+            }
+            let rep = full_lines.join("\n") + "\n";
+            let open = open_lines.join("\n") + "\n";
             let mut r = reports().lock().unwrap_or_else(|e| e.into_inner());
             if r.len() >= KEEP_REPORTS {
                 r.pop_front();

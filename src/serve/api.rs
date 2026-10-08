@@ -133,8 +133,6 @@ fn is_public(path: &str) -> bool {
             // read-only, no volume data, asked by a supervisor that holds
             // no node token.
             | "/debug/stalls"
-            | "/debug/tasks"
-            | "/debug/threads"
             | "/debug/locks"
     )
 }
@@ -306,6 +304,12 @@ fn volume_delete(path: &str) -> Option<String> {
 fn is_destructive_274(method: &Method, path: &str) -> bool {
     let p = path.trim_end_matches('/');
     let seg: Vec<&str> = p.split('/').collect();
+    // A task dump pauses the runtime it traces and a thread dump reads every
+    // thread's kernel stack: on demand, by the admin only, never open and
+    // never on a timer (#365).
+    if matches!(p, "/debug/tasks" | "/debug/threads") {
+        return true;
+    }
     if *method == Method::POST {
         if matches!(p, "/api/v1/slabs" | "/api/v1/arrays" | "/api/v1/spares") {
             return true;

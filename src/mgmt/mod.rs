@@ -223,12 +223,12 @@ pub struct AppState {
     /// Hot spares for the RAID sets, by pool (#252).
     pub spares: Arc<crate::raid::spares::SparePool>,
     /// Behind an `Arc` so work that outlives a request can hold it.
-    pub volume_manager: Arc<tokio::sync::Mutex<VolumeManager>>,
+    pub volume_manager: Arc<crate::lockwatch::TrackedMutex<VolumeManager>>,
     /// Which volumes exist, read without `volume_manager`'s lock (#358).
     pub volume_presence: crate::volume::VolumePresence,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
-    pub slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
-    pub gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
+    pub slab_registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+    pub gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     /// Control-plane state behind the /v1 CSI contract surface.
     pub v1: tokio::sync::Mutex<api::v1::V1State>,
     /// StormFS chunk ownership, map versions and version pins (#49, #50).
@@ -432,8 +432,8 @@ impl AppState {
     pub fn new(
         config: StormBlockConfig,
         volume_manager: VolumeManager,
-        slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
-        gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
+        slab_registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+        gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     ) -> Self {
         // The node's own rungs sit under every slab's failure domain, so a
         // policy that spreads at `rack` has something to compare (#72).
@@ -454,7 +454,7 @@ impl AppState {
         ana::load(&config);
         #[cfg(feature = "nvmeof")]
         let nvmeof_settings = config.nvmeof.clone();
-        let volume_manager = Arc::new(tokio::sync::Mutex::new(volume_manager));
+        let volume_manager = Arc::new(crate::lockwatch::TrackedMutex::new(volume_manager));
         let rebuilds = crate::rebuild::Rebuilds::new(volume_manager.clone(), &config.rebuild);
         let slab_registry_for_eraser = slab_registry.clone();
         AppState {
@@ -562,7 +562,7 @@ pub async fn serve_tls(
     reloader: Arc<tls::Reloader>,
 ) -> anyhow::Result<()> {
     loop {
-        let (tcp_stream, _peer) = listener.accept().await?;
+        let (tcp_stream, peer) = listener.accept().await?;
         let acceptor = reloader.acceptor();
         let app = router.clone();
         tokio::spawn(async move {
@@ -587,6 +587,7 @@ pub async fn serve_tls(
                     if let Some(c) = cert {
                         req.extensions_mut().insert(c);
                     }
+                    req.extensions_mut().insert(axum::extract::ConnectInfo(peer));
                     Ok::<_, std::convert::Infallible>(svc.call(req).await.unwrap())
                 }
             });
@@ -694,7 +695,8 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
         if let Some(ctx) = state.serve.get() {
             ctx.status.set(&ctx.status.mgmt_listening, true);
         }
-        axum::serve(listener, router)
+        // The peer's address on every request, for its log line (#365).
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
             .map_err(|e| anyhow::anyhow!("management server error: {e}"))?;
     }
