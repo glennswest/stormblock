@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Flow-over paced to the destination disk; SMR named (2026-10-08, #282, P2) — IN PROGRESS
+### Flow-over paced to the destination disk; SMR named (2026-10-08, #282, P2) — DONE
 
 From #269: an SMR disk under a flow-over's sustained writes fills its cache
 and every flush (the node's fsyncs too) takes seconds.
@@ -183,8 +183,11 @@ and every flush (the node's fsyncs too) takes seconds.
 - [x] `identity::recording_of`: `queue/zoned`, else a known DM-SMR model;
       WARN at open (`SasDevice`), listed on `/debug/stalls`
 - [x] tests; docs (durability rule 10, README), CHANGELOG
-- [ ] build + full nextest; golden; server3's real flush times once a
-      release with this engine is on it (not mine to install)
+- [x] found: the power-cut flow-over test's cut by window count (#331)
+      could land past the last window (2/6 at 95%): cut by progress now,
+      10/10 alone. Full nextest at 80525f4 1014/1014; golden
+- Not on metal: server3's `/debug/stalls` flush times and the pacing WARN
+  on a release with this engine (stormcentral's install)
 
 ### /debug open without a token: bounded and redacted (2026-10-08, #283, P2) — DONE
 
