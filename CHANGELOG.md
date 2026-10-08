@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #231: a ublk attach no longer blocks an async worker, or the export table, while its device comes up.
+  - **Before:** `UblkExportManager::ensure` polled with `std::thread::sleep`, up to 1 s for the kernel's id and then up to 5 s for the block device, on a runtime worker and holding `ublk_exports`. Every other attach, and every request that reads the export table (volume listings, health, usage), waited behind it.
+  - **Now:** `ublk_export::attach` begins under the lock: it answers an existing export, waits for an attach of the same volume already under way, or starts a server and records it pending. It then waits asynchronously (`wait_ready`, same bounds and the same checks: an id assigned, the node present, nothing mounted on it) on a task of its own with no lock held, and finishes under the lock: the export is recorded, or its server is taken down. A caller that gives up leaves nothing half made.
+  - **Tests:** `waiting_for_a_device_never_blocks_the_runtime`, `a_device_that_does_not_come_up_is_refused_in_time`, `the_export_table_is_free_while_a_device_comes_up`. `ci-ublk-qd-verify.sh` adds four volumes attached at once on a real kernel.
 - **feat:** #282: the flow-over paces itself to what its destination disk sustains, and shingled disks are named.
   - **Pacing:** after each window it reads the destination disk's flush times over the last 30 s (`drive::flushgate::recent`, p90; a slab on a partition flushes its disk). Above `STORMBLOCK_FLOW_FLUSH_BOUND_MS` (1000; 0 = off) it halves the window and pauses for one flush time (at most 10 s); under it the window doubles back. Said once at WARN when it starts and at INFO when the disk keeps up again. `paced` is added to the flow-over's time breakdown. A disk that keeps up runs at #331's full speed.
   - **Shingled disks:** a block device whose disk reports `queue/zoned` host-managed or host-aware, or whose model is on Seagate's, WD's or Toshiba's published drive-managed SMR lists (server3's ST2000DM008 among them), is logged at WARN when opened and listed on `/debug/stalls`.

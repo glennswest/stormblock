@@ -172,6 +172,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### ublk attach: no blocking wait, no lock across it (2026-10-08, #231) — IN PROGRESS
+
+`ensure` polled with `std::thread::sleep` (≤ 1 s id, ≤ 5 s node) on a worker
+holding `ublk_exports`.
+- [x] `ublk_export::attach` = `begin` (lock) → `wait_ready` (async, a task
+      of its own, no lock) → `finish` (lock); pending per volume, a second
+      attach waits for the first; failure shuts the server down
+- [x] unit tests; `ci-ublk-qd-verify.sh` parallel attach; CHANGELOG
+- [ ] full nextest; the QEMU script; golden
+
 ### Flow-over paced to the destination disk; SMR named (2026-10-08, #282, P2) — DONE
 
 From #269: an SMR disk under a flow-over's sustained writes fills its cache

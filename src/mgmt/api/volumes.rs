@@ -1292,7 +1292,7 @@ async fn attach_volume(
             true,
         )
     {
-        if let Some(path) = state.ublk_exports.lock().await.ensure(&key, device.clone()) {
+        if let Some(path) = crate::mgmt::ublk_export::attach(&state, &key, device.clone()).await {
             return Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response();
         }
         if want == WantTransport::Ublk {

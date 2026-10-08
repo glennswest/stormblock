@@ -20,6 +20,9 @@
 # of a kubelet's image clone does) — the volume must stay with its data, a
 # DELETE be refused (409), and the volume go once the device is detached.
 #
+# And (#231): four volumes attached over ublk at once — each reply a block
+# device that exists, all different, a listing answered meanwhile.
+#
 # And (#337): the slab's dm device suspended after a write, so an fsync's
 # FLUSH is never answered — `/api/v1/health` must list it in `ublk_stuck`
 # once it is 30 s old and the watchdog log it; after a resume the fsync
@@ -193,6 +196,7 @@ EOT
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
     [ "$mode" = concurrent ] && in_use
+    [ "$mode" = concurrent ] && parallel_attach
     [ "$mode" = concurrent ] && unanswered
 
     step stop
@@ -257,6 +261,37 @@ in_use() {
     grep -E "kept until it is detached|ephemeral volume .* deleted" /run/engine-$mode.log | sed 's/^/LOG /' | tail -3
 }
 
+# #231: four volumes attached at once. The wait for each device runs with
+# no lock held, so they come up side by side, a listing answers meanwhile,
+# and every reply is a block device that exists, each a different one.
+parallel_attach() {
+    step parallel-attach
+    ids=
+    for n in 1 2 3 4; do
+        ids="$ids $(api -X POST http://127.0.0.1:$port/api/v1/volumes -d "{\"name\":\"pa$n\",\"size\":\"64M\"}" \
+            | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)"
+    done
+    jobs=
+    for v in $ids; do
+        ( api -X POST http://127.0.0.1:$port/api/v1/volumes/$v/attach -d '{"transport":"ublk"}' \
+            | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p' > /tmp/pa-$v ) &
+        jobs="$jobs $!"
+    done
+    t0=$(now)
+    api http://127.0.0.1:$port/api/v1/volumes > /dev/null && t1=$(now)
+    wait $jobs
+    devs=
+    for v in $ids; do
+        d=$(cat /tmp/pa-$v)
+        [ -b "$d" ] || { r parallel-attach "FAIL ($v '$d')"; return; }
+        devs="$devs $d"
+    done
+    n=$(echo $devs | tr ' ' '\n' | sort -u | wc -l)
+    echo "GUEST parallel-attach:$devs; listing during them $(ms $t0 $t1) ms"
+    [ "$n" = 4 ] && r parallel-attach PASS || r parallel-attach "FAIL (devices:$devs)"
+    for v in $ids; do api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v/attach > /dev/null; done
+}
+
 # #337: a flush the disk below never answers. The slab's dm device is
 # suspended (I/O queued, not failed) after a write, so the fsync's FLUSH
 # waits in the engine. Health must name it once it is 30 s old, and the
@@ -306,7 +341,8 @@ SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
-         unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared; do
+         unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
+         parallel-attach; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ -n "$SP" ] && [ -n "$CP" ] && [ "$CP" -gt 0 ]; then

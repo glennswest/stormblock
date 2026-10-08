@@ -1727,7 +1727,7 @@ async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) 
         if let Some(local) = local_id {
             let device = state.volume_manager.lock().await.get_volume(&EngineVolumeId(local));
             if let Some(device) = device {
-                if let Some(path) = state.ublk_exports.lock().await.ensure(&id, device) {
+                if let Some(path) = crate::mgmt::ublk_export::attach(&state, &id, device).await {
                     return Ok(Json(AttachInfo::Ublk { device_hint: path }));
                 }
             }
