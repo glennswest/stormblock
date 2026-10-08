@@ -64,6 +64,15 @@ pub struct LocalDisk {
     /// `initramfs` (the survey) or `boot-local`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// The storage controllers the initramfs found before it decided (#345):
+    /// `pci`, `id` (vendor:device), `class`, `driver` (null: none bound) and
+    /// the `drives` under each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controllers: Vec<serde_json::Value>,
+    /// Every drive it found (#345): `name`, `model`, `serial`, `size_bytes`,
+    /// `transport`, `controller`, `bay`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drives: Vec<serde_json::Value>,
 }
 
 /// Where the boot writes [`LocalDisk`]: `/run` survives the switch_root.
@@ -79,6 +88,20 @@ fn local_disk_path() -> std::path::PathBuf {
 pub fn read_local_disk() -> Option<LocalDisk> {
     let text = std::fs::read_to_string(local_disk_path()).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// Record a new verdict, keeping the boot's inventory (#345): `boot-local`
+/// says what it did with the disk without losing what the initramfs found.
+pub fn update_local_disk(state: &str, drive: Option<&str>, reason: Option<String>, from: &str) {
+    let old = read_local_disk();
+    write_local_disk(&LocalDisk {
+        state: state.to_string(),
+        drive: drive.map(str::to_string),
+        reason,
+        from: Some(from.to_string()),
+        controllers: old.as_ref().map(|o| o.controllers.clone()).unwrap_or_default(),
+        drives: old.map(|o| o.drives).unwrap_or_default(),
+    });
 }
 
 /// Write the verdict (atomically; a warning when it cannot be).
@@ -322,13 +345,28 @@ mod tests {
         assert_eq!(j["local_disk"]["drive"], "/dev/sda");
         assert!(j["local_disk"]["reason"].as_str().unwrap().contains("expander"));
         // As boot-local writes it.
-        write_local_disk(&LocalDisk {
-            state: "failed".into(),
-            drive: Some("/dev/sda".into()),
-            reason: Some("Input/output error".into()),
-            from: Some("boot-local".into()),
-        });
+        update_local_disk("failed", Some("/dev/sda"), Some("Input/output error".into()), "boot-local");
         assert_eq!(read_local_disk().unwrap().state, "failed");
+        // #345: the initramfs's inventory is kept through boot-local's update,
+        // and carried in the report.
+        std::fs::write(
+            &path,
+            r#"{"state": "unknown", "drive": null, "reason": null, "from": "initramfs",
+               "controllers": [{"pci": "0000:01:00.0", "id": "1000:0097", "class": "0x010700", "driver": "mpt3sas", "drives": ["sda"]},
+                               {"pci": "0000:00:1f.2", "id": "8086:a102", "class": "0x010601", "driver": null, "drives": []}],
+               "drives": [{"name": "sda", "model": "WDC WD20EFAX-68F", "serial": "WD-WX11D28JFS6T", "size_bytes": 2000398934016,
+                           "transport": "sas", "controller": "0000:01:00.0", "bay": "4"}]}"#,
+        )
+        .unwrap();
+        update_local_disk("taken", Some("/dev/sda"), None, "boot-local");
+        let note = read_local_disk().unwrap();
+        assert_eq!((note.state.as_str(), note.controllers.len(), note.drives.len()), ("taken", 2, 1));
+        let mut r = build(&[slab(1, false, false)], None);
+        r.local_disk = Some(note);
+        let j = serde_json::to_value(&r).unwrap();
+        assert_eq!(j["local_disk"]["controllers"][0]["driver"], "mpt3sas");
+        assert!(j["local_disk"]["controllers"][1]["driver"].is_null(), "an unbound controller is reported");
+        assert_eq!(j["local_disk"]["drives"][0]["serial"], "WD-WX11D28JFS6T");
         std::env::remove_var("STORMBLOCK_LOCAL_DISK_REPORT");
     }
 }

@@ -1255,6 +1255,131 @@ elif [ "$nd_waited" -gt 0 ]; then
 fi
 # --- END netdev wait
 
+# --- BEGIN storage inventory (covered by tests/initramfs-storage-inventory.sh)
+# What storage this machine has, said before anything decides about a disk
+# (#345, owner: "a check during the boot, that we see if controller and drive
+# is there"). Every PCI mass-storage controller (class 01xx: AHCI, SAS HBA or
+# RAID, NVMe, virtio), its driver and whether one bound, and the drives under
+# each. A controller with no driver is a WARNING naming its PCI id: its drives
+# cannot be seen at all. A SAS/RAID/NVMe/SCSI controller whose driver bound
+# and that shows no drive yet is waited for (bounded, STORM_STORAGE_WAIT, 30 s:
+# SAS and expander discovery runs on after the driver loads), not skipped. The
+# inventory goes into /run/stormblock/local-disk.json (`controllers`,
+# `drives`), which the slab decision's verdict (#344) keeps, and from there
+# into the engine's health for stormcentral to hold against what it knows the
+# machine has (stormcentral#566).
+INV_PCI="${STORM_PCI_SYS:-/sys/bus/pci/devices}"
+INV_BLOCK="${STORM_INV_BLOCK:-/sys/block}"
+INV_WAIT="${STORM_STORAGE_WAIT:-30}"
+INV_REPORT="${STORM_LOCAL_DISK_REPORT:-/run/stormblock/local-disk.json}"
+inv_clean() { tr -d '"\\' | tr '\000-\037' ' ' | sed 's/^ *//; s/ *$//'; }
+inv_read() { [ -r "$1" ] && head -c 128 "$1" 2>/dev/null | inv_clean; }
+inv_controllers() { # -> "pci class vendor:device driver|-" per controller
+    for _c in "$INV_PCI"/*; do
+        [ -r "$_c/class" ] || continue
+        _cls=$(cat "$_c/class" 2>/dev/null)
+        case "$_cls" in 0x01*) ;; *) continue ;; esac
+        _drv=-
+        [ -e "$_c/driver" ] && _drv=$(basename "$(readlink -f "$_c/driver")")
+        _v=$(cat "$_c/vendor" 2>/dev/null); _d=$(cat "$_c/device" 2>/dev/null)
+        echo "${_c##*/} $_cls ${_v#0x}:${_d#0x} $_drv"
+    done
+}
+inv_disks() { # -> every whole disk a driver made
+    for _b in "$INV_BLOCK"/*; do
+        _n=${_b##*/}
+        case "$_n" in loop*|ram*|zram*|ublkb*|nbd*|dm-*|md*|sr*|fd*) continue ;; esac
+        [ -e "$_b/device" ] || continue
+        echo "$_n"
+    done
+}
+inv_disks_of() { # pci -> the disks under that controller
+    for _n in $(inv_disks); do
+        case "$(readlink -f "$INV_BLOCK/$_n")" in */"$1"/*) echo "$_n" ;; esac
+    done
+}
+inv_waiting() { # -> bound SAS/RAID/NVMe/SCSI controllers with no drive yet
+    inv_controllers | while read -r _p _cls _id _drv; do
+        [ "$_drv" = - ] && continue
+        case "$_cls" in 0x0100*|0x0104*|0x0107*|0x0108*) ;; *) continue ;; esac
+        [ -n "$(inv_disks_of "$_p")" ] || echo "$_p"
+    done
+}
+_iw=0
+_iwhat=$(inv_waiting)
+if [ -n "$_iwhat" ]; then
+    echo "  storage: waiting up to ${INV_WAIT}s for drives on $(echo $_iwhat)"
+    while [ "$_iw" -lt "$INV_WAIT" ] && [ -n "$(inv_waiting)" ]; do
+        sleep 1
+        _iw=$((_iw + 1))
+    done
+    _iwhat=$(inv_waiting)
+    if [ -n "$_iwhat" ]; then
+        echo "  storage: after ${_iw}s still no drive on $(echo $_iwhat)"
+    else
+        echo "  storage: drives appeared after ${_iw}s"
+    fi
+fi
+INV_CONTROLLERS=""
+INV_DRIVES=""
+_ij() { [ -n "$1" ] && printf '"%s"' "$1" || printf null; }
+echo "storage inventory:"
+_seen=""
+while read -r _p _cls _id _drv; do
+    [ -n "$_p" ] || continue
+    _ds=$(inv_disks_of "$_p")
+    _dj=""
+    for _n in $_ds; do _dj="$_dj${_dj:+, }\"$_n\""; done
+    INV_CONTROLLERS="$INV_CONTROLLERS${INV_CONTROLLERS:+, }{\"pci\": \"$_p\", \"id\": \"$_id\", \"class\": \"$_cls\", \"driver\": $( [ "$_drv" = - ] && printf null || printf '"%s"' "$_drv"), \"drives\": [$_dj]}"
+    if [ "$_drv" = - ]; then
+        echo "  $_p [$_id] class $_cls: no driver bound"
+        echo "WARNING: storage controller $_p [$_id] (class $_cls) has no driver bound - its drives cannot be seen (#345)"
+    else
+        echo "  $_p [$_id] class $_cls: $_drv, $(echo $_ds | wc -w) drive(s)"
+    fi
+    _seen="$_seen $_ds"
+done <<INVEOF
+$(inv_controllers)
+INVEOF
+for _n in $(inv_disks); do
+    _b="$INV_BLOCK/$_n"
+    _path=$(readlink -f "$_b")
+    _ctl=""
+    for _c in $(inv_controllers | awk '{print $1}'); do
+        case "$_path" in */"$_c"/*) _ctl="$_c" ;; esac
+    done
+    _model=$(inv_read "$_b/device/model")
+    _serial=$(inv_read "$_b/device/serial")
+    if [ -z "$_serial" ] && [ -r "$_b/device/vpd_pg80" ]; then
+        _serial=$(tail -c +5 "$_b/device/vpd_pg80" 2>/dev/null | inv_clean)
+    fi
+    _bytes=$(( $(cat "$_b/size" 2>/dev/null || echo 0) * 512 ))
+    case "$_n:$_path" in
+    nvme*) _tr=nvme ;;
+    vd*) _tr=virtio ;;
+    *"/usb"*) _tr=usb ;;
+    *"/ata"*) _tr=sata ;;
+    *"/end_device-"*|*"/expander-"*|*"/port-"*) _tr=sas ;;
+    *) _tr=scsi ;;
+    esac
+    _bay=""
+    for _e in "$_b"/device/enclosure_device:*; do
+        [ -e "$_e" ] && _bay="${_e##*enclosure_device:}"
+    done
+    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"size_bytes\": $_bytes, \"transport\": \"$_tr\", \"controller\": $(_ij "$_ctl"), \"bay\": $(_ij "$_bay")}"
+    echo "    $_n: ${_model:-?} serial ${_serial:-?}, $((_bytes / 1000000000)) GB, $_tr${_ctl:+ on $_ctl}${_bay:+, bay $_bay}"
+done
+[ -n "$INV_CONTROLLERS" ] || echo "  no storage controller on PCI"
+[ -n "$INV_DRIVES" ] || echo "  no drive"
+INV_CONTROLLERS="[$INV_CONTROLLERS]"
+INV_DRIVES="[$INV_DRIVES]"
+# The verdict starts unknown; the slab decision fills it in (#344), and keeps
+# the inventory.
+mkdir -p "$(dirname "$INV_REPORT")" 2>/dev/null
+printf '{"state": "unknown", "drive": null, "reason": null, "from": "initramfs", "controllers": %s, "drives": %s}\n' \
+    "$INV_CONTROLLERS" "$INV_DRIVES" > "$INV_REPORT" 2>/dev/null || true
+# --- END storage inventory
+
 # --- BEGIN node state read (covered by tests/initramfs-boot-nic.sh)
 # What this machine's installed system says about itself, read before the
 # network (#229, #238): `/config/stormcos.toml` and `/config/install-node.toml`
@@ -3081,9 +3206,10 @@ if [ "$BOOT_MODE" = "local" ]; then
     ld_write() { # state drive reason
         mkdir -p "$(dirname "$LD_REPORT")" 2>/dev/null
         _r=$(printf '%s' "$3" | tr '"\\\n' "'' ")
-        printf '{"state": "%s", "drive": %s, "reason": %s, "from": "initramfs"}\n' "$1" \
+        printf '{"state": "%s", "drive": %s, "reason": %s, "from": "initramfs", "controllers": %s, "drives": %s}\n' "$1" \
             "$( [ -n "$2" ] && printf '"%s"' "$2" || printf null)" \
-            "$( [ -n "$_r" ] && printf '"%s"' "$_r" || printf null)" > "$LD_REPORT" 2>/dev/null || true
+            "$( [ -n "$_r" ] && printf '"%s"' "$_r" || printf null)" \
+            "${INV_CONTROLLERS:-[]}" "${INV_DRIVES:-[]}" > "$LD_REPORT" 2>/dev/null || true
     }
     drive_signature() { # dev /sys/block/X -> what it carries; nothing when blank
         _got=$(dd if="$1" bs=1048576 count=1 2>/dev/null | wc -c)

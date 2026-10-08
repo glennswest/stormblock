@@ -6973,6 +6973,14 @@ async fn handle_boot_local(
     }
 
     let (mut mgr, resumed) = open_slabs_resuming(slab_paths, meta, true).await?;
+    // Booting from the machine's own disk is the disk taken (#344, #345): the
+    // verdict says so, keeping the initramfs's inventory. A boot from the
+    // appliance leaves the survey's verdict as it is.
+    if let Some(local) = slab_paths.iter().find(|p| !is_fabric_uri(p)) {
+        if slab_paths.iter().all(|p| !is_fabric_uri(p)) && local.starts_with("/dev/") {
+            crate::mgmt::slab_report::update_local_disk("taken", Some(local), None, "boot-local");
+        }
+    }
 
     // 3. Resolve the boot volume: --volume wins, else boot.toml.
     let selector = match volume {
@@ -7039,12 +7047,7 @@ async fn handle_boot_local(
                 // Laid, updated or already current: the disk carries this
                 // node's layout, and the successor makes it bootable.
                 local_boot_disk = Some(disk.to_string());
-                crate::mgmt::slab_report::write_local_disk(&crate::mgmt::slab_report::LocalDisk {
-                    state: "taken".into(),
-                    drive: Some(disk.to_string()),
-                    reason: None,
-                    from: Some("boot-local".into()),
-                });
+                crate::mgmt::slab_report::update_local_disk("taken", Some(disk), None, "boot-local");
             }
             // Said plainly, and on the console, because this is the one line
             // that explains why a node that was going to run locally is
@@ -7056,12 +7059,7 @@ async fn handle_boot_local(
                 println!("Flow-over: the node boots from the appliance, unaffected.");
                 eprintln!("WARNING: this node runs from the appliance: {disk} could not be taken: {e} (#344)");
                 tracing::warn!("flow-over disabled for {disk}: {e}");
-                crate::mgmt::slab_report::write_local_disk(&crate::mgmt::slab_report::LocalDisk {
-                    state: "failed".into(),
-                    drive: Some(disk.to_string()),
-                    reason: Some(e.to_string()),
-                    from: Some("boot-local".into()),
-                });
+                crate::mgmt::slab_report::update_local_disk("failed", Some(disk), Some(e.to_string()), "boot-local");
             }
         }
     }
