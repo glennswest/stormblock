@@ -84,7 +84,7 @@ timeout 180 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 1024 -smp 2
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/sata.img",if=none,id=d0,format=raw -device ide-hd,drive=d0,bus=ide.0,serial=SATA0001,model=TestSATA \
     -drive file="$W/nvme.img",if=none,id=d1,format=raw -device nvme,drive=d1,serial=NVME0001 \
-    -drive file="$W/virtio.img",if=virtio,format=raw,serial=VIRT0001 \
+    -drive file="$W/virtio.img",if=none,id=d2,format=raw -device virtio-blk-pci,drive=d2,serial=VIRT0001 \
     -device lsi53c895a,id=scsi0 > "$W/guest.log" 2>&1
 echo "  qemu exit $?"
 tr -d '\r' < "$W/guest.log" > "$W/g.txt"

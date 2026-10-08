@@ -174,21 +174,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Boot inventory of storage controllers and drives (2026-10-08, #345, P1) — IN PROGRESS
+### Boot inventory of storage controllers and drives (2026-10-08, #345, P1) — PAUSED for P0 #346 (back in line)
 
 Owner: "a check during the boot, that we see if controller and drive is
 there". On top of #344's `local_disk` verdict.
-- [ ] `# --- BEGIN storage inventory` before anything reads a disk: every PCI
+- [x] `# --- BEGIN storage inventory` before anything reads a disk: every PCI
       class-01 controller (id, class, driver bound?), its drives (model,
       serial, size, transport, SES bay); waits (`STORM_STORAGE_WAIT`, 30 s)
       while a bound SAS/RAID/NVMe/SCSI controller has no drive; WARNING for
       an unbound one; printed, and in `local-disk.json` (`controllers`,
       `drives`), kept by the survey's verdict
-- [ ] engine: `LocalDisk.controllers/drives` in health; boot-local keeps
+- [x] engine: `LocalDisk.controllers/drives` in health; boot-local keeps
       them when it updates the verdict, and says `taken` when it boots from
       local slabs
-- [ ] tests/initramfs-storage-inventory.sh (fake PCI + block sysfs); unit
-      test; README, boot-hooks.md, CHANGELOG; golden
+- [x] tests/initramfs-storage-inventory.sh (9 checks) and every initramfs
+      test under sh and busybox sh, /init parses, slab_report unit 4/4 on a
+      build VM at 5205403
+- [ ] `ci-storage-inventory-verify.sh` (QEMU: AHCI, NVMe, virtio-blk, an
+      unbound LSI HBA): first run failed on its own QEMU arguments (serial
+      on -drive); fixed, never run since. Then README, boot-hooks.md,
+      CHANGELOG, full nextest, golden
 
 ### The Dell runs diskless with its slabs on sda (2026-10-08, #344, P0) — DONE here, metal pending
 
