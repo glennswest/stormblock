@@ -162,10 +162,101 @@ pub struct MetadataPressure {
     pub fits: bool,
 }
 
+/// A metadata persist in progress, as `/debug/locks` and the API watchdog
+/// report it (#358): which generation, what it is doing, for how long, and
+/// whether its caller holds the volume manager's lock meanwhile (every
+/// create, clone, delete and seal does). A request stalled behind the manager
+/// then says what holds it, instead of only "HELD".
+#[derive(Debug, Clone)]
+pub struct PersistActivity {
+    pub generation: u64,
+    pub phase: &'static str,
+    pub secs: f64,
+    pub slabs: usize,
+    pub holds_manager: bool,
+}
+
+fn persists() -> &'static std::sync::Mutex<Vec<(u64, std::time::Instant, &'static str, usize, bool)>> {
+    static P: std::sync::OnceLock<std::sync::Mutex<Vec<(u64, std::time::Instant, &'static str, usize, bool)>>> =
+        std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// Every persist running now, oldest first.
+pub fn persists_in_progress() -> Vec<PersistActivity> {
+    let p = persists().lock().unwrap_or_else(|e| e.into_inner());
+    p.iter()
+        .map(|(g, t, phase, slabs, held)| PersistActivity {
+            generation: *g,
+            phase,
+            secs: t.elapsed().as_secs_f64(),
+            slabs: *slabs,
+            holds_manager: *held,
+        })
+        .collect()
+}
+
+/// One persist's entry in [`persists_in_progress`], gone when it is dropped.
+struct PersistMark(u64);
+
+impl PersistMark {
+    fn new(generation: u64, slabs: usize, holds_manager: bool) -> Self {
+        persists().lock().unwrap_or_else(|e| e.into_inner()).push((
+            generation,
+            std::time::Instant::now(),
+            "flushing the slabs",
+            slabs,
+            holds_manager,
+        ));
+        PersistMark(generation)
+    }
+    fn phase(&self, phase: &'static str) {
+        let mut p = persists().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(e) = p.iter_mut().find(|e| e.0 == self.0) {
+            e.2 = phase;
+        }
+    }
+}
+
+impl Drop for PersistMark {
+    fn drop(&mut self) {
+        let mut p = persists().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = p.iter().position(|e| e.0 == self.0) {
+            p.remove(i);
+        }
+        drop(p);
+    }
+}
+
+/// Which volumes exist, readable without the manager's lock (#358).
+///
+/// The manager's own mutex is held through a whole durable persist by every
+/// create, clone, delete and seal (their slab flushes included, seconds each
+/// on a busy SMR disk), so "does volume X exist" asked under that mutex
+/// waits in line behind all of them. The fstemplates listing asked it once
+/// per template and did not answer for 30 s on the Dell. This set is kept in
+/// step with the manager's map wherever a volume is added or removed.
+#[derive(Clone, Default)]
+pub struct VolumePresence(Arc<std::sync::RwLock<std::collections::HashSet<VolumeId>>>);
+
+impl VolumePresence {
+    pub fn contains(&self, id: &VolumeId) -> bool {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).contains(id)
+    }
+    fn insert(&self, id: VolumeId) {
+        self.0.write().unwrap_or_else(|e| e.into_inner()).insert(id);
+    }
+    fn remove(&self, id: &VolumeId) {
+        self.0.write().unwrap_or_else(|e| e.into_inner()).remove(id);
+    }
+}
+
 pub struct VolumeManager {
     gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
     registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
     volumes: HashMap<VolumeId, Arc<ThinVolumeHandle>>,
+    /// The ids in `volumes`, for readers that must not wait on the manager.
+    present: VolumePresence,
     /// Legacy mapping: array_id → slab_id (for backward compat with callers
     /// that pass array_id to create_volume).
     array_slabs: HashMap<RaidArrayId, SlabId>,
@@ -287,6 +378,7 @@ impl VolumeManager {
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
             holds: Default::default(),
+            present: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
             v2: Default::default(),
@@ -314,6 +406,7 @@ impl VolumeManager {
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
             holds: Default::default(),
+            present: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
             v2: Default::default(),
@@ -324,6 +417,12 @@ impl VolumeManager {
     /// a clone to whatever serves volumes as devices.
     pub fn holds(&self) -> holds::ServeHolds {
         self.holds.clone()
+    }
+
+    /// Which volumes exist, for readers that must not wait on this manager's
+    /// lock (#358). Take it once, keep it: it stays in step with the manager.
+    pub fn presence(&self) -> VolumePresence {
+        self.present.clone()
     }
 
     // ── Lineage, sealing, filesystem identity (#76) ────────────────────
@@ -1017,6 +1116,7 @@ impl VolumeManager {
             handle.use_stripe_log(store.dir());
         }
         self.volumes.insert(id, handle);
+        self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
         self.persist().await;
         Ok(id)
@@ -1210,6 +1310,7 @@ impl VolumeManager {
                 self.origins.insert(vrec.id, vrec.origin);
             }
             self.volumes.insert(vrec.id, handle);
+            self.present.insert(vrec.id);
             if let Some(parent) = vrec.parent {
                 self.parents.insert(vrec.id, parent);
             }
@@ -1375,6 +1476,7 @@ impl VolumeManager {
             ),
         });
         self.volumes.insert(id, handle);
+        self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
         if let Some((first, _)) = placements.first() {
             self.record_lineage(id, *first);
@@ -1591,6 +1693,7 @@ impl VolumeManager {
             let snap_id = snap.id();
             let handle = Arc::new(self.inherit_handle(snap, source_id));
             self.volumes.insert(snap_id, handle);
+            self.present.insert(snap_id);
             self.origins.insert(snap_id, crate::volume::metadata::Origin::Node);
             self.record_lineage(snap_id, *source_id);
             ids.push(snap_id);
@@ -1624,6 +1727,7 @@ impl VolumeManager {
         }
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
+        self.present.remove(&id);
         self.parents.remove(&id);
         self.fs_info.remove(&id);
         self.owners.remove(&id);
@@ -1769,6 +1873,7 @@ impl VolumeManager {
         let snap_id = snap.id();
         let snap_handle = Arc::new(self.inherit_handle(snap, &source_id));
         self.volumes.insert(snap_id, snap_handle);
+        self.present.insert(snap_id);
         self.origins.insert(snap_id, crate::volume::metadata::Origin::Node);
         self.record_lineage(snap_id, source_id);
         Ok(snap_id)
@@ -2033,7 +2138,7 @@ impl VolumeManager {
         let result = match self.records(generation).await {
             None => Ok(()),
             Some(records) => {
-                Self::sync_then_write(&self.registry, &self.records_written, &self.records_on_slab, records).await
+                Self::sync_then_write(&self.registry, &self.records_written, &self.records_on_slab, records, true).await
             }
         };
         Self::persisted(&self.durability, result);
@@ -2062,7 +2167,7 @@ impl VolumeManager {
         };
         let result = match records {
             None => Ok(()),
-            Some(r) => Self::sync_then_write(&registry, &written, &on_slab, r).await,
+            Some(r) => Self::sync_then_write(&registry, &written, &on_slab, r, false).await,
         };
         Self::persisted(&durability, result);
     }
@@ -2558,12 +2663,14 @@ impl VolumeManager {
         written: &tokio::sync::Mutex<u64>,
         on_slab: &std::sync::Mutex<HashMap<SlabId, u64>>,
         mut records: Records,
+        holds_manager: bool,
     ) -> anyhow::Result<()> {
         // Every slab at once: slabs on one disk are partitions of one
         // device, and its flushes are shared by everyone who asked before
         // each began (#269) — two slabs' syncs cost two cache flushes, not
         // four, where one after the other cost each in full.
         let ids: Vec<SlabId> = registry.read().await.iter().map(|(id, _)| *id).collect();
+        let mark = PersistMark::new(records.generation, ids.len(), holds_manager);
         let synced = futures_util::future::join_all(
             ids.iter().map(|id| crate::drive::slab::sync_registered(registry, *id)),
         )
@@ -2577,12 +2684,15 @@ impl VolumeManager {
         // Format v2 stores: changes, applied in the order they were taken
         // (never skipped for a newer generation: a change list is not a
         // snapshot).
+        mark.phase("writing the v2 records");
         let v2_failed = match records.v2.take() {
             Some(v2) => persist_v2::apply(v2).await,
             None => Vec::new(),
         };
 
+        mark.phase("waiting for the record writer");
         let mut last = written.lock().await;
+        mark.phase("writing the records");
         if *last > records.generation {
             // A newer snapshot is already on disk, and it holds all of this.
             if !v2_failed.is_empty() {
@@ -2895,7 +3005,7 @@ impl VolumeManager {
         match self.records(generation).await {
             None => Ok(()),
             Some(records) => {
-                Self::sync_then_write(&self.registry, &self.records_written, &self.records_on_slab, records).await
+                Self::sync_then_write(&self.registry, &self.records_written, &self.records_on_slab, records, true).await
             }
         }
     }
@@ -3083,6 +3193,7 @@ impl VolumeManager {
                 }
             }
             self.volumes.insert(vrec.id, handle);
+            self.present.insert(vrec.id);
             if vrec.origin != crate::volume::metadata::Origin::Unmarked {
                 self.origins.insert(vrec.id, vrec.origin);
             }
@@ -3291,6 +3402,22 @@ async fn raise_shares(reg: &mut SlabRegistry, view: &gem::SlotView, rebuilt: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #358: a persist in progress is listed with its phase and whether its
+    /// caller holds the manager, and is gone once it ends.
+    #[test]
+    fn a_persist_in_progress_is_listed_until_it_ends() {
+        let gen = u64::MAX - 7;
+        let mark = PersistMark::new(gen, 3, true);
+        mark.phase("writing the records");
+        let now = persists_in_progress();
+        let a = now.iter().find(|a| a.generation == gen).expect("listed");
+        assert_eq!(a.phase, "writing the records");
+        assert_eq!(a.slabs, 3);
+        assert!(a.holds_manager);
+        drop(mark);
+        assert!(persists_in_progress().iter().all(|a| a.generation != gen));
+    }
     use crate::drive::filedev::FileDevice;
     use crate::raid::{RaidArray, RaidLevel};
 

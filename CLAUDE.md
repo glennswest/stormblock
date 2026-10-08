@@ -181,6 +181,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The engine didn't answer GET /api/v1/fstemplates within 30 s (2026-10-08, #358, P0) — IN PROGRESS
+
+Dell 11.98 after a full flow-over; sbregistry's test-image builds failed twice.
+The Dell isn't reachable now (no answer on :9090), so this is by reading:
+`live_json` took the volume manager's mutex once per template, and every
+create/clone/delete/seal holds that mutex through its persist (flushes
+included; the Dell's disk is a WD20EFAX, SMR). Its own build's clones and
+deletes queued ahead each time.
+- [x] `VolumePresence` (ids, kept in step at the 6 inserts and the remove);
+      the listing and one GET read it, no manager lock
+- [x] persists in progress (`PersistMark`: generation, phase, age, slabs,
+      caller holds the manager) in `/debug/locks` and the watchdog's captures
+- [x] test `the_template_listing_answers_while_the_volume_manager_is_held`;
+      unit tests; README, CHANGELOG
+- [ ] build VM: the new tests, integration_fstemplates, debug, full check
+- Left as it was: the 25 manager methods still persist under the lock (the
+  rest of #269's fix, a bigger change); other reads that take the lock wait
+  behind them as before
+
 ### The data classes as designed, and how they're built (2026-10-08, #356, P0) — DONE; the build is #361 (needs-owner)
 
 Owner: the design had partner and customer (and system) with their own

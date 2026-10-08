@@ -542,7 +542,11 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   ublk device's current-thread runtime is named but never dumped, because
   tracing it while it serves I/O re-enters it and panics it (#334); `threads`: every OS
   thread, its state and kernel stack; `locks`: whether the volume manager,
-  the extent map and the slab registry are held. Without the node token
+  the extent map and the slab registry are held, and every metadata persist
+  in progress (generation, phase, age, slabs, and whether its caller holds
+  the volume manager, as every create, clone, delete and seal does), so a
+  stall behind the manager says what it waits on (#358); the watchdog's
+  captures carry the same. Without the node token
   (#283): requests by method, age and route family (`/api/v1/volumes/…`, no
   ids, names or tags), remote flush devices by transport, the watchdog's
   reports as their open summary, threads without stacks. `tasks` takes one
@@ -1170,7 +1174,10 @@ in that set.
 volume again when it is there and unsealed, and marks the template broken
 when the volume is missing (a delete cut short, a reclaim, a store restored
 onto a slab seeded again), was never recorded, or will not seal. The listing
-also looks for the volume on every read. A broken template lists as
+also looks for the volume on every read, in a set of the volumes that exist
+kept beside the volume manager, never under its lock. That lock is held
+through every create, clone and delete's durable persist, and asking it once
+per template kept the listing from answering for 30 s on a busy node (#358). A broken template lists as
 `"state": "broken"` with `"broken": "<why>"`. A clone or claim of it answers
 409 `fstemplate <name> is broken: <why>. It is not sealed and cannot be
 cloned; delete it and mint it again`. Deleting it and creating it again

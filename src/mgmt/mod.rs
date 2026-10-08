@@ -224,6 +224,8 @@ pub struct AppState {
     pub spares: Arc<crate::raid::spares::SparePool>,
     /// Behind an `Arc` so work that outlives a request can hold it.
     pub volume_manager: Arc<tokio::sync::Mutex<VolumeManager>>,
+    /// Which volumes exist, read without `volume_manager`'s lock (#358).
+    pub volume_presence: crate::volume::VolumePresence,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
     pub slab_registry: Arc<tokio::sync::RwLock<SlabRegistry>>,
     pub gem: Arc<tokio::sync::RwLock<GlobalExtentMap>>,
@@ -445,6 +447,7 @@ impl AppState {
             }
         }
         let holds = volume_manager.holds();
+        let volume_presence = volume_manager.presence();
         // Before any target serves: a volume this node was told is not to be
         // used through it must not answer optimized after a restart (#83).
         #[cfg(feature = "nvmeof")]
@@ -464,6 +467,7 @@ impl AppState {
             slab_report: std::sync::Mutex::new(None),
             stage_job: Default::default(),
             volume_manager,
+            volume_presence,
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,
             gem,

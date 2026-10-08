@@ -1462,6 +1462,58 @@ async fn a_qcow2_disk_image_imports_into_a_sealed_golden_and_clones_with_its_own
 /// startup — it lists as `broken` with the reason, every clone and claim of
 /// it answers one clear 409, and it can be deleted and minted again. A ready
 /// template whose volume is there but unsealed is re-sealed, not broken.
+/// #358: the Dell's engine did not answer `GET /api/v1/fstemplates` within
+/// 30 s while sbregistry built test images. The listing looked for each
+/// template's sealed volume under the volume manager's lock, once per
+/// template, and that lock is held through every create, clone and delete's
+/// durable persist. Now it answers with the manager held the whole time,
+/// and still says which template's volume is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_template_listing_answers_while_the_volume_manager_is_held() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let mut ids = Vec::new();
+    for i in 0..6 {
+        ids.push(sealed_template(&state, &format!("pvc-ext4j-{i}m")).await);
+    }
+    let gone = {
+        let s = state.fstemplates.lock().await;
+        VolumeId(s.get(&ids[0]).unwrap().sealed_volume_id.unwrap())
+    };
+    state.volume_manager.lock().await.delete_volume(gone).await.unwrap();
+    let (base, server) = start(state.clone()).await;
+
+    // Held by "a persist on a slow disk" for the whole of the requests.
+    let held = state.volume_manager.clone().lock_owned().await;
+    let c = reqwest::Client::new();
+    let t0 = std::time::Instant::now();
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        c.get(format!("{base}/api/v1/fstemplates")).send(),
+    )
+    .await
+    .expect("the listing waited on the volume manager")
+    .unwrap();
+    assert!(r.status().is_success());
+    let v: serde_json::Value = r.json().await.unwrap();
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 6, "{v}");
+    let by = |n: &str| items.iter().find(|t| t["name"] == n).unwrap().clone();
+    assert_eq!(by("pvc-ext4j-0m")["state"], "broken", "a gone volume is still seen: {v}");
+    assert_eq!(by("pvc-ext4j-1m")["state"], "ready", "{v}");
+    let one = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        c.get(format!("{base}/api/v1/fstemplates/pvc-ext4j-2m")).send(),
+    )
+    .await
+    .expect("a GET of one template waited on the volume manager")
+    .unwrap();
+    assert!(one.status().is_success());
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5), "{:?}", t0.elapsed());
+    drop(held);
+    server.abort();
+}
+
 #[tokio::test]
 async fn a_ready_template_whose_volume_is_gone_lists_broken_and_refuses_clones_clearly() {
     let dir = TempDir::new().unwrap();

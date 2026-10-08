@@ -298,10 +298,15 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
 
 /// A template as listed, its sealed volume looked for now (#281): a ready
 /// template whose volume has gone since the last check lists as broken.
-async fn live_json(state: &AppState, mut t: template::FsTemplate) -> serde_json::Value {
+///
+/// Looked for in the volume presence set, never under the volume manager's
+/// lock (#358): that lock is held through every create, clone and delete's
+/// durable persist, and taking it once per template made the listing wait
+/// in line behind all of them — over 30 s on the Dell.
+fn live_json(state: &AppState, mut t: template::FsTemplate) -> serde_json::Value {
     if t.state == template::TemplateState::Ready && t.broken.is_none() {
         if let Some(src) = t.clone_source() {
-            if state.volume_manager.lock().await.get_volume(&src).is_none() {
+            if !state.volume_presence.contains(&src) {
                 t.broken = Some(format!("its sealed volume {} is missing", src.0));
             }
         }
@@ -315,7 +320,7 @@ async fn list_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let templates: Vec<template::FsTemplate> = state.fstemplates.lock().await.templates.clone();
     let mut items = Vec::with_capacity(templates.len());
     for t in templates {
-        items.push(live_json(&state, t).await);
+        items.push(live_json(&state, t));
     }
     let count = items.len();
     Json(json!({ "items": items, "count": count }))
@@ -324,7 +329,7 @@ async fn list_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse
 async fn get_template(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let found = state.fstemplates.lock().await.find(&id).cloned();
     match found {
-        Some(t) => Json(live_json(&state, t).await).into_response(),
+        Some(t) => Json(live_json(&state, t)).into_response(),
         None => ApiError::not_found(format!("fstemplate {id} not found")),
     }
 }

@@ -256,7 +256,7 @@ pub fn locks(state: &AppState) -> String {
     let gem_r = state.gem.try_read().is_ok();
     let reg_w = state.slab_registry.try_write().is_ok();
     let reg_r = state.slab_registry.try_read().is_ok();
-    format!(
+    let mut out = format!(
         "volume manager (mutex): {}\n\
          extent map (rwlock): write {} / read {}\n\
          slab registry (rwlock): write {} / read {}\n\
@@ -266,7 +266,31 @@ pub fn locks(state: &AppState) -> String {
         held(gem_r),
         held(reg_w),
         held(reg_r),
-    )
+    );
+    out.push_str(&persists_view(&crate::volume::persists_in_progress()));
+    out
+}
+
+/// The metadata persists running now (#358). A create, clone, delete or seal
+/// holds the volume manager's lock through its persist, flushes included,
+/// so this is what a request waiting on that lock is waiting behind. Names
+/// no volume: open to `/debug` without a token, like the lock states.
+pub fn persists_view(p: &[crate::volume::PersistActivity]) -> String {
+    if p.is_empty() {
+        return "metadata persists in progress: none\n".to_string();
+    }
+    let mut out = format!("metadata persists in progress: {}\n", p.len());
+    for a in p {
+        out.push_str(&format!(
+            "  generation {}: {} for {:.1}s, {} slab(s){}\n",
+            a.generation,
+            a.phase,
+            a.secs,
+            a.slabs,
+            if a.holds_manager { ", its caller holding the volume manager" } else { "" },
+        ));
+    }
+    out
 }
 
 /// Every OS thread of this process: name, state, what it waits in, and its
@@ -512,6 +536,19 @@ mod view_tests {
 #[cfg(all(test, tokio_unstable, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lock_report_says_what_holds_the_volume_manager() {
+        assert_eq!(persists_view(&[]), "metadata persists in progress: none\n");
+        let v = persists_view(&[crate::volume::PersistActivity {
+            generation: 42,
+            phase: "flushing the slabs",
+            secs: 14.31,
+            slabs: 3,
+            holds_manager: true,
+        }]);
+        assert!(v.contains("generation 42: flushing the slabs for 14.3s, 3 slab(s), its caller holding the volume manager"), "{v}");
+    }
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::AtomicBool;
