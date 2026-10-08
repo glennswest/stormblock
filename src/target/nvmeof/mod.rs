@@ -221,9 +221,30 @@ pub struct Subsystem {
     /// subsequent attach is an async event plus a rescan, with no Connect and
     /// no new TCP session per container.
     ns_changed: tokio::sync::broadcast::Sender<u32>,
+    /// False once draining (#188): a Connect to it is refused, so a live
+    /// count of 0 means finished, not not-yet-started — the drain a target of
+    /// its own on a port of its own used to give, for one subsystem among many
+    /// on a shared listener.
+    accepting: std::sync::atomic::AtomicBool,
+    /// Connections bound to it by their Connect, admin and I/O queues alike.
+    live: std::sync::atomic::AtomicUsize,
 }
 
 impl Subsystem {
+    /// Refuse new Connects; the ones in hand go on (#188). Idempotent.
+    pub fn stop_accepting(&self) {
+        self.accepting.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_accepting(&self) -> bool {
+        self.accepting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many connections are bound to it right now (#188).
+    pub fn live_connections(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn new(nqn: String, access: HostAccess) -> Self {
         // Depth only bounds how far an admin connection may fall behind before
         // it is told to rescan wholesale, so a modest buffer is fine.
@@ -233,6 +254,8 @@ impl Subsystem {
             namespaces: tokio::sync::RwLock::new(HashMap::new()),
             access: std::sync::RwLock::new(access),
             ns_changed,
+            accepting: std::sync::atomic::AtomicBool::new(true),
+            live: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -381,9 +404,29 @@ impl Subsystem {
 }
 
 /// What a connection learned at Connect.
+/// A connection counted against the subsystem it bound to (#188), until it
+/// ends.
+struct BoundTo(Arc<Subsystem>);
+
+impl BoundTo {
+    fn new(sub: Arc<Subsystem>) -> Self {
+        sub.live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        BoundTo(sub)
+    }
+}
+
+impl Drop for BoundTo {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 struct Session {
     /// `None` on a discovery connection.
     sub: Option<Arc<Subsystem>>,
+    /// The count this connection holds on `sub` (#188).
+    #[allow(dead_code)]
+    bound: Option<BoundTo>,
     hostnqn: String,
     /// The queue's DH-HMAC-CHAP exchange, when its host has a key. Until it
     /// has authenticated, nothing but Authentication Send/Receive runs.
@@ -988,7 +1031,7 @@ impl NvmeofTarget {
         let is_discovery = connect.subnqn == discovery::DISCOVERY_NQN;
 
         let mut session =
-            Session { sub: None, hostnqn: connect.hostnqn.clone(), auth: None, commands: 0, last: None };
+            Session { sub: None, bound: None, hostnqn: connect.hostnqn.clone(), auth: None, commands: 0, last: None };
         if !is_discovery {
             // A subsystem this target has, or nothing.
             let Some(sub) = self.subsystem(&connect.subnqn) else {
@@ -1009,7 +1052,16 @@ impl NvmeofTarget {
                 pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
                 return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "host not allowed"));
             };
+            // A subsystem being drained takes no one new (#188): what is
+            // attached finishes, nothing else arrives.
+            if !sub.is_accepting() {
+                tracing::info!("NVMe-oF: refused {peer}: '{}' is being withdrawn", connect.subnqn);
+                let cqe = NvmeCqe::error_dnr(sqe.cid(), 0, 0, 1, 0x80); // Connect Invalid Parameters
+                pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
+                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "subsystem draining"));
+            }
             session.auth = key.map(|k| auth::ControllerAuth::new(k, &connect.hostnqn, &connect.subnqn));
+            session.bound = Some(BoundTo::new(sub.clone()));
             session.sub = Some(sub);
         }
 
