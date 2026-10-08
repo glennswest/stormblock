@@ -5473,6 +5473,9 @@ pub async fn run() -> anyhow::Result<()> {
         report(later.iter().sum());
         let mut foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
         let mut last_move = std::time::Duration::ZERO;
+        // Where the flow-over's time goes (#331): said every 100 moves and at
+        // the end, so a slow one on a node says why.
+        let mut spent = FlowSpent { began: Some(std::time::Instant::now()), ..Default::default() };
         for (i, &source) in sources.iter().enumerate() {
             later[i] = 0;
             let after: usize = later.iter().sum();
@@ -5518,12 +5521,16 @@ pub async fn run() -> anyhow::Result<()> {
                 // Foreground first (#269): when a volume has been read or written
                 // since the last move, give the disk back for as long as that move
                 // took (capped) before the next. An idle node moves at full speed.
+                let t = std::time::Instant::now();
                 if crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed) != foreground {
                     tokio::time::sleep(last_move.min(FLOW_YIELD_MAX)).await;
                 }
+                spent.yielded += t.elapsed();
                 foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
                 let started = std::time::Instant::now();
                 let fence = crate::volume::fence::exclusive(leg).await;
+                spent.fence += started.elapsed();
+                let t = std::time::Instant::now();
                 // The copy holds only the fence on this slot; the map and the
                 // registry are taken to allocate and to publish (#269). Holding
                 // them for the copy stalled every volume's I/O and every API call
@@ -5532,6 +5539,7 @@ pub async fn run() -> anyhow::Result<()> {
                     .migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence)
                     .await;
                 drop(fence);
+                spent.copy += t.elapsed();
                 match res {
                     Ok(_) => {
                         moved += 1;
@@ -5562,17 +5570,56 @@ pub async fn run() -> anyhow::Result<()> {
                 // machine that can lose power at any point in them, and a slot
                 // table that has run ahead of the map is a volume with a hole in
                 // it.
+                let t = std::time::Instant::now();
                 persist().await;
+                spent.persist += t.elapsed();
+                let t = std::time::Instant::now();
                 let mut r = registry.write().await;
                 engine.release_owed(&mut r).await;
                 drop(r);
+                spent.release += t.elapsed();
                 // The whole move: the copy, and the flushes of the persist after
                 // it, which on a spinning disk are most of it (#269).
                 last_move = started.elapsed();
+                spent.moves += 1;
+                if spent.moves % 100 == 0 {
+                    spent.say(moved);
+                }
             }
         }
+        spent.say(moved);
         report(0);
         Some((moved, failed))
+    }
+
+    /// Where a flow-over's time went (#331).
+    #[derive(Default)]
+    struct FlowSpent {
+        began: Option<std::time::Instant>,
+        moves: u64,
+        yielded: std::time::Duration,
+        fence: std::time::Duration,
+        copy: std::time::Duration,
+        persist: std::time::Duration,
+        release: std::time::Duration,
+    }
+
+    impl FlowSpent {
+        fn say(&mut self, moved: u64) {
+            let began = *self.began.get_or_insert_with(std::time::Instant::now);
+            let secs = began.elapsed().as_secs_f64().max(1e-9);
+            let line = format!(
+                "flow-over: {moved} moved in {secs:.1}s ({:.0}/h): yield {:.1}s, fence {:.1}s, copy {:.1}s, persist {:.1}s, release {:.1}s",
+                moved as f64 * 3600.0 / secs,
+                self.yielded.as_secs_f64(),
+                self.fence.as_secs_f64(),
+                self.copy.as_secs_f64(),
+                self.persist.as_secs_f64(),
+                self.release.as_secs_f64(),
+            );
+            println!("{line}");
+            tracing::info!("{line}");
+        }
     }
 
     /// Move the goldens onto the disk the boot laid out, in the background.
@@ -9639,6 +9686,172 @@ mod forge_mode_tests {
         let mut back = vec![0u8; MIB as usize];
         dev.read(0, &mut back).await.unwrap();
         assert_eq!(back, image, "the clone reads as the release it was claimed from");
+    }
+
+    /// #331: the flow-over's rate, modelled on a netbooted install. An
+    /// appliance engine serves a release slab (goldens, and clones of them
+    /// that wrote an extent each) as a sealed volume over NVMe/TCP; the node
+    /// opens it with the real initiator, as `boot-local` does, adds its local
+    /// system slab and runs the flow-over with the persist `spawn_flow_over`
+    /// uses, while a foreground writer runs. Prints the rate and where the
+    /// time went (`FlowSpent`). Knobs: FLOW_MODEL_EXTENTS (1500),
+    /// FLOW_MODEL_GOLDENS (30), FLOW_MODEL_FOREGROUND (1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore]
+    async fn flow_over_rate_model() {
+        use std::time::{Duration, Instant};
+        let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let extents = env("FLOW_MODEL_EXTENTS", 1500);
+        let goldens = env("FLOW_MODEL_GOLDENS", 30).max(1);
+        let foreground = env("FLOW_MODEL_FOREGROUND", 1) == 1;
+        let per = extents.div_ceil(goldens);
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+
+        // The appliance and the release slab it serves.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut config = StormBlockConfig::default();
+        let forge_dir = dir.path().join("forge");
+        std::fs::create_dir_all(&forge_dir).unwrap();
+        config.management.data_dir = Some(forge_dir.to_string_lossy().to_string());
+        config.management.advertised_addr = Some("127.0.0.1".into());
+        config.nvmeof = Some(section(&format!("127.0.0.1:{port}")));
+        let mut vm = VolumeManager::new(MIB);
+        let array = RaidArrayId(uuid::Uuid::new_v4());
+        let release_bytes = (extents * 2 + 512) * MIB;
+        let pool = FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), release_bytes + 512 * MIB)
+            .await
+            .unwrap();
+        vm.add_backing_device(array, Arc::new(pool)).await;
+        let release = vm.create_volume("release", release_bytes, array).await.unwrap();
+        {
+            let dev = vm.get_volume(&release).unwrap();
+            let fmt = crate::drive::slab::SlabFormat::new(MIB, StorageTier::Hot)
+                .with_role(SlabRole::System)
+                .with_auto_metadata(release_bytes);
+            let slab = Slab::format_with(dev, fmt).await.unwrap();
+            let sid = slab.slab_id();
+            let mut fill = VolumeManager::new(MIB);
+            fill.add_slab(slab).await;
+            fill.persist_to_slabs(vec![sid]);
+            let block: Vec<u8> = (0..MIB as usize).map(|i| (i % 251) as u8 + 1).collect();
+            for g in 0..goldens {
+                let id = fill.create_volume_any(&format!("golden-{g}"), per * MIB).await.unwrap();
+                let h = fill.get_volume(&id).unwrap();
+                for e in 0..per {
+                    h.write(e * MIB, &block).await.unwrap();
+                }
+                h.flush().await.unwrap();
+                fill.seal_volume(id, None).await.unwrap();
+                // A service clone of it that wrote an extent of its own.
+                let c = fill.create_snapshot(id, &format!("svc-{g}")).await.unwrap();
+                let ch = fill.get_volume(&c).unwrap();
+                ch.write(0, &[7u8; 4096]).await.unwrap();
+                ch.flush().await.unwrap();
+            }
+            fill.persist().await;
+        }
+        vm.seal_volume(release, None).await.unwrap();
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let forge = Arc::new(AppState::new(config.clone(), vm, reg, gem));
+        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config.management).unwrap();
+        let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 2, pin_cores: false }));
+        mgmt::forge::serve(&forge, &reactor, Arc::new(target)).await.unwrap();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forge_api = listener.local_addr().unwrap();
+        let router = mgmt::api::router(forge.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let c = reqwest::Client::new();
+        c.post(format!("http://{forge_api}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": "node", "volume": release.0.to_string()}))
+            .send()
+            .await
+            .unwrap();
+        let claim: serde_json::Value = c
+            .post(format!("http://{forge_api}/api/v1/synonyms/boothost/node/claim"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let a = &claim["attach"];
+        let uri = NvmeTcpSpec {
+            addr: addr.to_string(),
+            nqn: a["nqn"].as_str().unwrap().to_string(),
+            nsid: a["nsid"].as_u64().unwrap() as u32,
+            host_nqn: Some(a["host_nqns"][0].as_str().unwrap().to_string()),
+            dhchap: None,
+        }
+        .uri();
+        let built = t0.elapsed();
+
+        // The node: the clone over NVMe/TCP, and its own system slab.
+        let (mut node, _, _) = super::open_slabs_with_disks(&[uri], None, false).await.unwrap();
+        let src = *node.registry().read().await.iter().next().unwrap().0;
+        let local = FileDevice::open_with_capacity(dir.path().join("sda.bin").to_str().unwrap(), release_bytes)
+            .await
+            .unwrap();
+        let fmt = crate::drive::slab::SlabFormat::new(MIB, StorageTier::Hot)
+            .with_role(SlabRole::System)
+            .with_auto_metadata(release_bytes);
+        let dest_slab = Slab::format_with(Arc::new(local), fmt).await.unwrap();
+        let dest = dest_slab.slab_id();
+        node.add_slab(dest_slab).await;
+        node.keep_metadata_in_first(&[dest]);
+        node.record_flow_over(dest, vec![src]);
+        node.persist().await;
+        let svc = node.find_volume("svc-0").await.unwrap();
+        let svc = node.get_volume(&svc).unwrap();
+        let mut ncfg = StormBlockConfig::default();
+        ncfg.management.data_dir = Some(dir.path().join("node").display().to_string());
+        std::fs::create_dir_all(dir.path().join("node")).unwrap();
+        let (reg, gem) = (node.registry().clone(), node.gem().clone());
+        let state = Arc::new(AppState::new(ncfg, node, reg, gem));
+        let left = super::extents_on(&state.gem, &[src]).await;
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fg = {
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                let mut n = 0u64;
+                while foreground && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    svc.write((1 + n % 64) * 4096, &[n as u8; 4096]).await.unwrap();
+                    svc.flush().await.unwrap();
+                    n += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+        };
+        let st = state.clone();
+        let persist = move || {
+            let st = st.clone();
+            async move { crate::volume::VolumeManager::persist_detached(&st.volume_manager).await }
+        };
+        let t = Instant::now();
+        let r = super::flow_system_half(&state.gem, &state.slab_registry, &[src], dest, persist, None).await;
+        let secs = t.elapsed().as_secs_f64();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        fg.await.unwrap();
+        let (moved, failed) = r.expect("the flow-over finished");
+        println!(
+            "FLOW-MODEL {}",
+            serde_json::json!({
+                "extents_on_source": left, "moved": moved, "failed": failed, "secs": secs,
+                "extents_per_hour": moved as f64 * 3600.0 / secs, "mb_per_s": moved as f64 / secs,
+                "foreground": foreground, "built_secs": built.as_secs_f64(),
+            })
+        );
+        assert_eq!(failed, 0);
+        assert_eq!(super::extents_on(&state.gem, &[src]).await, 0, "everything moved");
     }
 
     /// #314: a network-booted node's engine lists and verifies the boot
