@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The engine didn't answer GET /api/v1/fstemplates within 30 s (2026-10-08, #358, P0) — IN PROGRESS
+### The engine didn't answer GET /api/v1/fstemplates within 30 s (2026-10-08, #358, P0) — DONE (golden-stormblock-e4154c4409d0), metal pending
 
 Dell 11.98 after a full flow-over; sbregistry's test-image builds failed twice.
 The Dell isn't reachable now (no answer on :9090), so this is by reading:
@@ -205,8 +205,9 @@ deletes queued ahead each time.
       keepalive; test through a proxy that goes silent
 - [x] a complete flow-over retires its remote sources
       (`retire_drained_slab`); unit test
-- [ ] build VM: the new tests, nvmeof, flow-over, fstemplates; full check;
-      golden
+- [x] `check.sh` at 7fc6ccf ALL PASS (nextest 1038/1038 with the 5 new
+      tests; the silent flush gave up in 2.2 s on a 2 s bound); golden
+      golden-stormblock-e4154c4409d0 (stormcos#417)
 - Left as it was: the 25 manager methods still persist under the lock (the
   rest of #269's fix, a bigger change); other reads that take the lock wait
   behind them as before
