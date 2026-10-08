@@ -279,6 +279,50 @@ fn human(n: u64) -> String {
     format!("{n}B")
 }
 
+/// Where a directory-backed drive's time goes (#300): calls and nanoseconds
+/// per kind of filesystem operation, for every drive in the process.
+pub mod dir_stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub const KINDS: [&str; 8] = ["task", "open", "read", "write", "punch", "remove", "rescan", "exists"];
+    static CALLS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+    static NANOS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+    /// One call of `kind` that took `d` (for a wait, not a closure).
+    pub(super) fn add(kind: usize, d: std::time::Duration) {
+        CALLS[kind].fetch_add(1, Ordering::Relaxed);
+        NANOS[kind].fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    pub(super) fn time<T>(kind: usize, f: impl FnOnce() -> T) -> T {
+        let t = std::time::Instant::now();
+        let r = f();
+        CALLS[kind].fetch_add(1, Ordering::Relaxed);
+        NANOS[kind].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        r
+    }
+
+    /// `(kind, calls, seconds)` for every kind, and the counts reset.
+    pub fn take() -> Vec<(&'static str, u64, f64)> {
+        KINDS
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                (*k, CALLS[i].swap(0, Ordering::Relaxed), NANOS[i].swap(0, Ordering::Relaxed) as f64 / 1e9)
+            })
+            .collect()
+    }
+}
+use dir_stats::time as dtime;
+const T_TASK: usize = 0;
+const T_OPEN: usize = 1;
+const T_READ: usize = 2;
+const T_WRITE: usize = 3;
+const T_PUNCH: usize = 4;
+const T_REMOVE: usize = 5;
+const T_RESCAN: usize = 6;
+const T_EXISTS: usize = 7;
+
 fn dir_stored(dir: &std::path::Path) -> u64 {
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
@@ -393,8 +437,10 @@ impl EmulatedDevice {
 
     async fn dir_io(&self, dir: PathBuf, offset: u64, op: DirOp) -> DriveResult<Vec<u8>> {
         let stored = Arc::clone(&self.inner);
+        let queued = std::time::Instant::now();
         tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
             use std::os::unix::fs::FileExt;
+            dir_stats::add(T_TASK, queued.elapsed()); // waiting for a blocking thread
             let mut out = Vec::new();
             let (len, data) = match &op {
                 DirOp::Read(n) => (*n as u64, None),
@@ -413,11 +459,11 @@ impl EmulatedDevice {
                 let path = Self::chunk_path(&dir, chunk);
                 match &op {
                     DirOp::Read(_) => {
-                        if let Ok(f) = std::fs::File::open(&path) {
+                        if let Ok(f) = dtime(T_OPEN, || std::fs::File::open(&path)) {
                             let dst = &mut out[done as usize..(done + n) as usize];
                             let mut got = 0usize;
                             while got < dst.len() {
-                                let r = f.read_at(&mut dst[got..], off + got as u64)?;
+                                let r = dtime(T_READ, || f.read_at(&mut dst[got..], off + got as u64))?;
                                 if r == 0 {
                                     break; // past the file's end: zeros
                                 }
@@ -428,9 +474,11 @@ impl EmulatedDevice {
                     DirOp::Write(_) => {
                         let src = &data.unwrap()[done as usize..(done + n) as usize];
                         let zero = src.iter().all(|&b| b == 0);
-                        if !(zero && !path.exists()) {
-                            let f = std::fs::OpenOptions::new().create(true).read(true).write(true).open(&path)?;
-                            f.write_all_at(src, off)?;
+                        if !(zero && !dtime(T_EXISTS, || path.exists())) {
+                            let f = dtime(T_OPEN, || {
+                                std::fs::OpenOptions::new().create(true).read(true).write(true).open(&path)
+                            })?;
+                            dtime(T_WRITE, || f.write_all_at(src, off))?;
                             if !zero {
                                 stored.stored.fetch_add(n, Ordering::Relaxed);
                             }
@@ -438,12 +486,12 @@ impl EmulatedDevice {
                     }
                     DirOp::Zero(_) => {
                         if off == 0 && n == CHUNK {
-                            if std::fs::remove_file(&path).is_ok() {
-                                stored.stored.store(dir_stored(&dir), Ordering::Relaxed);
+                            if dtime(T_REMOVE, || std::fs::remove_file(&path)).is_ok() {
+                                stored.stored.store(dtime(T_RESCAN, || dir_stored(&dir)), Ordering::Relaxed);
                             }
-                        } else if path.exists() {
-                            let f = std::fs::OpenOptions::new().write(true).open(&path)?;
-                            punch_hole(&f, off, n)?;
+                        } else if dtime(T_EXISTS, || path.exists()) {
+                            let f = dtime(T_OPEN, || std::fs::OpenOptions::new().write(true).open(&path))?;
+                            dtime(T_PUNCH, || punch_hole(&f, off, n))?;
                         }
                     }
                 }
