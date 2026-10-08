@@ -1504,7 +1504,10 @@ async fn detach_volume(
     Json(serde_json::json!({ "id": uuid, "attached": false })).into_response()
 }
 
-/// `POST /api/v1/volumes/import {name, file|url, format?, redundancy?, size?, seal?}`
+/// `POST /api/v1/volumes/import {name, file|url, format?, redundancy?, size?, seal?, role?, verify?}`
+/// — `role` (`system`|`data`) is the half the golden lands in (#93); a held
+/// VM image or any media a node keeps says `data`, which no install lays
+/// again (#349).
 /// — a cloud image, a VM export (qcow2, vmdk, ova) or an ISO becomes a
 /// sealed golden. Async: 202 with the job, poll `GET …/import/{id}`.
 /// `POST /api/v1/volumes/{id}/cidata` — make this volume a cloud-init seed.

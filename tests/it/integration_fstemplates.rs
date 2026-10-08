@@ -1541,3 +1541,69 @@ async fn a_ready_template_whose_volume_is_gone_lists_broken_and_refuses_clones_c
     assert!(r.status().is_success(), "{}", r.text().await.unwrap());
     server.abort();
 }
+
+/// #349 (stormblock-registry#104): `role` on `POST /api/v1/volumes/import`
+/// places the golden in that half. On a node with both halves, a held VM
+/// image imported with `role: "data"` lands in the data half, which no
+/// install lays again; one with no role lands in the system half, as before.
+#[tokio::test]
+async fn an_import_with_role_data_lands_in_the_data_half() {
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::placement::topology::StorageTier;
+
+    let dir = TempDir::new().unwrap();
+    let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    for role in [SlabRole::System, SlabRole::Data] {
+        let path = dir.path().join(format!("{role:?}.slab"));
+        let dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(path.to_str().unwrap(), 256 * 1024 * 1024).await.unwrap());
+        let fmt = SlabFormat::new(DEFAULT_EXTENT_SIZE, StorageTier::Hot)
+            .with_role(role)
+            .with_auto_metadata(dev.capacity_bytes());
+        vm.add_slab(Slab::format_with(dev, fmt).await.unwrap()).await;
+    }
+    let mut config = StormBlockConfig::default();
+    config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
+    let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+    let state = Arc::new(AppState::new(config, vm, reg, gem));
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    let image = dir.path().join("vm.raw");
+    std::fs::write(&image, vec![0x42u8; 8 * 1024 * 1024]).unwrap();
+
+    let import = |name: &'static str, role: Option<&'static str>| {
+        let (client, url, image) = (client.clone(), url.clone(), image.clone());
+        async move {
+            let mut body = serde_json::json!({ "name": name, "file": image.to_str().unwrap(), "verify": false });
+            if let Some(r) = role {
+                body["role"] = r.into();
+            }
+            let mut st: serde_json::Value =
+                client.post(format!("{url}/api/v1/volumes/import")).json(&body).send().await.unwrap().json().await.unwrap();
+            let id = st["id"].as_str().unwrap().to_string();
+            for _ in 0..400 {
+                if st["state"] == "done" || st["state"] == "failed" {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                st = client.get(format!("{url}/api/v1/volumes/import/{id}")).send().await.unwrap().json().await.unwrap();
+            }
+            assert_eq!(st["state"], "done", "{st}");
+            let vol = st["volume_id"].as_str().unwrap().to_string();
+            let v: serde_json::Value =
+                client.get(format!("{url}/api/v1/volumes/{vol}")).send().await.unwrap().json().await.unwrap();
+            assert_eq!(v["sealed"], true, "{v}");
+            let roles: Vec<String> = v["placement"]["slabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["role"].as_str().unwrap().to_string())
+                .collect();
+            roles
+        }
+    };
+    assert_eq!(import("media-data", Some("data")).await, vec!["data"], "role data: the data half only");
+    assert_eq!(import("media-default", None).await, vec!["system"], "no role: the system half, as before");
+    server.abort();
+}
