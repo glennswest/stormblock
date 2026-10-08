@@ -174,6 +174,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Boot inventory of storage controllers and drives (2026-10-08, #345, P1) — IN PROGRESS
+
+Owner: "a check during the boot, that we see if controller and drive is
+there". On top of #344's `local_disk` verdict.
+- [ ] `# --- BEGIN storage inventory` before anything reads a disk: every PCI
+      class-01 controller (id, class, driver bound?), its drives (model,
+      serial, size, transport, SES bay); waits (`STORM_STORAGE_WAIT`, 30 s)
+      while a bound SAS/RAID/NVMe/SCSI controller has no drive; WARNING for
+      an unbound one; printed, and in `local-disk.json` (`controllers`,
+      `drives`), kept by the survey's verdict
+- [ ] engine: `LocalDisk.controllers/drives` in health; boot-local keeps
+      them when it updates the verdict, and says `taken` when it boots from
+      local slabs
+- [ ] tests/initramfs-storage-inventory.sh (fake PCI + block sysfs); unit
+      test; README, boot-hooks.md, CHANGELOG; golden
+
 ### The Dell runs diskless with its slabs on sda (2026-10-08, #344, P0) — DONE here, metal pending
 
 11.95 on C2NR0Q2: health `diskless`, both halves nvme-tcp, sda laid
