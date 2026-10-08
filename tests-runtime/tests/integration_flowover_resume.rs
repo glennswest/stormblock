@@ -104,13 +104,17 @@ async fn a_cut_short_flow_over_resumes_from_a_fresh_clone() {
     assert!(!text.contains("mapping dropped"), "extents were still dropped:\n{text}");
 }
 
-/// Without a source the old behaviour stands, loudly: what was not moved is
-/// missing, and the log says why.
+/// Without a source the boot is refused, and says what is stranded. Until
+/// #259 it dropped the unmoved mappings and booted with holes (server3: PID 1
+/// SIGSEGV); now it names the volumes and the missing slab instead.
 #[tokio::test]
 async fn without_a_source_the_unmoved_extents_are_missing_and_said_so() {
     let dir = TempDir::new().unwrap();
     let (local, _clone) = cut_short(&dir).await;
-    let (_, text) = boot_local(&local, None);
+    let (ok, text) = boot_local(&local, None);
+    assert!(!ok, "a boot with extents on no slab must be refused:\n{text}");
     assert!(text.contains("flow-over cut short"), "no warning about the missing slab:\n{text}");
-    assert!(text.contains("mapping dropped"), "expected the unmoved extents to be dropped:\n{text}");
+    assert!(text.contains("refusing to boot"), "expected the boot to be refused:\n{text}");
+    assert!(text.contains("root ("), "the refusal must name the stranded volume:\n{text}");
+    assert!(!text.contains("mapping dropped"), "no mapping may be dropped:\n{text}");
 }
