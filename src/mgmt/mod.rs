@@ -44,6 +44,9 @@ pub struct DriveInfo {
     /// Where the drive is — failure-domain labels given at registration
     /// (#70). Empty when nobody said.
     pub labels: crate::placement::domain::FailureDomain,
+    /// Opened with a DH-HMAC-CHAP secret given for it (#213): reported as
+    /// `dhchap: true`. The secret itself is the device's, never kept here.
+    pub dhchap: bool,
 }
 
 /// Information about a RAID array, stored in AppState.

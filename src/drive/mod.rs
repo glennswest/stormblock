@@ -296,6 +296,23 @@ pub async fn open_drives(paths: &[String]) -> Vec<(String, DriveResult<Box<dyn B
 }
 
 pub async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
+    open_one_drive_with_secret(path, None).await
+}
+
+/// [`open_one_drive`], with the DH-HMAC-CHAP secret an `nvme-tcp://` drive
+/// answers with when its target asks (#213). The secret is never part of the
+/// path: a path is logged, listed and persisted. It is kept with the open
+/// device, so a reconnect answers with it too. A secret for anything that is
+/// not an `nvme-tcp://` URI is refused rather than ignored.
+pub async fn open_one_drive_with_secret(
+    path: &str,
+    dhchap: Option<crate::target::nvmeof::auth::DhchapKey>,
+) -> DriveResult<Box<dyn BlockDevice>> {
+    if dhchap.is_some() && !path.starts_with("nvme-tcp://") {
+        return Err(DriveError::Other(anyhow::anyhow!(
+            "a DH-HMAC-CHAP secret is for an nvme-tcp:// drive, and {path:?} is not one"
+        )));
+    }
     // An emulated drive for scale tests (#208): any capacity, nothing stored
     // but what is written; one name is one drive for the process.
     if let Some(spec) = emulated::EmulatedSpec::parse(path) {
@@ -305,7 +322,10 @@ pub async fn open_one_drive(path: &str) -> DriveResult<Box<dyn BlockDevice>> {
     // (stormblock#73). The same string works everywhere a device path
     // does: config `[[drives]]`, POST /api/v1/drives, RAID members.
     #[cfg(feature = "nvmeof")]
-    if let Some(spec) = nvmeof_dev::NvmeTcpSpec::parse(path) {
+    if let Some(mut spec) = nvmeof_dev::NvmeTcpSpec::parse(path) {
+        if dhchap.is_some() {
+            spec.dhchap = dhchap;
+        }
         let dev = nvmeof_dev::NvmeofDevice::connect(&spec).await?;
         return Ok(Box::new(dev));
     }

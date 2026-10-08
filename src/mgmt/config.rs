@@ -615,6 +615,19 @@ pub fn log_advertised_host(cfg: &ManagementConfig, listen_host: &str) {
     }
 }
 
+/// A secret read from configuration or a request body (#213). Its `Debug` says
+/// nothing of it, so a `{:?}` of what holds it cannot put it in a log line;
+/// a field of this type is never serialized (`#[serde(skip_serializing)]`).
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DriveConfig {
     /// A device, a file or a URI. Unused with `kind = "emulated"`.
@@ -633,6 +646,14 @@ pub struct DriveConfig {
     /// The emulated drive's name; `emu<index>` when unset.
     #[serde(default)]
     pub name: Option<String>,
+    /// The DH-HMAC-CHAP secret (`DHHC-1:…`) an `nvme-tcp://` drive answers
+    /// its target with (#213). Never part of `path`, which is logged and
+    /// listed. Prefer `dhchap_secret_file`, which keeps it out of this file.
+    #[serde(default, skip_serializing)]
+    pub dhchap_secret: Option<Secret>,
+    /// A file holding that secret (one line), read at startup.
+    #[serde(default)]
+    pub dhchap_secret_file: Option<String>,
 }
 
 impl DriveConfig {
@@ -660,6 +681,28 @@ impl DriveConfig {
             }
             Some(k) => Err(format!("[[drives]] #{index}: unknown kind {k:?} (device, emulated)")),
         }
+    }
+
+    /// The `index`th entry's DH-HMAC-CHAP secret, if it has one (#213):
+    /// `dhchap_secret`, or the contents of `dhchap_secret_file`. Refused for
+    /// a drive that is not `nvme-tcp://`, and when both are given. An error
+    /// never carries the secret.
+    pub fn dhchap(&self, index: usize) -> Result<Option<crate::target::nvmeof::auth::DhchapKey>, String> {
+        let text = match (&self.dhchap_secret, &self.dhchap_secret_file) {
+            (None, None) => return Ok(None),
+            (Some(_), Some(_)) => {
+                return Err(format!("[[drives]] #{index}: dhchap_secret and dhchap_secret_file both given; one"))
+            }
+            (Some(s), None) => s.0.clone(),
+            (None, Some(f)) => std::fs::read_to_string(f)
+                .map_err(|e| format!("[[drives]] #{index}: dhchap_secret_file {f}: {e}"))?,
+        };
+        if !self.device_path(index)?.starts_with("nvme-tcp://") {
+            return Err(format!("[[drives]] #{index}: a DH-HMAC-CHAP secret is for an nvme-tcp:// drive"));
+        }
+        crate::target::nvmeof::auth::DhchapKey::parse(&text)
+            .map(Some)
+            .map_err(|e| format!("[[drives]] #{index}: dhchap secret: {e}"))
     }
 }
 
@@ -1425,5 +1468,53 @@ mod ublk_default_tests {
         // serde's `bool` default of false.
         let quiet: StormBlockConfig = toml::from_str("[management]\n").unwrap();
         assert!(quiet.management.ublk_transport);
+    }
+
+    /// #213: a drive's DH-HMAC-CHAP secret is read from the entry or its
+    /// file, refused for anything that is not nvme-tcp://, and never shown
+    /// by `{:?}`.
+    #[test]
+    fn a_drive_secret_is_read_and_never_shown() {
+        let key = crate::target::nvmeof::auth::DhchapKey::generate();
+        let secret = key.to_secret();
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("leg0.secret");
+        std::fs::write(&file, format!("{secret}\n")).unwrap();
+        let toml_str = format!(
+            r#"
+[[drives]]
+path = "nvme-tcp://10.0.0.5:4420/nqn.x?nsid=1"
+dhchap_secret = "{secret}"
+
+[[drives]]
+path = "nvme-tcp://10.0.0.6:4420/nqn.y?nsid=1"
+dhchap_secret_file = "{}"
+
+[[drives]]
+path = "/dev/sdb"
+dhchap_secret = "{secret}"
+
+[[drives]]
+path = "nvme-tcp://10.0.0.7:4420/nqn.z?nsid=1"
+"#,
+            file.display()
+        );
+        let cfg: StormBlockConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(cfg.drives[0].dhchap(0).unwrap(), Some(key.clone()));
+        assert_eq!(cfg.drives[1].dhchap(1).unwrap(), Some(key.clone()));
+        let e = cfg.drives[2].dhchap(2).unwrap_err();
+        assert!(e.contains("nvme-tcp://") && !e.contains(&secret), "{e}");
+        assert_eq!(cfg.drives[3].dhchap(3).unwrap(), None);
+        let mut both = cfg.drives[0].clone();
+        both.dhchap_secret_file = Some(file.display().to_string());
+        assert!(both.dhchap(0).unwrap_err().contains("both"));
+        let mut bad = cfg.drives[0].clone();
+        bad.dhchap_secret = Some(Secret("DHHC-1:01:bm90IGEga2V5:".into()));
+        let e = bad.dhchap(0).unwrap_err();
+        assert!(!e.contains("bm90IGEga2V5"), "{e}");
+        let shown = format!("{:?}", cfg.drives);
+        assert!(!shown.contains(&secret), "{shown}");
+        let serialized = serde_json::to_string(&cfg.drives).unwrap();
+        assert!(!serialized.contains(&secret), "{serialized}");
     }
 }

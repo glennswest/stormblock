@@ -35,6 +35,7 @@ async fn setup(dir: &TempDir) -> (Arc<AppState>, uuid::Uuid, uuid::Uuid) {
             device: d.clone(),
             path: format!("/dev/test{i}"),
             labels: Default::default(),
+            dhchap: false,
         })
         .collect();
     let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.unwrap();

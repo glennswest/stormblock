@@ -52,6 +52,9 @@ pub struct DriveResponse {
     /// Set for an emulated drive (#208): never media.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emulated: Option<EmulatedState>,
+    /// Opened with a DH-HMAC-CHAP secret (#213). The secret is never shown.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dhchap: bool,
 }
 
 /// What an emulated drive holds and whether it is failed (#208).
@@ -100,6 +103,7 @@ async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 block_size: d.device.block_size(),
                 labels: d.labels.to_string(),
                 emulated: emulated_state(d.device.as_ref()),
+                dhchap: d.dhchap,
             }
         })
         .collect();
@@ -131,6 +135,7 @@ async fn get_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
                 block_size: d.device.block_size(),
                 labels: d.labels.to_string(),
                 emulated: emulated_state(d.device.as_ref()),
+                dhchap: d.dhchap,
             };
             Json(resp).into_response()
         }
@@ -204,6 +209,13 @@ pub struct OpenRequest {
     /// minted per open (#65).
     #[serde(default)]
     pub uuid: Option<Uuid>,
+    /// The DH-HMAC-CHAP secret (`DHHC-1:…`) an `nvme-tcp://` drive answers
+    /// its target with (#213), for a host the target requires one of. Never
+    /// part of `path`, never echoed, never written down: it lives with the
+    /// open drive, which reconnects with it. A caller that registers drives
+    /// registers them again after a restart, secret included.
+    #[serde(default)]
+    pub dhchap_secret: Option<crate::mgmt::config::Secret>,
 }
 
 async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequest>) -> Response {
@@ -217,6 +229,22 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
         }
     }
 
+    let dhchap = match &req.dhchap_secret {
+        None => None,
+        Some(s) => {
+            if !req.path.starts_with("nvme-tcp://") || req.size_bytes.is_some() {
+                return ApiError::bad_request(format!(
+                    "dhchap_secret is for an nvme-tcp:// drive, and {} is not one",
+                    req.path
+                ));
+            }
+            match crate::target::nvmeof::auth::DhchapKey::parse(&s.0) {
+                Ok(k) => Some(k),
+                Err(e) => return ApiError::bad_request(format!("dhchap_secret: {e}")),
+            }
+        }
+    };
+    let given = dhchap.is_some();
     let dev: Arc<dyn crate::drive::BlockDevice> = match req.size_bytes {
         Some(bytes) => {
             match crate::drive::filedev::FileDevice::open_with_capacity(&req.path, bytes).await {
@@ -224,7 +252,7 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
                 Err(e) => return ApiError::bad_request(format!("opening {}: {e}", req.path)),
             }
         }
-        None => match crate::drive::open_one_drive(&req.path).await {
+        None => match crate::drive::open_one_drive_with_secret(&req.path, dhchap).await {
             Ok(d) => Arc::from(d),
             Err(e) => return ApiError::bad_request(format!("opening {}: {e}", req.path)),
         },
@@ -240,6 +268,7 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
             device: dev.clone(),
             path: req.path.clone(),
             labels: labels.clone(),
+            dhchap: given,
         });
         drives.len() - 1
     };
@@ -248,12 +277,13 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
     }
     let id = dev.id();
     tracing::info!(
-        "drive {index} opened: {} ({}) — {} bytes, block_size={}, type={}",
+        "drive {index} opened: {} ({}) — {} bytes, block_size={}, type={}{}",
         req.path,
         id.uuid,
         dev.capacity_bytes(),
         dev.block_size(),
-        dev.device_type()
+        dev.device_type(),
+        if given { ", DH-HMAC-CHAP" } else { "" }
     );
     (
         axum::http::StatusCode::CREATED,
@@ -269,6 +299,7 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
             block_size: dev.block_size(),
             labels: labels.to_string(),
             emulated: emulated_state(dev.as_ref()),
+            dhchap: given,
         }),
     )
         .into_response()

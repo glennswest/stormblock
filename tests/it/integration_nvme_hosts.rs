@@ -565,3 +565,92 @@ async fn connections_are_counted_open_and_closed() {
     assert!(m.contains("stormblock_nvmeof_connections_closed_total"), "{m}");
     assert!(m.contains("stormblock_nvmeof_io_seconds"), "{m}");
 }
+
+async fn post_drive(n: &Node, body: serde_json::Value) -> (u16, String) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/drives", n.api))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    (resp.status().as_u16(), resp.text().await.unwrap_or_default())
+}
+
+/// #213: a RAID head attaches a leg whose host must prove a secret through
+/// `POST /api/v1/drives {path, dhchap_secret}`. The secret is never in the
+/// path, never in a response, a listing or an error, and the drive reports
+/// `dhchap: true`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drive_whose_host_has_a_secret_is_opened_with_it() {
+    let dir = TempDir::new().unwrap();
+    let n = node(&dir, false).await;
+    let (s, a) = attach(&n, n.clone_a, serde_json::json!({"transport": "nvme-tcp", "host_nqn": H1, "dhchap": true})).await;
+    assert_eq!(s, 200, "{a}");
+    let secret = a["dhchap_secret"].as_str().unwrap().to_string();
+    let path = format!(
+        "nvme-tcp://{}/{}?nsid={}&hostnqn={H1}",
+        n.nvme,
+        a["nqn"].as_str().unwrap(),
+        a["nsid"].as_u64().unwrap()
+    );
+    // The key itself, without the DHHC-1:<hh>: framing, is what must not leak.
+    let key_b64 = secret.trim_end_matches(':').rsplit(':').next().unwrap().to_string();
+    let leaks = |text: &str| text.contains(&key_b64);
+
+    // No secret: the target refuses, and so does the call.
+    let (st, body) = post_drive(&n, serde_json::json!({"path": path})).await;
+    assert_eq!(st, 400, "{body}");
+    assert!(body.contains("DH-HMAC-CHAP"), "{body}");
+
+    // Another host's secret: refused.
+    let wrong = DhchapKey::generate().to_secret();
+    let (st, body) = post_drive(&n, serde_json::json!({"path": path, "dhchap_secret": wrong})).await;
+    assert_eq!(st, 400, "{body}");
+
+    // Not a secret: refused without being repeated.
+    let (st, body) = post_drive(&n, serde_json::json!({"path": path, "dhchap_secret": "DHHC-1:01:bm90IGEga2V5:"})).await;
+    assert_eq!(st, 400, "{body}");
+    assert!(!body.contains("bm90IGEga2V5"), "{body}");
+
+    // A secret for something that is not nvme-tcp://: refused, not ignored.
+    let file = dir.path().join("plain.bin").to_string_lossy().to_string();
+    let (st, body) =
+        post_drive(&n, serde_json::json!({"path": file, "size_bytes": 16 * MIB, "dhchap_secret": secret})).await;
+    assert_eq!(st, 400, "{body}");
+    assert!(!leaks(&body), "{body}");
+
+    // With it: open, reported, never shown.
+    let (st, body) = post_drive(&n, serde_json::json!({"path": path, "dhchap_secret": secret})).await;
+    assert_eq!(st, 201, "{body}");
+    assert!(!leaks(&body), "the reply carries the secret: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["dhchap"], true, "{v}");
+    assert_eq!(v["path"].as_str(), Some(path.as_str()));
+
+    let list = reqwest::get(format!("{}/api/v1/drives", n.api)).await.unwrap().text().await.unwrap();
+    assert!(!leaks(&list), "{list}");
+    let lv: serde_json::Value = serde_json::from_str(&list).unwrap();
+    let item = lv["items"].as_array().unwrap().iter().find(|d| d["path"] == path.as_str()).expect("listed");
+    assert_eq!(item["dhchap"], true);
+    let uuid = item["uuid"].as_str().unwrap();
+    let one = reqwest::get(format!("{}/api/v1/drives/{uuid}", n.api)).await.unwrap().text().await.unwrap();
+    assert!(one.contains("\"dhchap\":true") && !leaks(&one), "{one}");
+
+    // Data moves through the drive the engine opened.
+    let dev = n.state.drives.read().await.iter().find(|d| d.path == path).unwrap().device.clone();
+    dev.write(0, &vec![9u8; 4096]).await.unwrap();
+    let mut back = vec![0u8; 4096];
+    dev.read(0, &mut back).await.unwrap();
+    assert_eq!(back, vec![9u8; 4096]);
+
+    // Nothing in the data dir holds it either.
+    for e in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        if e.path().is_file() && e.path().extension().is_some_and(|x| x == "json") {
+            let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+            if e.file_name() == "nvme_hosts.json" {
+                continue; // the target's own record of the host's secret (#210)
+            }
+            assert!(!leaks(&text), "{} holds the secret", e.path().display());
+        }
+    }
+}

@@ -39,6 +39,7 @@ async fn setup_state_with_array(dir: &TempDir) -> Arc<AppState> {
             device: d.clone(),
             path: format!("/dev/test{i}"),
             labels: Default::default(),
+            dhchap: false,
         }
     }).collect();
 

@@ -50,6 +50,7 @@ async fn open_drives(dir: &TempDir, state: &AppState) -> Vec<Arc<dyn BlockDevice
             device: dev.clone(),
             path: path.to_str().unwrap().to_string(),
             labels: FailureDomain::from_labels([("shelf", "ds1".to_string()), ("bay", i.to_string())]),
+            dhchap: false,
         });
         out.push(dev);
     }

@@ -1092,6 +1092,14 @@ pub async fn run() -> anyhow::Result<()> {
         .map(|(i, d)| d.device_path(i))
         .collect::<Result<_, _>>()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Each drive's DH-HMAC-CHAP secret (#213), by position: never in its path.
+    let device_secrets: Vec<Option<crate::target::nvmeof::auth::DhchapKey>> = config
+        .drives
+        .iter()
+        .enumerate()
+        .map(|(i, d)| d.dhchap(i))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Collect the first volume device for target export
     let mut export_device: Option<Arc<dyn BlockDevice>> = None;
@@ -1103,9 +1111,13 @@ pub async fn run() -> anyhow::Result<()> {
 
     // Phase 1: Open drives
     if !device_paths.is_empty() {
-        let results = drive::open_drives(&device_paths).await;
+        let mut results = Vec::with_capacity(device_paths.len());
+        for (path, secret) in device_paths.iter().zip(&device_secrets) {
+            let given = secret.is_some();
+            results.push((path.clone(), given, drive::open_one_drive_with_secret(path, secret.clone()).await));
+        }
         let mut drives: Vec<Arc<dyn BlockDevice>> = Vec::new();
-        for (path, result) in results {
+        for (path, dhchap, result) in results {
             match result {
                 Ok(dev) => {
                     tracing::info!(
@@ -1124,6 +1136,7 @@ pub async fn run() -> anyhow::Result<()> {
                             device: arc_dev.clone(),
                             path: path.clone(),
                             labels: Default::default(),
+                            dhchap,
                         });
                     }
                     drives.push(arc_dev);
@@ -3174,7 +3187,7 @@ pub async fn run() -> anyhow::Result<()> {
     async fn set_boot_disks(state: &AppState, disks: OpenedDisks) {
         *state.boot_disks.write().await = disks
             .into_iter()
-            .map(|(path, device)| DriveInfo { device, path, labels: Default::default() })
+            .map(|(path, device)| DriveInfo { device, path, labels: Default::default(), dhchap: false })
             .collect();
     }
 
