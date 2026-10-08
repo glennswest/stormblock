@@ -1864,6 +1864,11 @@ impl VolumeManager {
     }
 
     /// List all volumes: (id, name, virtual_size, allocated).
+    /// Every volume's id, with nothing read from the volumes themselves.
+    pub fn volume_ids(&self) -> Vec<VolumeId> {
+        self.volumes.keys().copied().collect()
+    }
+
     pub async fn list_volumes(&self) -> Vec<(VolumeId, String, u64, u64)> {
         let mut list = Vec::with_capacity(self.volumes.len());
         for (id, handle) in &self.volumes {

@@ -309,11 +309,83 @@ pub struct ListVolumesQuery {
 /// `If-None-Match: "N"`): a 304 means nothing about any volume — which exist,
 /// their lineage, their placement — has changed since, and it need not
 /// re-read 481 of them to find that out.
+///
+/// The generation is the volume manager's (it moves on every metadata
+/// persist) plus the number of times what the listing reports *without* a
+/// persist has changed (#218): what is attached and how (every transport,
+/// mounts included), slab presence, quarantine and failure, running drains,
+/// the rebuild queue, RAID member states and owners. Not `allocated_bytes`:
+/// a usage counter that moves with every write that maps an extent.
 #[derive(Debug, Serialize)]
 struct VolumeList {
     items: Vec<VolumeResponse>,
     count: usize,
     generation: u64,
+}
+
+/// What the listing reports that a persist does not move (#218), hashed.
+async fn listing_fingerprint(state: &AppState, vm: &VolumeManager, ctx: &super::usage::Context) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ctx.fingerprint(&mut h);
+    {
+        let reg = vm.registry().read().await;
+        let mut slabs: Vec<(Uuid, bool)> = reg.iter().map(|(id, _)| (id.0, reg.is_quarantined(id))).collect();
+        slabs.sort();
+        slabs.hash(&mut h);
+    }
+    let mut vols: Vec<(Uuid, Vec<Uuid>, String)> = vm
+        .volume_ids()
+        .into_iter()
+        .map(|id| {
+            let failed = vm
+                .get_volume_handle(&id)
+                .map(|v| v.failed_slabs().into_iter().map(|s| s.0).collect())
+                .unwrap_or_default();
+            let owner = vm.owner(&id).map(|o| serde_json::to_string(o).unwrap_or_default()).unwrap_or_default();
+            (id.0, failed, owner)
+        })
+        .collect();
+    vols.sort();
+    vols.hash(&mut h);
+    serde_json::to_string(&state.rebuilds.jobs()).unwrap_or_default().hash(&mut h);
+    {
+        let drains = state.drains.read().await;
+        let mut all: Vec<String> =
+            drains.all().await.iter().map(|d| serde_json::to_string(d).unwrap_or_default()).collect();
+        all.sort();
+        all.hash(&mut h);
+    }
+    {
+        let arrays = state.arrays.read().await;
+        let mut members: Vec<(Uuid, usize, String)> = arrays
+            .iter()
+            .flat_map(|(id, info)| {
+                info.array.member_drives().into_iter().map(move |(i, st, _)| (id.0, i, st.to_string()))
+            })
+            .collect();
+        members.sort();
+        members.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The listing's generation (#218): the volume manager's plus how many times
+/// [`listing_fingerprint`] has changed. Both only ever grow, so the sum moves
+/// whenever either does.
+async fn listing_generation(state: &AppState, vm: &VolumeManager, ctx: &super::usage::Context) -> u64 {
+    let fp = listing_fingerprint(state, vm, ctx).await;
+    let bumps = {
+        let mut s = state.listing_state.lock().unwrap();
+        if s.0 != fp {
+            if s.0 != 0 {
+                s.1 += 1;
+            }
+            s.0 = fp;
+        }
+        s.1
+    };
+    vm.generation() + bumps
 }
 
 async fn list_volumes(
@@ -325,7 +397,7 @@ async fn list_volumes(
     // What is served, gathered before the volume manager is held (#138).
     let ctx = super::usage::Context::gather(&state).await;
     let vm = state.volume_manager.lock().await;
-    let generation = vm.generation();
+    let generation = listing_generation(&state, &vm, &ctx).await;
     let etag = format!("\"{generation}\"");
     let known = headers
         .get(axum::http::header::IF_NONE_MATCH)

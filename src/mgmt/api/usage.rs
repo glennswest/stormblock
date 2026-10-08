@@ -170,6 +170,23 @@ impl Context {
                 }
             }
         }
+        // A host's own subsystem (#210): an attach that named `host_nqn`, or a
+        // boot claim's clone. Not on the shared subsystem, so not below.
+        #[cfg(feature = "nvmeof")]
+        {
+            let hosts = state.nvme_hosts.lock().await;
+            for sub in hosts.subsystems.values() {
+                for ns in &sub.namespaces {
+                    let mut a = Attachment::new("nvme-tcp");
+                    a.target = Some(sub.nqn.clone());
+                    a.nsid = Some(ns.nsid);
+                    let list = ctx.attachments.entry(ns.volume).or_default();
+                    if !list.contains(&a) {
+                        list.push(a);
+                    }
+                }
+            }
+        }
         {
             let v1 = state.v1.lock().await;
             ctx.snapshots.extend(v1.snapshots.values().filter_map(|s| s.local_id));
@@ -199,6 +216,29 @@ impl Context {
             }
         }
         ctx
+    }
+
+    /// Feed what this context says into `h`, in an order that does not
+    /// depend on how it was gathered (#218): the listing's generation moves
+    /// when it changes.
+    pub fn fingerprint(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        let mut vols: Vec<(&Uuid, Vec<String>)> = self
+            .attachments
+            .iter()
+            .map(|(v, list)| {
+                let mut s: Vec<String> = list.iter().map(|a| serde_json::to_string(a).unwrap_or_default()).collect();
+                s.sort();
+                (v, s)
+            })
+            .collect();
+        vols.sort();
+        vols.hash(h);
+        for set in [&self.template_raw, &self.template_sealed, &self.snapshots] {
+            let mut ids: Vec<&Uuid> = set.iter().collect();
+            ids.sort();
+            ids.hash(h);
+        }
     }
 
     /// Every volume something is attached to — the one answer the listing

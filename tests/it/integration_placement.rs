@@ -175,3 +175,78 @@ async fn two_slabs_on_one_drive_are_one_failure_domain() {
         .unwrap_err();
     assert!(err.to_string().contains("domain"), "{err}");
 }
+
+/// #218: what the listing reports without a persist — a failed or
+/// quarantined slab, an attach and a detach — moves the generation too, and
+/// nothing changing still answers 304.
+#[tokio::test]
+async fn the_generation_moves_on_attach_detach_and_slab_state() {
+    let dir = TempDir::new().unwrap();
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_slab(file_slab(&dir, "a").await).await;
+    vm.add_slab(file_slab(&dir, "b").await).await;
+    let id = vm
+        .create_volume_with("m", 1 << 20, CreateOptions::redundant(RedundancyPolicy::mirror(2)))
+        .await
+        .unwrap();
+    vm.get_volume(&id).unwrap().write(0, &vec![1u8; SLOT as usize]).await.unwrap();
+    let (state, base, server) = serve(&dir, vm).await;
+    let c = reqwest::Client::new();
+
+    let get = |since: u64| {
+        let c = c.clone();
+        let base = base.clone();
+        async move {
+            let r = c.get(format!("{base}/api/v1/volumes?since={since}")).send().await.unwrap();
+            let status = r.status().as_u16();
+            let body: serde_json::Value = if status == 200 { r.json().await.unwrap() } else { serde_json::Value::Null };
+            (status, body)
+        }
+    };
+    let gen0 = |b: &serde_json::Value| b["generation"].as_u64().unwrap();
+    let (_, body) = get(0).await;
+    let mut g = gen0(&body);
+    assert_eq!(get(g).await.0, 304, "nothing changed");
+
+    // A slab this volume stops trusting.
+    let slabs: Vec<stormblock::drive::slab::SlabId> =
+        state.slab_registry.read().await.iter().map(|(id, _)| *id).collect();
+    state.volume_manager.lock().await.get_volume_handle(&id).unwrap().set_failed_slabs([slabs[0]]);
+    let (st, body) = get(g).await;
+    assert_eq!(st, 200, "a failed slab is a change");
+    assert!(gen0(&body) > g);
+    g = gen0(&body);
+    assert_eq!(get(g).await.0, 304, "and then nothing changed");
+
+    // A slab a health report quarantined.
+    state.slab_registry.write().await.set_quarantined(slabs[1], true);
+    let (st, body) = get(g).await;
+    assert_eq!(st, 200, "a quarantine is a change");
+    g = gen0(&body);
+    assert_eq!(get(g).await.0, 304);
+
+    // An attach to a host's own subsystem (#210): the volume is in use, and
+    // the listing says so.
+    let sub: stormblock::mgmt::nvme_hosts::HostSubsystem = serde_json::from_value(serde_json::json!({
+        "nqn": "nqn.test:host:h1",
+        "hosts": [],
+        "namespaces": [{"volume": id.0, "nsid": 1}]
+    }))
+    .unwrap();
+    state.nvme_hosts.lock().await.subsystems.insert(sub.nqn.clone(), sub);
+    let (st, body) = get(g).await;
+    assert_eq!(st, 200, "an attach is a change");
+    let item = &body["items"][0];
+    assert_eq!(item["in_use"], true, "{item}");
+    assert_eq!(item["attachments"][0]["target"], "nqn.test:host:h1", "{item}");
+    g = gen0(&body);
+    assert_eq!(get(g).await.0, 304);
+
+    // The detach.
+    state.nvme_hosts.lock().await.subsystems.clear();
+    let (st, body) = get(g).await;
+    assert_eq!(st, 200, "a detach is a change");
+    assert_eq!(body["items"][0]["in_use"], false);
+    assert!(gen0(&body) > g);
+    server.abort();
+}

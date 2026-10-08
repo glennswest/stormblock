@@ -171,6 +171,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The listing generation moves on attach, detach and slab state (2026-10-08, #218) — IN PROGRESS
+
+`generation` moved only on a metadata persist; attach/detach, failed or
+quarantined slabs, drains and rebuilds changed the listing behind a 304.
+- [ ] fingerprint of what the listing reports without a persist (the usage
+      context incl. mounts, slab presence/quarantine, per-volume failed
+      slabs, owners, rebuild jobs, drains, RAID member states); generation =
+      the manager's + the number of times it changed. Not `allocated_bytes`
+- [ ] found: the usage context missed #210's per-host subsystems (a
+      host-bound attach was not `in_use`): added
+- [ ] test; README, CHANGELOG
+
 ### The handover record carries the incumbent's engine version (2026-10-08, #189) — DONE
 
 11.45 shipped a v19.1.4 engine over a v16.1.0 initramfs; the handover relies

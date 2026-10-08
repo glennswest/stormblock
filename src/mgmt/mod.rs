@@ -355,6 +355,11 @@ pub struct AppState {
     /// Per-host NVMe subsystems and who may reach them (#210).
     #[cfg(feature = "nvmeof")]
     pub nvme_hosts: tokio::sync::Mutex<nvme_hosts::NvmeHosts>,
+    /// The volume listing's state generation (#218): (the last fingerprint
+    /// of what the listing reports that a persist does not move, how many
+    /// times it has changed). The listing's `generation` is the volume
+    /// manager's plus that count.
+    pub listing_state: std::sync::Mutex<(u64, u64)>,
     /// The `[nvmeof]` settings in force: `--config`'s, or the forge settings
     /// this node keeps (#272). Read through [`AppState::nvmeof_settings`],
     /// never `config.nvmeof`, which is only what the file said at start.
@@ -531,6 +536,7 @@ impl AppState {
             nvmeof_target: tokio::sync::RwLock::new(None),
             #[cfg(feature = "nvmeof")]
             nvme_hosts: tokio::sync::Mutex::new(nvme_hosts::NvmeHosts::default()),
+            listing_state: std::sync::Mutex::new((0, 0)),
             #[cfg(feature = "nvmeof")]
             nvmeof_settings: std::sync::RwLock::new(nvmeof_settings),
             #[cfg(feature = "nvmeof")]
