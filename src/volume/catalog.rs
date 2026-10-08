@@ -12,7 +12,11 @@
 //! [`VolumeView`] is what the reader code takes, so the same code reads the
 //! manager (where it already holds it) or a catalog.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, HashSet};
+
+use crate::drive::BlockDevice;
+use crate::drive::slab::SlabId;
+use crate::raid::RaidArrayId;
 use std::sync::Arc;
 
 use super::metadata::{Origin, Owner};
@@ -37,6 +41,8 @@ pub trait VolumeView {
     fn generation(&self) -> u64;
     fn gem(&self) -> &Arc<TrackedRwLock<GlobalExtentMap>>;
     fn registry(&self) -> &Arc<TrackedRwLock<SlabRegistry>>;
+    fn array_of_slab(&self, slab: &SlabId) -> Option<RaidArrayId>;
+    fn slot_size(&self) -> u64;
 }
 
 /// `(id, name, size, allocated)` for every volume, as
@@ -62,7 +68,9 @@ struct Entry {
 /// The volumes as the manager last published them.
 pub struct Catalog {
     generation: u64,
-    entries: BTreeMap<VolumeId, Entry>,
+    entries: HashMap<VolumeId, Entry>,
+    array_slabs: Vec<(RaidArrayId, SlabId)>,
+    slot_size: u64,
     templates: HashSet<VolumeId>,
     gem: Arc<TrackedRwLock<GlobalExtentMap>>,
     registry: Arc<TrackedRwLock<SlabRegistry>>,
@@ -91,6 +99,8 @@ impl Catalog {
             generation: m.generation(),
             entries,
             templates: m.template_ids(),
+            array_slabs: m.array_slab_pairs(),
+            slot_size: m.slot_size(),
             gem: m.gem().clone(),
             registry: m.registry().clone(),
         }
@@ -128,6 +138,12 @@ impl VolumeView for Catalog {
     fn registry(&self) -> &Arc<TrackedRwLock<SlabRegistry>> {
         &self.registry
     }
+    fn array_of_slab(&self, slab: &SlabId) -> Option<RaidArrayId> {
+        self.array_slabs.iter().find(|(_, s)| s == slab).map(|(a, _)| *a)
+    }
+    fn slot_size(&self) -> u64 {
+        self.slot_size
+    }
 }
 
 impl VolumeView for super::VolumeManager {
@@ -163,6 +179,12 @@ impl VolumeView for super::VolumeManager {
     }
     fn registry(&self) -> &Arc<TrackedRwLock<SlabRegistry>> {
         super::VolumeManager::registry(self)
+    }
+    fn array_of_slab(&self, slab: &SlabId) -> Option<RaidArrayId> {
+        super::VolumeManager::array_of_slab(self, slab)
+    }
+    fn slot_size(&self) -> u64 {
+        super::VolumeManager::slot_size(self)
     }
 }
 
@@ -217,6 +239,12 @@ macro_rules! view_through {
             }
             fn registry(&self) -> &Arc<TrackedRwLock<SlabRegistry>> {
                 VolumeView::registry(&**self)
+            }
+            fn array_of_slab(&self, slab: &SlabId) -> Option<RaidArrayId> {
+                VolumeView::array_of_slab(&**self, slab)
+            }
+            fn slot_size(&self) -> u64 {
+                VolumeView::slot_size(&**self)
             }
         }
     };

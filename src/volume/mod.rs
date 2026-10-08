@@ -264,12 +264,6 @@ impl Drop for DeferPersists {
 /// A long operation's claim on one volume (#364), released on drop.
 pub struct VolumeOp {
     ops: Arc<std::sync::Mutex<HashMap<VolumeId, &'static str>>>,
-    /// The engine's own manager, the one behind the API (#364): inside an
-    /// API request its persists are owed and made after the lock is released.
-    shared: std::sync::atomic::AtomicBool,
-    /// What the listing reads without this manager's lock (#364), published
-    /// each time the records are taken.
-    catalog: catalog::CatalogCell,
     id: VolumeId,
 }
 
@@ -322,6 +316,12 @@ pub struct VolumeManager {
     /// Long operations running on a volume (#364): one at a time per
     /// volume, any number on different volumes, with no manager lock.
     ops: Arc<std::sync::Mutex<HashMap<VolumeId, &'static str>>>,
+    /// The engine's own manager, the one behind the API (#364): inside an
+    /// API request its persists are owed and made after the lock is released.
+    shared: std::sync::atomic::AtomicBool,
+    /// What the listing reads without this manager's lock (#364), published
+    /// each time the records are taken.
+    catalog: catalog::CatalogCell,
     /// Legacy mapping: array_id → slab_id (for backward compat with callers
     /// that pass array_id to create_volume).
     array_slabs: HashMap<RaidArrayId, SlabId>,
@@ -2411,6 +2411,11 @@ impl VolumeManager {
     /// Publish the catalog now (at startup, before the first persist).
     pub fn publish_catalog(&self) {
         self.catalog.publish(catalog::Catalog::of(self));
+    }
+
+    /// Which slab each RAID array's volumes sit on (for the catalog).
+    pub fn array_slab_pairs(&self) -> Vec<(RaidArrayId, SlabId)> {
+        self.array_slabs.iter().map(|(a, s)| (*a, *s)).collect()
     }
 
     /// The blanks, by id (for the catalog).
