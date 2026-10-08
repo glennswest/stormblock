@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### /debug open without a token: bounded and redacted (2026-10-08, #283, P2) — IN PROGRESS
+### /debug open without a token: bounded and redacted (2026-10-08, #283, P2) — DONE
 
 #269 opened /debug for a supervisor with no token; it showed other callers'
 paths (volume ids, boothost tags) and let anyone force task dumps. Kept
@@ -182,7 +182,7 @@ open (the issue's reason holds), with:
       watchdog report's open summary, no thread stacks
 - [x] `/debug/tasks`: one dump at a time, answered from it for 5 s
 - [x] tests; docs (README, auth.md), CHANGELOG
-- [ ] full nextest on a build VM; golden; close
+- [x] full nextest at 57d4f24 1011/1011 on a build VM; golden; closed
 
 ### Is a flush outstanding on fastetcd's volume? (2026-10-08, #337, P1) — DONE
 
