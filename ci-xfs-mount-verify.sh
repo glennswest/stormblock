@@ -67,6 +67,8 @@ truncate -s 4G "$W/d1.img"
 cat > "$W/stormblock.toml" <<EOF
 [management]
 api_token = "$TOKEN"
+# The slab format and the seal are destructive verbs (#274).
+admin_token = "$TOKEN"
 listen_addr = "127.0.0.1:$MGMT"
 data_dir = "$W/data"
 node_name = "ci-xfs-mount"
