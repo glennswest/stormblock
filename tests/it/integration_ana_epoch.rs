@@ -308,3 +308,93 @@ async fn a_fence_takes_the_fenced_heads_leg_away_before_it_answers() {
     let (s, _) = v1_attach(&n, &id, H1, Some(1)).await;
     assert_eq!(s, 412);
 }
+
+/// #195: a promote and an expired dual-attach window drop attachment
+/// records; the data path behind each goes with them, and the window expires
+/// on time, with no call to notice it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn promote_and_an_expired_window_take_the_data_path_with_the_record() {
+    let dir = TempDir::new().unwrap();
+    let n = node(&dir).await;
+    let mk = |name: &'static str| {
+        let api = n.api.clone();
+        async move {
+            let (s, v) = call(
+                reqwest::Method::POST,
+                format!("{api}/v1/volumes"),
+                serde_json::json!({"name": name, "size_bytes": 16 * MIB, "replica_tier": {"slaves": 0}}),
+            )
+            .await;
+            assert_eq!(s, 200, "{v}");
+            let id = v["id"].as_str().unwrap().to_string();
+            // A slave on another node, so it can be promoted and migrated to.
+            let (s, v) = call(
+                reqwest::Method::POST,
+                format!("{api}/v1/volumes/{id}/placement"),
+                serde_json::json!({"master_node": "sno", "slave_node": "peer"}),
+            )
+            .await;
+            assert_eq!(s, 200, "{v}");
+            id
+        }
+    };
+
+    // Promote: the attachment at the current epoch is dropped, and its host
+    // can no longer write or connect.
+    let id = mk("promoted").await;
+    let (s, a) = v1_attach(&n, &id, H1, None).await;
+    assert_eq!(s, 200, "{a}");
+    let (nqn, nsid) = (a["nqn"].as_str().unwrap().to_string(), a["nsid"].as_u64().unwrap() as u32);
+    let host = NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H1)).await.unwrap();
+    host.write(0, &vec![1u8; 4096]).await.unwrap();
+    let (s, f) = call(reqwest::Method::POST, format!("{}/v1/volumes/{id}/fence", n.api), serde_json::json!({"expected_epoch": 1})).await;
+    assert_eq!(s, 200, "{f}");
+    // Reattach at the new epoch (the fence took the first one away).
+    let (s, a) = v1_attach(&n, &id, H1, Some(2)).await;
+    assert_eq!(s, 200, "{a}");
+    let (nqn, nsid) = (a["nqn"].as_str().unwrap().to_string(), a["nsid"].as_u64().unwrap() as u32);
+    let host = NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H1)).await.unwrap();
+    host.write(0, &vec![2u8; 4096]).await.unwrap();
+    let (s, p) = call(
+        reqwest::Method::POST,
+        format!("{}/v1/volumes/{id}/promote", n.api),
+        serde_json::json!({"target_node": "peer", "fenced_epoch": 2}),
+    )
+    .await;
+    assert_eq!(s, 200, "{p}");
+    assert_eq!(p["attachments"].as_array().map(|a| a.len()), Some(0), "{p}");
+    assert!(host.write(0, &vec![3u8; 4096]).await.is_err(), "the promote took the host's path away");
+    assert!(NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H1)).await.is_err(), "and it cannot connect back");
+
+    // An expired window: the migration target's attachment goes on time.
+    let id = mk("migrating").await;
+    let (s, w) = call(
+        reqwest::Method::POST,
+        format!("{}/v1/volumes/{id}/dual-attach", n.api),
+        serde_json::json!({"target_node": "peer", "ttl_secs": 1}),
+    )
+    .await;
+    assert_eq!(s, 200, "{w}");
+    let (s, a) = call(
+        reqwest::Method::POST,
+        format!("{}/v1/volumes/{id}/attach", n.api),
+        serde_json::json!({"node": "peer", "mode": "migration_target", "transport": "nvme_tcp", "host_nqn": H2}),
+    )
+    .await;
+    assert_eq!(s, 200, "{a}");
+    let (nqn, nsid) = (a["nqn"].as_str().unwrap().to_string(), a["nsid"].as_u64().unwrap() as u32);
+    let target = NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H2)).await.unwrap();
+    target.write(0, &vec![4u8; 4096]).await.unwrap();
+    // No call to the API: the timer has to do it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while target.write(0, &vec![5u8; 4096]).await.is_ok() {
+        assert!(std::time::Instant::now() < deadline, "the expired window still lets the target write");
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let (_, v) = call(reqwest::Method::GET, format!("{}/v1/volumes/{id}", n.api), serde_json::json!({})).await;
+    assert!(
+        v["attachments"].as_array().unwrap().iter().all(|a| a["node"] != "peer"),
+        "the record went too: {v}"
+    );
+    assert!(n.state.v1.lock().await.dual_attach.get(&id).is_none());
+}

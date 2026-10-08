@@ -174,6 +174,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### /v1: promote and expiry tear down the data path; expiry on time (2026-10-08, #195) — IN PROGRESS
+
+Promote and a dual-attach window's auto-abort dropped attachment records and
+left the ublk device / namespace; expiry ran only inside some calls.
+- [x] promote revokes every attachment it drops (`revoke_attachment`);
+      expiry = `drop_node_attachments` (the abort's teardown, now shared)
+- [x] expiry on every `/v1` call (reads and detach included) and a 1 s timer
+      (`expiry_loop`, ends with the state); windows still open at a restart
+      expire on the timer
+- [ ] test `integration_ana_epoch::promote_and_an_expired_window_take_the_
+      data_path_with_the_record`; docs; CHANGELOG
+
 ### tests-runtime/ has a gate (2026-10-08, #222) — IN PROGRESS
 
 Since #209 the eight runtime tests ran nowhere, the flow-over resume

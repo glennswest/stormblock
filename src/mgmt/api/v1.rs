@@ -689,21 +689,72 @@ impl V1State {
         self.volumes.values().find(|r| r.vol.name == name)
     }
 
-    /// Drop expired dual-attach windows (engine-enforced auto-abort).
-    fn expire_windows(&mut self, now_ms: i64) {
+    /// Take the dual-attach windows that have expired out of the state:
+    /// `(volume, target node)`. [`expire_windows`] aborts them.
+    fn take_expired(&mut self, now_ms: i64) -> Vec<(String, String)> {
         let expired: Vec<String> = self
             .dual_attach
             .iter()
             .filter(|(_, w)| w.expires_at_ms <= now_ms)
             .map(|(vid, _)| vid.clone())
             .collect();
-        for vid in expired {
-            if let Some(w) = self.dual_attach.remove(&vid) {
-                tracing::info!("dual-attach window on {vid} expired; auto-aborting");
-                if let Some(nodes) = self.attachments.get_mut(&vid) {
-                    nodes.retain(|n| n != &w.target_node);
-                }
-            }
+        expired
+            .into_iter()
+            .filter_map(|vid| self.dual_attach.remove(&vid).map(|w| (vid, w.target_node)))
+            .collect()
+    }
+}
+
+/// Abort every dual-attach window that has expired (#195): the target's
+/// attachments go the way a `close {outcome: abort}` takes them — records,
+/// and the data path behind them (ublk device, namespace).
+///
+/// Run on every `/v1` call, detach and reads included, and by a timer
+/// ([`expiry_loop`]): an expired window must not hold the target's access, or
+/// block a promote, until some other call happens by.
+async fn expire_windows(state: &AppState, v1: &mut V1State) {
+    for (vid, target) in v1.take_expired(now_ms()) {
+        tracing::info!("dual-attach window on {vid} expired; auto-aborting");
+        drop_node_attachments(state, v1, &vid, &target).await;
+    }
+}
+
+/// Take away every attachment `node` holds on `id`: its records and the data
+/// path behind each (ublk device, namespace), keeping what other nodes share.
+async fn drop_node_attachments(state: &AppState, v1: &mut V1State, id: &str, node: &str) {
+    if let Some(nodes) = v1.attachments.get_mut(id) {
+        nodes.retain(|n| n != node);
+    }
+    let Some(rec) = v1.volumes.get_mut(id) else {
+        v1.save();
+        return;
+    };
+    let local = rec.local_id;
+    let (gone, kept): (Vec<Attachment>, Vec<Attachment>) =
+        rec.vol.attachments.drain(..).partition(|a| a.node == node);
+    rec.vol.attachments = kept.clone();
+    let shared = if gone.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none())
+        && !kept.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none())
+    {
+        v1.nvme_nsids.remove(id)
+    } else {
+        None
+    };
+    v1.save();
+    for att in &gone {
+        revoke_attachment(state, id, local, att, &kept, shared).await;
+    }
+}
+
+/// Expire dual-attach windows on time (#195), not only when a call happens
+/// by. Ends when the state is gone.
+async fn expiry_loop(state: std::sync::Weak<AppState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let Some(state) = state.upgrade() else { return };
+        let mut v1 = state.v1.lock().await;
+        if v1.dual_attach.values().any(|w| w.expires_at_ms <= now_ms()) {
+            expire_windows(&state, &mut v1).await;
         }
     }
 }
@@ -1167,7 +1218,7 @@ async fn create_volume(
     }
 
     let mut v1 = state.v1.lock().await;
-    v1.expire_windows(now_ms());
+    expire_windows(&state, &mut v1).await;
 
     // Name-based idempotency: same name + same size → the existing volume.
     if let Some(existing) = v1.volume_by_name(&req.name) {
@@ -1341,7 +1392,8 @@ async fn list_volumes(
     State(state): State<Arc<AppState>>,
     Query(q): Query<NameFilter>,
 ) -> V1Result<Vec<Volume>> {
-    let v1 = state.v1.lock().await;
+    let mut v1 = state.v1.lock().await;
+    expire_windows(&state, &mut v1).await;
     Ok(Json(
         v1.volumes
             .values()
@@ -1355,7 +1407,8 @@ async fn get_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> V1Result<Volume> {
-    let v1 = state.v1.lock().await;
+    let mut v1 = state.v1.lock().await;
+    expire_windows(&state, &mut v1).await;
     v1.volumes
         .get(&id)
         .map(|r| Json(r.vol.clone()))
@@ -1653,7 +1706,7 @@ async fn attach_volume(
 async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) -> V1Result<AttachInfo> {
     let want = WantTransport::parse(req.transport.as_deref()).map_err(V1Error::BadRequest)?;
     let mut v1 = state.v1.lock().await;
-    v1.expire_windows(now_ms());
+    expire_windows(&state, &mut v1).await;
     let rec = v1
         .volumes
         .get(&id)
@@ -1887,6 +1940,7 @@ async fn detach_volume(
     Json(req): Json<DetachRequest>,
 ) -> V1Result<serde_json::Value> {
     let mut v1 = state.v1.lock().await;
+    expire_windows(&state, &mut v1).await;
     let local_node = v1.local_node.clone();
     if let Some(nodes) = v1.attachments.get_mut(&id) {
         nodes.retain(|n| n != &req.node);
@@ -2108,7 +2162,7 @@ async fn fence_volume(
     Json(req): Json<FenceRequest>,
 ) -> V1Result<serde_json::Value> {
     let mut v1 = state.v1.lock().await;
-    v1.expire_windows(now_ms());
+    expire_windows(&state, &mut v1).await;
     let epoch = apply_fence(&mut v1, &id, req.expected_epoch)?;
     // Before answering: once the fence has answered, a host attached below
     // it can no longer write (#83, #6).
@@ -2128,8 +2182,25 @@ async fn promote_volume(
     Json(req): Json<PromoteRequest>,
 ) -> V1Result<Volume> {
     let mut v1 = state.v1.lock().await;
-    v1.expire_windows(now_ms());
-    apply_promote(&mut v1, &id, &req.target_node, req.fenced_epoch).map(Json)
+    expire_windows(&state, &mut v1).await;
+    // A promote drops every attachment record (the pair is re-made around
+    // the new master): the data path behind each goes with it (#195), or a
+    // ublk device or namespace outlives its record, and a later detach
+    // finds nothing to tear down.
+    let before = v1.volumes.get(&id).map(|r| (r.local_id, r.vol.attachments.clone()));
+    let vol = apply_promote(&mut v1, &id, &req.target_node, req.fenced_epoch)?;
+    if let Some((local, gone)) = before.filter(|(_, g)| !g.is_empty()) {
+        let shared = if gone.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none()) {
+            v1.nvme_nsids.remove(&id)
+        } else {
+            None
+        };
+        v1.save();
+        for att in &gone {
+            revoke_attachment(&state, &id, local, att, &[], shared).await;
+        }
+    }
+    Ok(Json(vol))
 }
 
 // ---------------------------------------------------------------------------
@@ -2148,7 +2219,7 @@ async fn open_dual_attach(
     Json(req): Json<DualAttachRequest>,
 ) -> V1Result<DualAttachWindow> {
     let mut v1 = state.v1.lock().await;
-    v1.expire_windows(now_ms());
+    expire_windows(&state, &mut v1).await;
     let rec = v1
         .volumes
         .get(&id)
@@ -2194,7 +2265,7 @@ async fn close_dual_attach(
     Json(req): Json<CloseDualAttachRequest>,
 ) -> V1Result<Volume> {
     let mut v1 = state.v1.lock().await;
-    v1.expire_windows(now_ms());
+    expire_windows(&state, &mut v1).await;
     let w = v1
         .dual_attach
         .get(&id)
@@ -2206,27 +2277,8 @@ async fn close_dual_attach(
     v1.dual_attach.remove(&id);
     match req.outcome {
         DualAttachOutcome::Abort => {
-            if let Some(nodes) = v1.attachments.get_mut(&id) {
-                nodes.retain(|n| n != &target);
-            }
             // The migration target's access ends with the window (#83).
-            if let Some(rec) = v1.volumes.get_mut(&id) {
-                let local = rec.local_id;
-                let (gone, kept): (Vec<Attachment>, Vec<Attachment>) =
-                    rec.vol.attachments.drain(..).partition(|a| a.node == target);
-                rec.vol.attachments = kept.clone();
-                let shared = if gone.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none())
-                    && !kept.iter().any(|a| a.transport == "nvme_tcp" && a.host_nqn.is_none())
-                {
-                    v1.nvme_nsids.remove(&id)
-                } else {
-                    None
-                };
-                v1.save();
-                for att in &gone {
-                    revoke_attachment(&state, &id, local, att, &kept, shared).await;
-                }
-            }
+            drop_node_attachments(&state, &mut v1, &id, &target).await;
             let vol = v1
                 .volumes
                 .get(&id)
@@ -2576,6 +2628,11 @@ async fn get_node_capacity(
 // answers 401 in this contract's envelope: the layer picks the body by prefix.
 
 pub fn router(state: Arc<AppState>) -> Router {
+    // Dual-attach windows expire on time (#195); a second router over the same
+    // state runs a second loop, which finds nothing left to do.
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        rt.spawn(expiry_loop(Arc::downgrade(&state)));
+    }
     Router::new()
         .route("/volumes", post(create_volume).get(list_volumes))
         .route("/volumes/{id}", get(get_volume).delete(delete_volume))
