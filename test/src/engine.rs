@@ -54,9 +54,10 @@ impl Engine {
         let nqn = format!("nqn.2026-09.io.storm:test-{}", name);
         let config = format!(
             "[management]\nlisten_addr = \"127.0.0.1:{api_port}\"\ndata_dir = \"{data}\"\nnode_name = \"test-{name}\"\n\
-             ublk_transport = false\n\n[nvmeof]\nlisten_addr = \"127.0.0.1:{nvme_port}\"\nnqn = \"{nqn}\"\n\
+             admin_token_file = \"{admin}\"\nublk_transport = false\n\n[nvmeof]\nlisten_addr = \"127.0.0.1:{nvme_port}\"\nnqn = \"{nqn}\"\n\
              export_drives = false\n",
-            data = dir.join("data").display()
+            data = dir.join("data").display(),
+            admin = dir.join("admin_token").display()
         );
         std::fs::write(dir.join("stormblock.toml"), config).map_err(|e| e.to_string())?;
         let mut e = Engine {
@@ -114,9 +115,12 @@ impl Engine {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        self.token = std::fs::read_to_string(self.dir.join("data/api_token"))
+        // The harness is this engine's operator: it formats slabs, which is
+        // destructive (#274), so it holds the admin token the engine minted
+        // into the work dir. The admin token covers ordinary verbs too.
+        self.token = std::fs::read_to_string(self.dir.join("admin_token"))
             .map(|t| t.trim().to_string())
-            .map_err(|e| format!("no minted token: {e}"))?;
+            .map_err(|e| format!("no minted admin token: {e}"))?;
         self.http = Client::builder()
             .timeout(Duration::from_secs(120))
             .bearer(Some(self.token.clone()))

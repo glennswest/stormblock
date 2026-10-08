@@ -8,6 +8,7 @@
 #   1. the test image (test/build.sh): the musl release build of `stormblock`
 #      and `stormblock-test`, packaged FROM scratch. 87d2d99 reached main
 #      compiling neither its tests nor this image; the test machines found it.
+#      Then the image's `short` suite (the in-pod engine, #139), with podman.
 #   2. every initramfs shell test, under sh and busybox sh where it is there.
 #   3. the whole suite with cargo-nextest (installed when the build VM has
 #      none, stormcentral#534).
@@ -25,6 +26,8 @@ if [ "${CHECK_SKIP_IMAGE:-0}" = 1 ] || ! command -v podman >/dev/null 2>&1; then
     STAGE_ONLY=1 sh test/build.sh
 else
     sh test/build.sh
+    echo "== check: the test image's short suite"
+    podman run --rm --user 65532 --tmpfs /results:rw,mode=1777 stormblock-test short
 fi
 
 echo "== check: initramfs tests"

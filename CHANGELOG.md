@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #360: the test image's suites failed at `engine-up` since #274 (`POST /slabs` is destructive, and the harness held only the node token). The harness now runs its in-pod engine with `admin_token_file` in the work dir and uses that token. `check.sh` runs the `short` suite in the image too.
 - **fix:** #357: 87d2d99 did not compile (E0597 in `ensure_system_data`: the registry guard was borrowed by the block's tail expression; fixed in e978796), and the test image could not build. **build:** `check.sh` is the one routine check now (`sc-build 'sh check.sh'`): the test image (`test/build.sh`), every initramfs test under sh and busybox sh, the nextest suite, the runtime tests. A commit isn't called done until it passes.
 - **feat:** #355 (P0, stormcos#456): `system-data`, the node's kept record of itself.
   - **The volume:** `boot-local` makes it (ext4, 4 GiB thin) in a local data half when it isn't there yet, and exports it after every other ublk device. Every install keeps it; a diskless boot makes none.
