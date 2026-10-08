@@ -67,11 +67,30 @@ Whatever the policy, three rules decide which drives are candidates at all
    or an install may take; every other drive is left alone and the console
    says so. A machine without it (NVMe-only, while the line names
    `/dev/sda`) falls back to the scan under the next two rules.
-2. **Never a shelf.** A drive behind a SAS expander, or attached to an SES
-   enclosure (`/sys/block/X/device/enclosure_device:*`), is never taken by
-   the scan, and the install's search for this node's data slab skips it.
-   `rd.stormblock.allow-external=1` allows them, for a server whose own bays
-   sit behind an expander or a SES backplane.
+2. **Never a shelf.** A drive behind a SAS expander (a disk shelf's IOMs are
+   expanders) is never taken by the scan, and the install's search for this
+   node's data slab skips it. An SES enclosure on its own is not a shelf: a
+   server's own hot-plug backplane is one. The Dell R230's bays on its
+   mpt3sas HBA are, and treating them as a shelf left it running diskless
+   from forge with its slabs on sda (#344). `rd.stormblock.allow-external=1`
+   allows a drive behind an expander, for a server whose own bays sit behind
+   one.
+
+**What the boot did with the machine's own disk (#344)** is written to
+`/run/stormblock/local-disk.json` (which survives `switch_root`) and reported
+in the engine's health as `slabs.local_disk`. It records:
+- `taken` and the drive;
+- `refused`: a drive carrying stormblock slabs that this boot left alone,
+  with why (behind an expander, not the named drive, the release on it
+  cannot be told, the policy). The console says `WARNING: this node runs from
+  the appliance although <drive> carries stormblock slabs: <why>`;
+- `failed`: `boot-local` could not use the drive the survey chose, with its
+  error;
+- `none`: no local drive carries slabs.
+
+The flow-over onto the node's own disk is mandatory (owner, 2026-10-08): a
+node running diskless names the drive and the reason instead of a bare
+`remote`.
 3. **Somebody else's is not blank.** A drive that is not a stormblock slab
    is taken only when its first and last MiB are zeros; a stormraid
    superblock is named on the console. `force` may still clear the named

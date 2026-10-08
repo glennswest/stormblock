@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #344 (P0): the Dell ran diskless from forge with its slabs on `sda`, and said nothing.
+  - **Cause:** #273's survey took any drive in an SES enclosure for a disk shelf. The R230's own bays on its mpt3sas HBA are an SES enclosure, so with no `rd.stormblock.slab=` and no boot intent, `sda` was skipped and refused.
+  - **The rule now:** a shelf is a drive behind a SAS expander.
+  - **Never silent:** the boot's verdict on the machine's own disk (taken, refused with why, failed, none) is written to `/run/stormblock/local-disk.json` by the survey and by `boot-local`. It is said on the console, by `adopt-ublk` too, and reported in health as `slabs.local_disk`.
 - **fix:** #195: `/v1` promote and dual-attach expiry tear down what they drop.
   - **Promote:** every attachment record it drops takes its data path with it: the ublk device is removed and the namespace released.
   - **Expiry:** an expired window aborts the way `close {outcome: abort}` does.

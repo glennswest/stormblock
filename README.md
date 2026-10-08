@@ -513,6 +513,11 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   - It is counted only on a node with a remote slab, at most every 10 s, and
     never waited for: it is left out until a first answer could be read, so
     absent means unknown.
+  - `local_disk` (#344): what this boot did with the machine's own disk, as
+    the initramfs and `boot-local` recorded it. `state` is `taken`,
+    `refused`, `failed` or `none`, with `drive` and `reason`. A diskless node
+    whose drive carries slabs says which drive and why
+    (`docs/boot-hooks.md`).
   And `"ublk_stuck"` (#337): every request a ublk device was handed and has
   not answered for 30 s or more, oldest first, with `device`
   (`volume:<id>`), `ublk` (`/dev/ublkbN`), `queue`, `tag`, `op` (`flush`,
@@ -1577,8 +1582,8 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.tag=<name>` | the firmware's `StormBootTag`, else this, else SMBIOS serial/UUID | the name claimed as (`boothost/<name>`); a firmware name that differs wins, with a warning (#249) |
 | `rd.stormblock.hostnqn=<nqn>` | the firmware's `StormBootHostNqn` | the NQN presented on every NVMe/TCP connect |
 | `rd.stormblock.trust-smbios=1` | off | let a name guessed from SMBIOS install over a disk (#249) |
-| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any` (a blank drive, or this node's own layout), `blank`, `off`, `force`; only the drive `rd.stormblock.slab=` names when it is present, never a drive in an external enclosure (#273, `docs/boot-hooks.md`) |
-| `rd.stormblock.allow-external=1` | off | let the survey take a drive behind a SAS expander or in an SES enclosure, for a server whose own bays sit behind one (#273) |
+| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any` (a blank drive, or this node's own layout), `blank`, `off`, `force`; only the drive `rd.stormblock.slab=` names when it is present, never a drive behind a SAS expander, which is a disk shelf (#273). A server's own SES backplane is not one (#344, `docs/boot-hooks.md`) |
+| `rd.stormblock.allow-external=1` | off | let the survey take a drive behind a SAS expander, for a server whose own bays sit behind one (#273) |
 | `rd.stormblock.wipe=<dev>` | — | clear that disk's partition table and slab headers once, before the survey |
 | `rd.stormblock.slab=<dev\|file\|nvme-tcp://…>` | — | boot from a local (or named) slab instead of claiming |
 | `rd.stormblock.meta=<dir>` | — | where the volume records are, for a slab that keeps none |
