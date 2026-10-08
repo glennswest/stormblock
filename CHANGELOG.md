@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #189: the handover record carries the incumbent's engine version.
+  - **Recorded:** `boot-local` writes `engine_version` into `handover.json`. Each `adopt-ublk` writes its own once it serves, so the next handover compares with the real incumbent.
+  - **Compared:** `adopt-ublk` checks it before anything is stood down. The same version is said on the console. Another version, or none (an engine older than this), is a `WARNING:` naming both.
+  - **Refused when asked:** `--version-mismatch refuse` (`STORMBLOCK_ADOPT_VERSION_MISMATCH`) refuses instead, and the incumbent serves on. 11.45 shipped a v19.1.4 engine over a v16.1.0 initramfs.
+  - **Not the commit:** the record compares versions only, which is #341's to extend.
 - **feat:** #213: an `nvme-tcp://` drive takes a DH-HMAC-CHAP secret beside its path, never in it.
   - **How it is given:** `POST /api/v1/drives {path, dhchap_secret}` over HTTP; `[[drives]] dhchap_secret` or `dhchap_secret_file` in config.
   - **Where it lives:** the secret goes to the initiator and stays with the open drive, which reconnects with it. It is never echoed (responses, listings, errors), its `Debug` is redacted, it is never serialized, and it is never written to disk.
