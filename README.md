@@ -336,6 +336,9 @@ only in the file is **not applied**.
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds a **kept** data half (the update path) | policy decides |
 | `STORMBLOCK_SLOT_CACHE_MB` | bound of each slab's cache of slot table pages; nothing else of the table is kept in memory (#155) | `16` |
 | `STORMBLOCK_FLOW_BOOT_GRACE_SECS` | the most a successor's flow-over waits for the node's boot: until volume I/O is still for 10 s (#278) | `90`; `0` starts at once |
+| `STORMBLOCK_FLOW_BATCH` | extents a flow-over moves per window, one persist per window (#331) | `64` |
+| `STORMBLOCK_FLOW_PARALLEL` | moves a flow-over makes at once (#331) | `8` |
+| `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per attached NVMe/TCP namespace (#331) | `4` |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
 | `STORMBLOCK_BOOT_TAG` | this machine's name for that claim; the initramfs exports the name it resolved (#259) | the firmware's `StormBootTag` EFI variable, else SMBIOS serial, else SMBIOS UUID (#249) |

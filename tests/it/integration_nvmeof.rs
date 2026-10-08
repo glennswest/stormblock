@@ -3,7 +3,7 @@
 //! FileDevice → RAID 1 → ThinVolume → NvmeofTarget → TCP → NvmeofInitiator
 
 use crate::common;
-use stormblock::drive::{open_one_drive, DriveType};
+use stormblock::drive::{open_one_drive, BlockDevice, DriveType};
 use stormblock::target::nvmeof::NvmeofConfig;
 use common::nvmeof_initiator::NvmeofInitiator;
 
@@ -182,6 +182,53 @@ async fn nvme_tcp_uri_attaches_as_block_device() {
     let mut past = vec![0u8; 10];
     assert!(dev.read(dev.capacity_bytes() - 5, &mut past).await.is_err());
 
+    server.abort();
+}
+
+/// #331: an attached namespace has several I/O connections. Writes of 64
+/// bytes into the same blocks (slot-table entries), from many tasks at once,
+/// are read-modify-writes that can no longer share one connection: none may
+/// undo another. Large reads and writes in parallel stay byte-exact.
+#[tokio::test]
+async fn parallel_io_over_several_connections_stays_exact() {
+    let (_dir, vol, _vm) = common::setup_raid1_volume(64 * 1024 * 1024, 32 * 1024 * 1024).await;
+    let (addr, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+    let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev: std::sync::Arc<dyn BlockDevice> = open_one_drive(&uri).await.expect("URI attach").into();
+
+    // 256 entries of 64 bytes over 4 blocks, every entry its own task.
+    let tasks: Vec<_> = (0..256u64)
+        .map(|i| {
+            let dev = dev.clone();
+            tokio::spawn(async move { dev.write(i * 64, &[i as u8 ^ 0x5A; 64]).await.unwrap() })
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let mut back = vec![0u8; 256 * 64];
+    dev.read(0, &mut back).await.unwrap();
+    for i in 0..256usize {
+        assert!(back[i * 64..(i + 1) * 64].iter().all(|b| *b == i as u8 ^ 0x5A), "entry {i} was undone");
+    }
+
+    // 16 MiB-at-once copies: 1 MiB each, written then read back in parallel.
+    const MIB: u64 = 1024 * 1024;
+    let tasks: Vec<_> = (1..17u64)
+        .map(|k| {
+            let dev = dev.clone();
+            tokio::spawn(async move {
+                let data: Vec<u8> = (0..MIB).map(|i| ((i * 7 + k) % 251) as u8).collect();
+                dev.write(k * MIB, &data).await.unwrap();
+                let mut got = vec![0u8; MIB as usize];
+                dev.read(k * MIB, &mut got).await.unwrap();
+                assert!(got == data, "MiB {k} read back different");
+            })
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap();
+    }
     server.abort();
 }
 

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **perf:** #331: an attached NVMe/TCP namespace has several I/O connections (`STORMBLOCK_NVME_TCP_QUEUES`, 4), not one.
+  - **Problem:** a flow-over's parallel 1 MiB copies (eight 128 KiB round trips each) and the node's own reads of extents still on the appliance queued on a single connection.
+  - **Now:** each operation takes a free connection. The first connection is made at open, the rest when first needed. A partial-block read-modify-write holds a device lock exclusively, so no write on another connection lands inside it.
+  - **Tests:** `integration_nvmeof::parallel_io_over_several_connections_stays_exact` (256 concurrent 64-byte entries in 4 blocks; 16 parallel 1 MiB copies).
 - **perf/fix:** #331: the slot fence is one lock per slot in use, not 4096 hashed shards.
   - **Problem:** with the shards, two unrelated slots waited for each other. With the flow-over's 8 moves at once, the model's in-process appliance served a move's NVMe/TCP read from a slot in the shard the move held, so the move waited on itself and the flow-over hung (seen once, after 256 moves).
   - **Now:** a lock is made when a slot is first held and dropped with its last guard, in 64 tables.

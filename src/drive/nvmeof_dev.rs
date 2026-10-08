@@ -13,11 +13,16 @@
 //! this target and the Linux kernel target.
 //!
 //! Queue model: one admin connection (QID 0) used at open for Identify,
-//! then dropped; one I/O connection (QID 1) kept behind a Mutex for
-//! serialized I/O — same concurrency shape as `IscsiDevice`. A connection
-//! that errors is dropped and re-established on the next operation, so a
-//! bounced remote node degrades to per-op errors (which RAID sees) and
-//! heals without a reopen.
+//! then dropped; several I/O connections (`STORMBLOCK_NVME_TCP_QUEUES`, 4),
+//! each behind its own Mutex, one command at a time on each. An operation
+//! takes a free one (#331: with one, a flow-over's parallel 1 MiB copies and
+//! the node's own reads all queued on a single connection). The first is
+//! made at open, the rest when first needed. A connection that errors is
+//! dropped and re-established on the next operation, so a bounced remote
+//! node degrades to per-op errors (which RAID sees) and heals without a
+//! reopen. A write that is not whole blocks is a read-modify-write, and
+//! holds the device's `rmw` lock exclusively so no write on another
+//! connection lands between its read and its write.
 
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -76,6 +81,12 @@ pub fn default_host_nqn() -> &'static str {
         .get_or_init(|| std::env::var("STORMBLOCK_HOST_NQN").unwrap_or_else(|_| HOST_NQN.to_string()))
         .as_str()
 }
+/// I/O connections per attached namespace (#331): `STORMBLOCK_NVME_TCP_QUEUES`,
+/// 4, at least 1.
+fn io_queues() -> usize {
+    std::env::var("STORMBLOCK_NVME_TCP_QUEUES").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(4)
+}
+
 /// Per-op transfer cap: fits every target's defaults (our ICResp
 /// advertises maxh2cdata 131072) and keeps NLB well inside 16 bits.
 const MAX_CHUNK: usize = 128 * 1024;
@@ -526,9 +537,13 @@ impl Conn {
 
 /// A remote NVMe-TCP namespace attached as a local drive.
 pub struct NvmeofDevice {
-    /// I/O queue connection (QID 1); None after an error until the next op
-    /// re-establishes it.
-    conn: Mutex<Option<Conn>>,
+    /// I/O queue connections; None until first used, and after an error
+    /// until the next op re-establishes it.
+    conns: Vec<Mutex<Option<Conn>>>,
+    /// Where the next operation starts looking for a free connection.
+    next: AtomicU32,
+    /// Writes hold it shared; a read-modify-write exclusively.
+    rmw: tokio::sync::RwLock<()>,
     spec: NvmeTcpSpec,
     capacity: u64,
     block_size: u32,
@@ -596,8 +611,12 @@ impl NvmeofDevice {
             model: if model.is_empty() { "NVMe-TCP".into() } else { model },
             path: uri,
         };
+        let mut conns = vec![Mutex::new(Some(io_conn))];
+        conns.extend((1..io_queues()).map(|_| Mutex::new(None)));
         Ok(NvmeofDevice {
-            conn: Mutex::new(Some(io_conn)),
+            conns,
+            next: AtomicU32::new(0),
+            rmw: tokio::sync::RwLock::new(()),
             spec: spec.clone(),
             capacity,
             block_size,
@@ -609,7 +628,14 @@ impl NvmeofDevice {
     /// operation dropped it. The caller runs one operation and, on error,
     /// clears the slot so the next call reconnects.
     async fn lock_conn(&self) -> DriveResult<tokio::sync::MutexGuard<'_, Option<Conn>>> {
-        let mut guard = self.conn.lock().await;
+        // A free connection, else wait for one in turn.
+        let n = self.conns.len();
+        let start = self.next.fetch_add(1, Ordering::Relaxed) as usize;
+        let free = (0..n).find_map(|i| self.conns[(start + i) % n].try_lock().ok());
+        let mut guard = match free {
+            Some(g) => g,
+            None => self.conns[start % n].lock().await,
+        };
         if guard.is_none() {
             *guard = Some(
                 Conn::establish(&self.spec, 1)
@@ -739,6 +765,7 @@ impl BlockDevice for NvmeofDevice {
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         if self.is_aligned(offset, buf.len()) {
             self.check_aligned(offset, buf.len())?;
+            let _w = self.rmw.read().await;
             let mut guard = self.lock_conn().await?;
             let conn = guard.as_mut().expect("lock_conn established");
             return match self.write_blocks(conn, offset, buf).await {
@@ -747,9 +774,11 @@ impl BlockDevice for NvmeofDevice {
             };
         }
         // Read-modify-write the covering blocks under one hold of the
-        // connection, so no other write of this device lands in between.
+        // connection and the device's `rmw` lock, so no other write of this
+        // device lands in between.
         let (start, end) = self.cover(offset, buf.len())?;
         let mut span = vec![0u8; (end - start) as usize];
+        let _w = self.rmw.write().await;
         let mut guard = self.lock_conn().await?;
         let conn = guard.as_mut().expect("lock_conn established");
         if let Err(e) = self.read_blocks(conn, start, &mut span).await {
