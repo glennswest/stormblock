@@ -67,18 +67,39 @@ Whatever the policy, three rules decide which drives are candidates at all
    or an install may take; every other drive is left alone and the console
    says so. A machine without it (NVMe-only, while the line names
    `/dev/sda`) falls back to the scan under the next two rules.
-2. **Never a shelf.** A drive behind a SAS expander (a disk shelf's IOMs are
-   expanders) is never taken by the scan, and the install's search for this
-   node's data slab skips it. An SES enclosure on its own is not a shelf: a
-   server's own hot-plug backplane is one. The Dell R230's bays on its
-   mpt3sas HBA are, and treating them as a shelf left it running diskless
-   from forge with its slabs on sda (#344). `rd.stormblock.allow-external=1`
-   allows a drive behind an expander, for a server whose own bays sit behind
-   one.
+2. **By the shelf's position, never by being on a shelf (#347, owner).**
+   Every SES enclosure is a shelf, with its own id (the enclosure's logical
+   id), position and bays. A server has several:
+   - `internal`: inside the chassis (a mid-plane, an M.2 carrier; a drive in
+     no enclosure is internal too);
+   - `front`: the outward-facing hot-plug bays;
+   - `rear`: the back bays some models have;
+   - `external`: a JBOD or disk shelf on its own IOMs (the NetApp).
+
+   The system half may go on the machine's own shelves (internal, front,
+   rear) with nothing named. An external shelf's drives are taken only when
+   `rd.stormblock.slab=` names them, and the install's search for this
+   node's data slab skips them.
+
+   How position is told:
+   - an enclosure not behind a SAS expander is the machine's own (the Dell
+     R230's front bays on its mpt3sas HBA);
+   - behind an expander it is external, unless its SES identity is a known
+     server backplane (Dell's `DP BP…`: the large front shelf of a Dell with
+     many bays). When in doubt, external;
+   - an own shelf is `rear` or `internal` when its component or enclosure
+     name says so, else `front`;
+   - a drive behind an expander in no enclosure is external.
+
+   `rd.stormblock.allow-external=1` takes an external shelf's drive as the
+   machine's own. #344's first fix ("a shelf is only behind an expander") was
+   the wrong model and is replaced by this.
 
 **What the boot did with the machine's own disk (#344)** is written to
 `/run/stormblock/local-disk.json` (which survives `switch_root`) and reported
-in the engine's health as `slabs.local_disk`. It records:
+in the engine's health as `slabs.local_disk`, with the drive's `shelf` (`id`,
+`position`, `bay`, `identity`, #347) and the boot's storage inventory
+(`controllers`, `drives`, #345). It records:
 - `taken` and the drive;
 - `refused`: a drive carrying stormblock slabs that this boot left alone,
   with why (behind an expander, not the named drive, the release on it

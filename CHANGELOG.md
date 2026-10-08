@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #347 (P0, owner's correction to #344): every SES enclosure is a shelf, and the system disk is chosen by the shelf's position.
+  - **The model:** shelves are internal, front, rear or external, each with its own id (the enclosure's logical id), position and bays. Shelf membership is never a reason to refuse a drive.
+  - **The rule:** the system half goes on the machine's own shelves (internal, front, rear) unnamed. An external shelf's drives are taken only when `rd.stormblock.slab=` names them.
+  - **Telling them apart:** behind an expander means external, unless the SES identity is a known server backplane (Dell `DP BP…`); when in doubt, external.
+  - **Reported:** `local_disk.shelf` names the shelf and bay, and the storage inventory gives every drive's shelf.
+  - **Replaces** #344's first fix ("a shelf is only behind an expander").
 - **fix:** #346 (P0): a blank disk was refused (`the data slab will not open: bad slab magic`) and the node ran diskless.
   - **Cause:** `take_local_disk_for` and the identity guard went by partition types. A disk that kept a node table with nothing in it (zeroed but for its table, or a lay cut short before its data slab) counted as "this node's", and its data slab "would not open".
   - **Now:** the data partition's slab magic decides. With no magic there is nothing to keep, and both halves are laid fresh without `force`. A slab with its magic present that does not open is still refused and named, and so is a data partition that cannot be read.

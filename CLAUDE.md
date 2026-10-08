@@ -174,6 +174,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Shelves by position (2026-10-08, #347, P0, owner corrects #344) — IN PROGRESS
+
+Every SES enclosure is a shelf: internal, front, rear, external, each its
+own id/position/bays; never refuse a drive for being on one. System half on
+the machine's own shelves unnamed; external only when named.
+- [x] `# --- BEGIN shelves` (`shelf_of`, `shelf_json`): enclosure id,
+      SES identity, bay; behind an expander = external unless a known server
+      backplane (DP BP…), else front/rear/internal by name; no enclosure =
+      internal (behind an expander = external). Survey decides by position;
+      a named drive is taken wherever it is. Inventory and `local_disk.shelf`
+      carry it
+- [ ] tests: front+rear+internal, a large front shelf (DP BP14G+EXP, 24
+      drives), an external JBOD (NETAPP), the Dell's single front bay; the
+      inventory's shelves; unit test; full nextest; golden with #346
+
 ### A blank disk refused: 'data slab will not open: bad slab magic' (2026-10-08, #346, P0) — DONE here, metal pending
 
 11.97 on the Dell, a zeroed disk: `local_disk: failed … the data slab will

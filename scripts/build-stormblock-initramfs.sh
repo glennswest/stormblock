@@ -1255,6 +1255,80 @@ elif [ "$nd_waited" -gt 0 ]; then
 fi
 # --- END netdev wait
 
+# --- BEGIN shelves (covered by tests/initramfs-boot-hook.sh, tests/initramfs-storage-inventory.sh)
+# Every SES enclosure is a shelf (#347, owner): that is where a bay, a slot,
+# the locate and fault LEDs and presence come from. A server has several,
+# each its own shelf with its own id (the enclosure's logical id), position
+# and bays:
+#   internal  inside the chassis (a mid-plane, an M.2 carrier; a drive in no
+#             enclosure at all is internal too)
+#   front     the outward-facing hot-plug bays
+#   rear      the back bays some models have
+#   external  a JBOD or disk shelf on its own IOMs (the NetApp)
+# Shelf membership is never a reason to refuse a drive. Position is: the
+# system half may go on the machine's own shelves (internal, front, rear)
+# with nothing named; an external shelf's drives only when named. How
+# position is told:
+#   - an enclosure not behind a SAS expander is the machine's own (the Dell
+#     R230's front bays on its mpt3sas HBA);
+#   - behind an expander it is external, unless its SES identity is a known
+#     server backplane (Dell's `DP` `BP..` backplanes: the large front shelf
+#     of a Dell with many bays). When in doubt, external (owner);
+#   - an own shelf is rear or internal when its component or enclosure says
+#     so, else front;
+#   - a drive behind an expander with no enclosure at all is external.
+shelf_clean() { tr -d '"\\' | tr '\000-\037' ' ' | sed 's/^ *//; s/ *$//'; }
+shelf_of() { # /sys/block/X -> "id|position|bay|identity"
+    _sb="$1"
+    _sbpath=$(readlink -f "$_sb" 2>/dev/null)
+    _comp=""
+    for _se in "$_sb"/device/enclosure_device:*; do
+        [ -e "$_se" ] && _comp="$_se"
+    done
+    if [ -z "$_comp" ]; then
+        case "$_sbpath" in
+        */expander-*) echo "-|external||" ;;
+        *) echo "-|internal||" ;;
+        esac
+        return 0
+    fi
+    _bay="${_comp##*enclosure_device:}"
+    _cdir=$(readlink -f "$_comp" 2>/dev/null)
+    _edir=$(dirname "$_cdir")
+    _eid=$(cat "$_edir/id" 2>/dev/null | shelf_clean)
+    [ -n "$_eid" ] || _eid="${_edir##*/}"
+    _ident="$(cat "$_edir/device/vendor" 2>/dev/null | shelf_clean) $(cat "$_edir/device/model" 2>/dev/null | shelf_clean)"
+    _ident=$(printf '%s' "$_ident" | shelf_clean)
+    _pos=""
+    case "$_sbpath" in
+    */expander-*)
+        case "$_ident" in
+        DP\ BP*|DELL\ BP*) ;;
+        *) _pos=external ;;
+        esac
+        ;;
+    esac
+    if [ -z "$_pos" ]; then
+        case "$_bay $_ident" in
+        *[Rr]ear*|*REAR*) _pos=rear ;;
+        *[Ii]nternal*|*INTERNAL*|*M.2*|*BOSS*) _pos=internal ;;
+        *) _pos=front ;;
+        esac
+    fi
+    echo "$_eid|$_pos|$_bay|$_ident"
+}
+shelf_json() { # /sys/block/X -> {"id": …, "position": …, "bay": …, "identity": …}
+    _sj=$(shelf_of "$1")
+    _sid=${_sj%%|*}; _sj=${_sj#*|}
+    _spos=${_sj%%|*}; _sj=${_sj#*|}
+    _sbay=${_sj%%|*}; _sident=${_sj#*|}
+    printf '{"id": %s, "position": "%s", "bay": %s, "identity": %s}' \
+        "$( [ "$_sid" = - ] && printf null || printf '"%s"' "$_sid")" "$_spos" \
+        "$( [ -n "$_sbay" ] && printf '"%s"' "$_sbay" || printf null)" \
+        "$( [ -n "$_sident" ] && printf '"%s"' "$_sident" || printf null)"
+}
+# --- END shelves
+
 # --- BEGIN storage inventory (covered by tests/initramfs-storage-inventory.sh)
 # What storage this machine has, said before anything decides about a disk
 # (#345, owner: "a check during the boot, that we see if controller and drive
@@ -1362,12 +1436,11 @@ for _n in $(inv_disks); do
     *"/end_device-"*|*"/expander-"*|*"/port-"*) _tr=sas ;;
     *) _tr=scsi ;;
     esac
-    _bay=""
-    for _e in "$_b"/device/enclosure_device:*; do
-        [ -e "$_e" ] && _bay="${_e##*enclosure_device:}"
-    done
-    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"size_bytes\": $_bytes, \"transport\": \"$_tr\", \"controller\": $(_ij "$_ctl"), \"bay\": $(_ij "$_bay")}"
-    echo "    $_n: ${_model:-?} serial ${_serial:-?}, $((_bytes / 1000000000)) GB, $_tr${_ctl:+ on $_ctl}${_bay:+, bay $_bay}"
+    # Controllers -> shelves -> bays -> drives (#347).
+    _sh=$(shelf_of "$_b")
+    _shid=${_sh%%|*}; _sh=${_sh#*|}; _shpos=${_sh%%|*}; _sh=${_sh#*|}; _bay=${_sh%%|*}
+    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"size_bytes\": $_bytes, \"transport\": \"$_tr\", \"controller\": $(_ij "$_ctl"), \"shelf\": $(shelf_json "$_b"), \"bay\": $(_ij "$_bay")}"
+    echo "    $_n: ${_model:-?} serial ${_serial:-?}, $((_bytes / 1000000000)) GB, $_tr${_ctl:+ on $_ctl}, $_shpos shelf${_shid:+ $_shid}${_bay:+, bay $_bay}"
 done
 [ -n "$INV_CONTROLLERS" ] || echo "  no storage controller on PCI"
 [ -n "$INV_DRIVES" ] || echo "  no drive"
@@ -3155,13 +3228,11 @@ if [ "$BOOT_MODE" = "local" ]; then
     #
     #   1. The drive rd.stormblock.slab= names, when it is on this machine,
     #      is the only one. Every other drive is left alone and said so.
-    #   2. A drive behind a SAS expander - a disk shelf - is never taken by
-    #      the scan (rd.stormblock.allow-external=1 for a server whose own
-    #      bays sit behind one). Not every SES enclosure: a server's own
-    #      hot-plug backplane is one too (the Dell R230's bays on its
-    #      mpt3sas HBA, #344), and treating it as a shelf left the Dell
-    #      running diskless from forge with its slabs on sda. A shelf's
-    #      drives are always behind its IOMs' expanders.
+    #   2. A drive on an external shelf is never taken by the scan for the
+    #      system half (rd.stormblock.allow-external=1 for one that is this
+    #      machine's own). By the shelf's position, never by being on a shelf
+    #      (#347, owner): the machine's own shelves (internal, front, rear)
+    #      are taken with nothing named; see the shelves block.
     #   3. "Nobody's" means blank: its first and last MiB are zeros. Anything
     #      else - a partition table, a stormraid member, md, LVM, ZFS, a
     #      filesystem - is somebody's, and left.
@@ -3177,10 +3248,11 @@ if [ "$BOOT_MODE" = "local" ]; then
         return 0
     }
     NAMED_DISK=$(named_disk)
-    drive_external() { # /sys/block/X -> 0 when the drive is in a shelf
+    drive_external() { # /sys/block/X -> 0 when the drive is on an external shelf (#347)
         [ "${ALLOW_EXTERNAL:-}" = 1 ] && return 1
-        case "$(readlink -f "$1" 2>/dev/null)" in */expander-*) return 0 ;; esac
-        return 1
+        _de=$(shelf_of "$1")
+        _de=${_de#*|}
+        [ "${_de%%|*}" = external ]
     }
     # What this boot did with the machine's own disk (#344), for the engine's
     # health once the node runs: `taken` (the disk chosen), `refused` (a
@@ -3206,9 +3278,11 @@ if [ "$BOOT_MODE" = "local" ]; then
     ld_write() { # state drive reason
         mkdir -p "$(dirname "$LD_REPORT")" 2>/dev/null
         _r=$(printf '%s' "$3" | tr '"\\\n' "'' ")
-        printf '{"state": "%s", "drive": %s, "reason": %s, "from": "initramfs", "controllers": %s, "drives": %s}\n' "$1" \
+        _ldsh=null
+        [ -n "$2" ] && [ -e "$SURVEY_SYS/${2##*/}" ] && _ldsh=$(shelf_json "$SURVEY_SYS/${2##*/}")
+        printf '{"state": "%s", "drive": %s, "reason": %s, "shelf": %s, "from": "initramfs", "controllers": %s, "drives": %s}\n' "$1" \
             "$( [ -n "$2" ] && printf '"%s"' "$2" || printf null)" \
-            "$( [ -n "$_r" ] && printf '"%s"' "$_r" || printf null)" \
+            "$( [ -n "$_r" ] && printf '"%s"' "$_r" || printf null)" "$_ldsh" \
             "${INV_CONTROLLERS:-[]}" "${INV_DRIVES:-[]}" > "$LD_REPORT" 2>/dev/null || true
     }
     drive_signature() { # dev /sys/block/X -> what it carries; nothing when blank
@@ -3237,10 +3311,16 @@ if [ "$BOOT_MODE" = "local" ]; then
             ld_refused "$2" "not the drive rd.stormblock.slab= names (/dev/$NAMED_DISK)"
             return 1
         fi
+        # The drive the command line names is taken wherever it is (#347):
+        # an external shelf's drive is the system disk only when named.
+        if [ -n "$NAMED_DISK" ] && [ "${1##*/}" = "$NAMED_DISK" ]; then
+            return 0
+        fi
         if drive_external "$1"; then
-            echo "  $2 is behind a SAS expander (a disk shelf) - leaving it (#273;"
-            echo "  rd.stormblock.allow-external=1 if this machine's own bays are)"
-            ld_refused "$2" "behind a SAS expander (a disk shelf, #273); rd.stormblock.allow-external=1 if it is this machine's own bay"
+            _dsh=$(shelf_of "$1")
+            echo "  $2 is on an external shelf (${_dsh%%|*}, $(echo "$_dsh" | cut -d'|' -f4)) - not taken for the"
+            echo "  system half unless named (#347; rd.stormblock.allow-external=1 if it is this machine's own)"
+            ld_refused "$2" "on an external shelf ($(echo "$_dsh" | cut -d'|' -f1,4 | tr '|' ' ')), taken only when named (#347); rd.stormblock.allow-external=1 if it is this machine's own"
             return 1
         fi
         return 0

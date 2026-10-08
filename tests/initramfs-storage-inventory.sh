@@ -21,7 +21,8 @@ GEN="$HERE/../scripts/build-stormblock-initramfs.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-sed -n '/# --- BEGIN storage inventory/,/# --- END storage inventory/p' "$GEN" > "$WORK/inv.sh"
+sed -n '/# --- BEGIN shelves/,/# --- END shelves/p' "$GEN" > "$WORK/inv.sh"
+sed -n '/# --- BEGIN storage inventory/,/# --- END storage inventory/p' "$GEN" >> "$WORK/inv.sh"
 [ -s "$WORK/inv.sh" ] || { echo "FAIL: could not extract the storage inventory block"; exit 1; }
 
 fail=0
@@ -51,7 +52,12 @@ make_tree() {
     echo 0x010700 > "$T/pci/0000:01:00.0/class"; echo 0x1000 > "$T/pci/0000:01:00.0/vendor"; echo 0x0097 > "$T/pci/0000:01:00.0/device"
     ln -s "$T/drivers/mpt3sas" "$T/pci/0000:01:00.0/driver"
     sd="$dev/0000:00:01.0/0000:01:00.0/host0/port-0:0/end_device-0:0/target0:0:0/0:0:0:0"
-    mkdir -p "$sd/block/sda" "$sd/enclosure_device:Slot 04"
+    mkdir -p "$sd/block/sda"
+    # Its shelf (#347): the R230's front backplane, an SES enclosure.
+    ses="$dev/0000:00:01.0/0000:01:00.0/host0/port-0:1/end_device-0:1/target0:0:1/0:0:1:0/enclosure/0:0:1:0"
+    mkdir -p "$ses/Slot 04" "$ses/device"
+    echo 500056b3a1b2c3d4 > "$ses/id"; echo DP > "$ses/device/vendor"; echo "BP13G+" > "$ses/device/model"
+    ln -s "$ses/Slot 04" "$sd/enclosure_device:Slot 04"
     echo "WDC WD20EFAX-68F" > "$sd/model"
     printf '\000\200\000\020WD-WX11D28JFS6T' > "$sd/vpd_pg80"
     ln -s "$sd" "$sd/block/sda/device"
@@ -101,8 +107,8 @@ contains "a bound NVMe controller with no drive is waited for" "waiting up to 3s
 contains "  and its drive came" "drives appeared after 1s" "$out"
 contains "the HBA, its driver, its drive" "0000:01:00.0 [1000:0097] class 0x010700: mpt3sas, 1 drive(s)" "$out"
 contains "the drive: model, serial from VPD 0x80, size, transport, controller, bay" \
-    "sda: WDC WD20EFAX-68F serial WD-WX11D28JFS6T, 2000 GB, sas on 0000:01:00.0, bay Slot 04" "$out"
-contains "the NVMe namespace, serial from sysfs" "nvme0n1: Samsung SSD 970 serial S4EWNX0N, 1000 GB, nvme on 0000:02:00.0" "$out"
+    "sda: WDC WD20EFAX-68F serial WD-WX11D28JFS6T, 2000 GB, sas on 0000:01:00.0, front shelf 500056b3a1b2c3d4, bay Slot 04" "$out"
+contains "the NVMe namespace, serial from sysfs, in no enclosure: internal" "nvme0n1: Samsung SSD 970 serial S4EWNX0N, 1000 GB, nvme on 0000:02:00.0, internal shelf -" "$out"
 contains "an unbound controller is a WARNING naming its PCI id" \
     "WARNING: storage controller 0000:00:1f.2 [8086:a102] (class 0x010601) has no driver bound" "$out"
 case "$out" in *0000:03:00.0*|*loop0*) check "no network card, no loop device" no yes ;; *) check "no network card, no loop device" yes yes ;; esac
@@ -114,10 +120,11 @@ d = json.load(open(sys.argv[1]))
 c = {x["pci"]: x for x in d["controllers"]}
 dr = {x["name"]: x for x in d["drives"]}
 print(d["state"], len(c), c["0000:01:00.0"]["driver"], c["0000:00:1f.2"]["driver"], ",".join(c["0000:01:00.0"]["drives"]),
-      dr["sda"]["serial"], dr["sda"]["bay"], dr["sda"]["size_bytes"], dr["nvme0n1"]["transport"])
+      dr["sda"]["serial"], dr["sda"]["bay"], dr["sda"]["size_bytes"], dr["nvme0n1"]["transport"],
+      dr["sda"]["shelf"]["position"], dr["sda"]["shelf"]["id"], dr["sda"]["shelf"]["identity"], dr["nvme0n1"]["shelf"]["position"])
 ' "$WORK/report.json" 2>&1)
     check "local-disk.json carries the inventory, as JSON" \
-        "unknown 3 mpt3sas None sda WD-WX11D28JFS6T Slot 04 2000398934016 nvme" "$r"
+        "unknown 3 mpt3sas None sda WD-WX11D28JFS6T Slot 04 2000398934016 nvme front 500056b3a1b2c3d4 DP BP13G+ internal" "$r"
 else
     echo "  skip  local-disk.json as JSON (no python3)"
 fi

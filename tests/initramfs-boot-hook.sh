@@ -27,7 +27,9 @@ sed -n '/# --- BEGIN local-slab probe/,/# --- END local-slab probe/p' "$GEN" > "
 [ -s "$WORK/probe.sh" ] || { echo "FAIL: could not extract the local-slab probe"; exit 1; }
 sed -n '/# --- BEGIN hook takeable/,/# --- END hook takeable/p' "$GEN" > "$WORK/takeable.sh"
 [ -s "$WORK/takeable.sh" ] || { echo "FAIL: could not extract the takeable block"; exit 1; }
-sed -n '/# --- BEGIN assimilate survey/,/# --- END assimilate survey/p' "$GEN" > "$WORK/survey.sh"
+# The shelves (#347) first: the survey decides by a shelf's position.
+sed -n '/# --- BEGIN shelves/,/# --- END shelves/p' "$GEN" > "$WORK/survey.sh"
+sed -n '/# --- BEGIN assimilate survey/,/# --- END assimilate survey/p' "$GEN" >> "$WORK/survey.sh"
 [ -s "$WORK/survey.sh" ] || { echo "FAIL: could not extract the assimilate survey"; exit 1; }
 sed -n '/# --- BEGIN boothost claim/,/# --- END boothost claim/p' "$GEN" > "$WORK/claim.sh"
 [ -s "$WORK/claim.sh" ] || { echo "FAIL: could not extract the boothost claim"; exit 1; }
@@ -622,6 +624,12 @@ echo "drives this install may take (#273):"
 #   bay         a blank drive in the server's own SES backplane, no expander
 #               (the Dell R230's bays on its mpt3sas HBA, #344)
 #   baylayout   this node's own layout, in such a bay
+# and, with real enclosures (an id, the SES device's vendor and model, #347):
+#   front       the Dell's front bay: DP BP13G+, no expander
+#   rear        a rear bay: DP BP13G+ Rear, component "Rear Slot 0"
+#   internal    in no enclosure and behind no expander (an M.2, onboard SATA)
+#   bigfront    a large front shelf behind an expander: DP BP14G+EXP
+#   jbod        an external shelf: NETAPP DS224-12, behind its IOM's expander
 #   stormraid   an internal drive with a stormraid superblock
 #   foreign     an internal drive with a partition table (bytes in its first MiB)
 #   tail        an internal drive with data in its last MiB only (md 1.0, ZFS)
@@ -637,8 +645,21 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
         for spec in "$@"; do
             n="${spec%%|*}"; kind="${spec#*|}"
             case "$kind" in
-            expander|shelf|datashelf) mkdir -p "$real/port-0:0/expander-0:0/$n"; ln -s "$real/port-0:0/expander-0:0/$n" "$sys/$n" ;;
+            expander|shelf|datashelf|bigfront|jbod) mkdir -p "$real/port-0:0/expander-0:0/$n"; ln -s "$real/port-0:0/expander-0:0/$n" "$sys/$n" ;;
             *) mkdir -p "$sys/$n" ;;
+            esac
+            enc() { # id vendor model component: the drive's enclosure, as sysfs has it
+                _ed="$real/enclosure/$1"
+                mkdir -p "$_ed/device" "$_ed/$4"
+                echo "$1" > "$_ed/id"; echo "$2" > "$_ed/device/vendor"; echo "$3" > "$_ed/device/model"
+                mkdir -p "$sys/$n/device"
+                ln -s "$_ed/$4" "$sys/$n/device/enclosure_device:$4"
+            }
+            case "$kind" in
+            front) enc 500056b3a1b2c3d4 DP "BP13G+" "Slot 04" ;;
+            rear) enc 500056b3a1b2c3e0 DP "BP13G+ Rear" "Rear Slot 0" ;;
+            bigfront) enc 500056b3a1b2c4ff DP "BP14G+EXP" "Slot $n" ;;
+            jbod) enc 500a098003c1d2e0 NETAPP "DS224-12" "Slot $n" ;;
             esac
             echo 0 > "$sys/$n/removable"; echo 8192 > "$sys/$n/size"
             dd if=/dev/zero of="$dev/$n" bs=1048576 count=4 2>/dev/null
@@ -725,6 +746,39 @@ case "$(ld)" in *'"state": "taken"'*'"drive": "/dev/sda"'*) check "  and the ver
 *) check "  and the verdict is taken, sda: $(ld)" yes no ;; esac
 NOINTENT=""
 check "a blank drive in the server's own SES bay is taken" "/dev/sdb" "$(survey_m any sdb\|bay)"
+
+echo "shelves, by position (#347):"
+shpos() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d.get("shelf") or {}; print(d["state"], s.get("position"), s.get("bay"), s.get("identity"))' "$WORK/local-disk.json" 2>&1; }
+if command -v python3 >/dev/null 2>&1; then HAVE_PY=1; else HAVE_PY=""; fi
+# A server with front, rear and internal shelves: each is its own, each the
+# machine's own, and the system half may go on any of them unnamed.
+check "front + rear + internal: the internal drive, first in order, is taken" "/dev/sda" \
+    "$(survey_m any sda\|internal sdb\|front sdc\|rear)"
+[ -n "$HAVE_PY" ] && check "  the verdict names its shelf: internal" "taken internal None None" "$(shpos)"
+check "a front shelf's drive is taken unnamed" "/dev/sdb" "$(survey_m any sdb\|front)"
+[ -n "$HAVE_PY" ] && check "  the verdict: front, bay Slot 04, DP BP13G+" "taken front Slot 04 DP BP13G+" "$(shpos)"
+check "a rear shelf's drive is taken unnamed" "/dev/sdc" "$(survey_m any sdc\|rear)"
+[ -n "$HAVE_PY" ] && check "  the verdict: rear" "taken rear Rear Slot 0 DP BP13G+ Rear" "$(shpos)"
+# The owner's other Dell: a large front shelf behind an expander.
+big=""
+for n in b c d e f g h i j k l m n o p q r s t u v w x y; do big="$big sd$n|bigfront"; done
+check "a large front shelf behind an expander (DP BP14G+EXP): its first drive is taken" "/dev/sdb" \
+    "$(survey_m any $big)"
+[ -n "$HAVE_PY" ] && check "  the verdict: front, bay Slot sdb, DP BP14G+EXP" "taken front Slot sdb DP BP14G+EXP" "$(shpos)"
+# An external JBOD: never taken for the system half unless named.
+check "an external JBOD's blank drive is not taken unnamed" "" "$(survey_m any sdb\|jbod)"
+grep -q "is on an external shelf (500a098003c1d2e0, NETAPP DS224-12)" "$WORK/msurvey.log" \
+    && check "  and the console names the shelf" yes yes || check "  and the console names the shelf" yes no
+check "  but taken when named" "/dev/sdb" "$(NAMED=/dev/sdb survey_m any sdb\|jbod)"
+check "an external JBOD beside a front bay: the front bay is taken" "/dev/sdc" \
+    "$(survey_m any sdb\|jbod sdc\|front)"
+# The Dell's single front bay, a blank disk (its new SAS drives), no intent,
+# nothing named: laid fresh, and the verdict names the front shelf.
+NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
+check "the Dell's single front bay, a blank disk, no intent: laid fresh" "/dev/sda force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|front)"
+[ -n "$HAVE_PY" ] && check "  the verdict: taken, front, Slot 04" "taken front Slot 04 DP BP13G+" "$(shpos)"
+NOINTENT=""
 # A drive with slabs left alone says which and why, and the console says it.
 check "a data slab in a shelf is left" "" "$(survey_m force sdb\|datashelf)"
 case "$(ld)" in *'"state": "refused"'*'"drive": "/dev/sdb"'*'SAS expander'*) check "  the verdict names the drive and the shelf" yes yes ;;

@@ -61,6 +61,11 @@ pub struct LocalDisk {
     pub drive: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The drive's shelf (#347): `id` (the enclosure's logical id, null for
+    /// none), `position` (`internal`, `front`, `rear`, `external`), `bay`,
+    /// `identity` (the SES vendor and model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shelf: Option<serde_json::Value>,
     /// `initramfs` (the survey) or `boot-local`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -94,10 +99,13 @@ pub fn read_local_disk() -> Option<LocalDisk> {
 /// says what it did with the disk without losing what the initramfs found.
 pub fn update_local_disk(state: &str, drive: Option<&str>, reason: Option<String>, from: &str) {
     let old = read_local_disk();
+    // The shelf the survey named, when it is the same drive (#347).
+    let shelf = old.as_ref().filter(|o| o.drive.as_deref() == drive).and_then(|o| o.shelf.clone());
     write_local_disk(&LocalDisk {
         state: state.to_string(),
         drive: drive.map(str::to_string),
         reason,
+        shelf,
         from: Some(from.to_string()),
         controllers: old.as_ref().map(|o| o.controllers.clone()).unwrap_or_default(),
         drives: old.map(|o| o.drives).unwrap_or_default(),
@@ -351,7 +359,8 @@ mod tests {
         // and carried in the report.
         std::fs::write(
             &path,
-            r#"{"state": "unknown", "drive": null, "reason": null, "from": "initramfs",
+            r#"{"state": "taken", "drive": "/dev/sda", "reason": null, "from": "initramfs",
+               "shelf": {"id": "500056b3a1b2c3d4", "position": "front", "bay": "Slot 04", "identity": "DP BP13G+"},
                "controllers": [{"pci": "0000:01:00.0", "id": "1000:0097", "class": "0x010700", "driver": "mpt3sas", "drives": ["sda"]},
                                {"pci": "0000:00:1f.2", "id": "8086:a102", "class": "0x010601", "driver": null, "drives": []}],
                "drives": [{"name": "sda", "model": "WDC WD20EFAX-68F", "serial": "WD-WX11D28JFS6T", "size_bytes": 2000398934016,
@@ -367,6 +376,7 @@ mod tests {
         assert_eq!(j["local_disk"]["controllers"][0]["driver"], "mpt3sas");
         assert!(j["local_disk"]["controllers"][1]["driver"].is_null(), "an unbound controller is reported");
         assert_eq!(j["local_disk"]["drives"][0]["serial"], "WD-WX11D28JFS6T");
+        assert_eq!(j["local_disk"]["shelf"]["position"], "front", "the survey's shelf is kept for the same drive (#347)");
         std::env::remove_var("STORMBLOCK_LOCAL_DISK_REPORT");
     }
 }
