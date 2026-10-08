@@ -73,6 +73,8 @@ pub struct ServeConfig {
     /// A ceiling per pass, so a bad classification cannot empty an array in
     /// one sweep.
     pub reap_max_per_pass: usize,
+    /// An NVMe export that names no `host_nqn` admits any host (#212).
+    pub allow_any_host: bool,
 }
 
 impl Default for ServeConfig {
@@ -96,6 +98,7 @@ impl Default for ServeConfig {
             reap_apply: true,
             reap_min_age_secs: 900,
             reap_max_per_pass: 64,
+            allow_any_host: true,
         }
     }
 }

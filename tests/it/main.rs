@@ -38,6 +38,7 @@ mod integration_power_cut;
 mod integration_raid_degraded;
 mod integration_raid_sets;
 mod integration_releases;
+mod integration_serve_host_bound;
 mod integration_serve_in_use;
 mod integration_serve_own_exports;
 mod integration_serve_mounted;

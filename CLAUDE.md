@@ -171,6 +171,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### /serve/v1 exports bound to one host (2026-10-08, #212) — IN PROGRESS
+
+Each serve export is its own subsystem on its own portal, `HostAccess::Any`.
+The one caller left is stormblock-registry (golden builds, media clones); it
+sends no host NQN, so closing by default would break it: the owner's call.
+- [ ] `host_nqn` on `POST /serve/v1/exports` and on a `/serve/v1/volumes`
+      create with `export`; kept on the wiring row and the export entry; the
+      reconciler sets the subsystem's access to it (discovery per host)
+- [ ] `[serve] allow_any_host` (default true = today): false refuses an
+      export with no host and closes rows from before host binding; a start
+      line says which
+- [ ] tests; README, nvme-access.md, CHANGELOG; ask the owner about the
+      default; stormblock-registry issue (send host_nqn)
+
 ### The listing generation moves on attach, detach and slab state (2026-10-08, #218) — DONE
 
 `generation` moved only on a metadata persist; attach/detach, failed or

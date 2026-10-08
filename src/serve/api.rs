@@ -675,6 +675,11 @@ struct CreateExportRequest {
     /// for per-instance clones so they are actually garbage-collected.
     #[serde(default)]
     ephemeral: bool,
+    /// The host this export is for (#212): its subsystem admits that NQN and
+    /// no other, and discovery on its portal shows it to that host only.
+    /// NVMe only.
+    #[serde(default)]
+    host_nqn: Option<String>,
 }
 
 async fn create_export(
@@ -682,8 +687,29 @@ async fn create_export(
     Json(req): Json<CreateExportRequest>,
 ) -> MkResult {
     let proto = parse_protocol(req.protocol.as_deref(), ctx.cfg.iscsi_enabled)?;
-    let attach = export_volume(&ctx, req.volume_id, proto, req.ephemeral).await?;
+    let host = check_host(&ctx, proto, req.host_nqn.as_deref())?;
+    let attach = export_volume(&ctx, req.volume_id, proto, req.ephemeral, host).await?;
     Ok((StatusCode::CREATED, Json(attach)).into_response())
+}
+
+/// The host an export is bound to (#212), checked before anything is made: an
+/// NQN for an NVMe export; none at all when `[serve] allow_any_host = false`
+/// is refused; iSCSI takes none.
+fn check_host(ctx: &ServeContext, proto: WireProto, host: Option<&str>) -> Result<Option<String>, MkError> {
+    let host = host.map(str::trim).filter(|h| !h.is_empty());
+    match (proto, host) {
+        (WireProto::Iscsi, Some(_)) => Err(MkError::bad("host_nqn is for an nvme-tcp export")),
+        (WireProto::Iscsi, None) => Ok(None),
+        (WireProto::Nvmeof, Some(h)) if !h.starts_with("nqn.") || h.len() > 223 => {
+            Err(MkError::bad(format!("host_nqn {h:?} is not an NQN")))
+        }
+        (WireProto::Nvmeof, Some(h)) => Ok(Some(h.to_string())),
+        (WireProto::Nvmeof, None) if !ctx.cfg.allow_any_host => Err(MkError::bad(
+            "this node admits no host to an export that names none ([serve] allow_any_host = false): \
+             give host_nqn",
+        )),
+        (WireProto::Nvmeof, None) => Ok(None),
+    }
 }
 
 /// Declare an export and pin its wiring in one step, so the LUN id and portal
@@ -693,6 +719,7 @@ async fn export_volume(
     volume_id: Uuid,
     proto: WireProto,
     ephemeral: bool,
+    host_nqn: Option<String>,
 ) -> Result<Value, MkError> {
     {
         let vm = ctx.state.volume_manager.lock().await;
@@ -722,6 +749,13 @@ async fn export_volume(
                 ephemeral,
             )
             .map_err(|e| MkError::conflict(e.to_string()))?;
+        let row = match w.get_mut(&export_id) {
+            Some(r) => {
+                r.host_nqn = host_nqn.clone();
+                r.clone()
+            }
+            None => row,
+        };
         let mut ex = ctx.state.exports.write().await;
         ex.push(ExportEntry {
             id: export_id,
@@ -743,7 +777,7 @@ async fn export_volume(
                 WireProto::Iscsi => None,
                 WireProto::Nvmeof => Some(1),
             },
-            host_nqn: None,
+            host_nqn: host_nqn.clone(),
             subsystem: None,
             serve: true,
         });
@@ -872,6 +906,9 @@ struct CreateVolumeRequest {
     /// Delete the volume when its export is withdrawn.
     #[serde(default)]
     ephemeral: bool,
+    /// The host the export is for (#212). With `export: true` only.
+    #[serde(default)]
+    host_nqn: Option<String>,
 }
 
 async fn create_volume(
@@ -881,6 +918,7 @@ async fn create_volume(
     // Validate before creating anything: a bad or unserved protocol must 400
     // without leaving an orphan volume behind.
     let proto = parse_protocol(req.protocol.as_deref(), ctx.cfg.iscsi_enabled)?;
+    let host = if req.export { check_host(&ctx, proto, req.host_nqn.as_deref())? } else { None };
     let volume_id = match &req.from_template {
         // The engine owns cloning as of stormblock v8.1.0. Going through it
         // rather than snapshotting the sealed volume here is what gets every
@@ -964,7 +1002,7 @@ async fn create_volume(
         "from_template": req.from_template,
     });
     if req.export {
-        let attach = match export_volume(&ctx, volume_id, proto, req.ephemeral).await {
+        let attach = match export_volume(&ctx, volume_id, proto, req.ephemeral, host).await {
             Ok(a) => a,
             Err(e) => {
                 // The volume was made for this export, and the caller is told

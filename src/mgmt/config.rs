@@ -131,6 +131,11 @@ pub struct ServeSection {
     pub reap_apply: Option<bool>,
     pub reap_min_age_secs: Option<u64>,
     pub reap_max_per_pass: Option<usize>,
+    /// Whether an NVMe export that names no `host_nqn` admits any host that
+    /// reaches its portal (#212). `true` (unset) keeps that; `false` refuses
+    /// such an export, and wires a row from before host binding admitting no
+    /// host.
+    pub allow_any_host: Option<bool>,
 }
 
 impl Default for ServeSection {
@@ -153,6 +158,7 @@ impl Default for ServeSection {
             reap_apply: None,
             reap_min_age_secs: None,
             reap_max_per_pass: None,
+            allow_any_host: None,
         }
     }
 }
@@ -252,6 +258,7 @@ impl StormBlockConfig {
             reap_apply: self.serve.reap_apply.unwrap_or(d.reap_apply),
             reap_min_age_secs: self.serve.reap_min_age_secs.unwrap_or(d.reap_min_age_secs),
             reap_max_per_pass: self.serve.reap_max_per_pass.unwrap_or(d.reap_max_per_pass),
+            allow_any_host: self.serve.allow_any_host.unwrap_or(d.allow_any_host),
         })
     }
 }

@@ -102,6 +102,19 @@ impl ServeContext {
         wiring: WiringTable,
     ) -> Self {
         let exports_path = PathBuf::from(&cfg.data_dir).join("exports.json");
+        // Said once at start (#212), as the shared subsystem's policy is.
+        let unbound = wiring.exports.iter().filter(|w| w.nqn.is_some() && w.host_nqn.is_none()).count();
+        if cfg.allow_any_host {
+            tracing::warn!(
+                "/serve/v1: an NVMe export that names no host_nqn admits ANY host that reaches its \
+                 portal ({unbound} such export(s) now; [serve] allow_any_host = false closes them, #212)"
+            );
+        } else {
+            tracing::info!(
+                "/serve/v1: an NVMe export admits only the host_nqn it names ({unbound} export(s) \
+                 name none and admit no host)"
+            );
+        }
         ServeContext {
             cfg,
             state,
@@ -261,6 +274,9 @@ impl ServeContext {
             "ephemeral": w.ephemeral,
             "attach": self.attach_params(w),
         });
+        if let (Some(h), Some(obj)) = (&w.host_nqn, v.as_object_mut()) {
+            obj.insert("host_nqn".into(), serde_json::json!(h));
+        }
         // Say plainly why a row is sitting there, rather than leaving a
         // consumer to poll a `pending` that will never advance.
         if self.is_blocked(w) {

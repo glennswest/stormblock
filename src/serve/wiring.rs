@@ -124,6 +124,11 @@ pub struct Wiring {
     /// so dropped clones are actually garbage-collected (issue #7).
     #[serde(default)]
     pub ephemeral: bool,
+    /// The one host this export's subsystem admits (#212), when the export
+    /// named one. `None`: any host, unless `[serve] allow_any_host = false`,
+    /// which admits none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_nqn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,6 +302,7 @@ impl WiringTable {
             },
             state: WireState::Pending,
             ephemeral,
+            host_nqn: None,
         };
         self.exports.push(w.clone());
         Ok(w)

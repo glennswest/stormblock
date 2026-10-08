@@ -662,6 +662,14 @@ async fn start_subsystem(
         advertised_addr: format!("{}:{}", ctx.cfg.advertise_addr, row.portal_port).parse().ok(),
         ..Default::default()
     }));
+    // Who may connect (#212): the export's host, or any host where the node
+    // still allows it, or none. Set before the listener runs, so there is no
+    // moment it admits anyone it should not.
+    target.default_subsystem().set_access(match &row.host_nqn {
+        Some(h) => crate::target::nvmeof::HostAccess::Hosts([(h.clone(), None)].into_iter().collect()),
+        None if ctx.cfg.allow_any_host => crate::target::nvmeof::HostAccess::Any,
+        None => crate::target::nvmeof::HostAccess::none(),
+    });
     // Namespace 1: the only namespace this subsystem will ever have.
     target.add_namespace_dynamic(1, dev).await;
 
