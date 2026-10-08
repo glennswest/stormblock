@@ -97,6 +97,7 @@ say "an XFS blank (mkfs-xfs, sealed) and two claims of it"
 T=$(api -X POST "http://127.0.0.1:$MGMT/api/v1/fstemplates" \
     -d '{"name":"ci-xfs-blank","size":"512M","fs":"xfs","label":"blank"}') \
     || { echo "FAIL: template"; tail -20 "$W/engine.log"; exit 1; }
+T=$(echo "$T" | j 'json.dumps(d.get("template", d))')
 TID=$(echo "$T" | j 'd["id"]')
 G=$(echo "$T" | j 'd.get("sealed_volume_id") or d.get("volume_id")')
 GU=$(echo "$T" | j 'd.get("fs_uuid") or ""')
