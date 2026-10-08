@@ -658,6 +658,7 @@ IMAGE_STORE=""
 WRITABLE=""
 MOUNTS=""
 NTP_MODE=""
+DECLARED_NET=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -685,6 +686,8 @@ for param in $(cat /proc/cmdline); do
         # `off`: no NTP step in the initramfs (#251); the build-date floor
         # still applies.
         rd.stormblock.ntp=*)         NTP_MODE="${param#*=}" ;;
+        # `off`: the boot NIC ignores the node's declared [network] (#229).
+        rd.stormblock.declared-net=*) DECLARED_NET="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the
@@ -1252,6 +1255,65 @@ elif [ "$nd_waited" -gt 0 ]; then
 fi
 # --- END netdev wait
 
+# --- BEGIN node state read (covered by tests/initramfs-boot-nic.sh)
+# What this machine's installed system says about itself, read before the
+# network (#229, #238): `/config/stormcos.toml` and `/config/install-node.toml`
+# (#78) on the local disk's `stormcos-state` volume. The boot NIC's declared
+# address and the name DHCP is asked under both come from here.
+#
+# Before the network `$SLAB` is set only by `rd.stormblock.slab=`, so the
+# disk is looked for: the one the command line names, when it names one (and
+# only that one, #273); otherwise the first internal, non-removable disk that
+# holds the volume. Never a drive in a shelf, and never a fabric URI (there is
+# no network yet). Read-only: `slab cat` opens nothing for writing.
+STATE_DIR="${STORM_RUN:-/run}/stormblock-node-state"
+STATE_TOML="$STATE_DIR/stormcos.toml"
+STATE_NODE="$STATE_DIR/install-node.toml"
+STATE_DISK=""
+_ss="${STORM_STATE_SYS:-/sys/block}"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+rm -f "${STATE_TOML:?}" "${STATE_NODE:?}"
+state_read() { # disk -> 0 when it holds stormcos-state (either file may be absent)
+    _held=1
+    for _f in stormcos.toml install-node.toml; do
+        "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$1" --volume stormcos-state \
+            --out "$STATE_DIR/$_f" "/config/$_f" >/dev/null 2>&1
+        case $? in
+        0) _held=0 ;;
+        1) _held=0; rm -f "${STATE_DIR:?}/${_f:?}" ;;   # the volume is there, the file is not
+        *) rm -f "${STATE_DIR:?}/${_f:?}"; return 1 ;;  # not a slab, or no such volume
+        esac
+    done
+    return $_held
+}
+state_disks() {
+    case "$SLAB" in
+    *://*) return 0 ;;
+    /*) [ -e "$SLAB" ] && echo "$SLAB"; return 0 ;;
+    esac
+    for _d in "$_ss"/sd? "$_ss"/sd?? "$_ss"/nvme*n? "$_ss"/nvme*n?? "$_ss"/vd?; do
+        [ -e "$_d" ] || continue
+        [ "$(cat "$_d/removable" 2>/dev/null)" = "1" ] && continue
+        if [ "${ALLOW_EXTERNAL:-}" != 1 ]; then
+            case "$(readlink -f "$_d" 2>/dev/null)" in */expander-*) continue ;; esac
+            _encl=""
+            for _e in "$_d"/device/enclosure_device:*; do [ -e "$_e" ] && _encl=1; done
+            [ -n "$_encl" ] && continue
+        fi
+        echo "${STORM_STATE_DEV:-/dev}/${_d##*/}"
+    done
+}
+for _sd in $(state_disks); do
+    if state_read "$_sd"; then
+        STATE_DISK="$_sd"
+        break
+    fi
+done
+if [ -n "$STATE_DISK" ]; then
+    echo "  node state: stormcos-state on $STATE_DISK ($(cd "$STATE_DIR" && ls | tr '\n' ' '))"
+fi
+# --- END node state read
+
 # --- BEGIN uplink selection (covered by tests/initramfs-nic-selection.sh)
 LINK_WAIT="${STORM_LINK_WAIT:-10}"
 # Injectable only so the selection can be tested against a fake tree; nothing
@@ -1466,6 +1528,7 @@ net_unbond() {
     ip link del "$BOND" 2>/dev/null || true
 }
 
+# --- BEGIN bridge bring-up (covered by ci-boot-nic-verify.sh)
 # Put one uplink on the bridge and leave $IFACE naming whatever now holds the
 # address. A function because a lease has to be able to fail and be retried on
 # the next candidate, and each attempt has to start from the same state.
@@ -1527,17 +1590,193 @@ net_teardown() {
     ip link del "$BRIDGE" 2>/dev/null || true
     ip addr flush dev "$1" 2>/dev/null || true
 }
+# --- END bridge bring-up
 
-if [ -n "$IP_CONF" ] && [ "$IP_CONF" != "dhcp" ]; then
-    # Static IP from kernel cmdline (ip=addr::gw:mask::iface:none). One
-    # candidate only: the address was chosen for a particular port, and
-    # putting it on a different one is not a fallback, it is a wrong answer.
-    net_bring_up "$IFACE"
-    ADDR=$(echo "$IP_CONF" | cut -d: -f1)
-    GW=$(echo "$IP_CONF" | cut -d: -f3)
-    MASK=$(echo "$IP_CONF" | cut -d: -f4)
-    ip addr add "$ADDR/$MASK" dev "$IFACE"
-    [ -n "$GW" ] && ip route add default via "$GW"
+# --- BEGIN boot nic (covered by tests/initramfs-boot-nic.sh)
+# Which port the node's address goes on, and whether it is static (#229).
+#
+# Every release's command line says `ip=dhcp` (one line boots every node,
+# stormcos#182), so what one node declares has to win here: stormpump never
+# addresses a bridge port after switch_root (stormpump#33), and the boot NIC
+# is one. The declaration is read the way stormpump's `plan_for` reads it:
+# stormcos.toml when it declares any interface, else install-node.toml (#78),
+# whole, never merged. Its `[network]` single form is the node's primary
+# interface, the one it boots on:
+#   static, an exact name, present, with carrier -> its addresses, gateway,
+#     dns, domain and mtu, on the bridge, instead of DHCP;
+#   dhcp with an exact name -> that port is tried first.
+# A declared port with no carrier, or not on this machine, is said and the
+# boot goes on with DHCP as before: a node that cannot reach its appliance
+# cannot boot. A static `ip=` on the command line wins over the declaration,
+# and its `<device>` field names the port. `rd.stormblock.declared-net=off`
+# ignores the declaration. Values are read from one line each (arrays on one
+# line), which is how stormpump writes install-node.toml.
+BOOT_NIC=""
+BOOT_ADDRS=""
+BOOT_GW=""
+BOOT_DNS=""
+BOOT_DOMAIN=""
+BOOT_MTU=""
+BOOT_FROM=""
+nic_present() { # name -> 0 when it is one of this machine's ports
+    for _p in $ALL_PHYS; do [ "$_p" = "$1" ] && return 0; done
+    return 1
+}
+mask_prefix() { # 24 | 255.255.255.0 -> 24; nothing when it is neither
+    case "$1" in
+    *.*.*.*) echo "$1" | awk -F. '{
+        n = 0
+        for (i = 1; i <= 4; i++) { v = $i + 0; while (v > 0) { n += v % 2; v = int(v / 2) } }
+        print n }' ;;
+    *[!0-9]*|'') ;;
+    *) echo "$1" ;;
+    esac
+}
+toml_declares() { # file -> 0 when it declares any interface (stormpump's rule)
+    [ -s "$1" ] || return 1
+    awk '
+        /^[[:space:]]*\[\[[[:space:]]*network\.interfaces[[:space:]]*\]\]/ { s = 2; next }
+        /^[[:space:]]*\[[[:space:]]*network[[:space:]]*\][[:space:]]*(#.*)?$/ { s = 1; next }
+        /^[[:space:]]*\[/ { s = 0; next }
+        s == 1 && /^[[:space:]]*(interface|name)[[:space:]]*=/ { f = 1 }
+        s == 2 && /^[[:space:]]*(name|driver)[[:space:]]*=/ { f = 1 }
+        END { exit !f }' "$1"
+}
+toml_network() { # file key -> the value under [network], quotes and brackets gone
+    awk -v want="$2" '
+        /^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[[[:space:]]*network[[:space:]]*\][[:space:]]*(#.*)?$/); next }
+        s && /=/ {
+            k = $0; sub(/[[:space:]]*=.*/, "", k); gsub(/[[:space:]]/, "", k)
+            if (k != want) next
+            v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v)
+            gsub(/[]["\047,]/, " ", v); gsub(/[[:space:]]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v)
+            print v; exit
+        }' "$1"
+}
+
+# The command line first: a static `ip=<addr>::<gw>:<mask>::<device>:none`.
+_ipa=$(echo "$IP_CONF" | cut -d: -f1)
+_ipdev=$(echo "$IP_CONF" | cut -d: -f6)
+case "$IP_CONF" in
+''|dhcp|on|any|dhcp6|auto6|off|none) _ipa="" ;;
+esac
+DECL_FILE=""
+DECL_FROM=""
+if [ "${DECLARED_NET:-}" != off ]; then
+    if toml_declares "${STATE_TOML:-}"; then
+        DECL_FILE="$STATE_TOML"; DECL_FROM="stormcos.toml on ${STATE_DISK:-the local disk}"
+    elif toml_declares "${STATE_NODE:-}"; then
+        DECL_FILE="$STATE_NODE"; DECL_FROM="install-node.toml on ${STATE_DISK:-the local disk}"
+    fi
+elif toml_declares "${STATE_TOML:-}" || toml_declares "${STATE_NODE:-}"; then
+    netsay "  boot NIC: the node's declared network is ignored (rd.stormblock.declared-net=off)"
+fi
+
+if [ -n "$_ipa" ]; then
+    _ipgw=$(echo "$IP_CONF" | cut -d: -f3)
+    _ippre=$(mask_prefix "$(echo "$IP_CONF" | cut -d: -f4)")
+    BOOT_NIC="$IFACE"
+    if [ -n "$_ipdev" ]; then
+        if nic_present "$_ipdev"; then
+            BOOT_NIC="$_ipdev"
+        else
+            netsay "WARNING: ip= names $_ipdev, which this machine does not have (ports:$ALL_PHYS) - using $IFACE"
+        fi
+    fi
+    case "$_ipa" in */*) BOOT_ADDRS="$_ipa" ;; *) BOOT_ADDRS="$_ipa${_ippre:+/$_ippre}" ;; esac
+    BOOT_GW="$_ipgw"
+    BOOT_FROM="the command line (ip=)"
+    [ -n "$DECL_FILE" ] && netsay "  boot NIC: ip= on the command line wins over the declaration in $DECL_FROM"
+elif [ -n "$DECL_FILE" ]; then
+    _dn=$(toml_network "$DECL_FILE" name)
+    [ -n "$_dn" ] || _dn=$(toml_network "$DECL_FILE" interface)
+    _dm=$(toml_network "$DECL_FILE" mode)
+    _da="$(toml_network "$DECL_FILE" address) $(toml_network "$DECL_FILE" addresses)"
+    case "${_dm:-dhcp}" in
+    static|dhcp) ;;
+    *) _dn="" ;;   # `up`: something else addresses it; nothing for the boot to do
+    esac
+    case "$_dn" in
+    '') ;;
+    *'*'*)
+        netsay "  boot NIC: [network] in $DECL_FROM names '$_dn', a pattern, not one port - the usual selection"
+        ;;
+    *)
+        if ! nic_present "$_dn"; then
+            netsay "WARNING: [network] in $DECL_FROM names $_dn, which this machine does not have (ports:$ALL_PHYS) - DHCP as usual"
+        elif [ "${_dm:-dhcp}" = dhcp ]; then
+            if [ "$(net_carrier "$_dn")" = 1 ]; then
+                CANDIDATES="$_dn $(for _c in $CANDIDATES; do [ "$_c" = "$_dn" ] || printf '%s ' "$_c"; done)"
+                CANDIDATES="${CANDIDATES% }"
+                IFACE="$_dn"
+                netsay "  boot NIC: $_dn first, as [network] in $DECL_FROM declares (dhcp)"
+            else
+                netsay "WARNING: [network] in $DECL_FROM names $_dn, which has no carrier - DHCP on the others"
+            fi
+        else
+            _good=""
+            for _a in $_da; do
+                case "$_a" in
+                */[0-9]*) _good="$_good $_a" ;;
+                *) netsay "WARNING: [network] in $DECL_FROM: address '$_a' states no prefix - not applied" ;;
+                esac
+            done
+            _good="${_good# }"
+            if [ -z "$_good" ]; then
+                netsay "WARNING: [network] in $DECL_FROM is static on $_dn with no usable address - DHCP as usual"
+            elif [ "$(net_carrier "$_dn")" != 1 ]; then
+                # Static on a port with no cable is a node nobody can reach,
+                # and one that cannot reach its appliance to boot. DHCP
+                # elsewhere is at least a node that can be looked at.
+                netsay "WARNING: [network] in $DECL_FROM puts $_good on $_dn, which has no carrier - DHCP on the others instead"
+            else
+                BOOT_NIC="$_dn"
+                BOOT_ADDRS="$_good"
+                BOOT_GW=$(toml_network "$DECL_FILE" gateway)
+                BOOT_DNS=$(toml_network "$DECL_FILE" dns)
+                BOOT_DOMAIN=$(toml_network "$DECL_FILE" domain)
+                BOOT_MTU=$(toml_network "$DECL_FILE" mtu)
+                case "$BOOT_MTU" in *[!0-9]*) BOOT_MTU="" ;; esac
+                BOOT_FROM="[network] in $DECL_FROM"
+            fi
+        fi
+        ;;
+    esac
+fi
+# Put the static address on: the port onto the bridge (net_bring_up), the
+# addresses on whatever holds them, the gateway, and the resolver a lease would
+# have written, so appliance discovery and the node name read the same files.
+static_apply() {
+    # A static address: from the command line, or declared by the node (the
+    # boot nic block). One port only: the address was chosen for a particular
+    # port, and putting it on a different one is not a fallback, it is a
+    # wrong answer.
+    netsay "  static: $BOOT_ADDRS on $BOOT_NIC${BOOT_GW:+, gateway $BOOT_GW}, from $BOOT_FROM"
+    if [ -n "$BOOT_MTU" ]; then
+        ip link set "$BOOT_NIC" mtu "$BOOT_MTU" 2>/dev/null \
+            || netsay "WARNING: $BOOT_NIC does not take mtu $BOOT_MTU"
+    fi
+    net_bring_up "$BOOT_NIC"
+    for _a in $BOOT_ADDRS; do
+        ip addr add "$_a" dev "$IFACE" || netsay "WARNING: could not add $_a to $IFACE"
+    done
+    if [ -n "$BOOT_GW" ]; then
+        ip route add default via "$BOOT_GW" || netsay "WARNING: no default route via $BOOT_GW"
+    fi
+    # What a lease would have written, so appliance discovery and the node
+    # name read the same files either way.
+    if [ -n "$BOOT_DNS$BOOT_DOMAIN" ]; then
+        : > /etc/resolv.conf
+        [ -n "$BOOT_DOMAIN" ] && echo "search $BOOT_DOMAIN" >> /etc/resolv.conf
+        for _d in $BOOT_DNS; do echo "nameserver $_d" >> /etc/resolv.conf; done
+    fi
+    [ -n "$BOOT_DOMAIN" ] && echo "$BOOT_DOMAIN" > /run/dhcp-domain
+    [ -n "$BOOT_DNS" ] && echo "$BOOT_DNS" > /run/dhcp-dns
+}
+# --- END boot nic
+
+if [ -n "$BOOT_ADDRS" ]; then
+    static_apply
 else
     # DHCP, over each candidate in turn until one answers.
     #
@@ -1564,8 +1803,9 @@ else
     # server's lease table says who holds each lease. Before the lease the
     # network has not said what the node is called, so the hint comes from
     # what this machine already knows:
-    #   1. its declared name, `[node] hostname` in /config/stormcos.toml on
-    #      the local disk's `stormcos-state` volume (a node installed before);
+    #   1. its declared name, `[node] hostname` in /config/stormcos.toml, else
+    #      install-node.toml, on the local disk's `stormcos-state` volume (a
+    #      node installed before; copied by the node state read block, #229);
     #   2. the name its firmware claimed its boot image on (`StormBootTag`,
     #      #249), which stormbootx took from DHCP and reverse DNS a stage
     #      earlier. Never an SMBIOS guess, and never a `mac-` placeholder.
@@ -1573,22 +1813,19 @@ else
     DHCP_NAME=""
     DHCP_NAME_FROM=""
     DHCP_HOST_ARGS=""
-    _hint_toml="${STORM_RUN:-/run}/stormcos-state.toml"
-    case "$SLAB" in
-    /*)
-        if [ -e "$SLAB" ] && "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$SLAB" \
-               --volume stormcos-state --out "$_hint_toml" /config/stormcos.toml >/dev/null 2>&1 \
-           && [ -s "$_hint_toml" ]; then
-            DHCP_NAME=$(awk '
-                /^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[node\][[:space:]]*(#.*)?$/) ; next }
-                s && /^[[:space:]]*hostname[[:space:]]*=/ {
-                    sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*#.*$/, ""); gsub(/"/, ""); print; exit
-                }' "$_hint_toml")
-            [ -n "$DHCP_NAME" ] && DHCP_NAME_FROM="its declared name (stormcos.toml on $SLAB)"
+    # Read by the node state read block; stormcos.toml wins, as in stormpump.
+    for _hint_toml in "${STATE_TOML:-}" "${STATE_NODE:-}"; do
+        [ -s "$_hint_toml" ] || continue
+        DHCP_NAME=$(awk '
+            /^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[node\][[:space:]]*(#.*)?$/) ; next }
+            s && /^[[:space:]]*hostname[[:space:]]*=/ {
+                sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]*#.*$/, ""); gsub(/"/, ""); print; exit
+            }' "$_hint_toml")
+        if [ -n "$DHCP_NAME" ]; then
+            DHCP_NAME_FROM="its declared name (${_hint_toml##*/} on ${STATE_DISK:-the local disk})"
+            break
         fi
-        rm -f "$_hint_toml"
-        ;;
-    esac
+    done
     if [ -z "$DHCP_NAME" ] && [ "${BOOTTAG_FROM:-}" = firmware ]; then
         case "$BOOTTAG" in
         ""|mac-*) ;;
@@ -1780,6 +2017,9 @@ fi
 
 fi
 fi
+
+# The node's own config, copied for the network step: not kept past it.
+rm -f "${STATE_TOML:?}" "${STATE_NODE:?}"
 
 # --- BEGIN clock step (covered by tests/initramfs-clock.sh)
 # Set the clock once, bounded, before anything reads it (#251).

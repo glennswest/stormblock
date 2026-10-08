@@ -9,8 +9,10 @@
 #     each step saying why it gave no name;
 #   * the FQDN from the lease's domain (or the name's own), set as the
 #     kernel's domainname;
-#   * the name the node asks DHCP under: its declared name (stormcos.toml on
-#     the local disk), else the name its firmware booted as; never a guess.
+#   * the name the node asks DHCP under: its declared name (stormcos.toml,
+#     else install-node.toml, as the node state read block copied them off
+#     the local disk, #229), else the name its firmware booted as; never a
+#     guess.
 #
 # Runs the real code: the blocks are extracted from the init script this repo
 # generates, between their marker comments, so the test cannot drift.
@@ -114,25 +116,15 @@ check "nothing at all: the MAC, no domain" "storm-06f96d|storm-06f96d|" "$r"
 # ---------------------------------------------------------------------------
 echo "the name DHCP is asked under:"
 
-STUB="$WORK/stormblock"
-cat > "$STUB" <<'STUBEOF'
-#!/bin/sh
-[ "$1 $2" = "slab cat" ] || exit 2
-out=""; vol=""
-while [ $# -gt 0 ]; do
-    case "$1" in --out) out="$2"; shift ;; --volume) vol="$2"; shift ;; esac
-    shift
-done
-[ "$vol" = stormcos-state ] && [ -n "${STUB_TOML:-}" ] || exit 1
-printf '%s\n' "$STUB_TOML" > "$out"
-STUBEOF
-chmod +x "$STUB"
-disk="$WORK/sda"; : > "$disk"
-
 hint() ( # -> DHCP_HOST_ARGS ; console in hint.out
     set +e
-    STORM_STORMBLOCK="$STUB"; STORM_RUN="$WORK"; export STUB_TOML
-    SLAB="${SLAB_ARG-$disk}"; BOOTTAG="${TAG:-}"; BOOTTAG_FROM="${FROM:-}"
+    # What the node state read block copied off the local disk (#229).
+    STATE_TOML="$WORK/st/stormcos.toml"; STATE_NODE="$WORK/st/install-node.toml"
+    STATE_DISK=/dev/sda
+    rm -rf "$WORK/st"; mkdir -p "$WORK/st"
+    [ -n "${STUB_TOML:-}" ] && printf '%s\n' "$STUB_TOML" > "$STATE_TOML"
+    [ -n "${STUB_NODE:-}" ] && printf '%s\n' "$STUB_NODE" > "$STATE_NODE"
+    BOOTTAG="${TAG:-}"; BOOTTAG_FROM="${FROM:-}"
     . "$WORK/hint.sh" > "$WORK/hint.out" 2>&1
     echo "$DHCP_HOST_ARGS"
 )
@@ -151,7 +143,15 @@ check "a provisional mac- name is not a name" "" "$(TAG=mac-0cc47a06f96d FROM=fi
 check "a toml with no [node] hostname: the firmware's" "-x hostname:server8" \
     "$(STUB_TOML='[node.labels]
 hostname = "nope"' TAG=server8 FROM=firmware hint)"
-check "no disk and no firmware name: nothing sent" "" "$(SLAB_ARG="" hint)"
+check "no state and no firmware name: nothing sent" "" "$(hint)"
+check "install-node.toml's name when stormcos.toml has none" "-x hostname:node7" \
+    "$(STUB_TOML='[node.labels]
+x = "y"' STUB_NODE='[node]
+hostname = "node7"' TAG=server8 FROM=firmware hint)"
+contains "  and the console names the file" "install-node.toml on /dev/sda" "$(cat "$WORK/hint.out")"
+check "stormcos.toml's name wins" "-x hostname:stormblock1" \
+    "$(STUB_TOML="$TOML" STUB_NODE='[node]
+hostname = "node7"' hint)"
 check "a name with odd characters is made a hostname" "-x hostname:node-1" "$(TAG='Node_1' FROM=firmware hint)"
 
 [ "$fail" = 0 ] && echo "all node name checks passed" || { echo "FAILURES"; exit 1; }
