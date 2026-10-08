@@ -683,7 +683,8 @@ mod tests {
             ..Default::default()
         };
         let mut w = PressureWatcher::new(cfg, registry.clone(), 1 << 20);
-        assert!(matches!(w.check().await, GrowthDecision::Grew { .. }));
+        let d = w.check().await;
+        assert!(matches!(d, GrowthDecision::Grew { .. }), "check() decided {d:?}");
 
         let reg = registry.read().await;
         let adopted = reg.get(&known.0).expect("the same slab, by id — not a fresh format");

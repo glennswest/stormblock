@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix:** #279: `FileDevice::write` returned before its bytes were in the file. It is `seek` plus `write_all` on a `tokio::fs::File`, which hands the write to the blocking pool and returns. That `File` orders its own later operations after the write, but a second `FileDevice` on the same path could read the file before the write landed.
+  - **Symptom:** the flaky `pressure::tests::an_existing_slab_on_a_source_is_adopted_with_its_data`, where the watcher reopens a slab another `FileDevice` had just formatted, and the full suite's load keeps the blocking pool busy.
+  - **Fix:** `write` now flushes the tokio `File` (not an fsync), so a returned write is in the file.
+  - **Tests:** `filedev::tests::a_write_is_in_the_file_when_it_returns` (the blocking pool kept busy, the file read directly after each write). The pressure test now prints what `check()` decided.
 - **test:** #191: the power-cut simulation tears writes and cuts inside operations.
   - **Tearing:** `CrashDevice::crash_with(seed, keep, Tear)` tears the writes it keeps. `Tear::Prefix` keeps the first n units of a write (a drive writing in order) and `Tear::Scatter` any subset (out of order). It tears at the drive's atomic unit: 4096 bytes, or 512 with `with_atomic_unit(512)`, where one 4 KiB slot-table page or record block can land in part.
   - **Cut inside an operation:** `CrashDevice::cut_at(n)` takes the power as the nth write arrives, so a persist or a slot-table sync is caught part-way.

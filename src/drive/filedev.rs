@@ -235,6 +235,13 @@ impl BlockDevice for FileDevice {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset)).await.map_err(DriveError::Io)?;
         file.write_all(buf).await.map_err(DriveError::Io)?;
+        // `tokio::fs::File` hands a write to the blocking pool and returns:
+        // this File orders its own later operations after it, but another
+        // handle on the path — a second `FileDevice`, the reopen of a slab —
+        // could read the file before it landed (#279, flaky under load).
+        // Wait for it: a write that has returned is in the file. Not an
+        // fsync; `flush` is that.
+        file.flush().await.map_err(DriveError::Io)?;
         Ok(buf.len())
     }
 
@@ -402,4 +409,43 @@ mod tests {
         drop(dev);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// #279: a write that has returned is in the file, for any reader of
+    /// the path, however busy the blocking pool is. A task keeps the pool's
+    /// one thread busy; the file is read directly (not through tokio) right
+    /// after each write returns.
+    #[test]
+    fn a_write_is_in_the_file_when_it_returns() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("dev.bin").to_str().unwrap().to_string();
+            let dev = FileDevice::open_with_capacity(&path, 1 << 20).await.unwrap();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let s2 = stop.clone();
+            let busy = tokio::spawn(async move {
+                while !s2.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = tokio::task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_millis(3))).await;
+                }
+            });
+            for i in 0..200u64 {
+                let v = (i % 250 + 1) as u8;
+                let off = (i % 64) * 4096;
+                dev.write(off, &[v; 4096]).await.unwrap();
+                let on_disk = std::fs::read(&path).unwrap();
+                assert!(
+                    on_disk[off as usize..off as usize + 4096].iter().all(|&b| b == v),
+                    "write {i} returned before its bytes were in the file"
+                );
+                tokio::task::yield_now().await;
+            }
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            busy.await.unwrap();
+        });
+    }
+
 }
