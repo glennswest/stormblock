@@ -4192,7 +4192,9 @@ mod redundancy_tests {
         gate.0.store(true, Ordering::SeqCst);
         let writer = {
             let v = v.clone();
-            tokio::spawn(async move { v.write(0, &[0x5A; 512]).await })
+            // A whole block: a shorter write is padded with a read first,
+            // and that read, not the stripe's, would meet the gate.
+            tokio::spawn(async move { v.write(0, &[0x5A; 4096]).await })
         };
         gate.1.notified().await;
 
@@ -4220,8 +4222,7 @@ mod redundancy_tests {
 
         let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
         assert_ne!(g.legs[0].slab_id, p_slab, "the parity leg moved");
-        let mut a2 = a.clone();
-        a2[..512].fill(0x5A);
+        let a2 = vec![0x5A; slot as usize];
         let xor = |x: &[u8], y: &[u8]| -> Vec<u8> { x.iter().zip(y).map(|(p, q)| p ^ q).collect() };
         assert_eq!(raw(&reg, g.legs[0], slot as usize).await, xor(&a2, &b), "P = A' ^ B on the moved leg");
         // And member 0 reconstructs from it.
