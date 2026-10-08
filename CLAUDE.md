@@ -27,7 +27,7 @@ commit  →  push  →  sc-build  →  read the result
 
 Tests that create files need `mkdir -p tmp && export TMPDIR=$PWD/tmp` in the
 scratch tree: dev's `/tmp/stormblock-*` directories are root-owned from old
-builds (stormcentral#61). Known red: `integration_image` (#120), and on a busy
+builds (stormcentral#61). Known red on a busy
 box `mgmt_luns_at_scale` (#134) and
 `integration_fstemplates::a_create_whose_caller_gives_up_still_finishes` (#173).
 
@@ -421,7 +421,7 @@ left the ublk device / namespace; expiry ran only inside some calls.
       empty `attachments` is left out of the reply); fixed, to run again.
       PAUSED for P0 #344
 
-### tests-runtime/ has a gate (2026-10-08, #222) — PAUSED for P0 #344 (back in line)
+### tests-runtime/ has a gate (2026-10-08, #222) — DONE (check.sh, 6381f35 ALL PASS)
 
 Since #209 the eight runtime tests ran nowhere, the flow-over resume
 regression test (#171/#172) among them.
@@ -431,9 +431,9 @@ regression test (#171/#172) among them.
 - [x] engine_e2e no longer passes by skipping without `STORMBLOCK_BIN`
 - [x] filed #342 (ublk_resize in a QEMU guest), #343 (iSCSI tests need an
       external target)
-- [ ] run `ci-runtime-tests.sh` on a build VM (never ran: paused while
-      queued); fix what fails; CHANGELOG. Code, script, README, CLAUDE.md
-      pushed (0ff8829)
+- [x] run on a build VM; fixed what it found: boot-local read only v1
+      volumes.dat (6fe39a7), e2e token + host_nqn, the #259 refusal, #120
+      (509b930). Last stage of `check.sh`; 32/32 at 6381f35
 
 ### Default claim with a serial (2026-10-08, #202) — WAITING ON THE OWNER
 
