@@ -716,6 +716,13 @@ case "$(ld)" in *'"state": "taken"'*'"drive": "/dev/sda"'*) check "  and the ver
 *) check "  and the verdict is taken, sda: $(ld)" yes no ;; esac
 check "the same release in its own bay: kept (recovery)" "/dev/sda" \
     "$(STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey_m any sda\|baylayout)"
+# #346: the Dell with a zeroed disk in its bay, no drive named, no intent:
+# laid fresh (force; boot-local then lays both halves, the engine's half of
+# #346), and the verdict says so.
+check "the Dell, a zeroed disk in its own SES bay, no intent: laid fresh" "/dev/sda force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|bay)"
+case "$(ld)" in *'"state": "taken"'*'"drive": "/dev/sda"'*) check "  and the verdict is taken, sda" yes yes ;;
+*) check "  and the verdict is taken, sda: $(ld)" yes no ;; esac
 NOINTENT=""
 check "a blank drive in the server's own SES bay is taken" "/dev/sdb" "$(survey_m any sdb\|bay)"
 # A drive with slabs left alone says which and why, and the console says it.

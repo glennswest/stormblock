@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #346 (P0): a blank disk was refused (`the data slab will not open: bad slab magic`) and the node ran diskless.
+  - **Cause:** `take_local_disk_for` and the identity guard went by partition types. A disk that kept a node table with nothing in it (zeroed but for its table, or a lay cut short before its data slab) counted as "this node's", and its data slab "would not open".
+  - **Now:** the data partition's slab magic decides. With no magic there is nothing to keep, and both halves are laid fresh without `force`. A slab with its magic present that does not open is still refused and named, and so is a data partition that cannot be read.
 - **fix:** #344 (P0): the Dell ran diskless from forge with its slabs on `sda`, and said nothing.
   - **Cause:** #273's survey took any drive in an SES enclosure for a disk shelf. The R230's own bays on its mpt3sas HBA are an SES enclosure, so with no `rd.stormblock.slab=` and no boot intent, `sda` was skipped and refused.
   - **The rule now:** a shelf is a drive behind a SAS expander.
