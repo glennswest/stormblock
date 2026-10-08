@@ -781,7 +781,7 @@ check "the Dell's single front bay, a blank disk, no intent: laid fresh" "/dev/s
 NOINTENT=""
 # A drive with slabs left alone says which and why, and the console says it.
 check "a data slab in a shelf is left" "" "$(survey_m force sdb\|datashelf)"
-case "$(ld)" in *'"state": "refused"'*'"drive": "/dev/sdb"'*'SAS expander'*) check "  the verdict names the drive and the shelf" yes yes ;;
+case "$(ld)" in *'"state": "refused"'*'"drive": "/dev/sdb"'*'external shelf'*'"position": "external"'*) check "  the verdict names the drive and the shelf" yes yes ;;
 *) check "  the verdict names the drive and the shelf: $(ld)" yes no ;; esac
 grep -q "WARNING: this node runs from the appliance although /dev/sdb" "$WORK/msurvey.log" \
     && check "  and the console says it" yes yes || check "  and the console says it" yes no
