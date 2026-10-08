@@ -247,6 +247,36 @@ pub async fn node_layout(device: &Arc<dyn BlockDevice>) -> Result<Option<(usize,
     })
 }
 
+/// Whether a slab's magic is at `offset` (#346): `Ok(false)` when the bytes
+/// read and hold none (a zeroed disk, a table laid and never filled),
+/// `Err` when they cannot be read (a fault to name, never a disk to lay over).
+pub async fn slab_magic_at(device: &Arc<dyn BlockDevice>, offset: u64) -> Result<bool> {
+    let mut buf = vec![0u8; (device.block_size() as usize).max(4096)];
+    device
+        .read(offset, &mut buf)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading {} bytes at {offset}: {e}", buf.len())))?;
+    Ok(buf[..8] == crate::drive::slab::SLAB_MAGIC)
+}
+
+/// Whether a node layout's data half holds a slab at all (#346): its data
+/// partition, or its bulk one, carries slab magic. `None` when the drive
+/// carries no node layout. A table whose data partitions hold no magic has
+/// nothing in them to keep: the drive is laid fresh, both halves. Only a
+/// slab that is there (magic present) and does not open is refused.
+pub async fn node_data_half_present(device: &Arc<dyn BlockDevice>) -> Result<Option<bool>> {
+    let Some((data_i, _)) = node_layout(device).await? else { return Ok(None) };
+    let gpt = Gpt::read(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let start = |i: usize| gpt.entries[i].start_bytes(gpt.block_size);
+    let mut present = slab_magic_at(device, start(data_i)).await?;
+    if let Some(b) = bulk_partition(device).await {
+        present |= slab_magic_at(device, start(b)).await?;
+    }
+    Ok(Some(present))
+}
+
 /// The bulk partition of a node layout (#156), if it has one.
 pub async fn bulk_partition(device: &Arc<dyn BlockDevice>) -> Option<usize> {
     let gpt = Gpt::read(device).await.ok()?;

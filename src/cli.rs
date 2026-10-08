@@ -2858,7 +2858,17 @@ pub async fn run() -> anyhow::Result<()> {
                 format!("partition {} ({})", i + 1, e.name)
             };
             if e.type_guid == crate::image::type_guid::SLAB_DATA {
-                return Ok(Some(format!("{path} {label} is typed as a stormblock data slab")));
+                // Typed as one, and holding one: a partition laid and never
+                // filled, or zeroed, holds no identity to protect (#346).
+                match crate::image::local::slab_magic_at(&dev, e.first_lba * gpt.block_size as u64).await {
+                    Ok(false) => continue,
+                    Ok(true) => return Ok(Some(format!("{path} {label} is typed as a stormblock data slab"))),
+                    Err(err) => {
+                        return Ok(Some(format!(
+                            "{path} {label} is typed as a stormblock data slab and cannot be read ({err})"
+                        )))
+                    }
+                }
             }
             // A slab whose GPT entry predates the data type still knows what it
             // is: the header carries the role too, and the two are written
@@ -4717,7 +4727,22 @@ pub async fn run() -> anyhow::Result<()> {
         // only the system half of the system drive). `--local-disk-force` still
         // answers for a drive whose data slab is not part of a node layout (an
         // abandoned install), never for a node's data half.
-        if crate::image::local::node_layout(&dest_dev).await?.is_some() {
+        // A node table whose data partitions hold no slab at all (#346): a
+        // zeroed disk that kept its backup table, or a lay cut off before its
+        // data slab was formatted. There is nothing in them to keep, so the
+        // drive is laid fresh, both halves. A data slab that is there (its
+        // magic present) and does not open is still refused below, and named;
+        // a data partition that cannot be read is refused here.
+        let data_half = crate::image::local::node_data_half_present(&dest_dev)
+            .await
+            .map_err(|e| anyhow::anyhow!("not installing over {disk}: its data partition cannot be read: {e}"))?;
+        if data_half == Some(false) {
+            println!(
+                "Flow-over: {disk} carries a node table, but no slab is in its data partition \
+                 (no slab magic): nothing to keep — laying both halves fresh (#346)"
+            );
+        }
+        if data_half == Some(true) {
             // **And if it is already up to date, do nothing at all.**
             //
             // A node that netboots regularly would otherwise reformat its
@@ -7612,6 +7637,91 @@ file = "{state}"
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// #346: a node table whose data partition holds no slab (a zeroed disk
+    /// that kept its table, a lay cut off before its data slab) is laid fresh,
+    /// both halves, with no force. A data slab that is there (magic present)
+    /// and does not open is still refused, the drive untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_node_table_with_an_empty_data_partition_is_laid_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let root = p("root.img");
+        std::fs::write(&root, vec![0x5Au8; 8 * MIB as usize]).unwrap();
+        let state = p("state.img");
+        std::fs::write(&state, vec![0xA5u8; 8 * MIB as usize]).unwrap();
+        let spec = format!(
+            r#"
+name = "install-346"
+size = "1G"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "root"
+file = "{root}"
+[data_slab]
+size = "256M"
+[[data_slab.golden]]
+name = "state"
+file = "{state}"
+"#
+        );
+        let image = p("image.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&image))
+            .await
+            .unwrap();
+        let disk = p("disk.raw");
+        std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
+        let open_disk = || async { crate::drive::open_path(&disk, false).await.unwrap() };
+        let data_start = |dev: Arc<dyn BlockDevice>| async move {
+            let (d, _) = crate::image::local::node_layout(&dev).await.unwrap().unwrap();
+            let gpt = crate::pallet::gpt::Gpt::read(&dev).await.unwrap();
+            gpt.entries[d].start_bytes(gpt.block_size)
+        };
+
+        // A first install lays the table and both slabs.
+        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
+        drop(mgr);
+        let dev = open_disk().await;
+        let at = data_start(dev.clone()).await;
+        assert!(crate::image::local::slab_magic_at(&dev, at).await.unwrap(), "the data slab was laid");
+
+        // Its data partition zeroed: the table stays, no slab in it.
+        dev.write(at, &vec![0u8; MIB as usize]).await.unwrap();
+        dev.flush().await.unwrap();
+        assert_eq!(crate::image::local::node_data_half_present(&dev).await.unwrap(), Some(false));
+        assert_eq!(super::data_slab_on(&disk).await.unwrap(), None, "an empty data partition is no identity");
+        drop(dev);
+
+        // The next install takes it fresh, both halves, with no force.
+        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let laid = super::take_local_disk(&mut mgr, &disk, "hot", false).await;
+        let flow = laid.expect("a table with an empty data partition is laid fresh").expect("laid");
+        assert!(flow.data_flow, "laid fresh: the data half is moved in");
+        drop(mgr);
+        let dev = open_disk().await;
+        let at = data_start(dev.clone()).await;
+        assert!(crate::image::local::slab_magic_at(&dev, at).await.unwrap(), "the data slab is laid again");
+
+        // A data slab that is there and broken: magic, then a damaged header.
+        let mut hdr = vec![0u8; 4096];
+        dev.read(at, &mut hdr).await.unwrap();
+        for b in &mut hdr[8..512] {
+            *b ^= 0xFF;
+        }
+        dev.write(at, &hdr).await.unwrap();
+        dev.flush().await.unwrap();
+        drop(dev);
+        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let e = super::take_local_disk(&mut mgr, &disk, "hot", false).await.expect_err("a broken data slab is refused");
+        assert!(e.to_string().contains("not installing over"), "{e}");
+        let dev = open_disk().await;
+        let mut back = vec![0u8; 4096];
+        dev.read(at, &mut back).await.unwrap();
+        assert_eq!(back, hdr, "the refused drive is untouched");
     }
 
     /// #285: the data half moves while it is written, and a boot cut short in

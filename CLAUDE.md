@@ -174,6 +174,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A blank disk refused: 'data slab will not open: bad slab magic' (2026-10-08, #346, P0) — IN PROGRESS
+
+11.97 on the Dell, a zeroed disk: `local_disk: failed … the data slab will
+not open: bad slab magic`, diskless. `take_local_disk_for` took any drive
+with node partition *types* as "already this node's" and `install::plan`
+then opened its data slab; `data_slab_on` refused any partition *typed* data.
+A table with nothing in it (zeroed disk that kept a table, a lay cut short
+before its data slab) has nothing to keep.
+- [ ] `slab_magic_at`, `node_data_half_present`: magic absent = lay both
+      halves fresh (no force); present and broken = refused, named; read
+      error = refused, named. `data_slab_on` asks for the magic too
+- [ ] test `install_tests::a_node_table_with_an_empty_data_partition_is_laid_
+      fresh`; full nextest; CHANGELOG; golden
+
 ### Boot inventory of storage controllers and drives (2026-10-08, #345, P1) — PAUSED for P0 #346 (back in line)
 
 Owner: "a check during the boot, that we see if controller and drive is
