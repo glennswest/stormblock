@@ -638,6 +638,7 @@ impl ThinVolumeHandle {
         let width = data as usize;
         for &stripe in stripes {
             let _s = self.shard(stripe).lock().await;
+            let _f = self.fenced_stripe(stripe, width).await;
             let members = match self.assemble_stripe(stripe, width).await {
                 Ok(m) => m,
                 Err(e) => {
@@ -755,6 +756,71 @@ impl ThinVolumeHandle {
                 _ => loc = again,
             }
         }
+    }
+
+    /// A shared fence on every slot of a parity stripe, its members and its
+    /// parity legs (#240), taken the way [`fenced_lookup`](Self::fenced_lookup)
+    /// takes one extent's: the map is read again once the fence is held, and
+    /// again until it names the same slots. Held for a whole read-modify-
+    /// write, so a drain cannot move a member or a parity leg under it.
+    ///
+    /// Taken after the stripe lock and never while holding the map or the
+    /// registry, and never twice in one operation: tokio's RwLock queues a
+    /// reader behind a waiting move, so a second hold of a slot already held
+    /// would wait for itself.
+    async fn fenced_stripe(&self, stripe: u64, width: usize) -> fence::Held {
+        let legs = |gem: &GlobalExtentMap| -> Vec<Leg> {
+            let mut v: Vec<Leg> = (stripe * width as u64..(stripe + 1) * width as u64)
+                .filter_map(|x| gem.lookup(self.id, x))
+                .flat_map(|l| l.legs().collect::<Vec<_>>())
+                .collect();
+            if let Some(g) = gem.lookup_parity(self.id, stripe) {
+                v.extend(g.legs.iter().copied());
+            }
+            v.sort_by_key(|l| (l.slab_id.0, l.slot_idx));
+            v
+        };
+        let mut found = legs(&*self.gem.read().await);
+        loop {
+            let held = fence::hold(found.iter().copied()).await;
+            let again = legs(&*self.gem.read().await);
+            if again == found {
+                return held;
+            }
+            found = again;
+        }
+    }
+
+    /// Read part of one member of a parity stripe (#240): the stripe fenced,
+    /// the member's own slot first; when that cannot be read, the stripe
+    /// lock, the fence again and a reconstruction.
+    async fn read_parity_member(&self, vext: u64, off: u64, buf: &mut [u8], width: usize) -> DriveResult<()> {
+        let stripe = vext / width as u64;
+        {
+            let _held = self.fenced_stripe(stripe, width).await;
+            let loc = { self.gem.read().await.lookup(self.id, vext) };
+            let Some(loc) = loc else {
+                buf.fill(0);
+                return Ok(());
+            };
+            for leg in self.usable_legs(&loc, vext) {
+                match self.read_leg(leg, off, buf).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        tracing::warn!(vext, slab = %leg.slab_id, slot = leg.slot_idx, error = %e, "leg read failed");
+                        self.mark_failed(leg.slab_id, &e);
+                    }
+                }
+            }
+        }
+        // Lock order: the stripe lock before the fence, so the fence above
+        // is let go first.
+        let _s = self.shard(stripe).lock().await;
+        let _held = self.fenced_stripe(stripe, width).await;
+        let members = self.assemble_stripe(stripe, width).await?;
+        let i = (vext % width as u64) as usize;
+        buf.copy_from_slice(&members[i][off as usize..off as usize + buf.len()]);
+        Ok(())
     }
 
     /// Lock key for an extent under the current policy: the stripe for a
@@ -1748,6 +1814,9 @@ impl ThinVolumeHandle {
         let stripe = vext / data as u64;
         let member_idx = (vext % data as u64) as usize;
         let _s = self.shard(stripe).lock().await;
+        // Every slot of the stripe fenced for the whole read-modify-write
+        // (#240): a drain moving a member or a parity leg waits for it.
+        let _f = self.fenced_stripe(stripe, width).await;
 
         // The write hole, bounded: say which stripe is mid-write before it
         // is, so a restart verifies this one and not the whole volume.
@@ -1898,6 +1967,7 @@ impl ThinVolumeHandle {
         let stripe = vext / width as u64;
         let member_idx = (vext % width as u64) as usize;
         let _s = self.shard(stripe).lock().await;
+        let _f = self.fenced_stripe(stripe, width).await;
         let (loc, group) = {
             let gem = self.gem.read().await;
             (gem.lookup(self.id, vext), gem.lookup_parity(self.id, stripe).cloned())
@@ -2473,6 +2543,7 @@ impl ThinVolumeHandle {
             t.take(self.slot_size * width as u64).await;
         }
         let _s = self.shard(stripe).lock().await;
+        let _f = self.fenced_stripe(stripe, width).await;
         let members = match self.assemble_stripe(stripe, width).await {
             Ok(m) => m,
             Err(e) => {
@@ -2768,6 +2839,14 @@ impl ThinVolumeHandle {
 
             let buf_start = bytes_read as usize;
             let buf_end = buf_start + to_read;
+
+            // A parity member: the whole stripe fenced (#240).
+            if let Redundancy::Parity { data, .. } = self.redundancy().scheme {
+                self.read_parity_member(vext_idx, off_in_slot, &mut buf[buf_start..buf_end], data as usize).await?;
+                bytes_read += to_read as u64;
+                pos += to_read as u64;
+                continue;
+            }
 
             // Look up extent in GEM, its slots fenced against a move (#239)
             let (location, _held) = self.fenced_lookup(vext_idx).await;
@@ -4030,6 +4109,127 @@ mod redundancy_tests {
         assert_eq!(report.unrecoverable, 0, "{report:?}");
         assert_eq!(report.parity_verified, 1);
         cleanup(&paths);
+    }
+
+    /// A file device whose next read stops until let go: an I/O caught
+    /// between finding its slots and using them (#240).
+    struct Gated(Arc<dyn BlockDevice>, Arc<(std::sync::atomic::AtomicBool, tokio::sync::Notify, tokio::sync::Notify)>);
+
+    #[async_trait]
+    impl BlockDevice for Gated {
+        fn id(&self) -> &DeviceId {
+            self.0.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.0.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.0.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.0.optimal_io_size()
+        }
+        fn device_type(&self) -> DriveType {
+            self.0.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+            if self.1 .0.swap(false, Ordering::SeqCst) {
+                self.1 .1.notify_one();
+                self.1 .2.notified().await;
+            }
+            self.0.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            self.0.write(offset, buf).await
+        }
+        async fn flush(&self) -> DriveResult<()> {
+            self.0.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+            self.0.discard(offset, len).await
+        }
+        fn smart_status(&self) -> DriveResult<SmartData> {
+            self.0.smart_status()
+        }
+    }
+
+    /// #240: a drain moving a parity leg while a stripe's read-modify-write
+    /// is in flight. The write has found the stripe (its member and its
+    /// parity leg) and is inside the device reading the member's old bytes
+    /// when the move runs. Without the stripe fenced, the move copies the
+    /// parity, points the map at the copy and lets the old leg go, and the
+    /// write then folds its delta into the leg it found: the copy's parity
+    /// is stale, and the member it protects reconstructs wrong. With it, the
+    /// move finds the leg busy until the write is done.
+    ///
+    /// `FENCE_OFF_240=1` runs it without the fence, to see the loss.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_parity_leg_is_not_moved_under_a_stripe_write() {
+        if std::env::var("FENCE_OFF_240").is_ok() {
+            crate::volume::fence::OFF.store(true, Ordering::Relaxed);
+        }
+        let slot = 4096u64;
+        let gate = Arc::new((std::sync::atomic::AtomicBool::new(false), tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = SlabRegistry::new();
+        // Three slabs for the stripe, a fourth for the parity leg to move to.
+        for i in 0..4 {
+            let path = dir.path().join(format!("slab-{i}.bin")).display().to_string();
+            let dev = FileDevice::open_with_capacity(&path, 8 * 1024 * 1024).await.unwrap();
+            let dev: Arc<dyn BlockDevice> = Arc::new(Gated(Arc::new(dev), gate.clone()));
+            registry.add(Slab::format(dev, slot, StorageTier::Hot).await.unwrap());
+        }
+        let gem: Shared<GlobalExtentMap> = Arc::new(tokio::sync::RwLock::new(GlobalExtentMap::new()));
+        let reg: Shared<SlabRegistry> = Arc::new(tokio::sync::RwLock::new(registry));
+        let v = volume(&gem, &reg, "raid5:2+1", slot);
+        let a = pattern(1, slot as usize);
+        let b = pattern(2, slot as usize);
+        v.write(0, &a).await.unwrap();
+        v.write(slot, &b).await.unwrap();
+        let p_slab = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().legs[0].slab_id;
+
+        // The write, stopped inside the device reading member 0's old bytes.
+        gate.0.store(true, Ordering::SeqCst);
+        let writer = {
+            let v = v.clone();
+            tokio::spawn(async move { v.write(0, &[0x5A; 512]).await })
+        };
+        gate.1.notified().await;
+
+        // The drain's move of the parity leg, meanwhile.
+        let engine = crate::placement::PlacementEngine::new();
+        let first = {
+            let mut g = gem.write().await;
+            let mut r = reg.write().await;
+            engine.migrate_parity_leg_at(&mut g, &mut r, v.volume_id(), 0, p_slab, "drive").await
+        };
+        gate.2.notify_one();
+        writer.await.unwrap().unwrap();
+        if crate::volume::fence::OFF.load(Ordering::Relaxed) {
+            assert!(first.is_ok(), "without the fence the move goes ahead: {first:?}");
+        } else {
+            assert!(
+                matches!(first, Err(crate::placement::PlacementError::Busy { .. })),
+                "the stripe's write holds its parity leg: {first:?}"
+            );
+            // Once it is done, the move goes ahead.
+            let mut g = gem.write().await;
+            let mut r = reg.write().await;
+            engine.migrate_parity_leg_at(&mut g, &mut r, v.volume_id(), 0, p_slab, "drive").await.unwrap();
+        }
+
+        let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+        assert_ne!(g.legs[0].slab_id, p_slab, "the parity leg moved");
+        let mut a2 = a.clone();
+        a2[..512].fill(0x5A);
+        let xor = |x: &[u8], y: &[u8]| -> Vec<u8> { x.iter().zip(y).map(|(p, q)| p ^ q).collect() };
+        assert_eq!(raw(&reg, g.legs[0], slot as usize).await, xor(&a2, &b), "P = A' ^ B on the moved leg");
+        // And member 0 reconstructs from it.
+        let la = loc(&gem, v.volume_id(), 0).await;
+        reg.write().await.remove(&la.slab_id);
+        let mut back = vec![0u8; slot as usize];
+        v.read(0, &mut back).await.unwrap();
+        assert_eq!(back, a2, "member 0 rebuilt from B and the moved parity");
     }
 
     #[tokio::test]

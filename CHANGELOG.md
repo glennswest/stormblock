@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #240: the slot fence covers parity stripes and StormFS chunk frees.
+  - **Parity:** a parity volume's write (read-modify-write), discard, stripe verify and resync now hold every member and parity leg of the stripe shared, after the stripe lock, for the whole operation (`fenced_stripe`; the map is re-read until it names the same slots). A drain's parity-leg move (`migrate_parity_leg_at`, which only tries the fence) finds them busy instead of copying a parity leg and letting it go while a write folds its delta into it. Parity reads fence the stripe too, and let it go before taking the stripe lock to reconstruct.
+  - **StormFS:** `chunk::free` looks its extents up and unmaps them under one map write lock. Before, a move that published between the read-locked lookup and the unmap had its new slot leaked and the slot it replaced freed a second time. `versioned::commit` already did everything under the write locks, and neither does device I/O on a mapped slot, so neither needs the fence.
+  - **Tests:** `a_parity_leg_is_not_moved_under_a_stripe_write` (a write stopped inside the device while the parity leg is moved: Busy, then moved afterwards, with parity right and member 0 rebuilt from it). `FENCE_OFF_240=1` shows the loss.
 - **feat:** #253: the initramfs reads stormbootx's `StormBootClock` EFI variable.
   - **`synced:<server>`:** logged as `clock: firmware synced from <server>`, and the NTP step is skipped (up to `STORM_NTP_WAIT` s saved per try). It runs anyway if the clock still reads before the image's build date, or with `rd.stormblock.ntp=always`.
   - **`unsynced`:** logged as `clock: firmware did not sync`, and the step runs as before.

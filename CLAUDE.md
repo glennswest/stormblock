@@ -172,6 +172,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The slot fence on parity stripes and StormFS (2026-10-08, #240) — IN PROGRESS
+
+- [x] `fenced_stripe` (members + parity legs, re-read until stable) after the
+      stripe lock in write/release/verify/resync; parity reads own path
+      (fence, read; drop; stripe lock; fence; reconstruct) — never a slot
+      held twice
+- [x] `chunk::free`: lookup + unmap under one map write lock (a move between
+      leaked its copy and double-freed); `versioned::commit` already atomic
+- [x] test `a_parity_leg_is_not_moved_under_a_stripe_write`
+      (`FENCE_OFF_240=1` shows the loss); durability.md, fence.rs, CHANGELOG
+- [ ] build: the test with and without the fence; full nextest; golden
+
 ### The initramfs reads StormBootClock (2026-10-08, #253) — DONE
 
 - [x] clock block: `clock_firmware` (efivarfs, validated), synced = no NTP

@@ -539,12 +539,21 @@ pub async fn free(
         let first = ext.offset.div_ceil(slot_size);
         let last = ext.end() / slot_size;
 
+        // Looked up and unmapped under one write lock (#240). A move
+        // publishes under the same lock after checking the extent still names
+        // the slot it copied: one that went first is seen here at its new
+        // slot, and one that comes after finds the extent gone and gives its
+        // copy back. Looking up under a read lock and unmapping later freed
+        // a slot the move had already replaced, and leaked its copy.
         let mut to_free: Vec<(u64, ExtentLocation)> = Vec::new();
         {
-            let g = gem.read().await;
+            let mut g = gem.write().await;
             for vext in first..last {
                 match g.lookup(ext.volume, vext) {
-                    Some(loc) => to_free.push((vext, loc.clone())),
+                    Some(loc) => {
+                        to_free.push((vext, loc.clone()));
+                        g.remove(ext.volume, vext);
+                    }
                     None => out.already_free += 1,
                 }
             }
@@ -555,13 +564,6 @@ pub async fn free(
                 map.release(ext.volume, ext.offset, ext.len);
             }
             continue;
-        }
-
-        {
-            let mut g = gem.write().await;
-            for (vext, _) in &to_free {
-                g.remove(ext.volume, *vext);
-            }
         }
 
         // Group by slab so a run of slots costs one batch rather than one

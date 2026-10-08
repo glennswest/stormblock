@@ -31,6 +31,11 @@
 //! wait on its own read when an engine in the same process served that read
 //! from a slot in the same shard (a test's in-process appliance).
 //!
+//! A parity volume fences a whole stripe — every member and parity leg —
+//! for a read-modify-write, a discard, a verify or a resync (#240,
+//! `ThinVolumeHandle::fenced_stripe`), and never takes a slot twice in one
+//! operation: a second shared hold queues behind a waiting move.
+//!
 //! Lock order: a volume's extent shards and its volume lock, then the fence,
 //! then the map and the registry. I/O never waits for the fence while
 //! holding the map or the registry. A move that already holds them (the

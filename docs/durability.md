@@ -134,6 +134,17 @@ tests run on.
    reports the slot busy. Every copy is read back and compared before any map
    names it. The flow-over quarantines its sources, so a copy-on-write made
    meanwhile lands on the local disk rather than behind the move.
+   A parity volume's stripe is fenced whole (#240): its read-modify-write,
+   discard, verify and resync hold every member and parity leg shared, after
+   the stripe lock, for the whole operation, so a drain cannot move a parity
+   leg between the read of the old parity and the write of the new. A read
+   holds the stripe's slots while it reads its member, and lets them go
+   before it takes the stripe lock to reconstruct one it cannot read. A slot
+   is never held twice by one operation: the fence's lock queues a second
+   reader behind a waiting move. StormFS chunks are freed by looking them up
+   and unmapping them under one map write lock, the lock a move publishes
+   under, so a move either went first and its copy is what is freed, or comes
+   after and finds the extent gone.
    The flow-over's copy holds the fence and nothing else (#269): the
    registry is taken to allocate the destination (reserved against the
    collector), and the map and the registry to publish, after checking that
