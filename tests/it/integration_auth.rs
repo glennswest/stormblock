@@ -332,7 +332,7 @@ async fn debug_is_open_but_an_open_caller_sees_no_paths_and_cannot_force_dumps()
 }
 
 /// #365: who holds a lock and who waits on it is named. A background task
-/// holds the volume manager; `GET /api/v1/volumes` waits on it; `/debug/locks`
+/// holds the volume manager; a `DELETE /api/v1/volumes/{id}` waits on it; `/debug/locks`
 /// names the holder, how long, and the waiting request (by route family in
 /// the open view), and the request ends with its lock wait counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -352,14 +352,16 @@ async fn a_lock_holder_and_its_waiters_are_named() {
     let c2 = c.clone();
     let b2 = base.clone();
     let waiting = tokio::spawn(async move {
-        c2.get(format!("{b2}/api/v1/volumes/3f1c0de5-0283-4000-8000-5ec2e7da7a00")).bearer_auth("sekrit").send().await
+        // A delete still takes the manager (to tell a golden from a volume);
+        // a plain GET no longer does (#364: it reads the published catalog).
+        c2.delete(format!("{b2}/api/v1/volumes/3f1c0de5-0283-4000-8000-5ec2e7da7a00")).bearer_auth("sekrit").send().await
     });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let full = c.get(format!("{base}/debug/locks")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
     assert!(full.contains("the volume manager: held"), "{full}");
     assert!(full.contains("by template build pvc-16t"), "the holder is named: {full}");
-    assert!(full.contains("1 waiting") && full.contains("GET /api/v1/volumes/3f1c0de5"), "the waiter is named: {full}");
+    assert!(full.contains("1 waiting") && full.contains("DELETE /api/v1/volumes/3f1c0de5"), "the waiter is named: {full}");
     let open = c.get(format!("{base}/debug/locks")).send().await.unwrap().text().await.unwrap();
     assert!(open.contains("by template build pvc-16t"), "{open}");
     assert!(!open.contains("3f1c0de5"), "the open view names no volume: {open}");
@@ -367,7 +369,7 @@ async fn a_lock_holder_and_its_waiters_are_named() {
     tx.send(()).unwrap();
     holder.await.unwrap();
     let r = waiting.await.unwrap().unwrap();
-    assert!(r.status().as_u16() == 404 || r.status().is_success(), "{}", r.status());
+    assert!(r.status().as_u16() == 404 || r.status().is_success() || r.status().as_u16() == 409, "{}", r.status());
     let after = c.get(format!("{base}/debug/locks")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
     assert!(!after.contains("template build"), "a released lock leaves nothing behind: {after}");
     server.abort();
