@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Flow-over as fast as the hardware allows (2026-10-07, #331, P0) — IN PROGRESS
+### Flow-over as fast as the hardware allows (2026-10-07, #331, P0) — DONE (golden-stormblock-aa3cf1526f06), hardware number on the release
 
 Owner: 20x today's rate is the direction, not a test; make it as fast as the
 hardware allows, measured on real hardware (a blade or the Dell). The hours
@@ -196,8 +196,9 @@ netbooted install over NVMe/TCP to an in-process appliance, 1530 extents,
       VM's flush cost swamps it over loopback). 6000 extents, 300 goldens:
       185k / 336k (persist = the VM disk's flush, 0.7 s a window). Full
       nextest at e93f08b 1006/1006; flow/install/fence/nvmeof at daaad9c 88/88
-- [ ] golden; real hardware (a blade or the Dell): `flow_over_remaining`
-      and the breakdown lines on the next install
+- [x] golden golden-stormblock-aa3cf1526f06 (stormcos#353); numbers on #331;
+      `stormcentral shipped`. Not on metal: a blade or the Dell installing a
+      release with it (`flow_over_remaining`, the breakdown lines)
 
 ### Emulated directory backing, mkfs-ext4 off v3.0.0 (2026-10-07, #300, P2) — PARKED (master: #331 first)
 
