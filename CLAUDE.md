@@ -174,6 +174,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Install drops sealed non-release volumes in the system half (2026-10-08, #349, P0) — WAITING ON THE OWNER (ask 2)
+
+stormblock-registry#104: registry goldens and held media made with no role
+sit sealed in the system half; `install::plan` skips sealed volumes, so the
+next install drops them.
+- [x] ask 1: `role` on `POST /api/v1/volumes/import` has worked since #93
+      (`ImportSpec.role`); the route's doc now names it; test
+      `integration_fstemplates::an_import_with_role_data_lands_in_the_data_half`
+- [ ] ask 2: no provenance on a record, so a dropped release golden and a
+      node-made golden look alike. Asked on #349 (needs-owner): A stop on all
+      (blocks flavor switches), B carry into the data half, C mark origin
+      release|node and drop/carry by it, unmarked carried (recommended), D
+      the release lists what it retires
+
 ### Shelves by position (2026-10-08, #347, P0, owner corrects #344) — DONE here, metal pending
 
 Every SES enclosure is a shelf: internal, front, rear, external, each its
