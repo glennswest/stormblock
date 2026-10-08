@@ -263,9 +263,12 @@ async fn three_hundred_exports_share_one_listener_and_drain_one_by_one() {
 
     // Drain one with a host attached.
     let (_, _, nqn) = made[7].clone();
-    let held = NvmeofDevice::connect(&spec(port, &nqn, H1)).await.unwrap();
-    let mut b = vec![0u8; 4096];
-    held.read(0, &mut b).await.unwrap(); // its I/O connection is open
+    // One controller, held open as a host holds its queues.
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let mut held = NvmeofInitiator::connect(addr).await.unwrap();
+    held.ic_handshake().await.unwrap();
+    let (_, st) = held.fabric_connect_raw(&nqn, H1, 0).await.unwrap();
+    assert_eq!(st, 0, "connected");
     let eid = {
         let w = s.ctx.wiring.lock().await;
         w.exports.iter().find(|r| r.nqn.as_deref() == Some(nqn.as_str())).unwrap().export_id
@@ -278,8 +281,13 @@ async fn three_hundred_exports_share_one_listener_and_drain_one_by_one() {
         async move { ctx.wiring.lock().await.exports.iter().find(|r| r.export_id == eid).map(|r| r.state) }
     };
     assert_eq!(state(&s).await, Some(stormblock::serve::wiring::WireState::Draining), "held: still draining");
-    held.read(0, &mut b).await.expect("the attached host is still served");
-    assert!(NvmeofDevice::connect(&spec(port, &nqn, H2)).await.is_err(), "a draining subsystem takes no one new");
+    let id = held.identify_controller().await.expect("the attached host is still served");
+    assert!(!id.is_empty(), "the attached host is still served");
+    let mut late = NvmeofInitiator::connect(addr).await.unwrap();
+    late.ic_handshake().await.unwrap();
+    let (_, st) = late.fabric_connect_raw(&nqn, H1, 0).await.unwrap();
+    assert_ne!(st, 0, "a draining subsystem takes no one new");
+    drop(late);
     drop(held);
     for _ in 0..50 {
         stormblock::serve::reconcile::pass(&s.ctx).await.unwrap();
