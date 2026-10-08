@@ -186,7 +186,7 @@ left the ublk device / namespace; expiry ran only inside some calls.
 - [ ] test `integration_ana_epoch::promote_and_an_expired_window_take_the_
       data_path_with_the_record`; docs; CHANGELOG
 
-### tests-runtime/ has a gate (2026-10-08, #222) — IN PROGRESS
+### tests-runtime/ has a gate (2026-10-08, #222) — PAUSED for P0 #344 (back in line)
 
 Since #209 the eight runtime tests ran nowhere, the flow-over resume
 regression test (#171/#172) among them.
@@ -196,7 +196,9 @@ regression test (#171/#172) among them.
 - [x] engine_e2e no longer passes by skipping without `STORMBLOCK_BIN`
 - [x] filed #342 (ublk_resize in a QEMU guest), #343 (iSCSI tests need an
       external target)
-- [ ] run it on a build VM; fix what fails; README, CHANGELOG
+- [ ] run `ci-runtime-tests.sh` on a build VM (never ran: paused while
+      queued); fix what fails; CHANGELOG. Code, script, README, CLAUDE.md
+      pushed (0ff8829)
 
 ### Default claim with a serial (2026-10-08, #202) — WAITING ON THE OWNER
 
