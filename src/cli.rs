@@ -7004,11 +7004,12 @@ pub(crate) async fn ensure_system_data(
     use crate::drive::DriveType;
     let local_data = {
         let reg = mgr.registry().read().await;
-        reg.iter().any(|(id, s)| {
+        let any = reg.iter().any(|(id, s)| {
             s.is_data()
                 && !reg.is_quarantined(id)
                 && !matches!(s.device().device_type(), DriveType::NvmeTcp | DriveType::Iscsi)
-        })
+        });
+        any
     };
     if let Some(id) = mgr.find_volume(SYSTEM_DATA_VOLUME).await {
         return Ok(local_data.then_some(id));
