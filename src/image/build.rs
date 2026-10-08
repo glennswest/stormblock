@@ -725,12 +725,20 @@ impl ImageBuilder {
         let listed = mgr.list_volumes().await;
         let mut out = Vec::with_capacity(listed.len());
         for id in order {
-            if let Some((_, name, size, allocated)) = listed.iter().find(|(i, ..)| *i == id) {
+            if let Some((_, name, size, _)) = listed.iter().find(|(i, ..)| *i == id) {
+                // What the field says: bytes mapped to slab slots. The
+                // listing's `allocated` is what a volume costs (5e4e5d3), and
+                // a golden and its first clone share every slot, so each cost
+                // 0 there and the report said nothing landed (#120).
+                let mapped = match mgr.get_volume_handle(&id) {
+                    Some(h) => h.mapped().await,
+                    None => 0,
+                };
                 out.push(VolumeReport {
                     id: id.0,
                     name: name.clone(),
                     size_bytes: *size,
-                    allocated_bytes: *allocated,
+                    allocated_bytes: mapped,
                     clone_of: clone_of.get(&id).map(|g| g.0),
                     sealed: mgr.is_sealed(&id),
                     fs_uuid: mgr.fs_info(&id).and_then(|f| f.uuid),

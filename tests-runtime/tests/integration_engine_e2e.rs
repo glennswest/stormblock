@@ -161,7 +161,8 @@ async fn a_plain_create_works_on_a_node_that_has_slabs() {
         let id = body["id"].as_str().unwrap().to_string();
         let resp = client
             .post(format!("{}/api/v1/volumes/{id}/attach", e.base))
-            .json(&serde_json::json!({"transport": "nvme-tcp"}))
+            // The shared subsystem is closed (#210): an attach names its host.
+            .json(&serde_json::json!({"transport": "nvme-tcp", "host_nqn": "nqn.2026-09.lo.test:e2e-host"}))
             .send().await.unwrap();
         assert!(resp.status().is_success(), "{role}: attach {}", resp.status());
     }
