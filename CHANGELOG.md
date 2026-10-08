@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #357: 87d2d99 did not compile (E0597 in `ensure_system_data`: the registry guard was borrowed by the block's tail expression; fixed in e978796), and the test image could not build. **build:** `check.sh` is the one routine check now (`sc-build 'sh check.sh'`): the test image (`test/build.sh`), every initramfs test under sh and busybox sh, the nextest suite, the runtime tests. A commit isn't called done until it passes.
 - **feat:** #355 (P0, stormcos#456): `system-data`, the node's kept record of itself.
   - **The volume:** `boot-local` makes it (ext4, 4 GiB thin) in a local data half when it isn't there yet, and exports it after every other ublk device. Every install keeps it; a diskless boot makes none.
   - **Mounted by `/init`** at `/run/stormblock/system-data` (which survives `switch_root`). It writes `config/mounts.release` (the release's mount list), `history/boots/<time>.json` (release, tag, cmdline, the disk verdict and storage inventory, the handover) and `history/installs/<time>.json` for a boot that installed, keeping the newest 500 boot records.

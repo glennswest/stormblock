@@ -1,7 +1,7 @@
 #!/bin/sh
 # ci-runtime-tests.sh — the runtime tests (tests-runtime/, #209) against the
 # binary of this commit (#222). Part of the routine check:
-#   sc-build 'cargo nextest run --locked && sh ci-runtime-tests.sh'
+#   sc-build 'sh check.sh'   (its last stage)
 #
 # They drive the built binary (STORMBLOCK_BIN) and need no root: boot-local
 # (--check), the engine end to end over HTTP, the flow-over resume (#171/#172),

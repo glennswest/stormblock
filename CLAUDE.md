@@ -39,7 +39,7 @@ caps long's waves).
 
 ## Build
 ```bash
-sc-build 'cargo nextest run --locked && sh ci-runtime-tests.sh'    # the routine check (#222)
+sc-build 'sh check.sh'                                              # the routine check (#357)
 sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl'  # meant for goldens
 sc-build 'cargo check --locked --features cluster'                   # the Raft layer, opt-in
 ```
@@ -54,7 +54,7 @@ The golden itself is built by stormcos's `deploy/build-goldens.sh` with
   interfere. `cargo nextest run` builds the lib, bins and tests, not examples.
 - `tests-runtime/` holds the **runtime tests**: they drive the built binary
   (`STORMBLOCK_BIN`), a kernel device or privileges. `ci-runtime-tests.sh`
-  (part of the routine check, #222) builds the commit's binary and runs every
+  (part of the routine check, #222, #357) builds the commit's binary and runs every
   one that needs no root; the `#[ignore]`d ones are listed, not run:
   `ublk_resize` (root, ublk_drv: #342), `external_iscsi`/`iscsi_blockdev` (an
   external iSCSI target: #343). The build VMs have no cargo-nextest
@@ -62,7 +62,14 @@ The golden itself is built by stormcos's `deploy/build-goldens.sh` with
 - `src/main.rs` is a wrapper; the command line is `stormblock::cli`, compiled
   and tested once as part of the library.
 
-**Build settings.** The routine check never runs `cargo build --release`.
+**The routine check is `check.sh`** (#357): the test image (`test/build.sh`,
+the musl release build of `stormblock` and `stormblock-test`), every initramfs
+test under sh and busybox sh, the whole nextest suite, the runtime tests. Run
+it on a commit before calling it done: 87d2d99 reached main with neither its
+tests nor the test image compiling (#357). A narrower `sc-build '…'` is for
+iterating, never the last word on a commit.
+
+**Build settings.**
 - `dev`/`test`: `debug = "line-tables-only"`, no debug info for dependencies.
 - `release`: thin LTO, 16 codegen units, for performance measurement.
 - `dist`: fat LTO, 1 codegen unit, meant for goldens (`--profile dist`); the
