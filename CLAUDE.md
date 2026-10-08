@@ -172,6 +172,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Is a flush outstanding on fastetcd's volume? (2026-10-08, #337, P1) — IN PROGRESS
+
+server3 11.91: fastetcd's fdatasync stuck 70+ min from 19:09:47Z, health
+ok, other volumes fine. The node was powered off overnight and the Dell's
+console logs plugin does not answer, so nothing live was left to read.
+By reading: 11.91 predates #334's fix (8723092). rustkube-node's medium
+suite was minting and cloning in parallel and the API timed out from 19:09Z,
+which is what makes the watchdog (requests > 10 s) run `task_dump`. On the
+Dell, under the same suite and release, that dump panicked a ublk device's
+current-thread runtime and lost a wake, so that device's requests never
+completed: one volume stuck, the rest and health fine. Nothing tracked an
+unanswered ublk request, so the engine could not answer the question.
+- [x] per-queue tag tracking (`ublk::QueueTrack`, `ublk::stuck`); health
+      `ublk_stuck` (≥ 30 s); watchdog WARN every 30 s; tests; README,
+      CHANGELOG
+- [ ] build + tests on a build VM; answer on #337 and fastetcd#138
+
 ### Flow-over as fast as the hardware allows (2026-10-07, #331, P0) — DONE (golden-stormblock-aa3cf1526f06), hardware number on the release
 
 Owner: 20x today's rate is the direction, not a test; make it as fast as the

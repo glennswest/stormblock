@@ -68,6 +68,9 @@ use super::AppState;
 /// which of its nodes are open without trying to break into each one. Saying
 /// "a token is required here" tells an attacker nothing they do not learn from
 /// the first 401.
+/// How long a ublk request may go unanswered before health names it (#337).
+pub const UBLK_STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
     struct Health {
@@ -93,6 +96,14 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// first answer could be read without waiting (unknown, not settled).
         #[serde(skip_serializing_if = "Option::is_none")]
         slabs: Option<super::slab_report::SlabReport>,
+        /// Requests a ublk device was handed and has not answered for 30 s
+        /// or more, oldest first: device (`volume:<id>`), `/dev/ublkbN`,
+        /// queue, tag, op, seconds (#337). A FLUSH here is a consumer's
+        /// fsync that has not returned. Left out when there is none. `status`
+        /// stays `ok`: a probe asks whether the engine answers, not whether
+        /// every device does.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        ublk_stuck: Vec<crate::drive::ublk::Stuck>,
     }
     let flow_over_remaining =
         u64::try_from(state.flow_over_remaining.load(std::sync::atomic::Ordering::Relaxed)).ok();
@@ -113,6 +124,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         raid,
         flow_over_remaining,
         slabs: super::slab_report::for_health(&state),
+        ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
     })
     .into_response()
 }

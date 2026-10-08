@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-10-08
+- **feat:** #337: health names a ublk request that was never answered.
+  - **Why:** on server3 (11.91), fastetcd's fdatasync did not return for 70 minutes while health said ok, and the engine could not say whether a FLUSH on its device was outstanding. The likely cause is #334, fixed in golden-stormblock-65b6578787be: under the same suite on the Dell, the stall watchdog's task dump panicked a ublk device's runtime and lost a wake. That device's requests then never completed.
+  - **Now:** each ublk queue records when each tag's request was taken, and its op. `/api/v1/health` lists every request unanswered for 30 s or more (`ublk_stuck`: device, `/dev/ublkbN`, queue, tag, op, seconds), and the watchdog logs it every 30 s.
+  - **Tests:** `ublk::tests::an_unanswered_request_is_listed_until_it_is_answered`, `integration_auth::health_names_a_ublk_request_that_was_never_answered`.
+
 ### 2026-10-07
 - **perf:** #331: an attached NVMe/TCP namespace has several I/O connections (`STORMBLOCK_NVME_TCP_QUEUES`, 4), not one.
   - **Problem:** a flow-over's parallel 1 MiB copies (eight 128 KiB round trips each) and the node's own reads of extents still on the appliance queued on a single connection.

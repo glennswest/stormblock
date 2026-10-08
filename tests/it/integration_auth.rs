@@ -141,6 +141,34 @@ async fn health_reports_what_the_flow_over_has_left() {
     server.abort();
 }
 
+/// #337: health names a ublk request unanswered for 30 s, open (no token),
+/// so a consumer whose fsync never returns can see it is below it.
+#[tokio::test]
+async fn health_names_a_ublk_request_that_was_never_answered() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with(&dir, config_with_token("sekrit")).await;
+    let (base, server) = serve(state.clone()).await;
+    let c = reqwest::Client::new();
+    let get = || async {
+        c.get(format!("{base}/api/v1/health")).send().await.unwrap().json::<serde_json::Value>().await.unwrap()
+    };
+    assert!(get().await.get("ublk_stuck").is_none(), "nothing outstanding: left out");
+    let t = stormblock::drive::ublk::QueueTrack::new(77, 0, "volume:fastetcd-data".into(), 8);
+    t.begin(3, 2 /* UBLK_IO_OP_FLUSH */);
+    assert!(get().await.get("ublk_stuck").is_none(), "a flush just taken is not stuck");
+    t.backdate(3, 4300);
+    let body = get().await;
+    assert_eq!(body["status"], "ok");
+    let s = &body["ublk_stuck"][0];
+    assert_eq!(s["op"], "flush");
+    assert_eq!(s["ublk"], "/dev/ublkb77");
+    assert_eq!(s["device"], "volume:fastetcd-data");
+    assert!(s["secs"].as_f64().unwrap() >= 4300.0);
+    t.end(3);
+    assert!(get().await.get("ublk_stuck").is_none(), "answered: gone");
+    server.abort();
+}
+
 #[tokio::test]
 async fn health_says_when_the_node_is_open() {
     let dir = TempDir::new().unwrap();

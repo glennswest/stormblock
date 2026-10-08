@@ -489,6 +489,12 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   - It is counted only on a node with a remote slab, at most every 10 s, and
     never waited for: it is left out until a first answer could be read, so
     absent means unknown.
+  And `"ublk_stuck"` (#337): every request a ublk device was handed and has
+  not answered for 30 s or more, oldest first, with `device`
+  (`volume:<id>`), `ublk` (`/dev/ublkbN`), `queue`, `tag`, `op` (`flush`,
+  `write`, …) and `secs`. A `flush` there is a consumer's fsync that has not
+  returned. Left out when there is none; `status` stays `ok`. The watchdog
+  logs the same list (WARN) every 30 s while it lasts.
   A booting node asks this of every candidate address before it has a token.
 - `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
   public, read-only, no volume data (#269): what the engine is doing when its

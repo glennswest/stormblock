@@ -879,6 +879,7 @@ impl UblkServer {
             let max_io = DEFAULT_MAX_IO_BYTES as usize;
             let rt_handle = tokio::runtime::Handle::current();
             let barrier = startup_barrier.clone();
+            let track = QueueTrack::new(assigned_id, q, self.device.id().path.clone(), queue_depth);
 
             let handle = std::thread::Builder::new()
                 .name(format!("ublk-q{}", q))
@@ -886,7 +887,7 @@ impl UblkServer {
                     let desc_base = desc_base;
                     queue_worker(
                         q, raw_char_fd, desc_base.0, depth, max_io,
-                        device, running, rt_handle, barrier,
+                        device, running, rt_handle, barrier, track,
                     );
                 })
                 .map_err(|e| DriveError::Other(anyhow::anyhow!(
@@ -1409,6 +1410,117 @@ fn submit_ctrl_cmd(
 /// `user_data` of the eventfd read that says requests have finished.
 const WAKE: u64 = u64::MAX;
 
+/// Requests a device has been given and not yet answered, by tag (#337).
+///
+/// fastetcd on server3 (11.91) saw its fdatasync not return for 70 minutes
+/// while every other volume and `/api/v1/health` were fine, and nothing in
+/// the engine could say whether a FLUSH on its device was outstanding. Each
+/// queue keeps, per tag, when its request was taken (0 = none) and its op:
+/// two stores per request. [`stuck`] lists those older than a bound, for
+/// health and the watchdog.
+pub struct QueueTrack {
+    dev_id: u32,
+    queue: u16,
+    device: String,
+    since_ms: Vec<std::sync::atomic::AtomicU64>,
+    op: Vec<std::sync::atomic::AtomicU8>,
+}
+
+/// One request a device has not answered.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Stuck {
+    pub device: String,
+    pub ublk: String,
+    pub queue: u16,
+    pub tag: u16,
+    pub op: &'static str,
+    pub secs: f64,
+}
+
+static TRACKS: std::sync::LazyLock<std::sync::Mutex<Vec<std::sync::Weak<QueueTrack>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn track_now_ms() -> u64 {
+    static BASE: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    BASE.elapsed().as_millis() as u64 + 1
+}
+
+impl QueueTrack {
+    #[doc(hidden)]
+    pub fn new(dev_id: u32, queue: u16, device: String, depth: u16) -> Arc<Self> {
+        let t = Arc::new(QueueTrack {
+            dev_id,
+            queue,
+            device,
+            since_ms: (0..depth).map(|_| Default::default()).collect(),
+            op: (0..depth).map(|_| Default::default()).collect(),
+        });
+        let mut all = TRACKS.lock().unwrap_or_else(|e| e.into_inner());
+        all.retain(|w| w.strong_count() > 0);
+        all.push(Arc::downgrade(&t));
+        t
+    }
+
+    #[doc(hidden)]
+    pub fn begin(&self, tag: u16, op: u8) {
+        self.op[tag as usize].store(op, Ordering::Relaxed);
+        self.since_ms[tag as usize].store(track_now_ms(), Ordering::Release);
+    }
+
+    #[doc(hidden)]
+    pub fn end(&self, tag: u16) {
+        self.since_ms[tag as usize].store(0, Ordering::Release);
+    }
+
+    /// Makes `tag`'s request look `secs` old (tests).
+    #[doc(hidden)]
+    pub fn backdate(&self, tag: u16, secs: u64) {
+        let at = self.since_ms[tag as usize].load(Ordering::Acquire);
+        self.since_ms[tag as usize].store(at.saturating_sub(secs * 1000).max(1), Ordering::Release);
+    }
+}
+
+fn op_name(op: u8) -> &'static str {
+    match op {
+        UBLK_IO_OP_READ => "read",
+        UBLK_IO_OP_WRITE => "write",
+        UBLK_IO_OP_FLUSH => "flush",
+        UBLK_IO_OP_DISCARD => "discard",
+        UBLK_IO_OP_WRITE_ZEROES => "write-zeroes",
+        _ => "other",
+    }
+}
+
+/// Every request a ublk device has held for `older_than` or more, oldest
+/// first.
+pub fn stuck(older_than: std::time::Duration) -> Vec<Stuck> {
+    let now = track_now_ms();
+    let bound = older_than.as_millis() as u64;
+    let all: Vec<Arc<QueueTrack>> = {
+        let all = TRACKS.lock().unwrap_or_else(|e| e.into_inner());
+        all.iter().filter_map(|w| w.upgrade()).collect()
+    };
+    let mut out = Vec::new();
+    for t in all {
+        for (tag, since) in t.since_ms.iter().enumerate() {
+            let since = since.load(Ordering::Acquire);
+            if since == 0 || now.saturating_sub(since) < bound {
+                continue;
+            }
+            out.push(Stuck {
+                device: t.device.clone(),
+                ublk: format!("/dev/ublkb{}", t.dev_id),
+                queue: t.queue,
+                tag: tag as u16,
+                op: op_name(t.op[tag].load(Ordering::Relaxed)),
+                secs: now.saturating_sub(since) as f64 / 1000.0,
+            });
+        }
+    }
+    out.sort_by(|a, b| b.secs.total_cmp(&a.secs));
+    out
+}
+
 /// A request served: its result, and the tag's buffer back.
 struct Done {
     tag: u16,
@@ -1554,6 +1666,7 @@ fn queue_worker(
     running: Arc<AtomicBool>,
     rt_handle: tokio::runtime::Handle,
     startup_barrier: Arc<std::sync::Barrier>,
+    track: Arc<QueueTrack>,
 ) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -1697,9 +1810,11 @@ fn queue_worker(
             let offset = desc.start_sector * 512;
             let length = desc.nr_sectors as usize * 512;
             let buf = std::mem::take(&mut bufs[tag as usize]);
+            track.begin(tag, op);
 
             if serial {
                 let (result, buf) = rt_handle.block_on(serve(&*device, op, offset, length, buf));
+                track.end(tag);
                 bufs[tag as usize] = buf;
                 push_commit(&mut ring, char_fd, queue_id, tag, result, &bufs[tag as usize]);
                 continue;
@@ -1707,8 +1822,10 @@ fn queue_worker(
             completions.in_flight.fetch_add(1, Ordering::SeqCst);
             let device = device.clone();
             let completions = completions.clone();
+            let track = track.clone();
             rt_handle.spawn(async move {
                 let (result, buf) = serve(&*device, op, offset, length, buf).await;
+                track.end(tag);
                 completions.post(Done { tag, result, buf });
             });
         }
@@ -1772,6 +1889,29 @@ fn submit_io_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #337: a request a device has not answered is listed with its op and
+    /// age, oldest first; an answered one, or a dropped device, is not.
+    #[test]
+    fn an_unanswered_request_is_listed_until_it_is_answered() {
+        let t = QueueTrack::new(9337, 1, "volume:fastetcd".into(), 4);
+        t.begin(2, UBLK_IO_OP_FLUSH);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        t.begin(0, UBLK_IO_OP_WRITE);
+        let mine = |v: Vec<Stuck>| v.into_iter().filter(|s| s.ublk == "/dev/ublkb9337").collect::<Vec<_>>();
+        let all = mine(stuck(std::time::Duration::ZERO));
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].op, all[0].tag, all[0].queue), ("flush", 2, 1), "oldest first");
+        assert_eq!(all[0].device, "volume:fastetcd");
+        let old = mine(stuck(std::time::Duration::from_millis(25)));
+        assert_eq!(old.len(), 1, "only the flush is that old: {old:?}");
+        t.end(2);
+        t.end(0);
+        assert!(mine(stuck(std::time::Duration::ZERO)).is_empty(), "answered");
+        t.begin(1, UBLK_IO_OP_READ);
+        drop(t);
+        assert!(mine(stuck(std::time::Duration::ZERO)).is_empty(), "a device gone is not listed");
+    }
 
     #[test]
     fn ublk_abi_struct_sizes() {

@@ -290,8 +290,28 @@ pub fn start(state: Arc<AppState>) {
     let spawned = std::thread::Builder::new().name("api-watchdog".into()).spawn(move || {
         let mut last_capture: Option<Instant> = None;
         let mut starved_since: Option<Instant> = None;
+        let mut last_ublk: Option<Instant> = None;
         loop {
             std::thread::sleep(Duration::from_secs(2));
+            // A ublk device that has not answered a request (#337): said
+            // every 30 s while it lasts, with its op and age, so a consumer
+            // whose fsync never returns can be told it is below it.
+            let stuck = crate::drive::ublk::stuck(crate::mgmt::api::UBLK_STUCK_AFTER);
+            if !stuck.is_empty() && last_ublk.map(|t| t.elapsed() >= REPORT_AGAIN).unwrap_or(true) {
+                last_ublk = Some(Instant::now());
+                let list: Vec<String> = stuck
+                    .iter()
+                    .take(16)
+                    .map(|s| format!("{} {} ({}) q{} tag {}: {:.0}s", s.op, s.ublk, s.device, s.queue, s.tag, s.secs))
+                    .collect();
+                tracing::warn!(
+                    "ublk: {} request(s) unanswered for {}s or more: {}{}",
+                    stuck.len(),
+                    crate::mgmt::api::UBLK_STUCK_AFTER.as_secs(),
+                    list.join("; "),
+                    if stuck.len() > 16 { "; …" } else { "" }
+                );
+            }
             let beat_age = since_start_ms().saturating_sub(HEARTBEAT.load(Ordering::Relaxed));
             let starved = beat_age > 5_000;
             if starved && starved_since.is_none() {
