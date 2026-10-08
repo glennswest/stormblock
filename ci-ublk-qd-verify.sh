@@ -20,6 +20,11 @@
 # of a kubelet's image clone does) — the volume must stay with its data, a
 # DELETE be refused (409), and the volume go once the device is detached.
 #
+# And (#337): the slab's dm device suspended after a write, so an fsync's
+# FLUSH is never answered — `/api/v1/health` must list it in `ublk_stuck`
+# once it is 30 s old and the watchdog log it; after a resume the fsync
+# returns and the entry goes.
+#
 # Pass: the round trips are exact in both modes, the #267 checks hold, and
 # served at once is at least 3× faster on parallel reads than served serially.
 #
@@ -186,6 +191,7 @@ EOT
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
     [ "$mode" = concurrent ] && in_use
+    [ "$mode" = concurrent ] && unanswered
 
     step stop
     kill -TERM $pid; wait $pid
@@ -194,7 +200,7 @@ EOT
 
 # A hang must say where it is: the engine's log and every one of its threads'
 # kernel stacks, then the guest powers off.
-( sleep ${WATCHDOG:-200}
+( sleep ${WATCHDOG:-300}
   echo "WATCHDOG fired"
   for l in /run/engine-*.log; do sed "s|^|LOG ${l##*/}: |" $l | tail -15; done
   for p in $(pidof stormblock); do
@@ -249,6 +255,31 @@ in_use() {
     grep -E "kept until it is detached|ephemeral volume .* deleted" /run/engine-$mode.log | sed 's/^/LOG /' | tail -3
 }
 
+# #337: a flush the disk below never answers. The slab's dm device is
+# suspended (I/O queued, not failed) after a write, so the fsync's FLUSH
+# waits in the engine. Health must name it once it is 30 s old, and the
+# watchdog log it; after a resume the fsync returns and the entry goes.
+unanswered() {
+    step unanswered
+    dd if=/dev/urandom of=$dev bs=4096 count=1 seek=100 oflag=direct 2>/dev/null
+    dmsetup suspend --noflush slow$disk || { r unanswered-suspend FAIL; return; }
+    dd if=/dev/null of=$dev bs=4096 count=0 conv=fsync,notrunc 2>/dev/null &
+    f=$!
+    sleep 36
+    h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
+    echo "LOG health while suspended: $h"
+    case "$h" in *'"ublk_stuck"'*'"op":"flush"'*)
+        r unanswered-named PASS ;;
+        *) r unanswered-named "FAIL (no flush in ublk_stuck)" ;; esac
+    grep -q "unanswered for 30s or more: flush" /run/engine-$mode.log && r unanswered-logged PASS \
+        || r unanswered-logged FAIL
+    dmsetup resume slow$disk
+    wait $f && r unanswered-fsync-returned PASS || r unanswered-fsync-returned FAIL
+    sleep 3
+    h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
+    case "$h" in *ublk_stuck*) r unanswered-cleared "FAIL ($h)" ;; *) r unanswered-cleared PASS ;; esac
+}
+
 run serial vda 9091
 run concurrent vdb 9092
 echo "GUEST done"
@@ -272,7 +303,8 @@ SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
 SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
-for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach; do
+for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
+         unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ -n "$SP" ] && [ -n "$CP" ] && [ "$CP" -gt 0 ]; then
