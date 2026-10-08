@@ -424,6 +424,21 @@ pub fn threads_view(stacks: bool) -> String {
 
 /// Every task of every registered runtime, with where it is parked.
 pub async fn task_dump(limit: Duration) -> String {
+    // Off unless asked for (#368). On the Dell (11.98) a tokio worker
+    // panicked in the scheduler (`state.rs:120 next.is_notified()`) four
+    // seconds after the watchdog's capture, which dumped the API runtime. A
+    // dump polls every task in trace mode, and ours are not tokio's leaf
+    // futures: tracing runs their I/O, and a completion inside it schedules a
+    // task the dump is holding — the shape #334 found on the current-thread
+    // runtimes. The panic left the runtime without that worker, and the next
+    // dump waited on it for ever. `/debug/threads` is the safe view.
+    if std::env::var_os("STORMBLOCK_TASK_DUMP").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let _ = limit;
+        return "task dumps are off: tracing the runtime's tasks while they serve I/O can \
+                corrupt the scheduler (#368, #334). STORMBLOCK_TASK_DUMP=1 turns them on, on \
+                a node you are prepared to restart; /debug/threads is the safe view\n"
+            .to_string();
+    }
     #[cfg(all(tokio_unstable, target_os = "linux"))]
     {
         let handles: Vec<(String, tokio::runtime::Handle)> =
@@ -699,6 +714,8 @@ mod tests {
     /// A finishes when its I/O wakes it, and B gets the Mutex.
     #[test]
     fn a_task_dump_leaves_a_current_thread_runtime_running() {
+        // Dumps are off by default (#368); this test is about one.
+        std::env::set_var("STORMBLOCK_TASK_DUMP", "1");
         let io = Io::default();
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();

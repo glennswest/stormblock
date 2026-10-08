@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #368 (P0, Dell 11.98): a tokio worker panicked in the scheduler (`state.rs:120 next.is_notified()`) 4 s after the watchdog's timed task dump, and the engine stayed up, answering nothing and logging nothing (the next dump waited on the dead worker). Now:
+  - a panic in the daemon, `adopt-ublk` or `boot-local` aborts the process, after a `FATAL:` line with a captured backtrace on stderr and in the record, so stormpump restarts it;
+  - task dumps are off unless `STORMBLOCK_TASK_DUMP=1` (tracing tasks while they serve I/O is the #334 mechanism, on the multi-thread runtime);
+  - the watchdog no longer dumps on a timer (#365).
+  Runtime test: a panic in a spawned task ends the daemon with SIGABRT and says why.
 - **feat:** #365 (P0, owner): the engine's logging says who holds its locks, and its watchdog no longer floods the log.
   - **Named lock holders:** the volume manager, slab registry and extent map are `lockwatch::TrackedMutex` / `TrackedRwLock`. Their guards record the holder: an API request (`GET /api/v1/volumes (req 42)`, each request runs under that name) or a named task (the flow-over, the eraser, a rebuild, a drain, the serve reconciler and reaper). They also record since when, and the waiters. A hold or wait over 1 s is logged when it ends (WARN over 10 s). Records are removed by guards, so an error, panic or cancelled request leaves nothing behind (tested).
   - **Watchdog:** one line per stalled request, naming each lock it waits on with that lock's holder, age and waiters. No thread or task dump on a timer.

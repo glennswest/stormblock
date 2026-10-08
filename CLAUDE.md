@@ -181,6 +181,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A worker panic left the engine alive and silent (2026-10-08, #368, P0) — IN PROGRESS
+
+Dell 11.98: tokio `state.rs:120 next.is_notified()` 4 s after the
+watchdog's capture (a task dump of the API runtime), then nothing: no log,
+no /health, no exit. By reading: the dump traces our I/O futures for real
+(the #334 shape, on the multi-thread runtime), and the next dump waited on
+the dead worker, so the watchdog went quiet too.
+- [x] serving modes abort on any panic (`logging::abort_on_panic`: FATAL +
+      captured backtrace on stderr and in the record, then abort)
+- [x] task dumps off unless `STORMBLOCK_TASK_DUMP=1`; no timed dumps (#365)
+- [x] runtime test `a_panic_in_the_daemon_aborts_it_and_says_why`
+      (`STORMBLOCK_TEST_PANIC_AFTER_MS`); README, CHANGELOG
+- [ ] build VM: check.sh with #362/#365; golden; comment on #368
+
 ### The engine's logging: lock holders named, no dump floods (2026-10-08, #365, P0 owner, ahead of everything) — IN PROGRESS
 
 Dell: 21,191 lines dropped by stormcast's limiter, the watchdog's 220-thread

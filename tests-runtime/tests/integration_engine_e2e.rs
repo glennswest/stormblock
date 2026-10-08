@@ -207,3 +207,50 @@ async fn a_node_with_no_slabs_says_that_rather_than_naming_a_parameter() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// #368: a panic in the serving engine ends the process, said on stderr with
+/// a backtrace, so its supervisor restarts it. Before, a tokio worker's panic
+/// on the Dell left the engine alive, silent and answering nothing.
+#[test]
+fn a_panic_in_the_daemon_aborts_it_and_says_why() {
+    use std::os::unix::process::ExitStatusExt;
+    let bin = bin();
+    let dir = TempDir::new().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let mgmt = free_port();
+    let config = dir.path().join("stormblock.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[management]\nlisten_addr = \"127.0.0.1:{mgmt}\"\ndata_dir = {:?}\n\
+             discovery_disabled = true\nublk_transport = false\n",
+            data.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(&bin)
+        .args(["-c", config.to_str().unwrap(), "--no-iscsi", "--no-nvmeof"])
+        .env("STORMBLOCK_TEST_PANIC_AFTER_MS", "1500")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("the engine is still running 30 s after a panic: alive and silent");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut err = String::new();
+    use std::io::Read;
+    child.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    assert_eq!(status.signal(), Some(6), "aborted (SIGABRT), not exited: {status:?}\n{err}");
+    assert!(err.contains("FATAL: daemon: panic on thread"), "{err}");
+    assert!(err.contains("test panic in a spawned task"), "{err}");
+}

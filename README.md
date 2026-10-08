@@ -559,10 +559,19 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   WARN over 10 s). Without the node token (#283) requests are named by
   route family (`/api/v1/volumes/…`), never an id, a name or a tag.
 - `GET /debug/tasks`, `/debug/threads` — **the admin's only** (#365), on
-  demand: every async task of the API's runtime with the `.await` it is
-  parked on (a tokio task dump: the build sets `--cfg tokio_unstable` in
-  `.cargo/config.toml`; one dump at a time, answering for 5 s), and every OS
-  thread with its state and kernel stack. Each ublk device's
+  demand: every OS thread with its state and kernel stack; and, **only with
+  `STORMBLOCK_TASK_DUMP=1`** (#368), every async task of the API's runtime
+  with the `.await` it is parked on (a tokio task dump: the build sets
+  `--cfg tokio_unstable` in `.cargo/config.toml`; one dump at a time,
+  answering for 5 s). Tracing tasks while they serve I/O corrupted the
+  scheduler on the Dell (11.98: a worker panicked in tokio's `state.rs:120`
+  four seconds after the watchdog's dump), so it is off unless asked for.
+- **A panic ends a serving engine** (#368): the daemon, `adopt-ublk` and
+  `boot-local` abort on any panic, after saying it on stderr (every console)
+  and in the record, with a backtrace whatever `RUST_BACKTRACE` says:
+  `FATAL: <mode>: panic on thread '<name>': …; aborting so the supervisor
+  restarts the engine`. stormpump restarts it, and `adopt-ublk` takes the
+  ublk devices back. Never alive and silent. Each ublk device's
   current-thread runtime is named but never dumped (#334). `stalls` also
   names every zoned or drive-managed SMR disk the engine opened (#282).
 - Every API request ends with one line (#365): `api: <method> <path>

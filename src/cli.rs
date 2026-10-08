@@ -865,6 +865,23 @@ pub async fn run() -> anyhow::Result<()> {
         _ => false,
     };
     crate::logging::init(node);
+    // The engine that serves (a node's, or the daemon): a panic ends it, so
+    // its supervisor restarts it, never leaving it half-alive (#368). The
+    // CLI tools keep the default: a panic there ends the command anyway.
+    match &cli.command {
+        Some(SubCommand::AdoptUblk { .. }) => crate::logging::abort_on_panic("adopt-ublk"),
+        Some(SubCommand::BootLocal { .. }) => crate::logging::abort_on_panic("boot-local"),
+        None => crate::logging::abort_on_panic("daemon"),
+        _ => {}
+    }
+    // Test hook (#368): a panic in a spawned task after N ms, the way the
+    // Dell's worker died, so a test can see the process end.
+    if let Some(ms) = std::env::var("STORMBLOCK_TEST_PANIC_AFTER_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            panic!("test panic in a spawned task (STORMBLOCK_TEST_PANIC_AFTER_MS)");
+        });
+    }
     tracing::info!("StormBlock starting, config: {}", cli.config);
 
     // Load and merge configuration
@@ -10860,6 +10877,7 @@ mod flow_over_api_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn server3_api_during_flow_over() {
+        std::env::set_var("STORMBLOCK_TASK_DUMP", "1"); // a model that dumps (#368: off by default)
         const SLOT: u64 = 1024 * 1024;
         const MIB: u64 = 1024 * 1024;
         let run_for = Duration::from_secs(
