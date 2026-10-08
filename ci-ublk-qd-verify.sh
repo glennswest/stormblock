@@ -124,6 +124,8 @@ run() {
     cat > /run/sb$disk.toml <<EOT
 [management]
 api_token = "t"
+# Formatting a slab is destructive (#274): the same token is the admin one.
+admin_token = "t"
 listen_addr = "127.0.0.1:$port"
 data_dir = "/run/sb$disk"
 node_name = "ci-ublk"
