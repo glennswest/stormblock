@@ -126,7 +126,7 @@ only the slot it touches.
 | | |
 |---|---|
 | **API** | `:9090`. `/api/v1` (drives, arrays, slabs, volumes, templates, synonyms, pallets, images, rebuilds, …), `/v1` (the CSI contract), `/serve/v1` (exports, readiness), `/apis/storage.storm.io/v1` (kube-shaped, `?watch=1`) |
-| **Data ports** | NVMe/TCP `4420`, iSCSI `3260`, per-export portals `3261–3388`, discovery UDP `7447` |
+| **Data ports** | NVMe/TCP `4420`, iSCSI `3260`, `/serve/v1` NVMe `3261` (one listener, a subsystem per volume), iSCSI portals `3262–3388`, discovery UDP `7447` |
 | **Auth** | a bearer token on everything, minted at first start; open: `/api/v1/health`, the `/serve/v1` probes, the boot claim, a boot intent's read and install report. NVMe/TCP: a volume is served to the host an attach names, from its own subsystem, optionally behind DH-HMAC-CHAP; the shared subsystem admits no host by default (#210) |
 | **Health** | `GET /api/v1/health` (public, no I/O); `GET /serve/v1/ready` — 200 only when an attach would work now |
 | **Metrics** | `GET /metrics` (token): slab and drive gauges refreshed at scrape, API counters, pool, rebuild, iSCSI, serving |

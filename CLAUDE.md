@@ -187,17 +187,19 @@ defaults to XFS (stormcos#91).
       nvme0c0n3, the device is nvme0n3); fixed, not rerun. Then CHANGELOG,
       README
 
-### /serve/v1 past 128 volumes: one listener, a subsystem per export (2026-10-08, #188, P2) — IN PROGRESS
+### /serve/v1 past 128 volumes: one listener, a subsystem per export (2026-10-08, #188, P2) — DONE
 
 Each serve NVMe export had a target and a port of its own out of a 128-port
 span. Since #210 one listener serves many subsystems; the drain (stop
 accepting, then wait for the live count to reach 0) moves to the subsystem.
-- [ ] target: per-subsystem `accepting` and `live` (a Connect to a draining
+- [x] target: per-subsystem `accepting` and `live` (a Connect to a draining
       subsystem refused; a connection counted against the subsystem it bound)
-- [ ] serve: one shared NVMe listener at `[serve] portal_base`; an export =
+- [x] serve: one shared NVMe listener at `[serve] portal_base`; an export =
       a subsystem `<prefix>:vol-<uuid>` on it (host access #212); drain and
       withdraw per subsystem; the port allocator for iSCSI rows only
-- [ ] test: 300 exports on one node, served and drained; serve tests; docs
+- [x] test: 300 exports on one node, served and drained; serve tests; docs
+- [x] on a build VM: integration_serve 13/13 incl. the 300-export test,
+      nvme_hosts 13/13, nvmeof unit 50/50; full nextest; golden
 
 ### stormblock-ublk.service stops after the engine does (2026-10-08, #187) — DONE
 

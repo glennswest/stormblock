@@ -114,8 +114,12 @@ the only other open requests; `docs/auth.md`).
 **Serving.** ublk devices for the local node, each request served as it
 arrives up to the queue depth (128), not one at a time (#264); a shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
-(CHAP, MC/S, ALUA, thousands of LUNs) and per-export portals (one port per
-exported volume, 128 by default, #188). `/serve/v1`
+(CHAP, MC/S, ALUA, thousands of LUNs). `/serve/v1`'s NVMe exports are each
+a subsystem of their own (`<nqn_prefix>:vol-<uuid>`, the volume as namespace
+1) on one listener at `[serve] portal_base`, so a node serves as many as it
+has volumes. Each one drains on its own: it refuses new Connects and is
+withdrawn when its own connections end (#188). iSCSI exports keep a portal
+port each, from the span. `/serve/v1`
 (the serving layer: exports, readiness, tar in/out, raw import, trim) is
 mounted by the engine whenever it has a data directory.
 
@@ -420,7 +424,7 @@ namespace; set `false` where the drives are the engine's pool) is used;
 | `data_dir` | `<management.data_dir>/serve` | wiring and export tables; with neither set, serving is skipped |
 | `advertise_addr` | the management advertised address | what consumers attach to |
 | `iscsi_enabled` | `false` | serve the legacy shared iSCSI target |
-| `portal_base`, `portal_span` | `3261`, `128` | per-export portal ports (3261–3388) |
+| `portal_base`, `portal_span` | `3261`, `128` | `portal_base`: the one NVMe/TCP listener every `/serve/v1` NVMe export is a subsystem of (#188, no cap but the node's); the span: per-export iSCSI portal ports after it |
 | `iqn`, `iqn_prefix` | `iqn.2026-08.lo.storm:shared`, `iqn.2026-08.lo.storm` | |
 | `nqn`, `nqn_prefix` | `nqn.2026-08.lo.storm:shared`, `nqn.2026-08.lo.storm` | per-volume subsystems are `<nqn_prefix>:vol-<uuid>` |
 | `drain_grace_secs` | `120` | a withdrawn export drains this long before its LUN is pulled |
@@ -489,7 +493,8 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
 | TCP 9090 | management API, `/metrics`, cluster and Raft RPCs | always (daemon, and `adopt-ublk --api`) |
 | TCP 4420 | NVMe-oF/TCP: the shared subsystem, every host's own subsystem, and discovery (each host is shown only its own, [docs/nvme-access.md](docs/nvme-access.md)) | daemon, with something to export at startup; `adopt-ublk` in forge mode, on by default (#287) |
 | TCP 3260 | iSCSI shared target | daemon, unless `--no-iscsi` |
-| TCP 3261–3388 | per-export portals and per-volume NVMe subsystems (`[serve] portal_base/span`) | when `/serve/v1` is mounted |
+| TCP 3261 | `/serve/v1`'s NVMe/TCP listener: every per-volume subsystem (`[serve] portal_base`, #188) | when `/serve/v1` serves an NVMe export |
+| TCP 3262–3388 | per-export iSCSI portals (`[serve] portal_span`) | when `/serve/v1` serves an iSCSI export |
 | UDP 7447, group 239.255.42.99 | node discovery beacon | daemon, unless `discovery_disabled` |
 
 ## Health, readiness and metrics

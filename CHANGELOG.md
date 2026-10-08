@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #188: `/serve/v1` is no longer capped at 128 NVMe exports per node.
+  - **One listener:** each export is now a subsystem (its own NQN, the volume as namespace 1, its host access) on one listener at `[serve] portal_base`. It used to be a target on its own port from a 128-port span.
+  - **The drain, per subsystem:** the target gives every subsystem an accept gate and a live-connection count. A withdrawn export refuses new Connects and goes when its own connections end, which is the guarantee the per-port drain gave. iSCSI exports keep a port each.
+  - **Upgrading:** an export restored from before is served on the shared port, and its attach parameters say so.
+  - **Test:** 300 exports on a span of 8, each reachable with its own volume; one drained under an attached host while its neighbours serve on.
 - **fix:** #187: `systemd/stormblock-ublk.service` `TimeoutStopSec` 10 → 30, above the engine's ~13 s stop budget, so SIGKILL never lands mid-teardown (#105). A test (`cli::tests::every_unit_outlasts_the_engines_stop`) reads every unit in `systemd/` and fails one at or below the budget.
 - **fix:** #349 (P0, stormblock-registry#104): an install dropped sealed volumes the node had made in the system half (registry goldens, held media) without a word.
   - **Origin on every volume:** `release`, `node` or `unmarked`. `image build`, the claimed release image at `boot-local` and staged copies are `release`; everything the engine creates is `node`. It is carried in format v2's volume header after the fields older engines read (they skip it), and shown on every volume as `origin`.

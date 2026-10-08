@@ -205,7 +205,10 @@ The engine, for its part, does not restore serve's exports (NSID 1 of their
 own subsystem) onto its shared subsystem at start.
 
 **`/serve/v1`'s own subsystems, bound to a host (#212).** Each serve export
-is a subsystem of its own on its own portal.
+is a subsystem of its own on the serve listener (`[serve] portal_base`, one
+port for all of them since #188). It drains on its own: a withdrawn export's
+subsystem refuses new Connects, serves the connections it has, and goes when
+its own count reaches zero.
 - `POST /serve/v1/exports {volume_id, protocol: "nvme-tcp", host_nqn}` (and a
   `/serve/v1/volumes` create with `export: true, host_nqn`) binds the export
   to that host. Its subsystem admits that NQN alone, and discovery on the
