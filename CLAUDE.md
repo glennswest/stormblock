@@ -172,14 +172,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The initramfs reads StormBootClock (2026-10-08, #253) — IN PROGRESS
+### The initramfs reads StormBootClock (2026-10-08, #253) — DONE
 
 - [x] clock block: `clock_firmware` (efivarfs, validated), synced = no NTP
       step (unless before build date / `rd.stormblock.ntp=always`),
       unsynced/absent = as before; `/run/stormblock/clock`
 - [x] tests/initramfs-clock.sh +7 cases; README, CHANGELOG
-- [ ] every initramfs test under sh and busybox sh on a build VM; generated
-      /init parses; `ci-clock-verify.sh` (QEMU) still passes
+- [x] every initramfs test under sh and busybox sh on a build VM (clock
+      52/52), the generated /init parses, `ci-clock-verify.sh` ALL PASS;
+      golden. Not on metal: an X9 blade booted by stormbootx ≥ v0.12.0 on a
+      stormcos release with this initramfs
 
 ### ublk attach: no blocking wait, no lock across it (2026-10-08, #231) — DONE
 
