@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### ublk attach: no blocking wait, no lock across it (2026-10-08, #231) — IN PROGRESS
+### ublk attach: no blocking wait, no lock across it (2026-10-08, #231) — DONE
 
 `ensure` polled with `std::thread::sleep` (≤ 1 s id, ≤ 5 s node) on a worker
 holding `ublk_exports`.
@@ -180,7 +180,9 @@ holding `ublk_exports`.
       of its own, no lock) → `finish` (lock); pending per volume, a second
       attach waits for the first; failure shuts the server down
 - [x] unit tests; `ci-ublk-qd-verify.sh` parallel attach; CHANGELOG
-- [ ] full nextest; the QEMU script; golden
+- [x] full nextest at 5ec27f5 1016/1017 (#333, 5/5 alone);
+      `ci-ublk-qd-verify.sh` ALL PASS (4 attaches at once: 4 distinct
+      existing devices, a listing in 19 ms meanwhile); golden
 
 ### Flow-over paced to the destination disk; SMR named (2026-10-08, #282, P2) — DONE
 
