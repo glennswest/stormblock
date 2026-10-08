@@ -171,6 +171,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### `slab holds` = intact: goldens verified (2026-10-08, #245) — WAITING ON THE OWNER
+
+"Complete" is done (#239, 2ceec10). "Intact" needs a reference digest per
+golden, and storing one on the slab breaks older readers: a VolumeRecord
+field breaks v1 and v2, and v2's `document_of` refuses an unknown key kind.
+After a #122 stage and rollback, N's engine reads what N+1 wrote. Asked on
+#245 (needs-owner): **A** two steps, first readers skip unknown v2 kinds,
+then a `digest` key at seal, a background verify after flow-over/stage, and
+`slab holds` reading the verdicts (recommended, gives #271 too); **B**
+stormcentral's manifest sha256; **C** read both sides over NVMe/TCP at
+boot; **D** leave intact to a scrub (#160). Nothing built yet.
+
 ### Stale doc pointers from stormcos#65's pass (2026-10-08, #254, P2) — DONE
 
 - [x] each of the issue's seven claims checked against the other repos'
