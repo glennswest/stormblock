@@ -868,8 +868,8 @@ async fn cloning_across_the_role_boundary_copies_instead_of_sharing() {
     }
     mgr.seal_volume(golden, None).await.unwrap();
 
-    let vm = Arc::new(tokio::sync::Mutex::new(mgr));
-    let slabs_of = |vm: Arc<tokio::sync::Mutex<VolumeManager>>, id| async move {
+    let vm = Arc::new(stormblock::lockwatch::TrackedMutex::new(mgr));
+    let slabs_of = |vm: Arc<stormblock::lockwatch::TrackedMutex<VolumeManager>>, id| async move {
         let m = vm.lock().await;
         let gem = m.gem().read().await;
         let mut s: Vec<_> = gem

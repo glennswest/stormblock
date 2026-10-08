@@ -320,8 +320,8 @@ async fn iscsi_thin_volume_io() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(RwLock::new(registry));
-    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
+    let registry = Arc::new(stormblock::lockwatch::TrackedRwLock::new(registry));
+    let gem = Arc::new(stormblock::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -376,8 +376,8 @@ async fn iscsi_multi_volume_isolation() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(RwLock::new(registry));
-    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
+    let registry = Arc::new(stormblock::lockwatch::TrackedRwLock::new(registry));
+    let gem = Arc::new(stormblock::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -645,8 +645,8 @@ async fn iscsi_multi_extent_volume() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(RwLock::new(registry));
-    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
+    let registry = Arc::new(stormblock::lockwatch::TrackedRwLock::new(registry));
+    let gem = Arc::new(stormblock::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -725,8 +725,8 @@ async fn iscsi_snapshot_cow() {
 
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(RwLock::new(registry));
-    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
+    let registry = Arc::new(stormblock::lockwatch::TrackedRwLock::new(registry));
+    let gem = Arc::new(stormblock::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
@@ -834,8 +834,8 @@ async fn iscsi_sequential_write_stress() {
     let total_slots = slab.total_slots();
     let mut registry = SlabRegistry::new();
     registry.add(slab);
-    let registry = Arc::new(RwLock::new(registry));
-    let gem = Arc::new(RwLock::new(GlobalExtentMap::new()));
+    let registry = Arc::new(stormblock::lockwatch::TrackedRwLock::new(registry));
+    let gem = Arc::new(stormblock::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
 
     let placement = PlacementPolicy {
         preferred_tier: StorageTier::Cool,
