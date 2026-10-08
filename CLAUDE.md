@@ -187,6 +187,12 @@ defaults to XFS (stormcos#91).
       nvme0c0n3, the device is nvme0n3); fixed, not rerun. Then CHANGELOG,
       README
 
+### stormblock-ublk.service stops after the engine does (2026-10-08, #187) — DONE
+
+- [x] `TimeoutStopSec` 10 → 30 (the engine's stop is ~13 s, #105); test
+      `cli::tests::every_unit_outlasts_the_engines_stop` over every unit in
+      `systemd/`; README, CHANGELOG
+
 ### Install drops sealed non-release volumes in the system half (2026-10-08, #349, P0) — DONE here (owner: C)
 
 stormblock-registry#104: registry goldens and held media made with no role

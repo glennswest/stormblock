@@ -33,7 +33,10 @@ ExecStart=/usr/sbin/stormblock boot-iscsi --portal ${PORTAL} --port ${PORT} --iq
 Restart=on-failure
 RestartSec=2
 KillMode=process
-TimeoutStopSec=10
+# Above the engine's own stop budget (~13 s: the flush and the ublk teardown
+# side by side). SIGKILL in the middle of a teardown leaves queue threads in
+# io_uring_enter that nothing can reap (#105, #187).
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

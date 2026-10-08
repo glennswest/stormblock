@@ -7437,6 +7437,39 @@ async fn handle_migrate_boot(
 mod tests {
     use super::note_no_intent;
 
+    /// #187 (#105): every systemd unit this repo ships stops the engine with
+    /// time to spare. The engine's stop is the flush and the ublk teardown
+    /// side by side, bounded at about 13 s; SIGKILL before that lands
+    /// mid-teardown and leaves queue threads in `io_uring_enter` nothing can
+    /// reap, and every restart after it fails.
+    #[test]
+    fn every_unit_outlasts_the_engines_stop() {
+        const ENGINE_STOP_BUDGET_SECS: u64 = 13;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("systemd");
+        let mut units = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("service") {
+                continue;
+            }
+            units += 1;
+            let text = std::fs::read_to_string(&path).unwrap();
+            let secs: u64 = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("TimeoutStopSec="))
+                .unwrap_or_else(|| panic!("{} sets no TimeoutStopSec (systemd's default is 90 s, but say it)", path.display()))
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("{}: TimeoutStopSec is not whole seconds: {e}", path.display()));
+            assert!(
+                secs > ENGINE_STOP_BUDGET_SECS,
+                "{}: TimeoutStopSec={secs} is not above the engine's ~{ENGINE_STOP_BUDGET_SECS} s stop",
+                path.display()
+            );
+        }
+        assert!(units >= 2, "the units in {}", dir.display());
+    }
+
     /// An appliance that states no intent (older than v20) leaves the marker
     /// the initramfs reads as "install without an intent" (#236); one that
     /// states any intent takes it away.

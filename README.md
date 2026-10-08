@@ -1817,8 +1817,8 @@ and DEL_DEV leaves them there, and **a thread stuck in the kernel cannot be
 reaped** — systemd then finds a process it cannot kill and every subsequent
 restart ends in `failed` mode. So a unit's `TimeoutStopSec` must stay above the
 engine's own budget (~13 s), or SIGKILL lands in the middle of a teardown and
-makes exactly that. `stormblock-target.service` has 30; `stormblock-ublk.service`
-still has 10 (#187).
+makes exactly that. Both units in `systemd/` have 30 (#187), and a test reads
+every unit there and fails one at or below the budget.
 
 ## Not built, or not wired
 

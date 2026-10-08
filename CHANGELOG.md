@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #187: `systemd/stormblock-ublk.service` `TimeoutStopSec` 10 → 30, above the engine's ~13 s stop budget, so SIGKILL never lands mid-teardown (#105). A test (`cli::tests::every_unit_outlasts_the_engines_stop`) reads every unit in `systemd/` and fails one at or below the budget.
 - **fix:** #349 (P0, stormblock-registry#104): an install dropped sealed volumes the node had made in the system half (registry goldens, held media) without a word.
   - **Origin on every volume:** `release`, `node` or `unmarked`. `image build`, the claimed release image at `boot-local` and staged copies are `release`; everything the engine creates is `node`. It is carried in format v2's volume header after the fields older engines read (they skip it), and shown on every volume as `origin`.
   - **The install:** of the system-half volumes the new release doesn't name, an old release's are dropped, and the node's and unmarked ones (sealed or not) are carried. Their extents move into the data slab, keeping id, sharing and record, before the system half is laid again. It is reported as `carried` on the console and in the report.
