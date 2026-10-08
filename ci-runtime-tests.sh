@@ -19,4 +19,4 @@ export STORMBLOCK_BIN
 echo "== not run here (#[ignore]: root, kernel devices or an external target):"
 cargo test --locked -p stormblock-runtime-tests -- --list --ignored 2>/dev/null | grep ': test$' | sed 's/^/   /'
 echo "== runtime tests"
-cargo test --locked -p stormblock-runtime-tests -- --test-threads=4
+cargo test --locked -p stormblock-runtime-tests --no-fail-fast -- --test-threads=4
