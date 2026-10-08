@@ -1569,7 +1569,8 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.ntp=off` | on | skip the NTP step (the build-date floor still applies, #251) |
 | `rd.stormblock.ntp=always` | — | step from NTP even when stormbootx says it synced the clock (#253) |
 | `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`, which formats its target, #162) |
-| `ip=<addr>::<gw>:<mask>…` | DHCP | a static address for the uplink; `ip=dhcp` or none means DHCP (a static address declared elsewhere is overridden by DHCP, #229) |
+| `ip=<addr>::<gw>:<mask>::<device>:none` | DHCP | a static address, on `<device>` when it is given and present (else the selected uplink); the mask a prefix or dotted. Wins over the node's declaration. `ip=dhcp` or none means DHCP unless the node declares a static boot-NIC address (#229, below) |
+| `rd.stormblock.declared-net=off` | on | ignore the node's declared `[network]` for the boot NIC (#229) |
 | `console=` | — | every one that exists gets the boot messages (#237) |
 
 Bounded waits, overridable in the environment (for tests): `STORM_NETDEV_WAIT`
@@ -1635,6 +1636,53 @@ the later name first.
 `tests/initramfs-netdev.sh` and `tests/initramfs-nic-selection.sh` pin both.
 The running system loading `mlx4_en` itself is stormcos#211.
 
+### The boot NIC's address: what the node declares (#229)
+
+Every release's command line says `ip=dhcp`, because one line boots every
+node (stormcos#182). stormpump never addresses a bridge port after
+switch_root (stormpump#33), and the boot NIC is one. So the initramfs is
+where a node's declared static address has to win.
+
+**Where it reads the declaration.** Before the network, `/init` looks for
+the local `stormcos-state` volume:
+- on the drive `rd.stormblock.slab=` names, when it names one (and only that
+  drive, #273);
+- otherwise on the first internal, non-removable `sd`/`nvme`/`vd` disk that
+  holds it. A drive in a shelf is never read (`rd.stormblock.allow-external=1`
+  overrides), and nothing is read when the named slab is a fabric URI.
+
+It copies `/config/stormcos.toml` and `/config/install-node.toml` (#78) with
+`slab cat`, read-only, and removes the copies once the network is up. The
+DHCP name hint above reads the same copies, so a netbooting node is now read
+too.
+
+**Which declaration.** The file is chosen the way stormpump's `plan_for`
+chooses it: `stormcos.toml` when it declares any interface, else
+`install-node.toml`, whole and never merged. Its `[network]` single form
+(`interface`/`name`, `mode`, `address`/`addresses`, `gateway`, `dns`,
+`domain`, `mtu`) describes the port the node boots on. Each value must be on
+one line, which is how stormpump writes `install-node.toml`.
+- **`static` on an exact name that is present and has carrier:** that port
+  goes on `stormbr0`, with the addresses (each needs a prefix), the gateway as
+  the default route, the MTU, and the DNS and domain in `/etc/resolv.conf`.
+  No DHCP is sent. The console says `static: <addr> on <port>, …, from
+  [network] in <file>`.
+- **`dhcp` on an exact name with carrier:** that port is tried first.
+- **Not applied, with a line saying why, and the boot carries on with DHCP as
+  before:** a port this machine does not have, one with no carrier, a pattern
+  (`eth*`), an address with no prefix, or `mode = "up"`. A node that cannot
+  reach its appliance cannot boot, so DHCP stays the fallback.
+
+A static `ip=` on the command line wins over the declaration, and its
+`<device>` field names the port. `rd.stormblock.declared-net=off` ignores the
+declaration altogether.
+
+`tests/initramfs-boot-nic.sh` pins both blocks. `ci-boot-nic-verify.sh` boots
+them in QEMU. With `ip=dhcp` on the line and a static `[network]`:
+- the address, MTU and default route are on `stormbr0`;
+- the guest reaches the host through the declared gateway;
+- the guest sends no DHCP packet.
+
 ### The initramfs node name: the network's, and why when it is not (#238)
 
 The node takes its name in this order:
@@ -1660,8 +1708,9 @@ the kernel's `domainname`, and the console prints the FQDN.
 `udhcpc -x hostname:<name>`, so the server's lease table says who holds each
 lease. The name comes from what the machine already knows before the lease:
 
-- its declared `[node] hostname` in `/config/stormcos.toml` on the local
-  disk's `stormcos-state` volume;
+- its declared `[node] hostname` in `/config/stormcos.toml`, else in
+  `install-node.toml`, on the local disk's `stormcos-state` volume (found
+  before the network as described under the boot NIC, #229);
 - otherwise the name its firmware booted as (`StormBootTag`, #249).
 
 An SMBIOS guess or a `mac-` placeholder is never sent.

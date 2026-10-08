@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #229: the initramfs applies the node's declared static boot-NIC address instead of `ip=dhcp`.
+  - **Where it reads it:** before the network, `/init` finds the local `stormcos-state` volume: on the drive `rd.stormblock.slab=` names, else on the first internal, non-removable disk (never a shelf drive, #273). It copies `/config/stormcos.toml` and `/config/install-node.toml` with `slab cat`.
+  - **What it applies:** `[network]` is read as stormpump's `plan_for` reads it. A `static` declaration on an exact, present port with carrier puts its addresses, gateway, MTU, DNS and domain on `stormbr0`, and no DHCP is sent. A `dhcp` declaration on a named port makes that port the first one tried. Anything else (a missing port, no carrier, a pattern, no prefix) is reported and the boot falls back to DHCP.
+  - **Command line:** a static `ip=` still wins, and its `<device>` field is now honoured. A dotted mask becomes a prefix. `ip=off`/`none` no longer reads as an address. `rd.stormblock.declared-net=off` ignores the declaration.
+  - **Name hint (#238):** the DHCP name hint reads the same copies, so a netbooting node's declared name is now found too, and so is `install-node.toml`'s.
+  - **Tests:** `tests/initramfs-boot-nic.sh` covers both blocks. `ci-boot-nic-verify.sh` boots them in QEMU.
 - **docs:** #254 (stormcos#65's pass): stale pointers corrected.
   - **Block size:** release disks are composed at 4096 with a `-S 4096` FAT16 ESP (owner, #233), not at 512. The old firmware failures were a FAT32-labelled ESP. The per-volume 512 LBA stays as a supported option (#248). Updated in the README and `docs/composed-disks.md`.
   - **Golden:** it is no longer "held since v17". Releases since 11.55 ship it, and only forge runs an old engine (CLAUDE.md, `docs/presentation.md`).

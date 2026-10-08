@@ -171,7 +171,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A declared static boot-NIC address wins over `ip=dhcp` (2026-10-08, #229) — IN PROGRESS
+### A declared static boot-NIC address wins over `ip=dhcp` (2026-10-08, #229) — DONE
 
 stormcos keeps `ip=dhcp` on every release's command line (stormcos#182: one
 line boots every node), so the node's own declaration has to win in the
@@ -181,16 +181,22 @@ addresses a bridge port (stormpump#33, b3d8c1e), so the address goes on
 `stormbr0`. Before the network, `$SLAB` is set only by
 `rd.stormblock.slab=`: a netbooting node's disk was not read at all (the #238
 name hint had the same gap).
-- [ ] `# --- BEGIN node state read`: the local `stormcos-state` (the named
+- [x] `# --- BEGIN node state read`: the local `stormcos-state` (the named
       disk, else the first internal non-removable sd/nvme/vd disk holding it,
       #273's rules), both files copied to /run; the #238 hint uses the copy
-- [ ] `# --- BEGIN boot nic`: plan_for's choice of file; `[network]`'s
+- [x] `# --- BEGIN boot nic`: plan_for's choice of file; `[network]`'s
       exact, present NIC: static = its addresses, gateway, dns, domain, mtu
       on stormbr0 (no carrier: DHCP as before, said); dhcp = tried first.
       A static `ip=` wins and its `<iface>` field is honoured;
       `rd.stormblock.declared-net=off` ignores the declaration
-- [ ] tests/initramfs-boot-nic.sh, node-name test updated; README, CHANGELOG
-- [ ] every initramfs test under sh and busybox sh on dev; /init parses
+- [x] tests/initramfs-boot-nic.sh, node-name test updated; README, CHANGELOG
+- [x] every initramfs test under sh and busybox sh on a build VM at
+      14c32a6 (boot-nic 36 checks), the generated /init parses under both;
+      `ci-boot-nic-verify.sh` ALL PASS (kernel 7.2.8: static on stormbr0,
+      mtu, route, resolv, the host reached via the gateway, 0 DHCP frames;
+      an absent port falls back, said); `ci-node-name-verify.sh` ALL PASS
+- Not on metal: a node with a static `[network]` in its stormcos-state on a
+  stormcos release with this initramfs
 
 ### `slab holds` = intact: goldens verified (2026-10-08, #245) — WAITING ON THE OWNER
 
