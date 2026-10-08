@@ -240,7 +240,7 @@ async fn allocate(State(state): State<Arc<AppState>>, Json(req): Json<AllocateRe
             let items: Vec<ExtentJson> = extents.iter().map(ExtentJson::from).collect();
             persist(&state, &st).await;
             drop(st);
-            state.volume_manager.lock().await.persist().await;
+            crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
             Json(json!({
                 "extents": items,
                 "tier": req.tier,
@@ -362,7 +362,7 @@ async fn free_extents(state: Arc<AppState>, req: ExtentsRequest, release_ownersh
 
     persist(&state, &st).await;
     drop(st);
-    state.volume_manager.lock().await.persist().await;
+    crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
 
     Json(json!({
         "freed": freed,
@@ -490,7 +490,7 @@ async fn commit(State(state): State<Arc<AppState>>, Json(req): Json<CommitJson>)
             // committed data.
             persist(&state, &st).await;
             drop(st);
-            state.volume_manager.lock().await.persist().await;
+            crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
 
             Json(json!({
                 "version": out.version,

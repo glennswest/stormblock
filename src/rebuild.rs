@@ -449,7 +449,7 @@ impl Rebuilds {
                     let vm = vm.clone();
                     let h = h2.clone();
                     Box::pin(async move {
-                        vm.lock().await.persist().await;
+                        crate::volume::VolumeManager::persist_detached(&vm).await;
                         h.release_slots(&owed).await;
                     })
                 });
@@ -462,7 +462,7 @@ impl Rebuilds {
                     checkpoint_every: 4096,
                 };
                 let mut report = handle.resync_with(&opts).await;
-                self.volumes.lock().await.persist().await;
+                crate::volume::VolumeManager::persist_detached(&self.volumes).await;
                 let owed = std::mem::take(&mut report.owed);
                 handle.release_slots(&owed).await;
                 let health = handle.health().await;

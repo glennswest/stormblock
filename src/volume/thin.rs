@@ -125,6 +125,9 @@ pub enum VolumeError {
     /// Something serves the volume as a device right now; it is not deleted
     /// under it (#267).
     InUse { id: VolumeId, by: Vec<String> },
+    /// Another long operation (a resync, a restripe) is running on the
+    /// volume (#364): one at a time per volume.
+    Busy(String),
 }
 
 impl fmt::Display for VolumeError {
@@ -164,6 +167,7 @@ impl fmt::Display for VolumeError {
                 "volume {id} is in use by {}: detach it first",
                 by.join(", ")
             ),
+            VolumeError::Busy(why) => write!(f, "{why}; try again when it has finished"),
         }
     }
 }

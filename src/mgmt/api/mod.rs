@@ -218,7 +218,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     ))
     // Outermost: every request is registered for the stall watchdog (#269),
     // from the moment it arrives, the credential check included.
-    .layer(axum::middleware::from_fn(crate::mgmt::debug::track))
+    .layer(axum::middleware::from_fn_with_state(state.clone(), crate::mgmt::debug::track))
 }
 
 /// Standard error response.

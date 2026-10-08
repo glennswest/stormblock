@@ -226,6 +226,8 @@ pub struct AppState {
     pub volume_manager: Arc<crate::lockwatch::TrackedMutex<VolumeManager>>,
     /// Which volumes exist, read without `volume_manager`'s lock (#358).
     pub volume_presence: crate::volume::VolumePresence,
+    /// What the volume listing reads without `volume_manager`'s lock (#364).
+    pub volume_catalog: crate::volume::catalog::CatalogCell,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
     pub slab_registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     pub gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
@@ -448,6 +450,11 @@ impl AppState {
         }
         let holds = volume_manager.holds();
         let volume_presence = volume_manager.presence();
+        // The API's manager: its persists inside a request are made after
+        // the request releases it (#364).
+        volume_manager.mark_shared();
+        volume_manager.publish_catalog();
+        let volume_catalog = volume_manager.catalog_cell();
         // Before any target serves: a volume this node was told is not to be
         // used through it must not answer optimized after a restart (#83).
         #[cfg(feature = "nvmeof")]
@@ -468,6 +475,7 @@ impl AppState {
             stage_job: Default::default(),
             volume_manager,
             volume_presence,
+            volume_catalog,
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,
             gem,

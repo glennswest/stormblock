@@ -5,6 +5,7 @@
 //! (NVMe-oF, iSCSI) see volumes as plain block devices.
 
 #[cfg(feature = "stormfs-data")]
+pub mod catalog;
 pub mod chunk;
 pub mod extent;
 pub mod fence;
@@ -228,6 +229,56 @@ impl Drop for PersistMark {
     }
 }
 
+/// See [`VolumeManager::defer_persists`]. Holds the flags, not the manager,
+/// so the manager's `&mut` methods can be called while it lives.
+pub struct DeferPersists {
+    defer: Arc<std::sync::atomic::AtomicBool>,
+    owed: Arc<std::sync::atomic::AtomicBool>,
+    done: bool,
+}
+
+impl DeferPersists {
+    /// Stop deferring; whether a persist is owed (make it with
+    /// [`VolumeManager::persist_detached`] once the manager is released).
+    pub fn owed(mut self) -> bool {
+        self.done = true;
+        self.defer.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.owed.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for DeferPersists {
+    fn drop(&mut self) {
+        if !self.done {
+            // An early return (an error): deferral off, so nothing after it
+            // skips a persist. What was owed is in memory and goes with the
+            // next persist; said, so a crash before then is not a mystery.
+            self.defer.store(false, std::sync::atomic::Ordering::SeqCst);
+            if self.owed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                tracing::warn!("volume metadata: a deferred persist was left to the next one (an operation ended early)");
+            }
+        }
+    }
+}
+
+/// A long operation's claim on one volume (#364), released on drop.
+pub struct VolumeOp {
+    ops: Arc<std::sync::Mutex<HashMap<VolumeId, &'static str>>>,
+    /// The engine's own manager, the one behind the API (#364): inside an
+    /// API request its persists are owed and made after the lock is released.
+    shared: std::sync::atomic::AtomicBool,
+    /// What the listing reads without this manager's lock (#364), published
+    /// each time the records are taken.
+    catalog: catalog::CatalogCell,
+    id: VolumeId,
+}
+
+impl Drop for VolumeOp {
+    fn drop(&mut self) {
+        self.ops.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+    }
+}
+
 /// Which volumes exist, readable without the manager's lock (#358).
 ///
 /// The manager's own mutex is held through a whole durable persist by every
@@ -243,6 +294,12 @@ impl VolumePresence {
     pub fn contains(&self, id: &VolumeId) -> bool {
         self.0.read().unwrap_or_else(|e| e.into_inner()).contains(id)
     }
+    pub fn len(&self) -> usize {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn insert(&self, id: VolumeId) {
         self.0.write().unwrap_or_else(|e| e.into_inner()).insert(id);
     }
@@ -257,6 +314,14 @@ pub struct VolumeManager {
     volumes: HashMap<VolumeId, Arc<ThinVolumeHandle>>,
     /// The ids in `volumes`, for readers that must not wait on the manager.
     present: VolumePresence,
+    /// While set ([`VolumeManager::defer_persists`]), `persist` only notes
+    /// that one is owed (#364): the caller makes it after releasing the
+    /// manager, with [`VolumeManager::persist_detached`].
+    defer_persist: Arc<std::sync::atomic::AtomicBool>,
+    persist_owed: Arc<std::sync::atomic::AtomicBool>,
+    /// Long operations running on a volume (#364): one at a time per
+    /// volume, any number on different volumes, with no manager lock.
+    ops: Arc<std::sync::Mutex<HashMap<VolumeId, &'static str>>>,
     /// Legacy mapping: array_id → slab_id (for backward compat with callers
     /// that pass array_id to create_volume).
     array_slabs: HashMap<RaidArrayId, SlabId>,
@@ -379,6 +444,11 @@ impl VolumeManager {
             flowing_into: std::sync::Mutex::new(Vec::new()),
             holds: Default::default(),
             present: Default::default(),
+            defer_persist: Default::default(),
+            persist_owed: Default::default(),
+            ops: Default::default(),
+            shared: Default::default(),
+            catalog: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
             v2: Default::default(),
@@ -407,6 +477,11 @@ impl VolumeManager {
             flowing_into: std::sync::Mutex::new(Vec::new()),
             holds: Default::default(),
             present: Default::default(),
+            defer_persist: Default::default(),
+            persist_owed: Default::default(),
+            ops: Default::default(),
+            shared: Default::default(),
+            catalog: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
             v2: Default::default(),
@@ -417,6 +492,18 @@ impl VolumeManager {
     /// a clone to whatever serves volumes as devices.
     pub fn holds(&self) -> holds::ServeHolds {
         self.holds.clone()
+    }
+
+    /// Claim `id` for a long operation (`what`: "resync", "restripe", …)
+    /// that runs without the manager lock (#364). `Err` names the one already
+    /// running: two on one volume would each rebuild the same legs.
+    pub fn begin_op(&self, id: VolumeId, what: &'static str) -> Result<VolumeOp, &'static str> {
+        let mut o = self.ops.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(running) = o.get(&id) {
+            return Err(running);
+        }
+        o.insert(id, what);
+        Ok(VolumeOp { ops: self.ops.clone(), id })
     }
 
     /// Which volumes exist, for readers that must not wait on this manager's
@@ -1596,10 +1683,66 @@ impl VolumeManager {
     /// offline operation — the API refuses it while the volume is exported.
     pub async fn restripe(&mut self, id: VolumeId, policy: RedundancyPolicy) -> Result<RestripeReport, VolumeError> {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        let r = Self::restripe_work(handle, self.gem.clone(), self.registry.clone(), self.slot_size, id, policy).await?;
+        self.persist().await;
+        Ok(r)
+    }
+
+    /// [`restripe`](Self::restripe) holding the manager only to find the
+    /// volume (#364): the copy runs under the volume's own lock, and the
+    /// persist after it is detached. The API's restripe held the manager for
+    /// the whole copy.
+    pub async fn restripe_unlocked(
+        vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
+        id: VolumeId,
+        policy: RedundancyPolicy,
+    ) -> Result<RestripeReport, VolumeError> {
+        let (handle, gem, registry, slot, _op) = {
+            let m = vm.lock().await;
+            let h = m.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+            let op = m.begin_op(id, "restripe").map_err(|r| VolumeError::Busy(format!("volume {id} has a {r} running")))?;
+            (h, m.gem.clone(), m.registry.clone(), m.slot_size, op)
+        };
+        let r = Self::restripe_work(handle, gem, registry, slot, id, policy).await?;
+        Self::persist_detached(vm).await;
+        Ok(r)
+    }
+
+    /// [`resync_volume`](Self::resync_volume) holding the manager only to
+    /// find the volume (#364). The replaced slots are released after the
+    /// detached persist, as before: only once the map that stopped naming
+    /// them is on disk.
+    pub async fn resync_volume_unlocked(
+        vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
+        id: VolumeId,
+        verify: bool,
+    ) -> Result<ResyncReport, VolumeError> {
+        let (handle, _op) = {
+            let m = vm.lock().await;
+            let h = m.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+            let op = m.begin_op(id, "resync").map_err(|r| VolumeError::Busy(format!("volume {id} has a {r} running")))?;
+            (h, op)
+        };
+        let mut report = handle.resync_with(&ResyncOptions { verify, ..Default::default() }).await;
+        Self::persist_detached(vm).await;
+        let owed = std::mem::take(&mut report.owed);
+        handle.release_slots(&owed).await;
+        Ok(report)
+    }
+
+    /// The work of a restripe, with no manager (#364): the volume's own lock
+    /// is what keeps its I/O out while it is copied.
+    async fn restripe_work(
+        handle: Arc<ThinVolumeHandle>,
+        gem_arc: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+        slot_size: u64,
+        id: VolumeId,
+        policy: RedundancyPolicy,
+    ) -> Result<RestripeReport, VolumeError> {
         let needed = policy.scheme.width();
         if needed > 1 {
-            let available = self
-                .registry
+            let available = registry
                 .read()
                 .await
                 .distinct_domains_with_space_in_role(&policy.spread, handle.placement_role(), handle.extent_size());
@@ -1611,48 +1754,48 @@ impl VolumeManager {
             let v = handle.lock().await;
             (v.name.clone(), v.virtual_size)
         };
-        let scratch = ThinVolume::new(format!("{name}-restripe"), size, self.slot_size);
+        let scratch = ThinVolume::new(format!("{name}-restripe"), size, slot_size);
         let scratch_id = scratch.id();
         let dest = Arc::new(ThinVolumeHandle::with_redundancy(
             scratch,
-            self.gem.clone(),
-            self.registry.clone(),
+            gem_arc.clone(),
+            registry.clone(),
             PlacementPolicy { role: handle.placement_role(), ..Default::default() },
             policy.clone(),
         ));
 
         let extents: Vec<u64> = {
-            let gem = self.gem.read().await;
+            let gem = gem_arc.read().await;
             gem.volume_extents(&id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default()
         };
         let _hold = handle.lock().await;
-        let mut buf = vec![0u8; self.slot_size as usize];
+        let mut buf = vec![0u8; slot_size as usize];
         let mut copied = 0usize;
         for vext in &extents {
-            let off = vext * self.slot_size;
+            let off = vext * slot_size;
             if let Err(e) = handle.read(off, &mut buf).await {
-                self.discard_scratch(scratch_id).await;
+                Self::discard_scratch_in(&gem_arc, &registry, scratch_id).await;
                 return Err(VolumeError::Drive(e));
             }
             if let Err(e) = dest.write(off, &buf).await {
-                self.discard_scratch(scratch_id).await;
+                Self::discard_scratch_in(&gem_arc, &registry, scratch_id).await;
                 return Err(VolumeError::Drive(e));
             }
             copied += 1;
         }
         if let Err(e) = dest.flush().await {
-            self.discard_scratch(scratch_id).await;
+            Self::discard_scratch_in(&gem_arc, &registry, scratch_id).await;
             return Err(VolumeError::Drive(e));
         }
 
         // Swap: the volume takes the scratch placement; the old one goes.
         let old = {
-            let mut gem = self.gem.write().await;
+            let mut gem = gem_arc.write().await;
             gem.rename_volume(scratch_id, id)
         };
         let mut released = 0usize;
         if let Some(old) = old {
-            let mut reg = self.registry.write().await;
+            let mut reg = registry.write().await;
             let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
             for leg in old.all_legs() {
                 by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
@@ -1669,10 +1812,20 @@ impl VolumeManager {
         handle.force_redundancy(policy.clone());
         handle.set_failed_slabs(Vec::new());
         drop(_hold);
-        self.persist().await;
         Ok(RestripeReport { extents_copied: copied, slots_released: released, redundancy: policy.spelling() })
     }
 
+    async fn discard_scratch_in(
+        gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>,
+        registry: &crate::lockwatch::TrackedRwLock<SlabRegistry>,
+        scratch_id: VolumeId,
+    ) {
+        let mut gem = gem.write().await;
+        let mut reg = registry.write().await;
+        let _ = snapshot::delete_snapshot(scratch_id, &mut gem, &mut reg).await;
+    }
+
+    #[allow(dead_code)]
     async fn discard_scratch(&self, scratch_id: VolumeId) {
         let mut gem = self.gem.write().await;
         let mut reg = self.registry.write().await;
@@ -1997,6 +2150,83 @@ impl VolumeManager {
         Ok(dest_id)
     }
 
+    /// [`copy_volume`](Self::copy_volume) holding the manager only for the
+    /// bookkeeping (#364): the destination is created under it, the copy runs
+    /// with no manager lock (each extent under the volumes' own fences), and
+    /// the lineage is published under it again. The persists go outside it.
+    /// A cross-role clone held the manager for the whole copy, and every
+    /// listing on the node waited (the Dell: a clone of ~60 s, `GET /volumes`
+    /// 10-58 s behind it).
+    pub async fn copy_volume_unlocked(
+        vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
+        source_id: VolumeId,
+        name: &str,
+        role: SlabRole,
+    ) -> Result<VolumeId, VolumeError> {
+        let (source, dest_id, dest, extents, slot_size) = {
+            let mut m = vm.lock().await;
+            let defer = m.defer_persists();
+            let source = m.volumes.get(&source_id).ok_or(VolumeError::VolumeNotFound(source_id))?.clone();
+            let virtual_size = source.lock().await.virtual_size;
+            let opts = CreateOptions {
+                redundancy: source.redundancy(),
+                placement: PlacementPolicy::default(),
+                role: Some(role),
+                extent_size: Some(source.extent_size()),
+                id: None,
+            };
+            let dest_id = m.create_volume_with(name, virtual_size, opts).await?;
+            let dest = m.volumes.get(&dest_id).ok_or(VolumeError::VolumeNotFound(dest_id))?.clone();
+            let extents: Vec<u64> = {
+                let gem = m.gem.read().await;
+                gem.volume_extents(&source_id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default()
+            };
+            let _ = defer.owed();
+            (source, dest_id, dest, extents, m.slot_size)
+        };
+        // The new volume's record, made durable with no lock held.
+        Self::persist_detached(vm).await;
+
+        let mut buf = vec![0u8; slot_size as usize];
+        let mut failed = None;
+        for vext in &extents {
+            let off = vext * slot_size;
+            let r = match source.read(off, &mut buf).await {
+                Err(e) => Some(e),
+                Ok(_) => dest.write(off, &buf).await.err(),
+            };
+            if r.is_some() {
+                failed = r;
+                break;
+            }
+        }
+        if failed.is_none() {
+            failed = dest.flush().await.err();
+        }
+        drop(dest);
+        if let Some(e) = failed {
+            {
+                let mut m = vm.lock().await;
+                let defer = m.defer_persists();
+                let _ = m.delete_volume(dest_id).await;
+                let _ = defer.owed();
+            }
+            Self::persist_detached(vm).await;
+            return Err(VolumeError::Drive(e));
+        }
+        {
+            let mut m = vm.lock().await;
+            m.record_lineage(dest_id, source_id);
+        }
+        Self::persist_detached(vm).await;
+        tracing::info!(
+            "volume {source_id} copied into a {role} slab as '{name}' ({dest_id}): \
+             {} extent(s), sharing nothing with the source; no manager lock held across the copy (#364)",
+            extents.len()
+        );
+        Ok(dest_id)
+    }
+
     /// A clone descends from its source and starts out carrying the same
     /// filesystem (same UUID, until something stamps it — which the
     /// filesystem-aware clone path does).
@@ -2159,7 +2389,48 @@ impl VolumeManager {
         self.array_slabs.iter().find(|(_, s)| *s == slab).map(|(a, _)| *a)
     }
 
+    /// Persists made through this manager while the returned guard lives are
+    /// owed, not made (#364): the manager's own methods persist at their end,
+    /// under the caller's lock, and that persist flushes every slab. Take
+    /// this, do the work, then [`DeferPersists::owed`] and, after the manager
+    /// is released, [`VolumeManager::persist_detached`] — the records taken
+    /// under the lock, the flushes and writes without it. A guard dropped on
+    /// an early return turns deferral off again; what it owed is made by the
+    /// next persist.
+    pub fn defer_persists(&self) -> DeferPersists {
+        self.defer_persist.store(true, std::sync::atomic::Ordering::SeqCst);
+        DeferPersists { defer: self.defer_persist.clone(), owed: self.persist_owed.clone(), done: false }
+    }
+
+    /// Where this manager publishes what the listing reads (#364). Take it
+    /// once, keep it.
+    pub fn catalog_cell(&self) -> catalog::CatalogCell {
+        self.catalog.clone()
+    }
+
+    /// Publish the catalog now (at startup, before the first persist).
+    pub fn publish_catalog(&self) {
+        self.catalog.publish(catalog::Catalog::of(self));
+    }
+
+    /// The blanks, by id (for the catalog).
+    pub fn template_ids(&self) -> std::collections::HashSet<VolumeId> {
+        self.templates.clone()
+    }
+
+    /// Mark this the engine's shared manager (see `shared`).
+    pub fn mark_shared(&self) {
+        self.shared.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub async fn persist(&self) {
+        if self.defer_persist.load(std::sync::atomic::Ordering::SeqCst) {
+            self.persist_owed.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        if self.shared.load(std::sync::atomic::Ordering::SeqCst) && crate::lockwatch::owe_persist() {
+            return;
+        }
         // A persist made for the API or a consumer is foreground work: a
         // flow-over gives the disk back while there is any (#269). Its own
         // persists are `persist_detached` and do not count.
@@ -2184,6 +2455,14 @@ impl VolumeManager {
     /// after every extent it moves, and on server3's spinning disk each
     /// persist was several flushes of seconds each.
     pub async fn persist_detached(vm: &crate::lockwatch::TrackedMutex<VolumeManager>) {
+        let _ = Self::persist_detached_checked(vm).await;
+    }
+
+    /// [`persist_detached`](Self::persist_detached), answering whether the
+    /// records were written: what an API request's middleware makes once its
+    /// handler released the manager (#364), turning a failure into the
+    /// request's 500 as a failed `persist_checked` would have.
+    pub async fn persist_detached_checked(vm: &crate::lockwatch::TrackedMutex<VolumeManager>) -> anyhow::Result<()> {
         let (registry, written, on_slab, durability, records) = {
             let g = vm.lock().await;
             let generation = g.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -2199,7 +2478,9 @@ impl VolumeManager {
             None => Ok(()),
             Some(r) => Self::sync_then_write(&registry, &written, &on_slab, r, false).await,
         };
+        let out = result.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"));
         Self::persisted(&durability, result);
+        out
     }
 
     fn persisted(durability: &std::sync::Mutex<Option<String>>, result: anyhow::Result<()>) {
@@ -2360,6 +2641,9 @@ impl VolumeManager {
     /// The records a persist writes, taken in memory. `None` when this
     /// manager keeps no records anywhere.
     async fn records(&self, generation: u64) -> Option<Records> {
+        // Every persist comes here, under the lock: what the listing reads
+        // is published with it (#364).
+        self.catalog.publish(catalog::Catalog::of(self));
         if self.metadata_store.is_none() && self.metadata_slabs.is_empty() {
             return None;
         }
@@ -3031,6 +3315,13 @@ impl VolumeManager {
     /// there produces an image that cannot boot, so it has to fail the build
     /// rather than warn into a log nobody reads.
     pub async fn persist_checked(&self) -> anyhow::Result<()> {
+        if self.defer_persist.load(std::sync::atomic::Ordering::SeqCst) {
+            self.persist_owed.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(());
+        }
+        if self.shared.load(std::sync::atomic::Ordering::SeqCst) && crate::lockwatch::owe_persist() {
+            return Ok(());
+        }
         let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         match self.records(generation).await {
             None => Ok(()),

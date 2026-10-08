@@ -1230,19 +1230,29 @@ async fn clone_volume_impl(
         )));
     }
 
-    let (id, size) = {
-        let mut m = vm.lock().await;
-        // Across the role boundary a clone cannot share slots — a slot is in
-        // one partition — so it is a copy. Within the boundary, and by
-        // default, it is the ordinary copy-on-write clone (#88).
-        let crossing = spec
-            .role
-            .filter(|want| m.volume_role(&source).is_some_and(|have| have != *want));
-        let id = match crossing {
-            Some(role) => m
-                .copy_volume(source, &spec.name, role)
+    // Across the role boundary a clone cannot share slots — a slot is in
+    // one partition — so it is a copy, made with no manager lock across it
+    // (#364). Within the boundary, and by default, it is the ordinary
+    // copy-on-write clone (#88).
+    let crossing = {
+        let m = vm.lock().await;
+        spec.role.filter(|want| m.volume_role(&source).is_some_and(|have| have != *want))
+    };
+    let copied = match crossing {
+        Some(role) => Some(
+            crate::volume::VolumeManager::copy_volume_unlocked(vm, source, &spec.name, role)
                 .await
                 .map_err(|e| TemplateError::Internal(format!("copying volume: {e}")))?,
+        ),
+        None => None,
+    };
+    let (id, size) = {
+        let mut m = vm.lock().await;
+        // Persists inside are owed, made below or by the mint's own
+        // detached persist at its end (#364).
+        let defer = m.defer_persists();
+        let id = match copied {
+            Some(id) => id,
             // One metadata write for the whole mint, at the end (#137).
             None => m
                 .create_snapshot_deferred(source, &spec.name)
@@ -1262,12 +1272,13 @@ async fn clone_volume_impl(
                 size = want;
             }
         }
+        let _ = defer.owed();
         (id, size)
     };
 
     // No filesystem the engine knows about: a plain clone, done.
     let Some(fs) = fs else {
-        vm.lock().await.persist().await;
+        crate::volume::VolumeManager::persist_detached(vm).await;
         return Ok(CloneResult {
             volume_id: id,
             source,
@@ -1308,8 +1319,9 @@ async fn clone_volume_impl(
             let mut m = vm.lock().await;
             let mut info = fs.clone();
             info.uuid = fs_uuid;
-            let _ = m.set_fs_info(id, Some(info)).await;
+            let _ = m.set_fs_info_deferred(id, Some(info));
         }
+        crate::volume::VolumeManager::persist_detached(vm).await;
         return Ok(CloneResult {
             volume_id: id,
             source,

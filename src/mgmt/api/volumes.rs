@@ -1,5 +1,7 @@
 //! GET/POST/DELETE /api/v1/volumes — volume management + snapshots.
 
+#[allow(unused_imports)]
+use crate::volume::catalog::VolumeView;
 use std::sync::Arc;
 
 use axum::{
@@ -127,7 +129,7 @@ struct Described {
     owner: Option<crate::volume::metadata::Owner>,
 }
 
-async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described {
+async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -> Described {
     match vm.get_volume_handle(id) {
         Some(handle) => {
             let h = handle.health().await;
@@ -332,7 +334,7 @@ struct VolumeList {
 }
 
 /// What the listing reports that a persist does not move (#218), hashed.
-async fn listing_fingerprint(state: &AppState, vm: &crate::volume::VolumeManager, ctx: &super::usage::Context) -> u64 {
+async fn listing_fingerprint(state: &AppState, vm: &impl crate::volume::catalog::VolumeView, ctx: &super::usage::Context) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     ctx.fingerprint(&mut h);
@@ -381,7 +383,7 @@ async fn listing_fingerprint(state: &AppState, vm: &crate::volume::VolumeManager
 /// The listing's generation (#218): the volume manager's plus how many times
 /// [`listing_fingerprint`] has changed. Both only ever grow, so the sum moves
 /// whenever either does.
-async fn listing_generation(state: &AppState, vm: &crate::volume::VolumeManager, ctx: &super::usage::Context) -> u64 {
+async fn listing_generation(state: &AppState, vm: &impl crate::volume::catalog::VolumeView, ctx: &super::usage::Context) -> u64 {
     let fp = listing_fingerprint(state, vm, ctx).await;
     let bumps = {
         let mut s = state.listing_state.lock().unwrap();
@@ -402,10 +404,30 @@ async fn list_volumes(
     headers: axum::http::HeaderMap,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "list").increment(1);
-    // What is served, gathered before the volume manager is held (#138).
+    // What is served, gathered before anything else (#138).
     let ctx = super::usage::Context::gather(&state).await;
+    // The catalog the manager published (#364): read with no manager lock,
+    // so a listing never waits on a create, a clone or a persist. Only when
+    // it does not name exactly the volumes that exist (one added or removed
+    // since its last persist) is the manager read instead.
+    if let Some(c) = state.volume_catalog.latest() {
+        if crate::volume::catalog::is_current(&c, &state.volume_presence) {
+            return list_from(&state, &c, &ctx, &q, &headers).await;
+        }
+    }
     let vm = state.volume_manager.lock().await;
-    let generation = listing_generation(&state, &vm, &ctx).await;
+    vm.publish_catalog();
+    list_from(&state, &vm, &ctx, &q, &headers).await
+}
+
+async fn list_from(
+    state: &Arc<AppState>,
+    vm: &impl VolumeView,
+    ctx: &super::usage::Context,
+    q: &ListVolumesQuery,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    let generation = listing_generation(state, vm, ctx).await;
     let etag = format!("\"{generation}\"");
     let known = headers
         .get(axum::http::header::IF_NONE_MATCH)
@@ -414,14 +436,14 @@ async fn list_volumes(
     if q.since == Some(generation) || known.as_deref() == Some(etag.as_str()) {
         return (axum::http::StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
     }
-    let vols = vm.list_volumes().await;
+    let vols = crate::volume::catalog::list_volumes(vm).await;
     let mut items: Vec<VolumeResponse> = Vec::with_capacity(vols.len());
     for (id, name, vsize, allocated) in &vols {
-        let usage = ctx.usage(&vm, id);
+        let usage = ctx.usage(vm, id);
         if !super::usage::matches(&usage, vm.owner(id).is_some(), q.kind.as_deref(), q.in_use, q.unowned) {
             continue;
         }
-        let d = describe(&vm, id).await;
+        let d = describe(vm, id).await;
         items.push(VolumeResponse {
             placement: None,
             usage,
@@ -450,7 +472,7 @@ async fn list_volumes(
             origin: d.origin,
         });
         if q.placement {
-            let p = super::placement::of_volume(&state, &vm, *id).await;
+            let p = super::placement::of_volume(state, vm, *id).await;
             if let Some(last) = items.last_mut() {
                 last.array_id = p.as_ref().and_then(one_array);
                 last.placement = p;
@@ -485,15 +507,31 @@ async fn get_volume(
     let vol_id = VolumeId(uuid);
     // Gathered before the volume manager is held (#138).
     let ctx = super::usage::Context::gather(&state).await;
+    // The published catalog when it is current (#364), else the manager.
+    if let Some(c) = state.volume_catalog.latest() {
+        if crate::volume::catalog::is_current(&c, &state.volume_presence) {
+            return get_from(&state, &c, &ctx, vol_id, uuid).await;
+        }
+    }
     let vm = state.volume_manager.lock().await;
+    get_from(&state, &vm, &ctx, vol_id, uuid).await
+}
+
+async fn get_from(
+    state: &Arc<AppState>,
+    vm: &impl VolumeView,
+    ctx: &super::usage::Context,
+    vol_id: VolumeId,
+    uuid: Uuid,
+) -> Response {
     match vm.get_volume_handle(&vol_id) {
         Some(handle) => {
             let name = handle.name().await;
             let allocated = handle.allocated().await;
             let vsize = handle.capacity_bytes();
-            let d = describe(&vm, &vol_id).await;
-            let placement = super::placement::of_volume(&state, &vm, vol_id).await;
-            let usage = ctx.usage(&vm, &vol_id);
+            let d = describe(vm, &vol_id).await;
+            let placement = super::placement::of_volume(state, vm, vol_id).await;
+            let usage = ctx.usage(vm, &vol_id);
             let resp = VolumeResponse {
                 array_id: placement.as_ref().and_then(one_array),
                 placement,
@@ -1770,14 +1808,16 @@ async fn restripe_volume(
             "volume {uuid} is exported; a restripe rebuilds its placement offline — detach it first"
         ));
     }
-    let mut vm = state.volume_manager.lock().await;
-    match vm.restripe(VolumeId(uuid), policy).await {
+    // No manager lock across the copy (#364): the volume's own lock and its
+    // operation claim keep it to one restripe at a time.
+    match crate::volume::VolumeManager::restripe_unlocked(&state.volume_manager, VolumeId(uuid), policy).await {
         Ok(report) => {
-            let health = vm.health(&VolumeId(uuid)).await;
+            let health = state.volume_manager.lock().await.health(&VolumeId(uuid)).await;
             Json(serde_json::json!({ "id": uuid, "report": report, "health": health })).into_response()
         }
         Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
         Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => ApiError::conflict(e.to_string()),
+        Err(e @ crate::volume::VolumeError::Busy(_)) => ApiError::conflict(e.to_string()),
         Err(e) => ApiError::internal(e.to_string()),
     }
 }
@@ -1799,13 +1839,14 @@ async fn resync_volume(
             "volume {uuid} is being rebuilt (see /api/v1/rebuilds); it is resynced when that finishes"
         ));
     }
-    let mut vm = state.volume_manager.lock().await;
-    match vm.resync_volume(VolumeId(uuid), q.verify).await {
+    // No manager lock across the rebuild (#364).
+    match crate::volume::VolumeManager::resync_volume_unlocked(&state.volume_manager, VolumeId(uuid), q.verify).await {
         Ok(report) => {
-            let health = vm.health(&VolumeId(uuid)).await;
+            let health = state.volume_manager.lock().await.health(&VolumeId(uuid)).await;
             Json(serde_json::json!({ "id": uuid, "report": report, "health": health })).into_response()
         }
         Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
+        Err(e @ crate::volume::VolumeError::Busy(_)) => ApiError::conflict(e.to_string()),
         Err(e) => ApiError::internal(e.to_string()),
     }
 }

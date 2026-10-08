@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #364 (P0, owner): the volume manager's lock is held for bookkeeping, not across I/O, and the listing never waits on a writer.
+  - **Persists after the lock:** inside an API request the shared manager's persists are owed, not made under its lock. The request's middleware makes them (`persist_detached_checked`: records taken under the lock, flushes and writes without it) once the handler has released everything, before it answers; a failure is the request's 500. Elsewhere `lock().persist()` became `persist_detached` (rebuild, drain, staging, StormFS), with the same ordering.
+  - **Long operations off the lock:** a cross-role clone copies with no manager lock (`copy_volume_unlocked`), and so do the API's resync and restripe (`*_unlocked`), one long operation per volume (`begin_op`, 409 for a second), any number on different volumes.
+  - **Readers:** `GET /api/v1/volumes` and `GET /api/v1/volumes/{id}` read a published `Catalog`, a snapshot the manager publishes each time it takes its records, through `VolumeView`. They take the manager only when the catalog does not name exactly the volumes that exist.
+  - **The rule, checked:** a device flush with the manager held is a WARN, or a panic with `STORMBLOCK_LOCK_ASSERT=1`.
+  - **Test:** a slab device with 500 ms flushes and 30 ms writes; two cross-role copies, ten creates and ten clones at once; every listing meanwhile answers under 400 ms, and nothing flushes with the manager held.
 - **fix:** #368 (P0, Dell 11.98): a tokio worker panicked in the scheduler (`state.rs:120 next.is_notified()`) 4 s after the watchdog's timed task dump, and the engine stayed up, answering nothing and logging nothing (the next dump waited on the dead worker). Now:
   - a panic in the daemon, `adopt-ublk` or `boot-local` aborts the process, after a `FATAL:` line with a captured backtrace on stderr and in the record, so stormpump restarts it;
   - task dumps are off unless `STORMBLOCK_TASK_DUMP=1` (tracing tasks while they serve I/O is the #334 mechanism, on the multi-thread runtime);

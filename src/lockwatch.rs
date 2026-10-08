@@ -39,11 +39,29 @@ pub const HOLD_WARN: Duration = Duration::from_secs(10);
 pub struct Activity {
     pub name: Arc<str>,
     wait_us: Arc<AtomicU64>,
+    /// An API request (#364): the shared volume manager's persists inside it
+    /// are owed, and made by the request's middleware after every lock is
+    /// released, before it answers.
+    api: bool,
+    owes_persist: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Activity {
     pub fn new(name: impl Into<Arc<str>>) -> Self {
-        Activity { name: name.into(), wait_us: Arc::new(AtomicU64::new(0)) }
+        Activity {
+            name: name.into(),
+            wait_us: Arc::new(AtomicU64::new(0)),
+            api: false,
+            owes_persist: Default::default(),
+        }
+    }
+    /// An API request's activity (see `api`).
+    pub fn request(name: impl Into<Arc<str>>) -> Self {
+        Activity { api: true, ..Activity::new(name) }
+    }
+    /// Whether a persist was owed inside this activity (and clears it).
+    pub fn take_owed_persist(&self) -> bool {
+        self.owes_persist.swap(false, Ordering::SeqCst)
     }
     /// Time spent waiting on tracked locks inside this activity so far.
     pub fn lock_wait(&self) -> Duration {
@@ -90,6 +108,20 @@ pub fn current_name() -> Arc<str> {
     std::thread::current().name().unwrap_or("a thread").to_string().into()
 }
 
+/// Inside an API request: note that the shared volume manager owes a
+/// persist, to be made by the request's middleware once every lock is
+/// released (#364). `false` outside one: persist now, as always.
+pub fn owe_persist() -> bool {
+    ACTIVITY
+        .try_with(|a| {
+            if a.api {
+                a.owes_persist.store(true, Ordering::SeqCst);
+            }
+            a.api
+        })
+        .unwrap_or(false)
+}
+
 fn add_wait(d: Duration) {
     let _ = ACTIVITY.try_with(|a| a.wait_us.fetch_add(d.as_micros() as u64, Ordering::Relaxed));
 }
@@ -102,6 +134,8 @@ struct Entry {
     who: Arc<str>,
     since: Instant,
     write: bool,
+    /// The tokio task that took it, for [`assert_not_held`].
+    task: Option<tokio::task::Id>,
 }
 
 /// One lock's holders and waiters.
@@ -126,13 +160,13 @@ impl LockState {
     }
 
     fn wait(self: &Arc<Self>, write: bool) -> WaitMark {
-        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write };
+        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write, task: tokio::task::try_id() };
         self.waiters.lock().unwrap_or_else(|p| p.into_inner()).push(e.clone());
         WaitMark { state: self.clone(), entry: e }
     }
 
     fn hold(self: &Arc<Self>, write: bool) -> HoldMark {
-        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write };
+        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write, task: tokio::task::try_id() };
         self.holders.lock().unwrap_or_else(|p| p.into_inner()).push(e.clone());
         HoldMark { state: self.clone(), entry: e }
     }
@@ -387,6 +421,41 @@ impl<T> Deref for TrackedWriteGuard<'_, T> {
 impl<T> DerefMut for TrackedWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.guard
+    }
+}
+
+// ── Nothing held across I/O ──────────────────────────────────────────────
+
+/// Does the current task hold the lock called `lock` (`"volume manager"`)?
+pub fn current_task_holds(lock: &str) -> bool {
+    let Some(me) = tokio::task::try_id() else { return false };
+    let states: Vec<Arc<LockState>> = {
+        let a = all().lock().unwrap_or_else(|e| e.into_inner());
+        a.iter().filter_map(|w| w.upgrade()).collect()
+    };
+    states.iter().filter(|s| s.name == lock).any(|s| {
+        s.holders.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|e| e.task == Some(me))
+    })
+}
+
+/// The rule of #364: the volume manager's lock is never held across I/O.
+/// Called where the engine flushes a device: a holder there is reported, at
+/// WARN once a minute, and with `STORMBLOCK_LOCK_ASSERT=1` (the #364 tests)
+/// is a panic, so a path that breaks the rule fails its test.
+pub fn assert_not_held(lock: &str, across: &str) {
+    if !current_task_holds(lock) {
+        return;
+    }
+    let strict = std::env::var_os("STORMBLOCK_LOCK_ASSERT").as_deref() == Some(std::ffi::OsStr::new("1"));
+    let msg = format!("lock: the {lock} is held by {} across {across} (#364)", current_name());
+    if strict {
+        panic!("{msg}");
+    }
+    static LAST: StdMutex<Option<Instant>> = StdMutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.map(|t| t.elapsed() >= Duration::from_secs(60)).unwrap_or(true) {
+        *last = Some(Instant::now());
+        tracing::warn!("{msg}");
     }
 }
 

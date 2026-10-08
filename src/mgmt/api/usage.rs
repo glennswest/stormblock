@@ -18,6 +18,8 @@
 //! Gathered once per request, with each lock taken and released on its own —
 //! never while the volume manager is held.
 
+#[allow(unused_imports)]
+use crate::volume::catalog::VolumeView;
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
@@ -255,7 +257,7 @@ impl Context {
     /// * a template's sealed volume, or a blank an image shipped → `blank`;
     /// * a whole-disk image or ISO (`fs.kind` gpt, mbr, iso9660) → `media`;
     /// * any other sealed volume → `golden`.
-    pub fn kind(&self, vm: &VolumeManager, id: &VolumeId) -> &'static str {
+    pub fn kind(&self, vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -> &'static str {
         if self.template_raw.contains(&id.0) {
             return "template";
         }
@@ -274,7 +276,7 @@ impl Context {
         "golden"
     }
 
-    pub fn usage(&self, vm: &VolumeManager, id: &VolumeId) -> Usage {
+    pub fn usage(&self, vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -> Usage {
         let attachments = self.attachments.get(&id.0).cloned().unwrap_or_default();
         let consumer = match vm.owner(id) {
             Some(o) => Some(Consumer {

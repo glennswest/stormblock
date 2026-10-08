@@ -181,6 +181,30 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — IN PROGRESS
+
+The Dell: `GET /volumes` 10–58 s behind the manager mutex; a clone ~60 s.
+Codex review: cross-role clone holds the manager across `copy_volume`;
+resync/restripe endpoints across the rebuild; `sync_registered` holds the
+registry read guard while `publish_ready` writes; snapshot creation holds
+GEM+registry write guards across ref-count table I/O.
+- [x] API requests: the shared manager's persists owed, made by `track()`
+      after the handler released it (`persist_detached_checked`; failure =
+      500); `lock().persist()` → `persist_detached` elsewhere
+- [x] cross-role copy, API resync and restripe without the manager
+      (`*_unlocked`), `begin_op` per volume (409 for a second)
+- [x] readers: `volume::catalog` (Catalog published in `records()`,
+      `VolumeView`), list and get read it when current (checked against
+      `VolumePresence`)
+- [x] `lockwatch::assert_not_held` at device flushes (WARN; panic with
+      `STORMBLOCK_LOCK_ASSERT=1`)
+- [x] tests: `integration_locks` (slow device; copies, creates, clones,
+      listings), `one_long_operation_per_volume`
+- [ ] build VM; then the slab-level holds (sync_registered/publish_ready,
+      snapshot ref-count I/O under GEM+registry) and the template build's
+      inline persists, as a second step if this one is not enough
+- [ ] check.sh, golden, comment
+
 ### A worker panic left the engine alive and silent (2026-10-08, #368, P0) — DONE (golden-stormblock-501f2106e220)
 
 Dell 11.98: tokio `state.rs:120 next.is_notified()` 4 s after the

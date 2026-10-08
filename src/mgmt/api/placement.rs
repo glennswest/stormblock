@@ -12,6 +12,8 @@
 //! the volume's map, O(extents), so the listing only does it when asked
 //! (`?placement=true`); the single-volume GET always does.
 
+#[allow(unused_imports)]
+use crate::volume::catalog::VolumeView;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -153,7 +155,7 @@ struct Count {
 /// Where volume `id` lives, or `None` when there is no such volume.
 ///
 /// Takes the volume manager the caller already holds, so a listing asks once.
-pub async fn of_volume(state: &Arc<AppState>, vm: &VolumeManager, id: VolumeId) -> Option<Placement> {
+pub async fn of_volume(state: &Arc<AppState>, vm: &impl crate::volume::catalog::VolumeView, id: VolumeId) -> Option<Placement> {
     let handle = vm.get_volume_handle(&id)?;
     let health = handle.health().await;
     let local = local_node(state);

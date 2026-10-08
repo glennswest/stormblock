@@ -342,7 +342,7 @@ pub async fn delete_generation(vm: &crate::lockwatch::TrackedMutex<VolumeManager
             .map_err(|e| anyhow::anyhow!("deleting {} ({}) of release {}: {e}", v.name, v.id, gen.version))?;
         n += 1;
     }
-    vm.lock().await.persist().await;
+    crate::volume::VolumeManager::persist_detached(&vm).await;
     Ok(n)
 }
 

@@ -162,7 +162,7 @@ fn is_probe(path: &str) -> bool {
 /// status, caller, peer, total time and time spent waiting on locks. A
 /// request a client gave up on is removed when its future is dropped, and
 /// said so.
-pub async fn track(mut req: Request, next: Next) -> Response {
+pub async fn track(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -180,8 +180,31 @@ pub async fn track(mut req: Request, next: Next) -> Response {
         InFlight { method: method.clone(), path: path.clone(), name: name.clone(), since, reported: None },
     );
     let guard = Registered { id, name: name.clone(), since, done: false };
-    let activity = crate::lockwatch::Activity::new(name.clone());
-    let resp = crate::lockwatch::scope(activity.clone(), next.run(req)).await;
+    let activity = crate::lockwatch::Activity::request(name.clone());
+    let mut resp = crate::lockwatch::scope(activity.clone(), next.run(req)).await;
+    // The persist the request's changes owe, made now that its handler has
+    // released the volume manager (#364): never under that lock, still
+    // before the caller hears the answer.
+    if activity.take_owed_persist() {
+        let persisted = crate::lockwatch::scope(
+            activity.clone(),
+            crate::volume::VolumeManager::persist_detached_checked(&state.volume_manager),
+        )
+        .await;
+        if let Err(e) = persisted {
+            tracing::error!("api: {name}: its changes were not written to the volume metadata: {e}");
+            if resp.status().is_success() {
+                resp = (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({
+                        "code": 500,
+                        "error": format!("the change was made but the volume metadata was not written: {e}"),
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
     let mut guard = guard;
     guard.done = true;
     let status = resp.status().as_u16();

@@ -39,6 +39,8 @@ impl FlushGate {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = DriveResult<()>>,
     {
+        // Never with the volume manager held (#364).
+        crate::lockwatch::assert_not_held("volume manager", "a device flush");
         let ticket = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
         let _running = self.running.lock().await;
         if self.done.load(Ordering::SeqCst) >= ticket {
