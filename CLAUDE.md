@@ -183,8 +183,11 @@ left the ublk device / namespace; expiry ran only inside some calls.
 - [x] expiry on every `/v1` call (reads and detach included) and a 1 s timer
       (`expiry_loop`, ends with the state); windows still open at a restart
       expire on the timer
+- [x] docs (migration.md), CHANGELOG
 - [ ] test `integration_ana_epoch::promote_and_an_expired_window_take_the_
-      data_path_with_the_record`; docs; CHANGELOG
+      data_path_with_the_record`: first run failed on its own assertion (an
+      empty `attachments` is left out of the reply); fixed, to run again.
+      PAUSED for P0 #344
 
 ### tests-runtime/ has a gate (2026-10-08, #222) — PAUSED for P0 #344 (back in line)
 

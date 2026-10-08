@@ -362,7 +362,7 @@ async fn promote_and_an_expired_window_take_the_data_path_with_the_record() {
     )
     .await;
     assert_eq!(s, 200, "{p}");
-    assert_eq!(p["attachments"].as_array().map(|a| a.len()), Some(0), "{p}");
+    assert_eq!(p["attachments"].as_array().map_or(0, |a| a.len()), 0, "{p}");
     assert!(host.write(0, &vec![3u8; 4096]).await.is_err(), "the promote took the host's path away");
     assert!(NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H1)).await.is_err(), "and it cannot connect back");
 
@@ -393,7 +393,7 @@ async fn promote_and_an_expired_window_take_the_data_path_with_the_record() {
     }
     let (_, v) = call(reqwest::Method::GET, format!("{}/v1/volumes/{id}", n.api), serde_json::json!({})).await;
     assert!(
-        v["attachments"].as_array().unwrap().iter().all(|a| a["node"] != "peer"),
+        v["attachments"].as_array().is_none_or(|a| a.iter().all(|a| a["node"] != "peer")),
         "the record went too: {v}"
     );
     assert!(n.state.v1.lock().await.dual_attach.get(&id).is_none());
