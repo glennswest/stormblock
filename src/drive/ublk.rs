@@ -1442,7 +1442,9 @@ static TRACKS: std::sync::LazyLock<std::sync::Mutex<Vec<std::sync::Weak<QueueTra
 
 fn track_now_ms() -> u64 {
     static BASE: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
-    BASE.elapsed().as_millis() as u64 + 1
+    // Offset so 0 never means "now" and an age can be made up (tests'
+    // `backdate`) without going below it.
+    BASE.elapsed().as_millis() as u64 + 1_000_000_000
 }
 
 impl QueueTrack {
