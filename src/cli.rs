@@ -298,6 +298,12 @@ enum SubCommand {
         /// Metadata directory, if the slab does not carry its own
         #[arg(long)]
         meta: Option<String>,
+        /// When the incumbent's engine version (from the handover record) is
+        /// not this one's, or it recorded none (#189): `warn` (say so loudly,
+        /// take over) or `refuse` (exit before standing it down; it serves
+        /// on).
+        #[arg(long, env = "STORMBLOCK_ADOPT_VERSION_MISMATCH", default_value = "warn")]
+        version_mismatch: crate::drive::handover::VersionPolicy,
         /// Also serve the management API here (e.g. `127.0.0.1:9090`).
         ///
         /// The process that holds the slab is the engine, and it is the only
@@ -918,10 +924,10 @@ pub async fn run() -> anyhow::Result<()> {
                 tracing::info!("Requires Linux 6.0+ with ublk_drv module loaded");
                 return Ok(());
             }
-            SubCommand::AdoptUblk { slab, volumes, meta, api, data_dir } => {
+            SubCommand::AdoptUblk { slab, volumes, meta, version_mismatch, api, data_dir } => {
                 return handle_adopt_ublk(
                     slab, volumes, meta.as_deref(), api.as_deref(), data_dir.as_deref(),
-                    &cli.config,
+                    &cli.config, *version_mismatch,
                 ).await;
             }
             SubCommand::BootClaim { boothost, tag, namespace, timeout_secs, token } => {
@@ -6084,6 +6090,7 @@ pub async fn run() -> anyhow::Result<()> {
         api: Option<&str>,
         data_dir: Option<&str>,
         config_path: &str,
+        version_policy: crate::drive::handover::VersionPolicy,
     ) -> anyhow::Result<()> {
         use crate::drive::ublk::UblkServer;
 
@@ -6100,6 +6107,25 @@ pub async fn run() -> anyhow::Result<()> {
         let record = crate::drive::handover::Record::read(std::path::Path::new(
             crate::drive::handover::DEFAULT_PATH,
         ));
+
+        // Which engine is being taken over (#189), decided before anything is
+        // touched: refusing here leaves the incumbent serving.
+        {
+            use crate::drive::handover::{check_version, VersionCheck, ENGINE_VERSION};
+            let check = check_version(record.as_ref(), ENGINE_VERSION);
+            let (said, go) = check.verdict(ENGINE_VERSION, version_policy);
+            if check == VersionCheck::Same {
+                println!("adopt: {said}");
+            } else if go {
+                eprintln!("WARNING: adopt: {said}. Taking over anyway (--version-mismatch refuse to stop).");
+                tracing::warn!("adopt: {said}");
+            } else {
+                anyhow::bail!(
+                    "refused (--version-mismatch refuse): {said}. Nothing was stood down; the \
+                     incumbent serves on"
+                );
+            }
+        }
 
         let from_record = record.as_ref().map(|r| r.volumes_in_device_order());
         let volumes: &[String] = if !volumes.is_empty() {
@@ -6384,6 +6410,19 @@ pub async fn run() -> anyhow::Result<()> {
     }
     adopt_succeeded();
     write_handover_state("serving", live, Some(steps.start().elapsed()));
+    // This engine is now the incumbent (#189): the next handover compares
+    // with it, not with whoever wrote the record first.
+    {
+        let path = std::path::Path::new(crate::drive::handover::DEFAULT_PATH);
+        if let Some(mut rec) = crate::drive::handover::Record::read(path) {
+            if rec.engine_version.as_deref() != Some(crate::drive::handover::ENGINE_VERSION) {
+                rec.engine_version = Some(crate::drive::handover::ENGINE_VERSION.to_string());
+                if let Err(e) = rec.write(path) {
+                    tracing::warn!("could not record this engine's version in {}: {e}", path.display());
+                }
+            }
+        }
+    }
     if live < threads.len() {
         tracing::warn!(
             "adopted {live} of {} device(s); the rest are named in the errors above",
@@ -6689,6 +6728,7 @@ async fn handle_adopt_ublk(
     _api: Option<&str>,
     _data_dir: Option<&str>,
     _config_path: &str,
+    _version_policy: crate::drive::handover::VersionPolicy,
 ) -> anyhow::Result<()> {
     anyhow::bail!("ublk is Linux-only")
 }
@@ -7098,6 +7138,7 @@ async fn handle_boot_local(
             flow_over: laid_flow_over.clone(),
             local_boot: local_boot_disk.clone(),
             installed: installed.clone(),
+            engine_version: Some(crate::drive::handover::ENGINE_VERSION.to_string()),
             // An install the appliance asked for is done when this disk is
             // (#148) — only when there is a flow-over to finish. With none,
             // the intent stays `install` and the next boot tries again.

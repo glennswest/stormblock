@@ -156,6 +156,79 @@ pub struct Record {
     /// stormupdate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed: Option<crate::image::install::Report>,
+    /// The version of the engine serving the devices this record names (#189):
+    /// written by `boot-local`, and rewritten by each `adopt-ublk` once it
+    /// serves, so the next handover compares with the real incumbent. 11.45
+    /// shipped a v19.1.4 engine over a v16.1.0 initramfs; the successor's
+    /// handover depends on the incumbent's own stand-down, flush and exit.
+    /// Absent in a record an engine older than this wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
+}
+
+/// This engine's version, as it is written into a handover record.
+pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What `adopt-ublk` does when the incumbent's version is not its own (#189).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VersionPolicy {
+    /// Say so loudly, and take over.
+    #[default]
+    Warn,
+    /// Refuse before standing the incumbent down: it serves on.
+    Refuse,
+}
+
+impl std::str::FromStr for VersionPolicy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "warn" | "" => Ok(VersionPolicy::Warn),
+            "refuse" => Ok(VersionPolicy::Refuse),
+            o => Err(format!("{o:?}: warn or refuse")),
+        }
+    }
+}
+
+/// The incumbent's version against this engine's (#189).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionCheck {
+    Same,
+    Differs(String),
+    /// No record, or one written before records carried a version.
+    Unknown,
+}
+
+pub fn check_version(record: Option<&Record>, mine: &str) -> VersionCheck {
+    match record.and_then(|r| r.engine_version.as_deref()) {
+        Some(v) if v == mine => VersionCheck::Same,
+        Some(v) => VersionCheck::Differs(v.to_string()),
+        None => VersionCheck::Unknown,
+    }
+}
+
+impl VersionCheck {
+    /// What to say, and whether `policy` lets the takeover go on.
+    pub fn verdict(&self, mine: &str, policy: VersionPolicy) -> (String, bool) {
+        match self {
+            VersionCheck::Same => (format!("the incumbent engine is v{mine}, the same as this one"), true),
+            VersionCheck::Differs(v) => (
+                format!(
+                    "the incumbent engine is v{v} and this one is v{mine}: the handover relies on \
+                     the incumbent's own stand-down, flush and exit, so an engine of another \
+                     version (an initramfs older than its release) is a hazard"
+                ),
+                policy == VersionPolicy::Warn,
+            ),
+            VersionCheck::Unknown => (
+                format!(
+                    "the incumbent recorded no engine version (it predates #189, so it is older \
+                     than this v{mine}): the handover relies on its own stand-down, flush and exit"
+                ),
+                policy == VersionPolicy::Warn,
+            ),
+        }
+    }
 }
 
 impl Record {
@@ -405,6 +478,7 @@ mod tests {
             local_boot: None,
             install: None,
             installed: None,
+            engine_version: None,
             devices: vec![
                 Device { dev_id: 0, volume: "stormpump".into() },
                 Device { dev_id: 2, volume: "sbregistry".into() },
@@ -493,5 +567,38 @@ mod tests {
         rec.install = Some(t);
         let bytes = serde_json::to_vec(&rec).expect("encodes");
         assert_eq!(serde_json::from_slice::<Record>(&bytes).expect("decodes"), rec);
+    }
+
+    /// #189: the record carries the incumbent's version; a mismatch, or a
+    /// record with none, is said and refused only when asked.
+    #[test]
+    fn the_incumbents_version_is_recorded_and_compared() {
+        let mut rec = a_record();
+        // A record from before #189 still reads, and has no version.
+        let old = serde_json::to_string(&rec).unwrap();
+        assert!(!old.contains("engine_version"));
+        let back: Record = serde_json::from_str(&old).unwrap();
+        assert_eq!(check_version(Some(&back), "20.0.0"), VersionCheck::Unknown);
+        assert_eq!(check_version(None, "20.0.0"), VersionCheck::Unknown);
+
+        rec.engine_version = Some("16.1.0".into());
+        let back: Record = serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+        assert_eq!(back.engine_version.as_deref(), Some("16.1.0"));
+        let c = check_version(Some(&back), "20.0.0");
+        assert_eq!(c, VersionCheck::Differs("16.1.0".into()));
+        let (said, go) = c.verdict("20.0.0", VersionPolicy::Warn);
+        assert!(go && said.contains("v16.1.0") && said.contains("v20.0.0"), "{said}");
+        assert!(!c.verdict("20.0.0", VersionPolicy::Refuse).1);
+        assert!(!VersionCheck::Unknown.verdict("20.0.0", VersionPolicy::Refuse).1);
+        assert!(VersionCheck::Unknown.verdict("20.0.0", VersionPolicy::Warn).1);
+
+        rec.engine_version = Some(ENGINE_VERSION.into());
+        let c = check_version(Some(&rec), ENGINE_VERSION);
+        assert_eq!(c, VersionCheck::Same);
+        assert!(c.verdict(ENGINE_VERSION, VersionPolicy::Refuse).1, "the same version is never refused");
+
+        assert_eq!("refuse".parse::<VersionPolicy>(), Ok(VersionPolicy::Refuse));
+        assert_eq!("WARN".parse::<VersionPolicy>(), Ok(VersionPolicy::Warn));
+        assert!("maybe".parse::<VersionPolicy>().is_err());
     }
 }

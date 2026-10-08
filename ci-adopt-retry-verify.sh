@@ -25,6 +25,13 @@
 #   sigterm-capture   (#144) a file written to the engine's state dir just
 #              before SIGTERM is in the next adopter's: only the final
 #              state capture can have put it there
+#   version    (#189) boot-local records its engine version; the first
+#              adopter says it is the same, and rewrites the record as its own
+#   version-refused   the record made to say 16.1.0: an adopter with
+#              --version-mismatch refuse exits before the stand-down, and the
+#              incumbent serves on
+#   version-warn      the next adopter (default warn) says WARNING with both
+#              versions, takes over, and records its own version
 #
 # Needs: cargo, qemu-system-x86_64, /boot/vmlinuz-$(uname -r) and its
 # ublk_drv module, a static busybox and curl. Run on dev through sc-build:
@@ -172,6 +179,16 @@ else
     log adopt-a /run/adopt-a.log 20
 fi
 
+# 3a. version (#189): the incumbent's version recorded, compared, rewritten.
+ver=$(stormblock --version 2>/dev/null | awk '{print $NF}')
+recv=$(sed -n 's/.*"engine_version": *"\([^"]*\)".*/\1/p' /run/stormblock/handover.json)
+echo "GUEST version: binary $ver, record $recv"
+if [ -n "$ver" ] && [ "$recv" = "$ver" ] && grep -q "adopt: the incumbent engine is v$ver, the same as this one" /run/adopt-a.log; then
+    r version PASS
+else
+    r version "FAIL (binary '$ver', record '$recv')"; log adopt-a /run/adopt-a.log 10
+fi
+
 # 3b. timing (#303): the handover's steps on the console, and its state.
 grep -h '^\[slabs +\|^\[adopt +' /run/adopt-a.log | sed 's/^/GUEST timing: /'
 grep -h '^\[boot-local stop +' /run/boot-local.log | sed 's/^/GUEST timing: /'
@@ -226,6 +243,19 @@ else
 fi
 grep -h "is on ublk device" /run/adopt-d.log | head -1 | sed 's/^/GUEST refused: /'
 
+# 6b. version-refused (#189): the record says an older engine; refuse means
+#     nothing is stood down.
+sed -i 's/"engine_version": *"[^"]*"/"engine_version": "16.1.0"/' /run/stormblock/handover.json
+stormblock adopt-ublk --version-mismatch refuse > /run/adopt-v.log 2>&1
+rc=$?
+dd if=/dev/ublkb0 of=/tmp/rv bs=1M count=4 iflag=direct 2>/dev/null
+if [ "$rc" != 0 ] && [ "$rc" != 75 ] && alive $c && cmp -s /tmp/pat /tmp/rv \
+   && grep -q "refused (--version-mismatch refuse): the incumbent engine is v16.1.0" /run/adopt-v.log; then
+    r version-refused PASS
+else
+    r version-refused "FAIL (exit $rc)"; log adopt-v /run/adopt-v.log 10
+fi
+
 # 7. sigterm-handover (#144): the adopter stood down by the next one gets
 #    SIGTERM and stops in order (exit 0, devices released, not deleted); the
 #    next one serves the same bytes.
@@ -240,6 +270,16 @@ if [ "$crc" = 0 ] && grep -q "adopt: SIGTERM" /run/adopt-c.log && grep -q "adopt
     r sigterm-handover PASS
 else
     r sigterm-handover "FAIL (old adopter exit $crc)"; log adopt-c /run/adopt-c.log 10; log adopt-e /run/adopt-e.log 10
+fi
+# 7b. version-warn (#189): the adopter that took over from the "16.1.0"
+#     incumbent said so, and recorded its own version.
+recv=$(sed -n 's/.*"engine_version": *"\([^"]*\)".*/\1/p' /run/stormblock/handover.json)
+grep -h "WARNING: adopt:" /run/adopt-e.log | head -1 | sed 's/^/GUEST version-warn: /'
+if grep -q "WARNING: adopt: the incumbent engine is v16.1.0 and this one is v$ver" /run/adopt-e.log \
+   && [ "$recv" = "$ver" ] && alive $e; then
+    r version-warn PASS
+else
+    r version-warn "FAIL (record '$recv')"; log adopt-e /run/adopt-e.log 10
 fi
 
 # 8. sigterm-capture (#144): what the engine wrote just before a SIGTERM is
@@ -277,7 +317,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -drive file="$W/a.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG|PS|WATCHDOG)|panick'
 
-for m in incumbent-serves retry timing give-up rerun refused sigterm-handover sigterm-capture; do
+for m in incumbent-serves retry version timing give-up rerun refused version-refused sigterm-handover version-warn sigterm-capture; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi

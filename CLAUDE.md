@@ -171,6 +171,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The handover record carries the incumbent's engine version (2026-10-08, #189) — IN PROGRESS
+
+11.45 shipped a v19.1.4 engine over a v16.1.0 initramfs; the handover relies
+on the incumbent's own stand-down, flush and exit.
+- [ ] `Record.engine_version` (boot-local writes it; each adopt-ublk rewrites
+      it once serving); `adopt-ublk` compares before anything is stood down:
+      same = said, differs/unrecorded = WARNING, or refused with
+      `--version-mismatch refuse` (`STORMBLOCK_ADOPT_VERSION_MISMATCH`)
+- [ ] unit test; `ci-adopt-retry-verify.sh` version, version-refused,
+      version-warn; README, CHANGELOG. The commit is #341's
+
 ### A DH-HMAC-CHAP secret for nvme-tcp:// drives (2026-10-08, #213) — DONE
 
 - [x] `drive::open_one_drive_with_secret` (refused for anything not
