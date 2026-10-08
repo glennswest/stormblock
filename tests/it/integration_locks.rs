@@ -122,13 +122,14 @@ async fn listings_keep_their_time_while_builds_and_creates_flush_a_slow_disk() {
         }));
     }
     for i in 0..10 {
-        let (c, base) = (c.clone(), base.clone());
+        let (c1, b1) = (c.clone(), base.clone());
         work.push(tokio::spawn(async move {
-            let r = c.post(format!("{base}/api/v1/volumes")).json(&serde_json::json!({"name": format!("v{i}"), "size": "16M"})).send().await.unwrap();
+            let r = c1.post(format!("{b1}/api/v1/volumes")).json(&serde_json::json!({"name": format!("v{i}"), "size": "16M"})).send().await.unwrap();
             (format!("create v{i}"), r.status().as_u16(), r.text().await.unwrap())
         }));
-        let (c, base, src) = (c.clone(), base.clone(), source_id.clone());
+        let (c2, b2, src) = (c.clone(), base.clone(), source_id.clone());
         work.push(tokio::spawn(async move {
+            let (c, base) = (c2, b2);
             let r = c
                 .post(format!("{base}/api/v1/volumes/{src}/clone"))
                 .json(&serde_json::json!({"name": format!("cow-{i}")}))
