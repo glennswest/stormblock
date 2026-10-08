@@ -140,6 +140,14 @@ tests run on.
    the extent still names the source and carrying the source slot's share
    count as the slab has it then. Holding both for the copy queued every
    volume's I/O and every API call behind each move.
+   **Moves run in windows** (#331): up to 64 extents (`STORMBLOCK_FLOW_BATCH`),
+   up to 8 at once (`STORMBLOCK_FLOW_PARALLEL`), each slot once, then one
+   persist and then the release of their source slots. A source slot stays
+   owed, never freed, until the map naming its copy is durable, so a cut
+   anywhere in a window leaves each extent on its source or on a copy that is
+   whole. The flow-over gives the disk back to foreground I/O for a quarter
+   of a window's time, at most 2 s, when a volume was read or written since
+   the last window.
 11. **Nothing is written in place on a slab being emptied** (#239, reopened).
    Rule 9's fresh clone carries the *image's* bytes, not what the last boot
    wrote on its own clone, so a write left on the appliance side is lost the

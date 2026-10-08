@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **perf:** #331: the flow-over moves extents in windows.
+  - **Before:** one extent at a time, a full persist (every slab flushed, local and remote) after each, and a sleep as long as the whole previous move whenever any volume I/O had run.
+  - **Now:** windows of up to 64 extents (`STORMBLOCK_FLOW_BATCH`), with a slot shared by a golden and its clones moved once. Up to 8 move at once (`STORMBLOCK_FLOW_PARALLEL`), each holding only its slot's fence for the copy. Then one persist, then the release of their source slots. A source slot is still freed only after the map naming its copy is durable (durability rule 10).
+  - **Yield:** a quarter of a window's time, at most 2 s, when foreground I/O ran.
+  - **Timing:** the flow-over now says every 100 moves and at the end where its time went (`flow-over: N moved in Ts (X/h): yield, fence, copy, persist, release`).
+  - **Model:** `flow_over_rate_model` (ignored) runs a netbooted install over NVMe/TCP.
+  - **Note:** the hours on pvetest were the pve host's shared QLC NVMe (owner); server3 on its own disk flowed over in 36 s.
 - **fix:** #279: `FileDevice::write` returned before its bytes were in the file. It is `seek` plus `write_all` on a `tokio::fs::File`, which hands the write to the blocking pool and returns. That `File` orders its own later operations after the write, but a second `FileDevice` on the same path could read the file before the write landed.
   - **Symptom:** the flaky `pressure::tests::an_existing_slab_on_a_source_is_adopted_with_its_data`, where the watcher reopens a slab another `FileDevice` had just formatted, and the full suite's load keeps the blocking pool busy.
   - **Fix:** `write` now flushes the tokio `File` (not an fsync), so a returned write is in the file.

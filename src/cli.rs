@@ -5320,6 +5320,18 @@ pub async fn run() -> anyhow::Result<()> {
     /// seconds as well.
     const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
+    /// Moves a flow-over makes between persists (#331):
+    /// `STORMBLOCK_FLOW_BATCH`, 64. Each persist flushes every slab; one per
+    /// extent was most of a move.
+    fn flow_batch() -> usize {
+        std::env::var("STORMBLOCK_FLOW_BATCH").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(64)
+    }
+
+    /// Moves a flow-over makes at once (#331): `STORMBLOCK_FLOW_PARALLEL`, 8.
+    fn flow_parallel() -> usize {
+        std::env::var("STORMBLOCK_FLOW_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(8)
+    }
+
     /// How long the node's volume I/O must be still before a successor's
     /// flow-over starts (#278).
     const FLOW_BOOT_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
@@ -5517,72 +5529,102 @@ pub async fn run() -> anyhow::Result<()> {
                     (pass_moved, pass_had) = (0, !batch.is_empty());
                 }
                 report(batch.len() + after);
-                let Some((vol, vext, leg)) = batch.pop_front() else { break };
+                if batch.is_empty() {
+                    break;
+                }
+                // A window of moves (#331), each slot once: a slot a golden
+                // shares with its clones is listed once for each map, and one
+                // move rewrites all of them.
+                let mut seen = std::collections::HashSet::new();
+                let mut window = Vec::with_capacity(flow_batch());
+                while window.len() < flow_batch() {
+                    let Some((vol, vext, leg)) = batch.pop_front() else { break };
+                    if seen.insert(leg) {
+                        window.push((vol, vext, leg));
+                    }
+                }
                 // Foreground first (#269): when a volume has been read or written
-                // since the last move, give the disk back for as long as that move
-                // took (capped) before the next. An idle node moves at full speed.
+                // since the last window, give the disk back for a quarter of the
+                // time that window took (capped), before the next. An idle node
+                // moves at full speed; a busy one still moves most of the time.
                 let t = std::time::Instant::now();
                 if crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed) != foreground {
-                    tokio::time::sleep(last_move.min(FLOW_YIELD_MAX)).await;
+                    tokio::time::sleep((last_move / 4).min(FLOW_YIELD_MAX)).await;
                 }
                 spent.yielded += t.elapsed();
                 foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
                 let started = std::time::Instant::now();
-                let fence = crate::volume::fence::exclusive(leg).await;
-                spent.fence += started.elapsed();
-                let t = std::time::Instant::now();
-                // The copy holds only the fence on this slot; the map and the
-                // registry are taken to allocate and to publish (#269). Holding
-                // them for the copy stalled every volume's I/O and every API call
-                // behind each of the 7528 extents of the Dell's install.
-                let res = engine
-                    .migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence)
-                    .await;
-                drop(fence);
-                spent.copy += t.elapsed();
-                match res {
-                    Ok(_) => {
-                        moved += 1;
-                        pass_moved += 1;
-                    }
-                    // The extent changed since the pass listed it (a
-                    // copy-on-write took it, a discard freed it, another map's
-                    // move took the slot): the next pass lists it again if it
-                    // is still on the source.
-                    Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. }) => {
-                        continue;
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
-                        // A handful of bad extents is a disk worth giving up
-                        // on, and giving up leaves the node exactly where it
-                        // was: running from the appliance.
-                        if failed > 16 {
-                            // The node goes on running from the appliance.
-                            give_up().await;
-                            return None;
+                // Several moves at once (#331): each holds only the fence on its
+                // own slot for its copy; the map and the registry are taken to
+                // allocate and to publish (#269). One at a time, each waited for
+                // the network and both disks in turn.
+                let results: Vec<_> = {
+                    use futures_util::StreamExt;
+                    let engine = &engine;
+                    futures_util::stream::iter(window)
+                        .map(|(vol, vext, leg)| async move {
+                            let t = std::time::Instant::now();
+                            let fence = crate::volume::fence::exclusive(leg).await;
+                            let waited = t.elapsed();
+                            let res = engine.migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence).await;
+                            drop(fence);
+                            (vol, vext, res, waited)
+                        })
+                        .buffer_unordered(flow_parallel())
+                        .collect()
+                        .await
+                };
+                let copied = started.elapsed();
+                let mut window_moved = 0u64;
+                for (vol, vext, res, waited) in results {
+                    spent.fence += waited;
+                    match res {
+                        Ok(_) => {
+                            moved += 1;
+                            pass_moved += 1;
+                            window_moved += 1;
+                        }
+                        // The extent changed since the pass listed it (a
+                        // copy-on-write took it, a discard freed it, another map's
+                        // move took the slot): the next pass lists it again if it
+                        // is still on the source.
+                        Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. }) => {}
+                        Err(e) => {
+                            failed += 1;
+                            tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
                         }
                     }
                 }
-                // The map, then the slots it no longer names. Same order and
-                // same reason as the data half: this runs for minutes on a
-                // machine that can lose power at any point in them, and a slot
-                // table that has run ahead of the map is a volume with a hole in
-                // it.
-                let t = std::time::Instant::now();
-                persist().await;
-                spent.persist += t.elapsed();
-                let t = std::time::Instant::now();
-                let mut r = registry.write().await;
-                engine.release_owed(&mut r).await;
-                drop(r);
-                spent.release += t.elapsed();
-                // The whole move: the copy, and the flushes of the persist after
-                // it, which on a spinning disk are most of it (#269).
+                spent.copy += copied;
+                // The map, then the slots it no longer names — once for the
+                // window (#331), not once an extent. Same order and same reason
+                // as the data half: this runs on a machine that can lose power at
+                // any point, and a slot table that has run ahead of the map is a
+                // volume with a hole in it. Until this persist, every source slot
+                // of the window is still owed, never freed.
+                if window_moved > 0 {
+                    let t = std::time::Instant::now();
+                    persist().await;
+                    spent.persist += t.elapsed();
+                    let t = std::time::Instant::now();
+                    let mut r = registry.write().await;
+                    engine.release_owed(&mut r).await;
+                    drop(r);
+                    spent.release += t.elapsed();
+                }
+                // A handful of bad extents is a disk worth giving up on, and
+                // giving up leaves the node exactly where it was: running from
+                // the appliance.
+                if failed > 16 {
+                    give_up().await;
+                    return None;
+                }
+                // The whole window: the copies, and the flushes of the persist
+                // after them, which on a spinning disk are most of it (#269).
                 last_move = started.elapsed();
-                spent.moves += 1;
-                if spent.moves % 100 == 0 {
+                let before = spent.moves;
+                spent.moves += window_moved;
+                if spent.moves / 100 != before / 100 {
                     spent.say(moved);
                 }
             }
