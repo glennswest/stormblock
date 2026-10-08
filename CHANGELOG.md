@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #218: the volume listing's `generation` moves on what changes without a metadata persist.
+  - **What moves it:** attach and detach on every transport (mounts included), slab presence, quarantine and failure, drains, the rebuild queue, RAID member states and owners. A mirror that trusted the `304` from `?since=N` / `If-None-Match` missed these before.
+  - **How:** a fingerprint of those inputs is taken on each listing request. The generation is the volume manager's plus the number of times the fingerprint changed, so it only ever grows.
+  - **Not covered:** `allocated_bytes` (it moves with every write).
+  - **Also fixed:** a volume attached to a host's own NVMe subsystem (#210) now shows as `in_use`, with its attachment. The listing missed per-host subsystems.
 - **feat:** #189: the handover record carries the incumbent's engine version.
   - **Recorded:** `boot-local` writes `engine_version` into `handover.json`. Each `adopt-ublk` writes its own once it serves, so the next handover compares with the real incumbent.
   - **Compared:** `adopt-ublk` checks it before anything is stood down. The same version is said on the console. Another version, or none (an engine older than this), is a `WARNING:` naming both.
