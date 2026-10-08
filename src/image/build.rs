@@ -709,6 +709,9 @@ impl ImageBuilder {
             pairs.push((golden_id, clone_id));
         }
 
+        // Everything an image build lays is the release's (#349): an install
+        // drops what the next release no longer names.
+        mgr.mark_all(crate::volume::metadata::Origin::Release);
         // Write volumes.dat into the slab. A failure here is the build's, not
         // a warning in a log: an image whose slab cannot say what is in it is
         // an image that drops to a shell.

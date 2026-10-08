@@ -90,6 +90,11 @@ pub struct VolumeResponse {
     /// it is. `?unowned=true` on the listing asks the question directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<crate::volume::metadata::Owner>,
+    /// Where the volume came from (#349): `release` (laid by a release),
+    /// `node` (made on this node) or `unmarked` (recorded before origins
+    /// were). An install drops a release's system volume the next release
+    /// does not name, and carries the node's into the data half.
+    pub origin: &'static str,
     /// Where the volume lives — slabs, drives, RAID partners and the state of
     /// each (#136). Always on the single-volume GET; on the listing only with
     /// `?placement=true`, since it walks the volume's extent map.
@@ -118,6 +123,7 @@ struct Described {
     role: String,
     fs: Option<serde_json::Value>,
     fs_uuid: Option<Uuid>,
+    origin: &'static str,
     owner: Option<crate::volume::metadata::Owner>,
 }
 
@@ -141,6 +147,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
                 fs: fs.map(|f| f.json()),
                 fs_uuid: fs.and_then(|f| f.uuid),
                 owner: vm.owner(id).cloned(),
+                origin: vm.origin(id).as_str(),
             }
         }
         None => Described {
@@ -158,6 +165,7 @@ async fn describe(vm: &crate::volume::VolumeManager, id: &VolumeId) -> Described
             fs: None,
             fs_uuid: None,
             owner: None,
+            origin: crate::volume::metadata::Origin::Unmarked.as_str(),
         },
     }
 }
@@ -439,6 +447,7 @@ async fn list_volumes(
             role: d.role.clone(),
             fs: d.fs,
             owner: d.owner.clone(),
+            origin: d.origin,
         });
         if q.placement {
             let p = super::placement::of_volume(&state, &vm, *id).await;
@@ -510,6 +519,7 @@ async fn get_volume(
                 role: d.role.clone(),
                 fs: d.fs,
                 owner: d.owner.clone(),
+            origin: d.origin,
             };
             Json(resp).into_response()
         }
@@ -789,6 +799,7 @@ async fn create_volume(
             role: d.role.clone(),
             fs: d.fs,
             owner: d.owner.clone(),
+            origin: d.origin,
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -1245,6 +1256,7 @@ async fn clone_volume(
                 role: d.role.clone(),
                 fs: d.fs,
                 owner: d.owner.clone(),
+            origin: d.origin,
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
@@ -1946,6 +1958,7 @@ async fn create_snapshot(
                 role: d.role.clone(),
                 fs: d.fs,
                 owner: d.owner.clone(),
+            origin: d.origin,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -2026,6 +2039,7 @@ async fn resize_volume(
                 role: d.role.clone(),
                 fs: d.fs,
                 owner: d.owner.clone(),
+            origin: d.origin,
             };
             Json(resp).into_response()
         }
@@ -2475,6 +2489,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
         role: d.role,
         fs: d.fs,
         owner: d.owner.clone(),
+            origin: d.origin,
     })
 }
 

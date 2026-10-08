@@ -53,6 +53,14 @@ pub struct Plan {
     pub bulk_slab: Option<SlabId>,
     /// Every volume the data half records: `(id, name, sealed)`.
     pub volumes: Vec<(VolumeId, String, bool)>,
+    /// Volumes of the system half the release does not bring back that the
+    /// node made (or that say nothing of where they came from): carried into
+    /// the data half before the system half is laid again (#349).
+    #[allow(dead_code)]
+    pub carry: Vec<(VolumeId, String)>,
+    /// The old release's own system volumes this release no longer names:
+    /// dropped with the system half, as an install drops them (#349).
+    pub dropped: Vec<String>,
 }
 
 /// What an install did with the node's data half, for the console, the
@@ -75,6 +83,10 @@ pub struct Report {
     /// `node_volume`, the release's under `volume`.
     #[serde(default)]
     pub migrations: Vec<InstallMigration>,
+    /// Volumes the node made in the system half, carried into the data half
+    /// (#349): a registry golden, held media, a volume made with no role.
+    #[serde(default)]
+    pub carried: Vec<String>,
 }
 
 /// A migration an install leaves for stormupdate (#122's `migrate`).
@@ -181,24 +193,33 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
             Ok(d) => d,
             Err(e) => anyhow::bail!("the system half's records do not read ({e}): what it holds cannot be told"),
         };
-        let mut lost: Vec<String> = Vec::new();
+        // Owner (#349): an install drops old system volumes, never a partner's
+        // or a user's. What the old release laid and this one does not name
+        // goes with the system half; what the node made — or what says
+        // nothing of where it came from, recorded before origins were — is
+        // carried into the data half, sealed or not.
+        let mut carry = Vec::new();
+        let mut dropped = Vec::new();
         for v in doc.map(|d| d.volumes).unwrap_or_default() {
-            if v.sealed || seen.contains(&v.id) || release.contains(&v.name) || v.name.contains('@') {
+            if seen.contains(&v.id) || release.contains(&v.name) || v.name.contains('@') {
                 continue;
             }
-            lost.push(v.name);
+            match v.origin {
+                crate::volume::metadata::Origin::Release => dropped.push(v.name),
+                _ => carry.push((v.id, v.name)),
+            }
         }
-        if !lost.is_empty() {
-            lost.sort();
-            anyhow::bail!(
-                "the system half holds {} volume(s) this release does not bring back, which laying it again \
-                 would destroy: {} — move them to the data half (or delete them) and install again",
-                lost.len(),
-                lost.join(", ")
-            );
-        }
+        carry.sort_by(|a, b| a.1.cmp(&b.1));
+        dropped.sort();
+        return Ok(Plan { data_slab: data.slab_id(), bulk_slab: bulk.as_ref().map(|b| b.slab_id()), volumes, carry, dropped });
     }
-    Ok(Plan { data_slab: data.slab_id(), bulk_slab: bulk.as_ref().map(|b| b.slab_id()), volumes })
+    Ok(Plan {
+        data_slab: data.slab_id(),
+        bulk_slab: bulk.as_ref().map(|b| b.slab_id()),
+        volumes,
+        carry: Vec::new(),
+        dropped: Vec::new(),
+    })
 }
 
 /// A free name for the node's `name` set aside: `<name>@<previous>`, or with
@@ -340,6 +361,77 @@ pub fn version_id(os_release: &[u8]) -> Option<String> {
     String::from_utf8_lossy(os_release).lines().find_map(|l| {
         l.strip_prefix("VERSION_ID=").map(|v| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty())
     })
+}
+
+/// Carry the node's own volumes out of the system half into the data half
+/// before the system half is laid again (#349): every extent of each one
+/// still on the system slab moves to the data slab, its id, its sharing
+/// (a slot every map names follows for all of them) and its record kept.
+/// The data half then holds them, and `adopt` keeps them like any data
+/// volume. Refused before anything moves when the data slab has no room.
+pub async fn carry(device: &Arc<dyn BlockDevice>, plan: &Plan) -> anyhow::Result<Vec<String>> {
+    if plan.carry.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (data, bulk, system) = halves(device).await?;
+    let Some(system) = system else {
+        anyhow::bail!("the system half does not open: its volumes cannot be carried");
+    };
+    let (data_id, system_id) = (data.slab_id(), system.slab_id());
+    let mut mgr = VolumeManager::new(system.slot_size());
+    let mut found = vec![
+        crate::drive::discover::FoundSlab { label: "data".into(), slab: data },
+        crate::drive::discover::FoundSlab { label: "system".into(), slab: system },
+    ];
+    if let Some(b) = bulk {
+        found.push(crate::drive::discover::FoundSlab { label: "bulk".into(), slab: b });
+    }
+    mgr.adopt_slabs(found).await.map_err(|e| anyhow::anyhow!("opening the halves: {e}"))?;
+    let gem = mgr.gem().clone();
+    let registry = mgr.registry().clone();
+    let _pin = crate::volume::gem::pin_resident(&gem).await.map_err(|e| anyhow::anyhow!("loading extent maps: {e}"))?;
+    let ids: Vec<VolumeId> = plan.carry.iter().map(|(id, _)| *id).collect();
+    // What moves, and whether it fits.
+    let mut todo: Vec<(VolumeId, u64)> = Vec::new();
+    {
+        let g = gem.read().await;
+        for id in &ids {
+            let Some(m) = g.get_volume_map(id) else { continue };
+            if m.parity.values().any(|grp| grp.legs.iter().any(|l| l.slab_id == system_id)) {
+                anyhow::bail!("{} keeps parity in the system half: not carried automatically, move it by hand", id.0);
+            }
+            for (v, loc) in m.extents.iter() {
+                if loc.leg_on(system_id).is_some() {
+                    todo.push((*id, v));
+                }
+            }
+        }
+    }
+    let free = registry.read().await.get(&data_id).map(|s| s.free_slots()).unwrap_or(0);
+    if todo.len() as u64 > free {
+        anyhow::bail!(
+            "the data half has room for {free} extent(s) and the node's volumes in the system half need {}: \
+             not installing over this disk (nothing moved); make room or move them by hand",
+            todo.len()
+        );
+    }
+    let engine = crate::placement::PlacementEngine::new();
+    for (id, v) in todo {
+        let mut g = gem.write().await;
+        let mut reg = registry.write().await;
+        // A slot another carried map shares has moved already.
+        if g.lookup(id, v).is_none_or(|l| l.leg_on(system_id).is_none()) {
+            continue;
+        }
+        engine
+            .migrate_leg(&mut g, &mut reg, id, v, system_id, Some(data_id))
+            .await
+            .map_err(|e| anyhow::anyhow!("carrying {} extent {v}: {e}", id.0))?;
+    }
+    drop(_pin);
+    mgr.keep_metadata_in_first(&[data_id]);
+    mgr.persist_checked().await.map_err(|e| anyhow::anyhow!("recording the carried volumes: {e}"))?;
+    Ok(plan.carry.iter().map(|(_, n)| n.clone()).collect())
 }
 
 #[cfg(test)]

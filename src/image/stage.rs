@@ -478,6 +478,8 @@ pub async fn stage(
                 (id, v.extents.keys().copied().collect(), Vec::new())
             }
         };
+        // A staged copy of the release is the release's (#349).
+        vm.lock().await.set_origin(id, crate::volume::metadata::Origin::Release);
         gen.volumes.push(GenVolume { id, name: v.name.clone() });
         on_volume(&gen);
         let dst = vm.lock().await.get_volume(&id).ok_or_else(|| anyhow::anyhow!("{staged_name} has no handle"))?;

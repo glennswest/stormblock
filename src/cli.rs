@@ -4824,9 +4824,28 @@ pub async fn run() -> anyhow::Result<()> {
             // half's records must read and every leg they name must be in it.
             let release: std::collections::HashSet<String> =
                 mgr.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
-            let plan = crate::image::install::plan(&dest_dev, &release)
+            let mut plan = crate::image::install::plan(&dest_dev, &release)
                 .await
                 .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
+            // What the node made in the system half is carried into the data
+            // half first (#349): an install drops old system volumes, never a
+            // partner's or a user's. Then the data half is planned again with
+            // them in it.
+            let mut carried = Vec::new();
+            if !plan.carry.is_empty() {
+                carried = crate::image::install::carry(&dest_dev, &plan)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("not installing over {disk}: carrying the node's volumes out of the system half: {e}"))?;
+                for c in &carried {
+                    println!("Install: {c} — made on this node, in the system half: carried into the data half (#349)");
+                }
+                plan = crate::image::install::plan(&dest_dev, &release)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
+            }
+            for d in &plan.dropped {
+                println!("Install: {d} — the old release's, not in this one: dropped with the system half (#349)");
+            }
             let policy = match root {
                 Some(r) => crate::image::stage::read_policy(mgr, r).await.unwrap_or_else(|e| {
                     println!("Install: the release's {} not read ({e}); every data volume is kept", crate::image::stage::POLICY_FILE);
@@ -4872,10 +4891,11 @@ pub async fn run() -> anyhow::Result<()> {
             mgr.registry().write().await.add(laid.system);
             // The node's data half, adopted: its records into this manager, and
             // each name the release also uses settled by the release's policy.
-            let report =
+            let mut report =
                 crate::image::install::adopt(mgr, laid.data, laid.bulk, &plan, &policy, &version, &previous)
                     .await
                     .map_err(|e| anyhow::anyhow!("keeping the data half on {disk}: {e}"))?;
+            report.carried = carried;
             for k in &report.kept {
                 println!("Install: {k} — the node's, kept");
             }
@@ -6998,6 +7018,15 @@ async fn handle_boot_local(
     }
 
     let (mut mgr, resumed) = open_slabs_resuming(slab_paths, meta, true).await?;
+    // Everything in the release image this boot claimed is the release's
+    // (#349), whatever the engine that composed it recorded: an install drops
+    // what the next release no longer names, and carries what the node made.
+    // Only a boot from the claim alone: a resumed flow-over also holds the
+    // node's own disk, marked when its install began.
+    if !resumed && !slab_paths.is_empty() && slab_paths.iter().all(|p| is_fabric_uri(p)) {
+        let n = mgr.mark_all(crate::volume::metadata::Origin::Release);
+        tracing::info!("{n} volume(s) of the claimed release image marked as the release's (#349)");
+    }
     // Booting from the machine's own disk is the disk taken (#344, #345): the
     // verdict says so, keeping the initramfs's inventory. A boot from the
     // appliance leaves the survey's verdict as it is.

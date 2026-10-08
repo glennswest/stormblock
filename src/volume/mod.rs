@@ -199,6 +199,8 @@ pub struct VolumeManager {
     fs_info: HashMap<VolumeId, FsInfo>,
     /// What each volume belongs to, for the volumes anything has said (#115).
     owners: HashMap<VolumeId, crate::volume::metadata::Owner>,
+    /// Where each volume came from (#349). Absent = unmarked.
+    origins: HashMap<VolumeId, crate::volume::metadata::Origin>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -280,6 +282,7 @@ impl VolumeManager {
             templates: std::collections::HashSet::new(),
             fs_info: HashMap::new(),
             owners: HashMap::new(),
+            origins: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -306,6 +309,7 @@ impl VolumeManager {
             templates: std::collections::HashSet::new(),
             fs_info: HashMap::new(),
             owners: HashMap::new(),
+            origins: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -464,6 +468,32 @@ impl VolumeManager {
     /// What this volume belongs to, when anything has said.
     pub fn owner(&self, id: &VolumeId) -> Option<&crate::volume::metadata::Owner> {
         self.owners.get(id)
+    }
+
+    /// Where the volume came from (#349).
+    pub fn origin(&self, id: &VolumeId) -> crate::volume::metadata::Origin {
+        self.origins.get(id).copied().unwrap_or_default()
+    }
+
+    /// Say where a volume came from (#349); written at the next persist.
+    pub fn set_origin(&mut self, id: VolumeId, origin: crate::volume::metadata::Origin) {
+        if origin == crate::volume::metadata::Origin::Unmarked {
+            self.origins.remove(&id);
+        } else {
+            self.origins.insert(id, origin);
+        }
+    }
+
+    /// Mark every volume this manager holds with `origin` (#349). What a boot
+    /// opens from the release image it claimed, and what an image build lays,
+    /// is release content by definition — whatever the engine that composed
+    /// it recorded. Returns how many.
+    pub fn mark_all(&mut self, origin: crate::volume::metadata::Origin) -> usize {
+        let ids: Vec<VolumeId> = self.volumes.keys().copied().collect();
+        for id in &ids {
+            self.origins.insert(*id, origin);
+        }
+        ids.len()
     }
 
     /// Record what a volume belongs to, or forget it with `None` (#115).
@@ -987,6 +1017,7 @@ impl VolumeManager {
             handle.use_stripe_log(store.dir());
         }
         self.volumes.insert(id, handle);
+        self.origins.insert(id, crate::volume::metadata::Origin::Node);
         self.persist().await;
         Ok(id)
     }
@@ -1175,6 +1206,9 @@ impl VolumeManager {
             if let Some(owner) = vrec.owner.clone() {
                 self.owners.insert(vrec.id, owner);
             }
+            if vrec.origin != crate::volume::metadata::Origin::Unmarked {
+                self.origins.insert(vrec.id, vrec.origin);
+            }
             self.volumes.insert(vrec.id, handle);
             if let Some(parent) = vrec.parent {
                 self.parents.insert(vrec.id, parent);
@@ -1341,6 +1375,7 @@ impl VolumeManager {
             ),
         });
         self.volumes.insert(id, handle);
+        self.origins.insert(id, crate::volume::metadata::Origin::Node);
         if let Some((first, _)) = placements.first() {
             self.record_lineage(id, *first);
         }
@@ -1556,6 +1591,7 @@ impl VolumeManager {
             let snap_id = snap.id();
             let handle = Arc::new(self.inherit_handle(snap, source_id));
             self.volumes.insert(snap_id, handle);
+            self.origins.insert(snap_id, crate::volume::metadata::Origin::Node);
             self.record_lineage(snap_id, *source_id);
             ids.push(snap_id);
         }
@@ -1591,6 +1627,7 @@ impl VolumeManager {
         self.parents.remove(&id);
         self.fs_info.remove(&id);
         self.owners.remove(&id);
+        self.origins.remove(&id);
         self.retentions.remove(&id);
 
         // Remove all extents from GEM and dec_ref on slabs: their table pages
@@ -1732,6 +1769,7 @@ impl VolumeManager {
         let snap_id = snap.id();
         let snap_handle = Arc::new(self.inherit_handle(snap, &source_id));
         self.volumes.insert(snap_id, snap_handle);
+        self.origins.insert(snap_id, crate::volume::metadata::Origin::Node);
         self.record_lineage(snap_id, source_id);
         Ok(snap_id)
     }
@@ -2763,6 +2801,7 @@ impl VolumeManager {
                 access: handle.access(),
                 fs: self.fs_info.get(id).cloned(),
                 owner: self.owners.get(id).cloned(),
+                origin: self.origins.get(id).copied().unwrap_or_default(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -2824,6 +2863,7 @@ impl VolumeManager {
                 access,
                 fs: self.fs_info.get(&id).cloned(),
                 owner: self.owners.get(&id).cloned(),
+                origin: self.origins.get(&id).copied().unwrap_or_default(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3029,6 +3069,9 @@ impl VolumeManager {
                 }
             }
             self.volumes.insert(vrec.id, handle);
+            if vrec.origin != crate::volume::metadata::Origin::Unmarked {
+                self.origins.insert(vrec.id, vrec.origin);
+            }
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
         }

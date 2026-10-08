@@ -1225,11 +1225,31 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let mut record = rec.clone();
     record.extents.clear();
     record.parity.clear();
+    let origin = record.origin;
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
     );
+    // Fields after the header (#349): a tag and their bytes. Every reader
+    // decodes the header with `decode_from_slice`, which leaves trailing
+    // bytes alone, so an engine that knows none of them reads the header as
+    // it always did. Written only when there is something to say, so an
+    // unmarked volume's header is byte for byte what it was.
+    if origin != super::metadata::Origin::Unmarked {
+        out.extend_from_slice(HEADER_EXT_TAG);
+        out.push(origin.code());
+    }
     out
+}
+
+/// The tag of the fields after a volume header (#349).
+const HEADER_EXT_TAG: &[u8; 4] = b"SBX1";
+
+/// The fields after a header, from the bytes the header left (#349).
+fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
+    if rest.len() >= 5 && &rest[..4] == HEADER_EXT_TAG {
+        rec.origin = super::metadata::Origin::from_code(rest[4]);
+    }
 }
 
 /// The header's entries: chunks of at most [`MAX_VALUE`], the last one
@@ -1346,10 +1366,11 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
                     if ver != HEADER_VERSION {
                         return Err(err(format!("volume {}: header version {ver}", vol.0)));
                     }
-                    let (h, _): (Header, _) = bincode::serde::decode_from_slice(&buf[4..], cfg)
+                    let (h, used): (Header, _) = bincode::serde::decode_from_slice(&buf[4..], cfg)
                         .map_err(|e| err(format!("volume {} header: {e}", vol.0)))?;
                     let mut r = h.record;
                     r.extent_size = h.extent_size;
+                    header_ext(&buf[4 + used..], &mut r);
                     *rec = Some(r);
                 }
             }
@@ -1379,6 +1400,49 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #349: a volume's origin rides after its header; a reader that knows
+    /// only the header (every v2 engine before) decodes it as before.
+    #[test]
+    fn a_volumes_origin_rides_after_the_header_and_older_readers_skip_it() {
+        use crate::volume::metadata::Origin;
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let mut rec = VolumeRecord {
+            id,
+            name: "img-0123456789ab-root".into(),
+            virtual_size: 1 << 20,
+            array_id: None,
+            extents: Default::default(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: Default::default(),
+            failed_slabs: Vec::new(),
+            parent: None,
+            sealed: true,
+            template: false,
+            access: Default::default(),
+            fs: None,
+            owner: None,
+            lba: 4096,
+            extent_size: 0,
+            origin: Origin::Node,
+        };
+        let bytes = header_bytes(&rec, 1 << 20);
+        let doc = document_of(header_entries(id, &bytes)).unwrap();
+        assert_eq!(doc.volumes[0].origin, Origin::Node);
+        // The older reader: the header alone, the trailing bytes ignored.
+        let (h, used): (Header, _) =
+            bincode::serde::decode_from_slice(&bytes[4..], bincode::config::standard()).unwrap();
+        assert_eq!(h.record.name, rec.name);
+        assert!(used + 4 < bytes.len(), "the origin follows the header");
+        // Unmarked: byte for byte the header it always was.
+        rec.origin = Origin::Unmarked;
+        let plain = header_bytes(&rec, 1 << 20);
+        let (_, used): (Header, _) =
+            bincode::serde::decode_from_slice(&plain[4..], bincode::config::standard()).unwrap();
+        assert_eq!(used + 4, plain.len(), "nothing after an unmarked header");
+        assert_eq!(document_of(header_entries(id, &plain)).unwrap().volumes[0].origin, Origin::Unmarked);
+    }
     use crate::drive::slab::SlabId;
     use crate::volume::gem::{ExtentLocation, Leg};
 
@@ -1608,6 +1672,7 @@ mod tests {
             owner: None,
             lba: 4096,
             extent_size: 0,
+            origin: Default::default(),
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1641,6 +1706,7 @@ mod tests {
             owner: None,
             lba: 4096,
             extent_size: 0,
+            origin: Default::default(),
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));
