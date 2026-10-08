@@ -286,9 +286,14 @@ parallel_attach() {
         [ -b "$d" ] || { r parallel-attach "FAIL ($v '$d')"; return; }
         devs="$devs $d"
     done
-    n=$(echo $devs | tr ' ' '\n' | sort -u | wc -l)
+    # Distinct, in plain shell: the guest's busybox may lack sort.
+    seen= dup=
+    for d in $devs; do
+        case " $seen " in *" $d "*) dup=$d ;; esac
+        seen="$seen $d"
+    done
     echo "GUEST parallel-attach:$devs; listing during them $(ms $t0 $t1) ms"
-    [ "$n" = 4 ] && r parallel-attach PASS || r parallel-attach "FAIL (devices:$devs)"
+    [ -z "$dup" ] && r parallel-attach PASS || r parallel-attach "FAIL ($dup twice:$devs)"
     for v in $ids; do api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v/attach > /dev/null; done
 }
 
