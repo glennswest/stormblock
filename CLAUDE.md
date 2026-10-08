@@ -174,6 +174,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — IN PROGRESS
+
+#147 checked XFS with xfsprogs on files only. Needed before any PVC class
+defaults to XFS (stormcos#91).
+- [ ] `ci-xfs-mount-verify.sh`: the engine makes an XFS template and two
+      claims, attaches all three to one host over NVMe/TCP; dev's kernel in
+      QEMU mounts all three at once (blank ro), writes, unmounts, remounts,
+      `xfs_repair -n`, no XFS error in dmesg, UUIDs distinct, meta_uuid kept
+- [ ] run on dev; CHANGELOG, README
+
 ### Install drops sealed non-release volumes in the system half (2026-10-08, #349, P0) — WAITING ON THE OWNER (ask 2)
 
 stormblock-registry#104: registry goldens and held media made with no role

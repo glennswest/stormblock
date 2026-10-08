@@ -91,7 +91,8 @@ pub struct CreateTemplateRequest {
     pub size: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<u64>,
-    /// Filesystem to lay down. Only ext4 today.
+    /// Filesystem to lay down: `ext4` (the default), `ext3`, `ext2` or `xfs`
+    /// (#147; mounted by a real kernel in `ci-xfs-mount-verify.sh`, #225).
     #[serde(default)]
     pub fs: Option<String>,
     /// Journal on or off. Absent follows the filesystem kind — ext4 and ext3
