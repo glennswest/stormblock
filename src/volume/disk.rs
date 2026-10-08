@@ -1618,9 +1618,12 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Open a composed slab the way a node does: its record, its volumes.
-    async fn open_composed(vm: &VolumeManager, id: VolumeId) -> VolumeManager {
-        let dev = vm.get_volume(&id).unwrap();
+    /// Open a composed slab the way a node does: a clone of it (the sealed
+    /// slab takes no writes, as forge's boot claim does not hand it out
+    /// either), then its record and its volumes.
+    async fn open_composed(vm: &mut VolumeManager, id: VolumeId) -> VolumeManager {
+        let mine = vm.create_snapshot(id, &format!("node-{}", Uuid::new_v4().simple())).await.unwrap();
+        let dev = vm.get_volume(&mine).unwrap();
         let slab = Slab::open(dev).await.unwrap();
         let slab_id = slab.slab_id();
         let mut node = VolumeManager::new(SLOT);
@@ -1684,7 +1687,7 @@ mod tests {
         assert_eq!(report.volumes[2].first_slot, g.first_slot + 3, "the next golden follows the 3");
         assert_eq!(report.shared_bytes, 5 * SLOT);
 
-        let mut node = open_composed(&vm, VolumeId(report.id)).await;
+        let mut node = open_composed(&mut vm, VolumeId(report.id)).await;
         let golden_id = node.find_volume("pvc-1000.golden").await.unwrap();
         assert!(node.is_sealed(&golden_id));
         let clone = node.get_volume(&node.find_volume("pvc-1000").await.unwrap()).unwrap();
@@ -1751,7 +1754,7 @@ mod tests {
         assert_eq!(report.volumes[0].slots, mapped);
         println!("64 GiB ext4 blank: {mapped} slot(s) of {} KiB in the slab", SLOT / 1024);
 
-        let node = open_composed(&vm, VolumeId(report.id)).await;
+        let node = open_composed(&mut vm, VolumeId(report.id)).await;
         let clone = node.get_volume(&node.find_volume("pvc-ext4j-65536m").await.unwrap()).unwrap();
         assert_eq!(clone.capacity_bytes(), declared);
         let fsck = crate::fs::ext4::check(&clone).await.expect("the clone is a whole filesystem");
