@@ -110,6 +110,18 @@ away again and answers 412. A dual-attach `commit` revokes the old master's
 attachments and keeps the migration target's, which becomes the master's at
 the new epoch. `abort` takes the target's away.
 
+The other paths that drop attachment records take the data path with them
+(#195):
+- **A promote** drops every attachment, because the pair is re-made around
+  the new master. Each one's ublk device is removed and its namespace
+  released, so none outlives its record and no later detach is left with
+  nothing to tear down.
+- **A dual-attach window past its TTL** is aborted exactly as `abort` is.
+  It is aborted on every `/v1` call (reads and detach included) and on a
+  one-second timer, so an expired window does not keep the target's access,
+  or block a promote, until some call happens by. A window still open
+  across a restart expires on the timer too.
+
 Not here:
 - **Per-I/O epochs and self-demotion.** A head cut off from its legs fails
   its own writes (stormstorage#33).

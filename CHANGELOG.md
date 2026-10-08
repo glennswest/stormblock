@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #195: `/v1` promote and dual-attach expiry tear down what they drop.
+  - **Promote:** every attachment record it drops takes its data path with it: the ublk device is removed and the namespace released.
+  - **Expiry:** an expired window aborts the way `close {outcome: abort}` does.
+  - **On time:** windows expire on every `/v1` call, reads and detach included, and on a one-second timer, not only inside a create/attach/fence/promote.
 - **feat:** #212: `/serve/v1` exports bound to one host.
   - **`host_nqn`:** accepted on `POST /serve/v1/exports` and on a `/serve/v1/volumes` create with `export`. The export's own subsystem then admits that host alone, and discovery on its portal shows it to that host only. The host is kept on the wiring row and returned with the export.
   - **`[serve] allow_any_host`:** default `true`, today's behaviour: an export naming no host admits any host, said at start. `false` refuses such an export and closes rows from before host binding.
