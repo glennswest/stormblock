@@ -728,7 +728,12 @@ check "cannot tell which release: left alone" "" \
     "$(STUB_HOLDS=2 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout)"
 case "$(ld)" in *'"state": "refused"'*'cannot tell which release'*) check "  the verdict says why" yes yes ;;
 *) check "  the verdict says why: $(ld)" yes no ;; esac
-check "no drive with slabs: the verdict is none" "" "$(survey_m any sdc\|foreign)"
+# A drive whose slabs cannot be read looks like somebody else's disk: named
+# all the same, with what `slab list` said.
+check "a drive that is not a readable slab: left, and named" "" "$(survey_m any sdc\|foreign)"
+case "$(ld)" in *'"state": "refused"'*'"drive": "/dev/sdc"'*'not a readable stormblock slab'*'bad slab magic'*) check "  the verdict names it, with slab list's answer" yes yes ;;
+*) check "  the verdict names it, with slab list's answer: $(ld)" yes no ;; esac
+check "no drive at all: the verdict is none" "" "$(survey_m any)"
 case "$(ld)" in *'"state": "none"'*) check "  none" yes yes ;; *) check "  none: $(ld)" yes no ;; esac
 
 [ "$fail" -eq 0 ] && echo "all boot hook, probe, identity, takeable and survey checks passed"

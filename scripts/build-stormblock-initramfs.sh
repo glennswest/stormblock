@@ -3067,6 +3067,11 @@ if [ "$BOOT_MODE" = "local" ]; then
     LD_REPORT="${STORM_LOCAL_DISK_REPORT:-/run/stormblock/local-disk.json}"
     LD_DRIVE=""
     LD_WHY=""
+    # A drive that is not (readably) a stormblock slab and was left: reported
+    # when no slab-carrying drive was, because a slab that cannot be read
+    # (media errors) looks exactly like that, and is the fault to name.
+    LD_ODRIVE=""
+    LD_OWHY=""
     ld_refused() { # dev why -> remembered when dev carries stormblock slabs
         [ -n "$LD_DRIVE" ] && return 0
         "$SURVEY_SB" slab list "$1" 2>/dev/null | grep -q ": slab \|role=" || return 0
@@ -3305,6 +3310,10 @@ if [ "$BOOT_MODE" = "local" ]; then
                     sig=$(drive_signature "$SURVEY_DEV/${d##*/}" "$d")
                     if [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ]; }; then
                         echo "  $dev carries $sig - not ours and not blank, leaving it (#273)"
+                        if [ -z "$LD_ODRIVE" ]; then
+                            LD_ODRIVE="$dev"
+                            LD_OWHY="carries $sig and is not a readable stormblock slab ($(printf '%s' "$probe" | head -1))"
+                        fi
                     elif [ "$ASSIMILATE" = blank ] && \
                        "$SURVEY_SB" slab list "$dev" 2>&1 | grep -q "partition"; then
                         echo "  $dev carries partitions and the policy is 'blank' - leaving it"
@@ -3356,6 +3365,10 @@ if [ "$BOOT_MODE" = "local" ]; then
         ld_write refused "$LD_DRIVE" "$LD_WHY"
         echo "WARNING: this node runs from the appliance although $LD_DRIVE carries"
         echo "WARNING: stormblock slabs: $LD_WHY (#344)"
+    elif [ -n "$LD_ODRIVE" ]; then
+        ld_write refused "$LD_ODRIVE" "$LD_OWHY"
+        echo "WARNING: this node runs from the appliance; $LD_ODRIVE was not taken:"
+        echo "WARNING: $LD_OWHY (#344)"
     else
         ld_write none "" "no local drive carries stormblock slabs"
     fi
