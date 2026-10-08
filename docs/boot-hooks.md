@@ -436,6 +436,7 @@ part is the volume and the install and boot records.
   - `history/installs/<UTC time>.json`: the same record, for a boot that
     installed (its handover carries `installed`, the install report).
 - A mount that fails is a `WARNING:`; the boot goes on without a record.
-- The partner and customer classes (stormblock#356) are not split out here
-  yet. This volume is the system class.
+- This volume is the system class's kept data. The partner and customer
+  classes are not split out yet: today they share the data slab with it
+  (`docs/data-classes.md`, #356).
 

@@ -181,9 +181,13 @@ holding application containers, and "what kernel is this node on" wants neither.
 | 4 | `kube` | control-plane and node components |
 | 5 | `app` | an application: the containers one workload needs |
 | 6 | `runtime` | dependencies shared between applications |
-| 7 | `data` | data or configuration shipped as a sealed set |
-| 8 | `vendor` | vendor-supplied software, alternated A/B like `system` |
-| 9 | `user` | everything else: pulled images and customer data. One pallet — it is not replaced, so it has nothing to alternate with |
+| 7 | `data` | data or configuration shipped as a sealed set (stormcos's `data1`: the blanks the data volumes are cloned from). Writable data is not a pallet: it lives in the data slab |
+| 8 | `vendor` | the **partner** class: vendor-supplied software, alternated A/B like `system`. Designed, nothing writes it |
+| 9 | `user` | the **customer** class: everything else, pulled images and customer data. One pallet — it is not replaced, so it has nothing to alternate with. Designed, nothing writes it |
+
+`system`, `vendor` and `user` are the three data classes (system, partner,
+customer). What each holds, owns and keeps on an install, a demote or a
+factory wipe, and how the code differs today, is `docs/data-classes.md` (#356).
 
 **Priority only orders pallets that compete with each other.** A `kube` pallet
 does not outrank a `boot` pallet by carrying a bigger number — it is not in the
@@ -193,7 +197,7 @@ kind, so a pallet written before the field existed is never stranded.
 
 ### 2.6 Containers: one structure, sealed or not
 
-**Status: designed 2026-08-23, not yet implemented (#59).** Everything above
+**Status: designed 2026-08-23, not yet implemented (#59).** (#62, which this section once cited, was closed by goldens landing in the slab, 1890291 — a different shape.) Everything above
 this describes a pallet as sealed content and nothing else. That is what ships
 an image which *contains* a node; what makes one that **is** a node is that a
 pallet also carries the writable half.

@@ -1896,6 +1896,7 @@ What earlier docs described and the code does not do, each with its issue:
 | `docs/auth.md` | who may call a node's API; the boot claim; host goldens |
 | `docs/nvme-access.md` | who may connect over NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP, goldens write-protected (#210) |
 | `docs/migration.md` | moving a disk between nodes: NVMe ANA (states, notices, multipath across nodes) and the `/v1` epoch enforced at the target (#83, #6) |
+| `docs/data-classes.md` | the data classes system / partner / customer as designed (pallet kinds `system`, `vendor`, `user`), what an install, a demote/reset and a factory wipe do to each, where `system-data` fits, and how the code differs today: two halves, no class split (#356) |
 | `docs/erase.md` | secure delete: freed slots overwritten before reuse, levels, the audit record, what it does not do on flash, crypto-erase (design) (#286) |
 | `docs/durability.md` | what survives a power cut: slot entries after their data, frees made durable before reuse, recovery from stale records, the handover order, a flow-over cut short |
 | `docs/redundancy.md` | per-volume redundancy, failure domains, health, resync, automatic rebuild, drain, whole-disk goldens and import |
