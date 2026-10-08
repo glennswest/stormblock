@@ -85,6 +85,19 @@ fn record(label: &str, took: Duration, shared: u64) {
 
 /// The device flushes of the last `window`, per device: how many, p50, p99,
 /// max, and how many callers they were shared with.
+/// The `q` quantile (0..=1) of `label`'s flushes in the last `window`, and
+/// how many there were; None when there were none (#282).
+pub fn recent(label: &str, window: Duration, q: f64) -> Option<(Duration, usize)> {
+    let f = flushes().lock().unwrap_or_else(|e| e.into_inner());
+    let mut took: Vec<Duration> = f.iter().filter(|x| x.label == label && x.at.elapsed() <= window).map(|x| x.took).collect();
+    if took.is_empty() {
+        return None;
+    }
+    took.sort();
+    let at = ((took.len() as f64 - 1.0) * q.clamp(0.0, 1.0)).round() as usize;
+    Some((took[at], took.len()))
+}
+
 pub fn summary(window: Duration) -> String {
     summary_view(window, true)
 }

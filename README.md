@@ -338,6 +338,7 @@ only in the file is **not applied**.
 | `STORMBLOCK_FLOW_BOOT_GRACE_SECS` | the most a successor's flow-over waits for the node's boot: until volume I/O is still for 10 s (#278) | `90`; `0` starts at once |
 | `STORMBLOCK_FLOW_BATCH` | extents a flow-over moves per window, one persist per window (#331) | `64` |
 | `STORMBLOCK_FLOW_PARALLEL` | moves a flow-over makes at once (#331) | `8` |
+| `STORMBLOCK_FLOW_FLUSH_BOUND_MS` | the destination disk's flush time (p90, 30 s) above which a flow-over halves its window and pauses for one flush after each (#282) | `1000`; `0` off |
 | `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per attached NVMe/TCP namespace (#331) | `4` |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
@@ -511,7 +512,9 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   ids, names or tags), remote flush devices by transport, the watchdog's
   reports as their open summary, threads without stacks. `tasks` takes one
   dump at a time and answers from it for 5 s, so asking in a loop cannot
-  pause the runtime over and over.
+  pause the runtime over and over. `stalls` also names every zoned or drive-managed
+  SMR disk the engine opened (#282: `queue/zoned`, else the model on the
+  makers' published SMR lists), which is also said at WARN when it is opened.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.

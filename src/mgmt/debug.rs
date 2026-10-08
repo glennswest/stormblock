@@ -159,6 +159,7 @@ async fn stalls(full: Option<axum::Extension<crate::mgmt::auth::FullView>>) -> R
     }
     out.push_str(&in_flight_view(Duration::ZERO, full));
     out.push_str(&crate::drive::flushgate::summary_view(Duration::from_secs(300), full));
+    out.push_str(&shingled_report());
     let r = reports().lock().unwrap_or_else(|e| e.into_inner());
     out.push_str(&format!("\n{} watchdog report(s) kept, newest last\n", r.len()));
     for rep in r.iter() {
@@ -212,6 +213,21 @@ pub fn route_family(path: &str) -> String {
 
 async fn locks_route(State(state): State<Arc<AppState>>) -> Response {
     text(locks(&state))
+}
+
+/// The zoned or drive-managed SMR disks this engine opened (#282): their
+/// flushes take seconds once a sustained write has filled their cache, so a
+/// stall over one of them is the disk before it is anything else.
+fn shingled_report() -> String {
+    let disks = crate::drive::identity::shingled_disks();
+    if disks.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("shingled (SMR) disks: {}\n", disks.len());
+    for d in disks {
+        out.push_str(&format!("  /dev/{} {}: {:?}\n", d.disk, d.model, d.recording));
+    }
+    out
 }
 
 /// Requests in flight longer than `over`, oldest first: all of each path for

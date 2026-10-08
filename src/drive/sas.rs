@@ -111,6 +111,10 @@ impl SasDevice {
             path: path.clone(),
         };
         let device_type = detect_drive_type(&path);
+        // A zoned or drive-managed SMR disk is said once (#282).
+        if file_block.is_none() && !read_only {
+            super::identity::note_recording(&path);
+        }
         let io = DirectIo::new(fd);
         tracing::debug!(%path, engine = io.engine_name(), block_size, "block device opened O_DIRECT");
 

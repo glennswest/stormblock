@@ -172,6 +172,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Flow-over paced to the destination disk; SMR named (2026-10-08, #282, P2) — IN PROGRESS
+
+From #269: an SMR disk under a flow-over's sustained writes fills its cache
+and every flush (the node's fsyncs too) takes seconds.
+- [x] `FlowPace` (AIMD on the window): the destination disk's p90 flush time
+      over 30 s (`flushgate::recent`, label = `drive_id().path`) above
+      `STORMBLOCK_FLOW_FLUSH_BOUND_MS` (1000) halves the window and pauses
+      one flush (≤ 10 s); under it, doubles back. `paced` in the breakdown
+- [x] `identity::recording_of`: `queue/zoned`, else a known DM-SMR model;
+      WARN at open (`SasDevice`), listed on `/debug/stalls`
+- [x] tests; docs (durability rule 10, README), CHANGELOG
+- [ ] build + full nextest; golden; server3's real flush times once a
+      release with this engine is on it (not mine to install)
+
 ### /debug open without a token: bounded and redacted (2026-10-08, #283, P2) — DONE
 
 #269 opened /debug for a supervisor with no token; it showed other callers'

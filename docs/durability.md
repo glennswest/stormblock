@@ -148,6 +148,12 @@ tests run on.
    whole. The flow-over gives the disk back to foreground I/O for a quarter
    of a window's time, at most 2 s, when a volume was read or written since
    the last window.
+   It also paces itself to the destination disk (#282): when that disk's
+   flushes over the last 30 s take longer than `STORMBLOCK_FLOW_FLUSH_BOUND_MS`
+   (1000 ms; 0 = off) at p90, it halves its window and pauses for one flush
+   time (at most 10 s) after each, and doubles back once they are under. A
+   drive-managed SMR disk whose cache has filled is that disk; pacing changes
+   when moves happen, never the order above.
 11. **Nothing is written in place on a slab being emptied** (#239, reopened).
    Rule 9's fresh clone carries the *image's* bytes, not what the last boot
    wrote on its own clone, so a write left on the appliance side is lost the
