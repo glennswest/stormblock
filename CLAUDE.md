@@ -174,7 +174,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — IN PROGRESS
+### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — PAUSED for P0 #349 (back in line)
 
 #147 checked XFS with xfsprogs on files only. Needed before any PVC class
 defaults to XFS (stormcos#91).
@@ -182,7 +182,10 @@ defaults to XFS (stormcos#91).
       claims, attaches all three to one host over NVMe/TCP; dev's kernel in
       QEMU mounts all three at once (blank ro), writes, unmounts, remounts,
       `xfs_repair -n`, no XFS error in dmesg, UUIDs distinct, meta_uuid kept
-- [ ] run on dev; CHANGELOG, README
+- [ ] run on dev: the third run reached the guest and found its own bug
+      (native NVMe multipath: /sys/block lists the hidden path node
+      nvme0c0n3, the device is nvme0n3); fixed, not rerun. Then CHANGELOG,
+      README
 
 ### Install drops sealed non-release volumes in the system half (2026-10-08, #349, P0) — WAITING ON THE OWNER (ask 2)
 

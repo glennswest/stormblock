@@ -164,7 +164,9 @@ echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
 grep -q xfs /proc/filesystems || { r xfs-module FAIL; poweroff -f; }
 nvme connect -t tcp -a 10.0.2.2 -s "$PORT" -n "$SUB" --hostnqn "$H1" >/tmp/o 2>&1 || { r connect "FAIL ($(head -1 /tmp/o))"; poweroff -f; }
 sleep 2
-dev_of() { for b in /sys/block/nvme*n*; do [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
+# The namespace's block device, not a multipath path node (nvme0c0n1: hidden,
+# no /dev entry) — native NVMe multipath lists both in /sys/block.
+dev_of() { for b in /sys/block/nvme*n*; do case "${b##*/}" in nvme*c*n*) continue ;; esac; [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
 g=$(dev_of "$NS_G"); a=$(dev_of "$NS_A"); b=$(dev_of "$NS_B")
 echo "GUEST blank /dev/$g, claim a /dev/$a, claim b /dev/$b"
 uuid() { xfs_db -r -c "sb 0" -c "p uuid" "/dev/$1" 2>/dev/null | awk '{print $3}'; }
