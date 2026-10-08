@@ -172,7 +172,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Is a flush outstanding on fastetcd's volume? (2026-10-08, #337, P1) — IN PROGRESS
+### Is a flush outstanding on fastetcd's volume? (2026-10-08, #337, P1) — DONE
 
 server3 11.91: fastetcd's fdatasync stuck 70+ min from 19:09:47Z, health
 ok, other volumes fine. The node was powered off overnight and the Dell's
@@ -187,7 +187,12 @@ unanswered ublk request, so the engine could not answer the question.
 - [x] per-queue tag tracking (`ublk::QueueTrack`, `ublk::stuck`); health
       `ublk_stuck` (≥ 30 s); watchdog WARN every 30 s; tests; README,
       CHANGELOG
-- [ ] build + tests on a build VM; answer on #337 and fastetcd#138
+- [x] `ci-ublk-qd-verify.sh` (QEMU, real ublk): the slab's dm device
+      suspended after a write, the fsync's FLUSH named in health
+      (`op: flush`, 36 s) and logged, the fsync returns on resume, the entry
+      clears — ALL PASS at 9359159 (the script also needed the admin token,
+      #274). Full nextest at 39991d9 1007/1008 (#333, 6/6 alone)
+- [x] golden; answered on #337 and fastetcd#138
 
 ### Flow-over as fast as the hardware allows (2026-10-07, #331, P0) — DONE (golden-stormblock-aa3cf1526f06), hardware number on the release
 
