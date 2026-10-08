@@ -105,6 +105,7 @@ async fn an_ephemeral_volume_in_use_outlives_its_withdrawn_export() {
         nqn: None,
         state: WireState::Withdrawn,
         ephemeral: true,
+        host_nqn: None,
     });
 
     stormblock::serve::reconcile::pass(&ctx).await.unwrap();
