@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — DONE
+### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — DONE (golden-stormblock-a22b89c02880)
 
 `Slab::format_with` zero-filled the whole slot table, growth room included
 (~1 TB of writes for a 15 PB drive at enrol); `Slab::open` scanned every
