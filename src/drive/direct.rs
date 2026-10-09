@@ -149,20 +149,7 @@ impl DirectIo {
 
     /// Write all of `buf[..len]` at `offset`.
     pub async fn write(&self, offset: u64, buf: DmaBuf, len: usize) -> DriveResult<usize> {
-        let (mut n, mut buf) = self.submit(Kind::Write, offset, buf, len).await?;
-        while n < len {
-            // A short O_DIRECT write is rare and stops on a block boundary;
-            // finish it from where it stopped.
-            let mut rest = DmaBuf::alloc(len - n);
-            rest[..len - n].copy_from_slice(&buf[n..len]);
-            let (m, b) = self.submit(Kind::Write, offset + n as u64, rest, len - n).await?;
-            if m == 0 {
-                return Err(DriveError::Io(std::io::Error::new(std::io::ErrorKind::WriteZero, "short write")));
-            }
-            n += m;
-            buf = b;
-        }
-        Ok(len)
+        write_all(offset, buf, len, |off, b, l| self.submit(Kind::Write, off, b, l)).await
     }
 
     pub async fn sync(&self) -> DriveResult<()> {
@@ -170,6 +157,31 @@ impl DirectIo {
         // zero-size allocation.
         self.submit(Kind::Sync, 0, DmaBuf::alloc(1), 0).await.map(|_| ())
     }
+}
+
+/// Write all of `buf[..len]` at `offset` through `submit`, continuing a
+/// short write from where it stopped. The rest is always taken from the
+/// caller's buffer: the buffer a retry hands back holds only that retry's
+/// suffix, and slicing it at the cumulative count ran past its end on a
+/// second short write (#367).
+async fn write_all<F, Fut>(offset: u64, buf: DmaBuf, len: usize, mut submit: F) -> DriveResult<usize>
+where
+    F: FnMut(u64, DmaBuf, usize) -> Fut,
+    Fut: std::future::Future<Output = DriveResult<(usize, DmaBuf)>>,
+{
+    let (mut n, buf) = submit(offset, buf, len).await?;
+    while n < len {
+        // A short O_DIRECT write is rare and stops on a block boundary;
+        // finish it from where it stopped.
+        let mut rest = DmaBuf::alloc(len - n);
+        rest[..len - n].copy_from_slice(&buf[n..len]);
+        let (m, _) = submit(offset + n as u64, rest, len - n).await?;
+        if m == 0 {
+            return Err(DriveError::Io(std::io::Error::new(std::io::ErrorKind::WriteZero, "short write")));
+        }
+        n += m;
+    }
+    Ok(len)
 }
 
 impl Drop for DirectIo {
@@ -286,4 +298,36 @@ fn ring_thread(mut ring: io_uring::IoUring, fd: RawFd, wake: RawFd, rx: mpsc::Re
         }
     }
     unsafe { libc::close(fd) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #367: a 12 KiB write that lands 4 KiB, then 4 KiB, then the rest,
+    /// writes every byte where it belongs (it used to slice past the end
+    /// of the retry's buffer and panic).
+    #[tokio::test]
+    async fn two_short_writes_in_a_row_finish_the_write() {
+        let len = 12 * 1024;
+        let mut src = DmaBuf::alloc(len);
+        for (i, b) in src[..len].iter_mut().enumerate() {
+            *b = (i / 7) as u8;
+        }
+        let want = src[..len].to_vec();
+        let disk = std::sync::Arc::new(std::sync::Mutex::new(vec![0u8; len]));
+        let d = disk.clone();
+        let n = write_all(0, src, len, move |off, b, l| {
+            let d = d.clone();
+            async move {
+                let m = l.min(4096);
+                d.lock().unwrap()[off as usize..off as usize + m].copy_from_slice(&b[..m]);
+                Ok((m, b))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(n, len);
+        assert_eq!(*disk.lock().unwrap(), want);
+    }
 }
