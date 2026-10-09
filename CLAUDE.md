@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — DONE
+### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — DONE (golden-stormblock-b835c9f3b7dd)
 
 #359 made both downloads resume with a `Range`, under `TRANSFER` (8
 attempts, 30 min from the first): a 3 GiB image over a flaky mirror still
