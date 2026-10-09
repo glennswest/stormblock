@@ -355,6 +355,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
         return true;
     }
+    // Forge's CA and bootstrap token, which every node that boots from it is
+    // handed (#381): set by forge's stormcert, never by a node.
+    if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge/trust" {
+        return true;
+    }
     // Staging, activating or rolling back a release on this node (#122): it
     // rewrites what the node boots.
     if seg.len() >= 4 && seg[3] == "releases" {
@@ -1761,12 +1766,14 @@ mod tests {
     #[test]
     fn forge_mode_is_set_by_the_admin() {
         let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()), audit_only: false };
-        let as_ = |m: Method, tok: Option<&str>| decide(&auth, &m, "/api/v1/forge", None, tok).is_ok();
-        assert!(!as_(Method::GET, None));
-        assert!(as_(Method::GET, Some("t")));
-        for m in [Method::PUT, Method::DELETE] {
-            assert!(!as_(m.clone(), Some("t")), "{m}: the api token is not enough");
-            assert!(as_(m, Some("a")));
+        for path in ["/api/v1/forge", "/api/v1/forge/trust"] {
+            let as_ = |m: Method, tok: Option<&str>| decide(&auth, &m, path, None, tok).is_ok();
+            assert!(!as_(Method::GET, None));
+            assert!(as_(Method::GET, Some("t")));
+            for m in [Method::PUT, Method::DELETE] {
+                assert!(!as_(m.clone(), Some("t")), "{m} {path}: the api token is not enough");
+                assert!(as_(m, Some("a")));
+            }
         }
     }
 }

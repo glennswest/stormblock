@@ -1616,6 +1616,10 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
 
+        // This node is its own forge: its own trust for its own enrolment
+        // (#381), when its stormcert has set one.
+        mgmt::forge_trust::write_self(&state).await;
+
         // Phase 5: the serving surface (#60).
         //
         // `docs/layering.md` puts this in layer 2 — what it takes to serve volumes
@@ -6819,6 +6823,11 @@ pub async fn run() -> anyhow::Result<()> {
             },
             None => mgmt::forge::restore(&state, Some(mgmt::forge::default_settings(&state))).await,
         }
+        // The first node: forge mode on, booted from its own disk, no claim
+        // this boot — its own trust for its own enrolment (#381).
+        if mgmt::forge_trust::write_self(&state).await {
+            println!("  forge trust: this node's own, in {}", mgmt::forge_trust::node_dir().display());
+        }
         start_serving(&config, &state, "0.0.0.0:3260", "0.0.0.0:4420", &reactor).await;
 
         // Finish the flow-over the boot started.
@@ -7061,6 +7070,12 @@ async fn claim_boot_uri(
                     }
                     note_install_ticket(&base, &v);
                     note_host_secret(&base, &v);
+                    // Forge's trust, for the node's enrolment (#381).
+                    match crate::mgmt::forge_trust::from_claim(&crate::mgmt::forge_trust::node_dir(), &base, &v) {
+                        Ok("written") => eprintln!("boot-claim: forge trust written to {}", crate::mgmt::forge_trust::node_dir().display()),
+                        Ok(_) => eprintln!("boot-claim: {base} hands out no forge trust"),
+                        Err(e) => eprintln!("boot-claim: forge trust from {base} not written: {e}"),
+                    }
                     return Ok(uri.to_string());
                 }
                 // A tag nobody has decided for is a fleet decision that has

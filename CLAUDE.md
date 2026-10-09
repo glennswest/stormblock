@@ -960,6 +960,15 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
+### Forge's trust handed to a booting node (2026-10-09, #381, P0) — IN PROGRESS
+
+stormcos#486. `mgmt/forge_trust.rs`: forge's stormcert PUTs
+`/api/v1/forge/trust {ca, url?, bootstrap_token}` (admin; kept 0600 in the
+data dir); every boot claim answers `forge_trust`; boot-claim writes
+/run/stormblock/forge/{ca.crt,url,bootstrap.token,from}; the first node
+(forge on, no claim) writes its own on loopback at start and on set.
+[ ] build VM; check.sh; golden; stormcert issue (PUT the trust).
+
 ### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — PAUSED for P0 #381 (built and pushed; affected tests were running)
 
 Built (A): `Host.host_secret` (SHA-256), minted per claim, `host_secret` in

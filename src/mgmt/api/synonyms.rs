@@ -1238,6 +1238,9 @@ async fn claim_boothost(
     let out = json!({
         "intent": intent.as_str(),
         "host_secret": host_secret,
+        // Forge's CA, apiserver and bootstrap token, for the node's
+        // enrolment (#381): null when this forge holds none.
+        "forge_trust": crate::mgmt::forge_trust::claim_answer(&state),
         // Who this is, and what the machine called itself: a serial or a MAC
         // resolves to the host it is an alias of (#199).
         "host": {

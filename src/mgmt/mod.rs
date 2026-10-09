@@ -17,6 +17,8 @@ pub mod nvme_hosts;
 pub mod ana;
 #[cfg(feature = "nvmeof")]
 pub mod forge;
+#[cfg(feature = "nvmeof")]
+pub mod forge_trust;
 #[cfg(feature = "ui")]
 pub mod ui;
 

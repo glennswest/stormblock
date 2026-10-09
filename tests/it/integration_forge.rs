@@ -295,3 +295,86 @@ async fn a_node_is_a_forge_by_default_until_told_off_and_stays_off() {
     assert_eq!((s["state"].as_str(), s["from"].as_str(), s["nqn"].as_str()), (Some("on"), Some("persisted"), Some("nqn.2026-10.test:again")), "{s}");
     assert!(listening(addr).await);
 }
+
+/// #381 (stormcos#486): forge's trust reaches every node that boots from it.
+/// Forge's stormcert sets it; a boot claim hands it out; `boot-claim` writes
+/// `/run/stormblock/forge/` with its modes; a node that is its own forge
+/// writes its own, on loopback, and never over what a claim wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writes_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    use stormblock::mgmt::forge_trust;
+    const CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBforge\n-----END CERTIFICATE-----\n";
+    let dir = TempDir::new().unwrap();
+    let node_dir = dir.path().join("run/stormblock/forge");
+    std::env::set_var("STORMBLOCK_FORGE_TRUST_DIR", &node_dir);
+    let (state, base, golden) = engine(&dir, Some(&vec![7u8; MIB as usize])).await;
+    let c = reqwest::Client::new();
+    c.post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "server1", "volume": golden.unwrap().0.to_string()}))
+        .send().await.unwrap();
+    let claim = || async {
+        let r = c.post(format!("{base}/api/v1/synonyms/boothost/server1/claim")).json(&serde_json::json!({})).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+        r.json::<serde_json::Value>().await.unwrap()
+    };
+
+    // No trust set: a claim hands out none, and boot-claim leaves no directory.
+    let v = claim().await;
+    assert!(v["forge_trust"].is_null(), "{v}");
+    assert_eq!(forge_trust::from_claim(&node_dir, &base, &v), Ok("none"));
+    assert!(!node_dir.exists(), "no forge trust: the directory is absent");
+
+    // Set by forge's stormcert: a malformed one refused.
+    let r = c.put(format!("{base}/api/v1/forge/trust")).json(&serde_json::json!({"ca": "nope", "bootstrap_token": "t"})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = c.put(format!("{base}/api/v1/forge/trust"))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let st: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((st["set"].as_bool(), st["url"].as_str()), (Some(true), Some("https://127.0.0.1:6443")), "{st}");
+    assert!(!st.to_string().contains("abcdef.0123"), "the token is never shown: {st}");
+    // Kept 0600.
+    let kept = dir.path().join("engine").join(forge_trust::TRUST_FILE);
+    assert_eq!(std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777, 0o600);
+    // Forge mode off: this node is no forge, so it writes no trust of its own.
+    assert!(!node_dir.exists());
+
+    // A booting node's claim: handed the trust; boot-claim writes it.
+    let v = claim().await;
+    assert_eq!(v["forge_trust"]["ca"], CA);
+    assert_eq!(v["forge_trust"]["url"], "https://127.0.0.1:6443");
+    assert_eq!(v["forge_trust"]["bootstrap_token"], "abcdef.0123456789abcdef");
+    let booted = dir.path().join("booted/run/stormblock/forge");
+    assert_eq!(forge_trust::from_claim(&booted, &base, &v), Ok("written"));
+    let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(std::fs::read_to_string(booted.join("ca.crt")).unwrap(), CA);
+    assert_eq!(std::fs::read_to_string(booted.join("url")).unwrap(), "https://127.0.0.1:6443\n");
+    assert_eq!(std::fs::read_to_string(booted.join("bootstrap.token")).unwrap(), "abcdef.0123456789abcdef\n");
+    assert_eq!((mode(booted.join("ca.crt")), mode(booted.join("url")), mode(booted.join("bootstrap.token"))), (0o644, 0o644, 0o600));
+
+    // The first node: forge mode on, its trust set — its own, on loopback.
+    let port = free_port();
+    let r = c.put(format!("{base}/api/v1/forge")).json(&serde_json::json!({"listen_addr": format!("127.0.0.1:{port}")})).send().await.unwrap();
+    assert!(r.status().is_success());
+    let r = c.put(format!("{base}/api/v1/forge/trust"))
+        .json(&serde_json::json!({"ca": CA, "url": "https://forge.g8.lo:6443", "bootstrap_token": "abcdef.0123456789abcdef"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(forge_trust::read_from(&node_dir).as_deref(), Some("self"));
+    assert_eq!(std::fs::read_to_string(node_dir.join("url")).unwrap(), "https://127.0.0.1:6443\n", "its own apiserver, on loopback");
+    assert_eq!(mode(node_dir.join("bootstrap.token")), 0o600);
+    // Others are told the URL stormcert gave.
+    assert_eq!(claim().await["forge_trust"]["url"], "https://forge.g8.lo:6443");
+
+    // What a claim wrote this boot is never overwritten by the node's own.
+    forge_trust::write_dir(&node_dir, CA, "https://other-forge:6443", "x.y", "claim http://other-forge:9090").unwrap();
+    assert!(!forge_trust::write_self(&state).await);
+    assert_eq!(std::fs::read_to_string(node_dir.join("url")).unwrap(), "https://other-forge:6443\n");
+
+    // Forgotten: the claim hands out none again.
+    let r = c.delete(format!("{base}/api/v1/forge/trust")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(claim().await["forge_trust"].is_null());
+}
