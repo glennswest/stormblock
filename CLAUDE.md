@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### --data-dir is the node's data directory (2026-10-09, #163) — DONE
+### --data-dir is the node's data directory (2026-10-09, #163) — DONE (golden-stormblock-06e054a63b98)
 
 - [x] `merge_cli` sets `[management] data_dir` from `--data-dir` (the flag
       wins); the daemon reads only that; help text, README
