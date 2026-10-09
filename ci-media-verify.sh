@@ -64,6 +64,9 @@ head -c 300000 /dev/urandom > "$W/payload.bin"
 mkdir -p "$W/isodir"
 cp "$W/payload.bin" "$W/isodir/PAYLOAD.BIN"
 xorriso -as mkisofs -quiet -V STORMMEDIA -o "$W/media.iso" "$W/isodir" || die "xorriso"
+# A tail past the last 4 KiB, as most real ISOs have (#110 lost it): one
+# more 2048-byte sector when xorriso padded to 4 KiB.
+[ $(( $(stat -c %s "$W/media.iso") % 4096 )) = 0 ] && head -c 2048 /dev/zero >> "$W/media.iso"
 ISO_LEN=$(stat -c %s "$W/media.iso")
 echo "ISO $ISO_LEN bytes ($((ISO_LEN / 2048)) sectors of 2048; $((ISO_LEN % 4096)) past the last 4 KiB)"
 truncate -s 64M "$W/disk.img"
@@ -80,6 +83,7 @@ truncate -s 1G "$W/d1.img"
 cat > "$W/stormblock.toml" <<EOF
 [management]
 api_token = "$TOKEN"
+admin_token = "$TOKEN"
 listen_addr = "127.0.0.1:$MGMT"
 data_dir = "$W/data"
 node_name = "ci-media"
