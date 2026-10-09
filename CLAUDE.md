@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Redundancy, spread and tier on every claim path (2026-10-09, #151, P2) — DONE
+### Redundancy, spread and tier on every claim path (2026-10-09, #151, P2) — DONE (golden-stormblock-abcd60bee6e2)
 
 `/v1` create had no policy (every CSI PVC `none`); `spread` only as
 `@rung`; a tier on create was honoured until the next restart and not by
