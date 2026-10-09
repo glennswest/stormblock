@@ -1915,6 +1915,18 @@ impl VolumeManager {
             let vol = handle.lock().await;
             params.push((*source_id, name.clone(), vol.virtual_size, vol.slot_size));
         }
+        // Every member's in-place writes held off across the one fence, in
+        // id order (#367): the GEM lock alone stops allocations and
+        // copy-on-writes, not a write to a slot whose count it read as one.
+        let mut gated: Vec<VolumeId> = sources.iter().map(|(id, _)| *id).collect();
+        gated.sort_by_key(|id| id.0);
+        gated.dedup();
+        let mut _writes = Vec::with_capacity(gated.len());
+        for id in &gated {
+            self.prefetch_volume(*id).await?;
+            let h = self.volumes.get(id).ok_or(VolumeError::VolumeNotFound(*id))?.clone();
+            _writes.push(h.hold_writes().await);
+        }
 
         let mut snaps = Vec::with_capacity(sources.len());
         {
@@ -1928,6 +1940,7 @@ impl VolumeManager {
                 snaps.push(snap);
             }
         }
+        drop(_writes);
 
         let mut ids = Vec::with_capacity(snaps.len());
         for (snap, (source_id, _)) in snaps.into_iter().zip(sources) {
@@ -2108,6 +2121,8 @@ impl VolumeManager {
         drop(source_vol);
 
         self.prefetch_volume(source_id).await?;
+        // In-place writes held off while the slots are shared (#367).
+        let _writes = source_handle.hold_writes().await;
         let snap = {
             let mut gem = self.gem.write().await;
             let mut reg = self.registry.write().await;
@@ -5092,6 +5107,76 @@ mod redundancy_tests {
         let mut buf = vec![0u8; 4096];
         mgr.get_volume(&child).unwrap().read(0, &mut buf).await.unwrap();
         assert!(buf.iter().all(|&b| b == 7), "the clone keeps its refcounted extents");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Holds the next write inside the device, once armed, until let go.
+    struct HoldWrite(Arc<dyn BlockDevice>, Arc<(std::sync::atomic::AtomicBool, tokio::sync::Notify, tokio::sync::Notify)>);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for HoldWrite {
+        fn id(&self) -> &crate::drive::DeviceId { self.0.id() }
+        fn capacity_bytes(&self) -> u64 { self.0.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.0.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.0.optimal_io_size() }
+        fn device_type(&self) -> crate::drive::DriveType { self.0.device_type() }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> { self.0.read(offset, buf).await }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            if self.1 .0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                self.1 .1.notify_one();
+                self.1 .2.notified().await;
+            }
+            self.0.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> { self.0.flush().await }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> { self.0.discard(offset, len).await }
+    }
+
+    /// #367: a write that found its extent unshared (count one) and is on its
+    /// way to the device in place keeps a snapshot waiting until it has
+    /// landed. Before, the snapshot shared the slot first and the write
+    /// changed it underneath: what the snapshot read changed after it was
+    /// taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_waits_for_an_in_place_write_already_under_way() {
+        const SLOT: u64 = 64 * 1024;
+        let d = dir();
+        let path = d.join("held.bin").display().to_string();
+        let file: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&path, 8 * 1024 * 1024).await.unwrap());
+        let hold = Arc::new((std::sync::atomic::AtomicBool::new(false), tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        let dev: Arc<dyn BlockDevice> = Arc::new(HoldWrite(file, hold.clone()));
+        let slab = Slab::format(dev, SLOT, StorageTier::Hot).await.unwrap();
+        let mut mgr = VolumeManager::new(SLOT);
+        mgr.add_slab(slab).await;
+        let id = mgr.create_volume_any("v", 4 * SLOT).await.unwrap();
+        let v = mgr.get_volume(&id).unwrap();
+        v.write(0, &vec![0xAA; SLOT as usize]).await.unwrap();
+        v.flush().await.unwrap();
+        let mgr = Arc::new(tokio::sync::Mutex::new(mgr));
+
+        hold.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        let write = {
+            let v = v.clone();
+            tokio::spawn(async move { v.write(0, &[0xBB; 4096]).await.unwrap() })
+        };
+        hold.1.notified().await;
+        let snap = {
+            let mgr = mgr.clone();
+            tokio::spawn(async move { mgr.lock().await.create_snapshot(id, "v-snap").await.unwrap() })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!snap.is_finished(), "the snapshot shared the slot while a write to it in place was under way");
+        hold.2.notify_one();
+        write.await.unwrap();
+        let snap_id = snap.await.unwrap();
+
+        let s = mgr.lock().await.get_volume(&snap_id).unwrap();
+        let mut b = vec![0u8; 4096];
+        s.read(0, &mut b).await.unwrap();
+        assert_eq!(b, vec![0xBB; 4096], "the write landed before the snapshot");
+        v.write(0, &[0xCC; 4096]).await.unwrap();
+        s.read(0, &mut b).await.unwrap();
+        assert_eq!(b, vec![0xBB; 4096], "the snapshot does not change after it was taken");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

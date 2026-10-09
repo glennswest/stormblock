@@ -469,6 +469,12 @@ pub struct ThinVolumeHandle {
     /// before it is durable. A flush that finds `completed` no further has
     /// nothing to make durable and touches no device.
     synced: AtomicU64,
+    /// Held shared by every write and discard from the moment it looks at
+    /// an extent's share count until its data has landed; a snapshot takes
+    /// it exclusively while it shares the volume's slots (#367). A writer
+    /// that saw a count of one and wrote in place after a snapshot shared
+    /// the slot changed the snapshot underneath it.
+    snap_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// Counts one write, discard or write-zeroes as finished when it returns,
@@ -548,6 +554,7 @@ impl ThinVolumeHandle {
             last_health: std::sync::Mutex::new(None),
             completed: AtomicU64::new(1),
             synced: AtomicU64::new(0),
+            snap_gate: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
@@ -618,6 +625,13 @@ impl ThinVolumeHandle {
 
     /// Refuse a write, naming which gate closed it — sealing and read-only
     /// are different facts and an operator undoes them differently.
+    /// Keep every write and discard of this volume out until the guard is
+    /// dropped, after those already looking at an extent have landed: what
+    /// a snapshot holds while it shares the volume's slots (#367).
+    pub async fn hold_writes(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.snap_gate.clone().write_owned().await
+    }
+
     fn refuse_if_sealed(&self) -> DriveResult<()> {
         if self.is_sealed() {
             return Err(DriveError::ReadOnly(VolumeError::Sealed(self.id).to_string()));
@@ -2769,6 +2783,9 @@ impl ThinVolumeHandle {
     /// Whole blocks only, which is what everything below this expects.
     async fn write_blocks(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         self.refuse_if_sealed()?;
+        // No snapshot shares a slot between this write's look at its count
+        // and its data landing (#367).
+        let _gate = self.snap_gate.read().await;
         let buf_len = buf.len() as u64;
         let mut bytes_written = 0u64;
         let mut pos = offset;
@@ -3124,6 +3141,9 @@ impl BlockDevice for ThinVolumeHandle {
         self.resident().await?;
         self.refuse_if_sealed()?;
         let _finished = Finished(&self.completed);
+        // As a write: no snapshot shares a slot between the share check
+        // below and its release (#367).
+        let _gate = self.snap_gate.read().await;
         let policy = self.redundancy();
         // An unreplicated volume serialises against its own allocations with
         // the volume lock; a redundant one uses the extent/stripe shards,
