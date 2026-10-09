@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Imported media presented at the block they were authored for (2026-10-09, #110) — IN PROGRESS
+### Imported media presented at the block they were authored for (2026-10-09, #110) — DONE
 
 The per-volume LBA landed in #228; the import never set it, so every ISO and
 disk image (and every clone of one) was 4096: isofs refuses it, a 512 GPT has
@@ -194,7 +194,13 @@ no partitions at 4096, and the tail past the last 4 KiB was dropped.
       raw, explicit 4096, 1024 refused), the qcow2/MBR test asserts 512
 - [x] `ci-media-verify.sh` (QEMU, NVMe/TCP: ISO and GPT mount and read
       back, the 4096 control refused); docs, CHANGELOG
-- [ ] run both on build VMs; golden; close
+- [x] on build VMs: check.sh at 387a858 ALL PASS (nextest 1068/1068);
+      `ci-media-verify.sh` at 8713a83 ALL PASS (kernel 7.2.8: ISO and GPT
+      clones 512, ISO whole length, iso9660 and the GPT's vfat partition
+      mount and read back; the 4096 control: "ISOFS: unsupported/invalid
+      hardware sector size 4096"). Found by it: its own lookup took the
+      multipath path node (nvme0c0n1) for the device
+- Media imported before this stay 4096 (and their clones): import again
 
 ### The config file's [iscsi]/[nvmeof] take effect; CHAP is required when set (2026-10-09, #164) — DONE (golden-stormblock-2ec2e5085634)
 
