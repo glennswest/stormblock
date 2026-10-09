@@ -181,14 +181,14 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### --data-dir is the node's data directory (2026-10-09, #163) — IN PROGRESS
+### --data-dir is the node's data directory (2026-10-09, #163) — DONE
 
 - [x] `merge_cli` sets `[management] data_dir` from `--data-dir` (the flag
       wins); the daemon reads only that; help text, README
 - [x] tests: `config::…::the_data_dir_flag_is_the_node_s_data_dir`, runtime
       `data_dir_flag` (the built daemon: the token file in the flag's
       directory, `/serve/v1` mounted)
-- [ ] check.sh; golden; close
+- [x] check.sh at ab97c9a ALL PASS (nextest 1071/1071, the runtime test)
 
 ### A stopped VM's root disk becomes a named golden (2026-10-09, #143, P2) — WAITING ON THE OWNER
 
