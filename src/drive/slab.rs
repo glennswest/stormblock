@@ -635,6 +635,75 @@ pub struct SlabSyncHandle {
 }
 
 impl SlabSyncHandle {
+    /// Write entries [`Slab::ready_entries`] read, with no slab or registry
+    /// lock held (#364). Under the table's page lock, before anything is
+    /// written, every entry must still be what memory has and still be
+    /// waiting: a slot freed, re-confirmed or changed since answers `None`
+    /// and nothing is written (the caller reads again). Then the slots are
+    /// published exactly as [`Slab::publish_ready`] does it.
+    async fn publish_unlocked(
+        &self,
+        entries: Vec<(u64, [u8; SLOT_ENTRY_SIZE as usize])>,
+    ) -> DriveResult<Option<bool>> {
+        if entries.is_empty() {
+            return Ok(Some(false));
+        }
+        let pending = self.pending.clone();
+        let taken: std::sync::Mutex<Vec<u64>> = Default::default();
+        let wrote = self
+            .table
+            .write_checked(&entries, || {
+                let mut p = pending.lock().unwrap();
+                let current = entries.iter().all(|(idx, bytes)| {
+                    p.ready.contains(idx) && p.entries.get(idx).map(|s| s.to_bytes() == *bytes).unwrap_or(false)
+                });
+                if !current {
+                    return false;
+                }
+                let mut newly = taken.lock().unwrap();
+                for (idx, _) in &entries {
+                    p.ready.remove(idx);
+                    if p.unpublished.remove(idx) {
+                        newly.push(*idx);
+                    }
+                }
+                true
+            })
+            .await;
+        let newly = taken.into_inner().unwrap();
+        let unchanged = |p: &Pending, idx: &u64, bytes: &[u8; SLOT_ENTRY_SIZE as usize]| {
+            p.entries.get(idx).map(|s| s.to_bytes() == *bytes).unwrap_or(false)
+        };
+        match wrote {
+            Ok(false) => Ok(None),
+            Ok(true) => {
+                // On the device now: memory need not hold what the table
+                // says, unless it changed while the write ran.
+                let mut p = self.pending.lock().unwrap();
+                for (idx, bytes) in &entries {
+                    if !p.unpublished.contains(idx) && unchanged(&p, idx, bytes) {
+                        p.entries.remove(idx);
+                    }
+                }
+                Ok(Some(true))
+            }
+            Err(e) => {
+                // Not on the device: they wait for the next sync, unless a
+                // free or a change has taken them over meanwhile.
+                let mut p = self.pending.lock().unwrap();
+                for (idx, bytes) in &entries {
+                    if unchanged(&p, idx, bytes) {
+                        if newly.contains(idx) {
+                            p.unpublished.insert(*idx);
+                        }
+                        p.ready.insert(*idx);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// One sync at a time, one for many callers (#264): see [`SyncGate`].
     /// `publish` takes the confirmed slots and writes their entries, and says
     /// whether it wrote any.
@@ -687,8 +756,26 @@ pub async fn sync_registered(
     // #269): a page read under the registry would hold every volume's I/O.
     let ready: Vec<u64> = handle.pending.lock().unwrap().ready.iter().copied().collect();
     handle.table.prefetch(ready).await;
+    let publisher = handle.clone();
     handle
         .run(|| async move {
+            // The entries are read under the registry and written with
+            // nothing held (#364): a table write is device I/O, and a reader
+            // held across it queues every allocation, then every reader.
+            // Something changed between the two: read them again; three
+            // times over, publish under the registry as before.
+            for _ in 0..3 {
+                let entries = {
+                    let r = registry.read().await;
+                    match r.get(&id) {
+                        Some(slab) => slab.ready_entries(),
+                        None => return Ok(false),
+                    }
+                };
+                if let Some(wrote) = publisher.publish_unlocked(entries).await? {
+                    return Ok(wrote);
+                }
+            }
             let r = registry.read().await;
             match r.get(&id) {
                 Some(slab) => slab.publish_ready().await,
@@ -1094,6 +1181,29 @@ impl Slab {
         Ok(true)
     }
 
+    /// The confirmed slots' entries as they are to be published, read with
+    /// this slab borrowed and nothing changed (#364): the caller writes them
+    /// through [`SlabSyncHandle::publish_unlocked`] once it has let go.
+    fn ready_entries(&self) -> Vec<(u64, [u8; SLOT_ENTRY_SIZE as usize])> {
+        // Every entry waiting differs from the device, so memory holds it; one
+        // memory no longer holds was written since by its own write.
+        let mut p = self.pending.lock().unwrap();
+        let mut out = Vec::with_capacity(p.ready.len());
+        let mut written = Vec::new();
+        for &idx in &p.ready {
+            match p.entries.get(&idx) {
+                Some(slot) => out.push((idx, slot.to_bytes())),
+                None if !p.unpublished.contains(&idx) => written.push(idx),
+                // Allocated slots are always held (take_slot): not reached.
+                None => {}
+            }
+        }
+        for idx in written {
+            p.ready.remove(&idx);
+        }
+        out
+    }
+
     /// Put slots whose free is durable back in the bitmap.
     fn absorb_released(&mut self) {
         let released = std::mem::take(&mut self.pending.lock().unwrap().released);
@@ -1351,10 +1461,14 @@ impl Slab {
 
     /// Increment reference counts on many slots at once.
     ///
-    /// Cloning a volume bumps every extent it shares with its source, so the
-    /// per-slot path costs one read-modify-write per extent. This persists the
-    /// table by sector instead, which is what keeps clone latency proportional
-    /// to sectors touched rather than to image size.
+    /// Cloning a volume bumps every extent it shares with its source. The
+    /// counts change in memory and are written by the slab's next
+    /// [`sync`](Self::sync), by sector and with no lock held (#364): a clone
+    /// is taken under the extent map's and the registry's write locks, and a
+    /// table write there held every volume's I/O. Safe to defer: the clone's
+    /// record is persisted only after a sync of every slab, so a cut before
+    /// it leaves neither the clone nor its references; restore raises a
+    /// count below the maps it restores in any case (#171).
     pub async fn inc_ref_batch(&mut self, slot_indices: &[u64]) -> DriveResult<()> {
         // Validate everything before mutating, so a bad index cannot leave the
         // batch half-applied.
@@ -1376,10 +1490,12 @@ impl Slab {
         for (idx, slot) in now {
             bumped.entry(idx).or_insert(slot).ref_count += 1;
         }
+        let mut p = self.pending.lock().unwrap();
         for (idx, slot) in bumped {
-            self.set_slot(idx, slot);
+            p.entries.insert(idx, slot);
+            p.ready.insert(idx);
         }
-        self.persist_slots(slot_indices).await
+        Ok(())
     }
 
     /// Decrement reference counts on many slots at once, freeing any that
@@ -2261,6 +2377,7 @@ mod tests {
         let bumped: Vec<u64> = slots[60..70].to_vec();
         slab.inc_ref_batch(&bumped).await.unwrap();
         slab.inc_ref_batch(&[slots[99]]).await.unwrap();
+        slab.sync().await.unwrap();
 
         let free_before = slab.free_slots();
         drop(slab);
@@ -2349,6 +2466,7 @@ mod tests {
 
         // Touch only vol_a's slots; vol_b's share the same sectors.
         slab.inc_ref_batch(&a_slots).await.unwrap();
+        slab.sync().await.unwrap();
         drop(slab);
 
         let reopened = Slab::open(dev.clone()).await.unwrap();
@@ -2531,6 +2649,8 @@ mod tests {
         writes.store(0, std::sync::atomic::Ordering::Relaxed);
         reads.store(0, std::sync::atomic::Ordering::Relaxed);
         slab.inc_ref_batch(&slots).await.unwrap();
+        assert_eq!(writes.load(std::sync::atomic::Ordering::Relaxed), 0, "counts wait for the sync (#364)");
+        slab.sync().await.unwrap();
 
         let w = writes.load(std::sync::atomic::Ordering::Relaxed);
         let r = reads.load(std::sync::atomic::Ordering::Relaxed);

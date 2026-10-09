@@ -159,6 +159,18 @@ impl SlotTable {
     /// Write entries, each into its page: the page as the device has it,
     /// with these entries replaced.
     pub async fn write(&self, entries: &[(u64, [u8; SLOT_ENTRY_BYTES as usize])]) -> DriveResult<()> {
+        self.write_checked(entries, || true).await.map(|_| ())
+    }
+
+    /// [`write`](Self::write), if `still` says so once the page lock is held
+    /// (#364): a caller that read its entries with no slab lock held checks
+    /// them against memory here, where no other table write can come between
+    /// the check and its own. `Ok(false)`: nothing written.
+    pub async fn write_checked(
+        &self,
+        entries: &[(u64, [u8; SLOT_ENTRY_BYTES as usize])],
+        still: impl FnOnce() -> bool,
+    ) -> DriveResult<bool> {
         let mut by_page: std::collections::BTreeMap<u64, Vec<(usize, &[u8; SLOT_ENTRY_BYTES as usize])>> =
             Default::default();
         for (idx, bytes) in entries {
@@ -166,6 +178,9 @@ impl SlotTable {
             by_page.entry(page).or_default().push((off, bytes));
         }
         let _io = self.page_io.lock().await;
+        if !still() {
+            return Ok(false);
+        }
         for (page, changes) in by_page {
             let mut buf = self.load(page).await?.to_vec();
             for (off, bytes) in changes {
@@ -177,7 +192,7 @@ impl SlotTable {
             self.device.write(self.table_offset + page * PAGE, &buf).await?;
             self.cache.lock().unwrap_or_else(|e| e.into_inner()).put(page, buf.into());
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Every entry of the first `total` slots that is not free, read from the
