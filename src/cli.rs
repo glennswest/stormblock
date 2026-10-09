@@ -3286,12 +3286,18 @@ pub async fn run() -> anyhow::Result<()> {
         meta: Option<&str>,
         resume: bool,
     ) -> anyhow::Result<(VolumeManager, Option<Resumed>, OpenedDisks)> {
-        use std::path::{Path, PathBuf};
+        let attached = attach_slab_devices(slab_paths).await?;
+        open_slabs_on(slab_paths, attached, meta, resume).await
+    }
 
-        // 1. Open the slabs. A slab formatted by `image build` carries its own
-        //    volumes.dat, so opening it is also how the metadata is found — an
-        //    image has no filesystem to keep one in, and the "meta" directory
-        //    beside `/dev/sda4` is `/dev/meta`, which is nothing (#62).
+    /// Attach the device behind each slab path: open the block device (or
+    /// file), or connect the NVMe/TCP namespace. Nothing on it is read (#303):
+    /// what `adopt-ublk` does while the incumbent still serves, so the stand-down
+    /// window starts with the devices already there. Rule 8 (#171) stands: the
+    /// slabs themselves — table, headers, slot tables, records — are read only
+    /// after the incumbent has exited.
+    async fn attach_slab_devices(slab_paths: &[String]) -> anyhow::Result<OpenedDisks> {
+        use std::path::Path;
         for path in slab_paths {
             // A fabric URI is opened by attaching, not by statting a file — see the
             // scheme dispatch below. Only a local path is required to exist first:
@@ -3304,16 +3310,7 @@ pub async fn run() -> anyhow::Result<()> {
                 );
             }
         }
-        let mut slabs = Vec::with_capacity(slab_paths.len());
-        // The path each slab came from. One whole-disk path can yield several
-        // slabs, so this is what the per-slab reporting below zips against —
-        // `slab_paths` is no longer 1:1 with `slabs`.
-        let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
         let mut disks: OpenedDisks = Vec::with_capacity(slab_paths.len());
-        // Where opening the slabs goes (#303): attaching each path, finding and
-        // opening its slabs (the slot tables are read here), the records, the
-        // restore.
-        let mut steps = Steps::new("slabs");
         for path in slab_paths {
             // A slab is on a block device (O_DIRECT, #140), a namespace on the
             // fabric (NvmeofDevice), or — tests and development — a file. The diskless boot hands boot-local an
@@ -3337,6 +3334,34 @@ pub async fn run() -> anyhow::Result<()> {
                 }
                 dev
             };
+            disks.push((path.clone(), dev));
+        }
+        Ok(disks)
+    }
+
+    /// [`open_slabs_with_disks`] on devices [`attach_slab_devices`] attached.
+    async fn open_slabs_on(
+        slab_paths: &[String],
+        attached: OpenedDisks,
+        meta: Option<&str>,
+        resume: bool,
+    ) -> anyhow::Result<(VolumeManager, Option<Resumed>, OpenedDisks)> {
+        use std::path::{Path, PathBuf};
+
+        // 1. Open the slabs. A slab formatted by `image build` carries its own
+        //    volumes.dat, so opening it is also how the metadata is found — an
+        //    image has no filesystem to keep one in, and the "meta" directory
+        //    beside `/dev/sda4` is `/dev/meta`, which is nothing (#62).
+        let mut slabs = Vec::with_capacity(slab_paths.len());
+        // The path each slab came from. One whole-disk path can yield several
+        // slabs, so this is what the per-slab reporting below zips against —
+        // `slab_paths` is no longer 1:1 with `slabs`.
+        let mut slab_sources: Vec<String> = Vec::with_capacity(slab_paths.len());
+        let mut disks: OpenedDisks = Vec::with_capacity(attached.len());
+        // Where opening the slabs goes (#303): finding and opening each path's
+        // slabs (the slot tables are read here), the records, the restore.
+        let mut steps = Steps::new("slabs");
+        for (path, dev) in attached {
             disks.push((path.clone(), dev.clone()));
             steps.mark(format_args!("{path}: attached"));
             let before = slabs.len();
@@ -6418,6 +6443,15 @@ pub async fn run() -> anyhow::Result<()> {
         write_handover_state("adopting", dev_ids.len(), None);
         let slab_paths_given = slab_paths;
         let slab_paths: &[String] = &restore_paths;
+        // The devices attached while the incumbent still serves (#303, owner:
+        // A): opening each block device and connecting each NVMe/TCP namespace
+        // reads nothing from a slab, so rule 8 (#171) holds, and the window
+        // the units wait in no longer pays for the connects. Failing here
+        // leaves the incumbent serving. The first restore uses them; a retry
+        // attaches afresh (a connection may be what failed).
+        let pre_attached: std::sync::Mutex<Option<OpenedDisks>> =
+            std::sync::Mutex::new(Some(attach_slab_devices(slab_paths).await?));
+        steps.mark(format_args!("{} slab device(s) attached before the stand-down", slab_paths.len()));
 
         // Stand the incumbent down and wait for it to be gone, THEN read the
         // slabs (#171). ublk recovery holds every device's I/O in the gap; a
@@ -6448,11 +6482,16 @@ pub async fn run() -> anyhow::Result<()> {
                 let inject = fail_restores > 0;
                 fail_restores = fail_restores.saturating_sub(1);
                 let (opened_disks, record) = (&opened_disks, &record);
+                let pre = pre_attached.lock().unwrap().take();
                 async move {
                 if inject {
                     anyhow::bail!("{ADOPT_TEST_FAIL_RESTORES}: an injected restore failure");
                 }
-                let (mut mgr, _, disks) = open_slabs_with_disks(slab_paths, meta, false).await?;
+                let attached = match pre {
+                    Some(d) => d,
+                    None => attach_slab_devices(slab_paths).await?,
+                };
+                let (mut mgr, _, disks) = open_slabs_on(slab_paths, attached, meta, false).await?;
                 *opened_disks.lock().unwrap() = disks;
 
                 // The drive this boot laid keeps the records first, as it does in the

@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **perf:** #303 (owner's decision A, rule 8 kept): `adopt-ublk` attaches each slab device before it asks the incumbent to stand down. That means opening the block device, or connecting the NVMe/TCP namespace, with nothing read from a slab.
+  - **Shorter wait:** the window in which units' first I/O waits no longer pays for the connects.
+  - **Safer failure:** a device that will not attach fails while the incumbent still serves.
+  - **After the exit:** the slabs (table, headers, slot tables, records) are read only once the incumbent has exited, as before. A retried restore attaches afresh.
+  - **Console:** `[adopt +T s] N slab device(s) attached before the stand-down`.
 - **feat:** #220 (owner's decision A): an install is proven by the first boot off the local disk.
   - **Laid:** the installer's successor reports `installed` with `stage: laid` (no stage means the same, for older engines). The intent goes to `local`, and the host record gets `install: {state: laid, clone, laid_at}`.
   - **Left on the disk:** the successor then writes `<data_dir>/install-report.json`, which the state volume carries onto the disk.

@@ -19,6 +19,7 @@
 #              the stand-down, and the server it would have replaced still
 #              serves
 #   timing     (#303) the handover's steps on the console ([adopt +T s] …,
+#              the slab devices attached before the stand-down is asked for,
 #              [boot-local stop +T s] …) and handover-state.json `serving`
 #   sigterm-handover  (#144) the adopter the next one stands down gets
 #              SIGTERM and stops in order (exit 0); the next one serves
@@ -193,8 +194,12 @@ fi
 grep -h '^\[slabs +\|^\[adopt +' /run/adopt-a.log | sed 's/^/GUEST timing: /'
 grep -h '^\[boot-local stop +' /run/boot-local.log | sed 's/^/GUEST timing: /'
 hs=$(sed -n 's/.*"state": *"\([a-z]*\)".*/\1/p' /run/stormblock/handover-state.json 2>/dev/null)
+# The devices attached before the stand-down is asked for (#303, owner: A).
+att=$(grep -n 'attached before the stand-down' /run/adopt-a.log | head -1 | cut -d: -f1)
+ask=$(grep -n 'asking the incumbent to stand down' /run/adopt-a.log | head -1 | cut -d: -f1)
 if [ "$hs" = serving ] && grep -q '^\[adopt +.*live again' /run/adopt-a.log \
    && grep -q '^\[adopt +.*the incumbent has exited' /run/adopt-a.log \
+   && [ -n "$att" ] && [ -n "$ask" ] && [ "$att" -lt "$ask" ] \
    && grep -q '^\[boot-local stop +.*released' /run/boot-local.log; then
     r timing PASS
 else

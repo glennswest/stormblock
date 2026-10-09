@@ -92,7 +92,11 @@ tests run on.
    (`handover::take_over`). Reading first left the incumbent's last
    allocations out of the successor's map, with their slots looking free.
    The cost is a gap in which nothing serves the devices, root included
-   (#190), and three rules cover it:
+   (#190). What reads nothing from a slab happens before the stand-down
+   (#303, owner: A): each slab device is attached then (the block device
+   opened, the NVMe/TCP namespace connected), so the gap does not pay for
+   it; the partition table, slab headers, slot tables and records are read
+   only after the incumbent has exited. Three rules cover the gap:
    - Before the stand-down (while refusing still leaves the incumbent
      serving), every local path the restore reads (`--meta`, a slab file or
      device) must be on memory or a disk that is not ublk
