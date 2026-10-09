@@ -181,6 +181,15 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The LUN table is written behind the API (2026-10-09, #134) — IN PROGRESS
+
+- [x] `luns::LunsWriter` (`AppState.luns_writer`): attach/detach mark it,
+      one task writes the latest table (compact, blocking pool), coalesced;
+      `flush_luns` (daemon stop, tests)
+- [x] `mgmt_luns_at_scale`: last 100 vs first 100 (≤ 5× + 250 ms), the
+      file holds 1000; the restart test flushes first; README, CHANGELOG
+- [ ] check.sh; golden; close; the known-red note in CLAUDE.md
+
 ### NSIDs are never reused (2026-10-09, #96) — DONE (golden-stormblock-34e7b95994b8)
 
 - [x] `target::nvmeof::nsid`: per-subsystem high-water mark (process-wide by

@@ -1668,6 +1668,13 @@ pub async fn run() -> anyhow::Result<()> {
         tokio::signal::ctrl_c().await?;
         tracing::info!("Shutting down...");
 
+        // The LUN table's last change on disk (#134): written behind the API,
+        // so a change just before the stop may still be in flight. Bounded.
+        #[cfg(feature = "iscsi")]
+        if !mgmt::api::luns::flush_luns(&state, std::time::Duration::from_secs(2)).await {
+            tracing::warn!("the LUN table's last change may not be on disk");
+        }
+
         // **Kernel devices first, and signalled before anything is waited on.**
         //
         // A ublk export's queue threads sit in `io_uring_enter` waiting for work.

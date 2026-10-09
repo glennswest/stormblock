@@ -653,7 +653,7 @@ warnings only.
 
 In the data directory (`[management] data_dir`; `adopt-ublk --data-dir`):
 `volumes.dat` (+ `.bak`; or `metadata.v2`, a sparse 16 GiB file, in format 2,
-#158), `luns.json`, `exports.json`, `v1_state.json` (+
+#158), `luns.json` (written behind attaches and detaches by one writer, flushed at a stop, #134), `nsid_high.json` (the NSIDs each subsystem has handed out, #96), `exports.json`, `v1_state.json` (+
 journal), `fstemplates.json`, `synonyms.json`, `releases.json`, `moves.json`,
 `pallet_mirrors.json`, `stormfs.json`, `cluster_identity.json`, `api_token`
 (0600), `nvme_hosts.json` (0600: per-host NVMe subsystems and their

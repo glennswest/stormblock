@@ -62,9 +62,69 @@ fn luns_path(state: &AppState) -> Option<PathBuf> {
         .map(|d| PathBuf::from(d).join("luns.json"))
 }
 
+/// Keeps `luns.json` up to date behind the API (#134).
+///
+/// Writing the whole table on every attach made creating N LUNs write O(N²)
+/// bytes, each a replace-by-rename the filesystem pushes to disk: 1000
+/// attaches took 30–47 s on a loaded box, ~40 ms each. Now an attach or a
+/// detach marks the table changed and returns; one writer task writes the
+/// table as it is then, and changes that arrive while it writes are one more
+/// write, not one each. The table on disk lags the one in memory by at most
+/// the write in progress.
+pub struct LunsWriter {
+    dirty: std::sync::atomic::AtomicBool,
+    wake: tokio::sync::Notify,
+    /// Bumped after every write, for [`flush_luns`].
+    written: tokio::sync::watch::Sender<u64>,
+    marked: std::sync::atomic::AtomicU64,
+}
+
+/// Mark the LUN table changed: the writer writes it soon.
+pub async fn persist_luns(state: &Arc<AppState>) {
+    if luns_path(state).is_none() {
+        return;
+    }
+    let w = state.luns_writer.get_or_init(|| {
+        let w = Arc::new(LunsWriter {
+            dirty: false.into(),
+            wake: tokio::sync::Notify::new(),
+            written: tokio::sync::watch::channel(0).0,
+            marked: 0.into(),
+        });
+        let (task_w, weak) = (w.clone(), Arc::downgrade(state));
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering::SeqCst;
+            loop {
+                task_w.wake.notified().await;
+                while task_w.dirty.swap(false, SeqCst) {
+                    let upto = task_w.marked.load(SeqCst);
+                    let Some(state) = weak.upgrade() else { return };
+                    write_luns(&state).await;
+                    drop(state);
+                    task_w.written.send_replace(upto);
+                }
+            }
+        });
+        w
+    });
+    use std::sync::atomic::Ordering::SeqCst;
+    w.marked.fetch_add(1, SeqCst);
+    w.dirty.store(true, SeqCst);
+    w.wake.notify_one();
+}
+
+/// Wait until every change marked so far is on disk (at a stop, and in
+/// tests). Bounded: a writer that cannot write gives up after `limit`.
+pub async fn flush_luns(state: &AppState, limit: std::time::Duration) -> bool {
+    let Some(w) = state.luns_writer.get() else { return true };
+    let want = w.marked.load(std::sync::atomic::Ordering::SeqCst);
+    let mut rx = w.written.subscribe();
+    tokio::time::timeout(limit, rx.wait_for(|n| *n >= want)).await.map(|r| r.is_ok()).unwrap_or(false)
+}
+
 /// Write the current LUN table to disk. Best-effort: a persistence failure
-/// must not fail the API call that triggered it.
-pub async fn persist_luns(state: &AppState) {
+/// is logged, never the API call's.
+async fn write_luns(state: &AppState) {
     let Some(path) = luns_path(state) else { return };
 
     let snapshot: Vec<PersistedLun> = {
@@ -81,7 +141,7 @@ pub async fn persist_luns(state: &AppState) {
         v
     };
 
-    let bytes = match serde_json::to_vec_pretty(&snapshot) {
+    let bytes = match serde_json::to_vec(&snapshot) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("failed to serialize LUN table: {e}");
@@ -90,15 +150,18 @@ pub async fn persist_luns(state: &AppState) {
     };
 
     // Write to a temp file and rename so a crash mid-write cannot truncate
-    // the existing table.
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, &bytes) {
-        tracing::warn!("failed to write LUN table to {}: {e}", tmp.display());
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        tracing::warn!("failed to install LUN table at {}: {e}", path.display());
-    }
+    // the existing table. On the blocking pool: it is file I/O.
+    let _ = tokio::task::spawn_blocking(move || {
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &bytes) {
+            tracing::warn!("failed to write LUN table to {}: {e}", tmp.display());
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            tracing::warn!("failed to install LUN table at {}: {e}", path.display());
+        }
+    })
+    .await;
 }
 
 /// Re-open persisted LUNs and wire them into the running iSCSI target.

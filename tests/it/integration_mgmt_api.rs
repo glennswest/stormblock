@@ -288,6 +288,8 @@ async fn mgmt_luns_persist_across_restart() {
     assert_eq!(resp.status(), 201);
     server.abort();
 
+    // Written behind the API (#134): wait for the writer, as a stop does.
+    assert!(stormblock::mgmt::api::luns::flush_luns(&state, std::time::Duration::from_secs(10)).await);
     assert!(dir.path().join("luns.json").exists(), "LUN table should be written");
 
     // Restart: a fresh state over the same data dir re-opens the LUN table.
@@ -320,13 +322,22 @@ async fn mgmt_luns_at_scale() {
     let (state, vol_id) = setup_state_with_iscsi(&dir).await;
     let backing = stormblock::mgmt::LunBacking::Volume { volume_id: vol_id };
 
-    let start = std::time::Instant::now();
+    // The first hundred attaches, and the last hundred (#134): an attach
+    // that costs in proportion to the table is the blowup to catch, and
+    // comparing the two is a measure load on a shared box does not decide,
+    // as a wall-clock limit did.
+    let mut times = Vec::with_capacity(COUNT as usize);
     for _ in 0..COUNT {
+        let t = std::time::Instant::now();
         stormblock::mgmt::api::luns::attach_lun(&state, backing.clone(), None, false)
             .await
             .expect("attach should succeed");
+        times.push(t.elapsed());
     }
-    let elapsed = start.elapsed();
+    let first: std::time::Duration = times[..100].iter().sum();
+    let last: std::time::Duration = times[times.len() - 100..].iter().sum();
+    let total: std::time::Duration = times.iter().sum();
+    eprintln!("{COUNT} attaches: {total:?}; the first 100 {first:?}, the last 100 {last:?}");
 
     assert_eq!(state.lun_entries.read().await.len(), COUNT as usize);
 
@@ -340,12 +351,22 @@ async fn mgmt_luns_at_scale() {
     assert_eq!(luns.last(), Some(&(COUNT - 1)));
     assert_eq!(luns, (0..COUNT).collect::<Vec<_>>());
 
-    // Guards against a return to linear scans on the create path; the real
-    // budget is far under this, it only needs to catch a blowup.
+    // Guards against a return to linear work on the create path: the last
+    // hundred may cost a few times the first, never the ten- or twentyfold
+    // that a table rewritten on every attach costs.
     assert!(
-        elapsed.as_secs() < 30,
-        "creating {COUNT} LUNs took {elapsed:?}, expected far less"
+        last <= first * 5 + std::time::Duration::from_millis(250),
+        "the last 100 attaches took {last:?} against {first:?} for the first 100"
     );
+
+    // Still written: the table on disk has every LUN once the writer is done.
+    assert!(
+        stormblock::mgmt::api::luns::flush_luns(&state, std::time::Duration::from_secs(30)).await,
+        "the LUN table was written"
+    );
+    let path = dir.path().join("luns.json");
+    let on_disk: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(on_disk.len(), COUNT as usize);
 }
 
 /// `GET /api/v1/slabs/pool` answers the one question per-slab numbers could

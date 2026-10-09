@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **perf:** #134: an iSCSI LUN attach or detach no longer rewrites `luns.json` itself.
+  - **Writer:** it marks the table changed, and one writer task writes it (compact, on the blocking pool). Changes made while a write is in progress become one more write. The daemon flushes it at a stop.
+  - **Before:** every attach wrote the whole table and replaced it by rename, so 1000 attaches wrote O(N²) bytes and took 30–47 s on a loaded box.
+  - **Test:** `mgmt_luns_at_scale` now compares the last 100 attaches with the first 100, not a 30 s wall clock, and checks the table on disk holds all 1000.
 - **fix:** #96: NVMe-oF NSIDs are never reused in a subsystem.
   - **Allocation:** each subsystem hands out NSIDs above a high-water mark that only rises, persisted in `<data_dir>/nsid_high.json`. It used to give the lowest free NSID, so a released volume's NSID went to the next attach and a stale `?nsid=N` address reached another volume with no error.
   - **NN:** Identify Controller's NN covers the mark plus 1024.

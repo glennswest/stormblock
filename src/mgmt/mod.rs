@@ -377,6 +377,9 @@ pub struct AppState {
     /// LUNs (#24).
     #[cfg(feature = "iscsi")]
     pub lun_entries: tokio::sync::RwLock<HashMap<u64, LunEntry>>,
+    /// Writes `luns.json` behind attaches and detaches (#134).
+    #[cfg(feature = "iscsi")]
+    pub luns_writer: std::sync::OnceLock<Arc<crate::mgmt::api::luns::LunsWriter>>,
     #[cfg(feature = "cluster")]
     pub cluster: Option<Arc<crate::cluster::ClusterManager>>,
 }
@@ -587,6 +590,8 @@ impl AppState {
             forge: tokio::sync::Mutex::new(forge::Forge::default()),
             #[cfg(feature = "iscsi")]
             lun_entries: tokio::sync::RwLock::new(HashMap::new()),
+            #[cfg(feature = "iscsi")]
+            luns_writer: std::sync::OnceLock::new(),
             #[cfg(feature = "cluster")]
             cluster: None,
         }
