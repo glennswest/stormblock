@@ -27,7 +27,7 @@ now. The helper is `src/retry.rs`.
 | `QUICK` | 3 | 100 ms → 1 s | 10 s | a call an API request waits on |
 | `NETWORK` | 5 | 200 ms → 5 s | 60 s | another service over HTTP |
 | `BLOCK_IO` | 3 | 100 ms → 1 s | 120 s | one NVMe/TCP or iSCSI command (each attempt has its own I/O timeout, `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, 30 s) |
-| `TRANSFER` | 8 | 1 s → 30 s | 30 min | an image download, resuming |
+| `TRANSFER` | 8 | 1 s → 30 s | 30 min | an image download, resuming; an attempt that made progress starts the count and the deadline over (#125: `with_backoff_progress`), so a long download over a flaky link fails only when it stops getting anywhere |
 
 Only idempotent operations go through the helper, or ones made safe to
 repeat. A call that must not be retried says why where it is made.

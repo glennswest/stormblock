@@ -387,7 +387,7 @@ applies per clone.
 
 ```
 POST /api/v1/volumes/import {"name":"ubuntu-24.04","url":"https://cloud-images.ubuntu.com/…/noble-server-cloudimg-amd64.img","redundancy":"mirror:2"}
-GET  /api/v1/volumes/import/{id}      → downloading | writing | sealing | done | failed, bytes walked / written
+GET  /api/v1/volumes/import/{id}      → downloading | writing | sealing | done | failed, bytes walked / written; a failure says its `phase` (#125)
 POST /api/v1/volumes/{golden}/clone   {"name":"vm-7"} → a disk with its own GPT GUID / MBR signature
 POST /api/v1/volumes/{clone}/attach   → the VM's disk, over ublk or NVMe-TCP
 ```
@@ -399,6 +399,18 @@ descriptor + flat extent), and the VMDK inside an OVA. Only the clusters
 the image carries are written, so a 2 GB cloud image with 600 MB used
 costs 600 MB once and each VM pays what it writes. `vhd`/`vhdx` are
 recognised and refused; convert with `qemu-img convert -O qcow2`.
+
+**From a URL** (#125). The download resumes with a `Range` from the byte it
+reached, whether it is streamed (raw) or staged to a file (qcow2, VMDK, OVA).
+Each attempt that got further starts the retries over, so a 3 GiB image from
+a mirror that drops every few minutes arrives; one that stops making
+progress fails after the usual attempts. A failed import's status carries a
+`phase`:
+- `fetch`: the source. The URL, the server or the connection, once the
+  transfer gives up.
+- `write`: the engine. The volume, its writes, the staging file, the seal.
+- `verify`: the bytes. An image that does not decode, is empty, or holds a
+  filesystem that does not read.
 
 **Presented at the block it was authored for** (#110). A disk image is laid
 for a sector size, and Linux reads it only at that size: `isofs` refuses a

@@ -181,6 +181,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — IN PROGRESS
+
+#359 made both downloads resume with a `Range`, under `TRANSFER` (8
+attempts, 30 min from the first): a 3 GiB image over a flaky mirror still
+ran out. And a failed import gave only a message.
+- [x] `retry::with_backoff_progress`: an attempt that moved the transfer
+      forward starts the count and the deadline over; `get_to_channel`,
+      `get_to_file` use it
+- [x] `http::Error::Local` for the receiving side's file errors
+- [x] import: `Fail {phase, error}` (`fetch` | `write` | `verify`), `phase`
+      on the status
+- [x] tests: `retry::…::progress_starts_the_retries_over`,
+      `integration_fstemplates::an_import_from_a_dropping_mirror_resumes_
+      and_a_failure_names_its_phase` (64 KiB per connection, 640 KiB, both
+      paths; 404 → fetch; a broken qcow2 → verify); docs, CHANGELOG
+- [ ] check.sh; golden; close
+
 ### Imported media presented at the block they were authored for (2026-10-09, #110) — DONE (golden-stormblock-f7a453e7835f)
 
 The per-volume LBA landed in #228; the import never set it, so every ISO and

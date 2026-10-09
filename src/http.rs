@@ -41,12 +41,16 @@ pub enum Error {
     Serialize(String),
     /// TLS could not be set up (a CA that does not parse, say).
     Tls(String),
+    /// The receiving side failed, not the source (#125): the file a download
+    /// goes into could not be written, or the consumer of a stream stopped.
+    Local(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Url(m) => write!(f, "bad url: {m}"),
+            Error::Local(m) => write!(f, "{m}"),
             Error::Request(m) => write!(f, "request failed: {m}"),
             Error::Timeout(d) => write!(f, "request timed out after {d:?}"),
             Error::Body(m) => write!(f, "reading body: {m}"),
@@ -63,10 +67,17 @@ impl Error {
     /// Whether this is the network and not an answer (#359): a connection
     /// that failed, a timeout, a body cut off. A bad URL, JSON that does not
     /// decode or TLS that does not set up are the caller's.
+    /// The receiving side failed, not the source (#125).
+    pub fn is_local(&self) -> bool {
+        matches!(self, Error::Local(_))
+    }
+
     pub fn class(&self) -> crate::retry::Class {
         match self {
             Error::Request(_) | Error::Timeout(_) | Error::Body(_) => crate::retry::Class::Transient,
-            Error::Url(_) | Error::Json(_) | Error::Serialize(_) | Error::Tls(_) => crate::retry::Class::Permanent,
+            Error::Url(_) | Error::Json(_) | Error::Serialize(_) | Error::Tls(_) | Error::Local(_) => {
+                crate::retry::Class::Permanent
+            }
         }
     }
 }
@@ -473,7 +484,9 @@ impl Client {
             Error::Url(m) if m.starts_with("stopped:") => crate::retry::Class::Permanent,
             e => e.class(),
         };
-        crate::retry::with_backoff(&what, crate::retry::Policy::TRANSFER, classify, |_| async {
+        // An attempt that got further starts the retries over (#125).
+        let progress = || seen.load(std::sync::atomic::Ordering::SeqCst);
+        crate::retry::with_backoff_progress(&what, crate::retry::Policy::TRANSFER, classify, progress, |_| async {
             let from = seen.load(std::sync::atomic::Ordering::SeqCst);
             let (resumed, mut body) = self.get_from(url, from).await?;
             if from > 0 && !resumed {
@@ -486,7 +499,7 @@ impl Client {
                 if tx.send(data).await.is_err() {
                     // The consumer gave up — say so rather than reading the
                     // rest of a body nobody wants.
-                    return Err(Error::Url("stopped: the import stopped reading".into()));
+                    return Err(Error::Local("the import stopped reading".into()));
                 }
             }
             Ok(seen.load(std::sync::atomic::Ordering::SeqCst))
@@ -505,7 +518,11 @@ impl Client {
     pub async fn get_to_file(&self, url: &str, path: &std::path::Path) -> Result<u64, Error> {
         use tokio::io::AsyncWriteExt as _;
         let what = format!("GET {url} -> {}", path.display());
-        let r = crate::retry::with_backoff(&what, crate::retry::Policy::TRANSFER, Error::class, |_| async {
+        // What the file holds: an attempt that grew it starts the retries
+        // over (#125).
+        let held = std::sync::atomic::AtomicU64::new(0);
+        let progress = || held.load(std::sync::atomic::Ordering::SeqCst);
+        let r = crate::retry::with_backoff_progress(&what, crate::retry::Policy::TRANSFER, Error::class, progress, |_| async {
             let have = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
             let (resumed, mut body) = self.get_from(url, have).await?;
             let mut file = if resumed && have > 0 {
@@ -513,13 +530,14 @@ impl Client {
             } else {
                 tokio::fs::File::create(path).await
             }
-            .map_err(|e| Error::Url(format!("{}: {e}", path.display())))?;
+            .map_err(|e| Error::Local(format!("{}: {e}", path.display())))?;
             let mut written = if resumed { have } else { 0 };
             while let Some(data) = self.next_frame(&mut body).await? {
-                file.write_all(&data).await.map_err(|e| Error::Url(format!("{}: {e}", path.display())))?;
+                file.write_all(&data).await.map_err(|e| Error::Local(format!("{}: {e}", path.display())))?;
                 written += data.len() as u64;
+                held.store(written, std::sync::atomic::Ordering::SeqCst);
             }
-            file.flush().await.map_err(|e| Error::Url(format!("{}: {e}", path.display())))?;
+            file.flush().await.map_err(|e| Error::Local(format!("{}: {e}", path.display())))?;
             Ok(written)
         })
         .await;

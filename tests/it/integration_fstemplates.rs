@@ -1562,6 +1562,105 @@ async fn imported_media_are_presented_at_the_block_they_were_authored_for() {
     server.abort();
 }
 
+/// A server that sends at most 64 KiB of an image per connection and hangs
+/// up, resuming from a `Range`; `/missing` answers 404.
+async fn stingy_server(body: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let gets = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counted = gets.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else { return };
+            let body = body.clone();
+            let counted = counted.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let got = s.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..got]).to_ascii_lowercase();
+                if req.contains(" /missing ") {
+                    let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    return;
+                }
+                if req.starts_with("head ") {
+                    let _ = s
+                        .write_all(format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\naccept-ranges: bytes\r\nconnection: close\r\n\r\n", body.len()).as_bytes())
+                        .await;
+                    return;
+                }
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let from = req
+                    .lines()
+                    .find_map(|l| l.strip_prefix("range: bytes="))
+                    .and_then(|r| r.trim().trim_end_matches('-').parse::<usize>().ok());
+                let head = match from {
+                    None => format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()),
+                    Some(f) => format!(
+                        "HTTP/1.1 206 Partial\r\ncontent-length: {}\r\ncontent-range: bytes {f}-{}/{}\r\nconnection: close\r\n\r\n",
+                        body.len() - f,
+                        body.len() - 1,
+                        body.len()
+                    ),
+                };
+                let f = from.unwrap_or(0);
+                let _ = s.write_all(head.as_bytes()).await;
+                // A flaky mirror: 64 KiB, then the connection drops.
+                let _ = s.write_all(&body[f..(f + 65536).min(body.len())]).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), gets)
+}
+
+/// #125: an import from a URL survives a mirror that drops the connection
+/// every 64 KiB, far more often than the retry limit, on both paths (raw
+/// streamed, and staged to a file), because each drop came after progress
+/// and resumes with a `Range`. A failed import says which phase failed.
+#[tokio::test]
+async fn an_import_from_a_dropping_mirror_resumes_and_a_failure_names_its_phase() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    // 640 KiB: ten connections, nine drops.
+    let image: Vec<u8> = (0..640 * 1024u32).map(|i| (i % 253) as u8 | 1).collect();
+    let (mirror, gets) = stingy_server(image.clone()).await;
+
+    for (name, format) in [("streamed", Some("raw")), ("staged", None)] {
+        gets.store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut body = serde_json::json!({ "name": name, "url": format!("{mirror}/image.img") });
+        if let Some(f) = format {
+            body["format"] = f.into();
+        }
+        let st = import(&client, &url, body).await;
+        assert_eq!(st["state"], "done", "{name}: {st}");
+        assert!(st.get("phase").is_none(), "{name}: {st}");
+        let n = gets.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(n >= 10, "{name}: only {n} GETs: the drops were not exercised");
+        let vol: Uuid = st["volume_id"].as_str().unwrap().parse().unwrap();
+        let dev = state.volume_manager.lock().await.get_volume(&VolumeId(vol)).unwrap();
+        let mut got = vec![0u8; image.len()];
+        dev.read(0, &mut got).await.unwrap();
+        assert!(got == image, "{name}: the volume holds the image whole after {n} GETs");
+    }
+
+    // The source broke: `fetch`.
+    let st = import(&client, &url, serde_json::json!({ "name": "gone", "url": format!("{mirror}/missing"), "format": "raw" })).await;
+    assert_eq!(st["state"], "failed", "{st}");
+    assert_eq!(st["phase"], "fetch", "{st}");
+    let st = import(&client, &url, serde_json::json!({ "name": "gone2", "url": format!("{mirror}/missing") })).await;
+    assert_eq!((st["state"].as_str(), st["phase"].as_str()), (Some("failed"), Some("fetch")), "{st}");
+    // The bytes are not what they say: `verify`.
+    let bad = dir.path().join("bad.qcow2");
+    let mut q = b"QFI\xfb".to_vec();
+    q.extend_from_slice(&[0xff; 600]);
+    std::fs::write(&bad, &q).unwrap();
+    let st = import(&client, &url, serde_json::json!({ "name": "bad", "file": bad.to_str().unwrap() })).await;
+    assert_eq!((st["state"].as_str(), st["phase"].as_str()), (Some("failed"), Some("verify")), "{st}");
+    server.abort();
+}
+
 /// #281 (rustkube-node#140): a `ready` template whose sealed volume is gone
 /// is not ready. Its store outlives the volume (here the volume is deleted
 /// under it, as a delete cut short or a reclaim would); after a restart — the

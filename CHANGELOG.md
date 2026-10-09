@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #125: an import from a URL survives a flaky mirror, and a failed import says which part failed.
+  - **Retries:** a resuming download (`get_to_channel`, `get_to_file`, #359) starts its retries over after any attempt that made progress (`retry::with_backoff_progress`). A 3 GiB image at 0.7 MB/s no longer runs out of drops or of the 30-minute deadline while it is still arriving.
+  - **Phase:** a failed import's status carries `phase`: `fetch` (the source), `write` (the engine) or `verify` (what the bytes are).
+  - **Errors:** a download's own file errors are a local error (`http::Error::Local`), not a "bad url", so they count as `write`.
 - **fix:** #110: an imported ISO or disk image could not be read by Linux, because every import was presented at 4096-byte blocks.
   - **LBA:** an import is now presented at the block its image was authored for: a GPT at the LBA its header is at, an MBR disk or an ISO 9660 image at 512, anything else 4096. `"lba"` on `POST /api/v1/volumes/import` overrides it, and the status reports it. Clones inherit it.
   - **Size:** the volume's size is rounded up to whole blocks, so an image's tail is no longer cut off.

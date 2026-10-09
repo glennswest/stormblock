@@ -159,29 +159,77 @@ pub async fn with_backoff<T, E, F, Fut>(
     what: &str,
     policy: Policy,
     classify: impl Fn(&E) -> Class,
-    mut op: F,
+    op: F,
 ) -> Result<T, Failure<E>>
 where
     E: std::fmt::Display,
     F: FnMut(u32) -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
-    let start = Instant::now();
+    run(what, policy, classify, None::<fn() -> u64>, op).await
+}
+
+/// [`with_backoff`] for a transfer that resumes (#125): an attempt that
+/// moved `progress` forward before it failed starts the count and the
+/// deadline over. A long download over a flaky link fails only when it stops
+/// getting anywhere, not after so many drops or so long in all: 3 GiB at
+/// 0.7 MB/s takes longer than any fixed deadline a stuck one should get.
+pub async fn with_backoff_progress<T, E, F, Fut>(
+    what: &str,
+    policy: Policy,
+    classify: impl Fn(&E) -> Class,
+    progress: impl Fn() -> u64,
+    op: F,
+) -> Result<T, Failure<E>>
+where
+    E: std::fmt::Display,
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    run(what, policy, classify, Some(progress), op).await
+}
+
+async fn run<T, E, F, Fut, P>(
+    what: &str,
+    policy: Policy,
+    classify: impl Fn(&E) -> Class,
+    progress: Option<P>,
+    mut op: F,
+) -> Result<T, Failure<E>>
+where
+    E: std::fmt::Display,
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    P: Fn() -> u64,
+{
+    let first = Instant::now();
+    let mut start = first;
     let mut attempt = 0u32;
+    let mut total = 0u32;
     loop {
         attempt += 1;
-        match op(attempt).await {
+        total += 1;
+        let before = progress.as_ref().map(|p| p());
+        match op(total).await {
             Ok(v) => {
-                if attempt > 1 {
+                if total > 1 {
                     tracing::info!(
-                        "retry: {what} succeeded on attempt {attempt} after {:.1}s",
-                        start.elapsed().as_secs_f64()
+                        "retry: {what} succeeded on attempt {total} after {:.1}s",
+                        first.elapsed().as_secs_f64()
                     );
                 }
                 return Ok(v);
             }
             Err(e) => {
                 let class = classify(&e);
+                if let (Some(p), Some(b)) = (progress.as_ref(), before) {
+                    if class == Class::Transient && p() > b {
+                        // It got somewhere: the retries start over (#125).
+                        tracing::info!("retry: {what} attempt {total} failed after progress ({e}); retries start over");
+                        attempt = 1;
+                        start = Instant::now();
+                    }
+                }
                 let elapsed = start.elapsed();
                 let wait = policy.delay(attempt);
                 let out_of_time = elapsed + wait >= policy.deadline;
@@ -192,10 +240,10 @@ where
                             elapsed.as_secs_f64()
                         );
                     }
-                    return Err(Failure { error: e, class, attempts: attempt, elapsed });
+                    return Err(Failure { error: e, class, attempts: total, elapsed: first.elapsed() });
                 }
                 tracing::info!(
-                    "retry: {what} attempt {attempt} failed ({e}); again in {:.2}s",
+                    "retry: {what} attempt {total} failed ({e}); again in {:.2}s",
                     wait.as_secs_f64()
                 );
                 tokio::time::sleep(wait).await;
@@ -303,6 +351,43 @@ mod tests {
             with_backoff("test", p, |_| Class::Transient, |_| async { Err("down".to_string()) }).await;
         let f = r.unwrap_err();
         assert!(f.attempts < 10, "stopped by the deadline, not the count: {}", f.attempts);
+    }
+
+    /// #125: a transfer that keeps getting somewhere is not given up on for
+    /// the number of drops; one that stops getting anywhere is.
+    #[tokio::test]
+    async fn progress_starts_the_retries_over() {
+        let moved = AtomicU32::new(0);
+        let calls = AtomicU32::new(0);
+        // 3 attempts allowed, 10 drops each after some progress, then done.
+        let r: Result<u32, Failure<String>> = with_backoff_progress(
+            "test",
+            quick(3),
+            |_| Class::Transient,
+            || moved.load(Ordering::SeqCst) as u64,
+            |_| {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                moved.fetch_add(1, Ordering::SeqCst);
+                async move { if n < 10 { Err("dropped".to_string()) } else { Ok(n) } }
+            },
+        )
+        .await;
+        assert_eq!(r.unwrap(), 10, "ten drops, each after progress, then it finished");
+        // No progress: the limit holds.
+        let calls = AtomicU32::new(0);
+        let r: Result<(), Failure<String>> = with_backoff_progress(
+            "test",
+            quick(3),
+            |_| Class::Transient,
+            || 0,
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err("dropped".to_string()) }
+            },
+        )
+        .await;
+        assert_eq!(r.unwrap_err().attempts, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]

@@ -150,6 +150,46 @@ pub enum ImportState {
     Failed,
 }
 
+/// Which part of an import failed (#125), so a caller need not guess from
+/// the message whether the source or the engine broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Getting the bytes: the URL, the server, the connection, after every
+    /// retry and resume the transfer allows.
+    Fetch,
+    /// The engine storing them: the volume, its writes, the staging file, the
+    /// seal.
+    Write,
+    /// What the bytes are: an image that does not decode, is empty, or holds
+    /// a filesystem that does not read (#147, #198).
+    Verify,
+}
+
+/// A failed import: the phase and the error.
+#[derive(Debug, Clone)]
+pub struct Fail {
+    pub phase: Phase,
+    pub error: String,
+}
+
+impl Fail {
+    fn new(phase: Phase, error: impl std::fmt::Display) -> Fail {
+        Fail { phase, error: error.to_string() }
+    }
+    /// An HTTP error: the source's, unless the receiving side failed.
+    fn http(e: crate::http::Error) -> Fail {
+        Fail::new(if e.is_local() { Phase::Write } else { Phase::Fetch }, e)
+    }
+}
+
+/// Anything not said otherwise is the engine's.
+impl From<String> for Fail {
+    fn from(error: String) -> Fail {
+        Fail { phase: Phase::Write, error }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportStatus {
     pub id: Uuid,
@@ -177,6 +217,9 @@ pub struct ImportStatus {
     pub filesystems: Vec<crate::fs::survey::FoundFs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// On a failure, which part failed (#125): `fetch`, `write` or `verify`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
     pub started_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
@@ -254,6 +297,7 @@ impl Imports {
             lba: None,
             filesystems: Vec::new(),
             error: None,
+            phase: None,
             started_at: now(),
             finished_at: None,
         }));
@@ -266,7 +310,8 @@ impl Imports {
                 Ok(()) => s.state = ImportState::Done,
                 Err(e) => {
                     s.state = ImportState::Failed;
-                    s.error = Some(e);
+                    s.error = Some(e.error);
+                    s.phase = Some(e.phase);
                 }
             }
         });
@@ -389,7 +434,7 @@ pub async fn open_source(path: &Path, forced: Option<&str>) -> Result<(Source, S
     Ok((src, format))
 }
 
-async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>) -> Result<(), String> {
+async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>) -> Result<(), Fail> {
     // A raw image over HTTP is written as it arrives, with nothing staged.
     //
     // Raw is sequential, so there is no reason to spool it — and spooling
@@ -417,7 +462,7 @@ async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportSta
             // itself may take hours, a server that stops sending may not. It
             // resumes on failure and removes its partial file when it gives up.
             let client = crate::http::Client::builder().timeout(std::time::Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
-            let n = client.get_to_file(url, &target).await.map_err(|e| e.to_string())?;
+            let n = client.get_to_file(url, &target).await.map_err(Fail::http)?;
             {
                 let mut s = st.write().await;
                 s.downloaded_bytes = n;
@@ -449,7 +494,7 @@ async fn stream_raw(
     spec: &ImportSpec,
     st: &Arc<RwLock<ImportStatus>>,
     url: &str,
-) -> Result<(), String> {
+) -> Result<(), Fail> {
     let client = crate::http::Client::builder()
         .timeout(std::time::Duration::from_secs(6 * 3600))
         .build()
@@ -458,7 +503,7 @@ async fn stream_raw(
         Some(s) => Some(crate::mgmt::config::parse_size(s).map_err(|e| format!("size: {e}"))?),
         None => None,
     };
-    let length = client.content_length(url).await.map_err(|e| e.to_string())?;
+    let length = client.content_length(url).await.map_err(Fail::http)?;
     let size = match (declared, length) {
         (Some(d), Some(l)) => d.max(l),
         (Some(d), None) => d,
@@ -466,8 +511,9 @@ async fn stream_raw(
         // Neither: a volume cannot be created without a size, and guessing one
         // would silently truncate the image.
         (None, None) => {
-            return Err(format!(
-                "{url} does not say how big it is (no Content-Length); give `size`"
+            return Err(Fail::new(
+                Phase::Fetch,
+                format!("{url} does not say how big it is (no Content-Length); give `size`"),
             ))
         }
     };
@@ -510,7 +556,7 @@ async fn stream_raw(
     let mut window: Vec<u8> = Vec::with_capacity(WINDOW);
     let mut off = 0u64;
     let mut written = 0u64;
-    let outcome: Result<(), String> = async {
+    let outcome: Result<(), Fail> = async {
         while let Some(data) = rx.recv().await {
             let mut rest = &data[..];
             while !rest.is_empty() {
@@ -545,8 +591,8 @@ async fn stream_raw(
         // problem.
         match fetch.await {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(e) => return Err(format!("fetch task: {e}")),
+            Ok(Err(e)) => return Err(Fail::http(e)),
+            Err(e) => return Err(Fail::new(Phase::Write, format!("fetch task: {e}"))),
         }
         dev.flush().await.map_err(|e| e.to_string())?;
         Ok(())
@@ -578,12 +624,12 @@ async fn stream_raw(
     if let Err(e) = verdict(spec, &found) {
         let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
         st.write().await.volume_id = None;
-        return Err(e);
+        return Err(Fail::new(Phase::Verify, e));
     }
     if let Err(e) = settle_lba(state, spec, st, vol_id, fs.as_ref()).await {
         let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
         st.write().await.volume_id = None;
-        return Err(e);
+        return Err(e.into());
     }
     let mut vm = state.volume_manager.lock().await;
     if spec.seal {
@@ -594,11 +640,11 @@ async fn stream_raw(
     Ok(())
 }
 
-async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>, path: &Path) -> Result<(), String> {
-    let (mut src, format) = open_source(path, spec.format.as_deref()).await?;
+async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>, path: &Path) -> Result<(), Fail> {
+    let (mut src, format) = open_source(path, spec.format.as_deref()).await.map_err(|e| Fail::new(Phase::Verify, e))?;
     let vsize = src.virtual_size();
     if vsize == 0 {
-        return Err("image is empty".into());
+        return Err(Fail::new(Phase::Verify, "image is empty"));
     }
     let size = match &spec.size {
         Some(s) => crate::mgmt::config::parse_size(s).map_err(|e| format!("size: {e}"))?.max(vsize),
@@ -635,11 +681,13 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
     let mut buf = vec![0u8; chunk as usize];
     let mut off = 0u64;
     let mut written = 0u64;
-    let outcome: Result<(), String> = async {
+    let outcome: Result<(), Fail> = async {
         while off < vsize {
             let take = ((vsize - off).min(chunk)) as usize;
-            if src.may_have_data(off, chunk).await? {
-                src.read_at(off, &mut buf[..take]).await?;
+            // Reading the image is what it is (a qcow2 that does not decode);
+            // writing it is the engine's.
+            if src.may_have_data(off, chunk).await.map_err(|e| Fail::new(Phase::Verify, e))? {
+                src.read_at(off, &mut buf[..take]).await.map_err(|e| Fail::new(Phase::Verify, e))?;
                 if buf[..take].iter().any(|&b| b != 0) {
                     dev.write(off, &buf[..take]).await.map_err(|e| format!("write at {off}: {e}"))?;
                     written += take as u64;
@@ -681,12 +729,12 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
     if let Err(e) = verdict(spec, &found) {
         let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
         st.write().await.volume_id = None;
-        return Err(e);
+        return Err(Fail::new(Phase::Verify, e));
     }
     if let Err(e) = settle_lba(state, spec, st, vol_id, fs.as_ref()).await {
         let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
         st.write().await.volume_id = None;
-        return Err(e);
+        return Err(e.into());
     }
     let mut vm = state.volume_manager.lock().await;
     if spec.seal {
