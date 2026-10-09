@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### NSIDs are never reused (2026-10-09, #96) — DONE
+### NSIDs are never reused (2026-10-09, #96) — DONE (golden-stormblock-34e7b95994b8)
 
 - [x] `target::nvmeof::nsid`: per-subsystem high-water mark (process-wide by
       NQN), raised by every add (next and at), loaded from and kept in
