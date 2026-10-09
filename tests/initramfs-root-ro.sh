@@ -32,7 +32,7 @@ check() { # name expected actual
 echo "root mode:"
 ro_for() { # cmdline -> ROOT_RO
     printf '%s\n' "$1" > "$WORK/cmdline"
-    ( STORM_CMDLINE="$WORK/cmdline"; . "$WORK/mode.sh" >/dev/null 2>&1; echo "${ROOT_RO:-}" )
+    ( set +e; STORM_CMDLINE="$WORK/cmdline"; . "$WORK/mode.sh" >/dev/null 2>&1; echo "${ROOT_RO:-}" )
 }
 check "ro" "1" "$(ro_for "BOOT_IMAGE=vmlinuz ro console=ttyS0")"
 check "rw" "" "$(ro_for "rw quiet")"
@@ -53,7 +53,7 @@ chmod +x "$MSTUB"
 mounted_with() { # cmdline -> what mount_root ran for ext4
     printf '%s\n' "$1" > "$WORK/cmdline"
     : > "$WORK/mount.log"
-    ( STORM_CMDLINE="$WORK/cmdline"; STORM_MOUNT="$MSTUB"; MOUNT_LOG="$WORK/mount.log"; export MOUNT_LOG
+    ( set +e; STORM_CMDLINE="$WORK/cmdline"; STORM_MOUNT="$MSTUB"; MOUNT_LOG="$WORK/mount.log"; export MOUNT_LOG
       . "$WORK/mode.sh" >/dev/null 2>&1; mount_root /dev/ublkb0 /sysroot )
     cat "$WORK/mount.log"
 }

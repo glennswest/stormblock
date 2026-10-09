@@ -3944,7 +3944,9 @@ mount_root() {
             || ${STORM_MOUNT:-mount} "$1" "$2"
     fi
 }
-[ -n "$ROOT_RO" ] && echo "  the root is mounted read-only (ro on the command line)"
+if [ -n "$ROOT_RO" ]; then
+    echo "  the root is mounted read-only (ro on the command line)"
+fi
 # --- END root mode
 
 if [ -n "$OVERLAY" ]; then
