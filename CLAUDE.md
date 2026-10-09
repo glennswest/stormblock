@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A volume's {id} routes take its name (2026-10-09, #112) — DONE
+### A volume's {id} routes take its name (2026-10-09, #112) — DONE (golden-stormblock-65c86c79843c)
 
 - [x] `volume_key` (UUID; else the one volume of that name, from the
       current catalog or the manager; else a synonym; none = 404, several =
