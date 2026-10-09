@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #89: the initramfs no longer leaves storage and network controllers without a driver silently.
+  - **Second chance:** after udev and the protocol halves, every PCI storage (01xx) or network (02xx) function with no driver gets the module its modalias names loaded and a re-probe (`drivers_probe`); one that binds then is said to have.
+  - **Still unbound:** a WARNING with the reason, which is one of: no module in the image matches; a module matches and did not load; or a loaded module did not take it (a failed probe, with the kernel's last lines about the device). This runs on every boot. The NIC wait (#250) and the storage inventory (#345) run only when the network is configured.
+  - **Settle timeout:** `udevadm settle` ending on its 30 s timeout is now a WARNING.
+  - **Test:** `tests/initramfs-unbound.sh`.
 - **fix:** #98 step 3: one NVMe scheme per caller.
   - **Serve listener:** a claim's per-volume subsystem (`<prefix>:vol-<uuid>`, NSID 1) is a subsystem of the serve listener, as every `/serve/v1` export has been since #188. It had a listener and a port of its own each, from the same range the serve listener binds at.
   - **No fallback:** a claim no longer falls back to a namespace number in the shared subsystem. On a node that serves no per-volume subsystems, an unnamed claim gets no address and says so.

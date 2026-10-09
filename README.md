@@ -1744,6 +1744,16 @@ after the walk has stopped (#250). So, after discovery:
   netdev, walking the auxiliary bus's modaliases each second. It names any
   function that never gets one (a ConnectX-3 port set to InfiniBand is one).
 
+- **A controller with no driver is given a second chance, then named**
+  (#89). On every boot, whether or not the network is configured, each PCI
+  storage (01xx) or network (02xx) function with no driver bound has the
+  module its modalias names loaded and is re-probed (`drivers_probe`). One
+  that binds is said to have. One that does not is a WARNING with the
+  reason: no module in the image matches, a module matches and did not load,
+  or a loaded module did not take it (a failed probe, followed by the
+  kernel's last lines about the device). A `udevadm settle` that ends on its
+  30 s timeout is a WARNING too.
+
 Then the uplink selection sees every port, picks carrier first and fastest
 next, and prints them all. Ports at equal speed always order the same way:
 the later name first.

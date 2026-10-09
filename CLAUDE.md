@@ -193,6 +193,17 @@ data-slab records predate origins (#349), so they read unmarked.
       golden golden-stormblock-ac8207f40ae4 (stormcos#467); master told.
       Not on metal: the Dell's next install
 
+### Controllers left without a driver, found and named (2026-10-09, #89) — IN PROGRESS
+
+Root cause unknown (the walk + settle the issue proposed were already in);
+needs the SAS3008/BCM5720 host to reproduce. Done here: the issue's fix 1's
+log line and fix 2; fix 3 (coldplug after switch_root) is stormpump's.
+- [x] `# --- BEGIN unbound controllers`: storage/network functions with no
+      driver: modalias module + drivers_probe, then named with the reason;
+      the settle timeout said
+- [x] tests/initramfs-unbound.sh; README, CHANGELOG
+- [ ] every initramfs test under sh and busybox sh; /init parses; close
+
 ### One NVMe scheme per caller (2026-10-09, #98, step 3) — DONE (golden-stormblock-c13b97223a59)
 
 Owner's decision: per-volume subsystems. Steps 1–2 done (2026-08). Since:

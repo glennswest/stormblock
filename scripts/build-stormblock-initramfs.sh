@@ -1111,8 +1111,13 @@ if [ -x /usr/lib/systemd/systemd-udevd ] && udevadm --version >/dev/null 2>&1; t
     /usr/lib/systemd/systemd-udevd --daemon
     udevadm trigger --type=subsystems --action=add
     udevadm trigger --type=devices --action=add
-    udevadm settle --timeout=30
-    echo "  udev settled; $(lsmod 2>/dev/null | tail -n +2 | wc -l) module(s) now loaded"
+    # A settle that ends on its timeout leaves devices udev had not reached
+    # yet, and said nothing (#89): say so.
+    if udevadm settle --timeout=30; then
+        echo "  udev settled; $(lsmod 2>/dev/null | tail -n +2 | wc -l) module(s) now loaded"
+    else
+        echo "  WARNING: udev did not settle within 30 s - devices it had not reached may be left without a driver (#89)"
+    fi
     stamp "udev settled"
 else
     echo "  udev not present in this image"
@@ -1147,6 +1152,70 @@ for pair in $PROTO_HALVES; do
     fi
 done
 # --- END protocol halves
+
+# --- BEGIN unbound controllers (covered by tests/initramfs-unbound.sh)
+# Every PCI storage (01xx) or network (02xx) function left with no driver,
+# found, given a second chance, and named (#89). On a Dell with a SAS3008 and
+# a BCM5720, mpt3sas and tg3 were in the image, their dependencies met, and
+# neither bound: the HBA's disks and both onboard ports did not exist, and
+# nothing said so - it read as cabling, or as a machine that cannot netboot.
+# A second chance: the module the function's modalias names is loaded, and
+# the kernel asked to match it again (drivers_probe), which binds a driver
+# that loaded after the device was announced. Still nothing is a WARNING
+# with the reason: no module in this image matches, or one matches and is
+# loaded and did not take it (a failed probe: the kernel's last word on the
+# device follows). Runs on every boot, whatever the boot mode.
+UB_PCI="${STORM_PCI_SYSFS:-/sys/bus/pci/devices}"
+UB_PROBE="${STORM_PCI_PROBE:-/sys/bus/pci/drivers_probe}"
+UB_MODULES="${STORM_MODULE_SYSFS:-/sys/module}"
+UB_WAIT="${STORM_UNBOUND_WAIT:-2}"
+unbound_functions() { # -> "bdf class" per storage/network function with no driver
+    for _d in "$UB_PCI"/*; do
+        _cls=$(cat "$_d/class" 2>/dev/null)
+        case "$_cls" in 0x01*|0x02*) ;; *) continue ;; esac
+        [ -e "$_d/driver" ] && continue
+        echo "${_d##*/} $_cls"
+    done
+}
+UNBOUND=$(unbound_functions)
+if [ -n "$UNBOUND" ]; then
+    echo "$UNBOUND" | while read -r _b _cls; do
+        _ma=$(cat "$UB_PCI/$_b/modalias" 2>/dev/null)
+        [ -n "$_ma" ] && ${MODPROBE:-modprobe} -q "$_ma" 2>/dev/null
+        echo "$_b" > "$UB_PROBE" 2>/dev/null
+    done
+    _uw=0
+    while [ -n "$(unbound_functions)" ] && [ "$_uw" -lt "$UB_WAIT" ]; do
+        sleep 1
+        _uw=$((_uw + 1))
+    done
+    echo "$UNBOUND" | while read -r _b _cls; do
+        _d="$UB_PCI/$_b"
+        _id="$(cat "$_d/vendor" 2>/dev/null | sed 's/^0x//'):$(cat "$_d/device" 2>/dev/null | sed 's/^0x//')"
+        case "$_cls" in 0x01*) _what=storage ;; *) _what=network ;; esac
+        if [ -e "$_d/driver" ]; then
+            echo "  $_what controller $_b [$_id]: bound to $(basename "$(readlink "$_d/driver")") on a second probe (#89)"
+            continue
+        fi
+        _ma=$(cat "$_d/modalias" 2>/dev/null)
+        _mods=$(${MODPROBE:-modprobe} -R "$_ma" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+        if [ -z "$_mods" ]; then
+            echo "WARNING: $_what controller $_b [$_id] (class $_cls) has no driver: no module in this image matches it (#89)"
+            continue
+        fi
+        _loaded=""
+        for _m in $_mods; do
+            [ -d "$UB_MODULES/$_m" ] && _loaded="$_loaded${_loaded:+ }$_m"
+        done
+        if [ -n "$_loaded" ]; then
+            echo "WARNING: $_what controller $_b [$_id] (class $_cls) has no driver: $_loaded is loaded and did not take it - its probe failed (#89)"
+            dmesg 2>/dev/null | grep -F "$_b" | tail -3 | sed 's/^/    /'
+        else
+            echo "WARNING: $_what controller $_b [$_id] (class $_cls) has no driver: $_mods would match and did not load (#89)"
+        fi
+    done
+fi
+# --- END unbound controllers
 
 # The ones no device announces: filesystems, and the block driver this image
 # exports its root through.
