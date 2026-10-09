@@ -8912,7 +8912,9 @@ file = "{state}"
             let report = report.expect("an install report");
             if dropped {
                 assert_eq!(report.release_dropped, vec![name.to_string()], "{report:?}");
-                assert_eq!(mgr.find_volume(name).await, None, "{name}: dropped, it comes back with the release");
+                // The release may bring a volume of that name back (its
+                // own `svc.golden`); the node's is gone.
+                assert!(mgr.get_volume(&id).is_none(), "{name}: the node's record dropped, it comes back with the release");
             } else {
                 assert!(report.release_dropped.is_empty(), "{report:?}");
                 assert!(report.carried.contains(&name.to_string()), "{name}: carried: {report:?}");
