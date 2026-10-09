@@ -5007,6 +5007,8 @@ mod redundancy_tests {
             );
             (cold, clone, plain, p)
         };
+        let loaded = VolumeManager::load_data_dir(&meta).await.unwrap().unwrap();
+        eprintln!("DIAG loaded: {:?}", loaded.volumes.iter().map(|v| (v.name.clone(), v.origin, v.tier)).collect::<Vec<_>>());
         let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
         let dev = FileDevice::open(&path).await.unwrap();
         mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
