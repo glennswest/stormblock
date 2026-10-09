@@ -876,7 +876,15 @@ impl StormBlockConfig {
         #[cfg(feature = "nvmeof")] nvmeof_addr: Option<&str>,
         #[cfg(feature = "nvmeof")] nvmeof_nqn: Option<&str>,
         reactor_cores: usize,
+        data_dir: Option<&str>,
     ) {
+        // `--data-dir` is the node's data directory, not only the volume
+        // manager's (#163): the token file, `/serve/v1`, templates, synonyms,
+        // `/v1` state and discovery all read `[management] data_dir`.
+        if let Some(d) = data_dir {
+            self.management.data_dir = Some(d.to_string());
+        }
+
         // CLI devices override config drives
         if !devices.is_empty() {
             self.drives = devices.iter()
@@ -1561,7 +1569,7 @@ path = "nvme-tcp://10.0.0.7:4420/nqn.z?nsid=1"
 
     fn merged(file: &str, iscsi: [Option<&str>; 4], nvme: [Option<&str>; 2]) -> StormBlockConfig {
         let mut cfg: StormBlockConfig = toml::from_str(file).unwrap();
-        cfg.merge_cli(&[], None, 64, &[], iscsi[0], iscsi[1], iscsi[2], iscsi[3], nvme[0], nvme[1], 0);
+        cfg.merge_cli(&[], None, 64, &[], iscsi[0], iscsi[1], iscsi[2], iscsi[3], nvme[0], nvme[1], 0, None);
         cfg
     }
 
@@ -1609,5 +1617,19 @@ path = "nvme-tcp://10.0.0.7:4420/nqn.z?nsid=1"
         }
         // The flags complete what the file started.
         merged("[iscsi]\nchap_user = \"node\"\n", [None, None, None, Some("s")], [None; 2]).validate().unwrap();
+    }
+
+    /// #163: `--data-dir` is `[management] data_dir`, and wins over the file.
+    #[test]
+    fn the_data_dir_flag_is_the_node_s_data_dir() {
+        let mut cfg: StormBlockConfig = toml::from_str("[management]\ndata_dir = \"/from/file\"\n").unwrap();
+        cfg.merge_cli(&[], None, 64, &[], None, None, None, None, None, None, 0, Some("/from/flag"));
+        assert_eq!(cfg.management.data_dir.as_deref(), Some("/from/flag"));
+        let mut cfg: StormBlockConfig = toml::from_str("").unwrap();
+        cfg.merge_cli(&[], None, 64, &[], None, None, None, None, None, None, 0, Some("/only/flag"));
+        assert_eq!(cfg.management.data_dir.as_deref(), Some("/only/flag"));
+        let mut cfg: StormBlockConfig = toml::from_str("[management]\ndata_dir = \"/from/file\"\n").unwrap();
+        cfg.merge_cli(&[], None, 64, &[], None, None, None, None, None, None, 0, None);
+        assert_eq!(cfg.management.data_dir.as_deref(), Some("/from/file"), "no flag: the file's");
     }
 }

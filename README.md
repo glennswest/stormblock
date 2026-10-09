@@ -315,7 +315,7 @@ Every other command logs to stderr as before.
 | `--raid` | — | build an array from the drives: `1`/`raid1`/`mirror`, `5`, `6`, `10` |
 | `--stripe-kb` | `64` | stripe size for RAID 5/6/10 |
 | `--volume` | — | `name:size[:redundancy]` to create on the array (repeatable) |
-| `--data-dir` | — | volume metadata directory. **Only the volume manager sees it**: `/serve/v1`, the token file, templates, synonyms and `/v1` state read `[management] data_dir` (#163) |
+| `--data-dir` | `[management] data_dir` | the node's data directory: volume metadata, the token file, templates, synonyms, `/v1` state, `/serve/v1` and discovery (#163: it used to reach only the volume manager) |
 | `--iscsi-addr` | `[iscsi] listen_addr`, else `0.0.0.0:3260` | iSCSI listen address (`iscsi`) |
 | `--iscsi-target-name` | `[iscsi] target_name`, else `iqn.2024.io.stormblock:default` | iSCSI target IQN (`iscsi`) |
 | `--chap-user`, `--chap-secret` | `[iscsi] chap_user`/`chap_secret` | CHAP for the iSCSI target; both or neither (`iscsi`) |

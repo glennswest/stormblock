@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #163: `--data-dir` is the node's data directory, and wins over `[management] data_dir`. It used to reach only the volume manager: a daemon started with it and no `[management] data_dir` had no `/serve/v1`, kept synonyms and templates in memory, and put no token file in it. `tests-runtime/data_dir_flag.rs` checks the built daemon.
 - **fix:** #125: an import from a URL survives a flaky mirror, and a failed import says which part failed.
   - **Retries:** a resuming download (`get_to_channel`, `get_to_file`, #359) starts its retries over after any attempt that made progress (`retry::with_backoff_progress`). A 3 GiB image at 0.7 MB/s no longer runs out of drops or of the 30-minute deadline while it is still arriving.
   - **Phase:** a failed import's status carries `phase`: `fetch` (the source), `write` (the engine) or `verify` (what the bytes are).

@@ -93,7 +93,9 @@ struct Cli {
     #[arg(long, default_value = "0")]
     reactor_cores: usize,
 
-    /// Directory for persisting volume metadata (enables restart recovery)
+    /// The node's data directory: volume metadata, the token file, templates,
+    /// synonyms, `/v1` state and `/serve/v1`. Wins over `[management] data_dir`
+    /// (#163)
     #[arg(long)]
     data_dir: Option<String>,
 
@@ -922,6 +924,7 @@ pub async fn run() -> anyhow::Result<()> {
         #[cfg(feature = "nvmeof")]
         cli.nvmeof_nqn.as_deref(),
         cli.reactor_cores,
+        cli.data_dir.as_deref(),
     );
     config.validate()?;
 
@@ -1004,8 +1007,8 @@ pub async fn run() -> anyhow::Result<()> {
     mgmt::metrics::register_metrics();
 
     // Build shared state
-    let data_dir = cli.data_dir.as_deref()
-        .or(config.management.data_dir.as_deref());
+    // One data directory (#163): merge_cli put `--data-dir` there.
+    let data_dir = config.management.data_dir.as_deref();
     // A volume extent IS a slab slot. The volume layer divides an offset by
     // this to pick an extent and uses the remainder as the offset *within the
     // slot* the slab hands back, so a value larger than the slab's slot size
