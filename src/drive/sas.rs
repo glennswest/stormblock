@@ -221,7 +221,8 @@ impl BlockDevice for SasDevice {
         let unit = self.block_size as u64;
         let block = {
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
-            unsafe { libc::fstat(self.fd, &mut st) } == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFBLK
+            let rc = unsafe { libc::fstat(self.fd, &mut st) };
+            rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFBLK
         };
         super::zero_range_fast(self, self.fd, block, unit, offset, len).await
     }

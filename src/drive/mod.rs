@@ -221,7 +221,6 @@ pub struct IoCompletion {
 ///
 /// Implemented by NvmeDevice (VFIO), SasDevice (io_uring), and FileDevice (tokio).
 /// The RAID engine and volume manager only interact with this trait.
-#[async_trait]
 /// Zeros written as zeros, a megabyte at a time: what a device that cannot
 /// do better does, and what one that can falls back to.
 pub async fn write_zeroes_by_writing<D: BlockDevice + ?Sized>(dev: &D, offset: u64, len: u64) -> DriveResult<()> {
@@ -294,6 +293,7 @@ pub(crate) async fn zero_range_fast<D: BlockDevice + ?Sized>(
     Ok(())
 }
 
+#[async_trait]
 pub trait BlockDevice: Send + Sync {
     /// Device identity.
     fn id(&self) -> &DeviceId;
