@@ -193,7 +193,14 @@ r() { echo "RESULT $1 $2"; }
 echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
 if nvme connect -t tcp -a 10.0.2.2 -s "$PORT" -n "$SUB" --hostnqn "$H1" >/tmp/o 2>&1; then
     sleep 3
-    dev_of() { for b in /sys/block/nvme*n*; do [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
+    # Native NVMe multipath lists the hidden path node (nvme0c0n1) beside the
+    # device (nvme0n1): only the device is opened.
+    dev_of() {
+        for b in /sys/block/nvme*n*; do
+            case $(basename $b) in nvme*c*n*) continue ;; esac
+            [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return
+        done
+    }
     i=$(dev_of "$NS_I"); d=$(dev_of "$NS_D"); c=$(dev_of "$NS_C"); p=$(dev_of "$NS_P")
     echo "GUEST iso /dev/$i, disk /dev/$d, control /dev/$c, plain /dev/$p"
     lbs() { cat /sys/block/$1/queue/logical_block_size; }
@@ -219,10 +226,12 @@ if nvme connect -t tcp -a 10.0.2.2 -s "$PORT" -n "$SUB" --hostnqn "$H1" >/tmp/o 
         r disk-partition-mounts "FAIL ($(cat /tmp/m))"
     fi
     # The control: what every import was before. isofs must refuse it.
-    if mount -t iso9660 -o ro /dev/$c /mnt 2>/tmp/m; then
+    if [ ! -b /dev/$c ]; then
+        r control-4096-refused "FAIL (no /dev/$c)"
+    elif mount -t iso9660 -o ro /dev/$c /mnt 2>/tmp/m; then
         umount /mnt; r control-4096-refused "FAIL (mounted)"
     else
-        r control-4096-refused PASS
+        r control-4096-refused "PASS ($(cat /tmp/m))"
     fi
     nvme disconnect -n "$SUB" >/dev/null 2>&1
 else
