@@ -68,7 +68,7 @@ impl HttpDevice {
     pub async fn open(url: &str) -> anyhow::Result<Self> {
         let rest = url.strip_prefix("http://").ok_or_else(|| anyhow::anyhow!("http:// only"))?;
         let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-        let (status, lines, _) = crate::retry::with_backoff(
+        let (_status, lines, _) = crate::retry::with_backoff(
             &format!("GET {url} (size)"),
             crate::retry::Policy::NETWORK,
             classify,
