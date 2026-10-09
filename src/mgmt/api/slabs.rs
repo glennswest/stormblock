@@ -281,6 +281,32 @@ async fn format_slab(
     let opts = crate::drive::slab::SlabFormat::new(slot_size, tier)
         .with_role(role)
         .with_metadata(meta_bytes);
+    // On a task of its own (#363, #141's shape): a caller that stops
+    // waiting does not cut a format short with the drive half laid and the
+    // slab unregistered. The format is bounded (one step of the slot table
+    // whatever the drive's size), so the caller rarely has to.
+    let vm = state.volume_manager.clone();
+    crate::lockwatch::spawn_owing(
+        format_and_register(state, device, opts, domain, tier, role, slot_size),
+        move || async move {
+            if let Err(e) = crate::volume::VolumeManager::persist_detached_checked(&vm).await {
+                tracing::error!("slab format: the volume metadata was not written: {e}");
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| ApiError::internal(format!("slab format task: {e}")))
+}
+
+async fn format_and_register(
+    state: Arc<AppState>,
+    device: Arc<dyn crate::drive::BlockDevice>,
+    opts: crate::drive::slab::SlabFormat,
+    domain: Option<crate::placement::domain::FailureDomain>,
+    tier: crate::placement::topology::StorageTier,
+    role: crate::drive::slab::SlabRole,
+    slot_size: u64,
+) -> Response {
     match crate::drive::slab::Slab::format_with(device, opts).await {
         Ok(slab) => {
             let slab_id = slab.slab_id();

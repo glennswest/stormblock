@@ -3660,7 +3660,7 @@ fn reconcile_record(
                     // Mapping the second is handing the consumer
                     // another volume's bytes (#171).
                     let in_range =
-                        reg.get(&loc.slab_id).map(|s| (loc.slot_idx as u64) < s.total_slots()).unwrap_or(false);
+                        reg.get(&loc.slab_id).map(|s| (loc.slot_idx as u64) < s.committed_slots()).unwrap_or(false);
                     let slot = view.get(loc.primary());
                     let why = match slot {
                         _ if !in_range => Some("is out of range".to_string()),

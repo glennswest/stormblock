@@ -183,7 +183,7 @@ pub async fn collect_with(
     // Pass 1: find, without mutating.
     for (_, slab) in registry.iter() {
         report.slabs_scanned += 1;
-        report.slots_scanned += slab.total_slots();
+        report.slots_scanned += slab.committed_slots();
     }
     let mut in_view: Vec<(&crate::volume::gem::Leg, &crate::drive::slab::Slot)> = view.iter().collect();
     in_view.sort_by_key(|(l, _)| (l.slab_id.0, l.slot_idx));

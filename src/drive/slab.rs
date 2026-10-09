@@ -58,6 +58,11 @@ const HEADER_SIZE: u64 = 4096;
 
 /// Slot entry size on disk (64 bytes).
 const SLOT_ENTRY_SIZE: u64 = 64;
+
+/// Slot table entries zeroed at a time in a format-2 slab (#363): 64 MiB of
+/// table, 1 TiB of 1 MiB slots. A format zeroes one step, whatever the
+/// drive's size; the next is zeroed ahead of need as slots are used.
+pub const COMMIT_STEP: u64 = 1 << 20;
 /// Bytes of one slot table entry on the device.
 pub const SLOT_ENTRY_BYTES: u64 = SLOT_ENTRY_SIZE;
 
@@ -326,6 +331,16 @@ struct SlabHeader {
     /// formatted before this reads 0, meaning exactly `total_slots`, and
     /// older code ignores it.
     table_capacity: u64,
+    /// Slots the table has room for, zeroed or not (#363): entries from
+    /// `table_capacity` up to here were never written and are not read.
+    /// Format 2 only, at bytes 136..144 (0 = `table_capacity`); an older
+    /// engine ignores it, so it sees `table_capacity` as all the room there
+    /// is and can never grow into unzeroed entries.
+    table_room: u64,
+    /// Slots the slab's device holds (#363), of which `total_slots` (what an
+    /// older engine reads) is the part whose entries are zeroed. Format 2
+    /// only, at bytes 144..152 (0 = `total_slots`).
+    span: u64,
     #[allow(dead_code)]
     checksum: u32,
     /// [`SLAB_VERSION`] or [`SLAB_VERSION_2`].
@@ -359,6 +374,10 @@ impl SlabHeader {
             // v2: the capacity in 64 bits at 128, and the checksum over
             // everything but itself up to 256.
             buf[128..136].copy_from_slice(&cap.to_le_bytes());
+            let room = if self.table_room > self.table_capacity.max(self.total_slots) { self.table_room } else { 0 };
+            buf[136..144].copy_from_slice(&room.to_le_bytes());
+            let span = if self.span > self.total_slots { self.span } else { 0 };
+            buf[144..152].copy_from_slice(&span.to_le_bytes());
             let crc = Self::crc_v2(&buf);
             buf[124..128].copy_from_slice(&crc.to_le_bytes());
             return buf;
@@ -431,6 +450,14 @@ impl SlabHeader {
         } else {
             (u32::from_le_bytes(data[120..124].try_into().unwrap()) as u64).max(total_slots)
         };
+        let (table_room, span) = if version == SLAB_VERSION_2 {
+            (
+                u64::from_le_bytes(data[136..144].try_into().unwrap()).max(table_capacity),
+                u64::from_le_bytes(data[144..152].try_into().unwrap()).max(total_slots),
+            )
+        } else {
+            (table_capacity, total_slots)
+        };
 
         Ok(SlabHeader {
             slab_uuid,
@@ -448,6 +475,8 @@ impl SlabHeader {
             meta_offset,
             meta_size,
             table_capacity,
+            table_room,
+            span,
             checksum: stored_crc,
             version,
         })
@@ -481,6 +510,9 @@ pub struct SlabFormat {
     /// [`SLAB_VERSION`] or [`SLAB_VERSION_2`]: [`default_format`] unless
     /// said otherwise.
     pub version: u32,
+    /// Slot table entries committed at a time (#363): [`COMMIT_STEP`]
+    /// unless a test asks for fewer.
+    pub commit_step: u64,
 }
 
 impl SlabFormat {
@@ -493,7 +525,14 @@ impl SlabFormat {
             grow_to: 0,
             dedicated: false,
             version: default_format(),
+            commit_step: COMMIT_STEP,
         }
+    }
+
+    /// Commit the slot table `entries` at a time (a multiple of 64; #363).
+    pub fn with_commit_step(mut self, entries: u64) -> Self {
+        self.commit_step = entries.div_ceil(64).max(1) * 64;
+        self
     }
 
     /// Write the slab in this format (1 or 2) whatever the default.
@@ -591,6 +630,82 @@ async fn write_zeros(device: &Arc<dyn BlockDevice>, offset: u64, len: u64) -> Dr
     Ok(())
 }
 
+/// How much of a slab's slot table is committed (#363), shared so a step can
+/// be zeroed with no slab or registry lock held.
+pub(crate) struct Commit {
+    /// One step at a time; held across the zeroing, never with the
+    /// registry waiting on it from the step's side.
+    lock: tokio::sync::Mutex<()>,
+    /// Entries zeroed: the header's `table_capacity`.
+    cap: std::sync::atomic::AtomicU64,
+    /// Slots the device holds: the header's span.
+    span: std::sync::atomic::AtomicU64,
+    /// Entries the table has room for.
+    room: u64,
+    /// A step ahead of need is running.
+    ahead: std::sync::atomic::AtomicBool,
+    /// Entries a step commits.
+    step: std::sync::atomic::AtomicU64,
+}
+
+impl Commit {
+    fn new(cap: u64, span: u64, room: u64) -> Self {
+        Commit {
+            lock: tokio::sync::Mutex::new(()),
+            cap: cap.into(),
+            span: span.into(),
+            room,
+            ahead: false.into(),
+            step: COMMIT_STEP.into(),
+        }
+    }
+    /// Slots whose entries can be read: the span, as far as it is zeroed.
+    fn committed(&self) -> u64 {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.span.load(SeqCst).min(self.cap.load(SeqCst))
+    }
+    fn whole(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.cap.load(SeqCst) >= self.span.load(SeqCst).min(self.room)
+    }
+}
+
+/// Zero the next step of the table, make it durable, then name it in the
+/// header (#363): an entry the header names reads as free or as what was
+/// written to it, never as what the device held before. Returns whether a
+/// step was taken.
+async fn commit_step(c: &Commit, device: &Arc<dyn BlockDevice>, mut header: SlabHeader) -> DriveResult<bool> {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _g = c.lock.lock().await;
+    let cap = c.cap.load(SeqCst);
+    let span = c.span.load(SeqCst);
+    let limit = span.min(c.room);
+    if cap >= limit {
+        return Ok(false);
+    }
+    // Whole table pages (64 entries), never past the room.
+    let target = (cap + c.step.load(SeqCst)).min(limit).div_ceil(64).saturating_mul(64).min(c.room);
+    let mut len = (target - cap) * SLOT_ENTRY_SIZE;
+    let bs = device.block_size() as u64;
+    if bs > 1 && len % bs != 0 {
+        len = len.div_ceil(bs) * bs;
+    }
+    write_zeros(device, header.table_offset + cap * SLOT_ENTRY_SIZE, len).await?;
+    device.flush().await?;
+    header.table_capacity = target;
+    header.span = span;
+    header.total_slots = span.min(target);
+    header.update_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    device.write(0, &header.to_bytes()).await?;
+    device.flush().await?;
+    c.cap.store(target, SeqCst);
+    tracing::debug!("slab {}: slot table committed to {target} of {} entries", header.slab_uuid, c.room);
+    Ok(true)
+}
+
 /// A slab manages a device as an extent store with fixed-size slots.
 ///
 /// Any volume can allocate slots in any slab. The slab tracks
@@ -607,6 +722,8 @@ pub struct Slab {
     /// no per-slot record in memory beyond the free map and `pending`.
     table: Arc<super::slottable::SlotTable>,
     free_count: u64,
+    /// The committed part of the slot table (#363); the free map covers it.
+    commit: Arc<Commit>,
     /// Slots allocated whose table entry is not on the device yet (#171).
     pending: Arc<std::sync::Mutex<Pending>>,
     /// Group commit for [`sync`](Self::sync) (#264).
@@ -782,7 +899,18 @@ pub async fn sync_registered(
                 None => Ok(false),
             }
         })
-        .await
+        .await?;
+    // The next step of the table ahead of need, with no lock held (#363).
+    let ahead = registry.read().await.get(&id).and_then(|s| s.commit_ahead());
+    if let Some((commit, device, header)) = ahead {
+        tokio::spawn(async move {
+            if let Err(e) = commit_step(&commit, &device, header).await {
+                tracing::warn!("slab {id}: committing the next part of the slot table: {e}");
+            }
+            commit.ahead.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    Ok(())
 }
 
 /// Where a slab's own `volumes.dat` copies are, to write one with no lock
@@ -993,9 +1121,23 @@ impl Slab {
             meta_offset,
             meta_size,
             table_capacity: table_capacity.max(total_slots),
+            table_room: table_capacity.max(total_slots),
+            span: total_slots,
             checksum: 0,
             version: if opts.version == SLAB_VERSION_2 { SLAB_VERSION_2 } else { SLAB_VERSION },
         };
+        // Format 2 commits the table in steps (#363): one now, whatever the
+        // drive's size. Format 1 is read by engines that know no steps, so
+        // its whole table is zeroed as before.
+        let room = header.table_room;
+        let committed_cap = if header.version == SLAB_VERSION_2 {
+            total_slots.min(opts.commit_step).div_ceil(64).saturating_mul(64).min(room)
+        } else {
+            room
+        };
+        let mut header = header;
+        header.table_capacity = committed_cap;
+        header.total_slots = total_slots.min(committed_cap);
 
         // Write header
         let header_bytes = header.to_bytes();
@@ -1014,23 +1156,24 @@ impl Slab {
             device.write(meta_offset + meta_size / 2, &zero).await?;
         }
 
-        // Write zeroed slot table (padded to device block_size for alignment).
-        // All of it, reserved room included: a grow takes those entries as
-        // free, so they must read as free.
-        let table_bytes = table_capacity as usize * SLOT_ENTRY_SIZE as usize;
+        // Write zeroed slot table (padded to device block_size for alignment):
+        // the committed part (#363). The rest is zeroed a step at a time,
+        // before the header names it.
+        let table_bytes = committed_cap as usize * SLOT_ENTRY_SIZE as usize;
         let bs = device.block_size() as usize;
         let padded_table = if bs > 1 && table_bytes % bs != 0 {
             table_bytes.div_ceil(bs) * bs
         } else {
             table_bytes
         };
-        // In chunks: a table with room for a 7 TB slab is ~460 MB, and this
-        // runs in an initramfs.
         write_zeros(&device, table_offset, padded_table as u64).await?;
         device.flush().await?;
 
         let id = SlabId(slab_uuid);
-        let free_bitmap = super::freemap::FreeMap::new(total_slots as usize, true);
+        let commit = Arc::new(Commit::new(committed_cap, total_slots, room));
+        commit.step.store(opts.commit_step, std::sync::atomic::Ordering::SeqCst);
+        let committed = commit.committed();
+        let free_bitmap = super::freemap::FreeMap::new(committed as usize, true);
         let table = Arc::new(super::slottable::SlotTable::new(device.clone(), table_offset, data_offset));
 
         Ok(Slab {
@@ -1040,7 +1183,8 @@ impl Slab {
             tier,
             free_bitmap,
             table,
-            free_count: total_slots,
+            free_count: committed,
+            commit,
             pending: Default::default(),
             syncs: Default::default(),
             erase: Default::default(),
@@ -1056,7 +1200,10 @@ impl Slab {
         device.read(0, &mut header_buf).await?;
         let header = SlabHeader::from_bytes(&header_buf)?;
 
-        let total_slots = header.total_slots as usize;
+        // The committed part of the table only (#363): entries past it were
+        // never written.
+        let commit = Arc::new(Commit::new(header.table_capacity, header.span, header.table_room));
+        let total_slots = commit.committed() as usize;
         let table = Arc::new(super::slottable::SlotTable::new(
             device.clone(),
             header.table_offset,
@@ -1094,6 +1241,7 @@ impl Slab {
             free_bitmap,
             table,
             free_count,
+            commit,
             pending: Arc::new(std::sync::Mutex::new(pending)),
             syncs: Default::default(),
             erase: Default::default(),
@@ -1220,6 +1368,7 @@ impl Slab {
     /// [`take_slot`](Self::take_slot), and if the only free slots are ones
     /// whose free is not yet durable, flush to make it so and take one.
     async fn take_slot_or_flush(&mut self, volume_id: VolumeId, vext_idx: u64, generation: u64) -> DriveResult<u64> {
+        self.take_committed();
         self.absorb_released();
         if self.free_count == 0 {
             let freeing = std::mem::take(&mut self.pending.lock().unwrap_or_else(|e| e.into_inner()).freeing);
@@ -1232,7 +1381,56 @@ impl Slab {
                 self.absorb_released();
             }
         }
+        if self.free_count == 0 && !self.commit.whole() {
+            // Nothing committed is free and no step ran ahead of need (#363):
+            // take one now, under the caller's lock. Rare: a step is a TiB
+            // of 1 MiB slots, and the sync path commits ahead.
+            commit_step(&self.commit, &self.device, self.header_now()).await?;
+            self.take_committed();
+        }
         self.take_slot(volume_id, vext_idx, generation)
+    }
+
+    /// Take into the free map what a step committed since (#363).
+    fn take_committed(&mut self) {
+        let committed = self.commit.committed() as usize;
+        let len = self.free_bitmap.len();
+        if committed > len {
+            self.free_bitmap.resize(committed, true);
+            self.free_count += (committed - len) as u64;
+        }
+    }
+
+    /// The header as it is now: the committed part as the shared state has
+    /// it (#363).
+    fn header_now(&self) -> SlabHeader {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut h = self.header.clone();
+        let cap = self.commit.cap.load(SeqCst);
+        let span = self.commit.span.load(SeqCst);
+        h.table_capacity = cap;
+        h.span = span;
+        h.total_slots = span.min(cap);
+        h
+    }
+
+    /// When the committed part is running short, what a step needs, to take
+    /// it with no lock held (#363): see [`sync_registered`].
+    fn commit_ahead(&self) -> Option<(Arc<Commit>, Arc<dyn BlockDevice>, SlabHeader)> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.commit.whole() {
+            return None;
+        }
+        let committed = self.commit.committed();
+        let free_committed = self.free_count + committed.saturating_sub(self.free_bitmap.len() as u64);
+        let step = self.commit.step.load(SeqCst);
+        if free_committed >= step / 4 && free_committed * 4 >= committed {
+            return None;
+        }
+        if self.commit.ahead.swap(true, SeqCst) {
+            return None;
+        }
+        Some((self.commit.clone(), self.device.clone(), self.header_now()))
     }
 
     /// Mark a slot free in memory. A slot never published goes straight back
@@ -1362,7 +1560,7 @@ impl Slab {
     }
 
     fn in_range(&self, slot_idx: u64) -> DriveResult<()> {
-        if slot_idx as u64 >= self.header.total_slots {
+        if slot_idx >= self.commit.committed() {
             return Err(DriveError::Other(anyhow::anyhow!("slot index {slot_idx} out of range")));
         }
         Ok(())
@@ -1518,7 +1716,7 @@ impl Slab {
                 out.rejected.push((slot_idx, DecRefReject::Duplicate));
                 continue;
             }
-            if slot_idx as u64 >= self.header.total_slots {
+            if slot_idx >= self.commit.committed() {
                 out.rejected.push((slot_idx, DecRefReject::OutOfRange));
                 continue;
             }
@@ -1647,7 +1845,7 @@ impl Slab {
         ViewSource {
             slab: self.id,
             table: self.table.clone(),
-            total: self.header.total_slots,
+            total: self.commit.committed(),
             pending: self.pending.clone(),
         }
     }
@@ -1751,14 +1949,26 @@ impl Slab {
         self.header.slot_size
     }
 
-    /// Total number of slots.
+    /// Total number of slots: all the device holds, committed or not (#363).
     pub fn total_slots(&self) -> u64 {
-        self.header.total_slots
+        self.commit.span.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Slots whose table entries are zeroed and read (#363); the rest are
+    /// committed a step at a time as the slab fills.
+    pub fn committed_slots(&self) -> u64 {
+        self.commit.committed()
     }
 
     /// Slots the table has room for: how far this slab can grow in place.
     pub fn table_capacity(&self) -> u64 {
-        self.header.table_capacity
+        self.commit.room
+    }
+
+    /// Commit the slot table `entries` at a time from now on (#363): for
+    /// tests, which cannot fill a terabyte to see a step taken.
+    pub fn set_commit_step(&self, entries: u64) {
+        self.commit.step.store(entries.div_ceil(64).max(1) * 64, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Take in whatever the device has gained, up to the table's room.
@@ -1772,26 +1982,32 @@ impl Slab {
     /// Returns how many slots were added: 0 when the device has not grown by a
     /// whole slot, or the table has no room left.
     pub async fn grow(&mut self) -> DriveResult<u64> {
+        use std::sync::atomic::Ordering::SeqCst;
         let slot_size = self.header.slot_size;
         let fits = self.device.capacity_bytes().saturating_sub(self.header.data_offset) / slot_size;
-        let new_total = fits.min(self.header.table_capacity);
-        let old_total = self.header.total_slots;
+        let new_total = fits.min(self.commit.room);
+        let old_total = self.commit.span.load(SeqCst);
         if new_total <= old_total {
             return Ok(0);
         }
         let added = new_total - old_total;
-
-        self.header.total_slots = new_total;
-        self.header.free_slots = self.free_count + added;
-        self.header.update_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        self.device.write(0, &self.header.to_bytes()).await?;
-        self.device.flush().await?;
-
-        self.free_bitmap.resize(new_total as usize, true);
-        self.free_count += added;
+        {
+            // With the step lock: a step writes the header too (#363).
+            let _g = self.commit.lock.lock().await;
+            self.commit.span.store(new_total, SeqCst);
+            let mut h = self.header_now();
+            h.free_slots = self.free_count + added;
+            h.update_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            self.device.write(0, &h.to_bytes()).await?;
+            self.device.flush().await?;
+            self.header = h;
+        }
+        // Slots in a part already zeroed are free now; the rest come with
+        // the steps that zero them.
+        self.take_committed();
         Ok(added)
     }
 
@@ -1893,12 +2109,15 @@ impl Slab {
         // Slots whose free is not yet durable count: the next allocation that
         // needs one flushes and takes it.
         let p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        self.free_count + (p.freeing.len() + p.released.len()) as u64
+        // And every slot not yet in the free map: committed since, or not
+        // yet committed (#363). All of them are free.
+        let beyond = self.total_slots().saturating_sub(self.free_bitmap.len() as u64);
+        self.free_count + (p.freeing.len() + p.released.len()) as u64 + beyond
     }
 
     /// Number of allocated slots.
     pub fn allocated_slots(&self) -> u64 {
-        self.header.total_slots - self.free_slots()
+        self.total_slots().saturating_sub(self.free_slots())
     }
 
     /// Get a reference to the underlying device.
@@ -2018,6 +2237,7 @@ impl Slab {
 
     /// Step 3 of [`upgrade_to_v2`](Self::upgrade_to_v2): the header.
     pub async fn commit_v2(&mut self) -> DriveResult<()> {
+        self.header = self.header_now();
         self.header.version = SLAB_VERSION_2;
         self.device.write(0, &self.header.to_bytes()).await?;
         self.device.flush().await?;
@@ -2325,7 +2545,7 @@ mod tests {
             slab_uuid: Uuid::new_v4(), device_uuid: Uuid::new_v4(), slot_size: 1 << 20,
             total_slots: 100, free_slots: 100, data_offset: 1 << 20, table_offset: 4096,
             create_time: 1, update_time: 1, tier: StorageTier::Hot, flags: 0,
-            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, checksum: 0, version: 1,
+            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, table_room: 100, span: 100, checksum: 0, version: 1,
         };
         let b = h.to_bytes();
         assert_eq!(&b[120..124], &[0, 0, 0, 0], "no room beyond total_slots writes zero");
@@ -2725,6 +2945,178 @@ mod tests {
         cleanup(&path);
     }
 
+    /// Bytes written, for what a format costs (#363).
+    struct Bytes {
+        inner: Arc<dyn BlockDevice>,
+        written: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for Bytes {
+        fn id(&self) -> &super::super::DeviceId { self.inner.id() }
+        fn capacity_bytes(&self) -> u64 { self.inner.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.inner.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.inner.optimal_io_size() }
+        fn device_type(&self) -> super::super::DriveType { self.inner.device_type() }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            self.written.fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> DriveResult<()> { self.inner.flush().await }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+        fn smart_status(&self) -> DriveResult<super::super::SmartData> {
+            self.inner.smart_status()
+        }
+    }
+
+    /// A drive that held something before: every byte a pattern that, read
+    /// as a slot entry, is not free.
+    async fn used_drive(size: u64) -> (Arc<dyn BlockDevice>, String) {
+        let (dev, path) = create_slab_device(size).await;
+        let junk = vec![0xA5u8; 1 << 20];
+        let mut at = 0;
+        while at < size {
+            dev.write(at, &junk[..(size - at).min(1 << 20) as usize]).await.unwrap();
+            at += 1 << 20;
+        }
+        dev.flush().await.unwrap();
+        (dev, path)
+    }
+
+    /// #363: a format zeroes one step of the slot table whatever the drive's
+    /// size, and reports the whole drive.
+    #[tokio::test]
+    async fn a_format_writes_one_step_of_the_table_whatever_the_drive() {
+        // 2 TiB, sparse: 32 Mi slots of 64 KiB, a 2 GiB table. A step of
+        // 4096 entries is 256 KiB of it.
+        let (dev, path) = create_slab_device(2 << 40).await;
+        let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted: Arc<dyn BlockDevice> = Arc::new(Bytes { inner: dev.clone(), written: written.clone() });
+        let t = std::time::Instant::now();
+        let slab = Slab::format_with(
+            counted,
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_version(SLAB_VERSION_2).with_commit_step(4096),
+        )
+        .await
+        .unwrap();
+        let w = written.load(std::sync::atomic::Ordering::Relaxed);
+        println!("2 TiB: {} slots, {} committed, {w} bytes written in {:.2} s", slab.total_slots(), slab.committed_slots(), t.elapsed().as_secs_f64());
+        assert!(slab.total_slots() > 30_000_000, "{}", slab.total_slots());
+        assert_eq!(slab.committed_slots(), 4096);
+        assert_eq!(slab.free_slots(), slab.total_slots(), "the whole drive is free");
+        assert!(w < 4 << 20, "a format wrote {w} bytes: more than one step and a header");
+        let total = slab.total_slots();
+        drop(slab);
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(reopened.total_slots(), total);
+        assert_eq!(reopened.committed_slots(), 4096, "open reads the committed part only");
+        cleanup(&path);
+    }
+
+    /// #363: a slab on a used drive fills past several steps, nothing the
+    /// drive held reads as a slot, and a reopen finds exactly what was
+    /// allocated. What an older engine reads stays the committed part.
+    #[tokio::test]
+    async fn a_slab_on_a_used_drive_fills_past_its_steps_and_reopens() {
+        let (dev, path) = used_drive(96 << 20).await;
+        let mut slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_version(SLAB_VERSION_2).with_commit_step(128),
+        )
+        .await
+        .unwrap();
+        let total = slab.total_slots();
+        assert!(total > 1000, "{total}");
+        assert_eq!(slab.committed_slots(), 128);
+
+        // The header as an older engine reads it: the committed part only,
+        // and no room to grow into.
+        let mut h = vec![0u8; 4096];
+        dev.read(0, &mut h).await.unwrap();
+        assert_eq!(u64::from_le_bytes(h[52..60].try_into().unwrap()), 128, "total_slots on disk");
+        let old_cap = u64::from_le_bytes(h[128..136].try_into().unwrap());
+        assert!(old_cap == 0 || old_cap == 128, "table_capacity on disk: {old_cap}");
+
+        let vol = VolumeId::new();
+        let mut slots = std::collections::HashSet::new();
+        for v in 0..700u64 {
+            assert!(slots.insert(slab.allocate(vol, v).await.unwrap()));
+        }
+        assert!(slab.committed_slots() >= 700);
+        assert_eq!(slab.allocated_slots(), 700);
+        assert_eq!(slab.free_slots(), total - 700);
+        slab.sync().await.unwrap();
+        drop(slab);
+
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(reopened.total_slots(), total);
+        assert_eq!(reopened.allocated_slots(), 700, "nothing the drive held reads as a slot");
+        let in_use = reopened.slots_in_use().await.unwrap();
+        assert_eq!(in_use.len(), 700);
+        assert!(in_use.iter().all(|(i, s)| slots.contains(i) && s.volume_id == vol));
+        let mut h = vec![0u8; 4096];
+        dev.read(0, &mut h).await.unwrap();
+        let on_disk = u64::from_le_bytes(h[52..60].try_into().unwrap());
+        assert_eq!(on_disk, reopened.committed_slots(), "an older engine reads the committed part");
+        cleanup(&path);
+    }
+
+    /// #363: the sync path commits the next step ahead of need, with no lock
+    /// held, so an allocation rarely waits for one.
+    #[tokio::test]
+    async fn the_sync_path_commits_ahead_of_need() {
+        let (dev, path) = used_drive(64 << 20).await;
+        let mut slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_version(SLAB_VERSION_2).with_commit_step(256),
+        )
+        .await
+        .unwrap();
+        let vol = VolumeId::new();
+        for v in 0..250u64 {
+            let s = slab.allocate_deferred(vol, v, 1).await.unwrap();
+            slab.confirm(s);
+        }
+        assert_eq!(slab.committed_slots(), 256);
+        let id = slab.slab_id();
+        let mut reg = super::super::slab_registry::SlabRegistry::new();
+        reg.add(slab);
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(reg));
+        sync_registered(&registry, id).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while registry.read().await.get(&id).unwrap().committed_slots() < 512 {
+            assert!(std::time::Instant::now() < deadline, "no step was taken ahead of need");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        drop(registry);
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(reopened.committed_slots(), 512);
+        assert_eq!(reopened.allocated_slots(), 250);
+        cleanup(&path);
+    }
+
+    /// #363: a format-1 slab is still zeroed whole: engines before the steps
+    /// read all of it.
+    #[tokio::test]
+    async fn a_format_1_slab_is_zeroed_whole() {
+        let (dev, path) = used_drive(32 << 20).await;
+        let slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(64 * 1024, StorageTier::Hot).with_version(SLAB_VERSION).with_commit_step(64),
+        )
+        .await
+        .unwrap();
+        assert_eq!(slab.committed_slots(), slab.total_slots());
+        drop(slab);
+        assert_eq!(Slab::open(dev.clone()).await.unwrap().allocated_slots(), 0);
+        cleanup(&path);
+    }
+
     /// A clone of an N-extent image must cost sectors touched, not N round
     /// trips — that is the whole point of the batching, and it is what keeps
     /// clone latency flat as VM images grow.
@@ -3089,7 +3481,7 @@ mod tests {
             total_slots: 5_000_000_000, free_slots: 5_000_000_000, data_offset: 1 << 40, table_offset: 4096,
             create_time: 1, update_time: 1, tier: StorageTier::Cold, flags: 0,
             role: SlabRole::Data, meta_offset: 4096, meta_size: 1 << 30, table_capacity: 9_000_000_000,
-            checksum: 0, version: SLAB_VERSION_2,
+            table_room: 9_000_000_000, span: 5_000_000_000, checksum: 0, version: SLAB_VERSION_2,
         };
         let mut b = h.to_bytes();
         assert_eq!(u32::from_le_bytes(b[8..12].try_into().unwrap()), 2);
@@ -3178,6 +3570,8 @@ mod tests {
             meta_offset: HEADER_SIZE,
             meta_size: 128 * 1024,
             table_capacity: 0,
+            table_room: 0,
+            span: 0,
             checksum: 0,
             version: 1,
         };
@@ -3214,6 +3608,8 @@ mod tests {
             meta_offset: 0,
             meta_size: 0,
             table_capacity: 0,
+            table_room: 0,
+            span: 0,
             checksum: 0,
             version: 1,
         };
