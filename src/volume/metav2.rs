@@ -1359,6 +1359,14 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
             doc.arrays = d.arrays;
             continue;
         }
+        // A key kind this engine does not know is a newer engine's (#245):
+        // skipped, so a node rolled back to this release still opens a disk
+        // a newer one wrote. Before the volume's bookkeeping: an older
+        // engine's delete can leave a newer one's key with no header beside
+        // it, and that must not read as a volume.
+        if !matches!(k.kind(), kind::HEADER | kind::EXTENT | kind::PARITY) {
+            continue;
+        }
         if cur.as_ref().is_none_or(|(id, _, _)| *id != vol) {
             if let Some((id, _, rec)) = cur.take() {
                 doc.volumes.push(rec.ok_or_else(|| err(format!("volume {}: header incomplete", id.0)))?);
@@ -1404,7 +1412,7 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
                     rec.parity.insert(k.idx(), g);
                 }
             }
-            other => return Err(err(format!("unknown metadata key kind {other}"))),
+            _ => unreachable!("kinds this engine does not know were skipped above"),
         }
     }
     if let Some((id, _, rec)) = cur.take() {
@@ -1416,6 +1424,46 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #245, step 1: a key kind a newer engine writes (a sealed volume's
+    /// digest) is skipped, beside a volume's own keys and on its own (left by
+    /// an older engine's delete), so a rolled-back node still opens the disk.
+    #[test]
+    fn a_key_kind_this_engine_does_not_know_is_skipped() {
+        use crate::volume::metadata::Origin;
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let rec = VolumeRecord {
+            id,
+            name: "golden".into(),
+            virtual_size: 1 << 20,
+            array_id: None,
+            extents: Default::default(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: Default::default(),
+            failed_slabs: Vec::new(),
+            parent: None,
+            sealed: true,
+            template: false,
+            access: Default::default(),
+            fs: None,
+            owner: None,
+            lba: 4096,
+            extent_size: 0,
+            origin: Origin::Node,
+            tier: None,
+        };
+        let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
+        let mut entries = document_entries(&doc);
+        entries.push((Key::new(*id.0.as_bytes(), 9, 0), vec![1, 2, 3]));
+        let orphan = uuid::Uuid::new_v4();
+        entries.push((Key::new(*orphan.as_bytes(), 9, 0), vec![4]));
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let back = document_of(entries).expect("unknown kinds are skipped");
+        assert_eq!(back.volumes.len(), 1, "the orphan key is no volume");
+        assert_eq!(back.volumes[0].id, id);
+        assert!(back.volumes[0].sealed);
+    }
 
     /// #349: a volume's origin rides after its header; a reader that knows
     /// only the header (every v2 engine before) decodes it as before.

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **feat:** #245, step 1 (owner's decision A): a format-2 metadata reader skips key kinds it does not know, instead of refusing the disk. This includes one left with no volume beside it by an older engine's delete. Nothing is written differently yet. Step 2 (a sealed volume's `digest` key, checked in the background, read by `slab holds` as "intact") writes such a key, and is safe only once every release a node could roll back to carries this reader.
 - **feat:** #379 (owner's decision on stormcentral#416, replacing the handed-over token): the engine accepts a client certificate forge's CA issued as admin.
   - **New settings:** `[management] tls_admin_ca`, `tls_admin_crl`, `tls_admin_names`.
   - **What counts:** the certificate is verified against forge's CA alone, with forge's CRL, and must be valid for a listed identity (SAN DNS name). Any other certificate forge issued, which every enrolled node holds, is no credential here, and neither is a revoked one.
