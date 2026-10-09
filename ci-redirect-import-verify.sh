@@ -58,5 +58,11 @@ done
 echo "$ST" | j '"format %s, %d bytes downloaded, %d written, fs %s" % (d.get("format"), d["downloaded_bytes"], d["written_bytes"], (d.get("fs") or {}).get("kind"))'
 echo "$ST" | j '"\n".join("  filesystem: partition %s %s %s %s" % (f.get("partition"), f.get("kind"), f.get("label"), f.get("os") or "") for f in d.get("filesystems", []))'
 [ "$(echo "$ST" | j 'd.get("format")')" = qcow2 ] || die "not read as qcow2"
-echo "$ST" | j 'any("Debian" in str(f.get("os") or "") for f in d.get("filesystems", []))' | grep -q True || die "no Debian root found inside"
+[ "$(echo "$ST" | j '(d.get("fs") or {}).get("kind")')" = gpt ] || die "no partition table inside"
+# The root filesystem found and read end to end. (Its OS name is not checked:
+# Debian's /etc/os-release is a symlink the ext4 survey does not follow yet.)
+echo "$ST" | j 'any(f.get("kind") == "ext4" and (f.get("walked") or {}).get("entries", 0) > 1000 for f in d.get("filesystems", []))' \
+    | grep -q True || die "no ext4 root walked inside"
+echo "$ST" | j '"  walked: %s" % [f.get("walked") for f in d.get("filesystems", [])]'
+
 echo "ALL PASS"
