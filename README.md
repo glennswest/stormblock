@@ -74,7 +74,9 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   (`POST /api/v1/drives`), carry their identity (serial, WWN) and labels
   (`shelf`, `bay`, `hba` from stormdrive), and can be drained and reported
   failing over HTTP.
-- **Slabs** are the unit of storage: 1 MiB slots, a slot table, and optionally
+- **Slabs** are the unit of storage: 1 MiB slots, a slot table (committed a
+  64 MiB step at a time, so formatting and opening a slab cost what it holds,
+  not what the drive could hold, #363), and optionally
   the volume records themselves, so a slab is self-describing and can be
   adopted by another engine. Each has a **role** — `system` (goldens, replaced
   by an install) or `data` (identity and state, never formatted by an install)

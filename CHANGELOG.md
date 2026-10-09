@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **perf:** #363 (owner): nothing on a create, enrol or install path costs time in proportion to the drive.
+  - **Format:** a format-2 slab's slot table is committed in steps of 64 MiB. Formatting writes one step whatever the drive's size: a 15 PB drive used to take ~1 TB of zeros at enrol.
+  - **Steps:** each step is zeroed and flushed before the header names it, so nothing a reused drive held reads as a slot. Steps run ahead of need from the sync path with no lock held.
+  - **Open:** a slab reads only the committed part of its table, and its free map covers only that part.
+  - **Older engines:** the header keeps `total_slots`/`table_capacity` as the committed part, with the room and span in new v2 bytes (136..152). An older engine reads a smaller slab and cannot grow into entries that were never zeroed.
+  - **API:** `POST /api/v1/slabs` formats on a task of its own, so a caller that stops waiting no longer cuts a format short.
+  - **Related:** filed #374, RAID-5/6 parity that is never initialised.
 - **fix:** #364 (P0, owner), the rest:
   - **Slab sync:** a slab's sync reads the entries it publishes under the registry, then writes the table with no lock held. The write is checked under the table's page lock against memory, so a slot freed or changed in between is read again.
   - **Clones:** a clone's reference counts change in memory and are written by the next sync, not under the extent map's and the registry's write locks.

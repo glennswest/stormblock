@@ -205,7 +205,10 @@ as a restart would. On dev, at 1 MiB slots:
 | what the drives hold | 16 MiB | 8 MiB |
 
 What is left resident per PiB is the free map: 1 bit a slot, 128 MiB at
-1 MiB slots. 160 drives of 1 PiB need about 20 GiB, which is over the
+1 MiB slots. Since #363 a format-2 slab commits its slot table in steps: a
+format writes one step (64 MiB) whatever the drive's size, and open reads and
+the free map covers only what is committed, so both scale with what has been
+used, not with the drive. The measurements above predate it. 160 drives of 1 PiB need about 20 GiB, which is over the
 1 GiB/PiB budget of §2. Bulk extents of 64 MiB (#156) bring it to 2 MiB/PiB,
 and a free-extent tree (§3.3) brings it below that.
 

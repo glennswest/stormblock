@@ -139,6 +139,18 @@ on first open"), and as built:
   and writing over it); `table_capacity` u64 at 128..136; the checksum at
   124..128 covers 0..124 and 128..256. v1 is unchanged and refuses a table
   past 4 Gi slots.
+- **The slot table is committed in steps** (#363): a v2 format zeroes one
+  step of the table (`COMMIT_STEP`, 1 Mi entries = 64 MiB, 1 TiB of 1 MiB
+  slots), not the whole of it, so a format costs the same on any drive. The
+  next step is zeroed and flushed before the header names it: ahead of need
+  from the sync path with no lock held, or under the registry when an
+  allocation finds nothing committed. `total_slots` (52..60) and
+  `table_capacity` (128..136) are the committed part; `table_room`
+  (136..144) and `span` (144..152) are the room and the slots the device
+  holds, 0 meaning the same as the committed values. An engine before #363
+  reads only the committed part, sees a smaller slab, and its `grow()` cannot
+  reach entries that were never zeroed. `open` reads the committed part, and
+  the free map covers only it. A v1 table is still zeroed whole.
 - **The store** (`volume/metav2.rs`), over a region of `size` bytes: two 4 KiB
   superblocks, a log of `size/8` (16 pages to 64 MiB), the rest pages.
   - Superblock: magic `SMV2SUPR`, generation, root page, log start and its
