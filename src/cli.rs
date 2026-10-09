@@ -4888,7 +4888,7 @@ pub async fn run() -> anyhow::Result<()> {
                     .await
                     .map_err(|e| anyhow::anyhow!("not installing over {disk}: carrying the node's volumes out of the system half: {e}"))?;
                 for c in &carried {
-                    println!("Install: {c} — made on this node, in the system half: carried into the data half (#349)");
+                    println!("Install: {c} — the node's, with extents in the system half: carried into the data half (#349, #369)");
                 }
                 plan = crate::image::install::plan(&dest_dev, &release)
                     .await
@@ -4949,6 +4949,9 @@ pub async fn run() -> anyhow::Result<()> {
             report.carried = carried;
             for k in &report.kept {
                 println!("Install: {k} — the node's, kept");
+            }
+            for d in &report.release_dropped {
+                println!("Install: {d} — the old release's, recorded in the data half: re-laid with the system half (#369)");
             }
             for (n, to) in &report.aside {
                 println!("Install: {n} — the release's from now on; the node's kept as {to}");
