@@ -369,6 +369,13 @@ pub struct ManagementConfig {
     /// `/run/stormblock-admin/admin_token`: **never** under `/run/stormblock`,
     /// which every engine caller on a stormcos node mounts read-only.
     pub admin_token_file: Option<String>,
+    /// stormipmi's base URL (`http://<bastion>:9097`), where a forge reads a
+    /// machine's boot override when it answers its claim (#354, stormipmi#70).
+    /// Unset: no overrides. `$STORMBLOCK_BOOT_OVERRIDE_URL` too.
+    pub boot_override_url: Option<String>,
+    /// The token forge reports an override's result to stormipmi with (its
+    /// admin token, or the machine's secret). `$STORMBLOCK_BOOT_OVERRIDE_TOKEN_FILE` too.
+    pub boot_override_token_file: Option<String>,
     /// `enforce` (the default): a destructive verb needs the admin token or
     /// a Kubernetes bearer a SubjectAccessReview allows (#274). `audit`: the
     /// node token is still accepted for them, and each such call is logged as
@@ -472,6 +479,8 @@ impl Default for ManagementConfig {
             admin_token: None,
             token_file: None,
             admin_token_file: None,
+            boot_override_url: None,
+            boot_override_token_file: None,
             admin_gate: None,
             audit_log: None,
             kubernetes: None,

@@ -239,6 +239,11 @@ pub struct Host {
     /// nothing else. Kept hashed; never shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_secret: Option<String>,
+    /// The boot override (stormipmi's, #354) a claim of this host last acted
+    /// on and has not reported done: `{id, action, release, by, reason,
+    /// applied_at}`. Cleared when its result is reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_override: Option<serde_json::Value>,
     /// Whether the machine must prove its boot with a TPM 2.0 quote (#216).
     /// Set by the platform or an admin, never by the machine: a node that
     /// could write it could downgrade its own attestation. Unset reads as
@@ -1071,6 +1076,15 @@ impl SynonymStore {
         // Equal length hex; compared whole either way.
         let same = want.len() == got.len() && want.bytes().zip(got.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
         same.then_some(host)
+    }
+
+    /// Note (or, with `None`, clear) the boot override a claim acted on
+    /// (#354). A host not on record is not made for it.
+    pub fn note_boot_override(&mut self, host: &str, applied: Option<serde_json::Value>) {
+        if let Some(h) = self.hosts.get_mut(host) {
+            h.boot_override = applied;
+            self.persist();
+        }
     }
 
     /// The first boot off a laid disk (#220): the install laid from `clone`

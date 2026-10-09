@@ -960,6 +960,18 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
+### Forge acts on a machine's boot override from stormipmi (2026-10-09, #354, P1) — PAUSED for P0 #172 (WIP pushed)
+
+stormipmi#70's contract. Built (WIP): `mgmt/boot_override.rs` (fetch
+`<boot_override_url>/api/v1/machines/<tag>/override`, act on actor forge;
+report result in the background); claim: hold → 423, install → boothost
+pointed at the release + intent install (reported ok at laid, #220),
+local/recovery → reply intent, reported by the initramfs's claim; GET intent
+answers install/local; `Host.boot_override`. Left: boot-claim sends agent
+`stormblock-initramfs` and writes /run/stormblock/override; /init probe and
+survey honour local/recovery; tests (unit parse done; HTTP with a stand-in
+stormipmi; initramfs); docs; build; check.sh; golden.
+
 ### Forge's trust handed to a booting node (2026-10-09, #381, P0) — DONE (golden-stormblock-70d74378fcc4)
 
 stormcos#486. `mgmt/forge_trust.rs`: forge's stormcert PUTs

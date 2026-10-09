@@ -1033,6 +1033,56 @@ async fn claim_boothost(
         .chain(host.iter().flat_map(|h| h.former_names.iter().cloned()))
         .collect();
 
+    // 0. A boot override for this machine (#354): stormipmi's, read here.
+    let agent_name = agent.as_ref().and_then(|a| a.get("name")).and_then(|n| n.as_str()).map(str::to_string);
+    let from_initramfs = agent_name.as_deref() == Some(crate::mgmt::boot_override::INITRAMFS_AGENT);
+    let mut ov = if crate::mgmt::boot_override::configured(&state) {
+        match crate::mgmt::boot_override::fetch(&state, tag).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(host = tag, "boot override not read: {e}; claiming as usual");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(o) = ov.clone() {
+        match o.action.as_str() {
+            // Not booted while it stands; nothing reported (that would clear
+            // a one-shot hold and let the next retry boot).
+            "hold" => {
+                tracing::info!(host = tag, id = %o.id, "boot override: hold - claim refused");
+                return (
+                    StatusCode::LOCKED,
+                    Json(json!({
+                        "error": format!("{tag} is held by a boot override ({}{})", o.by.as_deref().unwrap_or("?"),
+                            o.reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default()),
+                        "code": 423,
+                        "held": true,
+                        "override": o,
+                    })),
+                )
+                    .into_response();
+            }
+            "install" => {
+                if let Err(why) = override_install(&state, tag, &o).await {
+                    tracing::warn!(host = tag, id = %o.id, "boot override install not applied: {why}");
+                    crate::mgmt::boot_override::report(&state, tag, &o.id, false, why);
+                    ov = None;
+                }
+            }
+            _ => {}
+        }
+        if let Some(o) = &ov {
+            let applied = json!({
+                "id": o.id, "action": o.action, "release": o.release, "by": o.by, "reason": o.reason,
+                "applied_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            });
+            state.synonyms.write().await.note_boot_override(tag, Some(applied));
+        }
+    }
+
     // 1. The assignment.
     let assignment = {
         let mut store = state.synonyms.write().await;
@@ -1235,8 +1285,19 @@ async fn claim_boothost(
     // its intent local. New at every claim; the last one is the one that
     // works. Handed only to the machine claiming, and kept hashed.
     let host_secret = state.synonyms.write().await.mint_host_secret(tag);
+    // What the override makes of this boot (#354): `local` or `recovery` in
+    // place of the intent, reported done by the boot's last claim.
+    let mut intent_word = intent.as_str().to_string();
+    if let Some(o) = ov.as_ref().filter(|o| o.action == "local" || o.action == "recovery") {
+        intent_word = o.action.clone();
+        if from_initramfs {
+            crate::mgmt::boot_override::report(&state, tag, &o.id, true, format!("{} served to {tag}", o.action));
+            state.synonyms.write().await.note_boot_override(tag, None);
+        }
+    }
     let out = json!({
-        "intent": intent.as_str(),
+        "intent": intent_word,
+        "override": ov,
         "host_secret": host_secret,
         // Forge's CA, apiserver and bootstrap token, for the node's
         // enrolment (#381): null when this forge holds none.
@@ -1287,6 +1348,36 @@ async fn claim_boothost(
         "attach": attach,
     });
     (StatusCode::CREATED, Json(out)).into_response()
+}
+
+/// An `install` override (#354): `boothost/<tag>` pointed at the release it
+/// names (kept, with history, so a rollback goes back), and the intent
+/// `install`, so this claim and the boot's next one install it.
+async fn override_install(state: &Arc<AppState>, tag: &str, o: &crate::mgmt::boot_override::Override) -> Result<(), String> {
+    let version = o.release.clone().unwrap_or_default();
+    let rel = super::releases::load(state)
+        .await
+        .into_iter()
+        .find(|r| r.version == version)
+        .ok_or_else(|| format!("no release {version} on this forge"))?;
+    let target = Target::Volume { id: VolumeId(rel.volume_id) };
+    let mut store = state.synonyms.write().await;
+    match store.get(BOOTHOST_NS, tag).map(|s| s.target.clone()) {
+        Some(t) if t == target => {}
+        Some(_) => {
+            store.repoint(BOOTHOST_NS, tag, target, Some(version.clone())).map_err(|e| e.to_string())?;
+            tracing::info!(host = tag, release = %version, "boot override: boothost pointed at the release to install");
+        }
+        None => {
+            let why = format!("boot override {}: install {version}", o.id);
+            store.create(BOOTHOST_NS, tag, target, Some(version.clone()), Some(why)).map_err(|e| e.to_string())?;
+        }
+    }
+    let intent = store.host(tag).map(|h| h.intent).unwrap_or_default();
+    if intent != BootIntent::Install {
+        store.set_intent(tag, BootIntent::Install).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Delete the host goldens a tag no longer uses: ones `hostgolden/<tag>` used
@@ -1409,10 +1500,26 @@ async fn get_intent(
         let store = state.synonyms.read().await;
         store.host_of(&name).and_then(|h| store.host(&h))
     };
-    match found {
-        Some(h) => Json(intent_body(&h, &name)).into_response(),
-        None => err(SynonymError::NotFound(synonym::key(BOOTHOST_NS, &name))),
+    let Some(h) = found else {
+        return err(SynonymError::NotFound(synonym::key(BOOTHOST_NS, &name)));
+    };
+    let mut v = intent_body(&h, &name);
+    // A boot override (#354): what the firmware asks before it claims says
+    // install or local as the override does; hold and recovery are the
+    // claim's to answer.
+    if crate::mgmt::boot_override::configured(&state) {
+        match crate::mgmt::boot_override::fetch(&state, &h.name).await {
+            Ok(Some(o)) => {
+                if o.action == "install" || o.action == "local" {
+                    v["intent"] = json!(o.action);
+                }
+                v["override"] = json!(o);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(host = %h.name, "boot override not read: {e}"),
+        }
     }
+    Json(v).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1513,6 +1620,14 @@ async fn installed(
             let reset = outcome == InstallDone::Reset;
             if reset {
                 tracing::info!(host = %h.name, volume = %clone.0, "install finished: boot intent is local again");
+                // An install a boot override asked for is done (#354).
+                if let Some(o) = h.boot_override.as_ref().filter(|o| o["action"] == "install") {
+                    if let Some(id) = o["id"].as_str() {
+                        let what = format!("installed {} on {}: the disk is laid", o["release"].as_str().unwrap_or("?"), h.name);
+                        crate::mgmt::boot_override::report(&state, &h.name, id, true, what);
+                    }
+                    state.synonyms.write().await.note_boot_override(&h.name, None);
+                }
             }
             let mut v = intent_body(&h, &name);
             v["reset"] = json!(reset);
