@@ -463,6 +463,12 @@ impl AppState {
         slab_registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     ) -> Self {
+        // NSIDs are never handed out twice, across restarts too (#96): the
+        // high-water marks live in the data directory.
+        #[cfg(feature = "nvmeof")]
+        if let Some(dir) = config.management.data_dir.as_ref() {
+            crate::target::nvmeof::nsid::load(std::path::Path::new(dir).join("nsid_high.json"));
+        }
         // The node's own rungs sit under every slab's failure domain, so a
         // policy that spreads at `rack` has something to compare (#72).
         if !config.management.topology.is_empty() {

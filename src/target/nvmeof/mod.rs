@@ -9,6 +9,7 @@ pub mod io;
 pub mod discovery;
 pub mod auth;
 pub mod ana;
+pub mod nsid;
 #[cfg(target_os = "linux")]
 pub mod zerocopy;
 
@@ -299,6 +300,9 @@ impl Subsystem {
                 cur.read_only = read_only;
             }
         }
+        // Given at an ID (a restore, a fixed NSID): the next one goes above
+        // it (#96).
+        nsid::raise(&self.nqn, nsid);
         self.notify_ns_changed(nsid);
         true
     }
@@ -318,8 +322,12 @@ impl Subsystem {
             if let Some((&n, _)) = ns.iter().find(|(_, v)| v.device.id().uuid == uuid) {
                 return n;
             }
-            let nsid = (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1);
+            // Above every NSID this subsystem has handed out, never a freed
+            // one (#96): an address someone still holds must not reach
+            // another volume.
+            let nsid = nsid::next(&self.nqn, ns.keys().copied());
             ns.insert(nsid, Namespace::new(device, read_only));
+            nsid::raise(&self.nqn, nsid);
             nsid
         };
         self.notify_ns_changed(nsid);
@@ -382,7 +390,12 @@ impl Subsystem {
     /// Lowest unused namespace ID. NSID 0 is reserved by the spec.
     pub async fn next_free_nsid(&self) -> u32 {
         let ns = self.namespaces.read().await;
-        (1u32..).find(|n| !ns.contains_key(n)).unwrap_or(1)
+        nsid::next(&self.nqn, ns.keys().copied())
+    }
+
+    /// The highest NSID this subsystem has handed out (#96).
+    pub fn nsid_high_water(&self) -> u32 {
+        nsid::high(&self.nqn)
     }
 
     /// Active namespace IDs, sorted.
@@ -1268,9 +1281,15 @@ impl NvmeofTarget {
                         // (= NN) sizes the host's ANA log buffer (#83).
                         let (subnqn, count) = match session.sub.as_ref() {
                             None => (discovery::DISCOVERY_NQN, 0),
+                            // NN covers the NSIDs handed out so far and the
+                            // next 1024 (#96): they only rise, and a host
+                            // that identified the controller before a later
+                            // attach still finds the new one within NN.
                             Some(s) => (
                                 s.nqn.as_str(),
-                                (s.list_namespaces().await.last().copied().unwrap_or(0)).max(ana::MAX_NAMESPACES),
+                                (s.list_namespaces().await.last().copied().unwrap_or(0))
+                                    .max(s.nsid_high_water().saturating_add(1024).min(nsid::MAX_NSID))
+                                    .max(ana::MAX_NAMESPACES),
                             ),
                         };
                         let mut d = admin::identify_controller(
@@ -1662,9 +1681,14 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    fn unique_target() -> Arc<NvmeofTarget> {
+        let nqn = format!("nqn.2026-10.test:nsid-{}", uuid::Uuid::new_v4().simple());
+        Arc::new(NvmeofTarget::new(NvmeofConfig { nqn, ..NvmeofConfig::default() }))
+    }
+
     #[tokio::test]
     async fn next_free_nsid_skips_reserved_and_used() {
-        let target = Arc::new(NvmeofTarget::new(NvmeofConfig::default()));
+        let target = unique_target();
         // NSID 0 is reserved, so the first handed out is 1.
         assert_eq!(target.next_free_nsid().await, 1);
 
@@ -1674,12 +1698,47 @@ mod tests {
         target.add_namespace_dynamic(2, d2).await;
         assert_eq!(target.next_free_nsid().await, 3);
 
-        // A gap left by a detached container is reused.
+        // #96: a gap left by a detached volume is never reused: an address
+        // someone still holds must not reach another volume.
         target.remove_namespace(1).await;
-        assert_eq!(target.next_free_nsid().await, 1);
+        assert_eq!(target.next_free_nsid().await, 3);
 
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
+    }
+
+    /// #96: a detached volume's NSID goes to nobody, the high-water mark is
+    /// kept across a restart, and Identify Controller's NN covers what comes
+    /// next.
+    #[tokio::test]
+    async fn an_nsid_is_never_handed_out_twice_even_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("nsid_high.json");
+        nsid::load(record.clone());
+        let target = unique_target();
+        let nqn = target.default.nqn.clone();
+        let (a, pa) = test_device("nsid-a").await;
+        let (b, pb) = test_device("nsid-b").await;
+        let (c, pc) = test_device("nsid-c").await;
+        assert_eq!(target.add_namespace_next(a).await, 1);
+        assert_eq!(target.add_namespace_next(b).await, 2);
+        assert!(target.remove_namespace(2).await);
+        assert!(target.remove_namespace(1).await);
+        assert_eq!(target.add_namespace_next(c.clone()).await, 3, "neither freed ID is reused");
+        assert!(target.remove_namespace(3).await);
+        assert_eq!(nsid::high(&nqn), 3);
+
+        // A restart: the marks come back from the file, and the subsystem
+        // starts above them though it serves nothing.
+        let saved: std::collections::HashMap<String, u32> =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(saved.get(&nqn), Some(&3));
+        nsid::load(record.clone());
+        let again = Arc::new(NvmeofTarget::new(NvmeofConfig { nqn: nqn.clone(), ..NvmeofConfig::default() }));
+        assert_eq!(again.add_namespace_next(c).await, 4);
+        for p in [pa, pb, pc] {
+            let _ = std::fs::remove_file(&p);
+        }
     }
 
     /// Many attaches at once each get a namespace of their own (#139): the

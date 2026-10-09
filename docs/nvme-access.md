@@ -32,6 +32,16 @@ One listener (`:4420`) carries several subsystems:
   asking host may connect to — a host given nothing is told of nothing.
 - A host subsystem goes when its last namespace does (a boot host's stays, with
   its hosts and secret, for the next claim).
+- **An NSID is never handed out twice in a subsystem** (#96). An attach's
+  address names the subsystem and the NSID, and in a shared subsystem the NSID
+  is all that tells two volumes apart. So a detached volume's NSID goes to
+  nobody: the next attach gets one above every NSID the subsystem has ever
+  handed out, and the high-water marks survive a restart in
+  `<data_dir>/nsid_high.json`. An address someone still holds then finds
+  nothing, never another volume. Identify Controller's NN covers the
+  subsystem's mark and the next 1024, so a host that connected earlier finds
+  later namespaces within it. An NSID asked for explicitly (an export's
+  `nsid`) is honoured.
 - **One volume is never two namespaces of one subsystem.** The namespace's
   NGUID is the volume id; two NSIDs with one NGUID is what the kernel reports
   as `duplicate IDs in subsystem`. Attaching a volume that is already served

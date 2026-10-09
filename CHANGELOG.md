@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #96: NVMe-oF NSIDs are never reused in a subsystem.
+  - **Allocation:** each subsystem hands out NSIDs above a high-water mark that only rises, persisted in `<data_dir>/nsid_high.json`. It used to give the lowest free NSID, so a released volume's NSID went to the next attach and a stale `?nsid=N` address reached another volume with no error.
+  - **NN:** Identify Controller's NN covers the mark plus 1024.
 - **perf:** #173: a first write to a fresh slot zeroes the rest of it with the device's own zeroing, not a megabyte of zeros written. That is `BLKZEROOUT` on a block device, a punched hole in a file, and the partition forwards it. A first write had written 1 MiB for every extent it touched since #171, and formatting a large blank touches metadata in every block group. On a loaded box that write volume showed as a format about six times slower (190 s for 100 GiB). Measured on an idle build VM with a file-backed slab, the format went from 2.2 s to 1.8 s; the write volume per first write is now the data alone. `STORMBLOCK_ZERO_BY_WRITING=1` keeps the old way, for measuring. The qcow2 import test now waits for the job to end rather than 5 s of wall clock.
 - **fix:** #113: the HTTP client follows redirects, so `POST /api/v1/volumes/import {url}` imports Fedora, Debian, Rocky and CentOS cloud images from their canonical URLs. These used to fail with "HTTP 302".
   - **Following:** 301/302/303/307/308, at most 10 hops (more is an error naming the chain), and a relative `Location` resolved. Every request path inherits it: send, HEAD, the streamed and staged downloads.
