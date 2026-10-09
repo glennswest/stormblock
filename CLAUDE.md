@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### An installed node's system disk is a drive (2026-10-09, #133) — IN PROGRESS
+### An installed node's system disk is a drive (2026-10-09, #133) — DONE
 
 `state.drives` came only from `[[drives]]` and `POST /api/v1/drives`;
 adopt-ublk's own disks (`boot_disks`, #314) were nowhere in the drive API.
@@ -193,7 +193,7 @@ adopt-ublk's own disks (`boot_disks`, #314) were nowhere in the drive API.
       PATCH: 409 on a system disk
 - [x] test `cli::system_disk_tests` (a laid node disk opened as adopt-ublk
       does); README, CHANGELOG
-- [ ] check.sh; golden; close. O_EXCL on slab devices (the issue's optional
+- [x] check.sh at 4167c84 ALL PASS (nextest 1072/1072). O_EXCL on slab devices (the issue's optional
       third point) not done: the initramfs engine and its successor hold the
       disk at once during a handover
 
