@@ -181,6 +181,27 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — IN PROGRESS
+
+`Slab::format_with` zero-filled the whole slot table, growth room included
+(~1 TB of writes for a 15 PB drive at enrol); `Slab::open` scanned every
+entry and built a capacity-sized free map; `POST /api/v1/slabs` formatted
+inline in the request.
+- [ ] v2 slabs: the table is committed in steps (`COMMIT_STEP` entries,
+      64 MiB): format zeroes the first step only; header v2 bytes 136..152
+      carry the room and the span, and `total_slots`/`table_capacity` on
+      disk stay the committed part (an older engine sees a smaller slab, and
+      its `grow()` cannot reach unzeroed entries)
+- [ ] a step is zeroed and flushed before the header names it; ahead of
+      need from the sync path (no lock), under the registry only when an
+      allocation finds nothing committed
+- [ ] open scans the committed part; the free map is committed-sized;
+      `total_slots()`/`free_slots()` report the whole span
+- [ ] `POST /api/v1/slabs` formats on a task of its own (#141's shape)
+- [ ] review the other create/enrol/install paths for O(capacity) work
+- [ ] tests (format cost bounded, fill past several steps, reopen, an
+      older reader's view, grow), docs, CHANGELOG, check.sh, golden
+
 ### Every remote call retries (2026-10-09, #359, P1 owner) — BACK IN LINE (P0 #364); code in golden-stormblock-02660bcdb1aa
 
 - [x] `src/retry.rs` (policies, classify io/status, attempts logged,
