@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The HTTP client follows redirects (2026-10-09, #113) — DONE
+### The HTTP client follows redirects (2026-10-09, #113) — DONE (golden-stormblock-8509f56dd988)
 
 - [x] `Client::exchange`: 301/302/303/307/308, ≤ 10 hops (chain in the
       error), relative `Location` resolved, no https→http, bearer only to the
