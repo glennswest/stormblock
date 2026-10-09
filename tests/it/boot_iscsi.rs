@@ -112,7 +112,6 @@ fn parse_lowercase_sizes() {
 // ── Provisioning workflow (offline, no real iSCSI) ──────────────
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use stormblock::drive::BlockDevice;
 use stormblock::drive::filedev::FileDevice;

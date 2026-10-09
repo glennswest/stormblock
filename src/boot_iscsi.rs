@@ -13,7 +13,6 @@
 
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
 
 use crate::drive::iscsi_dev::IscsiDevice;
 use crate::drive::slab::{Slab, SlabFormat, SlabId, DEFAULT_SLOT_SIZE};
