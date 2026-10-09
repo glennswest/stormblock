@@ -230,7 +230,7 @@ system half. Not #362 (forge composes; the disk was laid by 11.98).
       (stormcos#467). The second finding (goldens' extents dropped at
       restore: a shared slot's owner/count lost) is #370
 
-### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — PART DONE (golden-stormblock-e0c57de31892)
+### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — IN PROGRESS (part 1: golden-stormblock-e0c57de31892)
 
 The Dell: `GET /volumes` 10–58 s behind the manager mutex; a clone ~60 s.
 Codex review: cross-role clone holds the manager across `copy_volume`;
@@ -252,9 +252,18 @@ GEM+registry write guards across ref-count table I/O.
 - [x] check.sh at bc9f223 ALL PASS (34 listings during the slow-disk work,
       the slowest 260 ms); golden golden-stormblock-e0c57de31892; progress
       on #364
-- [ ] left: sync_registered/publish_ready under the registry read guard;
-      snapshot ref-count I/O under GEM+registry write; template builds'
-      inline persists; health from a snapshot
+- [x] slab sync: entries read under the registry, written with none held
+      (`publish_unlocked`, checked under the table's page lock; 3 tries,
+      then the old way) (cee415b)
+- [x] a clone's ref counts change in memory, written by the next sync
+      (the clone's record is persisted only after it) (cee415b)
+- [x] template builds a request starts: `lockwatch::spawn_owing` (persists
+      owed, made after the build)
+- [x] nothing exits holding a lock: cancel mid-I/O and error tests; the
+      slab's pending map recovers from a poisoned mutex
+- [x] health: RAID from the last reading when the table is busy
+- [ ] check.sh, golden, close. Not here: retier holds the manager for the
+      whole move (`/volumes/{id}/retier`), a job of its own
 
 ### A worker panic left the engine alive and silent (2026-10-08, #368, P0) — DONE (golden-stormblock-501f2106e220)
 

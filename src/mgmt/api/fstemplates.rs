@@ -397,8 +397,18 @@ async fn create_template(
     // anyone is still listening.
     let created = {
         let state = state.clone();
-        crate::lockwatch::spawn_inheriting(async move { template::create(&state.volume_manager, &state.fstemplates, &spec).await })
-            .await
+        // Its persists are made once the build has let go of the manager
+        // (#364), not inline under it.
+        let vm = state.volume_manager.clone();
+        crate::lockwatch::spawn_owing(
+            async move { template::create(&state.volume_manager, &state.fstemplates, &spec).await },
+            move || async move {
+                if let Err(e) = crate::volume::VolumeManager::persist_detached_checked(&vm).await {
+                    tracing::error!("template create: its changes were not written to the volume metadata: {e}");
+                }
+            },
+        )
+        .await
             .unwrap_or_else(|e| Err(template::TemplateError::Internal(format!("template create task: {e}"))))
     };
     match created {

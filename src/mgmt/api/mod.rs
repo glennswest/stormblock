@@ -80,7 +80,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         auth: &'static str,
         /// The worst of this node's RAID sets — `clean`, `rebuilding`,
         /// `degraded`, `failed` — when it has any (#252). Read without
-        /// waiting: when the array table is busy it is left out.
+        /// waiting: when the array table is busy, the last reading (#364).
         #[serde(skip_serializing_if = "Option::is_none")]
         raid: Option<&'static str>,
         /// Extents of this node's volumes still on a remote slab while the
@@ -107,15 +107,23 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     }
     let flow_over_remaining =
         u64::try_from(state.flow_over_remaining.load(std::sync::atomic::Ordering::Relaxed)).ok();
-    let raid = state.arrays.try_read().ok().and_then(|a| {
-        let rank = |s: &str| match s {
-            "failed" => 3,
-            "degraded" => 2,
-            "rebuilding" => 1,
-            _ => 0,
-        };
-        a.values().map(|i| i.array.status().state).max_by_key(|s| rank(s))
-    });
+    // From the last reading (#364): read when the table is free, kept, and
+    // answered from when it is busy, so a busy node does not drop the field.
+    static RAID_SEEN: std::sync::Mutex<Option<Option<&'static str>>> = std::sync::Mutex::new(None);
+    let raid = match state.arrays.try_read() {
+        Ok(a) => {
+            let rank = |s: &str| match s {
+                "failed" => 3,
+                "degraded" => 2,
+                "rebuilding" => 1,
+                _ => 0,
+            };
+            let now = a.values().map(|i| i.array.status().state).max_by_key(|s| rank(s));
+            *RAID_SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+            now
+        }
+        Err(_) => RAID_SEEN.lock().unwrap_or_else(|e| e.into_inner()).flatten(),
+    };
     Json(Health {
         status: "ok",
         service: "stormblock",

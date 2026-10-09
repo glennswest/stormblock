@@ -653,7 +653,7 @@ impl SlabSyncHandle {
         let wrote = self
             .table
             .write_checked(&entries, || {
-                let mut p = pending.lock().unwrap();
+                let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
                 let current = entries.iter().all(|(idx, bytes)| {
                     p.ready.contains(idx) && p.entries.get(idx).map(|s| s.to_bytes() == *bytes).unwrap_or(false)
                 });
@@ -679,7 +679,7 @@ impl SlabSyncHandle {
             Ok(true) => {
                 // On the device now: memory need not hold what the table
                 // says, unless it changed while the write ran.
-                let mut p = self.pending.lock().unwrap();
+                let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
                 for (idx, bytes) in &entries {
                     if !p.unpublished.contains(idx) && unchanged(&p, idx, bytes) {
                         p.entries.remove(idx);
@@ -690,7 +690,7 @@ impl SlabSyncHandle {
             Err(e) => {
                 // Not on the device: they wait for the next sync, unless a
                 // free or a change has taken them over meanwhile.
-                let mut p = self.pending.lock().unwrap();
+                let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
                 for (idx, bytes) in &entries {
                     if unchanged(&p, idx, bytes) {
                         if newly.contains(idx) {
@@ -720,12 +720,12 @@ impl SlabSyncHandle {
         }
         let covers = self.syncs.asked.load(SeqCst);
         // Free entries written before this flush are durable after it.
-        let freeing = std::mem::take(&mut self.pending.lock().unwrap().freeing);
+        let freeing = std::mem::take(&mut self.pending.lock().unwrap_or_else(|e| e.into_inner()).freeing);
         if let Err(e) = self.device.flush().await {
-            self.pending.lock().unwrap().freeing.extend(freeing);
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).freeing.extend(freeing);
             return Err(e);
         }
-        self.pending.lock().unwrap().released.extend(freeing);
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).released.extend(freeing);
         if publish().await? {
             self.device.flush().await?;
         }
@@ -754,7 +754,7 @@ pub async fn sync_registered(
     };
     // The pages the publish will write, read now with no lock held (#155,
     // #269): a page read under the registry would hold every volume's I/O.
-    let ready: Vec<u64> = handle.pending.lock().unwrap().ready.iter().copied().collect();
+    let ready: Vec<u64> = handle.pending.lock().unwrap_or_else(|e| e.into_inner()).ready.iter().copied().collect();
     handle.table.prefetch(ready).await;
     let publisher = handle.clone();
     handle
@@ -809,7 +809,7 @@ impl ViewSource {
     pub async fn read(&self) -> DriveResult<Vec<(u64, Slot)>> {
         let mut map: std::collections::BTreeMap<u64, Slot> =
             self.table.scan(self.total).await?.into_iter().collect();
-        let p = self.pending.lock().unwrap();
+        let p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         for (idx, slot) in &p.entries {
             if p.unpublished.contains(idx) || slot.state != SlotState::Free {
                 map.insert(*idx, slot.clone());
@@ -1123,14 +1123,14 @@ impl Slab {
         generation: u64,
     ) -> DriveResult<u64> {
         let idx = self.take_slot_or_flush(volume_id, vext_idx, generation).await?;
-        self.pending.lock().unwrap().unpublished.insert(idx);
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).unpublished.insert(idx);
         Ok(idx)
     }
 
     /// The slot's data is written: its entry may be published at the next
     /// [`sync`](Self::sync). A no-op for a slot already on the device.
     pub fn confirm(&self, slot_idx: u64) {
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if p.unpublished.contains(&slot_idx) {
             p.ready.insert(slot_idx);
         }
@@ -1138,7 +1138,7 @@ impl Slab {
 
     /// Whether any confirmed slot is waiting for [`sync`](Self::sync).
     pub fn has_ready(&self) -> bool {
-        !self.pending.lock().unwrap().ready.is_empty()
+        !self.pending.lock().unwrap_or_else(|e| e.into_inner()).ready.is_empty()
     }
 
     /// Make everything written to this slab so far durable, in the order a
@@ -1163,7 +1163,7 @@ impl Slab {
     /// data is durable: the sync flushed first). Whether any were written.
     async fn publish_ready(&self) -> DriveResult<bool> {
         let (ready, newly): (Vec<u64>, Vec<u64>) = {
-            let mut p = self.pending.lock().unwrap();
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             let ready: Vec<u64> = std::mem::take(&mut p.ready).into_iter().collect();
             let newly = ready.iter().copied().filter(|r| p.unpublished.remove(r)).collect();
             (ready, newly)
@@ -1173,7 +1173,7 @@ impl Slab {
         }
         if let Err(e) = self.persist_slots(&ready).await {
             // Not on the device: they wait for the next sync.
-            let mut p = self.pending.lock().unwrap();
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             p.unpublished.extend(newly);
             p.ready.extend(ready);
             return Err(e);
@@ -1187,7 +1187,7 @@ impl Slab {
     fn ready_entries(&self) -> Vec<(u64, [u8; SLOT_ENTRY_SIZE as usize])> {
         // Every entry waiting differs from the device, so memory holds it; one
         // memory no longer holds was written since by its own write.
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::with_capacity(p.ready.len());
         let mut written = Vec::new();
         for &idx in &p.ready {
@@ -1206,7 +1206,7 @@ impl Slab {
 
     /// Put slots whose free is durable back in the bitmap.
     fn absorb_released(&mut self) {
-        let released = std::mem::take(&mut self.pending.lock().unwrap().released);
+        let released = std::mem::take(&mut self.pending.lock().unwrap_or_else(|e| e.into_inner()).released);
         for idx in released {
             // Freed and the free on the device: nothing can have taken it,
             // since it was in no free map.
@@ -1222,13 +1222,13 @@ impl Slab {
     async fn take_slot_or_flush(&mut self, volume_id: VolumeId, vext_idx: u64, generation: u64) -> DriveResult<u64> {
         self.absorb_released();
         if self.free_count == 0 {
-            let freeing = std::mem::take(&mut self.pending.lock().unwrap().freeing);
+            let freeing = std::mem::take(&mut self.pending.lock().unwrap_or_else(|e| e.into_inner()).freeing);
             if !freeing.is_empty() {
                 if let Err(e) = self.device.flush().await {
-                    self.pending.lock().unwrap().freeing.extend(freeing);
+                    self.pending.lock().unwrap_or_else(|e| e.into_inner()).freeing.extend(freeing);
                     return Err(e);
                 }
-                self.pending.lock().unwrap().released.extend(freeing);
+                self.pending.lock().unwrap_or_else(|e| e.into_inner()).released.extend(freeing);
                 self.absorb_released();
             }
         }
@@ -1248,7 +1248,7 @@ impl Slab {
         let level = self.erase_now.unwrap_or(self.erase).max(self.erase);
         if level != super::erase::EraseLevel::None {
             let old = self.slot_now(idx as u64).await?;
-            let mut p = self.pending.lock().unwrap();
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             p.entries.insert(
                 idx as u64,
                 Slot {
@@ -1269,7 +1269,7 @@ impl Slab {
             }
             return Ok(true);
         }
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         p.ready.remove(&(idx as u64));
         if p.unpublished.remove(&(idx as u64)) {
             // The device already says free.
@@ -1288,7 +1288,7 @@ impl Slab {
     /// A slot's entry as the engine has it now: changed in memory, else as
     /// the device has it.
     async fn slot_now(&self, slot_idx: u64) -> DriveResult<Slot> {
-        if let Some(s) = self.pending.lock().unwrap().entries.get(&slot_idx) {
+        if let Some(s) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).entries.get(&slot_idx) {
             return Ok(s.clone());
         }
         self.table.read(slot_idx).await
@@ -1296,13 +1296,13 @@ impl Slab {
 
     /// Change an entry in memory; written by the next write of it.
     fn set_slot(&self, slot_idx: u64, slot: Slot) {
-        self.pending.lock().unwrap().entries.insert(slot_idx, slot);
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).entries.insert(slot_idx, slot);
     }
 
     /// The bytes the device should hold for a slot's entry: a slot not yet
     /// published is free there, whatever memory says.
     async fn entry_bytes(&self, slot_idx: u64) -> DriveResult<[u8; SLOT_ENTRY_SIZE as usize]> {
-        if self.pending.lock().unwrap().unpublished.contains(&slot_idx) {
+        if self.pending.lock().unwrap_or_else(|e| e.into_inner()).unpublished.contains(&slot_idx) {
             return Ok(Slot::free().to_bytes());
         }
         Ok(self.slot_now(slot_idx).await?.to_bytes())
@@ -1369,7 +1369,7 @@ impl Slab {
     }
 
     fn is_erasing(&self, slot_idx: u64) -> bool {
-        let p = self.pending.lock().unwrap();
+        let p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         p.erasing.contains_key(&slot_idx) || p.erasing_now.contains_key(&slot_idx)
     }
 
@@ -1490,7 +1490,7 @@ impl Slab {
         for (idx, slot) in now {
             bumped.entry(idx).or_insert(slot).ref_count += 1;
         }
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         for (idx, slot) in bumped {
             p.entries.insert(idx, slot);
             p.ready.insert(idx);
@@ -1598,7 +1598,7 @@ impl Slab {
             // this share's place (#171): a count on disk that is too high
             // leaks a share until restore recounts; one that is too low lets
             // a write land in place in a slot another volume still reads.
-            self.pending.lock().unwrap().ready.insert(slot_idx);
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).ready.insert(slot_idx);
             Ok(false)
         }
     }
@@ -1614,7 +1614,7 @@ impl Slab {
             Ok(mut slot) if slot.state.is_owned() && slot.ref_count < count => {
                 slot.ref_count = count;
                 self.set_slot(slot_idx, slot);
-                self.pending.lock().unwrap().ready.insert(slot_idx);
+                self.pending.lock().unwrap_or_else(|e| e.into_inner()).ready.insert(slot_idx);
                 true
             }
             _ => false,
@@ -1821,7 +1821,7 @@ impl Slab {
 
     /// Slots waiting to be overwritten or being overwritten.
     pub fn erasing_slots(&self) -> u64 {
-        let p = self.pending.lock().unwrap();
+        let p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         (p.erasing.len() + p.erasing_now.len()) as u64
     }
 
@@ -1829,7 +1829,7 @@ impl Slab {
     /// what to overwrite, where, and with what. Each is the eraser's until
     /// [`finish_erase`](Self::finish_erase) or [`return_erase`](Self::return_erase).
     pub fn take_erasing(&self, max: usize) -> Vec<EraseJob> {
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let picked: Vec<u64> = p.erasing.keys().copied().take(max).collect();
         let mut out = Vec::with_capacity(picked.len());
         for idx in picked {
@@ -1850,12 +1850,12 @@ impl Slab {
 
     /// Slots of `volume` waiting to be overwritten or being overwritten.
     pub fn erasing_for(&self, volume: VolumeId) -> u64 {
-        self.pending.lock().unwrap().erasing_by_volume.get(&volume).copied().unwrap_or(0)
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).erasing_by_volume.get(&volume).copied().unwrap_or(0)
     }
 
     /// An erase that did not finish goes back in the queue.
     pub fn return_erase(&self, slot_idx: u64) {
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = p.erasing_now.remove(&slot_idx) {
             p.erasing.insert(slot_idx, job);
         }
@@ -1867,7 +1867,7 @@ impl Slab {
         // An erasing slot is nobody's and nothing changes it but this, so
         // the queue's record of it is the entry (no table read, #155).
         {
-            let mut p = self.pending.lock().unwrap();
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             let job = p.erasing_now.remove(&slot_idx).or_else(|| p.erasing.remove(&slot_idx));
             let Some((_, vol)) = job else { return Ok(()) };
             if let Some(n) = p.erasing_by_volume.get_mut(&vol) {
@@ -1892,7 +1892,7 @@ impl Slab {
     pub fn free_slots(&self) -> u64 {
         // Slots whose free is not yet durable count: the next allocation that
         // needs one flushes and takes it.
-        let p = self.pending.lock().unwrap();
+        let p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         self.free_count + (p.freeing.len() + p.released.len()) as u64
     }
 
@@ -1960,7 +1960,7 @@ impl Slab {
         self.table.write(&entries).await?;
         // On the device now: what memory held for them is what the table
         // says, except a slot still unpublished (the device says free).
-        let mut p = self.pending.lock().unwrap();
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         for idx in idxs {
             if !p.unpublished.contains(&idx) {
                 p.entries.remove(&idx);

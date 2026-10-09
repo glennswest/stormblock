@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 2026-10-09
+- **fix:** #364 (P0, owner), the rest:
+  - **Slab sync:** a slab's sync reads the entries it publishes under the registry, then writes the table with no lock held. The write is checked under the table's page lock against memory, so a slot freed or changed in between is read again.
+  - **Clones:** a clone's reference counts change in memory and are written by the next sync, not under the extent map's and the registry's write locks.
+  - **Template builds:** a build a request starts persists after it has let go of the volume manager (`lockwatch::spawn_owing`).
+  - **Health:** health answers the RAID state from its last reading when the array table is busy.
+  - **Tests:** a lock holder cancelled mid-I/O, or one that fails, leaves the lock free and unclaimed.
+
 ### 2026-10-08
 - **feat:** #359 (owner): every call that leaves the process retries through one helper, `retry::with_backoff`. It is bounded by attempts and a deadline, backs off with jitter, never retries a real answer, logs the attempts ("succeeded on attempt 3", "gave up after 5"), and classifies a failure as infrastructure or a real error.
   - **Policies:** `QUICK`, `NETWORK`, `BLOCK_IO`, `TRANSFER`.

@@ -96,6 +96,29 @@ where
     }
 }
 
+/// [`spawn_inheriting`] for work a request starts that changes the shared
+/// volume manager (#364): the task runs as a request, so its persists are
+/// owed rather than made under the manager's lock, and `pay` makes the owed
+/// persist once the work is done and has let go of every lock. A request
+/// that awaits it answers after that; one that gave up does not stop it.
+pub fn spawn_owing<F, P, PF>(fut: F, pay: P) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+    P: FnOnce() -> PF + Send + 'static,
+    PF: Future<Output = ()> + Send + 'static,
+{
+    let name = ACTIVITY.try_with(|a| a.name.clone()).unwrap_or_else(|_| "background work".into());
+    let activity = Activity::request(name);
+    tokio::spawn(async move {
+        let out = scope(activity.clone(), fut).await;
+        if activity.take_owed_persist() {
+            scope(activity, pay()).await;
+        }
+        out
+    })
+}
+
 /// The current task's name: its activity, else its tokio task id, else the
 /// thread's name.
 pub fn current_name() -> Arc<str> {
@@ -580,6 +603,43 @@ mod tests {
         assert!(m.try_lock().is_ok(), "the next caller proceeds at once");
         let v = snapshot().into_iter().find(|v| v.lock == "volume manager");
         assert!(v.map(|v| v.holders.is_empty()).unwrap_or(true));
+    }
+
+    /// Nothing exits holding a lock (#364): a holder cancelled while it
+    /// waits on I/O (a request whose client went away, a job aborted), and
+    /// one that returns an error halfway, leave the lock free and no holder
+    /// named.
+    #[tokio::test]
+    async fn a_holder_cancelled_mid_io_or_failing_leaves_the_lock_free_and_unclaimed() {
+        let m = Arc::new(TrackedMutex::new(VolumeManager));
+        let unclaimed = || {
+            snapshot()
+                .into_iter()
+                .filter(|v| v.lock == "volume manager")
+                .all(|v| v.holders.iter().all(|h| !h.who.contains("cancelled") && !h.who.contains("failing")))
+        };
+
+        let m2 = m.clone();
+        let t = tokio::spawn(named("cancelled holder", async move {
+            let _g = m2.lock().await;
+            tokio::time::sleep(Duration::from_secs(3600)).await; // the I/O that never answers
+        }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(m.try_lock().is_err(), "held while it waits");
+        t.abort();
+        let _ = t.await;
+        assert!(m.try_lock().is_ok(), "free once cancelled");
+        assert!(unclaimed());
+
+        async fn halfway(m: &TrackedMutex<VolumeManager>) -> Result<(), &'static str> {
+            let _g = m.lock().await;
+            tokio::task::yield_now().await;
+            Err("the device said no")?;
+            Ok(())
+        }
+        assert!(named("failing holder", halfway(&m)).await.is_err());
+        assert!(m.try_lock().is_ok(), "free after an error");
+        assert!(unclaimed());
     }
 
     #[tokio::test]
