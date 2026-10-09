@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use super::{ApiError, ListResponse};
 use crate::mgmt::config::human_size;
-use crate::mgmt::AppState;
+use crate::mgmt::{AppState, DriveInfo};
 
 #[derive(Debug, Serialize)]
 pub struct DriveResponse {
@@ -55,6 +55,45 @@ pub struct DriveResponse {
     /// Opened with a DH-HMAC-CHAP secret (#213). The secret is never shown.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dhchap: bool,
+    /// This node's system disk (#133): the disk its own slabs were opened
+    /// from at boot, which serve its root. Listed so a drive plane sees it;
+    /// closed, drained, adopted, relabelled, reported failing or faulted
+    /// through this API, never (409).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
+}
+
+fn response_of(d: &DriveInfo, system: bool) -> DriveResponse {
+    let id = d.device.id();
+    DriveResponse {
+        uuid: id.uuid,
+        path: d.path.clone(),
+        model: id.model.clone(),
+        serial: id.serial.clone(),
+        wwn: id.wwn.clone(),
+        device_type: d.device.device_type().to_string(),
+        capacity_bytes: d.device.capacity_bytes(),
+        capacity_human: human_size(d.device.capacity_bytes()),
+        block_size: d.device.block_size(),
+        labels: d.labels.to_string(),
+        emulated: emulated_state(d.device.as_ref()),
+        dhchap: d.dhchap,
+        system,
+    }
+}
+
+/// A system disk is not changed through the drive API (#133).
+async fn refuse_system_disk(state: &AppState, id: &str, what: &str) -> Option<Response> {
+    let path = state.system_disk(id).await?;
+    Some(ApiError::conflict(format!(
+        "{path} is this node's system disk: its slabs serve the node's root, and it is not {what} through the drive API"
+    )))
+}
+
+/// Whether a slab's device is on `disk` (#133): the drive itself, or a
+/// partition of it.
+pub(crate) fn slab_is_on(slab: &crate::drive::slab::Slab, disk: &Arc<dyn crate::drive::BlockDevice>, path: &str) -> bool {
+    Arc::ptr_eq(slab.device(), disk) || slab.device().id().path == path || slab.device().drive_id().uuid == disk.id().uuid
 }
 
 /// What an emulated drive holds and whether it is failed (#208).
@@ -86,27 +125,8 @@ fn emulated_state(dev: &dyn crate::drive::BlockDevice) -> Option<EmulatedState> 
 async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "drives", "method" => "list")
         .increment(1);
-    let drives = state.drives.read().await;
-    let items: Vec<DriveResponse> = drives
-        .iter()
-        .map(|d| {
-            let id = d.device.id();
-            DriveResponse {
-                uuid: id.uuid,
-                path: d.path.clone(),
-                model: id.model.clone(),
-                serial: id.serial.clone(),
-                wwn: id.wwn.clone(),
-                device_type: d.device.device_type().to_string(),
-                capacity_bytes: d.device.capacity_bytes(),
-                capacity_human: human_size(d.device.capacity_bytes()),
-                block_size: d.device.block_size(),
-                labels: d.labels.to_string(),
-                emulated: emulated_state(d.device.as_ref()),
-                dhchap: d.dhchap,
-            }
-        })
-        .collect();
+    let items: Vec<DriveResponse> =
+        state.listed_drives().await.iter().map(|(d, system)| response_of(d, *system)).collect();
     let count = items.len();
     Json(ListResponse { items, count })
 }
@@ -119,26 +139,9 @@ async fn get_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
         Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
     };
 
-    let drives = state.drives.read().await;
-    match drives.iter().find(|d| d.device.id().uuid == uuid) {
-        Some(d) => {
-            let id = d.device.id();
-            let resp = DriveResponse {
-                uuid: id.uuid,
-                path: d.path.clone(),
-                model: id.model.clone(),
-                serial: id.serial.clone(),
-                wwn: id.wwn.clone(),
-                device_type: d.device.device_type().to_string(),
-                capacity_bytes: d.device.capacity_bytes(),
-                capacity_human: human_size(d.device.capacity_bytes()),
-                block_size: d.device.block_size(),
-                labels: d.labels.to_string(),
-                emulated: emulated_state(d.device.as_ref()),
-                dhchap: d.dhchap,
-            };
-            Json(resp).into_response()
-        }
+    let drives = state.listed_drives().await;
+    match drives.iter().find(|(d, _)| d.device.id().uuid == uuid) {
+        Some((d, system)) => Json(response_of(d, *system)).into_response(),
         None => ApiError::not_found(format!("drive {uuid} not found")),
     }
 }
@@ -162,9 +165,9 @@ async fn get_drive_smart(State(state): State<Arc<AppState>>, Path(id): Path<Stri
         Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
     };
 
-    let drives = state.drives.read().await;
-    match drives.iter().find(|d| d.device.id().uuid == uuid) {
-        Some(d) => {
+    let drives = state.listed_drives().await;
+    match drives.iter().find(|(d, _)| d.device.id().uuid == uuid) {
+        Some((d, _)) => {
             let smart = d.device.smart_status();
             match smart {
                 Ok(data) => {
@@ -219,6 +222,11 @@ pub struct OpenRequest {
 }
 
 async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequest>) -> Response {
+    // A second open of the system disk is a second writer under the node's
+    // own slabs (#133).
+    if let Some(r) = refuse_system_disk(&state, &req.path, "opened again").await {
+        return r;
+    }
     {
         // The same file twice would give the pallet allocator two views of one
         // free space, and it would hand out partitions that overlap — caught
@@ -300,6 +308,7 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
             labels: labels.to_string(),
             emulated: emulated_state(dev.as_ref()),
             dhchap: given,
+            system: false,
         }),
     )
         .into_response()
@@ -336,6 +345,9 @@ async fn close_drive(
     Path(id): Path<String>,
     Query(q): Query<CloseQuery>,
 ) -> Response {
+    if let Some(r) = refuse_system_disk(&state, &id, "closed").await {
+        return r;
+    }
     let found = {
         let drives = state.drives.read().await;
         drives
@@ -406,6 +418,9 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// counted and left alone.
 async fn adopt_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "drives", "method" => "adopt").increment(1);
+    if let Some(r) = refuse_system_disk(&state, &id, "adopted again").await {
+        return r;
+    }
 
     let found = {
         let drives = state.drives.read().await;
@@ -461,20 +476,19 @@ async fn adopt_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>)
 }
 
 async fn drive_slabs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let found = {
-        let drives = state.drives.read().await;
-        drives
-            .iter()
-            .find(|d| d.path == id || d.device.id().uuid.to_string() == id)
-            .map(|d| (d.device.clone(), d.path.clone(), d.labels.clone()))
-    };
+    let found = state
+        .listed_drives()
+        .await
+        .into_iter()
+        .find(|(d, _)| d.path == id || d.device.id().uuid.to_string() == id)
+        .map(|(d, _)| (d.device, d.path, d.labels));
     let Some((dev, path, labels)) = found else {
         return ApiError::not_found(format!("no open drive {id}"));
     };
     let registry = state.slab_registry.read().await;
     let items: Vec<serde_json::Value> = registry
         .iter()
-        .filter(|(_, slab)| Arc::ptr_eq(slab.device(), &dev) || slab.device().id().path == path)
+        .filter(|(_, slab)| slab_is_on(slab, &dev, &path))
         .map(|(sid, slab)| {
             serde_json::json!({
                 "id": sid.0.to_string(),
@@ -509,6 +523,9 @@ async fn set_labels(
     Path(id): Path<String>,
     Json(req): Json<LabelsRequest>,
 ) -> Response {
+    if let Some(r) = refuse_system_disk(&state, &id, "relabelled").await {
+        return r;
+    }
     let labels = crate::placement::domain::FailureDomain::from_labels(req.labels);
     let path = {
         let mut drives = state.drives.write().await;
@@ -548,6 +565,9 @@ async fn slabs_on_device(state: &AppState, dev: &Arc<dyn crate::drive::BlockDevi
 /// can be removed (#70 item 3). Async: poll `GET …/drain`. Terminal state
 /// `empty` means nothing of any volume is left on it.
 async fn start_drain(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    if let Some(r) = refuse_system_disk(&state, &id, "drained").await {
+        return r;
+    }
     let Some((dev, path)) = find_drive(&state, &id).await else {
         return ApiError::not_found(format!("no open drive {id}"));
     };
@@ -655,6 +675,11 @@ async fn drive_health(
     Path(id): Path<String>,
     Json(report): Json<DriveHealthReport>,
 ) -> Response {
+    // A failing report on the system disk would quarantine the node's only
+    // slabs and order a drain of its root (#133): refused, said.
+    if let Some(r) = refuse_system_disk(&state, &id, "quarantined or drained on a health report").await {
+        return r;
+    }
     let Some((dev, path)) = find_drive(&state, &id).await else {
         return ApiError::not_found(format!("no open drive {id}"));
     };
@@ -773,6 +798,9 @@ async fn emulate(
     Path(id): Path<String>,
     Json(req): Json<EmulateRequest>,
 ) -> Response {
+    if let Some(r) = refuse_system_disk(&state, &id, "faulted").await {
+        return r;
+    }
     let Some((dev, path)) = find_drive(&state, &id).await else {
         return ApiError::not_found(format!("no open drive {id}"));
     };

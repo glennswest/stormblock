@@ -38,6 +38,7 @@ use config::StormBlockConfig;
 
 
 /// Information about an opened drive, stored in AppState.
+#[derive(Clone)]
 pub struct DriveInfo {
     pub device: Arc<dyn BlockDevice>,
     pub path: String,
@@ -381,6 +382,31 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Every drive this engine reports (#133): those opened as drives, then
+    /// the disks the node's own slabs were opened from (`boot_disks`), which
+    /// are its system disk. Each once; `true` marks a system disk.
+    pub async fn listed_drives(&self) -> Vec<(DriveInfo, bool)> {
+        let mut out: Vec<(DriveInfo, bool)> = self.drives.read().await.iter().map(|d| (d.clone(), false)).collect();
+        for d in self.boot_disks.read().await.iter() {
+            let uuid = d.device.id().uuid;
+            if !out.iter().any(|(o, _)| o.path == d.path || o.device.id().uuid == uuid) {
+                out.push((d.clone(), true));
+            }
+        }
+        out
+    }
+
+    /// The path of the system disk `id` (uuid or path) names, when it is one
+    /// and was not opened as a drive (#133): the drive API reads it and
+    /// changes nothing on it.
+    pub async fn system_disk(&self, id: &str) -> Option<String> {
+        self.listed_drives()
+            .await
+            .into_iter()
+            .find(|(d, system)| *system && (d.path == id || d.device.id().uuid.to_string() == id))
+            .map(|(d, _)| d.path)
+    }
+
     /// The `[nvmeof]` settings in force (#272).
     #[cfg(feature = "nvmeof")]
     pub fn nvmeof_settings(&self) -> Option<config::NvmeofExportConfig> {

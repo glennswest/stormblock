@@ -181,6 +181,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### An installed node's system disk is a drive (2026-10-09, #133) — IN PROGRESS
+
+`state.drives` came only from `[[drives]]` and `POST /api/v1/drives`;
+adopt-ublk's own disks (`boot_disks`, #314) were nowhere in the drive API.
+- [x] `AppState::listed_drives` (drives, then boot disks, once each) and
+      `system_disk`; `/api/v1/drives` list/get/smart/slabs and the kube
+      `Drive` list/get read it; `system: true`; slabs on a disk's
+      partitions found by `drive_id`
+- [x] close, drain, adopt, labels, health, emulate, a second open, kube
+      PATCH: 409 on a system disk
+- [x] test `cli::system_disk_tests` (a laid node disk opened as adopt-ublk
+      does); README, CHANGELOG
+- [ ] check.sh; golden; close. O_EXCL on slab devices (the issue's optional
+      third point) not done: the initramfs engine and its successor hold the
+      disk at once during a handover
+
 ### --data-dir is the node's data directory (2026-10-09, #163) — DONE (golden-stormblock-06e054a63b98)
 
 - [x] `merge_cli` sets `[management] data_dir` from `--data-dir` (the flag

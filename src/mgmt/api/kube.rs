@@ -365,15 +365,16 @@ async fn get_slab(State(state): State<Arc<AppState>>, Path(name): Path<String>) 
 // ---------------------------------------------------------------- drives
 
 async fn all_drives(state: &AppState) -> Vec<Value> {
-    let drives = state.drives.read().await;
+    // The system disk too (#133), read-only: `status.system`.
+    let drives = state.listed_drives().await;
     let reg = state.slab_registry.read().await;
     let mut items = Vec::with_capacity(drives.len());
-    for d in drives.iter() {
+    for (d, system) in drives.iter() {
         let id = d.device.id();
         let key = id.uuid.to_string();
         let slabs: Vec<String> = reg
             .iter()
-            .filter(|(_, s)| Arc::ptr_eq(s.device(), &d.device) || s.device().id().path == d.path)
+            .filter(|(_, s)| super::drives::slab_is_on(s, &d.device, &d.path))
             .map(|(sid, _)| sid.0.to_string())
             .collect();
         let drain = state.drains.read().await.status(&d.path).await.map(|s| {
@@ -406,6 +407,7 @@ async fn all_drives(state: &AppState) -> Vec<Value> {
                 "slabs": slabs,
                 "smart": smart,
                 "drain": drain,
+                "system": system,
             }),
         ));
     }
@@ -414,11 +416,12 @@ async fn all_drives(state: &AppState) -> Vec<Value> {
 }
 
 async fn find_drive_key(state: &AppState, name: &str) -> Option<String> {
-    let drives = state.drives.read().await;
-    drives
-        .iter()
-        .find(|d| d.path == name || d.device.id().uuid.to_string() == name)
-        .map(|d| d.device.id().uuid.to_string())
+    state
+        .listed_drives()
+        .await
+        .into_iter()
+        .find(|(d, _)| d.path == name || d.device.id().uuid.to_string() == name)
+        .map(|(d, _)| d.device.id().uuid.to_string())
 }
 
 async fn get_drive(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
@@ -453,6 +456,13 @@ async fn patch_drive(
     Path(name): Path<String>,
     Json(patch): Json<DrivePatch>,
 ) -> Response {
+    if let Some(path) = state.system_disk(&name).await {
+        return status_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            format!("{path} is this node's system disk; it is not relabelled or drained through the drive API"),
+        );
+    }
     let found = {
         let drives = state.drives.read().await;
         drives

@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #133: an installed node's system disk is a drive.
+  - **Listed:** `/api/v1/drives` (and the kube `Drive` resources) list the disks the node's own slabs were opened from at boot, marked `"system": true`. `/drives/{id}/slabs` names the slabs on them, partitions included. Before, the list was empty while those slabs served root.
+  - **Read-only:** close, drain, adopt, labels, a health report, an emulated fault and a second `POST /api/v1/drives` of its path answer 409 naming it. A failing report would have quarantined the node's only slabs and drained its root.
 - **fix:** #163: `--data-dir` is the node's data directory, and wins over `[management] data_dir`. It used to reach only the volume manager: a daemon started with it and no `[management] data_dir` had no `/serve/v1`, kept synonyms and templates in memory, and put no token file in it. `tests-runtime/data_dir_flag.rs` checks the built daemon.
 - **fix:** #125: an import from a URL survives a flaky mirror, and a failed import says which part failed.
   - **Retries:** a resuming download (`get_to_channel`, `get_to_file`, #359) starts its retries over after any attempt that made progress (`retry::with_backoff_progress`). A 3 GiB image at 0.7 MB/s no longer runs out of drops or of the 30-minute deadline while it is still arriving.

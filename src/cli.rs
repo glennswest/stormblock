@@ -11240,3 +11240,89 @@ mod relay_tests {
         assert!(Some(have).filter(|_| !relay).is_none());
     }
 }
+
+/// #133: an installed node's system disk is listed by `/api/v1/drives`,
+/// marked `system`, and nothing in the drive API changes it.
+#[cfg(test)]
+mod system_disk_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+
+    #[tokio::test]
+    async fn the_system_disk_is_a_listed_drive_that_the_drive_api_does_not_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("sda.img").display().to_string();
+        {
+            let dev = Arc::new(FileDevice::open_with_capacity(&disk, 1 << 30).await.unwrap()) as Arc<dyn BlockDevice>;
+            let layout = crate::image::local::LocalLayout::for_drive(dev.capacity_bytes());
+            crate::image::local::lay_node_slabs(dev, &layout).await.unwrap();
+        }
+        // As adopt-ublk opens it: the slabs from the disk, the disk kept.
+        let (vm, _, disks) = super::open_slabs_with_disks(&[disk.clone()], None, false).await.unwrap();
+        let slabs = vm.registry().read().await.iter().count();
+        assert!(slabs >= 2, "both halves opened");
+        let node_dir = dir.path().join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let mut config = StormBlockConfig::default();
+        config.management.data_dir = Some(node_dir.display().to_string());
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = Arc::new(AppState::new(config, vm, reg, gem));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = listener.local_addr().unwrap();
+        let router = mgmt::api::router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let c = reqwest::Client::new();
+        let base = format!("http://{api}/api/v1/drives");
+
+        // Before: the disk that holds the node's root was no drive at all.
+        let list: serde_json::Value = c.get(&base).send().await.unwrap().json().await.unwrap();
+        assert_eq!(list["count"], 0, "{list}");
+
+        super::set_boot_disks(&state, disks).await;
+        let list: serde_json::Value = c.get(&base).send().await.unwrap().json().await.unwrap();
+        assert_eq!(list["count"], 1, "{list}");
+        let d = &list["items"][0];
+        assert_eq!(d["path"], disk.as_str(), "{d}");
+        assert_eq!(d["system"], true, "{d}");
+        let id = d["uuid"].as_str().unwrap().to_string();
+        let one: serde_json::Value = c.get(format!("{base}/{id}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(one["system"], true, "{one}");
+        let on: serde_json::Value = c.get(format!("{base}/{id}/slabs")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(on["count"].as_u64().unwrap() as usize, slabs, "its slabs are named under it: {on}");
+
+        // Nothing in the drive API changes it.
+        let r = c.delete(format!("{base}/{id}")).send().await.unwrap();
+        assert_eq!(r.status(), 409, "close");
+        let r = c.post(format!("{base}/{id}/drain")).send().await.unwrap();
+        assert_eq!(r.status(), 409, "drain");
+        let r = c.post(format!("{base}/{id}/adopt")).send().await.unwrap();
+        assert_eq!(r.status(), 409, "adopt");
+        let r = c.post(format!("{base}/{id}/health")).json(&serde_json::json!({"state": "failing"})).send().await.unwrap();
+        assert_eq!(r.status(), 409, "a failing report");
+        let r = c.put(format!("{base}/{id}/labels")).json(&serde_json::json!({"labels": {"shelf": "x"}})).send().await.unwrap();
+        assert_eq!(r.status(), 409, "labels");
+        let r = c.post(format!("{base}/{id}/emulate")).json(&serde_json::json!({"failed": true})).send().await.unwrap();
+        assert_eq!(r.status(), 409, "emulate");
+        let r = c.post(&base).json(&serde_json::json!({"path": disk})).send().await.unwrap();
+        assert_eq!(r.status(), 409, "a second open of it");
+        let msg = r.text().await.unwrap();
+        assert!(msg.contains("system disk"), "{msg}");
+        {
+            let reg = state.slab_registry.read().await;
+            assert!(reg.iter().all(|(sid, _)| !reg.is_quarantined(sid)), "nothing quarantined");
+        }
+
+        // The kube surface says the same.
+        let k: serde_json::Value = c
+            .get(format!("http://{api}/apis/storage.storm.io/v1/drives"))
+            .send().await.unwrap().json().await.unwrap();
+        let items = k["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{k}");
+        assert_eq!(items[0]["status"]["system"], true, "{k}");
+        let r = c
+            .patch(format!("http://{api}/apis/storage.storm.io/v1/drives/{id}"))
+            .json(&serde_json::json!({"spec": {"drain": true}}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 409, "a drain through the kube surface");
+    }
+}
