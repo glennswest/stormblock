@@ -6,7 +6,7 @@
 - **feat:** #151: a claim carries its StorageClass's redundancy, spread and tier.
   - **Fields:** `POST /v1/volumes` takes `redundancy`, `spread` and `tier`. `POST /api/v1/volumes` takes `spread` and `tier`, and `POST /api/v1/fstemplates` takes `spread`. The spelling is the same as `/api/v1`, where `spread` is the `@rung`.
   - **Refusal:** a policy the node cannot place is a 409 on `/v1`, as on `/api/v1`.
-  - **Tier:** a preference with fallback. It is kept in the format-2 volume header (after the origin; older readers skip it), restored, and inherited by clones.
+  - **Tier:** a preference with fallback. It is kept in the format-2 volume header (after the origin; older readers skip it), restored, and inherited by clones. Like origin, it is not kept in a format-1 `volumes.dat`.
   - **Clones:** a `/v1` clone that names another policy than its source's is refused. A size-class blank minted per policy hands it to its claims.
   - **Default:** a claim that names no policy is still `none`.
 - **fix:** #112: every `/api/v1/volumes/{id}` route takes the volume's name as well as its UUID (and a synonym, as clone already did). Before, `GET`, delete, attach, seal, resize and 14 others answered `400 invalid UUID` for an existing volume's name. A name nothing answers to is a `404`. A name two volumes share is a `409` naming both: the routes that already took names (clone, access, cidata, ana) picked one of them arbitrarily.

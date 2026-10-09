@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Redundancy, spread and tier on every claim path (2026-10-09, #151, P2) — IN PROGRESS
+### Redundancy, spread and tier on every claim path (2026-10-09, #151, P2) — DONE
 
 `/v1` create had no policy (every CSI PVC `none`); `spread` only as
 `@rung`; a tier on create was honoured until the next restart and not by
@@ -191,12 +191,18 @@ design's owner decision 2, not taken here).
       contradicts an `@rung` refused), `PlacementPolicy::preferring(tier)`
 - [x] `/v1` create: `redundancy`, `spread`, `tier`; InsufficientDomains 409
       like `/api/v1`; `/api/v1` create and template create: `spread`, `tier`
-- [x] the tier kept: `VolumeManager.tiers`, the v2 header extension after
+- [x] the tier kept: from the volume's placement into its record, the v2 header extension after
       origin (older readers skip it), restored, inherited by clones (a
       retier moves extents and leaves the preference); a `/v1` clone naming
       another policy than its source's: 409
-- [ ] tests (/v1 mirror placed and refused; a class blank per policy and
-      its clone; tier across a restart), docs, CHANGELOG, check.sh, golden
+- [x] tests: `integration_v1_api::v1_create_takes_redundancy_spread_and_
+      tier_and_blanks_carry_theirs`, `redundancy_tests::a_claims_tier_is_kept_
+      by_its_clones_and_across_a_restart`, `a_claims_spread_is_a_field_or_a_
+      rung_never_two`, the origin header test with a tier; found by the
+      restart test: a map of tiers missed the clone path, so the record now
+      reads the tier from the volume. check.sh at 41697b6 ALL PASS (nextest
+      1076/1076); docs (multi-drive.md §3), CHANGELOG
+- Drivers: rustkube-node#71 (blanks per policy), stormblock-csi#21 (send it)
 
 ### A volume's {id} routes take its name (2026-10-09, #112) — DONE (golden-stormblock-65c86c79843c)
 
