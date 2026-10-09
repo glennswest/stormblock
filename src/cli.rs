@@ -5923,6 +5923,7 @@ pub async fn run() -> anyhow::Result<()> {
         let gem_arc = state.gem.clone();
         let reg_arc = state.slab_registry.clone();
         let flow_remaining = state.flow_over_remaining.clone();
+        let data_dir = state.data_dir.clone();
         // Weak, so a migration in flight cannot keep the whole engine alive past
         // a shutdown that is trying to end.
         let state_for_persist = Arc::downgrade(state);
@@ -5955,7 +5956,30 @@ pub async fn run() -> anyhow::Result<()> {
                     None => false,
                 };
                 match install {
-                    Some(t) if booted => report_installed(t).await,
+                    // Laid: the intent goes back to local, and the report the
+                    // first boot off the disk makes is left on the disk
+                    // (through the state volume) for it (#220).
+                    Some(t) if booted => {
+                        if report_installed(&t, "laid").await == ReportOutcome::Done {
+                            if let Some(dir) = data_dir.as_deref() {
+                                let at = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let rep = crate::drive::handover::InstallReport {
+                                    ticket: t,
+                                    state: "laid".into(),
+                                    laid_at: at,
+                                    reported_at: None,
+                                    reason: None,
+                                };
+                                match rep.write(dir) {
+                                    Ok(()) => println!("Install: laid; the first boot off this disk reports booted"),
+                                    Err(e) => tracing::warn!("install report: {}: {e}", dir.display()),
+                                }
+                            }
+                        }
+                    }
                     Some(t) => println!(
                         "Install: not reported done to {} - the disk does not boot on its own; \
                          the intent stays install",
@@ -6793,6 +6817,15 @@ pub async fn run() -> anyhow::Result<()> {
                 Err(e) => tracing::warn!("install: the release generations not written in {d}: {e}"),
             }
         }
+        // The first boot off a laid disk says so (#220).
+        if let (Some(r), Some(d)) = (record.as_ref(), data_dir) {
+            if crate::drive::handover::local_only_boot(r) {
+                let d = std::path::PathBuf::from(d);
+                tokio::spawn(async move {
+                    report_first_local_boot(&d).await;
+                });
+            }
+        }
         if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.clone()) {
             spawn_flow_over(&state, flow, local_boot, install);
         } else if let Some((disk, sources)) = local_boot {
@@ -7045,11 +7078,22 @@ fn note_no_intent(path: &std::path::Path, base: &str, none_stated: bool) {
     }
 }
 
-/// Tell the appliance an install it asked for is done (#148): the flow-over
-/// finished and the disk boots on its own, so the machine's intent goes back
-/// to `local`. Retried for an hour — until it lands, the next power cycle
-/// installs again — and never fatal.
-async fn report_installed(ticket: crate::drive::handover::InstallTicket) {
+/// What an install report came to (#220).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReportOutcome {
+    Done,
+    /// The appliance answered no (4xx): asking again will not change it.
+    Refused(String),
+    /// Not reached in the hour it was tried.
+    GaveUp(String),
+}
+
+/// Tell the appliance how far an install it asked for got (#148, #220).
+/// `laid` from the installer's successor once the flow-over finished and the
+/// disk boots on its own: the machine's intent goes back to `local` and its
+/// record says `laid`. `booted` from the first boot off that disk: the
+/// install is proven. Retried for an hour, never fatal.
+pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTicket, stage: &str) -> ReportOutcome {
     let url = format!(
         "{}/api/v1/synonyms/boothost/{}/installed",
         ticket.boothost.trim_end_matches('/'),
@@ -7062,40 +7106,75 @@ async fn report_installed(ticket: crate::drive::handover::InstallTicket) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("install report to {url}: {e}");
-            return;
+            return ReportOutcome::GaveUp(e.to_string());
         }
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
     loop {
-        let last = match client.post(&url).json(&serde_json::json!({ "volume": ticket.volume })).send().await {
+        let body = serde_json::json!({ "volume": ticket.volume, "stage": stage });
+        let last = match client.post(&url).json(&body).send().await {
             Ok(resp) if resp.status().is_success() => {
-                println!("Install: reported done to {url}; this machine's boot intent is local again");
-                tracing::info!("install reported done to {url}");
-                return;
+                match stage {
+                    "booted" => println!("Install: reported to {url} that this machine booted from its own disk"),
+                    _ => println!("Install: reported laid to {url}; this machine's boot intent is local again"),
+                }
+                tracing::info!("install reported {stage} to {url}");
+                return ReportOutcome::Done;
             }
             // Refused — not the clone the install is for, or no such host.
             // Asking again will not change the answer.
             Ok(resp) if (400..500).contains(&resp.status().as_u16()) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                println!("Install: {url} refused the report ({status}: {body})");
-                tracing::warn!("install report refused by {url}: {status}: {body}");
-                return;
+                println!("Install: {url} refused the {stage} report ({status}: {body})");
+                tracing::warn!("install {stage} report refused by {url}: {status}: {body}");
+                return ReportOutcome::Refused(format!("{status}: {body}"));
             }
             Ok(resp) => format!("{}", resp.status()),
             Err(e) => e.to_string(),
         };
         if std::time::Instant::now() >= deadline {
-            println!(
-                "Install: could not report done to {url} ({last}); the intent stays install, \
-                 so the next power cycle installs again"
-            );
-            tracing::error!("install report to {url} gave up: {last}");
-            return;
+            match stage {
+                "booted" => println!("Install: could not report booted to {url} ({last}); the next boot tries again"),
+                _ => println!(
+                    "Install: could not report laid to {url} ({last}); the intent stays install, \
+                     so the next power cycle installs again"
+                ),
+            }
+            tracing::error!("install {stage} report to {url} gave up: {last}");
+            return ReportOutcome::GaveUp(last);
         }
-        tracing::warn!("install report to {url}: {last} - retrying");
+        tracing::warn!("install {stage} report to {url}: {last} - retrying");
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
+}
+
+/// The first boot off a laid disk (#220): an install report left `laid` in
+/// the data directory is reported `booted`, then rewritten `reported` (or
+/// `refused`). Not reached: left `laid`, for the next boot. Called only when
+/// this boot ran from local slabs alone (`handover::local_only_boot`).
+pub(crate) async fn report_first_local_boot(dir: &std::path::Path) -> Option<ReportOutcome> {
+    use crate::drive::handover::InstallReport;
+    let mut rep = InstallReport::read(dir).filter(|r| r.state == "laid")?;
+    println!("Install: this is the first boot off the disk laid from {}; telling {}", rep.ticket.volume, rep.ticket.boothost);
+    let outcome = report_installed(&rep.ticket, "booted").await;
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    match &outcome {
+        ReportOutcome::Done => {
+            rep.state = "reported".into();
+            rep.reported_at = Some(at);
+        }
+        ReportOutcome::Refused(why) => {
+            rep.state = "refused".into();
+            rep.reported_at = Some(at);
+            rep.reason = Some(why.clone());
+        }
+        ReportOutcome::GaveUp(_) => return Some(outcome),
+    }
+    if let Err(e) = rep.write(dir) {
+        tracing::warn!("install report: {}: {e}", dir.display());
+    }
+    Some(outcome)
 }
 
 /// The node's kept record of itself (#355, stormcos `docs/SYSTEM-DATA.md`):
@@ -11387,5 +11466,78 @@ mod system_disk_tests {
             .json(&serde_json::json!({"spec": {"drain": true}}))
             .send().await.unwrap();
         assert_eq!(r.status(), 409, "a drain through the kube surface");
+    }
+}
+
+/// #220: the first boot off a laid disk reports `booted` and rewrites the
+/// report `reported`; a refusal is kept as `refused` with why; nothing laid,
+/// nothing sent.
+#[cfg(test)]
+mod first_local_boot_tests {
+    use crate::drive::handover::{InstallReport, InstallTicket};
+
+    async fn appliance(status: u16) -> (String, std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        use axum::{routing::post, Json, Router};
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let app = Router::new().route(
+            "/api/v1/synonyms/boothost/server1/installed",
+            post(move |Json(v): Json<serde_json::Value>| {
+                let s2 = s2.clone();
+                async move {
+                    s2.lock().unwrap().push(v);
+                    (axum::http::StatusCode::from_u16(status).unwrap(), "{}")
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (format!("http://{addr}"), seen)
+    }
+
+    fn laid(base: &str) -> InstallReport {
+        InstallReport {
+            ticket: InstallTicket { boothost: base.into(), host: "server1".into(), volume: "0b7c7a1e-0000-4000-8000-000000000001".into() },
+            state: "laid".into(),
+            laid_at: 1,
+            reported_at: None,
+            reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_boot_off_a_laid_disk_reports_booted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, seen) = appliance(200).await;
+        // Nothing laid: nothing sent.
+        assert_eq!(super::report_first_local_boot(dir.path()).await, None);
+        laid(&base).write(dir.path()).unwrap();
+        assert_eq!(super::report_first_local_boot(dir.path()).await, Some(super::ReportOutcome::Done));
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0]["stage"].as_str(), sent[0]["volume"].as_str()), (Some("booted"), Some("0b7c7a1e-0000-4000-8000-000000000001")));
+        let r = InstallReport::read(dir.path()).unwrap();
+        assert_eq!(r.state, "reported");
+        assert!(r.reported_at.is_some());
+        // The next boot: already reported, nothing sent.
+        assert_eq!(super::report_first_local_boot(dir.path()).await, None);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        // Written through a dot-file the state capture skips: nothing else left.
+        let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into()).collect();
+        assert_eq!(names, vec![crate::drive::handover::INSTALL_REPORT_FILE.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_report_is_kept_with_why_and_not_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, seen) = appliance(409).await;
+        laid(&base).write(dir.path()).unwrap();
+        assert!(matches!(super::report_first_local_boot(dir.path()).await, Some(super::ReportOutcome::Refused(_))));
+        let r = InstallReport::read(dir.path()).unwrap();
+        assert_eq!(r.state, "refused");
+        assert!(r.reason.unwrap().contains("409"));
+        assert_eq!(super::report_first_local_boot(dir.path()).await, None);
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 }

@@ -257,13 +257,13 @@ reads *before* it claims:
 | intent | stormbootx does | then |
 |---|---|---|
 | `auto` (never set) | claims and boots the image | |
-| `install` | claims and boots; the initramfs installs over the local disk: its system half laid again, its data half kept (#311), or a fresh layout on a disk with no data slab | once the flow-over is done and the disk boots on its own, the node reports it and the intent becomes `local` |
+| `install` | claims and boots; the initramfs installs over the local disk: its system half laid again, its data half kept (#311), or a fresh layout on a disk with no data slab | once the flow-over is done and the disk boots on its own, the node reports it laid and the intent becomes `local`; the first boot off the disk reports it booted (#220) |
 | `local` | boots the local disk at once: no claim, no clone | |
 
 ```
 GET  /api/v1/synonyms/boothost/<name>/intent      → {host, intent, updated_at}   open
 PUT  /api/v1/synonyms/boothost/<name>/intent      {"intent": "install"|"local"|"auto"}  admin token
-POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>}  open
+POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>, "stage": "laid"|"booted"}  open
 ```
 
 `<name>` resolves like a claim: the host's name or any alias — a machine that
@@ -280,14 +280,32 @@ wins) and answers `intent: install`. `boot-claim` then writes
 force (an explicit `rd.stormblock.assimilate=off` still says no); `boot-local`
 carries the ticket in the handover record; and the adopting engine, once the
 flow-over has moved every extent and `local-boot` has laid the ESP and boot
-pallets and judged the disk bootable, posts `…/installed` with that clone's id,
-retrying for an hour. That is still the installer's session: nothing has booted
-from the disk yet. The owner's requirement is that the report come from the
-first boot off the local disk (#220). Only that clone's
-report resets the intent — any other is a 409 and changes nothing — and setting
-the intent clears it, so an install that began before a request never answers
-for it. Until the report lands the intent stays `install`, and the next power
-cycle installs again.
+pallets and judged the disk bootable, posts `…/installed` with that clone's id
+and `stage: laid` (no stage, from an engine before #220, means the same),
+retrying for an hour. Only that clone's report resets the intent: any other
+is a 409 and changes nothing. Setting the intent clears it, so an install
+that began before a request never answers for it. Until it lands, the intent
+stays `install` and the next power cycle installs again.
+
+**The install is proven by the first boot off the disk (#220; owner's
+decision A).**
+- **Laid:** the `laid` report sets the intent to `local` and records the
+  host's `install` as `{state: laid, clone, laid_at}`. That is still the
+  installer's session, and nothing has booted from the disk yet.
+- **Left for the next boot:** the adopting engine then leaves
+  `<data_dir>/install-report.json` (`laid`), which the state volume carries
+  onto the disk.
+- **Booted:** the next boot that runs from local slabs alone (no claim, no
+  flow-over) posts `stage: booted` for the same clone. The record becomes
+  `{state: booted, booted_at}`, and the file is rewritten `reported`, or
+  `refused` with the appliance's answer. If the appliance cannot be reached
+  within the hour, the file stays `laid` for the boot after.
+- **Refusals:** a `booted` report for a clone the install was not laid from,
+  or after a new install request, is a 409.
+- **A disk that never boots** stays `laid`. Nothing retries on its own;
+  stormcentral waits for `booted` and surfaces one that stays `laid`.
+- **Where it shows:** the record is on `GET …/<name>/intent` (`install`) and
+  `GET /api/v1/boothost/<name>`.
 
 **Aliases do not widen the claim.** An alias only lets a machine reach the host
 it has been *told* it is; nothing becomes an alias by itself, two hosts never

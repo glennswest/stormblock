@@ -1459,10 +1459,29 @@ async fn a_boot_intent_is_read_open_set_by_the_admin_and_install_is_one_shot() {
     assert_eq!(r.status(), 200);
     let v: serde_json::Value = r.json().await.unwrap();
     assert_eq!((v["intent"].as_str(), v["reset"].as_bool()), (Some("local"), Some(true)));
+    // Laid, not proven (#220): a report with no stage is an older successor's.
+    assert_eq!(v["install"]["state"], "laid", "{v}");
+    assert_eq!(v["install"]["clone"], initramfs["volume"]["id"], "{v}");
     assert_eq!(intent(&client, &base, "ac1f6b8aa79c").await.1["intent"], "local");
     // Reported again (a restart): harmless.
     let v: serde_json::Value = installed(&initramfs["volume"]["id"]).await.unwrap().json().await.unwrap();
     assert_eq!((v["intent"].as_str(), v["reset"].as_bool()), (Some("local"), Some(false)));
+
+    // The first boot off the disk proves it (#220): open, like the rest.
+    let booted = |vol: &serde_json::Value, stage: &str| {
+        client
+            .post(format!("{base}/api/v1/synonyms/boothost/server1/installed"))
+            .json(&serde_json::json!({"volume": vol, "stage": stage}))
+            .send()
+    };
+    assert_eq!(booted(&fw["volume"]["id"], "booted").await.unwrap().status(), 409, "not the clone it was laid from");
+    assert_eq!(booted(&initramfs["volume"]["id"], "rebooted").await.unwrap().status(), 400);
+    let r = booted(&initramfs["volume"]["id"], "booted").await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((v["intent"].as_str(), v["install"]["state"].as_str()), (Some("local"), Some("booted")), "{v}");
+    assert!(v["install"]["booted_at"].as_u64().is_some());
+    assert_eq!(intent(&client, &base, "server1").await.1["install"]["state"], "booted");
 
     // The host view shows it; other namespaces have no intent.
     let h: serde_json::Value = client
@@ -1470,6 +1489,7 @@ async fn a_boot_intent_is_read_open_set_by_the_admin_and_install_is_one_shot() {
         .bearer_auth("tok")
         .send().await.unwrap().json().await.unwrap();
     assert_eq!(h["intent"], "local");
+    assert_eq!(h["install"]["state"], "booted");
     assert_eq!(intent(&client, &base, "nobody").await.0, 404);
     let r = client.get(format!("{base}/api/v1/synonyms/images/server1/intent")).bearer_auth("tok").send().await.unwrap();
     assert_eq!(r.status(), 404);

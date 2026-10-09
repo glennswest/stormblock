@@ -218,6 +218,14 @@ pub struct Host {
     /// began before the request never answers for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_claim: Option<VolumeId>,
+    /// How far the last install got (#220): `laid` once the successor has
+    /// put the release on the disk (the intent is then `local`), `booted`
+    /// once the first boot off that disk says so. The install is proven by
+    /// the host booting from its own drive (owner, #148); one that stays
+    /// `laid` is a disk that did not boot, for stormcentral to surface.
+    /// Nothing retries on its own (#220, A).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<InstallProgress>,
     /// Whether the machine must prove its boot with a TPM 2.0 quote (#216).
     /// Set by the platform or an admin, never by the machine: a node that
     /// could write it could downgrade its own attestation. Unset reads as
@@ -388,6 +396,47 @@ impl ClaimRecord {
 
 /// What reporting an install done did (#148).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How far an install got (#220).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstallStage {
+    /// The disk is laid; its first boot has not reported.
+    Laid,
+    /// The machine has booted from its own disk.
+    Booted,
+}
+
+impl InstallStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InstallStage::Laid => "laid",
+            InstallStage::Booted => "booted",
+        }
+    }
+}
+
+/// The install a host's record carries (#220).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallProgress {
+    pub state: InstallStage,
+    /// The boot clone the install was laid from (the claim's volume).
+    pub clone: VolumeId,
+    pub laid_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booted_at: Option<u64>,
+}
+
+impl InstallProgress {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "state": self.state.as_str(),
+            "clone": self.clone.0,
+            "laid_at": self.laid_at,
+            "booted_at": self.booted_at,
+        })
+    }
+}
+
 pub enum InstallDone {
     /// The intent was `install` for this clone, and is now `local`.
     Reset,
@@ -900,6 +949,11 @@ impl SynonymStore {
         let h = self.hosts.entry(host.clone()).or_insert(base);
         h.intent = intent;
         h.install_claim = None;
+        // A new install request starts over: the last one's progress no
+        // longer answers for this machine (#220).
+        if intent == BootIntent::Install {
+            h.install = None;
+        }
         h.updated_at = t;
         let out = h.clone();
         self.persist();
@@ -974,12 +1028,47 @@ impl SynonymStore {
             };
             return Err(SynonymError::Conflict(why));
         }
+        let t = now();
         h.intent = BootIntent::Local;
         h.install_claim = None;
-        h.updated_at = now();
+        // Laid, not proven: the first boot off the disk says so (#220).
+        h.install = Some(InstallProgress { state: InstallStage::Laid, clone, laid_at: t, booted_at: None });
+        h.updated_at = t;
         let out = h.clone();
         self.persist();
         Ok((out, InstallDone::Reset))
+    }
+
+    /// The first boot off a laid disk (#220): the install laid from `clone`
+    /// is `booted`. Repeated, a no-op. Refused when no install was laid from
+    /// that clone — one superseded by a later request, or made up.
+    pub fn install_booted(&mut self, name: &str, clone: VolumeId) -> Result<Host, SynonymError> {
+        let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
+        let h = self.hosts.get_mut(&host).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
+        match h.install.as_mut() {
+            Some(p) if p.clone == clone => {
+                if p.state == InstallStage::Laid {
+                    let t = now();
+                    p.state = InstallStage::Booted;
+                    p.booted_at = Some(t);
+                    h.updated_at = t;
+                }
+            }
+            Some(p) => {
+                return Err(SynonymError::Conflict(format!(
+                    "the install recorded for {host} was laid from {}, not {}",
+                    p.clone.0, clone.0
+                )))
+            }
+            None => {
+                return Err(SynonymError::Conflict(format!(
+                    "no install of {host} is recorded as laid: a later request superseded it, or none was made"
+                )))
+            }
+        }
+        let out = h.clone();
+        self.persist();
+        Ok(out)
     }
 
     pub fn persist(&self) {
@@ -1294,6 +1383,38 @@ mod tests {
         // Asked again: the old report does not answer for the new request.
         s.set_intent("server1", BootIntent::Install).unwrap();
         assert!(s.install_done("server1", initramfs).is_err());
+    }
+
+    /// #220: laid when the successor reports, booted when the first boot off
+    /// the disk does; only for the clone it was laid from; a new request
+    /// starts over.
+    #[test]
+    fn an_install_is_laid_then_proven_by_the_first_boot_off_the_disk() {
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "server1", Target::Volume { id: vol() }, None, None).unwrap();
+        let (clone, other) = (vol(), vol());
+        // Booted before anything was laid: refused.
+        assert!(matches!(s.install_booted("server1", clone), Err(SynonymError::Conflict(_))));
+        s.set_intent("server1", BootIntent::Install).unwrap();
+        s.note_install_claim("server1", clone);
+        let (h, _) = s.install_done("server1", clone).unwrap();
+        let p = h.install.clone().expect("laid");
+        assert_eq!((h.intent, p.state, p.clone, p.booted_at), (BootIntent::Local, InstallStage::Laid, clone, None));
+        // Another clone's first boot does not prove this install.
+        assert!(matches!(s.install_booted("server1", other), Err(SynonymError::Conflict(_))));
+        assert_eq!(s.host("server1").unwrap().install.unwrap().state, InstallStage::Laid);
+        let h = s.install_booted("server1", clone).unwrap();
+        let p = h.install.clone().unwrap();
+        assert_eq!(p.state, InstallStage::Booted);
+        assert!(p.booted_at.is_some());
+        // Repeated (a reboot before the report was kept): the same.
+        assert_eq!(s.install_booted("server1", clone).unwrap().install.unwrap().booted_at, p.booted_at);
+        // Setting local does not forget it; a new install request does.
+        s.set_intent("server1", BootIntent::Local).unwrap();
+        assert!(s.host("server1").unwrap().install.is_some());
+        s.set_intent("server1", BootIntent::Install).unwrap();
+        assert!(s.host("server1").unwrap().install.is_none());
+        assert!(s.install_booted("server1", clone).is_err());
     }
 
     #[test]

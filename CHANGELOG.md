@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **feat:** #220 (owner's decision A): an install is proven by the first boot off the local disk.
+  - **Laid:** the installer's successor reports `installed` with `stage: laid` (no stage means the same, for older engines). The intent goes to `local`, and the host record gets `install: {state: laid, clone, laid_at}`.
+  - **Left on the disk:** the successor then writes `<data_dir>/install-report.json`, which the state volume carries onto the disk.
+  - **Booted:** the next boot that runs from local slabs alone posts `stage: booted`. The record becomes `booted`, and the file is rewritten `reported` (or `refused`); an appliance that cannot be reached leaves it `laid` for the next boot.
+  - **Never booted:** a disk that never boots stays `laid` for stormcentral to surface; nothing retries on its own.
+  - **Shown on:** `GET …/intent` and `GET /api/v1/boothost/{name}`.
 - **fix:** #89: the initramfs no longer leaves storage and network controllers without a driver silently.
   - **Second chance:** after udev and the protocol halves, every PCI storage (01xx) or network (02xx) function with no driver gets the module its modalias names loaded and a re-probe (`drivers_probe`); one that binds then is said to have.
   - **Still unbound:** a WARNING with the reason, which is one of: no module in the image matches; a module matches and did not load; or a loaded module did not take it (a failed probe, with the kernel's last lines about the device). This runs on every boot. The NIC wait (#250) and the storage inventory (#345) run only when the network is configured.

@@ -119,6 +119,60 @@ impl InstallTicket {
     }
 }
 
+/// The install a node still has to prove (#220), kept in the engine's data
+/// directory and so, through the state volume, on the disk it was laid on.
+/// The installer's successor writes it `laid` once the appliance has taken
+/// the disk as laid; the first boot that runs from local slabs only reports
+/// `booted` and rewrites it `reported` (or `refused`). Rewritten, never
+/// removed: the state volume keeps every file it has captured, so a removed
+/// one would come back at the next restore.
+pub const INSTALL_REPORT_FILE: &str = "install-report.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallReport {
+    #[serde(flatten)]
+    pub ticket: InstallTicket,
+    /// `laid`, `reported` or `refused`.
+    pub state: String,
+    pub laid_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl InstallReport {
+    pub fn path(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join(INSTALL_REPORT_FILE)
+    }
+
+    pub fn read(dir: &std::path::Path) -> Option<InstallReport> {
+        serde_json::from_slice(&std::fs::read(Self::path(dir)).ok()?).ok()
+    }
+
+    /// Written through a dot-file (which the state capture skips) and renamed.
+    pub fn write(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!(".{INSTALL_REPORT_FILE}.tmp"));
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::other(format!("encode install report: {e}")))?;
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, Self::path(dir))
+    }
+}
+
+/// Whether a boot ran from the machine's own disk alone: a handover record
+/// with no flow-over and no install, and every slab a local path (#220). A
+/// claimed clone is an `nvme-tcp://` (or `iscsi://`, `http://`) URI.
+pub fn local_only_boot(record: &Record) -> bool {
+    record.flow_over.is_none()
+        && record.install.is_none()
+        && !record.slabs.is_empty()
+        && record.slabs.iter().all(|p| {
+            !(p.starts_with("nvme-tcp://") || p.starts_with("iscsi://") || p.starts_with("http://") || p.starts_with("https://"))
+        })
+}
+
 /// Everything the successor needs to take over without being told.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Record {
@@ -485,6 +539,29 @@ mod tests {
                 Device { dev_id: 1, volume: "stormblock".into() },
             ],
         }
+    }
+
+    /// #220: only a boot from the machine's own disk alone counts as the
+    /// first boot off a laid disk.
+    #[test]
+    fn a_local_only_boot_is_one_with_no_claim_and_no_flow_over() {
+        let r = a_record();
+        assert!(local_only_boot(&r));
+        let mut claimed = a_record();
+        claimed.slabs = vec!["nvme-tcp://10.0.0.1:4420/nqn.x:host:server1?nsid=1".into()];
+        assert!(!local_only_boot(&claimed), "a claimed clone");
+        let mut mixed = a_record();
+        mixed.slabs.push("iscsi://10.0.0.1:3260/iqn.x".into());
+        assert!(!local_only_boot(&mixed), "any remote slab");
+        let mut flowing = a_record();
+        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false });
+        assert!(!local_only_boot(&flowing), "the install boot itself");
+        let mut installing = a_record();
+        installing.install = Some(InstallTicket { boothost: "http://f".into(), host: "h".into(), volume: "v".into() });
+        assert!(!local_only_boot(&installing), "an install in hand");
+        let mut none = a_record();
+        none.slabs.clear();
+        assert!(!local_only_boot(&none), "no slabs at all");
     }
 
     #[test]

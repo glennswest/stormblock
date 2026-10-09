@@ -101,6 +101,8 @@ async fn view(state: &AppState, h: &Host) -> serde_json::Value {
         // What its boot agent does before it claims (#148).
         "intent": h.intent.as_str(),
         "install_claim": h.install_claim.map(|v| v.0),
+        // How far the last install got (#220): laid, then booted.
+        "install": h.install.as_ref().map(|p| p.json()),
         // What its attestation must carry (#216), and its last boot claim.
         "tpm": tpm_word(h),
         "tpm_set_at": h.tpm_set_at,

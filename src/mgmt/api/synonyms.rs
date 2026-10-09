@@ -1339,6 +1339,10 @@ fn intent_body(h: &Host, asked_as: &str) -> serde_json::Value {
         "intent": h.intent.as_str(),
         "updated_at": h.updated_at,
     });
+    // How far the last install got (#220): laid, then booted.
+    if let Some(p) = &h.install {
+        v["install"] = p.json();
+    }
     if !synonym::host_match_key(asked_as).eq(&synonym::host_match_key(&h.name)) {
         v["resolved_from"] = json!(asked_as);
     }
@@ -1408,6 +1412,10 @@ async fn put_intent(
 pub struct InstalledRequest {
     /// The boot clone the node installed from — the `volume.id` of its claim.
     pub volume: String,
+    /// `laid` (or absent: an engine from before #220) from the installer's
+    /// successor once the disk is laid; `booted` from the first boot off it.
+    #[serde(default)]
+    pub stage: Option<String>,
 }
 
 /// `POST /api/v1/synonyms/boothost/<name>/installed {"volume": <clone id>}` —
@@ -1431,6 +1439,22 @@ async fn installed(
     let Ok(clone) = uuid::Uuid::parse_str(req.volume.trim()).map(VolumeId) else {
         return ApiError::bad_request(format!("volume {:?} is not a volume id", req.volume));
     };
+    match req.stage.as_deref().map(str::trim) {
+        None | Some("") | Some("laid") => {}
+        Some("booted") => {
+            let r = state.synonyms.write().await.install_booted(&name, clone);
+            return match r {
+                Ok(h) => {
+                    tracing::info!(host = %h.name, volume = %clone.0, "install proven: the machine booted from its own disk");
+                    let mut v = intent_body(&h, &name);
+                    v["reset"] = json!(false);
+                    Json(v).into_response()
+                }
+                Err(e) => err(e),
+            };
+        }
+        Some(other) => return ApiError::bad_request(format!("stage {other:?} is laid or booted")),
+    }
     let done = state.synonyms.write().await.install_done(&name, clone);
     match done {
         Ok((h, outcome)) => {
