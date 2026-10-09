@@ -180,6 +180,7 @@ ip link set lo up; ip link set eth0 up
 ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2
 T="-t tcp -a 10.0.2.2 -s $PORT"
 r() { echo "RESULT $1 $2"; }
+devs() { for b in /sys/block/nvme*n*; do case $(basename $b) in nvme*c*n*) ;; *) echo $b ;; esac; done; }
 echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
 [ -e /dev/nvme-fabrics ] || { r modules FAIL; poweroff -f; }
 
@@ -199,8 +200,10 @@ nvme connect $T -n "$SUB1" --hostnqn "$H2" >/tmp/o 2>&1 \
 # 5. H1 connects and finds its clone (rw) and the golden (ro), nothing else.
 if nvme connect $T -n "$SUB1" --hostnqn "$H1" >/tmp/o 2>&1; then
     sleep 2
-    dev_of() { for b in /sys/block/nvme*n*; do [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
-    count=$(for b in /sys/block/nvme*n*; do cat $b/nsid; done 2>/dev/null | wc -l)
+    # Native NVMe multipath lists a hidden path node (nvme0c0n1) beside each
+    # device (nvme0n1): only the devices count, and only they are opened.
+    dev_of() { for b in $(devs); do [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
+    count=$(for b in $(devs); do cat $b/nsid; done 2>/dev/null | wc -l)
     [ "$count" = 2 ] && r h1-sees-two-namespaces PASS || r h1-sees-two-namespaces "FAIL ($count)"
     a=$(dev_of "$NS_A"); g=$(dev_of "$NS_G")
     echo "GUEST clone nsid $NS_A = /dev/$a, golden nsid $NS_G = /dev/$g"
@@ -230,7 +233,7 @@ nvme connect $T -n "$SUB2" --hostnqn "$H2" --dhchap-secret "$S4" >/tmp/o 2>&1 \
 if nvme connect $T -n "$SUB2" --hostnqn "$H2" --dhchap-secret "$S2" >/tmp/o 2>&1; then
     sleep 2
     dmesg | grep -q 'authenticated with hash' && r h2-authenticated PASS || r h2-authenticated "FAIL (no auth line)"
-    count=$(for b in /sys/block/nvme*n*; do cat $b/nsid; done 2>/dev/null | wc -l)
+    count=$(for b in $(devs); do cat $b/nsid; done 2>/dev/null | wc -l)
     [ "$count" = 1 ] && r h2-sees-its-one-namespace PASS || r h2-sees-its-one-namespace "FAIL ($count)"
     nvme disconnect -n "$SUB2" >/dev/null 2>&1
 else
