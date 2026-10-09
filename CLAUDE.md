@@ -181,23 +181,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The config file's [iscsi]/[nvmeof] take effect; CHAP is required when set (2026-10-09, #164) — IN PROGRESS
+### The config file's [iscsi]/[nvmeof] take effect; CHAP is required when set (2026-10-09, #164) — DONE
 
 `--iscsi-addr`, `--iscsi-target-name`, `--nvmeof-addr`, `--nvmeof-nqn` had
 clap defaults, so the file's values were always overwritten; CHAP came only
 from the flags; the targets were built from `cli.*`. Found reading: a target
 with CHAP configured accepted an initiator offering `AuthMethod=None`
 (`login.rs`), so CHAP from the flags protected nothing either.
-- [ ] flags are `Option`s; `merge_cli`: CLI > file > default, sections
-      always present for the daemon as before
-- [ ] targets, the advertised host and the serve binds from the merged
-      config; half a CHAP pair (user without secret) refused at validate
-- [ ] login: CHAP configured → only `AuthMethod=CHAP` accepted; a target
-      with no CHAP says so at start (WARN)
-- [ ] tests: merge precedence, half pair refused, a CHAP target refuses
-      `None` and admits a CHAP login (test initiator learns CHAP), wrong
-      secret refused; the daemon with a file-only `[iscsi]` CHAP refuses an
-      unauthenticated login (runtime test); docs, CHANGELOG, check.sh
+- [x] flags are `Option`s; `merge_cli`: flag > file > default, sections
+      always present for the daemon as before (`iscsi_effective`,
+      `nvmeof_listen`)
+- [x] targets, the advertised host and the serve binds from the merged
+      config; half a CHAP pair (or an empty one) refused at validate
+- [x] login: CHAP configured → only `AuthMethod=CHAP` admitted; a target
+      with no CHAP WARNs at start
+- [x] tests: merge precedence, half pair, login units (None refused, right
+      and wrong secret), `integration_iscsi::iscsi_chap_authentication` (the
+      test initiator learnt CHAP), runtime `iscsi_chap_from_file` (the built
+      daemon, CHAP only in the file); check.sh at d4b7576 ALL PASS (nextest
+      1067/1067); README, CHANGELOG
 
 ### Pool admission under per-drive overcommit (2026-10-09, #152, P2) — WAITING ON THE OWNER
 
