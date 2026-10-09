@@ -974,7 +974,7 @@ quarantined remote half took nothing → ENOSPC → ublk EIO → fastetcd ext4 r
       (1102/1102); golden golden-stormblock-68c56e3016ff. The metal
       acceptance stays stormcentral's
 
-### Forge acts on a machine's boot override from stormipmi (2026-10-09, #354, P1) — IN PROGRESS
+### Forge acts on a machine's boot override from stormipmi (2026-10-09, #354, P1) — DONE (golden-stormblock-c1c8710a0e18)
 
 stormipmi#70's contract. Built (WIP): `mgmt/boot_override.rs` (fetch
 `<boot_override_url>/api/v1/machines/<tag>/override`, act on actor forge;
@@ -985,7 +985,8 @@ answers install/local; `Host.boot_override`; boot-claim sends agent
 `stormblock-initramfs` and writes /run/stormblock/override; /init probe
 (local boots the disk, recovery the claimed image) and survey (recovery: no
 drive touched). Tests: parse, HTTP with a stand-in stormipmi, boot-hook
-cases. [ ] build VM; initramfs tests; check.sh; golden.
+cases: 99/99 and boot-hook 141 under sh and busybox sh; check.sh at 5d18b3b
+ALL PASS (1103/1103); golden golden-stormblock-c1c8710a0e18; https://github.com/glennswest/stormcos/issues/493 (forge config).
 
 ### Forge's trust handed to a booting node (2026-10-09, #381, P0) — DONE (golden-stormblock-70d74378fcc4)
 
