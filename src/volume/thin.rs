@@ -85,6 +85,18 @@ pub struct PlacementPolicy {
     pub pinned: Option<SlabId>,
 }
 
+impl PlacementPolicy {
+    /// Prefer `tier`, falling back through every other tier, hottest first
+    /// (#151): a tier is a preference, never a refusal.
+    pub fn preferring(tier: StorageTier) -> Self {
+        let fallback = [StorageTier::Hot, StorageTier::Warm, StorageTier::Cool, StorageTier::Cold]
+            .into_iter()
+            .filter(|t| *t != tier)
+            .collect();
+        PlacementPolicy { preferred_tier: tier, tier_fallback: fallback, ..Default::default() }
+    }
+}
+
 impl Default for PlacementPolicy {
     fn default() -> Self {
         PlacementPolicy {
@@ -559,6 +571,11 @@ impl ThinVolumeHandle {
     /// Which half of the node's mutable storage this volume allocates from.
     pub fn placement_role(&self) -> SlabRole {
         self.placement.role
+    }
+
+    /// The tier this volume's new extents go to first (#151).
+    pub fn preferred_tier(&self) -> StorageTier {
+        self.placement.preferred_tier
     }
 
     /// The slab every extent of this volume lives on, when it is pinned (#150).

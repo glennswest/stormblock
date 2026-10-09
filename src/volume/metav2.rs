@@ -1226,6 +1226,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     record.extents.clear();
     record.parity.clear();
     let origin = record.origin;
+    let tier = record.tier;
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1235,9 +1236,15 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // bytes alone, so an engine that knows none of them reads the header as
     // it always did. Written only when there is something to say, so an
     // unmarked volume's header is byte for byte what it was.
-    if origin != super::metadata::Origin::Unmarked {
+    // Then the tier a claim asked for (#151), when not hot: a reader before
+    // it reads the origin and ignores the byte after.
+    let tier = tier.filter(|t| *t != crate::placement::topology::StorageTier::Hot);
+    if origin != super::metadata::Origin::Unmarked || tier.is_some() {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
+        if let Some(t) = tier {
+            out.push(t as u8);
+        }
     }
     out
 }
@@ -1249,6 +1256,15 @@ const HEADER_EXT_TAG: &[u8; 4] = b"SBX1";
 fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
     if rest.len() >= 5 && &rest[..4] == HEADER_EXT_TAG {
         rec.origin = super::metadata::Origin::from_code(rest[4]);
+        if rest.len() >= 6 {
+            use crate::placement::topology::StorageTier;
+            rec.tier = match rest[5] {
+                1 => Some(StorageTier::Warm),
+                2 => Some(StorageTier::Cool),
+                3 => Some(StorageTier::Cold),
+                _ => None,
+            };
+        }
     }
 }
 
@@ -1426,6 +1442,7 @@ mod tests {
             lba: 4096,
             extent_size: 0,
             origin: Origin::Node,
+            tier: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -1435,6 +1452,15 @@ mod tests {
             bincode::serde::decode_from_slice(&bytes[4..], bincode::config::standard()).unwrap();
         assert_eq!(h.record.name, rec.name);
         assert!(used + 4 < bytes.len(), "the origin follows the header");
+        // #151: a tier rides after the origin; the origin still reads, and
+        // a reader before the tier stops at the origin's byte.
+        rec.tier = Some(crate::placement::topology::StorageTier::Cold);
+        let with_tier = header_bytes(&rec, 1 << 20);
+        let doc = document_of(header_entries(id, &with_tier)).unwrap();
+        assert_eq!(doc.volumes[0].origin, Origin::Node);
+        assert_eq!(doc.volumes[0].tier, Some(crate::placement::topology::StorageTier::Cold));
+        assert_eq!(with_tier.len(), bytes.len() + 1, "one byte after the origin");
+        rec.tier = None;
         // Unmarked: byte for byte the header it always was.
         rec.origin = Origin::Unmarked;
         let plain = header_bytes(&rec, 1 << 20);
@@ -1673,6 +1699,7 @@ mod tests {
             lba: 4096,
             extent_size: 0,
             origin: Default::default(),
+            tier: None,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1707,6 +1734,7 @@ mod tests {
             lba: 4096,
             extent_size: 0,
             origin: Default::default(),
+            tier: None,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

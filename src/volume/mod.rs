@@ -357,6 +357,9 @@ pub struct VolumeManager {
     owners: HashMap<VolumeId, crate::volume::metadata::Owner>,
     /// Where each volume came from (#349). Absent = unmarked.
     origins: HashMap<VolumeId, crate::volume::metadata::Origin>,
+    /// The tier a volume's claim asked for, when not hot (#151): kept so a
+    /// restart and a clone place its new extents there too.
+    tiers: HashMap<VolumeId, StorageTier>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -439,6 +442,7 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             origins: HashMap::new(),
+            tiers: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -472,6 +476,7 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             origins: HashMap::new(),
+            tiers: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -1281,9 +1286,13 @@ impl VolumeManager {
         if let (Some(store), true) = (&self.metadata_store, parity) {
             handle.use_stripe_log(store.dir());
         }
+        let tier = handle.preferred_tier();
         self.volumes.insert(id, handle);
         self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
+        if tier != StorageTier::Hot {
+            self.tiers.insert(id, tier);
+        }
         self.persist().await;
         Ok(id)
     }
@@ -1456,10 +1465,13 @@ impl VolumeManager {
                 PlacementPolicy {
                     role,
                     pinned: vrec.array_id.and_then(|a| self.array_slabs.get(&a).copied()),
-                    ..Default::default()
+                    ..PlacementPolicy::preferring(vrec.tier.unwrap_or(StorageTier::Hot))
                 },
                 vrec.redundancy.clone(),
             ));
+            if let Some(t) = vrec.tier.filter(|t| *t != StorageTier::Hot) {
+                self.tiers.insert(vrec.id, t);
+            }
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
             handle.set_lba(vrec.lba);
@@ -1646,6 +1658,9 @@ impl VolumeManager {
         self.volumes.insert(id, handle);
         self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
+        if let Some(t) = placements.first().and_then(|(first, _)| self.tiers.get(first).copied()) {
+            self.tiers.insert(id, t);
+        }
         if let Some((first, _)) = placements.first() {
             self.record_lineage(id, *first);
         }
@@ -1929,6 +1944,12 @@ impl VolumeManager {
             self.volumes.insert(snap_id, handle);
             self.present.insert(snap_id);
             self.origins.insert(snap_id, crate::volume::metadata::Origin::Node);
+        if let Some(t) = self.tiers.get(&source_id).copied() {
+            self.tiers.insert(snap_id, t);
+        }
+            if let Some(t) = self.tiers.get(source_id).copied() {
+                self.tiers.insert(snap_id, t);
+            }
             self.record_lineage(snap_id, *source_id);
             ids.push(snap_id);
         }
@@ -1966,6 +1987,7 @@ impl VolumeManager {
         self.fs_info.remove(&id);
         self.owners.remove(&id);
         self.origins.remove(&id);
+        self.tiers.remove(&id);
         self.retentions.remove(&id);
 
         // Remove all extents from GEM and dec_ref on slabs: their table pages
@@ -2296,9 +2318,9 @@ impl VolumeManager {
     /// data volume that copied-on-write into a *system* slab would put half
     /// of the node's identity in the half an install replaces (#88).
     fn inherit_handle(&self, vol: ThinVolume, source_id: &VolumeId) -> ThinVolumeHandle {
-        let (policy, failed, role, pinned, lba) = match self.volumes.get(source_id) {
-            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab(), src.lba()),
-            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None, thin::Lba::DEFAULT),
+        let (policy, failed, role, pinned, lba, tier) = match self.volumes.get(source_id) {
+            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab(), src.lba(), src.preferred_tier()),
+            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None, thin::Lba::DEFAULT, StorageTier::Hot),
         };
         // A clone of a pinned volume shares its slots on that slab, and its
         // copy-on-writes stay there with them (#150).
@@ -2306,7 +2328,7 @@ impl VolumeManager {
             vol,
             self.gem.clone(),
             self.registry.clone(),
-            PlacementPolicy { role, pinned, ..Default::default() },
+            PlacementPolicy { role, pinned, ..PlacementPolicy::preferring(tier) },
             policy,
         );
         handle.set_failed_slabs(failed);
@@ -3282,6 +3304,7 @@ impl VolumeManager {
                 fs: self.fs_info.get(id).cloned(),
                 owner: self.owners.get(id).cloned(),
                 origin: self.origins.get(id).copied().unwrap_or_default(),
+                tier: self.tiers.get(id).copied(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -3344,6 +3367,7 @@ impl VolumeManager {
                 fs: self.fs_info.get(&id).cloned(),
                 owner: self.owners.get(&id).cloned(),
                 origin: self.origins.get(&id).copied().unwrap_or_default(),
+                tier: self.tiers.get(&id).copied(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3547,10 +3571,13 @@ impl VolumeManager {
                 PlacementPolicy {
                     role,
                     pinned: vrec.array_id.and_then(|a| self.array_slabs.get(&a).copied()),
-                    ..Default::default()
+                    ..PlacementPolicy::preferring(vrec.tier.unwrap_or(StorageTier::Hot))
                 },
                 vrec.redundancy.clone(),
             ));
+            if let Some(t) = vrec.tier.filter(|t| *t != StorageTier::Hot) {
+                self.tiers.insert(vrec.id, t);
+            }
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
             handle.set_lba(vrec.lba);
@@ -4942,6 +4969,48 @@ mod redundancy_tests {
         let mut back = vec![0u8; 512];
         mgr.get_volume(&clone).unwrap().read(1024, &mut back).await.unwrap();
         assert!(back.iter().all(|&b| b == 0x55));
+    }
+
+    /// #151: the tier a claim asked for is a preference that places the
+    /// volume's extents on a hot-only node too, is inherited by a clone, and
+    /// survives a restart.
+    #[tokio::test]
+    async fn a_claims_tier_is_kept_by_its_clones_and_across_a_restart() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let (cold, clone, plain, path) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let (s, p) = file_slab(&d, "a", slot).await;
+            mgr.add_slab(s).await;
+            let cold = mgr
+                .create_volume_with(
+                    "cold",
+                    1 << 20,
+                    CreateOptions { placement: PlacementPolicy::preferring(StorageTier::Cold), ..Default::default() },
+                )
+                .await
+                .unwrap();
+            let plain = mgr.create_volume_any("plain", 1 << 20).await.unwrap();
+            // Only a hot slab here: placed anyway (a preference, not a refusal).
+            mgr.get_volume(&cold).unwrap().write(0, &[3u8; 4096]).await.unwrap();
+            assert_eq!(mgr.get_volume_handle(&cold).unwrap().preferred_tier(), StorageTier::Cold);
+            mgr.seal_volume(cold, None).await.unwrap();
+            let clone = mgr.create_snapshot(cold, "cold-clone").await.unwrap();
+            assert_eq!(mgr.get_volume_handle(&clone).unwrap().preferred_tier(), StorageTier::Cold, "inherited");
+            mgr.persist().await;
+            (cold, clone, plain, p)
+        };
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        let dev = FileDevice::open(&path).await.unwrap();
+        mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        mgr.restore().await.unwrap();
+        for (id, tier) in [(cold, StorageTier::Cold), (clone, StorageTier::Cold), (plain, StorageTier::Hot)] {
+            assert_eq!(mgr.get_volume_handle(&id).unwrap().preferred_tier(), tier, "after a restart");
+        }
+        let mut back = vec![0u8; 4096];
+        mgr.get_volume(&clone).unwrap().read(0, &mut back).await.unwrap();
+        assert!(back.iter().all(|&b| b == 3));
     }
 
     /// #76: a sealed volume takes no writes, a clone records its parent and

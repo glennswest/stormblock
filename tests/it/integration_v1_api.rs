@@ -1126,3 +1126,103 @@ async fn v1_a_volume_recorded_encrypted_reads_back_false() {
     let v = &again.volumes.get(&id).expect("restored").vol;
     assert!(!v.encrypted, "reported as it is: not encrypted");
 }
+
+/// Two drives, each its own failure domain: a mirror of two places, one of
+/// three cannot.
+async fn setup_two_drives(dir: &TempDir) -> Arc<AppState> {
+    let devices = common::create_file_devices(dir, 2, 64 * 1024 * 1024).await;
+    let mut vm = VolumeManager::new(SLOT);
+    for d in devices {
+        vm.add_backing_device(stormblock::raid::RaidArrayId(uuid::Uuid::new_v4()), d).await;
+    }
+    let mut config = StormBlockConfig::default();
+    config.management.node_name = Some("w1".to_string());
+    config.management.ublk_transport = false;
+    config.management.data_dir = Some(dir.path().join("data").display().to_string());
+    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let slab_registry = vm.registry().clone();
+    let gem = vm.gem().clone();
+    Arc::new(AppState::new(config, vm, slab_registry, gem))
+}
+
+/// #151: a `/v1` claim carries its StorageClass's redundancy, spread and
+/// tier; it is placed by them, or refused (409) the way `/api/v1` refuses
+/// it. A size-class blank minted per policy hands the policy to every claim
+/// cloned from it, and a claim naming another policy for a clone is refused.
+#[tokio::test]
+async fn v1_create_takes_redundancy_spread_and_tier_and_blanks_carry_theirs() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_two_drives(&dir).await;
+    let (base, server) = start_server(state.clone()).await;
+    let c = reqwest::Client::new();
+    let backing = |name: &'static str| {
+        let state = state.clone();
+        async move {
+            let vm = state.volume_manager.lock().await;
+            let id = vm.find_volume(name).await.expect("the backing volume");
+            vm.get_volume_handle(&id).unwrap()
+        }
+    };
+
+    let mut req = create_req("pvc-mirror", 1 << 20, 0);
+    req["redundancy"] = json!("mirror");
+    req["spread"] = json!("drive");
+    req["tier"] = json!("cold");
+    let (s, v) = post(&c, format!("{base}/v1/volumes"), req).await;
+    assert_eq!(s, 200, "{v}");
+    let h = backing("pvc-mirror").await;
+    assert_eq!(h.redundancy().spelling(), "mirror:2", "the claim's policy, not none");
+    assert_eq!(h.preferred_tier(), stormblock::placement::topology::StorageTier::Cold);
+    // Writes land on both drives.
+    h.write(0, &[9u8; 4096]).await.unwrap();
+    let health = h.health().await;
+    assert_eq!((health.extents, health.legs_expected, health.legs_missing), (1, 2, 0), "{health:?}");
+
+    // Three copies on two drives: refused, as /api/v1 refuses it.
+    let mut req = create_req("pvc-three", 1 << 20, 0);
+    req["redundancy"] = json!("mirror:3");
+    let (s, e) = post(&c, format!("{base}/v1/volumes"), req).await;
+    assert_eq!(s, 409, "{e}");
+    assert_eq!(e["code"], "conflict");
+    assert!(state.volume_manager.lock().await.find_volume("pvc-three").await.is_none(), "nothing left behind");
+    // Malformed: 400.
+    for (r, sp, t) in [("mirror:2@shelf", Some("rack"), None), ("bogus", None, None), ("mirror", None, Some("lukewarm"))] {
+        let mut req = create_req("pvc-bad", 1 << 20, 0);
+        req["redundancy"] = json!(r);
+        if let Some(sp) = sp {
+            req["spread"] = json!(sp);
+        }
+        if let Some(t) = t {
+            req["tier"] = json!(t);
+        }
+        let (s, e) = post(&c, format!("{base}/v1/volumes"), req).await;
+        assert_eq!(s, 400, "{r} {sp:?} {t:?}: {e}");
+    }
+
+    // A size-class blank per policy, and a claim cloned from it.
+    let (s, t) = post(
+        &c,
+        format!("{base}/api/v1/fstemplates"),
+        json!({"name": "pvc-ext4j-64m-mirror2-drive", "size": "64M", "redundancy": "mirror", "spread": "drive"}),
+    )
+    .await;
+    assert!(s == 200 || s == 201, "{t}");
+    let tid = t["id"].as_str().unwrap().to_string();
+    let (s, cl) = post(&c, format!("{base}/api/v1/fstemplates/{tid}/clone"), json!({"name": "claim-1"})).await;
+    assert!(s == 200 || s == 201, "{cl}");
+    assert_eq!(backing("claim-1").await.redundancy().spelling(), "mirror:2", "the blank's policy");
+    // Through /v1 from the blank: the same policy is fine, another refused.
+    let blank = t["sealed_volume_id"].as_str().map(str::to_string).unwrap_or(tid.clone());
+    let mut req = create_req("claim-2", 64 << 20, 0);
+    req["source"] = json!({"kind": "volume", "id": blank});
+    req["redundancy"] = json!("mirror:2");
+    let (s, v) = post(&c, format!("{base}/v1/volumes"), req).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(backing("claim-2").await.redundancy().spelling(), "mirror:2");
+    let mut req = create_req("claim-3", 64 << 20, 0);
+    req["source"] = json!({"kind": "volume", "id": blank});
+    req["redundancy"] = json!("none");
+    let (s, e) = post(&c, format!("{base}/v1/volumes"), req).await;
+    assert_eq!(s, 409, "{e}");
+    server.abort();
+}

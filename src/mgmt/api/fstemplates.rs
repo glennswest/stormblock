@@ -117,6 +117,11 @@ pub struct CreateTemplateRequest {
     /// `mirror:3`, `raid5:4+1`, … (see `POST /api/v1/volumes`).
     #[serde(default)]
     pub redundancy: Option<String>,
+    /// The rung the legs differ at (#151), the same as `@rung`. A size-class
+    /// blank per `(size, fs, redundancy, spread)` hands its policy to every
+    /// claim cloned from it.
+    #[serde(default)]
+    pub spread: Option<String>,
     /// Format here and seal in one call. Default true; false leaves the
     /// template `awaiting_format` for an initiator to format over an export.
     #[serde(default = "yes")]
@@ -359,12 +364,9 @@ async fn create_template(
         }
     }
 
-    let redundancy = match req.redundancy.as_deref() {
-        Some(r) => match crate::volume::RedundancyPolicy::parse(r) {
-            Ok(p) => p,
-            Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
-        },
-        None => Default::default(),
+    let redundancy = match crate::volume::RedundancyPolicy::from_request(req.redundancy.as_deref(), req.spread.as_deref()) {
+        Ok(p) => p,
+        Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
     };
     let role = match req.role.as_deref() {
         None => None,

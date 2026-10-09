@@ -172,17 +172,28 @@ StorageClass. On stormcos a claim of class `stormblock` is served by the
 class, CoW-clones the sealed blank of that class (`pvc-ext4j-<MiB>m`) through
 `/api/v1/fstemplates/{id}/clone`, and attaches it over ublk — no mkfs, no copy,
 no CSI. CSI (stormblock-csi, `/v1`) exists only for third-party drivers.
-**Nothing carries a policy today:**
+**The engine's side is built (#151):**
 
-* rustkube-node reads no StorageClass parameters for the built-in driver. It
-  mints size-class blanks with no redundancy, so every PVC is `none`.
-* stormblock-csi, for third-party use, reads `stormblock.io/qosClass`,
-  `stormblock.io/bandwidthClass`, `stormblock.io/encrypted` and
-  `stormblock.io/replicaSlaves`, and `/v1` volume create has no redundancy
-  field. `encrypted: true` is refused (422 `unsupported`, #232): nothing
-  encrypts.
-* The engine already accepts `redundancy` on `POST /api/v1/volumes` and
-  `POST /api/v1/fstemplates`, and **a clone inherits its golden's policy**.
+* `POST /v1/volumes` takes `redundancy`, `spread` and `tier`. So do
+  `POST /api/v1/volumes` (plus `tier`) and `POST /api/v1/fstemplates`
+  (`redundancy`, `spread`). The spelling is the same everywhere: `spread` is
+  the `@rung` of `redundancy`, and naming two different rungs is a 400.
+* A policy the node cannot place on distinct domains is refused the same way
+  on both: 409 (`/v1` code `conflict`), nothing created.
+* `tier` is a preference with every other tier as fallback, never a refusal.
+  It is kept with the volume (in the format-2 header, after the origin; older
+  readers skip it), across a restart, and by every clone.
+* A clone (a blank's claim, a `/v1` create with a `source`) takes its
+  source's policy and tier. A `/v1` create that names another for a clone is
+  refused (409), not quietly given the source's.
+* A size-class blank minted with a policy hands it to every claim cloned from
+  it.
+
+**The drivers' side** is not built yet:
+* rustkube-node (#71) still mints blanks with no redundancy, so every
+  built-in PVC is `none` until it does.
+* stormblock-csi (#21) still sends no policy on `/v1` create.
+* `encrypted: true` is refused (422 `unsupported`, #232): nothing encrypts.
 
 **Proposed parameters** (the built-in driver's, with the same names offered
 to stormblock-csi):
@@ -281,7 +292,7 @@ above ran on files.
 | | where |
 |---|---|
 | per-volume background rebuild: automatic on failure, parallel, prioritised, throttled — **done** ([redundancy.md](redundancy.md#rebuilding-after-a-failure-146)) | stormblock #146 |
-| redundancy / spread / tier as StorageClass parameters, end to end | stormblock #151, rustkube-node #71, stormblock-csi #21 |
+| redundancy / spread / tier as StorageClass parameters, end to end — **engine done** (#151) | rustkube-node #71, stormblock-csi #21 |
 | overcommit per drive → pool admission and headroom | stormblock #152, stormdrive #13, rustkube-node #62 |
 | drive affinity for non-redundant volumes *(decision 1)* | stormblock #153 |
 | a new drive: slab by policy, then rebalance onto it *(decision 3)*; `POST /slabs/rebalance`; drain rate limit | stormblock #154 |

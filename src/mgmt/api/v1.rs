@@ -167,6 +167,20 @@ pub struct CreateVolumeRequest {
     /// has a bulk pool). A clone takes its source's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extent_size_bytes: Option<u64>,
+    /// A StorageClass's `redundancy` (#151), spelled as on `/api/v1`:
+    /// `mirror`, `mirror:3`, `raid5:4+1`, `raid6:4+2`, optionally `@rung`.
+    /// Absent: none. Every leg on a distinct failure domain, or the create
+    /// is refused (409).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redundancy: Option<String>,
+    /// The failure-domain rung the legs differ at (`drive`, `shelf`, `rack`,
+    /// …), the same as `@rung` (#151).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread: Option<String>,
+    /// The tier the volume's extents go to first (`hot`, `warm`, `cool`,
+    /// `cold`), falling back to the others (#151). Absent: hot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 /// `placement` on a `/v1` create.
@@ -1216,6 +1230,22 @@ async fn create_volume(
     if req.encrypted {
         return Err(V1Error::Unsupported(ENCRYPTION_UNSUPPORTED.to_string()));
     }
+    // The claim's policy (#151), checked before anything is allocated.
+    let policy = crate::volume::RedundancyPolicy::from_request(req.redundancy.as_deref(), req.spread.as_deref())
+        .map_err(|e| V1Error::BadRequest(format!("redundancy: {e}")))?;
+    let tier = match req.tier.as_deref() {
+        None => crate::placement::topology::StorageTier::Hot,
+        Some(t) => super::slabs::parse_tier(t)
+            .ok_or_else(|| V1Error::BadRequest(format!("tier {t}: hot, warm, cool or cold")))?,
+    };
+    let asked_policy = req.redundancy.is_some() || req.spread.is_some();
+    if (asked_policy && !policy.is_none() || req.tier.is_some())
+        && req.placement.as_ref().is_some_and(|p| p.array_id.is_some())
+    {
+        return Err(V1Error::BadRequest(
+            "a volume carved on an array is that array's storage: no redundancy, spread or tier of its own".into(),
+        ));
+    }
 
     let mut v1 = state.v1.lock().await;
     expire_windows(&state, &mut v1).await;
@@ -1292,6 +1322,28 @@ async fn create_volume(
         req.replica_tier.slaves,
     )?;
 
+    // A clone takes its source's policy and tier (#151): a claim that names
+    // another is refused, not quietly given the source's.
+    if let Some(src) = source_local {
+        let vm = state.volume_manager.lock().await;
+        if let Some(h) = vm.get_volume_handle(&EngineVolumeId(src)) {
+            let theirs = h.redundancy();
+            if asked_policy && theirs != policy {
+                return Err(V1Error::Conflict(format!(
+                    "a clone takes its source's redundancy ({}), not {}",
+                    theirs.spelling(),
+                    policy.spelling()
+                )));
+            }
+            if req.tier.is_some() && h.preferred_tier() != tier {
+                return Err(V1Error::Conflict(format!(
+                    "a clone takes its source's tier ({}), not {tier}",
+                    h.preferred_tier()
+                )));
+            }
+        }
+    }
+
     // Master on this node: back it with a real thin volume (COW clone of the
     // source when one is bound locally).
     let local_id = if master == v1.local_node {
@@ -1321,7 +1373,12 @@ async fn create_volume(
                         .create_volume_with(
                             &req.name,
                             req.size_bytes,
-                            crate::volume::CreateOptions::default().with_extent_size(req.extent_size_bytes),
+                            crate::volume::CreateOptions {
+                                redundancy: policy.clone(),
+                                placement: crate::volume::PlacementPolicy::preferring(tier),
+                                ..Default::default()
+                            }
+                            .with_extent_size(req.extent_size_bytes),
                         )
                         .await
                 }
@@ -1339,6 +1396,11 @@ async fn create_volume(
                     }
                 }
                 Some(id.0)
+            }
+            // Refused the way `/api/v1` refuses it (#151).
+            Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => return Err(V1Error::Conflict(e.to_string())),
+            Err(crate::volume::VolumeError::NoSpace) => {
+                return Err(V1Error::OutOfSpace("no slab has room for the volume".into()))
             }
             Err(e) => {
                 return Err(V1Error::Internal(format!("backing volume create failed: {e}")))

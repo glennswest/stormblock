@@ -226,6 +226,15 @@ pub struct CreateVolumeRequest {
     /// with `from_template` or `array_id`.
     #[serde(default)]
     pub id: Option<Uuid>,
+    /// The rung the legs differ at, as a field of its own (#151); the same
+    /// as `@rung` on `redundancy`.
+    #[serde(default)]
+    pub spread: Option<String>,
+    /// The tier new extents go to first, falling back to the others (#151):
+    /// `hot` (the default), `warm`, `cool`, `cold`. Kept with the volume and
+    /// its clones.
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -853,13 +862,20 @@ async fn create_volume(
     if req.id.is_some() && req.array_id.is_some() {
         return ApiError::bad_request("a given id is for a volume the node places itself; drop array_id");
     }
-    let redundancy = match req.redundancy.as_deref() {
-        Some(r) => match crate::volume::RedundancyPolicy::parse(r) {
-            Ok(p) => p,
-            Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
-        },
-        None => crate::volume::RedundancyPolicy::none(),
+    let redundancy = match crate::volume::RedundancyPolicy::from_request(req.redundancy.as_deref(), req.spread.as_deref()) {
+        Ok(p) => p,
+        Err(e) => return ApiError::bad_request(format!("redundancy: {e}")),
     };
+    let tier = match req.tier.as_deref() {
+        None => crate::placement::topology::StorageTier::Hot,
+        Some(t) => match super::slabs::parse_tier(t) {
+            Some(t) => t,
+            None => return ApiError::bad_request(format!("tier {t}: hot, warm, cool or cold")),
+        },
+    };
+    if req.tier.is_some() && req.array_id.is_some() {
+        return ApiError::bad_request("a volume on an array is that array's storage; drop \"tier\"");
+    }
     // An array binding is legacy. A volume's extents pick their own slabs, so
     // the only thing a create needs is somewhere to pick from — and demanding
     // an `array_id` for the plain case meant `{"name","size"}`, the request
@@ -917,9 +933,12 @@ async fn create_volume(
     let created = match array_id {
         Some(a) => vm.create_volume(&req.name, size, a).await,
         _ => {
-            let mut opts = crate::volume::CreateOptions::redundant(redundancy.clone())
-                .in_role_opt(role)
-                .with_extent_size(extent_size);
+            let mut opts = crate::volume::CreateOptions {
+                placement: crate::volume::PlacementPolicy::preferring(tier),
+                ..crate::volume::CreateOptions::redundant(redundancy.clone())
+            }
+            .in_role_opt(role)
+            .with_extent_size(extent_size);
             opts.id = req.id.map(VolumeId);
             vm.create_volume_with(&req.name, size, opts).await
         }

@@ -232,6 +232,10 @@ pub struct VolumeRecord {
     /// an extension older readers skip.
     #[serde(skip)]
     pub origin: Origin,
+    /// The tier the volume's claim asked for (#151), `None` for hot. Never
+    /// written by bincode; a format v2 header carries it after the origin.
+    #[serde(skip)]
+    pub tier: Option<crate::placement::topology::StorageTier>,
 }
 
 /// Where a volume came from (#349, owner: an install drops old system
@@ -440,6 +444,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     lba: crate::volume::thin::Lba::DEFAULT,
                     extent_size: 0,
                     origin: Default::default(),
+                    tier: None,
                 })
                 .collect(),
         }
@@ -552,6 +557,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     lba: crate::volume::thin::Lba::DEFAULT,
                     extent_size: 0,
                     origin: Default::default(),
+                    tier: None,
                 })
                 .collect(),
         }
@@ -616,6 +622,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     template: false,
                     extent_size: 0,
                     origin: Default::default(),
+                    tier: None,
                 })
                 .collect(),
         }
@@ -681,6 +688,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     template: false,
                         extent_size: 0,
                         origin: Default::default(),
+                    tier: None,
                     })
                 .collect(),
         }
@@ -741,6 +749,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     template: false,
                         extent_size: 0,
                         origin: Default::default(),
+                    tier: None,
                     })
                 .collect(),
         }
@@ -803,6 +812,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     template: false,
                         extent_size: 0,
                         origin: Default::default(),
+                    tier: None,
                     })
                 .collect(),
         }
@@ -859,6 +869,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     template: false,
                         extent_size: 0,
                         origin: Default::default(),
+                    tier: None,
                     })
                 .collect(),
         }
@@ -918,6 +929,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     template: false,
                         extent_size: 0,
                         origin: Default::default(),
+                    tier: None,
                     })
                 .collect(),
         }
@@ -1211,6 +1223,7 @@ mod tests {
                 template: false,
                     extent_size: 0,
                     origin: Default::default(),
+                    tier: None,
                 }],
         }
     }
@@ -1349,6 +1362,7 @@ mod tests {
                     lba: crate::volume::thin::Lba::DEFAULT,
                 extent_size: 0,
                 origin: Default::default(),
+                    tier: None,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1436,6 +1450,7 @@ mod tests {
                 template: false,
                     extent_size: 0,
                     origin: Default::default(),
+                    tier: None,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1661,6 +1676,7 @@ mod retention_tests {
                 template: false,
                     extent_size: 0,
                     origin: Default::default(),
+                    tier: None,
                 }],
         }
     }

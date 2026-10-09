@@ -107,6 +107,25 @@ impl RedundancyPolicy {
         self.scheme == Redundancy::None
     }
 
+    /// The policy a claim asks for (#151): `redundancy` as [`parse`] reads
+    /// it (absent: none), and `spread` the rung, as a field of its own or as
+    /// `@rung`. Both, saying different rungs, is refused rather than one
+    /// picked.
+    pub fn from_request(redundancy: Option<&str>, spread: Option<&str>) -> Result<Self, String> {
+        let mut policy = match redundancy {
+            Some(r) => Self::parse(r)?,
+            None => Self::none(),
+        };
+        if let Some(rung) = spread.map(str::trim).filter(|r| !r.is_empty()) {
+            let said = redundancy.is_some_and(|r| r.contains('@'));
+            if said && policy.spread != rung {
+                return Err(format!("spread {rung} and redundancy {} name different rungs", policy.spelling()));
+            }
+            policy = policy.at(rung);
+        }
+        Ok(policy)
+    }
+
     /// Parse the spellings an operator writes:
     /// `none`, `mirror` (= 2), `mirror:3`, `raid1` (= mirror:2), `raid10`
     /// (= mirror:2 — striping is what organic placement already does),
@@ -249,4 +268,16 @@ mod tests {
         assert_eq!(Redundancy::None.tolerates(), 0);
         assert!((Redundancy::Parity { data: 4, parity: 1 }.overhead() - 1.25).abs() < 1e-9);
     }
+    /// #151: `spread` as a field of its own, the same as `@rung`; both
+    /// naming different rungs is refused.
+    #[test]
+    fn a_claims_spread_is_a_field_or_a_rung_never_two() {
+        let p = RedundancyPolicy::from_request(Some("mirror"), Some("shelf")).unwrap();
+        assert_eq!(p.spelling(), "mirror:2@shelf");
+        assert_eq!(RedundancyPolicy::from_request(Some("mirror:2@shelf"), Some("shelf")).unwrap(), p);
+        assert!(RedundancyPolicy::from_request(Some("mirror:2@shelf"), Some("rack")).is_err());
+        assert!(RedundancyPolicy::from_request(None, None).unwrap().is_none());
+        assert_eq!(RedundancyPolicy::from_request(Some("mirror"), None).unwrap().spelling(), "mirror:2");
+    }
+
 }

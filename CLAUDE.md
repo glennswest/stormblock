@@ -187,13 +187,14 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 `@rung`; a tier on create was honoured until the next restart and not by
 clones. The default for a claim that names nothing stays `none` (the
 design's owner decision 2, not taken here).
-- [ ] `RedundancyPolicy::from_request(redundancy, spread)` (a spread that
+- [x] `RedundancyPolicy::from_request(redundancy, spread)` (a spread that
       contradicts an `@rung` refused), `PlacementPolicy::preferring(tier)`
-- [ ] `/v1` create: `redundancy`, `spread`, `tier`; InsufficientDomains 409
+- [x] `/v1` create: `redundancy`, `spread`, `tier`; InsufficientDomains 409
       like `/api/v1`; `/api/v1` create and template create: `spread`, `tier`
-- [ ] the tier kept: `VolumeManager.tiers`, the v2 header extension after
-      origin (older readers skip it), restored, inherited by clones,
-      updated by retier
+- [x] the tier kept: `VolumeManager.tiers`, the v2 header extension after
+      origin (older readers skip it), restored, inherited by clones (a
+      retier moves extents and leaves the preference); a `/v1` clone naming
+      another policy than its source's: 409
 - [ ] tests (/v1 mirror placed and refused; a class blank per policy and
       its clone; tier across a restart), docs, CHANGELOG, check.sh, golden
 
