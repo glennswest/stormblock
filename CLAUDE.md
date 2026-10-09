@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### An install refused the release's own volumes as data (2026-10-08, #369, P0) — IN PROGRESS
+### An install refused the release's own volumes as data (2026-10-08, #369, P0) — DONE (golden-stormblock-e0c57de31892)
 
 Dell 11.99 over 11.98: plan refused cilium, cilium-operator, hubble-relay,
 coredns (+ .golden) as "data volume(s) with extents outside the data half";
@@ -192,11 +192,11 @@ system half. Not #362 (forge composes; the disk was laid by 11.98).
       a release stray, not data; adopt drops its data-half record
       (`release_dropped`); node/unmarked volumes still refused
 - [x] test `a_release_volume_with_extents_outside_the_data_half_does_not_stop_an_install`
-- [ ] build VM; golden; how the data slab came to record them (the boot's
-      "record's slot now belongs to …; mapping dropped" lines on the Dell's
-      own disk are a second finding: shared slots' owners after a move)
+- [x] check.sh at bc9f223 ALL PASS; golden golden-stormblock-e0c57de31892
+      (stormcos#467). The second finding (goldens' extents dropped at
+      restore: a shared slot's owner/count lost) is #370
 
-### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — IN PROGRESS
+### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — PART DONE (golden-stormblock-e0c57de31892)
 
 The Dell: `GET /volumes` 10–58 s behind the manager mutex; a clone ~60 s.
 Codex review: cross-role clone holds the manager across `copy_volume`;
@@ -215,10 +215,12 @@ GEM+registry write guards across ref-count table I/O.
       `STORMBLOCK_LOCK_ASSERT=1`)
 - [x] tests: `integration_locks` (slow device; copies, creates, clones,
       listings), `one_long_operation_per_volume`
-- [ ] build VM; then the slab-level holds (sync_registered/publish_ready,
-      snapshot ref-count I/O under GEM+registry) and the template build's
-      inline persists, as a second step if this one is not enough
-- [ ] check.sh, golden, comment
+- [x] check.sh at bc9f223 ALL PASS (34 listings during the slow-disk work,
+      the slowest 260 ms); golden golden-stormblock-e0c57de31892; progress
+      on #364
+- [ ] left: sync_registered/publish_ready under the registry read guard;
+      snapshot ref-count I/O under GEM+registry write; template builds'
+      inline persists; health from a snapshot
 
 ### A worker panic left the engine alive and silent (2026-10-08, #368, P0) — DONE (golden-stormblock-501f2106e220)
 
