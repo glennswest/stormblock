@@ -2620,6 +2620,111 @@ mod tests {
         }
     }
 
+    /// Writes wait while `armed`: a device whose table write is in flight
+    /// for as long as the test wants (#364).
+    struct Gated {
+        inner: Arc<dyn BlockDevice>,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        blocked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for Gated {
+        fn id(&self) -> &super::super::DeviceId { self.inner.id() }
+        fn capacity_bytes(&self) -> u64 { self.inner.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.inner.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.inner.optimal_io_size() }
+        fn device_type(&self) -> super::super::DriveType { self.inner.device_type() }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.armed.load(SeqCst) {
+                self.blocked.fetch_add(1, SeqCst);
+                while self.armed.load(SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> DriveResult<()> { self.inner.flush().await }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+        fn smart_status(&self) -> DriveResult<super::super::SmartData> {
+            self.inner.smart_status()
+        }
+    }
+
+    /// #364: a sync writes its slot table with no registry lock held, and a
+    /// slot freed while that write is in flight comes out free on the device.
+    #[tokio::test]
+    async fn a_sync_writes_its_table_with_no_registry_held_and_a_free_meanwhile_wins() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gated: Arc<dyn BlockDevice> =
+            Arc::new(Gated { inner: dev.clone(), armed: armed.clone(), blocked: blocked.clone() });
+        let mut slab = Slab::format(gated, 64 * 1024, StorageTier::Hot).await.unwrap();
+        let vol = VolumeId::new();
+        let kept = slab.allocate_deferred(vol, 0, 1).await.unwrap();
+        let freed = slab.allocate_deferred(vol, 1, 1).await.unwrap();
+        slab.confirm(kept);
+        slab.confirm(freed);
+        let id = slab.slab_id();
+        let mut reg = super::super::slab_registry::SlabRegistry::new();
+        reg.add(slab);
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(reg));
+
+        armed.store(true, SeqCst);
+        let r = registry.clone();
+        let sync = tokio::spawn(async move { sync_registered(&r, id).await });
+        while blocked.load(SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // The table write is in flight: the registry is free to write.
+        let got_write = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (r, g) = (registry.clone(), got_write.clone());
+        let free = tokio::spawn(async move {
+            let mut w = r.write().await;
+            g.store(true, SeqCst);
+            w.get_mut(&id).unwrap().dec_ref_batch(&[freed]).await.map(|o| o.freed)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !got_write.load(SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "the registry was held across the table write");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        armed.store(false, SeqCst);
+        sync.await.unwrap().unwrap();
+        assert_eq!(free.await.unwrap().unwrap(), 1);
+        sync_registered(&registry, id).await.unwrap();
+        drop(registry);
+
+        let reopened = Slab::open(dev.clone()).await.unwrap();
+        assert_eq!(reopened.get_slot(kept).await.unwrap().state, SlotState::Allocated);
+        assert_eq!(reopened.get_slot(freed).await.unwrap().state, SlotState::Free, "the free written last wins");
+        cleanup(&path);
+    }
+
+    /// #364: a clone's ref counts change in memory, are read back at once,
+    /// and reach the device with the next sync, not before.
+    #[tokio::test]
+    async fn a_clones_ref_counts_wait_for_the_sync() {
+        let (dev, path) = create_slab_device(64 * 1024 * 1024).await;
+        let mut slab = Slab::format(dev.clone(), 64 * 1024, StorageTier::Hot).await.unwrap();
+        let vol = VolumeId::new();
+        let s = slab.allocate(vol, 0).await.unwrap();
+        slab.inc_ref_batch(&[s]).await.unwrap();
+        assert_eq!(slab.get_slot(s).await.unwrap().ref_count, 2, "memory has it at once");
+        assert_eq!(Slab::open(dev.clone()).await.unwrap().get_slot(s).await.unwrap().ref_count, 1, "not yet on the device");
+        slab.sync().await.unwrap();
+        assert_eq!(Slab::open(dev.clone()).await.unwrap().get_slot(s).await.unwrap().ref_count, 2);
+        cleanup(&path);
+    }
+
     /// A clone of an N-extent image must cost sectors touched, not N round
     /// trips — that is the whole point of the batching, and it is what keeps
     /// clone latency flat as VM images grow.
