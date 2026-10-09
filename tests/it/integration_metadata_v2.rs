@@ -758,3 +758,70 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
     assert_eq!(read_mib(&vm, "new0", 3 << 30).await, pattern(7, 3 << 30, 0));
     assert_eq!(read_mib(&vm, "new1", 3 << 30).await, pattern(7, 3 << 30, 1));
 }
+
+/// #367: a copy and a restripe of a volume whose extents are larger than the
+/// manager's slot step by the volume's own extent size, and a volume whose
+/// map was evicted is loaded first. Both used the manager's slot (1 MiB) on
+/// an 8 MiB-extent volume (reading the wrong offsets, reporting success),
+/// and both panicked on a cold map.
+#[tokio::test]
+async fn copy_and_restripe_use_the_volumes_extent_size_and_load_a_cold_map() {
+    use stormblock::drive::slab::SlabRole;
+    use stormblock::volume::{CreateOptions, RedundancyPolicy, BULK_EXTENT};
+    const MIB: u64 = 1 << 20;
+    let (d1, d8) = (device("512M").await, device("1G").await);
+    let mk = |dev: Arc<dyn BlockDevice>, slot: u64| async move {
+        let fmt = SlabFormat::new(slot, StorageTier::Hot)
+            .with_role(SlabRole::Data)
+            .with_version(SLAB_VERSION_2)
+            .with_auto_metadata(dev.capacity_bytes());
+        Slab::format_with(dev, fmt).await.unwrap()
+    };
+    let (s1, s8) = (mk(d1.clone(), MIB).await, mk(d8.clone(), BULK_EXTENT).await);
+    let (id1, id8) = (s1.slab_id(), s8.slab_id());
+    let mut vm = VolumeManager::new(MIB);
+    vm.add_slab(s1).await;
+    vm.add_slab(s8).await;
+    vm.persist_to_slabs(vec![id1, id8]);
+
+    let big = vm
+        .create_volume_with("big", 64 * MIB, CreateOptions::default().with_extent_size(Some(BULK_EXTENT)))
+        .await
+        .unwrap();
+    assert_eq!(esize(&vm, big), BULK_EXTENT);
+    // Blocks deep inside each 8 MiB extent: past the first 1 MiB of it.
+    let at = |e: u64, k: u64| e * BULK_EXTENT + k * MIB + 4096;
+    {
+        let v = vm.get_volume(&big).unwrap();
+        for e in [0u64, 2, 5] {
+            for k in [0u64, 3, 7] {
+                v.write(at(e, k), &pattern(7, e * 10 + k, 0)).await.unwrap();
+            }
+        }
+        v.flush().await.unwrap();
+    }
+    vm.persist().await;
+    vm.evict_idle(0).await;
+    assert!(vm.gem().read().await.is_cold(&big), "the map evicted");
+
+    let copy = vm.copy_volume(big, "big-copy", SlabRole::Data).await.unwrap();
+    assert_eq!(esize(&vm, copy), BULK_EXTENT);
+    for e in [0u64, 2, 5] {
+        for k in [0u64, 3, 7] {
+            assert_eq!(read_at(&vm, "big-copy", at(e, k)).await, pattern(7, e * 10 + k, 0), "copy: extent {e}, MiB {k}");
+        }
+    }
+
+    vm.persist().await;
+    vm.evict_idle(0).await;
+    assert!(vm.gem().read().await.is_cold(&big), "the map evicted again");
+    let r = vm.restripe(big, RedundancyPolicy::none()).await.unwrap();
+    assert_eq!(r.extents_copied, 3, "{r:?}");
+    for e in [0u64, 2, 5] {
+        for k in [0u64, 3, 7] {
+            assert_eq!(read_at(&vm, "big", at(e, k)).await, pattern(7, e * 10 + k, 0), "restripe: extent {e}, MiB {k}");
+        }
+    }
+    vm.persist().await;
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+}

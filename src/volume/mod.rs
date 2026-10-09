@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::drive::BlockDevice;
+use crate::drive::{BlockDevice, DriveError};
 use crate::drive::slab::{Slab, SlabId, SlabRole};
 use crate::drive::slab_registry::SlabRegistry;
 use crate::placement::topology::StorageTier;
@@ -1805,7 +1805,11 @@ impl VolumeManager {
             let v = handle.lock().await;
             (v.name.clone(), v.virtual_size)
         };
-        let scratch = ThinVolume::new(format!("{name}-restripe"), size, slot_size);
+        // The volume's own extent size, not the manager's slot (#367): the
+        // copy steps by it, and the scratch takes it.
+        let extent_size = handle.extent_size();
+        let _ = slot_size;
+        let scratch = ThinVolume::new(format!("{name}-restripe"), size, extent_size);
         let scratch_id = scratch.id();
         let dest = Arc::new(ThinVolumeHandle::with_redundancy(
             scratch,
@@ -1815,15 +1819,18 @@ impl VolumeManager {
             policy.clone(),
         ));
 
-        let extents: Vec<u64> = {
-            let gem = gem_arc.read().await;
-            gem.volume_extents(&id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default()
+        let (_pin, extents) = match mapped_extents(&gem_arc, id).await {
+            Ok(x) => x,
+            Err(e) => {
+                Self::discard_scratch_in(&gem_arc, &registry, scratch_id).await;
+                return Err(e);
+            }
         };
         let _hold = handle.lock().await;
-        let mut buf = vec![0u8; slot_size as usize];
+        let mut buf = vec![0u8; extent_size as usize];
         let mut copied = 0usize;
         for vext in &extents {
-            let off = vext * slot_size;
+            let off = vext * extent_size;
             if let Err(e) = handle.read(off, &mut buf).await {
                 Self::discard_scratch_in(&gem_arc, &registry, scratch_id).await;
                 return Err(VolumeError::Drive(e));
@@ -1959,6 +1966,12 @@ impl VolumeManager {
         if !by.is_empty() {
             return Err(VolumeError::InUse { id, by });
         }
+        if !self.volumes.contains_key(&id) {
+            return Err(VolumeError::VolumeNotFound(id));
+        }
+        // Its map in memory and its table pages read before anything is
+        // forgotten (#155, #367): a load that fails leaves the volume as it was.
+        self.prefetch_volume(id).await?;
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
         self.present.remove(&id);
@@ -1968,9 +1981,8 @@ impl VolumeManager {
         self.origins.remove(&id);
         self.retentions.remove(&id);
 
-        // Remove all extents from GEM and dec_ref on slabs: their table pages
-        // read first, with no lock held (#155).
-        self.prefetch_volume(id).await;
+        // Remove all extents from GEM and dec_ref on slabs (their table
+        // pages were read above, with no lock held).
         let mut gem = self.gem.write().await;
         let mut reg = self.registry.write().await;
         let level = erase.unwrap_or(reg.erase_default()).max(reg.erase_default());
@@ -2095,7 +2107,7 @@ impl VolumeManager {
         let slot_size = source_vol.slot_size;
         drop(source_vol);
 
-        self.prefetch_volume(source_id).await;
+        self.prefetch_volume(source_id).await?;
         let snap = {
             let mut gem = self.gem.write().await;
             let mut reg = self.registry.write().await;
@@ -2165,15 +2177,20 @@ impl VolumeManager {
         // Only the mapped extents: an unmapped one reads as zeros on both
         // sides, and writing it would cost the destination a slot per hole —
         // the same thin provisioning the image builder is careful about.
-        let extents: Vec<u64> = {
-            let gem = self.gem.read().await;
-            gem.volume_extents(&source_id)
-                .map(|it| it.map(|(v, _)| v).collect())
-                .unwrap_or_default()
+        let extents = match mapped_extents(&self.gem, source_id).await {
+            Ok((_pin, x)) => x,
+            Err(e) => {
+                drop(dest);
+                let _ = self.delete_volume(dest_id).await;
+                return Err(e);
+            }
         };
-        let mut buf = vec![0u8; self.slot_size as usize];
+        // The source's extent size, which the destination was made with
+        // (#367): not the manager's slot.
+        let extent_size = source.extent_size();
+        let mut buf = vec![0u8; extent_size as usize];
         for vext in &extents {
-            let off = vext * self.slot_size;
+            let off = vext * extent_size;
             let failed = match source.read(off, &mut buf).await {
                 Err(e) => Some(e),
                 Ok(_) => dest.write(off, &buf).await.err(),
@@ -2228,12 +2245,22 @@ impl VolumeManager {
             };
             let dest_id = m.create_volume_with(name, virtual_size, opts).await?;
             let dest = m.volumes.get(&dest_id).ok_or(VolumeError::VolumeNotFound(dest_id))?.clone();
-            let extents: Vec<u64> = {
-                let gem = m.gem.read().await;
-                gem.volume_extents(&source_id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default()
+            let extents = match mapped_extents(&m.gem, source_id).await {
+                Ok((_pin, x)) => x,
+                Err(e) => {
+                    drop(dest);
+                    let _ = m.delete_volume(dest_id).await;
+                    let _ = defer.owed();
+                    drop(m);
+                    Self::persist_detached(vm).await;
+                    return Err(e);
+                }
             };
             let _ = defer.owed();
-            (source, dest_id, dest, extents, m.slot_size)
+            // The source's extent size, which the destination was made with
+            // (#367): not the manager's slot.
+            let extent_size = source.extent_size();
+            (source, dest_id, dest, extents, extent_size)
         };
         // The new volume's record, made durable with no lock held.
         Self::persist_detached(vm).await;
@@ -2395,11 +2422,13 @@ impl VolumeManager {
     /// Read the slot table pages of every slot a volume maps into their
     /// slabs' caches, holding no lock while the device is read (#155): what
     /// a delete or a clone changes next under the registry lock.
-    pub async fn prefetch_volume(&self, id: VolumeId) {
-        // What follows a prefetch (a delete, a clone) needs the map.
-        if let Err(e) = gem::ensure_resident(&self.gem, id).await {
-            tracing::error!("volume {}: loading its extent map: {e}", id.0);
-        }
+    pub async fn prefetch_volume(&self, id: VolumeId) -> Result<(), VolumeError> {
+        // What follows a prefetch (a delete, a clone) needs the map: a load
+        // that fails stops it (#367), it does not go on to panic on a cold
+        // map or treat the volume as having no extents.
+        gem::ensure_resident(&self.gem, id)
+            .await
+            .map_err(|e| VolumeError::Drive(DriveError::Io(std::io::Error::other(format!("volume {}: loading its extent map: {e}", id.0)))))?;
         let by_slab: HashMap<SlabId, Vec<u64>> = {
             let gem = self.gem.read().await;
             let mut m: HashMap<SlabId, Vec<u64>> = HashMap::new();
@@ -2417,6 +2446,7 @@ impl VolumeManager {
         for (t, idx) in tables {
             t.prefetch(idx).await;
         }
+        Ok(())
     }
 
     /// Get the shared SlabRegistry.
@@ -3737,6 +3767,23 @@ fn reconcile_record(
 /// leg on must match. An engine that addressed 1 MiB extents in 4 MiB slots
 /// once wrote every extent across its neighbours; a record and a slab that
 /// disagree are refused, not guessed between.
+/// The extents `id` maps, its map loaded first and every map kept in memory
+/// while the returned pin is held (#367): a copy or restripe of a volume
+/// whose map was evicted panicked, and a load that fails is an error, not a
+/// volume with no extents (which would copy as zeros and report success).
+async fn mapped_extents(
+    map: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>,
+    id: VolumeId,
+) -> Result<(gem::Pin, Vec<u64>), VolumeError> {
+    let pin = map.read().await.pin();
+    gem::ensure_resident(map, id).await.map_err(|e| {
+        VolumeError::Drive(DriveError::Io(std::io::Error::other(format!("volume {}: loading its extent map: {e}", id.0))))
+    })?;
+    let g = map.read().await;
+    let extents = g.volume_extents(&id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default();
+    Ok((pin, extents))
+}
+
 fn restored_extent_size(
     reg: &SlabRegistry,
     vrec: &metadata::VolumeRecord,
