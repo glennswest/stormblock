@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### NSIDs are never reused (2026-10-09, #96) — IN PROGRESS
+### NSIDs are never reused (2026-10-09, #96) — DONE
 
 - [x] `target::nvmeof::nsid`: per-subsystem high-water mark (process-wide by
       NQN), raised by every add (next and at), loaded from and kept in
@@ -189,9 +189,11 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
       `next_free_nsid` go above it; NN = max(present, mark + 1024, MAX)
 - [x] tests (`an_nsid_is_never_handed_out_twice_even_after_a_restart`, the
       updated `next_free_nsid` test); docs (nvme-access.md), CHANGELOG
-- [ ] check.sh; the kernel over NVMe/TCP after an NSID above earlier ones
-      (ci-nvme-hosts-verify.sh); golden. #98 (two subsystem schemes) stays
-      the design question
+- [x] check.sh at 66b5a09 ALL PASS (nextest 1080/1080);
+      `ci-nvme-hosts-verify.sh` ALL PASS (13 guest checks, kernel 7.2.8) once
+      it presented the admin token (#274) and skipped multipath path nodes.
+      Not run: a host connected before a later, higher NSID is hot-added (NN
+      has 1024 of headroom for it). #98 stays the design question
 
 ### A first write zeroes its slot without writing a megabyte (2026-10-09, #173) — DONE (golden-stormblock-0c71541cc5ff)
 
