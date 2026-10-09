@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A first write zeroes its slot without writing a megabyte (2026-10-09, #173) — DONE
+### A first write zeroes its slot without writing a megabyte (2026-10-09, #173) — DONE (golden-stormblock-0c71541cc5ff)
 
 - [x] `ThinVolumeHandle::write_fresh`: the data, and `write_zeroes` around it
       (single, mirrored, parity member); `write_zeroes` overridden on
