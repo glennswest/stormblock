@@ -1056,6 +1056,7 @@ async fn a_create_whose_caller_gives_up_still_finishes() {
     }
 
     let mut state_now = String::new();
+    let t0 = std::time::Instant::now();
     for _ in 0..600 {
         if let Some(t) = state.fstemplates.lock().await.find("pvc-big") {
             state_now = t.state.as_str().to_string();
@@ -1066,6 +1067,9 @@ async fn a_create_whose_caller_gives_up_still_finishes() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    // #173: what a 100 GiB blank's format costs (the 30 s window above is
+    // what it was before first writes wrote a megabyte of zeros each).
+    eprintln!("100 GiB blank ready {:.1} s after the caller gave up", t0.elapsed().as_secs_f64());
     assert_eq!(state_now, "ready", "the format finished without anyone waiting for it");
     server.abort();
 }
@@ -1410,8 +1414,10 @@ async fn a_qcow2_disk_image_imports_into_a_sealed_golden_and_clones_with_its_own
         .json(&serde_json::json!({ "name": "cloud-golden", "file": path.to_str().unwrap() }))
         .send().await.unwrap().json().await.unwrap();
     let id = job["id"].as_str().unwrap().to_string();
+    // Until the job ends, not a wall clock sized for an idle box (#173):
+    // a full suite on a shared one took longer than 5 s.
     let mut st = job;
-    for _ in 0..200 {
+    for _ in 0..4800 {
         if st["state"] == "done" || st["state"] == "failed" {
             break;
         }

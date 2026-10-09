@@ -222,6 +222,78 @@ pub struct IoCompletion {
 /// Implemented by NvmeDevice (VFIO), SasDevice (io_uring), and FileDevice (tokio).
 /// The RAID engine and volume manager only interact with this trait.
 #[async_trait]
+/// Zeros written as zeros, a megabyte at a time: what a device that cannot
+/// do better does, and what one that can falls back to.
+pub async fn write_zeroes_by_writing<D: BlockDevice + ?Sized>(dev: &D, offset: u64, len: u64) -> DriveResult<()> {
+    const CHUNK: u64 = 1 << 20;
+    let zeros = vec![0u8; CHUNK.min(len).max(1) as usize];
+    let mut done = 0u64;
+    while done < len {
+        let n = (len - done).min(zeros.len() as u64) as usize;
+        dev.write(offset + done, &zeros[..n]).await?;
+        done += n as u64;
+    }
+    Ok(())
+}
+
+/// Zeros without moving them (#173): `BLKZEROOUT` on a block device (the
+/// drive's WRITE ZEROES / WRITE SAME where it has one, the kernel's own
+/// zeroing where it does not), a punched hole in a regular file. `Ok(false)`
+/// when neither applies; the caller writes zeros then. Only the part of the
+/// range on whole `unit`s is done here; the caller zeroes the edges.
+#[cfg(target_os = "linux")]
+pub(crate) async fn zero_out_fd(fd: std::os::unix::io::RawFd, block_device: bool, offset: u64, len: u64) -> DriveResult<bool> {
+    let r = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let rc = if block_device {
+            let range: [u64; 2] = [offset, len];
+            // BLKZEROOUT = _IO(0x12, 127)
+            unsafe { libc::ioctl(fd, 0x127F, &range) }
+        } else {
+            unsafe {
+                libc::fallocate(
+                    fd,
+                    libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                    offset as libc::off_t,
+                    len as libc::off_t,
+                )
+            }
+        };
+        if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    })
+    .await
+    .map_err(|e| DriveError::Other(e.into()))?;
+    Ok(r.is_ok())
+}
+
+/// [`zero_out_fd`] on the whole `unit`s of a range, the edges written: the
+/// range reads back as zeros either way.
+#[cfg(target_os = "linux")]
+pub(crate) async fn zero_range_fast<D: BlockDevice + ?Sized>(
+    dev: &D,
+    fd: std::os::unix::io::RawFd,
+    block_device: bool,
+    unit: u64,
+    offset: u64,
+    len: u64,
+) -> DriveResult<()> {
+    let unit = unit.max(512);
+    let start = offset.div_ceil(unit) * unit;
+    let end = (offset + len) / unit * unit;
+    if end <= start {
+        return write_zeroes_by_writing(dev, offset, len).await;
+    }
+    if !zero_out_fd(fd, block_device, start, end - start).await? {
+        return write_zeroes_by_writing(dev, offset, len).await;
+    }
+    if start > offset {
+        write_zeroes_by_writing(dev, offset, start - offset).await?;
+    }
+    if offset + len > end {
+        write_zeroes_by_writing(dev, end, offset + len - end).await?;
+    }
+    Ok(())
+}
+
 pub trait BlockDevice: Send + Sync {
     /// Device identity.
     fn id(&self) -> &DeviceId;
@@ -273,15 +345,7 @@ pub trait BlockDevice: Send + Sync {
     /// zeros; a device that can do better (a thin volume skipping what it
     /// never mapped) overrides it. Unlike `discard`, this is a promise.
     async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
-        const CHUNK: u64 = 1 << 20;
-        let zeros = vec![0u8; CHUNK.min(len).max(1) as usize];
-        let mut done = 0u64;
-        while done < len {
-            let n = (len - done).min(zeros.len() as u64) as usize;
-            self.write(offset + done, &zeros[..n]).await?;
-            done += n as u64;
-        }
-        Ok(())
+        write_zeroes_by_writing(self, offset, len).await
     }
 
     /// Query SMART health data. Returns None if not supported.

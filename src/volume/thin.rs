@@ -1211,6 +1211,48 @@ impl ThinVolumeHandle {
         Ok(())
     }
 
+    /// A fresh slot's first write (#171): the data, and zeros everywhere else
+    /// in the slot, so what this volume never wrote reads as zero, not as the
+    /// slot's previous tenant. The zeros go through the device's own zeroing
+    /// (#173): a punched hole or `BLKZEROOUT`, not a megabyte written per
+    /// extent, which made formatting a large blank about six times slower.
+    /// Data and zeros are both covered by the next flush, and the slot's
+    /// entry is published after it, as before.
+    async fn write_fresh(&self, leg: Leg, off_in_slot: u64, buf: &[u8]) -> DriveResult<()> {
+        let (dev, phys) = self.leg_io(leg, 0).await?;
+        let end = off_in_slot + buf.len() as u64;
+        // `STORMBLOCK_ZERO_BY_WRITING=1`: zeros written, as before #173, for
+        // measuring the difference.
+        let by_writing = zero_by_writing();
+        let zero = |at: u64, len: u64| {
+            let dev = dev.clone();
+            async move {
+                if by_writing {
+                    crate::drive::write_zeroes_by_writing(&*dev, at, len).await
+                } else {
+                    dev.write_zeroes(at, len).await
+                }
+            }
+        };
+        if off_in_slot > 0 {
+            zero(phys, off_in_slot).await?;
+        }
+        let n = dev.write(phys + off_in_slot, buf).await?;
+        if n != buf.len() {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "short write: {n} of {} bytes into slab {} slot {}",
+                buf.len(), leg.slab_id.0, leg.slot_idx
+            )));
+        }
+        if end < self.slot_size {
+            zero(phys + end, self.slot_size - end).await?;
+        }
+        if let Some(slab) = self.registry.read().await.get(&leg.slab_id) {
+            slab.confirm(leg.slot_idx);
+        }
+        Ok(())
+    }
+
     /// The legs of a location that are worth trying, preferred one first:
     /// not on a failed slab, rotated by extent so mirrors share the reads.
     fn usable_legs(&self, loc: &ExtentLocation, vext: u64) -> Vec<Leg> {
@@ -1313,9 +1355,7 @@ impl ThinVolumeHandle {
             // volume never wrote must read as zero, not as the slot's previous
             // tenant — a freed slot is discarded, and discard does not zero
             // on most SSDs and does nothing on an HDD.
-            let mut full = vec![0u8; self.slot_size as usize];
-            full[off_in_slot as usize..off_in_slot as usize + buf.len()].copy_from_slice(buf);
-            if let Err(e) = self.write_leg(leg, 0, &full).await {
+            if let Err(e) = self.write_fresh(leg, off_in_slot, buf).await {
                 self.give_back(&[leg]).await;
                 return Err(e);
             }
@@ -1337,9 +1377,7 @@ impl ThinVolumeHandle {
             let mut reg = self.registry.write().await;
             self.allocate_legs(&mut reg, vext_idx, policy, 1).await?
         };
-        let mut full = vec![0u8; self.slot_size as usize];
-        full[off_in_slot as usize..off_in_slot as usize + buf.len()].copy_from_slice(buf);
-        let results = futures_util::future::join_all(legs.iter().map(|l| self.write_leg(*l, 0, &full))).await;
+        let results = futures_util::future::join_all(legs.iter().map(|l| self.write_fresh(*l, off_in_slot, buf))).await;
         let mut good = Vec::new();
         let mut bad = Vec::new();
         for (leg, r) in legs.iter().zip(results) {
@@ -1929,9 +1967,7 @@ impl ThinVolumeHandle {
                         ))
                     })?
                 };
-                let mut full = vec![0u8; self.slot_size as usize];
-                full[range.clone()].copy_from_slice(buf);
-                if let Err(e) = self.write_leg(leg, 0, &full).await {
+                if let Err(e) = self.write_fresh(leg, range.start as u64, buf).await {
                     self.give_back(&[leg]).await;
                     return Err(e);
                 }
@@ -3161,6 +3197,13 @@ impl BlockDevice for ThinVolumeHandle {
     }
 }
 
+/// `STORMBLOCK_ZERO_BY_WRITING=1` (#173): a fresh slot's zeros written as
+/// zeros, the way it was before, to measure the difference.
+fn zero_by_writing() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("STORMBLOCK_ZERO_BY_WRITING").is_ok_and(|v| v.trim() == "1"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3811,6 +3854,73 @@ mod redundancy_tests {
         assert!(back[..4096].iter().all(|&b| b == 0));
         assert!(back[8192..].iter().all(|&b| b == 0));
         cleanup(&paths);
+    }
+
+    /// Bytes written, with `write_zeroes` passed through to the device's own.
+    struct Counted {
+        inner: Arc<dyn BlockDevice>,
+        written: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for Counted {
+        fn id(&self) -> &crate::drive::DeviceId { self.inner.id() }
+        fn capacity_bytes(&self) -> u64 { self.inner.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.inner.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.inner.optimal_io_size() }
+        fn device_type(&self) -> crate::drive::DriveType { self.inner.device_type() }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> { self.inner.read(offset, buf).await }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            self.written.fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> DriveResult<()> { self.inner.flush().await }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> { self.inner.discard(offset, len).await }
+        async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> { self.inner.write_zeroes(offset, len).await }
+        fn smart_status(&self) -> DriveResult<crate::drive::SmartData> { self.inner.smart_status() }
+    }
+
+    /// #173: a first write to a fresh 1 MiB slot writes its data and zeroes
+    /// the rest with the device's own zeroing (a punched hole here), not a
+    /// megabyte of zeros: twenty first writes of 4 KiB cost about 80 KiB of
+    /// writes, not 20 MiB. What the slot held before still never shows.
+    #[tokio::test]
+    async fn a_first_write_zeroes_its_slot_without_writing_a_megabyte() {
+        let slot = 1024 * 1024u64;
+        let path = std::env::temp_dir()
+            .join("stormblock-redundancy-test")
+            .join(format!("{}-zero.bin", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path_str = path.to_str().unwrap().to_string();
+        let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&path_str, 64 << 20).await.unwrap());
+        // A previous tenant's bytes everywhere.
+        let junk = vec![0xEEu8; 1 << 20];
+        for i in 0..64u64 {
+            dev.write(i << 20, &junk).await.unwrap();
+        }
+        let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted: Arc<dyn BlockDevice> = Arc::new(Counted { inner: dev, written: written.clone() });
+        let slab = Slab::format(counted, slot, StorageTier::Hot).await.unwrap();
+        let mut registry = SlabRegistry::new();
+        registry.add(slab);
+        let gem: Shared<GlobalExtentMap> = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
+        let reg: Shared<SlabRegistry> = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let v = volume(&gem, &reg, "none", slot);
+
+        written.store(0, std::sync::atomic::Ordering::Relaxed);
+        for e in 0..20u64 {
+            v.write(e * slot + 8192, &[0x5A; 4096]).await.unwrap();
+        }
+        let w = written.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(w < 20 * 64 * 1024, "{w} bytes written for twenty 4 KiB first writes");
+        for e in 0..20u64 {
+            let mut back = vec![0xFF; slot as usize];
+            v.read(e * slot, &mut back).await.unwrap();
+            assert!(back[..8192].iter().all(|&b| b == 0), "extent {e}: before the data");
+            assert!(back[8192..12288].iter().all(|&b| b == 0x5A), "extent {e}: the data");
+            assert!(back[12288..].iter().all(|&b| b == 0), "extent {e}: after the data");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

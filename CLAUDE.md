@@ -181,6 +181,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A first write zeroes its slot without writing a megabyte (2026-10-09, #173) — IN PROGRESS
+
+- [x] `ThinVolumeHandle::write_fresh`: the data, and `write_zeroes` around it
+      (single, mirrored, parity member); `write_zeroes` overridden on
+      `FileDevice` (punch / BLKZEROOUT), `SasDevice` (BLKZEROOUT, punch on an
+      O_DIRECT file), forwarded by `PartitionDevice`; edges written;
+      `STORMBLOCK_ZERO_BY_WRITING=1` for measuring
+- [x] test `thin::redundancy_tests::a_first_write_zeroes_its_slot_without_
+      writing_a_megabyte`; the qcow2 import test waits for the job; durability
+      rule 3, CHANGELOG
+- [ ] measure the 100 GiB blank both ways on a build VM; check.sh; golden
+
 ### The HTTP client follows redirects (2026-10-09, #113) — DONE (golden-stormblock-8509f56dd988)
 
 - [x] `Client::exchange`: 301/302/303/307/308, ≤ 10 hops (chain in the

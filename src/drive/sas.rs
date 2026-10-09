@@ -211,6 +211,21 @@ impl BlockDevice for SasDevice {
         self.flushes.flush(&self.id.path, || self.io.sync()).await
     }
 
+    /// The drive's own zeroing (#173): `BLKZEROOUT` on a block device (WRITE
+    /// ZEROES / WRITE SAME where the drive has it), a punched hole on an
+    /// O_DIRECT file; zeros written only where neither works.
+    async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let unit = self.block_size as u64;
+        let block = {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            unsafe { libc::fstat(self.fd, &mut st) } == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFBLK
+        };
+        super::zero_range_fast(self, self.fd, block, unit, offset, len).await
+    }
+
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
         if self.device_type == DriveType::SasHdd {
             return Ok(()); // No-op for HDDs.

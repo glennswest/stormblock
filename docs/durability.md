@@ -47,7 +47,13 @@ tests run on.
    for the next `sync` (or a flush when the slab has nothing else free).
 3. **A first write fills the whole slot.** What the volume never wrote reads
    as zeros, never as the slot's previous tenant. Discard does not zero on most
-   SSDs, and does nothing on an HDD.
+   SSDs, and does nothing on an HDD. The rest of the slot is zeroed with the
+   device's own zeroing (#173): `BLKZEROOUT` on a block device (the drive's
+   WRITE ZEROES / WRITE SAME where it has one), a punched hole in a file, with
+   only the unaligned edges written. Writing a megabyte of zeros per extent made
+   formatting a large blank about six times slower. Data and zeros are both
+   covered by the next flush, before the slot's entry is published.
+   `STORMBLOCK_ZERO_BY_WRITING=1` writes the zeros, to measure the difference.
 4. **Share counts only move down after what replaced the share is durable.**
    A count on disk that is too low lets a write land in place in a slot
    another volume still reads, which corrupts a blank or a snapshot.

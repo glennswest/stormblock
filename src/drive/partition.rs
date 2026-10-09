@@ -146,6 +146,12 @@ impl BlockDevice for PartitionDevice {
         self.inner.discard(self.start + offset, len).await
     }
 
+    /// The drive's own zeroing, at the partition's offset (#173).
+    async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.check(offset, len)?;
+        self.inner.write_zeroes(self.start + offset, len).await
+    }
+
     fn smart_status(&self) -> DriveResult<SmartData> {
         self.inner.smart_status()
     }

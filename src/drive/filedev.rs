@@ -261,6 +261,19 @@ impl BlockDevice for FileDevice {
     /// keeps the apparent length so slab offsets stay valid and only the
     /// allocated blocks go back. Block devices get `BLKDISCARD` instead,
     /// since hole punching is meaningless there.
+    /// A punched hole (a regular file) or `BLKZEROOUT` (a block device)
+    /// instead of a megabyte of zeros written (#173).
+    #[cfg(target_os = "linux")]
+    async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        use std::os::unix::io::AsRawFd;
+        if len == 0 {
+            return Ok(());
+        }
+        let fd = self.file.lock().await.as_raw_fd();
+        let unit = self.block_size() as u64;
+        super::zero_range_fast(self, fd, self.is_block_device, unit, offset, len).await
+    }
+
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
         if len == 0 {
             return Ok(());
