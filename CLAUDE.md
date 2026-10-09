@@ -181,6 +181,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Redundancy, spread and tier on every claim path (2026-10-09, #151, P2) — IN PROGRESS
+
+`/v1` create had no policy (every CSI PVC `none`); `spread` only as
+`@rung`; a tier on create was honoured until the next restart and not by
+clones. The default for a claim that names nothing stays `none` (the
+design's owner decision 2, not taken here).
+- [ ] `RedundancyPolicy::from_request(redundancy, spread)` (a spread that
+      contradicts an `@rung` refused), `PlacementPolicy::preferring(tier)`
+- [ ] `/v1` create: `redundancy`, `spread`, `tier`; InsufficientDomains 409
+      like `/api/v1`; `/api/v1` create and template create: `spread`, `tier`
+- [ ] the tier kept: `VolumeManager.tiers`, the v2 header extension after
+      origin (older readers skip it), restored, inherited by clones,
+      updated by retier
+- [ ] tests (/v1 mirror placed and refused; a class blank per policy and
+      its clone; tier across a restart), docs, CHANGELOG, check.sh, golden
+
 ### A volume's {id} routes take its name (2026-10-09, #112) — DONE (golden-stormblock-65c86c79843c)
 
 - [x] `volume_key` (UUID; else the one volume of that name, from the
