@@ -691,7 +691,6 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
                 return serde_json::Value::Null;
             }
         };
-        let access_any = access.is_any();
         // A subsystem of this volume's own, if it has one. The NQN carries
         // the volume uuid, so the address names what it serves: nothing to go
         // stale, and a deleted volume stops answering rather than resolving to
@@ -719,39 +718,11 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
             }
         }
 
-        // Not wired as its own subsystem yet — fall back to the shared one so
-        // a node mid-boot keeps working while the two schemes overlap. Only
-        // where that subsystem admits any host: a named host was handled
-        // above, and the shared subsystem is never how one is served.
-        if !access_any || !pol.allow_any_host {
-            return serde_json::Value::Null;
-        }
-        let Some(nsid) = super::v1::ensure_nvme_namespace(state, &volume.0.to_string(), Some(volume.0)).await
-        else {
-            return serde_json::Value::Null;
-        };
-        let listen: std::net::SocketAddr = match state.nvmeof_settings().as_ref() {
-            Some(n) => n.listen_addr.parse().unwrap_or_else(|_| "0.0.0.0:4420".parse().unwrap()),
-            None => "0.0.0.0:4420".parse().unwrap(),
-        };
-        // The address a *remote* initiator should dial. A wildcard listen
-        // address tells a caller nothing and loopback is worse than nothing.
-        let host = state
-            .config
-            .management
-            .resolve_advertised_host(&listen.ip().to_string());
-        let nqn = state
-            .nvmeof_settings()
-            .map(|n| n.nqn)
-            .unwrap_or_else(|| "nqn.2024.io.stormblock:default".to_string());
-        return json!({
-            "protocol": "nvme-tcp",
-            "address": host,
-            "port": listen.port(),
-            "nqn": nqn,
-            "nsid": nsid,
-            "uri": format!("nvme-tcp://{host}:{}/{nqn}?nsid={nsid}", listen.port()),
-        });
+        // No subsystem of its own (nothing serving on this node): no
+        // address. The shared subsystem's NSIDs were the other scheme, and a
+        // claim is never served from it (#98).
+        tracing::warn!(%volume, "claim: this node serves no per-volume subsystems; the clone is not served");
+        return serde_json::Value::Null;
     }
     #[cfg(not(feature = "nvmeof"))]
     {

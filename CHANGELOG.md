@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #98 step 3: one NVMe scheme per caller.
+  - **Serve listener:** a claim's per-volume subsystem (`<prefix>:vol-<uuid>`, NSID 1) is a subsystem of the serve listener, as every `/serve/v1` export has been since #188. It had a listener and a port of its own each, from the same range the serve listener binds at.
+  - **No fallback:** a claim no longer falls back to a namespace number in the shared subsystem. On a node that serves no per-volume subsystems, an unnamed claim gets no address and says so.
+  - **Already settled:** the reconciler rewrote only `/serve/v1`'s own exports (#217), and NSIDs are never reused (#96).
 - **fix:** #366 (Codex review), durability:
   - **FUA:** NVMe/TCP writes with FUA (CDW12 bit 30) and iSCSI WRITE(10/16) with FUA are flushed before they complete.
   - **VWC:** NVMe Identify Controller now reports a volatile write cache. It reported none, so Linux hosts never sent a Flush or FUA, and an fsync over NVMe/TCP made nothing durable on the engine.

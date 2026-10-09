@@ -193,6 +193,19 @@ data-slab records predate origins (#349), so they read unmarked.
       golden golden-stormblock-ac8207f40ae4 (stormcos#467); master told.
       Not on metal: the Dell's next install
 
+### One NVMe scheme per caller (2026-10-09, #98, step 3) — IN PROGRESS
+
+Owner's decision: per-volume subsystems. Steps 1–2 done (2026-08). Since:
+#217 (the reconciler rewrites only serve's own exports), #188 (one serve
+listener), #96 (NSIDs never reused), #210 (per-host subsystems; the shared
+subsystem closed by default, kept as opt-in: not retired here).
+- [x] a claim's per-volume subsystem on the serve listener, not a listener
+      and port each (they also bound from serve's own base)
+- [x] the claim's shared-subsystem fallback removed
+- [x] test `integration_serve_host_bound::a_claims_subsystem_is_served_on_
+      the_one_serve_listener`; nvme-access.md, CHANGELOG
+- [ ] build VM; check.sh; golden; close
+
 ### Codex review: durability (#366) and correctness (#367) (2026-10-09, P0) — DONE (golden-stormblock-ac8207f40ae4)
 
 - [x] #367: copy/restripe at the volume's extent size, cold map loaded

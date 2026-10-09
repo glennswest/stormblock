@@ -914,18 +914,19 @@ fn account_static_nodes(v1: &mut V1State, replicas: &[Replica], size: u64, charg
 ///
 /// Idempotent: a volume already served keeps its address, because handing out
 /// a new one would change it under whoever holds the old.
-pub(crate) async fn ensure_volume_subsystem(
+pub async fn ensure_volume_subsystem(
     state: &AppState,
     volume: Uuid,
     access: crate::target::nvmeof::HostAccess,
 ) -> Option<(String, u16)> {
     if let Some(found) = state.nvme_portals.read().await.get(&volume).cloned() {
-        if let Some(t) = state.volume_subsystems.lock().await.get(&volume).and_then(|s| s.target.clone()) {
-            t.default_subsystem().set_access(access);
+        if let Some(s) = state.volume_subsystems.lock().await.get(&volume) {
+            s.sub.set_access(access);
         }
         return Some(found);
     }
     let cfg = state.per_volume.read().await.clone()?;
+    let ctx = cfg.serve.upgrade()?;
     let device = state
         .volume_manager
         .lock()
@@ -933,53 +934,35 @@ pub(crate) async fn ensure_volume_subsystem(
         .get_volume(&EngineVolumeId(volume))?;
 
     let nqn = format!("{}:vol-{volume}", cfg.nqn_prefix);
-
-    // Walk the range until one binds. Bind failure is the allocator: another
-    // holder of the port is a fact, and asking the kernel beats keeping a
-    // second opinion about what is free.
-    let span = cfg.portal_span.max(1);
-    for i in 0..span {
-        let port = cfg.portal_base.saturating_add(i);
-        let listener =
-            match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-        let target = std::sync::Arc::new(crate::target::nvmeof::NvmeofTarget::new(
-            crate::target::nvmeof::NvmeofConfig {
-                nqn: nqn.clone(),
-                ..Default::default()
-            },
-        ));
-        // Who may connect, before anything can (#210).
-        target.default_subsystem().set_access(access.clone());
-        // Namespace 1, always: the volume is the only namespace here, so the
-        // number carries no information and nothing can disagree about it.
-        // A golden is served write-protected.
-        let sealed = state.volume_manager.lock().await.is_sealed(&EngineVolumeId(volume));
-        target.default_subsystem().add_namespace_at(1, device.clone(), sealed).await;
-        let runner = target.clone();
-        let reactor = cfg.reactor.clone();
-        let log_nqn = nqn.clone();
-        let task = tokio::spawn(async move {
-            if let Err(e) = runner.run_with_listener(listener, &reactor).await {
-                tracing::error!("nvme subsystem {log_nqn} on {port} stopped: {e}");
-            }
-        });
-        state.volume_subsystems.lock().await.insert(
-            volume,
-            crate::mgmt::VolumeSubsystem { nqn: nqn.clone(), port, task, target: Some(target.clone()) },
-        );
-        state.nvme_portals.write().await.insert(volume, (nqn.clone(), port));
-        tracing::info!("volume {volume} served as {nqn} on port {port}");
-        return Some((nqn, port));
+    // A subsystem of the serve listener, as every per-volume export is
+    // (#188): one listener for every volume, the NQN telling them apart at
+    // connect. It had a listener and a port of its own each, from the same
+    // range the serve listener binds at (#98, #99).
+    let (target, port) = match crate::serve::reconcile::nvme_listener(&ctx).await {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::warn!("volume {volume} not served as its own subsystem: {e}");
+            return None;
+        }
+    };
+    // Who may connect, before anything can (#210).
+    let sub = target.ensure_subsystem(&nqn, access.clone());
+    sub.set_access(access);
+    // Namespace 1, always: the volume is the only namespace here, so the
+    // number carries no information and nothing can disagree about it.
+    // A golden is served write-protected.
+    let sealed = state.volume_manager.lock().await.is_sealed(&EngineVolumeId(volume));
+    if !sub.add_namespace_at(1, device.clone(), sealed).await && !sub.serves(device.id().uuid).await {
+        tracing::warn!("{nqn}: namespace 1 is another volume's; not served");
+        return None;
     }
-    tracing::warn!(
-        "no free port in {}..{} to serve volume {volume} on its own subsystem",
-        cfg.portal_base,
-        cfg.portal_base.saturating_add(span)
+    state.volume_subsystems.lock().await.insert(
+        volume,
+        crate::mgmt::VolumeSubsystem { nqn: nqn.clone(), port, target: target.clone(), sub },
     );
-    None
+    state.nvme_portals.write().await.insert(volume, (nqn.clone(), port));
+    tracing::info!("volume {volume} served as {nqn} on the serve listener (port {port})");
+    Some((nqn, port))
 }
 
 pub(crate) async fn ensure_nvme_namespace(

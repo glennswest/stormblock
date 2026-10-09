@@ -3782,6 +3782,7 @@ pub async fn run() -> anyhow::Result<()> {
                     portal_base: ctx.cfg.portal_base,
                     portal_span: ctx.cfg.portal_span,
                     reactor: reactor.clone(),
+                    serve: Arc::downgrade(&ctx),
                 });
                 // Readiness reflects what this engine has actually done.
                 //

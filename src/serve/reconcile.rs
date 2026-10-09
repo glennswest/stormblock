@@ -643,7 +643,7 @@ async fn stop_portal(ctx: &Arc<ServeContext>, export_id: &Uuid) {
 /// bound at `[serve] portal_base` the first time an export needs it. Its own
 /// (default) subsystem admits nobody: only an export's NQN is reachable on it.
 #[cfg(feature = "nvmeof")]
-async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Arc<NvmeofTarget>, u16)> {
+pub(crate) async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Arc<NvmeofTarget>, u16)> {
     let mut l = ctx.nvme_listener.lock().await;
     if let Some(x) = l.as_ref() {
         return Ok((x.target.clone(), x.port));

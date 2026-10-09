@@ -2017,13 +2017,17 @@ async fn delete_volume(
     }
 }
 
-/// Stop a volume's own subsystem and stop advertising it.
-///
-/// Dropping the handle aborts the listener, which releases the port.
+/// Stop a volume's own subsystem and stop advertising it: its namespace
+/// first (a removal waits for what is in flight, #83), then the subsystem.
 pub(crate) async fn stop_volume_subsystem(state: &Arc<AppState>, volume: Uuid) {
     let gone = state.volume_subsystems.lock().await.remove(&volume);
     state.nvme_portals.write().await.remove(&volume);
     if let Some(s) = gone {
+        #[cfg(feature = "nvmeof")]
+        {
+            s.sub.remove_namespace(1).await;
+            s.target.remove_subsystem(&s.nqn);
+        }
         tracing::info!("volume {volume} no longer served as {} on port {}", s.nqn, s.port);
     }
 }

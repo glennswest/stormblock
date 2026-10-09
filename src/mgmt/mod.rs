@@ -198,24 +198,24 @@ pub struct PerVolumeServing {
     /// The same reactor the rest of the data path runs on — a subsystem
     /// started here must not bring its own thread pool.
     pub reactor: std::sync::Arc<crate::target::reactor::ReactorPool>,
+    /// The serving layer, whose one NVMe/TCP listener every per-volume
+    /// subsystem is served on (#188): a claim's subsystem goes there too,
+    /// never on a listener of its own (#98, #99). Weak: the context holds
+    /// this state.
+    pub serve: std::sync::Weak<crate::serve::ctx::ServeContext>,
 }
 
-/// One volume served as its own subsystem.
+/// One volume served as its own subsystem, on the serve listener (#98).
 pub struct VolumeSubsystem {
     pub nqn: String,
     pub port: u16,
-    /// Dropping this aborts the listener.
-    pub task: tokio::task::JoinHandle<()>,
-    /// The target, so who may connect can be changed after it started
-    /// (#210). `None` for a subsystem this process did not start itself.
+    /// The listener's target, to withdraw the subsystem from.
     #[cfg(feature = "nvmeof")]
-    pub target: Option<Arc<crate::target::nvmeof::NvmeofTarget>>,
-}
-
-impl Drop for VolumeSubsystem {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    pub target: Arc<crate::target::nvmeof::NvmeofTarget>,
+    /// The subsystem, so who may connect can be changed after it started
+    /// (#210).
+    #[cfg(feature = "nvmeof")]
+    pub sub: Arc<crate::target::nvmeof::Subsystem>,
 }
 
 pub struct AppState {
@@ -248,17 +248,17 @@ pub struct AppState {
     /// which is what NVMe multipath is: one subsystem, several portals
     /// (#98).
     ///
-    /// Written by the reconciler, which assigns the port, and read by the
-    /// claim so a consumer is told the address that names its volume. Empty
-    /// until a volume has been wired, which is why the claim still falls back
-    /// to the shared subsystem.
+    /// Written by the reconciler and by a claim (`ensure_volume_subsystem`),
+    /// both on the serve listener, and read by the claim so a consumer is
+    /// told the address that names its volume.
     pub nvme_portals: tokio::sync::RwLock<HashMap<uuid::Uuid, (String, u16)>>,
     /// How to serve a volume as a subsystem of its own, published by `serve`
     /// at startup because the settings live in its config and the API cannot
     /// see them.
     ///
     /// `None` when nothing is serving — the API then has no way to start a
-    /// subsystem and the claim falls back to the shared one.
+    /// subsystem, and an unnamed claim is answered with no address (#98:
+    /// the shared subsystem is never how a claim is served).
     pub per_volume: tokio::sync::RwLock<Option<PerVolumeServing>>,
     /// Subsystems this side started, kept alive. Dropping the handle stops the
     /// listener, so a volume stops answering when its entry goes.

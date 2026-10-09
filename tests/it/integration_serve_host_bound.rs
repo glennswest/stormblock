@@ -312,3 +312,57 @@ async fn three_hundred_exports_share_one_listener_and_drain_one_by_one() {
     let left = s.ctx.nvme_listener.lock().await.as_ref().unwrap().target.subsystems().len();
     assert_eq!(left, 1, "only the listener's own subsystem is left");
 }
+
+/// #98: a claim's own subsystem is a subsystem of the serve listener, as
+/// every `/serve/v1` export is (#188), not a listener of its own. It had a
+/// port each, from the range the serve listener binds at; a node claims twice
+/// per boot, so thousands of listeners at fleet scale. Each subsystem still
+/// admits only its own host, and the volume is namespace 1 of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claims_subsystem_is_served_on_the_one_serve_listener() {
+    use stormblock::target::nvmeof::HostAccess;
+    let dir = TempDir::new().unwrap();
+    let s = serve(&dir, None, false).await;
+    let state = s.ctx.state.clone();
+    *state.per_volume.write().await = Some(stormblock::mgmt::PerVolumeServing {
+        nqn_prefix: s.ctx.cfg.nqn_prefix.clone(),
+        portal_base: s.ctx.cfg.portal_base,
+        portal_span: s.ctx.cfg.portal_span,
+        reactor: s.ctx.reactor.clone(),
+        serve: Arc::downgrade(&s.ctx),
+    });
+
+    // A /serve/v1 export first: it binds the serve listener.
+    let (st, a) = export(&s, serde_json::json!({"volume_id": s.vols[0], "protocol": "nvme-tcp", "host_nqn": H1})).await;
+    assert_eq!(st, 201, "{a}");
+    let port = a["attach"]["port"].as_u64().unwrap() as u16;
+
+    let one = |h: &str| HostAccess::Hosts([(h.to_string(), None)].into_iter().collect());
+    let (nqn_b, port_b) = stormblock::mgmt::api::v1::ensure_volume_subsystem(&state, s.vols[1], one(H1)).await.expect("served");
+    let (nqn_c, port_c) = stormblock::mgmt::api::v1::ensure_volume_subsystem(&state, s.vols[2], one(H2)).await.expect("served");
+    assert_eq!((port_b, port_c), (port, port), "every subsystem on the one serve listener");
+    assert!(nqn_b.ends_with(&format!(":vol-{}", s.vols[1])) && nqn_c.ends_with(&format!(":vol-{}", s.vols[2])));
+    // Idempotent: the same address again.
+    assert_eq!(
+        stormblock::mgmt::api::v1::ensure_volume_subsystem(&state, s.vols[1], one(H1)).await,
+        Some((nqn_b.clone(), port))
+    );
+    // Nothing else bound in the range: no listener of its own.
+    for p in port + 1..port + s.ctx.cfg.portal_span {
+        assert!(std::net::TcpListener::bind(("0.0.0.0", p)).is_ok(), "port {p} is free");
+    }
+
+    // Each admits its own host, and the volume is namespace 1.
+    let dev = NvmeofDevice::connect(&spec(port, &nqn_b, H1)).await.expect("H1 reaches its claim");
+    dev.write(0, &vec![7u8; 4096]).await.unwrap();
+    let mut back = vec![0u8; 4096];
+    dev.read(0, &mut back).await.unwrap();
+    assert_eq!(back, vec![7u8; 4096]);
+    assert!(NvmeofDevice::connect(&spec(port, &nqn_b, H2)).await.is_err(), "H2 does not reach H1's");
+    assert!(NvmeofDevice::connect(&spec(port, &nqn_c, H2)).await.is_ok(), "H2 reaches its own");
+    let mut seen = discover(port, H1).await;
+    seen.sort();
+    let mut want = vec![a["attach"]["nqn"].as_str().unwrap().to_string(), nqn_b.clone()];
+    want.sort();
+    assert_eq!(seen, want, "discovery shows H1 what it may connect to");
+}

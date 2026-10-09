@@ -115,8 +115,13 @@ subsystem and the released one leaves it. No firmware change is needed. The
 template is `[nvmeof] boothost_host_nqn` (`{name}` is replaced).
 
 On a node without the shared listener (no NVMe-oF target at startup), a claim
-falls back to the volume's own subsystem on a `[serve]` portal, with the same
-allowed hosts.
+is served from the volume's own subsystem, `<serve prefix>:vol-<uuid>` at
+NSID 1, with the same allowed hosts. It is a subsystem of the one `[serve]`
+NVMe listener, the same listener as every `/serve/v1` export (#188), never a
+listener of its own (#98). A claim that names no host gets that subsystem only
+where the node admits any host. A claim is never served as a namespace number
+in the shared subsystem: on a node that serves no per-volume subsystems,
+an unnamed claim gets no address (#98).
 
 ## DH-HMAC-CHAP
 
