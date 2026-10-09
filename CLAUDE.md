@@ -181,7 +181,28 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The LUN table is written behind the API (2026-10-09, #134) — IN PROGRESS
+### #369 reopened: unmarked release volumes still refused (2026-10-09, P0) — IN PROGRESS
+
+12.02 on the Dell (96bb3b7, with bfd5d16): the same 8 volumes refused. Their
+data-slab records predate origins (#349), so they read unmarked.
+- [x] plan: an unmarked volume the release names (or its `.golden`) is the
+      release's; any other with stray extents only in this disk's system
+      half is carried (not refused); console line per re-laid/carried volume
+- [x] test extended (release, unmarked-named, node, unmarked-unnamed):
+      install_tests 19/19 on a build VM at c9ceb95
+- [ ] check.sh; golden; tell master-a2 at once (it composes for the Dell)
+
+### Codex review: durability (#366) and correctness (#367) (2026-10-09, P0) — IN PROGRESS
+
+- [x] #367: copy/restripe at the volume's extent size, cold map loaded
+      (`mapped_extents`), prefetch errors returned; snapshot gate against
+      in-place writes; O_DIRECT double short write (a143a48, db3deb1, f0d0bd1)
+- [x] #366: FUA (NVMe, iSCSI), VWC advertised, initiator flush = SYNCHRONIZE
+      CACHE (222b9fa); frees after checked persists, create/seal undone on a
+      failed write; boot-iscsi opens its own slab (#162) (619a6ae)
+- [ ] tests on a build VM; check.sh; golden; close #366, #367, #162
+
+### The LUN table is written behind the API (2026-10-09, #134) — PARKED for P0s (check.sh at 8365d46 ALL PASS 1080/1080; golden + close left)
 
 - [x] `luns::LunsWriter` (`AppState.luns_writer`): attach/detach mark it,
       one task writes the latest table (compact, blocking pool), coalesced;
