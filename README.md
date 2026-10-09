@@ -314,19 +314,24 @@ Every other command logs to stderr as before.
 | `--stripe-kb` | `64` | stripe size for RAID 5/6/10 |
 | `--volume` | — | `name:size[:redundancy]` to create on the array (repeatable) |
 | `--data-dir` | — | volume metadata directory. **Only the volume manager sees it**: `/serve/v1`, the token file, templates, synonyms and `/v1` state read `[management] data_dir` (#163) |
-| `--iscsi-addr` | `0.0.0.0:3260` | iSCSI listen address (`iscsi`) |
-| `--iscsi-target-name` | `iqn.2024.io.stormblock:default` | iSCSI target IQN (`iscsi`) |
-| `--chap-user`, `--chap-secret` | — | CHAP for the iSCSI target; both or neither (`iscsi`) |
+| `--iscsi-addr` | `[iscsi] listen_addr`, else `0.0.0.0:3260` | iSCSI listen address (`iscsi`) |
+| `--iscsi-target-name` | `[iscsi] target_name`, else `iqn.2024.io.stormblock:default` | iSCSI target IQN (`iscsi`) |
+| `--chap-user`, `--chap-secret` | `[iscsi] chap_user`/`chap_secret` | CHAP for the iSCSI target; both or neither (`iscsi`) |
 | `--no-iscsi` | off | do not start the iSCSI target (`iscsi`) |
-| `--nvmeof-addr` | `0.0.0.0:4420` | NVMe-oF/TCP listen address (`nvmeof`) |
-| `--nvmeof-nqn` | `nqn.2024.io.stormblock:default` | NVMe-oF subsystem NQN (`nvmeof`) |
+| `--nvmeof-addr` | `[nvmeof] listen_addr`, else `0.0.0.0:4420` | NVMe-oF/TCP listen address (`nvmeof`) |
+| `--nvmeof-nqn` | `[nvmeof] nqn`, else `nqn.2024.io.stormblock:default` | NVMe-oF subsystem NQN (`nvmeof`) |
 | `--no-nvmeof` | off | do not start the NVMe-oF target (`nvmeof`) |
 | `--reactor-cores` | `0` | per-core reactor threads for the targets; 0 = one per core |
 
-**The target listen addresses, IQN, NQN and CHAP come from these flags only.**
-`[iscsi] listen_addr/target_name/chap_*` and `[nvmeof] listen_addr/nqn` in the
-file are overwritten by the flags' defaults (#75, #164) — in particular CHAP set
-only in the file is **not applied**.
+**A flag wins over the file, the file over the default** (#164). Until #164
+the flags' defaults overwrote `[iscsi]` and `[nvmeof]` in the file, so CHAP
+set only in the file ran a target with no authentication. Now:
+- **CHAP is enforced.** When it is configured (by either), the iSCSI target
+  admits only a CHAP login; an initiator offering `AuthMethod=None` is
+  refused.
+- **Half a pair is refused.** A user without a secret, or the reverse, stops
+  the daemon at start.
+- **No CHAP is logged.** A target with no CHAP says so at start (WARN).
 
 ### Environment
 
@@ -410,12 +415,13 @@ it, because a path is logged, listed and persisted. Over HTTP it is
 - A wrong secret, or none, is a 400 from the target's refusal. A secret for a
   path that is not `nvme-tcp://` is a 400 too.
 
-**`[iscsi]`** (`iscsi`) — `max_connections` (`4`, MC/S per session) is used;
-`listen_addr`, `target_name`, `chap_user`, `chap_secret` are not (see above).
+**`[iscsi]`** (`iscsi`) — `listen_addr`, `target_name`, `chap_user` and
+`chap_secret` (both or neither; a flag wins, see above), and
+`max_connections` (`4`, MC/S per session).
 
-**`[nvmeof]`** (`nvmeof`) — `export_drives` (`true`: publish each drive as a raw
-namespace; set `false` where the drives are the engine's pool) is used;
-`listen_addr` and `nqn` are not (see above). Who may connect
+**`[nvmeof]`** (`nvmeof`) — `listen_addr` and `nqn` (a flag wins, see above),
+`export_drives` (`true`: publish each drive as a raw namespace; set `false`
+where the drives are the engine's pool). Who may connect
 ([docs/nvme-access.md](docs/nvme-access.md), #210): `allow_any_host`
 (`false`: the shared subsystem admits no host), `allowed_hosts` (`[]`),
 `require_dhchap` (`false`), `boothost_host_nqn`

@@ -104,12 +104,16 @@ impl IscsiInitiator {
     }
 
     fn make_login_bhs(&self, itt: u32, csg: u8, nsg: u8) -> Bhs {
+        self.make_login_bhs_t(itt, csg, nsg, true)
+    }
+
+    fn make_login_bhs_t(&self, itt: u32, csg: u8, nsg: u8, transit: bool) -> Bhs {
         let mut bhs = Bhs::new();
         bhs.set_opcode(Opcode::LoginRequest);
         bhs.set_immediate(true);
         bhs.set_csg(csg);
         bhs.set_nsg(nsg);
-        bhs.set_transit(true);
+        bhs.set_transit(transit);
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
         // ExpStatSN from target's last StatSN
@@ -175,16 +179,68 @@ impl IscsiInitiator {
     /// Two-phase: Security → Operational → FullFeature.
     /// Security params in Phase 1, operational params in Phase 2.
     pub async fn login(&mut self, initiator_name: &str, target_name: &str) -> io::Result<()> {
+        self.login_as(initiator_name, target_name, None).await
+    }
+
+    /// Login with CHAP (MD5) as `user` with `secret` (#164).
+    pub async fn login_chap(&mut self, initiator_name: &str, target_name: &str, user: &str, secret: &str) -> io::Result<()> {
+        self.login_as(initiator_name, target_name, Some((user, secret))).await
+    }
+
+    /// One security-stage exchange that stays in the stage: the reply's
+    /// parameters, or the refusal.
+    async fn security_step(&mut self, itt: u32, params: &[(&str, &str)]) -> io::Result<Vec<(String, String)>> {
+        let bhs = self.make_login_bhs_t(itt, STAGE_SECURITY, STAGE_SECURITY, false);
+        write_pdu(&mut self.writer, &IscsiPdu::with_data(bhs, encode_text_params(params)), false, false).await?;
+        let resp = read_pdu(&mut self.reader, false, false).await?;
+        if resp.bhs.raw[36] != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("security step refused: class={} detail={:#x}", resp.bhs.raw[36], resp.bhs.raw[37]),
+            ));
+        }
+        self.parse_login_response(&resp)?;
+        Ok(parse_text_params(&resp.data))
+    }
+
+    async fn login_as(&mut self, initiator_name: &str, target_name: &str, chap: Option<(&str, &str)>) -> io::Result<()> {
         // RFC 7143: all login PDUs in a login phase share the same ITT
         let login_itt = self.next_itt();
 
         // Phase 1: Security negotiation only
-        let security_params = encode_text_params(&[
-            ("InitiatorName", initiator_name),
-            ("TargetName", target_name),
-            ("SessionType", "Normal"),
-            ("AuthMethod", "None"),
-        ]);
+        let security_params = match chap {
+            None => encode_text_params(&[
+                ("InitiatorName", initiator_name),
+                ("TargetName", target_name),
+                ("SessionType", "Normal"),
+                ("AuthMethod", "None"),
+            ]),
+            Some((user, secret)) => {
+                // AuthMethod=CHAP, then CHAP_A, then the answer to the
+                // target's challenge, which ends the stage.
+                self.security_step(login_itt, &[
+                    ("InitiatorName", initiator_name),
+                    ("TargetName", target_name),
+                    ("SessionType", "Normal"),
+                    ("AuthMethod", "CHAP"),
+                ])
+                .await?;
+                let got = self.security_step(login_itt, &[("CHAP_A", "5")]).await?;
+                let find = |k: &str| got.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+                let bad = |w: &str| io::Error::new(io::ErrorKind::InvalidData, w.to_string());
+                let id: u8 = find("CHAP_I").ok_or_else(|| bad("no CHAP_I"))?.parse().map_err(|_| bad("CHAP_I"))?;
+                let c = find("CHAP_C").ok_or_else(|| bad("no CHAP_C"))?;
+                let c = c.trim_start_matches("0x");
+                let challenge: Vec<u8> = (0..c.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&c[i..i + 2], 16))
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| bad("CHAP_C"))?;
+                let r = stormblock::target::iscsi::chap::compute_chap_response(id, secret.as_bytes(), &challenge);
+                let hex: String = std::iter::once("0x".to_string()).chain(r.iter().map(|b| format!("{b:02x}"))).collect();
+                encode_text_params(&[("CHAP_N", user), ("CHAP_R", hex.as_str())])
+            }
+        };
 
         eprintln!("  login phase 1: Security→Operational (ITT={} {} bytes)", login_itt, security_params.len());
 

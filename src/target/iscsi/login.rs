@@ -161,13 +161,23 @@ impl LoginStateMachine {
                     self.params.discovery_session = val == "Discovery";
                 }
                 "AuthMethod" => {
-                    if self.chap_config.is_some() && val.contains("CHAP") {
-                        response_params.push(("AuthMethod", "CHAP"));
-                    } else if val.contains("None") || self.chap_config.is_none() {
+                    let offered: Vec<&str> = val.split(',').map(str::trim).collect();
+                    if self.chap_config.is_some() {
+                        // CHAP is required: an initiator that does not offer
+                        // it is refused. Taking its "None" admitted anyone
+                        // to a target configured for CHAP (#164).
+                        if offered.contains(&"CHAP") {
+                            response_params.push(("AuthMethod", "CHAP"));
+                        } else {
+                            tracing::warn!(
+                                "Login: '{}' offered AuthMethod={val}, but CHAP is required",
+                                self.params.initiator_name
+                            );
+                            return self.make_error_response(req, LoginStatus::AuthFailure);
+                        }
+                    } else {
                         response_params.push(("AuthMethod", "None"));
                         self.auth_complete = true;
-                    } else {
-                        return self.make_error_response(req, LoginStatus::AuthFailure);
                     }
                 }
                 "CHAP_A" => {
@@ -484,6 +494,72 @@ mod tests {
                 assert_eq!(params.initiator_name, "iqn.2024.com.test:init");
             }
             LoginResult::Failed(_) => panic!("login should not fail"),
+        }
+    }
+
+    fn chap_target() -> LoginStateMachine {
+        LoginStateMachine::new(
+            "iqn.2024.com.stormblock:disk1".into(),
+            Some(ChapConfig { username: "u".into(), secret: "a-test-secret".into() }),
+        )
+    }
+
+    fn security(auth: &str) -> IscsiPdu {
+        let params = encode_text_params(&[
+            ("InitiatorName", "iqn.2024.com.test:init"),
+            ("TargetName", "iqn.2024.com.stormblock:disk1"),
+            ("AuthMethod", auth),
+            ("SessionType", "Normal"),
+        ]);
+        make_login_request(STAGE_SECURITY, STAGE_OPERATIONAL, true, &params)
+    }
+
+    /// #164: a target with CHAP configured refuses an initiator that offers
+    /// no CHAP, however it asks: it used to take the initiator's "None".
+    #[test]
+    fn a_chap_target_refuses_an_initiator_offering_none() {
+        for auth in ["None", "None,KRB5", "SRP"] {
+            let mut sm = chap_target();
+            assert!(matches!(sm.process(&security(auth)), LoginResult::Failed(_)), "AuthMethod={auth} admitted");
+        }
+        // Nor may it skip to the operational stage.
+        let mut sm = chap_target();
+        let op = encode_text_params(&[("HeaderDigest", "None")]);
+        let req = make_login_request(STAGE_OPERATIONAL, STAGE_FULL_FEATURE, true, &op);
+        assert!(matches!(sm.process(&req), LoginResult::Failed(_)));
+    }
+
+    /// #164: CHAP with the right secret logs in; the wrong one is refused.
+    #[test]
+    fn a_chap_target_admits_the_right_secret_only() {
+        for (secret, ok) in [("a-test-secret", true), ("wrong", false)] {
+            let mut sm = chap_target();
+            // Offer CHAP (and None: an initiator's usual list), stay in security.
+            let params = encode_text_params(&[
+                ("InitiatorName", "iqn.2024.com.test:init"),
+                ("TargetName", "iqn.2024.com.stormblock:disk1"),
+                ("AuthMethod", "CHAP,None"),
+                ("SessionType", "Normal"),
+            ]);
+            let LoginResult::Continue(r) = sm.process(&make_login_request(STAGE_SECURITY, STAGE_SECURITY, false, &params)) else {
+                panic!("CHAP offered was refused");
+            };
+            assert!(parse_text_params(&r.data).iter().any(|(k, v)| k == "AuthMethod" && v == "CHAP"));
+            let a = encode_text_params(&[("CHAP_A", "5")]);
+            let LoginResult::Continue(r) = sm.process(&make_login_request(STAGE_SECURITY, STAGE_SECURITY, false, &a)) else {
+                panic!("CHAP_A refused");
+            };
+            let got = parse_text_params(&r.data);
+            let id: u8 = got.iter().find(|(k, _)| k == "CHAP_I").unwrap().1.parse().unwrap();
+            let c = &got.iter().find(|(k, _)| k == "CHAP_C").unwrap().1;
+            let challenge: Vec<u8> = (2..c.len()).step_by(2).map(|i| u8::from_str_radix(&c[i..i + 2], 16).unwrap()).collect();
+            let resp = super::super::chap::compute_chap_response(id, secret.as_bytes(), &challenge);
+            let hex: String = std::iter::once("0x".to_string()).chain(resp.iter().map(|b| format!("{b:02x}"))).collect();
+            let nr = encode_text_params(&[("CHAP_N", "u"), ("CHAP_R", hex.as_str())]);
+            match sm.process(&make_login_request(STAGE_SECURITY, STAGE_OPERATIONAL, true, &nr)) {
+                LoginResult::Continue(_) | LoginResult::Complete(..) => assert!(ok, "the wrong secret was admitted"),
+                LoginResult::Failed(_) => assert!(!ok, "the right secret was refused"),
+            }
         }
     }
 

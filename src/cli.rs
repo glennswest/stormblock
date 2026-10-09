@@ -45,15 +45,17 @@ struct Cli {
     #[arg(long = "volume", value_parser = parse_volume_spec)]
     volumes: Vec<VolumeSpec>,
 
-    /// iSCSI listen address (default: 0.0.0.0:3260)
+    /// iSCSI listen address; else `[iscsi] listen_addr`, else 0.0.0.0:3260
+    /// (#164: a flag left unset no longer overrides the file)
     #[cfg(feature = "iscsi")]
-    #[arg(long, default_value = "0.0.0.0:3260")]
-    iscsi_addr: String,
+    #[arg(long)]
+    iscsi_addr: Option<String>,
 
-    /// iSCSI target name (IQN)
+    /// iSCSI target name (IQN); else `[iscsi] target_name`, else
+    /// iqn.2024.io.stormblock:default
     #[cfg(feature = "iscsi")]
-    #[arg(long, default_value = "iqn.2024.io.stormblock:default")]
-    iscsi_target_name: String,
+    #[arg(long)]
+    iscsi_target_name: Option<String>,
 
     /// CHAP username for iSCSI authentication
     #[cfg(feature = "iscsi")]
@@ -70,15 +72,17 @@ struct Cli {
     #[arg(long)]
     no_iscsi: bool,
 
-    /// NVMe-oF/TCP listen address (default: 0.0.0.0:4420)
+    /// NVMe-oF/TCP listen address; else `[nvmeof] listen_addr`, else
+    /// 0.0.0.0:4420
     #[cfg(feature = "nvmeof")]
-    #[arg(long, default_value = "0.0.0.0:4420")]
-    nvmeof_addr: String,
+    #[arg(long)]
+    nvmeof_addr: Option<String>,
 
-    /// NVMe-oF subsystem NQN
+    /// NVMe-oF subsystem NQN; else `[nvmeof] nqn`, else
+    /// nqn.2024.io.stormblock:default
     #[cfg(feature = "nvmeof")]
-    #[arg(long, default_value = "nqn.2024.io.stormblock:default")]
-    nvmeof_nqn: String,
+    #[arg(long)]
+    nvmeof_nqn: Option<String>,
 
     /// Disable NVMe-oF/TCP target
     #[cfg(feature = "nvmeof")]
@@ -824,6 +828,17 @@ struct VolumeSpec {
     redundancy: crate::volume::RedundancyPolicy,
 }
 
+/// The iSCSI settings the target runs with (#164).
+#[cfg(feature = "iscsi")]
+fn iscsi_section(config: &StormBlockConfig) -> mgmt::config::IscsiExportConfig {
+    config.iscsi_effective()
+}
+
+/// Where the shared NVMe-oF target listens (#164).
+fn nvmeof_listen(config: &StormBlockConfig) -> String {
+    config.nvmeof_listen()
+}
+
 fn parse_volume_spec(s: &str) -> Result<VolumeSpec, String> {
     let parts: Vec<&str> = s.splitn(3, ':').collect();
     if parts.len() < 2 {
@@ -895,17 +910,17 @@ pub async fn run() -> anyhow::Result<()> {
         cli.stripe_kb,
         &cli_volumes,
         #[cfg(feature = "iscsi")]
-        Some(&cli.iscsi_addr),
+        cli.iscsi_addr.as_deref(),
         #[cfg(feature = "iscsi")]
-        Some(&cli.iscsi_target_name),
+        cli.iscsi_target_name.as_deref(),
         #[cfg(feature = "iscsi")]
         cli.chap_user.as_deref(),
         #[cfg(feature = "iscsi")]
         cli.chap_secret.as_deref(),
         #[cfg(feature = "nvmeof")]
-        Some(&cli.nvmeof_addr),
+        cli.nvmeof_addr.as_deref(),
         #[cfg(feature = "nvmeof")]
-        Some(&cli.nvmeof_nqn),
+        cli.nvmeof_nqn.as_deref(),
         cli.reactor_cores,
     );
     config.validate()?;
@@ -1020,7 +1035,7 @@ pub async fn run() -> anyhow::Result<()> {
     // attached — a derived address is a guess on a multi-homed node.
     mgmt::config::log_advertised_host(
         &config.management,
-        cli.nvmeof_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(""),
+        nvmeof_listen(&config).rsplit_once(':').map(|(h, _)| h).unwrap_or(""),
     );
 
     // Node/cluster discovery. Attached before the targets start so peers see
@@ -1443,25 +1458,33 @@ pub async fn run() -> anyhow::Result<()> {
     // Start iSCSI target (always, even with no initial device — LUNs can be added via REST)
     #[cfg(feature = "iscsi")]
     if !cli.no_iscsi {
-        let chap = match (&cli.chap_user, &cli.chap_secret) {
+        // From the merged configuration (#164): the flags, else the file,
+        // else the defaults. The file's CHAP used to be read and dropped,
+        // which ran a target the file said was protected with none.
+        let section = iscsi_section(&config);
+        let chap = match (&section.chap_user, &section.chap_secret) {
             (Some(user), Some(secret)) => Some(target::iscsi::chap::ChapConfig {
                 username: user.clone(),
                 secret: secret.clone(),
             }),
             _ => None,
         };
+        match &chap {
+            Some(c) => tracing::info!("iSCSI target on {}: CHAP required (user '{}')", section.listen_addr, c.username),
+            None => tracing::warn!(
+                "iSCSI target on {}: no CHAP configured, any initiator that reaches it may log in \
+                 ([iscsi] chap_user and chap_secret, or --chap-user and --chap-secret)",
+                section.listen_addr
+            ),
+        }
 
         let iscsi_config = target::iscsi::IscsiConfig {
-            listen_addr: cli.iscsi_addr.parse()
+            listen_addr: section.listen_addr.parse()
                 .expect("invalid iSCSI listen address"),
-            target_name: cli.iscsi_target_name.clone(),
+            target_name: section.target_name.clone(),
             chap,
             max_sessions: 64,
-            max_connections: config
-                .iscsi
-                .as_ref()
-                .map(|c| c.max_connections)
-                .unwrap_or(4),
+            max_connections: section.max_connections,
         };
         let iscsi = target::iscsi::IscsiTarget::new(iscsi_config);
 
@@ -1530,7 +1553,7 @@ pub async fn run() -> anyhow::Result<()> {
         #[cfg(feature = "nvmeof")]
         if !cli.no_nvmeof {
             if let Some(ref device) = export_device {
-                let listen_addr: std::net::SocketAddr = cli.nvmeof_addr.parse()
+                let listen_addr: std::net::SocketAddr = nvmeof_listen(&config).parse()
                     .expect("invalid NVMe-oF listen address");
                 // Report a routable address in the discovery log page — a wildcard
                 // listen address is useless to a remote initiator (#26).
@@ -1539,7 +1562,7 @@ pub async fn run() -> anyhow::Result<()> {
                     .and_then(|h| format!("{h}:{}", listen_addr.port()).parse().ok());
                 let nvmeof_config = target::nvmeof::NvmeofConfig {
                     listen_addr,
-                    nqn: cli.nvmeof_nqn.clone(),
+                    nqn: config.nvmeof.as_ref().map(|n| n.nqn.clone()).unwrap_or_else(mgmt::config::default_nvmeof_nqn),
                     advertised_addr,
                     ..Default::default()
                 };
@@ -1600,11 +1623,11 @@ pub async fn run() -> anyhow::Result<()> {
         // per-export portals bind?", and the answer is the same one it would have
         // been — the range is allocated the same way whichever transport wires it.
         #[cfg(feature = "nvmeof")]
-        let nvmeof_bind = cli.nvmeof_addr.clone();
+        let nvmeof_bind = nvmeof_listen(&config);
         #[cfg(not(feature = "nvmeof"))]
         let nvmeof_bind = "0.0.0.0:4420".to_string();
         #[cfg(feature = "iscsi")]
-        let iscsi_bind = cli.iscsi_addr.clone();
+        let iscsi_bind = iscsi_section(&config).listen_addr;
         #[cfg(not(feature = "iscsi"))]
         let iscsi_bind = "0.0.0.0:3260".to_string();
 

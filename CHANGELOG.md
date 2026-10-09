@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix (security):** #164: a config file with `[iscsi] chap_user/chap_secret` ran an iSCSI target with no authentication.
+  - **Precedence:** `--iscsi-addr`, `--iscsi-target-name`, `--nvmeof-addr` and `--nvmeof-nqn` have no defaults of their own now, so a flag left unset keeps the file's value (flag > file > default). The targets, the advertised host and the serve binds are built from the merged config.
+  - **CHAP enforced:** a target with CHAP configured admitted an initiator offering `AuthMethod=None`, so CHAP from the flags protected nothing either. It now admits only a CHAP login.
+  - **At start:** half a CHAP pair stops the daemon, and a target with no CHAP logs a WARN.
+  - **Tests:** the test initiator logs in with CHAP; `tests-runtime/iscsi_chap_from_file.rs` drives the built daemon.
 - **perf:** #363 (owner): nothing on a create, enrol or install path costs time in proportion to the drive.
   - **Format:** a format-2 slab's slot table is committed in steps of 64 MiB. Formatting writes one step whatever the drive's size: a 15 PB drive used to take ~1 TB of zeros at enrol.
   - **Steps:** each step is zeroed and flushed before the header names it, so nothing a reused drive held reads as a slot. Steps run ahead of need from the sync path with no lock held.

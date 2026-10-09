@@ -814,7 +814,7 @@ fn default_nvmeof_addr() -> String {
 }
 
 #[cfg(feature = "nvmeof")]
-fn default_nvmeof_nqn() -> String {
+pub fn default_nvmeof_nqn() -> String {
     "nqn.2024.io.stormblock:default".to_string()
 }
 
@@ -910,9 +910,11 @@ impl StormBlockConfig {
                 .collect();
         }
 
-        // iSCSI CLI overrides
+        // iSCSI: the flags, else the file, else the defaults (#164). Every
+        // value an unset flag leaves alone is the file's; the section is
+        // always there afterwards, as the daemon has always had it.
         #[cfg(feature = "iscsi")]
-        if iscsi_addr.is_some() || chap_user.is_some() {
+        {
             let existing = self.iscsi.take().unwrap_or(IscsiExportConfig {
                 listen_addr: default_iscsi_addr(),
                 target_name: default_iscsi_target_name(),
@@ -929,9 +931,9 @@ impl StormBlockConfig {
             });
         }
 
-        // NVMe-oF CLI overrides
+        // NVMe-oF likewise (#164).
         #[cfg(feature = "nvmeof")]
-        if nvmeof_addr.is_some() || nvmeof_nqn.is_some() {
+        {
             let existing = self.nvmeof.take().unwrap_or(NvmeofExportConfig {
                 listen_addr: default_nvmeof_addr(),
                 nqn: default_nvmeof_nqn(),
@@ -957,8 +959,40 @@ impl StormBlockConfig {
         }
     }
 
+    /// The iSCSI settings in effect: the section, else the defaults (#164).
+    #[cfg(feature = "iscsi")]
+    pub fn iscsi_effective(&self) -> IscsiExportConfig {
+        self.iscsi.clone().unwrap_or(IscsiExportConfig {
+            listen_addr: default_iscsi_addr(),
+            target_name: default_iscsi_target_name(),
+            chap_user: None,
+            chap_secret: None,
+            max_connections: default_max_connections(),
+        })
+    }
+
+    /// Where the shared NVMe-oF target listens: the section, else the
+    /// default (#164).
+    #[cfg(feature = "nvmeof")]
+    pub fn nvmeof_listen(&self) -> String {
+        self.nvmeof.as_ref().map(|n| n.listen_addr.clone()).unwrap_or_else(default_nvmeof_addr)
+    }
+
     /// Validate configuration values.
     pub fn validate(&self) -> anyhow::Result<()> {
+        // Half a CHAP pair is a mistake, not a choice to run without
+        // authentication (#164): refused rather than quietly served open.
+        #[cfg(feature = "iscsi")]
+        if let Some(i) = &self.iscsi {
+            match (&i.chap_user, &i.chap_secret) {
+                (Some(_), None) => anyhow::bail!("[iscsi] chap_user is set and chap_secret is not: both, or neither"),
+                (None, Some(_)) => anyhow::bail!("[iscsi] chap_secret is set and chap_user is not: both, or neither"),
+                (Some(u), Some(s)) if u.is_empty() || s.is_empty() => {
+                    anyhow::bail!("[iscsi] chap_user and chap_secret must not be empty")
+                }
+                _ => {}
+            }
+        }
         // Check management listen address parses
         self.management.listen_addr.parse::<SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid management listen_addr '{}': {e}", self.management.listen_addr))?;
@@ -1523,5 +1557,57 @@ path = "nvme-tcp://10.0.0.7:4420/nqn.z?nsid=1"
         assert!(!shown.contains(&secret), "{shown}");
         let serialized = serde_json::to_string(&cfg.drives).unwrap();
         assert!(!serialized.contains(&secret), "{serialized}");
+    }
+
+    fn merged(file: &str, iscsi: [Option<&str>; 4], nvme: [Option<&str>; 2]) -> StormBlockConfig {
+        let mut cfg: StormBlockConfig = toml::from_str(file).unwrap();
+        cfg.merge_cli(&[], None, 64, &[], iscsi[0], iscsi[1], iscsi[2], iscsi[3], nvme[0], nvme[1], 0);
+        cfg
+    }
+
+    /// #164: an unset flag leaves the file's value; a set one wins; neither
+    /// gives the default. The file's CHAP used to be read and dropped.
+    #[test]
+    fn the_file_s_iscsi_and_nvmeof_take_effect_unless_a_flag_says_otherwise() {
+        let file = "[iscsi]\nlisten_addr = \"10.0.0.1:3261\"\ntarget_name = \"iqn.2026.lo.storm:t\"\n\
+                    chap_user = \"node\"\nchap_secret = \"from-the-file\"\nmax_connections = 2\n\
+                    [nvmeof]\nlisten_addr = \"10.0.0.1:4421\"\nnqn = \"nqn.2026.lo.storm:n\"\nallowed_hosts = [\"nqn.h\"]\n";
+        let c = merged(file, [None; 4], [None; 2]);
+        let i = c.iscsi_effective();
+        assert_eq!((i.listen_addr.as_str(), i.target_name.as_str()), ("10.0.0.1:3261", "iqn.2026.lo.storm:t"));
+        assert_eq!((i.chap_user.as_deref(), i.chap_secret.as_deref()), (Some("node"), Some("from-the-file")));
+        assert_eq!(i.max_connections, 2);
+        assert_eq!(c.nvmeof_listen(), "10.0.0.1:4421");
+        let n = c.nvmeof.as_ref().unwrap();
+        assert_eq!((n.nqn.as_str(), n.allowed_hosts.len()), ("nqn.2026.lo.storm:n", 1));
+        c.validate().unwrap();
+
+        let c = merged(file, [Some("0.0.0.0:3262"), None, Some("cli"), Some("from-the-flag")], [Some("0.0.0.0:4422"), None]);
+        let i = c.iscsi_effective();
+        assert_eq!((i.listen_addr.as_str(), i.target_name.as_str()), ("0.0.0.0:3262", "iqn.2026.lo.storm:t"));
+        assert_eq!((i.chap_user.as_deref(), i.chap_secret.as_deref()), (Some("cli"), Some("from-the-flag")));
+        assert_eq!(c.nvmeof_listen(), "0.0.0.0:4422");
+        assert_eq!(c.nvmeof.as_ref().unwrap().nqn, "nqn.2026.lo.storm:n");
+
+        let c = merged("", [None; 4], [None; 2]);
+        let i = c.iscsi_effective();
+        assert_eq!((i.listen_addr.as_str(), i.chap_user.as_deref()), ("0.0.0.0:3260", None));
+        assert_eq!(c.nvmeof_listen(), "0.0.0.0:4420");
+        assert!(c.iscsi.is_some() && c.nvmeof.is_some(), "the daemon has both sections, as before");
+    }
+
+    /// #164: half a CHAP pair is refused, not served open.
+    #[test]
+    fn half_a_chap_pair_is_refused() {
+        for file in [
+            "[iscsi]\nchap_user = \"node\"\n",
+            "[iscsi]\nchap_secret = \"s\"\n",
+            "[iscsi]\nchap_user = \"\"\nchap_secret = \"s\"\n",
+        ] {
+            let c = merged(file, [None; 4], [None; 2]);
+            assert!(c.validate().is_err(), "{file}");
+        }
+        // The flags complete what the file started.
+        merged("[iscsi]\nchap_user = \"node\"\n", [None, None, None, Some("s")], [None; 2]).validate().unwrap();
     }
 }

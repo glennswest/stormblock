@@ -247,11 +247,22 @@ async fn iscsi_chap_authentication() {
 
     let (addr, server) = common::start_iscsi_target(vol, config).await;
 
-    // Non-CHAP login should still work when target advertises AuthMethod=None as fallback
-    // The login state machine accepts "None" even with CHAP configured if initiator offers it
-    // This tests that the target starts and accepts connections
-    let connect_result = IscsiInitiator::connect(addr).await;
-    assert!(connect_result.is_ok(), "should be able to connect");
+    // #164: offering no CHAP is refused. It used to be admitted ("None as a
+    // fallback"), so CHAP protected nothing.
+    let mut init = IscsiInitiator::connect(addr).await.unwrap();
+    let e = init.login(INITIATOR_NAME, TARGET_NAME).await.unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+
+    // The wrong secret is refused.
+    let mut init = IscsiInitiator::connect(addr).await.unwrap();
+    assert!(init.login_chap(INITIATOR_NAME, TARGET_NAME, "testuser", "wrong").await.is_err());
+
+    // The right one logs in, and the session works.
+    let mut init = IscsiInitiator::connect(addr).await.unwrap();
+    init.login_chap(INITIATOR_NAME, TARGET_NAME, "testuser", "testsecret").await.unwrap();
+    let payload = vec![0x5Au8; 4096];
+    init.write(0, &payload).await.unwrap();
+    assert_eq!(init.read(0, 1).await.unwrap(), payload);
 
     server.abort();
 }
