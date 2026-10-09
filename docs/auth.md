@@ -236,6 +236,26 @@ it safe by what it **cannot** do rather than by who calls it:
 5. **Re-imaging X** is an authenticated re-point of `boothost/<tag>`. The next
    claim makes X a new golden; the old one is deleted once nothing is cloned
    from it (its last boot clone goes at the next boot).
+6. **A machine's own host secret** (#247; owner's decision A) is how a node
+   re-points itself without a copy of the appliance's node token:
+   - **Minting:** every boot claim of host X answers `host_secret`, new each
+     claim; the last one is the one that works. The appliance keeps only its
+     SHA-256 on the host record and never shows it.
+   - **What it authorises,** for X alone:
+     - `PUT /api/v1/synonyms/boothost/X` to a **sealed** volume (no URI, no
+       unsealed volume: 403);
+     - `POST …/boothost/X/rollback`;
+     - `PUT …/boothost/X/intent` with `local` (`install` stays the admin's:
+       403).
+   - **Everything else** is an unknown bearer: another host's boothost, any
+     other verb, any other route. That is a 401.
+   - **Audit:** every call made with it is in the audit log as
+     `host-secret:X`.
+   - **On the node:** `boot-claim` writes it to
+     `/run/stormblock/host-secret.json` (`{appliance, host, secret}`, 0600).
+     `adopt-ublk` keeps it in the engine's data directory, and so in the
+     state volume, and puts it back in `/run` on a boot from the local disk,
+     which claims nothing. stormupdate reads it there.
 
 So the worst a caller that is not machine X can do by claiming as X is get
 X's image. Until a claim is bound to the host itself — a host key recorded on

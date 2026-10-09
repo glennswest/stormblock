@@ -261,6 +261,14 @@ impl ApiError {
         (StatusCode::CONFLICT, Json(body)).into_response()
     }
 
+    pub fn forbidden(msg: impl Into<String>) -> Response {
+        let body = ApiError {
+            error: msg.into(),
+            code: 403,
+        };
+        (StatusCode::FORBIDDEN, Json(body)).into_response()
+    }
+
     pub fn internal(msg: impl Into<String>) -> Response {
         let body = ApiError {
             error: msg.into(),

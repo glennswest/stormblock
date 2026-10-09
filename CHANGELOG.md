@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **feat:** #247 (owner's decision A): a per-host secret replaces the copy of the appliance's node token that stormupdate held.
+  - **Minting:** every boot claim answers `host_secret`, new each claim; the appliance keeps its SHA-256 on the host record.
+  - **Scope:** for that host only, it authorises re-pointing `boothost/<tag>` to a sealed volume, rolling it back, and setting its intent `local`. Anything else is 401, or 403 for an unsealed volume, a URI or intent `install`. Each use is audited as `host-secret:<host>`.
+  - **On the node:** `boot-claim` writes `/run/stormblock/host-secret.json` (0600). `adopt-ublk` keeps it in the data directory, and so in the state volume, and restores it on a boot from the local disk.
 - **perf:** #303 (owner's decision A, rule 8 kept): `adopt-ublk` attaches each slab device before it asks the incumbent to stand down. That means opening the block device, or connecting the NVMe/TCP namespace, with nothing read from a slab.
   - **Shorter wait:** the window in which units' first I/O waits no longer pays for the connects.
   - **Safer failure:** a device that will not attach fails while the incumbent still serves.

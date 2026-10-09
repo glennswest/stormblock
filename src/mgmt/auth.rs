@@ -405,6 +405,14 @@ fn admin_note(r: &Resolved) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct FullView;
 
+/// A request made with a machine's own host secret (#247): the host it
+/// covers. The handlers it may reach (re-point, rollback, intent) narrow it
+/// further: a sealed volume and no URI, intent `local` only.
+#[derive(Debug, Clone)]
+pub struct HostCredential {
+    pub host: String,
+}
+
 /// The engine-wide middleware. Reads whatever the node resolved at startup, so
 /// a router built in a test with no resolution stays open and the served one
 /// never is.
@@ -459,6 +467,41 @@ pub async fn require_token(
         } else {
             "anonymous"
         });
+    }
+    // A machine's own host secret (#247): only on its own boothost's
+    // re-point, rollback and intent, and only when it is the secret its last
+    // claim was handed. Anything else it is presented for is an unknown
+    // bearer, as before.
+    if !is_admin && !is_node && class != Class::Public {
+        if let (Some(bearer), Some(tag)) = (presented.as_deref(), crate::serve::api::host_scoped(&method, &path)) {
+            let holder = state.synonyms.read().await.host_secret_holder(&tag, bearer);
+            if let Some(host) = holder {
+                if let Some(s) = &slot {
+                    s.set("host-secret");
+                }
+                let (resource, verb, target) = crate::serve::api::review_attributes(&method, &path);
+                let mut rec = super::kubeauth::AuditRecord {
+                    at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    who: format!("host-secret:{host}"),
+                    method: method.to_string(),
+                    path: path.clone(),
+                    resource,
+                    verb,
+                    target,
+                    decision: "allowed".into(),
+                    reason: None,
+                    status: None,
+                };
+                req.extensions_mut().insert(HostCredential { host });
+                let resp = next.run(req).await;
+                rec.status = Some(resp.status().as_u16());
+                super::kubeauth::audit(state.audit_log.as_deref(), &rec);
+                return resp;
+            }
+        }
     }
     let destructive = match class {
         Class::Public => {

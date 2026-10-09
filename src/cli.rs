@@ -6856,6 +6856,18 @@ pub async fn run() -> anyhow::Result<()> {
                 Err(e) => tracing::warn!("install: the release generations not written in {d}: {e}"),
             }
         }
+        // This machine's host secret (#247): kept across boots in the data
+        // directory, and where stormupdate reads it.
+        if let Some(d) = data_dir {
+            match crate::drive::handover::carry_host_secret(
+                std::path::Path::new(crate::drive::handover::HOST_SECRET_PATH),
+                std::path::Path::new(d),
+            ) {
+                Some("kept") => tracing::info!("host secret from this boot's claim kept in {d}"),
+                Some(_) => tracing::info!("host secret restored to {}", crate::drive::handover::HOST_SECRET_PATH),
+                None => {}
+            }
+        }
         // The first boot off a laid disk says so (#220).
         if let (Some(r), Some(d)) = (record.as_ref(), data_dir) {
             if crate::drive::handover::local_only_boot(r) {
@@ -7048,6 +7060,7 @@ async fn claim_boot_uri(
                         eprintln!("boot-claim: {tag} -> {name}");
                     }
                     note_install_ticket(&base, &v);
+                    note_host_secret(&base, &v);
                     return Ok(uri.to_string());
                 }
                 // A tag nobody has decided for is a fleet decision that has
@@ -7098,6 +7111,23 @@ fn note_install_ticket(base: &str, reply: &serde_json::Value) {
         None => {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+/// Keep the host secret a claim handed this machine (#247), for stormupdate.
+/// Best effort: a machine without one is one that re-points with a token, as
+/// before.
+fn note_host_secret(base: &str, reply: &serde_json::Value) {
+    use crate::drive::handover::{HostSecret, HOST_SECRET_PATH};
+    let (Some(secret), Some(host)) = (
+        reply.get("host_secret").and_then(|s| s.as_str()),
+        reply.get("host").and_then(|h| h.get("name")).and_then(|n| n.as_str()),
+    ) else {
+        return;
+    };
+    let s = HostSecret { appliance: base.to_string(), host: host.to_string(), secret: secret.to_string() };
+    if let Err(e) = s.write(std::path::Path::new(HOST_SECRET_PATH)) {
+        eprintln!("boot-claim: {HOST_SECRET_PATH}: {e}");
     }
 }
 

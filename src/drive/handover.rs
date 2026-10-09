@@ -79,6 +79,56 @@ pub struct FlowOver {
 /// `boot-local` carries it into the handover record.
 pub const INSTALL_TICKET_PATH: &str = "/run/stormblock/install.json";
 
+/// This machine's host secret (#247), as `boot-claim` was handed it: where
+/// stormupdate reads it to re-point its own boothost, roll it back or set its
+/// intent local, without a copy of the appliance's node token. 0600.
+pub const HOST_SECRET_PATH: &str = "/run/stormblock/host-secret.json";
+/// The same, kept in the engine's data directory, so a boot from the local
+/// disk (no claim, nothing handed) still has the last one.
+pub const HOST_SECRET_FILE: &str = "host-secret.json";
+
+/// `{appliance, host, secret}`: who it is for, and the secret.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostSecret {
+    pub appliance: String,
+    pub host: String,
+    pub secret: String,
+}
+
+impl HostSecret {
+    pub fn read(path: &std::path::Path) -> Option<HostSecret> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+
+    /// Written 0600 through a dot-file (which the state capture skips).
+    pub fn write(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let tmp = dir.join(format!(".{name}.tmp"));
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?)?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    }
+}
+
+/// Keep the host secret across boots (#247): one handed this boot (`run`)
+/// goes into the data directory; with none handed (a boot from the local
+/// disk), the kept one comes back to `run`. Returns which way it went.
+pub fn carry_host_secret(run: &std::path::Path, data_dir: &std::path::Path) -> Option<&'static str> {
+    let kept = data_dir.join(HOST_SECRET_FILE);
+    match (HostSecret::read(run), HostSecret::read(&kept)) {
+        (Some(now), Some(old)) if now == old => None,
+        (Some(now), _) => now.write(&kept).ok().map(|_| "kept"),
+        (None, Some(old)) => old.write(run).ok().map(|_| "restored"),
+        (None, None) => None,
+    }
+}
+
 /// Where `boot-claim` notes that the appliance stated **no** intent at all
 /// (#236): an engine older than v20 (#148), which serves none. Written when
 /// the claim reply carries no `intent`, removed when it does. The initramfs
@@ -539,6 +589,31 @@ mod tests {
                 Device { dev_id: 1, volume: "stormblock".into() },
             ],
         }
+    }
+
+    /// #247: a secret handed this boot is kept; with none handed, the kept
+    /// one comes back; both written 0600.
+    #[test]
+    fn a_host_secret_is_kept_across_boots() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (run, data) = (dir.path().join("run/host-secret.json"), dir.path().join("engine"));
+        let a = HostSecret { appliance: "http://forge:9090".into(), host: "server1".into(), secret: "s-1".into() };
+        assert_eq!(carry_host_secret(&run, &data), None, "nothing anywhere");
+        a.write(&run).unwrap();
+        assert_eq!(carry_host_secret(&run, &data), Some("kept"));
+        assert_eq!(HostSecret::read(&data.join(HOST_SECRET_FILE)), Some(a.clone()));
+        assert_eq!(carry_host_secret(&run, &data), None, "already kept");
+        // A boot from the local disk: /run is fresh, the kept one returns.
+        std::fs::remove_file(&run).unwrap();
+        assert_eq!(carry_host_secret(&run, &data), Some("restored"));
+        assert_eq!(HostSecret::read(&run), Some(a.clone()));
+        assert_eq!(std::fs::metadata(&run).unwrap().permissions().mode() & 0o777, 0o600);
+        // The next claim's secret replaces the kept one.
+        let b = HostSecret { secret: "s-2".into(), ..a };
+        b.write(&run).unwrap();
+        assert_eq!(carry_host_secret(&run, &data), Some("kept"));
+        assert_eq!(HostSecret::read(&data.join(HOST_SECRET_FILE)), Some(b));
     }
 
     /// #220: only a boot from the machine's own disk alone counts as the

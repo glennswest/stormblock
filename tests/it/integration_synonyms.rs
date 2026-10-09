@@ -1676,3 +1676,96 @@ async fn a_claim_leaves_a_record_a_manager_can_read() {
     assert_eq!(v["last_claim"]["release"], v1.to_string());
     server.abort();
 }
+
+// ------------------------------------------------------------------ #247
+//
+// A machine's own host secret: handed at every boot claim, it re-points that
+// machine's boothost to a sealed volume, rolls it back and sets its intent
+// local — and nothing else, for no other host. stormupdate held a copy of the
+// appliance's node token for this.
+
+#[tokio::test]
+async fn a_host_secret_re_points_only_its_own_boothost_to_a_sealed_volume() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    for host in ["server1", "server2"] {
+        client
+            .post(format!("{base}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": host, "volume": v1.to_string()}))
+            .send().await.unwrap();
+    }
+    // A second sealed golden to move to: N+1.
+    let next = {
+        let mut vm = state.volume_manager.lock().await;
+        let id = vm.create_snapshot(stormblock::volume::VolumeId(v1), "release-n1").await.unwrap();
+        vm.seal_volume(id, None).await.unwrap();
+        id.0
+    };
+    state.set_auth(stormblock::serve::api::AuthConfig {
+        api_token: Some("tok".into()),
+        admin_token: Some("adm".into()),
+        audit_only: false,
+    });
+
+    let first = boot_claim(&client, &base, "server1").await;
+    let s1 = first["host_secret"].as_str().expect("a claim hands the machine its secret").to_string();
+    assert!(s1.len() >= 32);
+    let other = boot_claim(&client, &base, "server2").await["host_secret"].as_str().unwrap().to_string();
+    // The firmware's claim, then the initramfs's: the later one's works.
+    let s1b = boot_claim(&client, &base, "server1").await["host_secret"].as_str().unwrap().to_string();
+    assert_ne!(s1, s1b);
+
+    let send = |m: reqwest::Method, path: &str, tok: &str, body: Option<serde_json::Value>| {
+        let mut r = client.request(m, format!("{base}{path}")).bearer_auth(tok);
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        r.send()
+    };
+    use reqwest::Method;
+    let status = |r: reqwest::Response| r.status().as_u16();
+
+    // Its own boothost, to a sealed volume: yes.
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server1", &s1b, Some(serde_json::json!({"volume": next.to_string(), "label": "11.91"}))).await.unwrap();
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    // The superseded secret: no.
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server1", &s1, Some(serde_json::json!({"volume": v1.to_string()}))).await.unwrap();
+    assert_eq!(status(r), 401, "a claim replaces the secret");
+    // An unsealed volume, or a URI: no.
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server1", &s1b, Some(serde_json::json!({"volume": v2.to_string()}))).await.unwrap();
+    assert_eq!(status(r), 403);
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server1", &s1b, Some(serde_json::json!({"uri": "nvme-tcp://evil:4420/nqn.x"}))).await.unwrap();
+    assert_eq!(status(r), 403);
+    // Another host's boothost, with this host's secret: no.
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server2", &s1b, Some(serde_json::json!({"volume": next.to_string()}))).await.unwrap();
+    assert_eq!(status(r), 401);
+    let r = send(Method::POST, "/api/v1/synonyms/boothost/server2/rollback", &s1b, None).await.unwrap();
+    assert_eq!(status(r), 401);
+    // Its own rollback: back to N.
+    let r = send(Method::POST, "/api/v1/synonyms/boothost/server1/rollback", &s1b, None).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert!(v["target"].to_string().contains(&v1.to_string()), "back on N: {v}");
+    // Intent local: yes; install: no (the admin's).
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server1/intent", &s1b, Some(serde_json::json!({"intent": "local"}))).await.unwrap();
+    assert_eq!(status(r), 200);
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server1/intent", &s1b, Some(serde_json::json!({"intent": "install"}))).await.unwrap();
+    assert_eq!(status(r), 403);
+    // Nothing else: not a listing, not another verb on the boothost, not a
+    // volume delete, not another namespace.
+    assert_eq!(status(send(Method::GET, "/api/v1/volumes", &s1b, None).await.unwrap()), 401);
+    assert_eq!(status(send(Method::DELETE, "/api/v1/synonyms/boothost/server1", &s1b, None).await.unwrap()), 401);
+    assert_eq!(status(send(Method::DELETE, &format!("/api/v1/volumes/{v2}"), &s1b, None).await.unwrap()), 401);
+    assert_eq!(status(send(Method::PUT, "/api/v1/synonyms/default/server1", &s1b, Some(serde_json::json!({"volume": next.to_string()}))).await.unwrap()), 401);
+    // server2's own secret works for server2.
+    let r = send(Method::PUT, "/api/v1/synonyms/boothost/server2", &other, Some(serde_json::json!({"volume": next.to_string()}))).await.unwrap();
+    assert_eq!(status(r), 200);
+    // The secret is never shown.
+    let h: serde_json::Value = client.get(format!("{base}/api/v1/boothost/server1")).bearer_auth("tok").send().await.unwrap().json().await.unwrap();
+    assert!(!h.to_string().contains(&s1b) && h.get("host_secret").is_none(), "{h}");
+    server.abort();
+}

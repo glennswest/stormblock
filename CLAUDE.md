@@ -960,7 +960,15 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
-### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — WAITING ON THE OWNER
+### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — IN PROGRESS (owner: A, 2026-10-09)
+
+Built (A): `Host.host_secret` (SHA-256), minted per claim, `host_secret` in
+the reply; `serve::api::host_scoped` + `mgmt::auth` accept it on its own
+boothost's PUT / rollback / PUT intent (`HostCredential`), handlers narrow
+(sealed volume, no URI, intent local); boot-claim writes
+/run/stormblock/host-secret.json, adopt-ublk `carry_host_secret` via the data
+dir. Tests: integration_synonyms, handover, host_scoped. [ ] build VM;
+check.sh; golden; stormupdate issue. Earlier:
 
 The intent half is gone: #265 settled by #122's 2A, and stormupdate (b4cc7e0)
 sets no intent. Instead it re-points `boothost/<tag>` on forge itself (`PUT

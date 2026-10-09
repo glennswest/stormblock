@@ -115,6 +115,12 @@ pub struct Previous {
 /// somewhere that is not reloaded into memory on every start.
 const HISTORY: usize = 16;
 
+/// A host secret as it is kept (#247).
+fn secret_hash(secret: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(secret.trim().as_bytes()))
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -226,6 +232,13 @@ pub struct Host {
     /// Nothing retries on its own (#220, A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install: Option<InstallProgress>,
+    /// SHA-256 (hex) of this machine's host secret (#247): minted at every
+    /// boot claim of this host and handed to the machine in the reply, the
+    /// last one replacing the one before. It authorises this host's own
+    /// re-point to a sealed volume, its rollback and intent `local`, and
+    /// nothing else. Kept hashed; never shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_secret: Option<String>,
     /// Whether the machine must prove its boot with a TPM 2.0 quote (#216).
     /// Set by the platform or an admin, never by the machine: a node that
     /// could write it could downgrade its own attestation. Unset reads as
@@ -1037,6 +1050,27 @@ impl SynonymStore {
         let out = h.clone();
         self.persist();
         Ok((out, InstallDone::Reset))
+    }
+
+    /// A new host secret for `host` (#247), replacing the last: what a boot
+    /// claim hands the machine. Kept as its SHA-256 only. `None` for a host
+    /// not on record.
+    pub fn mint_host_secret(&mut self, host: &str) -> Option<String> {
+        let h = self.hosts.get_mut(host)?;
+        let secret = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        h.host_secret = Some(secret_hash(&secret));
+        self.persist();
+        Some(secret)
+    }
+
+    /// The host `name` resolves to, when `secret` is its host secret (#247).
+    pub fn host_secret_holder(&self, name: &str, secret: &str) -> Option<String> {
+        let host = self.host_of(name)?;
+        let want = self.hosts.get(&host)?.host_secret.as_deref()?;
+        let got = secret_hash(secret);
+        // Equal length hex; compared whole either way.
+        let same = want.len() == got.len() && want.bytes().zip(got.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
+        same.then_some(host)
     }
 
     /// The first boot off a laid disk (#220): the install laid from `clone`

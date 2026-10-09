@@ -324,8 +324,35 @@ async fn repoint(
 async fn repoint_two(
     State(state): State<Arc<AppState>>,
     Path((namespace, name)): Path<(String, String)>,
+    cred: Option<axum::Extension<crate::mgmt::auth::HostCredential>>,
     Json(req): Json<RepointRequest>,
 ) -> Response {
+    // A machine's own host secret (#247): its boothost, to a sealed volume
+    // on this node, and nothing else — not a URI, not an unsealed volume.
+    if let Some(axum::Extension(c)) = cred {
+        if namespace != BOOTHOST_NS {
+            return ApiError::forbidden("a host secret re-points only its own boothost");
+        }
+        if req.uri.is_some() {
+            return ApiError::forbidden(format!("host {}: a host secret re-points to a sealed volume, not a URI", c.host));
+        }
+        let Some(v) = req.volume.as_deref() else {
+            return ApiError::bad_request("give volume");
+        };
+        let sealed = {
+            let vm = state.volume_manager.lock().await;
+            match vm.find_volume(v).await {
+                Some(id) => vm.is_sealed(&id),
+                None => return ApiError::not_found(format!("no volume {v}")),
+            }
+        };
+        if !sealed {
+            return ApiError::forbidden(format!(
+                "host {}: a host secret re-points to a sealed volume (a release golden), and {v} is not sealed",
+                c.host
+            ));
+        }
+    }
     do_repoint(state, &namespace, &name, req).await
 }
 
@@ -348,7 +375,11 @@ async fn rollback_one(State(state): State<Arc<AppState>>, Path(name): Path<Strin
 async fn rollback_two(
     State(state): State<Arc<AppState>>,
     Path((namespace, name)): Path<(String, String)>,
+    cred: Option<axum::Extension<crate::mgmt::auth::HostCredential>>,
 ) -> Response {
+    if cred.is_some() && namespace != BOOTHOST_NS {
+        return ApiError::forbidden("a host secret rolls back only its own boothost");
+    }
     do_rollback(state, &namespace, &name).await
 }
 
@@ -1199,8 +1230,14 @@ async fn claim_boothost(
             inventory,
         },
     );
+    // This machine's own credential for what a node may do to its own boot
+    // (#247): re-point its boothost to a sealed volume, roll it back, set
+    // its intent local. New at every claim; the last one is the one that
+    // works. Handed only to the machine claiming, and kept hashed.
+    let host_secret = state.synonyms.write().await.mint_host_secret(tag);
     let out = json!({
         "intent": intent.as_str(),
+        "host_secret": host_secret,
         // Who this is, and what the machine called itself: a serial or a MAC
         // resolves to the host it is an alias of (#199).
         "host": {
@@ -1389,6 +1426,7 @@ pub struct IntentRequest {
 async fn put_intent(
     State(state): State<Arc<AppState>>,
     Path((namespace, name)): Path<(String, String)>,
+    cred: Option<axum::Extension<crate::mgmt::auth::HostCredential>>,
     Json(req): Json<IntentRequest>,
 ) -> Response {
     if let Err(r) = boothost_only(&namespace) {
@@ -1398,6 +1436,17 @@ async fn put_intent(
         Ok(i) => i,
         Err(e) => return ApiError::bad_request(e),
     };
+    // A machine's own host secret sets `local` and nothing else (#247):
+    // `install` destroys the disk's identity, and stays the admin's.
+    if let Some(axum::Extension(c)) = &cred {
+        if intent != BootIntent::Local {
+            return ApiError::forbidden(format!(
+                "host {}: a host secret sets the intent local only; {} needs the admin token",
+                c.host,
+                intent.as_str()
+            ));
+        }
+    }
     let set = state.synonyms.write().await.set_intent(&name, intent);
     match set {
         Ok(h) => {

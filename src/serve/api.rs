@@ -250,6 +250,29 @@ pub enum Class {
     Attestation(String),
 }
 
+/// The boothost a request names, when it is one of the three things a
+/// machine's own host secret may do (#247): re-point that boothost (`PUT
+/// /api/v1/synonyms/boothost/<tag>`), roll it back (`POST …/<tag>/rollback`),
+/// or set its intent (`PUT …/<tag>/intent`; the handler allows only
+/// `local`). The handlers hold the rest: a sealed volume, no URI.
+pub fn host_scoped(method: &Method, path: &str) -> Option<String> {
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    if seg.len() < 6 || seg[1] != "api" || seg[2] != "v1" || seg[3] != "synonyms" || seg[4] != "boothost" {
+        return None;
+    }
+    let tag = seg[5];
+    if tag.is_empty() || tag == "." || tag == ".." {
+        return None;
+    }
+    let ok = match (method, &seg[6..]) {
+        (&Method::PUT, []) => true,
+        (&Method::POST, ["rollback"]) => true,
+        (&Method::PUT, ["intent"]) => true,
+        _ => false,
+    };
+    ok.then(|| tag.to_string())
+}
+
 /// The host named by an attestation read, when this is one.
 fn attestation_read(method: &Method, path: &str) -> Option<String> {
     if *method != Method::GET {
@@ -1689,6 +1712,27 @@ mod tests {
     /// A machine reads its boot intent and reports an install done with no
     /// token; setting the intent needs the admin token when one is configured
     /// (#148).
+    /// #247: the three things a host secret may be presented for.
+    #[test]
+    fn host_scoped_names_the_boothost_of_three_routes_only() {
+        let t = |m: Method, p: &str| host_scoped(&m, p);
+        assert_eq!(t(Method::PUT, "/api/v1/synonyms/boothost/server1").as_deref(), Some("server1"));
+        assert_eq!(t(Method::POST, "/api/v1/synonyms/boothost/server1/rollback").as_deref(), Some("server1"));
+        assert_eq!(t(Method::PUT, "/api/v1/synonyms/boothost/server1/intent").as_deref(), Some("server1"));
+        for (m, p) in [
+            (Method::GET, "/api/v1/synonyms/boothost/server1"),
+            (Method::DELETE, "/api/v1/synonyms/boothost/server1"),
+            (Method::PUT, "/api/v1/synonyms/default/server1"),
+            (Method::POST, "/api/v1/synonyms/boothost/server1/claim"),
+            (Method::GET, "/api/v1/synonyms/boothost/server1/intent"),
+            (Method::PUT, "/api/v1/synonyms/boothost/../intent"),
+            (Method::PUT, "/api/v1/synonyms/boothost/server1/intent/x"),
+            (Method::DELETE, "/api/v1/volumes/x"),
+        ] {
+            assert_eq!(t(m.clone(), p), None, "{m} {p}");
+        }
+    }
+
     #[test]
     fn the_intent_is_read_open_and_set_by_the_admin() {
         let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()), audit_only: false };
