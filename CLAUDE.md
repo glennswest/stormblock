@@ -27,9 +27,8 @@ commit  →  push  →  sc-build  →  read the result
 
 Tests that create files need `mkdir -p tmp && export TMPDIR=$PWD/tmp` in the
 scratch tree: dev's `/tmp/stormblock-*` directories are root-owned from old
-builds (stormcentral#61). Known red on a busy
-box `mgmt_luns_at_scale` (#134) and
-`integration_fstemplates::a_create_whose_caller_gives_up_still_finishes` (#173).
+builds (stormcentral#61). No known-red tests since #134 (the LUN table written behind attaches) and
+#173 (a first write zeroes its slot without writing it).
 
 The test container (#139): `test/build.sh` builds `stormblock` and
 `stormblock-test` (musl) and the `FROM scratch` image;
@@ -139,7 +138,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/serve/` — the serving layer mounted at `/serve/v1` (wiring, reconciler, readiness, reaper, tar, raw, trim)
 - `src/mgmt/` — the management API (`api/`: every `/api/v1` surface, `v1.rs`, `kube.rs`, `rebuilds.rs`, `boothost.rs`, …), auth, config, metrics, discovery, ublk exports, `nvme_hosts.rs` (per-host NVMe subsystems, `nvme_hosts.json`), `ui/` (feature `ui`)
 - `src/cluster/` — openraft membership, heartbeat, replication (feature `cluster`, opt-in)
-- `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (formats every run, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
+- `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (opens its own slab, formats only a blank target or with `--format`, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
 - `src/cli.rs` — CLI, the daemon, and every subcommand (`open_slabs_resuming`: a flow-over cut short claims a fresh clone, #171); `src/main.rs` only calls `stormblock::cli::run` (#209)
 - `test/` — `stormblock-test`, the test container: short/medium/long suites that run the engine of the same commit in the pod (#139)
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222)
@@ -181,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### #369 reopened: unmarked release volumes still refused (2026-10-09, P0) — IN PROGRESS
+### #369 reopened: unmarked release volumes still refused (2026-10-09, P0) — DONE (golden-stormblock-ac8207f40ae4)
 
 12.02 on the Dell (96bb3b7, with bfd5d16): the same 8 volumes refused. Their
 data-slab records predate origins (#349), so they read unmarked.
@@ -190,9 +189,11 @@ data-slab records predate origins (#349), so they read unmarked.
       half is carried (not refused); console line per re-laid/carried volume
 - [x] test extended (release, unmarked-named, node, unmarked-unnamed):
       install_tests 19/19 on a build VM at c9ceb95
-- [ ] check.sh; golden; tell master-a2 at once (it composes for the Dell)
+- [x] check.sh at 19ba53e (1086/1086) and ad2d6cb (1088/1088) ALL PASS;
+      golden golden-stormblock-ac8207f40ae4 (stormcos#467); master told.
+      Not on metal: the Dell's next install
 
-### Codex review: durability (#366) and correctness (#367) (2026-10-09, P0) — IN PROGRESS
+### Codex review: durability (#366) and correctness (#367) (2026-10-09, P0) — DONE (golden-stormblock-ac8207f40ae4)
 
 - [x] #367: copy/restripe at the volume's extent size, cold map loaded
       (`mapped_extents`), prefetch errors returned; snapshot gate against
@@ -200,9 +201,11 @@ data-slab records predate origins (#349), so they read unmarked.
 - [x] #366: FUA (NVMe, iSCSI), VWC advertised, initiator flush = SYNCHRONIZE
       CACHE (222b9fa); frees after checked persists, create/seal undone on a
       failed write; boot-iscsi opens its own slab (#162) (619a6ae)
-- [ ] tests on a build VM; check.sh; golden; close #366, #367, #162
+- [x] targeted 86/86 at 619a6ae; check.sh at ad2d6cb ALL PASS (1088/1088);
+      golden golden-stormblock-ac8207f40ae4; #366, #367, #162 closed. Not run:
+      a Linux host flushing over NVMe/TCP now that VWC is reported
 
-### The LUN table is written behind the API (2026-10-09, #134) — PARKED for P0s (check.sh at 8365d46 ALL PASS 1080/1080; golden + close left)
+### The LUN table is written behind the API (2026-10-09, #134) — DONE (golden-stormblock-ac8207f40ae4; check.sh at 8365d46 and ad2d6cb ALL PASS)
 
 - [x] `luns::LunsWriter` (`AppState.luns_writer`): attach/detach mark it,
       one task writes the latest table (compact, blocking pool), coalesced;
