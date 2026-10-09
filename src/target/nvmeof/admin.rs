@@ -140,6 +140,14 @@ pub fn identify_controller(
     // ONCS (Optional NVM Command Support) — Write Zeroes, Dataset Management
     data[520..522].copy_from_slice(&0x0004u16.to_le_bytes()); // Dataset Management
 
+    // VWC: a volatile write cache is present (#366). A write is acknowledged
+    // before its slot is synced; with VWC clear a host takes every completed
+    // write as durable and never sends a Flush or sets FUA, so an fsync on
+    // the host made nothing durable here. The I/O controller only.
+    if !discovery {
+        data[525] = 0x01;
+    }
+
     // SGLS: SGLs supported (bit 0) + SGL data block in capsule (bit 20).
     // Mandatory nonzero for fabrics — the Linux initiator refuses the
     // controller with "Mandatory sgls are not supported!" otherwise.
@@ -270,6 +278,7 @@ mod tests {
         let sgls = u32::from_le_bytes(data[536..540].try_into().unwrap());
         assert_ne!(sgls & 0x3, 0, "SGLS mandatory for fabrics");
         assert_eq!(data[111], 1, "CNTRLTYPE = I/O controller");
+        assert_eq!(data[525] & 1, 1, "VWC: hosts flush and send FUA (#366)");
 
         // ANA (#83), as Linux's nvme_mpath_init_identify reads it.
         assert_eq!(data[76] & 0b1010, 0b1010, "CMIC: multi-controller + ANA");

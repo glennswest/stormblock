@@ -144,13 +144,21 @@ async fn handle_write(
         };
     }
 
-    match device.write(offset, &data[..expected_len]).await {
-        Ok(_) => IoResult {
+    // FUA (CDW12 bit 30, #366): the write is durable before it completes.
+    // A journal commit sent with FUA was acknowledged while still volatile.
+    let fua = sqe.cdw12() & (1 << 30) != 0;
+    let r = match device.write(offset, &data[..expected_len]).await {
+        Ok(_) if fua => device.flush().await,
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    };
+    match r {
+        Ok(()) => IoResult {
             cqe: NvmeCqe::success(cid, 0, 0),
             data: Vec::new(),
         },
         Err(e) => {
-            tracing::error!("NVMe write error at LBA {slba}: {e}");
+            tracing::error!("NVMe write error at LBA {slba}{}: {e}", if fua { " (FUA)" } else { "" });
             let (sct, sc) = io_status(&e, true);
             IoResult {
                 cqe: NvmeCqe::error(cid, 0, 0, sct, sc),
@@ -236,6 +244,45 @@ mod tests {
         raw[44..48].copy_from_slice(&((slba >> 32) as u32).to_le_bytes()); // CDW11 = SLBA high
         raw[48..52].copy_from_slice(&((nlb - 1) as u32).to_le_bytes()); // CDW12 = NLB (0-based)
         NvmeSqe::from_bytes(&raw)
+    }
+
+
+    /// Counts flushes (#366).
+    struct CountFlush(Arc<dyn BlockDevice>, std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for CountFlush {
+        fn id(&self) -> &crate::drive::DeviceId { self.0.id() }
+        fn capacity_bytes(&self) -> u64 { self.0.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.0.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.0.optimal_io_size() }
+        fn device_type(&self) -> crate::drive::DriveType { self.0.device_type() }
+        async fn read(&self, o: u64, b: &mut [u8]) -> crate::drive::DriveResult<usize> { self.0.read(o, b).await }
+        async fn write(&self, o: u64, b: &[u8]) -> crate::drive::DriveResult<usize> { self.0.write(o, b).await }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.flush().await
+        }
+        async fn discard(&self, o: u64, l: u64) -> crate::drive::DriveResult<()> { self.0.discard(o, l).await }
+    }
+
+    /// #366: a write with FUA is flushed before it completes; one without is not.
+    #[tokio::test]
+    async fn a_write_with_fua_is_flushed_before_it_completes() {
+        let (dev, path) = test_device().await;
+        let counted = Arc::new(CountFlush(dev, Default::default()));
+        let dev: Arc<dyn BlockDevice> = counted.clone();
+        let data = vec![0x5Au8; 4096];
+        let plain = make_sqe(IO_WRITE, 1, 0, 1);
+        let r = handle_io_command(&plain, &dev, &data).await;
+        assert_eq!(u16::from_le_bytes([r.cqe.raw[14], r.cqe.raw[15]]) & 0xFFFE, 0);
+        assert_eq!(counted.1.load(std::sync::atomic::Ordering::SeqCst), 0, "no FUA, no flush");
+        let mut fua = make_sqe(IO_WRITE, 1, 1, 1);
+        fua.raw[51] |= 0x40; // CDW12 bit 30
+        let r = handle_io_command(&fua, &dev, &data).await;
+        assert_eq!(u16::from_le_bytes([r.cqe.raw[14], r.cqe.raw[15]]) & 0xFFFE, 0);
+        assert_eq!(counted.1.load(std::sync::atomic::Ordering::SeqCst), 1, "FUA: flushed");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

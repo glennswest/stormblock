@@ -533,16 +533,18 @@ async fn do_read(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>) -> S
 async fn handle_write_10(cdb: &[u8], device: &Arc<dyn BlockDevice>, data: &[u8]) -> ScsiResult {
     let lba = u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]) as u64;
     let block_count = u16::from_be_bytes([cdb[7], cdb[8]]) as u64;
-    do_write(lba, block_count, device, data).await
+    do_write(lba, block_count, device, data, cdb[1] & 0x08 != 0).await
 }
 
 async fn handle_write_16(cdb: &[u8], device: &Arc<dyn BlockDevice>, data: &[u8]) -> ScsiResult {
     let lba = u64::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5], cdb[6], cdb[7], cdb[8], cdb[9]]);
     let block_count = u32::from_be_bytes([cdb[10], cdb[11], cdb[12], cdb[13]]) as u64;
-    do_write(lba, block_count, device, data).await
+    do_write(lba, block_count, device, data, cdb[1] & 0x08 != 0).await
 }
 
-async fn do_write(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>, data: &[u8]) -> ScsiResult {
+/// `fua`: the CDB's Force Unit Access bit (#366): the data is durable
+/// before GOOD is returned.
+async fn do_write(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>, data: &[u8], fua: bool) -> ScsiResult {
     let bs = device.block_size() as u64;
     let offset = lba * bs;
     let expected_len = (block_count * bs) as usize;
@@ -555,8 +557,13 @@ async fn do_write(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>, dat
         return ScsiResult::check_condition(SenseData::illegal_request());
     }
 
-    match device.write(offset, &data[..expected_len]).await {
-        Ok(_) => ScsiResult::good_empty(),
+    let r = match device.write(offset, &data[..expected_len]).await {
+        Ok(_) if fua => device.flush().await,
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    };
+    match r {
+        Ok(()) => ScsiResult::good_empty(),
         Err(e) => ScsiResult::check_condition(SenseData::for_drive_error(&e)),
     }
 }
@@ -741,6 +748,45 @@ mod tests {
         let block_size = u32::from_be_bytes(result.data[4..8].try_into().unwrap());
         assert_eq!(block_size, 4096);
         assert_eq!((last_lba as u64 + 1) * block_size as u64, 1024 * 1024);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Counts flushes (#366).
+    struct CountFlush(Arc<dyn BlockDevice>, std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for CountFlush {
+        fn id(&self) -> &crate::drive::DeviceId { self.0.id() }
+        fn capacity_bytes(&self) -> u64 { self.0.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.0.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.0.optimal_io_size() }
+        fn device_type(&self) -> crate::drive::DriveType { self.0.device_type() }
+        async fn read(&self, o: u64, b: &mut [u8]) -> crate::drive::DriveResult<usize> { self.0.read(o, b).await }
+        async fn write(&self, o: u64, b: &[u8]) -> crate::drive::DriveResult<usize> { self.0.write(o, b).await }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.flush().await
+        }
+        async fn discard(&self, o: u64, l: u64) -> crate::drive::DriveResult<()> { self.0.discard(o, l).await }
+    }
+
+    /// #366: WRITE(10) and WRITE(16) with FUA are flushed before GOOD.
+    #[tokio::test]
+    async fn a_write_with_fua_is_flushed_before_good() {
+        let (dev, path) = test_device().await;
+        let counted = Arc::new(CountFlush(dev, Default::default()));
+        let dev: Arc<dyn BlockDevice> = counted.clone();
+        let data = vec![0x5Au8; 4096];
+        let flushes = || counted.1.load(std::sync::atomic::Ordering::SeqCst);
+        let plain = [WRITE_10, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(handle_scsi_command(&plain, &dev, &data, &[0]).await.status, ScsiStatus::Good);
+        assert_eq!(flushes(), 0, "no FUA, no flush");
+        let fua10 = [WRITE_10, 0x08, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(handle_scsi_command(&fua10, &dev, &data, &[0]).await.status, ScsiStatus::Good);
+        assert_eq!(flushes(), 1, "WRITE(10) FUA");
+        let fua16 = [WRITE_16, 0x08, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0];
+        assert_eq!(handle_scsi_command(&fua16, &dev, &data, &[0]).await.status, ScsiStatus::Good);
+        assert_eq!(flushes(), 2, "WRITE(16) FUA");
         let _ = std::fs::remove_file(&path);
     }
 

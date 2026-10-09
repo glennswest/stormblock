@@ -25,6 +25,7 @@ const READ_CAPACITY_10: u8 = 0x25;
 const READ_10: u8 = 0x28;
 const WRITE_10: u8 = 0x2A;
 const UNMAP: u8 = 0x42;
+const SYNCHRONIZE_CACHE_10: u8 = 0x35;
 
 // Login stages
 const STAGE_SECURITY: u8 = 0;
@@ -490,6 +491,39 @@ impl IscsiConnection {
         }
     }
 
+    /// SYNCHRONIZE CACHE(10) over the whole LUN (#366): the target's
+    /// volatile cache written to its media. What a flush is; a NOP-Out
+    /// proves only that the target answers.
+    async fn scsi_synchronize_cache(&mut self) -> Result<(), DriveError> {
+        let itt = self.next_itt();
+        let mut bhs = Bhs::new();
+        bhs.set_opcode(Opcode::ScsiCommand);
+        bhs.set_final(true);
+        bhs.set_initiator_task_tag(itt);
+        bhs.set_cmd_sn(self.cmd_sn);
+        bhs.set_exp_stat_sn(self.exp_stat_sn);
+        bhs.set_lun(0);
+        bhs.set_expected_data_transfer_length(0);
+        let mut cdb = [0u8; 16];
+        cdb[0] = SYNCHRONIZE_CACHE_10; // LBA 0, count 0: every block
+        bhs.set_cdb(&cdb);
+        write_pdu(&mut self.writer, &IscsiPdu::new(bhs), false, false)
+            .await
+            .map_err(DriveError::Io)?;
+        self.cmd_sn += 1;
+        let resp = self.read_response().await?;
+        match resp.bhs.opcode() {
+            Some(Opcode::ScsiResponse) if resp.bhs.status() == 0 => Ok(()),
+            Some(Opcode::ScsiResponse) => Err(DriveError::Other(anyhow::anyhow!(
+                "SYNCHRONIZE CACHE failed with status {:#x}",
+                resp.bhs.status()
+            ))),
+            other => Err(DriveError::Other(anyhow::anyhow!(
+                "expected ScsiResponse after SYNCHRONIZE CACHE, got {other:?}"
+            ))),
+        }
+    }
+
     /// SCSI UNMAP — discard blocks.
     async fn scsi_unmap(
         &mut self,
@@ -844,26 +878,9 @@ impl IscsiDevice {
     }
 
     async fn flush_once(&self) -> DriveResult<()> {
-        // NOP-Out as keepalive/sync signal
         let mut g = self.session().await?;
         let conn = g.as_mut().expect("session established");
-        let itt = conn.next_itt();
-        let mut bhs = Bhs::new();
-        bhs.set_opcode(Opcode::NopOut);
-        bhs.set_immediate(true);
-        bhs.set_final(true);
-        bhs.set_initiator_task_tag(itt);
-        bhs.set_target_transfer_tag(0xFFFF_FFFF);
-        bhs.set_cmd_sn(conn.cmd_sn);
-        bhs.set_exp_stat_sn(conn.exp_stat_sn);
-
-        let pdu = IscsiPdu::new(bhs);
-        let r = deadline("flush", async {
-            write_pdu(&mut conn.writer, &pdu, false, false).await.map_err(DriveError::Io)?;
-            // Wait for NOP-In response
-            conn.read_response().await.map(|_| ())
-        })
-        .await;
+        let r = deadline("flush", conn.scsi_synchronize_cache()).await;
         if r.is_err() {
             *g = None;
         }

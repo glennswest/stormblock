@@ -266,3 +266,45 @@ async fn iscsi_chap_authentication() {
 
     server.abort();
 }
+
+/// Counts the flushes that reach the target's device (#366).
+struct CountFlush(std::sync::Arc<dyn stormblock::drive::BlockDevice>, std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl stormblock::drive::BlockDevice for CountFlush {
+    fn id(&self) -> &stormblock::drive::DeviceId { self.0.id() }
+    fn capacity_bytes(&self) -> u64 { self.0.capacity_bytes() }
+    fn block_size(&self) -> u32 { self.0.block_size() }
+    fn optimal_io_size(&self) -> u32 { self.0.optimal_io_size() }
+    fn device_type(&self) -> stormblock::drive::DriveType { self.0.device_type() }
+    async fn read(&self, o: u64, b: &mut [u8]) -> stormblock::drive::DriveResult<usize> { self.0.read(o, b).await }
+    async fn write(&self, o: u64, b: &[u8]) -> stormblock::drive::DriveResult<usize> { self.0.write(o, b).await }
+    async fn flush(&self) -> stormblock::drive::DriveResult<()> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.flush().await
+    }
+    async fn discard(&self, o: u64, l: u64) -> stormblock::drive::DriveResult<()> { self.0.discard(o, l).await }
+}
+
+/// #366: the engine's iSCSI initiator's flush reaches the target as a
+/// SYNCHRONIZE CACHE, which flushes the target's device. It sent a NOP-Out,
+/// which flushed nothing, so a slab sync over iSCSI claimed durability it
+/// did not have.
+#[tokio::test]
+async fn the_initiators_flush_flushes_the_targets_device() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lun.bin").display().to_string();
+    let file = stormblock::drive::filedev::FileDevice::open_with_capacity(&path, 8 << 20).await.unwrap();
+    let counted = std::sync::Arc::new(CountFlush(std::sync::Arc::new(file), Default::default()));
+    let (addr, _server) = common::start_iscsi_target(counted.clone(), default_iscsi_config()).await;
+
+    let dev = stormblock::drive::iscsi_dev::IscsiDevice::connect(&addr.ip().to_string(), addr.port(), TARGET_NAME)
+        .await
+        .unwrap();
+    use stormblock::drive::BlockDevice;
+    dev.write(0, &[0x66u8; 4096]).await.unwrap();
+    let before = counted.1.load(Ordering::SeqCst);
+    dev.flush().await.unwrap();
+    assert_eq!(counted.1.load(Ordering::SeqCst), before + 1, "a flush is a SYNCHRONIZE CACHE on the target");
+}
