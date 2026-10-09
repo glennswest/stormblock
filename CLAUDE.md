@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The config file's [iscsi]/[nvmeof] take effect; CHAP is required when set (2026-10-09, #164) — DONE
+### The config file's [iscsi]/[nvmeof] take effect; CHAP is required when set (2026-10-09, #164) — DONE (golden-stormblock-2ec2e5085634)
 
 `--iscsi-addr`, `--iscsi-target-name`, `--nvmeof-addr`, `--nvmeof-nqn` had
 clap defaults, so the file's values were always overwritten; CHAP came only
