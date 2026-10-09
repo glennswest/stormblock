@@ -118,6 +118,13 @@ pub enum DriveError {
 }
 
 impl DriveError {
+    /// The network (or a remote device) did not answer: a timeout, a refused,
+    /// reset or dropped connection (#359). Worth another attempt on a new
+    /// connection; never a reason to stop trusting the media.
+    pub fn is_transport(&self) -> bool {
+        matches!(self, DriveError::Io(e) if crate::retry::classify_io(e) == crate::retry::Class::Transient)
+    }
+
     /// Whether this is a reason to stop trusting the storage underneath.
     ///
     /// Marking a leg failed is sticky and it is written into the volume's
@@ -130,6 +137,12 @@ impl DriveError {
     /// the fault is actually in.
     pub fn is_media_failure(&self) -> bool {
         match self {
+            // A timeout or a dropped connection is the network, not the
+            // media (#359): the same I/O on a new connection succeeds.
+            DriveError::Io(e) if self.is_transport() => {
+                let _ = e;
+                false
+            }
             DriveError::Io(e) => !matches!(
                 e.kind(),
                 std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData

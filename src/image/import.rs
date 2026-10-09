@@ -356,7 +356,10 @@ async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportSta
                 .join("imports");
             tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
             let target = dir.join(format!("{}.img", st.read().await.id.simple()));
-            let client = crate::http::Client::builder().timeout(std::time::Duration::from_secs(6 * 3600)).build().map_err(|e| e.to_string())?;
+            // An idle bound, per frame and to the headers (#359): the download
+            // itself may take hours, a server that stops sending may not. It
+            // resumes on failure and removes its partial file when it gives up.
+            let client = crate::http::Client::builder().timeout(std::time::Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
             let n = client.get_to_file(url, &target).await.map_err(|e| e.to_string())?;
             {
                 let mut s = st.write().await;

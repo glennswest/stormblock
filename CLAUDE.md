@@ -181,6 +181,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Every remote call retries (2026-10-09, #359, P1 owner) — IN PROGRESS
+
+- [x] `src/retry.rs` (policies, classify io/status, attempts logged,
+      infra vs real); tests
+- [x] NVMe/TCP and iSCSI under `BLOCK_IO` (iSCSI: deadlines, re-login);
+      transport errors never mark the only copy failed; allocate_apart keeps
+      the real error
+- [x] http: GET/HEAD retried, `send_retried`; content_length, transfers
+      bounded (idle) and resumed; partial download removed; httpdev bounded
+- [x] kubeauth, stormfs, cluster join/migration chunk, build cleanup DELETE;
+      the rest commented (heartbeat, migration create) or kept (boot-claim,
+      install report, replication queue)
+- [x] docs/retries.md (the inventory), CHANGELOG
+- [ ] build VM: tests; check.sh; golden
+
 ### Goldens lost extents at every restart (2026-10-08, #370, P0 data) — DONE (golden-stormblock-7318bc78894f)
 
 Found reading the Dell's consoles: restore dropped golden mappings whose

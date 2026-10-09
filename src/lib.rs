@@ -16,6 +16,7 @@ pub mod rebuild;
 pub mod http;
 pub mod logging;
 pub mod lockwatch;
+pub mod retry;
 pub mod image;
 pub mod pallet;
 pub mod placement;

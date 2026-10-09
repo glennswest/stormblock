@@ -775,7 +775,58 @@ impl BlockDevice for NvmeofDevice {
         DriveType::NvmeTcp
     }
 
+    // Every op runs under the shared retry (#359): a timeout or a dropped
+    // connection (the attempt already dropped the connection, so the next
+    // reconnects) is tried again, bounded; a real answer (an alignment or
+    // range error, a refused command) fails at once. Each is safe to repeat:
+    // a read, the same bytes to the same blocks, a flush, a deallocate.
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        let len = buf.len();
+        let what = format!("NVMe-TCP {} read at {offset}", self.spec.addr);
+        let got = crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| async move {
+            let mut tmp = vec![0u8; len];
+            let n = self.read_once(offset, &mut tmp).await?;
+            Ok::<_, DriveError>((n, tmp))
+        })
+        .await
+        .map_err(|f| f.error)?;
+        buf.copy_from_slice(&got.1);
+        Ok(got.0)
+    }
+
+    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        let what = format!("NVMe-TCP {} write at {offset}", self.spec.addr);
+        crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| self.write_once(offset, buf))
+            .await
+            .map_err(|f| f.error)
+    }
+
+    async fn flush(&self) -> DriveResult<()> {
+        let what = format!("NVMe-TCP {} flush", self.spec.addr);
+        crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| self.flush_once())
+            .await
+            .map_err(|f| f.error)
+    }
+
+    async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        let what = format!("NVMe-TCP {} deallocate at {offset}", self.spec.addr);
+        crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| self.discard_once(offset, len))
+            .await
+            .map_err(|f| f.error)
+    }
+}
+
+/// A device error's retry class (#359).
+fn classify(e: &DriveError) -> crate::retry::Class {
+    if e.is_transport() {
+        crate::retry::Class::Transient
+    } else {
+        crate::retry::Class::Permanent
+    }
+}
+
+impl NvmeofDevice {
+    async fn read_once(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
         if self.is_aligned(offset, buf.len()) {
             self.check_aligned(offset, buf.len())?;
             let mut guard = self.lock_conn().await?;
@@ -800,7 +851,7 @@ impl BlockDevice for NvmeofDevice {
         Ok(buf.len())
     }
 
-    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+    async fn write_once(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         if self.is_aligned(offset, buf.len()) {
             self.check_aligned(offset, buf.len())?;
             let _w = self.rmw.read().await;
@@ -831,7 +882,7 @@ impl BlockDevice for NvmeofDevice {
         Ok(buf.len())
     }
 
-    async fn flush(&self) -> DriveResult<()> {
+    async fn flush_once(&self) -> DriveResult<()> {
         let nsid = self.spec.nsid;
         let mut guard = self.lock_conn().await?;
         let conn = guard.as_mut().expect("lock_conn established");
@@ -842,7 +893,7 @@ impl BlockDevice for NvmeofDevice {
         Ok(())
     }
 
-    async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+    async fn discard_once(&self, offset: u64, len: u64) -> DriveResult<()> {
         if len == 0 {
             return Ok(());
         }

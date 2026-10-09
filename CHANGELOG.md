@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** #359 (owner): every call that leaves the process retries through one helper, `retry::with_backoff`. It is bounded by attempts and a deadline, backs off with jitter, never retries a real answer, logs the attempts ("succeeded on attempt 3", "gave up after 5"), and classifies a failure as infrastructure or a real error.
+  - **Policies:** `QUICK`, `NETWORK`, `BLOCK_IO`, `TRANSFER`.
+  - **Block devices:** NVMe/TCP and iSCSI I/O retry on a new connection. iSCSI gets deadlines everywhere and logs in again after a failure.
+  - **HTTP:** `send()` retries GET/HEAD; `send_retried` is for callers that know a request is safe to repeat. The HEAD, the streamed import and the download are bounded (an idle bound) and resume with a `Range`; a download that gives up removes its partial file. The staging reader's Range GETs are bounded and use the helper.
+  - **Callers:** the Kubernetes reviews, StormFS registration, cluster join and migration chunks, and the build's cleanup DELETE retry.
+  - **Transport is not media:** a timeout or a dropped connection never marks the only copy of a volume failed.
+  - **Allocation:** errors that are not space are no longer reported as NoSpace.
+  - **Inventory:** every call site, before and now, in `docs/retries.md`.
 - **fix:** #370 (P0, data): on the Dell's own disk goldens lost extents at every restart ("the record's slot … now belongs to volume …; mapping dropped": fastetcd-backup.golden ×159, registry-data.golden ×33 in one boot), so a new clone of them read zeros there.
   - **Cause:** a move recorded the destination slot as owned by the volume whose map asked for the move. Through a clone's map, a shared slot became the clone's. Once the clone wrote that extent (copy-on-write, count down to one), every restore took the golden's mapping for a reused slot and dropped it.
   - **Moves keep the owner:** both move paths record the moved slot as the source slot's owner.

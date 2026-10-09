@@ -121,6 +121,9 @@ async fn probe_peers(
                 }
             };
             let url = format!("{scheme}://{peer_addr}/api/v1/cluster/heartbeat");
+            // Not retried here (#359): a heartbeat is sent every round, so
+            // the next round is its retry, and a peer is marked unreachable
+            // only after several missed rounds.
             let attempt = async {
                 let resp = client.post(&url).json(req.as_ref()).send().await?;
                 if !resp.status().is_success() {

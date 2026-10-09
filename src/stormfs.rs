@@ -127,10 +127,12 @@ impl StormFsRegistration {
         };
 
         let url = format!("{}/api/v1/storage/register", self.config.metadata_url.trim_end_matches('/'));
+        // An announcement of what this node holds: the same one twice is
+        // the same registration (#359).
         let resp = self.client
             .post(&url)
             .json(&announcement)
-            .send()
+            .send_retried(crate::retry::Policy::NETWORK)
             .await
             .map_err(|e| anyhow::anyhow!("StormFS metadata unreachable: {e}"))?;
 
@@ -163,7 +165,8 @@ impl StormFsRegistration {
             .json(&serde_json::json!({
                 "node_addr": self.config.advertise_addr,
             }))
-            .send()
+            // At shutdown, briefly: deregistering twice is deregistering.
+            .send_retried(crate::retry::Policy::QUICK)
             .await;
         tracing::info!("StormFS deregistration sent");
         Ok(())

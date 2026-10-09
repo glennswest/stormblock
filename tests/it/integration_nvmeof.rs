@@ -332,10 +332,24 @@ async fn a_command_on_a_connection_that_went_silent_fails_in_bounded_time_and_th
     let took = t0.elapsed();
     assert!(r.is_err(), "a flush nobody answered reported success");
     assert!(took >= std::time::Duration::from_millis(1500), "gave up too early: {took:?}");
-    assert!(took < std::time::Duration::from_secs(10), "bounded by the 2 s timeout, took {took:?}");
+    // Three attempts of 2 s each and the backoff between (#359), bounded.
+    assert!(took < std::time::Duration::from_secs(15), "bounded by the 2 s timeout and the retry policy, took {took:?}");
 
     frozen.store(false, Ordering::SeqCst);
     dev.write(4096, &vec![0x22u8; 4096]).await.expect("the next write reconnects");
+
+    // #359: a blip the network recovers from is not an error at all. Frozen
+    // for 2.5 s mid-flush: the first attempt times out (2 s), the retry
+    // reconnects once the path is back, and the flush succeeds.
+    frozen.store(true, Ordering::SeqCst);
+    let f = frozen.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        f.store(false, Ordering::SeqCst);
+    });
+    let t0 = std::time::Instant::now();
+    dev.flush().await.expect("a flush across a 2.5 s blip succeeds on a retry");
+    assert!(t0.elapsed() >= std::time::Duration::from_secs(2), "it did wait out the blip: {:?}", t0.elapsed());
     let mut back = vec![0u8; 8192];
     dev.read(0, &mut back).await.unwrap();
     assert!(back[..4096].iter().all(|b| *b == 0x11) && back[4096..].iter().all(|b| *b == 0x22));

@@ -977,7 +977,9 @@ impl Drop for VolumeExport {
                 Err(_) => return,
             };
             let url = format!("{}/api/v1/exports/{}", engine.trim_end_matches('/'), id);
-            let _ = client.delete(&url).send().await;
+            // Cleanup, best effort: a DELETE of an export is safe to repeat
+            // (a second answers 404), so it gets a short retry (#359).
+            let _ = client.delete(&url).send_retried(crate::retry::Policy::QUICK).await;
         });
     }
 }

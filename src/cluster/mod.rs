@@ -146,7 +146,9 @@ impl ClusterManager {
             capacity_bytes: local_info.capacity_bytes,
         };
 
-        let resp = client.post(&url).json(&req).send().await?;
+        // A join names this node by its id: asking twice is joining once
+        // (#359).
+        let resp = client.post(&url).json(&req).send_retried(crate::retry::Policy::NETWORK).await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("join failed: {body}");

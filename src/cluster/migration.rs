@@ -84,6 +84,9 @@ pub async fn migrate_volume(
         name: volume_name.to_string(),
         size_bytes: total_bytes,
     };
+    // Not retried (#359): a create is not idempotent here (no id is sent),
+    // and a retry after a create that landed but whose answer was lost would
+    // make a second volume. A failed migration is started again whole.
     let resp = client
         .post(format!("http://{}/api/v1/volumes", to_node_addr))
         .json(&create_req)
@@ -132,10 +135,12 @@ pub async fn migrate_volume(
                 data: base64::engine::general_purpose::STANDARD.encode(read_buf),
             };
 
+            // The same bytes to the same offset of the same volume: safe to
+            // repeat (#359).
             let resp = client
                 .post(format!("http://{}/api/v1/internal/replicate", to_node_addr))
                 .json(&chunk_req)
-                .send()
+                .send_retried(crate::retry::Policy::NETWORK)
                 .await?;
 
             if !resp.status().is_success() {

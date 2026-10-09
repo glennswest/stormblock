@@ -724,7 +724,19 @@ impl ThinVolumeHandle {
     #[track_caller]
     fn mark_failed(&self, slab: SlabId, why: &DriveError) {
         let at = std::panic::Location::caller();
-        if !why.is_media_failure() {
+        // A transport error (the network, after the device's own retries) is
+        // never sticky on the only copy (#359): marking it would leave a
+        // single-copy volume unreadable after one blip, its reads skipping
+        // the one leg it has. On a redundant volume a leg the network keeps
+        // failing is degraded as before, and a resync takes over.
+        if why.is_transport() && self.redundancy().is_none() {
+            tracing::warn!(
+                volume = %self.id, slab = %slab, at = %format!("{}:{}", at.file(), at.line()),
+                "the only copy's slab did not answer (transport): the I/O failed, the leg is not marked failed: {why}"
+            );
+            return;
+        }
+        if !why.is_media_failure() && !why.is_transport() {
             // The request was refused, not the storage. Marking here would
             // persist, and every later read of this volume would report a
             // leg that is perfectly readable as gone.
@@ -1024,6 +1036,11 @@ impl ThinVolumeHandle {
         let mut tiers = vec![self.placement.preferred_tier];
         tiers.extend(self.placement.tier_fallback.iter().copied());
         let failed_drives = self.failed_domains(registry);
+        // A slab that failed to allocate for a reason that is not space (a
+        // table page that did not read, a device that timed out): said, and
+        // returned if nothing else allocates, never reported as a full pool
+        // (#359: a flush timeout read as "capacity exceeded").
+        let mut not_space: Option<DriveError> = None;
         for tier in tiers {
             // A slab that is full or collides is skipped by the registry; one
             // that then fails to allocate (a race), or that sits on a drive
@@ -1048,12 +1065,19 @@ impl ThinVolumeHandle {
                         registry.reserve(slab_id, slot_idx);
                         return Ok(Leg::new(slab_id, slot_idx));
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        if !matches!(e, DriveError::NoSpace(_)) {
+                            tracing::warn!(volume = %self.id, slab = %slab_id, "allocation failed (not space): {e}");
+                            not_space = Some(e);
+                        }
                         tried.push(slab_id);
                         continue;
                     }
                 }
             }
+        }
+        if let Some(e) = not_space {
+            return Err(e);
         }
         Err(DriveError::NoSpace(format!(
             "no {} slab apart from {} domain(s) at rung '{rung}'",
@@ -3015,7 +3039,7 @@ impl BlockDevice for ThinVolumeHandle {
             // flush, then flushed again (#171) — with no registry lock held
             // across a flush (#269).
             if let Err(e) = crate::drive::slab::sync_registered(&self.registry, slab_id).await {
-                if !redundant || !e.is_media_failure() {
+                if !redundant || !(e.is_media_failure() || e.is_transport()) {
                     return Err(e);
                 }
                 tracing::warn!(volume = %self.id, slab = %slab_id, "flush failed on a leg: {e}");

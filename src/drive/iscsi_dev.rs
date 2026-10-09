@@ -40,8 +40,9 @@ static ISID_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// All I/O is serialized through a Mutex-wrapped TCP stream. For higher
 /// throughput, multiple connections (MC/S) could be added later.
 pub struct IscsiDevice {
-    /// Reader/writer protected by a mutex for serialized I/O.
-    conn: Mutex<IscsiConnection>,
+    /// Reader/writer protected by a mutex for serialized I/O; `None` after a
+    /// failure, so the next use logs in again (#359).
+    conn: Mutex<Option<IscsiConnection>>,
     /// Portal address (host:port).
     portal: String,
     /// Target IQN.
@@ -580,17 +581,11 @@ impl IscsiDevice {
     /// Connect to an iSCSI target and perform login + READ CAPACITY.
     ///
     /// Returns a ready-to-use `IscsiDevice` implementing `BlockDevice`.
-    pub async fn connect(
-        portal: &str,
-        port: u16,
-        iqn: &str,
-    ) -> DriveResult<Self> {
-        let addr = format!("{portal}:{port}");
-        tracing::info!("iSCSI initiator: connecting to {addr} target={iqn}");
-
-        let stream = TcpStream::connect(&addr)
-            .await
-            .map_err(DriveError::Io)?;
+    /// A TCP connection to `addr`, logged in to `iqn`, every step bounded
+    /// by the I/O timeout (#359): with no deadline, a target that stopped
+    /// answering held the device's lock for ever.
+    async fn establish(addr: &str, iqn: &str) -> DriveResult<IscsiConnection> {
+        let stream = deadline("connect", async { TcpStream::connect(addr).await.map_err(DriveError::Io) }).await?;
         stream.set_nodelay(true).map_err(DriveError::Io)?;
         let (reader, writer) = stream.into_split();
 
@@ -615,14 +610,35 @@ impl IscsiDevice {
             block_size: 512,
             isid,
         };
-
-        // Login
         let initiator_name = "iqn.2024.io.stormblock:initiator";
-        conn.login(initiator_name, iqn).await?;
+        deadline("login", conn.login(initiator_name, iqn)).await?;
+        Ok(conn)
+    }
+
+    /// The connection, logged in again if the last one failed.
+    async fn session(&self) -> DriveResult<tokio::sync::MutexGuard<'_, Option<IscsiConnection>>> {
+        let mut g = self.conn.lock().await;
+        if g.is_none() {
+            let mut c = Self::establish(&self.portal, &self.iqn).await?;
+            c.block_size = self.block_size.load(Ordering::Relaxed);
+            *g = Some(c);
+            tracing::info!("iSCSI initiator: logged in again to {} target={}", self.portal, self.iqn);
+        }
+        Ok(g)
+    }
+
+    pub async fn connect(
+        portal: &str,
+        port: u16,
+        iqn: &str,
+    ) -> DriveResult<Self> {
+        let addr = format!("{portal}:{port}");
+        tracing::info!("iSCSI initiator: connecting to {addr} target={iqn}");
+        let mut conn = Self::establish(&addr, iqn).await?;
         tracing::info!("iSCSI initiator: login successful");
 
         // READ CAPACITY to get disk size
-        let (total_blocks, block_size) = conn.read_capacity().await?;
+        let (total_blocks, block_size) = deadline("read capacity", conn.read_capacity()).await?;
         let capacity = total_blocks * block_size as u64;
         tracing::info!(
             "iSCSI initiator: capacity={} bytes ({:.1} GB), block_size={}, blocks={}",
@@ -633,7 +649,7 @@ impl IscsiDevice {
         );
 
         // INQUIRY for model/serial
-        let inquiry_data = conn.inquiry().await.unwrap_or_default();
+        let inquiry_data = deadline("inquiry", conn.inquiry()).await.unwrap_or_default();
         let vendor = if inquiry_data.len() >= 16 {
             String::from_utf8_lossy(&inquiry_data[8..16]).trim().to_string()
         } else {
@@ -654,7 +670,7 @@ impl IscsiDevice {
         };
 
         Ok(IscsiDevice {
-            conn: Mutex::new(conn),
+            conn: Mutex::new(Some(conn)),
             portal: addr,
             iqn: iqn.to_string(),
             capacity: AtomicU64::new(capacity),
@@ -675,8 +691,11 @@ impl IscsiDevice {
 
     /// Gracefully disconnect from the target.
     pub async fn disconnect(&self) -> DriveResult<()> {
-        let mut conn = self.conn.lock().await;
-        conn.logout().await
+        let mut g = self.conn.lock().await;
+        match g.take() {
+            Some(mut c) => deadline("logout", c.logout()).await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -703,7 +722,54 @@ impl BlockDevice for IscsiDevice {
         DriveType::Iscsi
     }
 
+    // Every op runs under the shared retry (#359), as NVMe/TCP's: a timeout
+    // or a dropped connection logs in again and tries again, bounded; a real
+    // answer fails at once. Each is safe to repeat.
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        let len = buf.len();
+        let what = format!("iSCSI {} read at {offset}", self.portal);
+        let got = crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| async move {
+            let mut tmp = vec![0u8; len];
+            let n = self.read_once(offset, &mut tmp).await?;
+            Ok::<_, DriveError>((n, tmp))
+        })
+        .await
+        .map_err(|f| f.error)?;
+        buf.copy_from_slice(&got.1);
+        Ok(got.0)
+    }
+
+    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        let what = format!("iSCSI {} write at {offset}", self.portal);
+        crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| self.write_once(offset, buf))
+            .await
+            .map_err(|f| f.error)
+    }
+
+    async fn flush(&self) -> DriveResult<()> {
+        let what = format!("iSCSI {} flush", self.portal);
+        crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| self.flush_once())
+            .await
+            .map_err(|f| f.error)
+    }
+
+    async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        let what = format!("iSCSI {} unmap at {offset}", self.portal);
+        crate::retry::with_backoff(&what, crate::retry::Policy::BLOCK_IO, classify, |_| self.discard_once(offset, len))
+            .await
+            .map_err(|f| f.error)
+    }
+
+    fn smart_status(&self) -> DriveResult<SmartData> {
+        Ok(SmartData {
+            healthy: true,
+            ..Default::default()
+        })
+    }
+}
+
+impl IscsiDevice {
+    async fn read_once(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
         let bs = self.block_size() as u64;
         if offset % bs != 0 {
             return Err(DriveError::NotAligned {
@@ -712,7 +778,8 @@ impl BlockDevice for IscsiDevice {
             });
         }
 
-        let mut conn = self.conn.lock().await;
+        let mut g = self.session().await?;
+        let conn = g.as_mut().expect("session established");
         let mut bytes_read = 0usize;
 
         while bytes_read < buf.len() {
@@ -725,7 +792,13 @@ impl BlockDevice for IscsiDevice {
             }
 
             let lba = (offset + bytes_read as u64) / bs;
-            let data = conn.scsi_read(lba, block_count).await?;
+            let data = match deadline("read", conn.scsi_read(lba, block_count)).await {
+                Ok(d) => d,
+                Err(e) => {
+                    *g = None;
+                    return Err(e);
+                }
+            };
             let to_copy = data.len().min(remaining);
             buf[bytes_read..bytes_read + to_copy].copy_from_slice(&data[..to_copy]);
             bytes_read += to_copy;
@@ -734,7 +807,7 @@ impl BlockDevice for IscsiDevice {
         Ok(bytes_read)
     }
 
-    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+    async fn write_once(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         let bs = self.block_size() as u64;
         if offset % bs != 0 {
             return Err(DriveError::NotAligned {
@@ -743,7 +816,8 @@ impl BlockDevice for IscsiDevice {
             });
         }
 
-        let mut conn = self.conn.lock().await;
+        let mut g = self.session().await?;
+        let conn = g.as_mut().expect("session established");
         let mut bytes_written = 0usize;
 
         while bytes_written < buf.len() {
@@ -759,17 +833,20 @@ impl BlockDevice for IscsiDevice {
                 (max_chunk / bs as usize) * bs as usize
             };
             let lba = (offset + bytes_written as u64) / bs;
-            conn.scsi_write(lba, &buf[bytes_written..bytes_written + chunk])
-                .await?;
+            if let Err(e) = deadline("write", conn.scsi_write(lba, &buf[bytes_written..bytes_written + chunk])).await {
+                *g = None;
+                return Err(e);
+            }
             bytes_written += chunk;
         }
 
         Ok(bytes_written)
     }
 
-    async fn flush(&self) -> DriveResult<()> {
+    async fn flush_once(&self) -> DriveResult<()> {
         // NOP-Out as keepalive/sync signal
-        let mut conn = self.conn.lock().await;
+        let mut g = self.session().await?;
+        let conn = g.as_mut().expect("session established");
         let itt = conn.next_itt();
         let mut bhs = Bhs::new();
         bhs.set_opcode(Opcode::NopOut);
@@ -781,16 +858,19 @@ impl BlockDevice for IscsiDevice {
         bhs.set_exp_stat_sn(conn.exp_stat_sn);
 
         let pdu = IscsiPdu::new(bhs);
-        write_pdu(&mut conn.writer, &pdu, false, false)
-            .await
-            .map_err(DriveError::Io)?;
-
-        // Wait for NOP-In response
-        let _resp = conn.read_response().await?;
-        Ok(())
+        let r = deadline("flush", async {
+            write_pdu(&mut conn.writer, &pdu, false, false).await.map_err(DriveError::Io)?;
+            // Wait for NOP-In response
+            conn.read_response().await.map(|_| ())
+        })
+        .await;
+        if r.is_err() {
+            *g = None;
+        }
+        r
     }
 
-    async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+    async fn discard_once(&self, offset: u64, len: u64) -> DriveResult<()> {
         let bs = self.block_size() as u64;
         let lba = offset / bs;
         let block_count = (len / bs) as u32;
@@ -798,15 +878,36 @@ impl BlockDevice for IscsiDevice {
             return Ok(());
         }
 
-        let mut conn = self.conn.lock().await;
-        conn.scsi_unmap(lba, block_count).await
+        let mut g = self.session().await?;
+        let conn = g.as_mut().expect("session established");
+        let r = deadline("unmap", conn.scsi_unmap(lba, block_count)).await;
+        if r.is_err() {
+            *g = None;
+        }
+        r
     }
 
-    fn smart_status(&self) -> DriveResult<SmartData> {
-        Ok(SmartData {
-            healthy: true,
-            ..Default::default()
-        })
+}
+
+/// A device error's retry class (#359).
+fn classify(e: &DriveError) -> crate::retry::Class {
+    if e.is_transport() {
+        crate::retry::Class::Transient
+    } else {
+        crate::retry::Class::Permanent
+    }
+}
+
+/// `fut`, bounded by the NVMe/TCP initiator's I/O timeout (#359): a target
+/// that does not answer is a timeout, never a wait for ever.
+async fn deadline<T>(what: &str, fut: impl std::future::Future<Output = DriveResult<T>>) -> DriveResult<T> {
+    let limit = crate::drive::nvmeof_dev::io_timeout();
+    match tokio::time::timeout(limit, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(DriveError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("iSCSI {what}: no answer within {}s", limit.as_secs()),
+        ))),
     }
 }
 

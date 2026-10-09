@@ -113,7 +113,9 @@ impl KubeAuth {
             .post(format!("{}{path}", self.api_url))
             .bearer(self.own_token().as_deref())
             .json(&body)
-            .send()
+            // A TokenReview or a SubjectAccessReview changes nothing: safe to
+            // ask again (#359), briefly, since an API call waits on it.
+            .send_retried(crate::retry::Policy::QUICK)
             .await
             .map_err(|e| format!("{}{path}: {e}", self.api_url))?;
         let status = r.status();
