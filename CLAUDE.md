@@ -960,15 +960,16 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
-### /init: a read-only root stays read-only (2026-10-09, #380, P1) — IN PROGRESS
+### /init: a read-only root stays read-only (2026-10-09, #380, P1) — DONE (initramfs at 9765d1e)
 
 stormcos#470. `# --- BEGIN root mode` (`ro`/`rw` from the cmdline, last
 wins; ro → ext4 `-o ro`); `# --- BEGIN network handoff` (/run/hostname,
 /run/resolv.conf always; /sysroot/etc only on rw with non-link files);
 container mount points named when missing on a ro root; legacy fstab writes
 warn. Tests: tests/initramfs-root-ro.sh, container-mounts ro case.
-[ ] every initramfs test under sh and busybox sh; /init parses; check.sh;
-say the blob on stormcos#470.
+Every initramfs test under sh and busybox sh (root-ro 18/18), /init parses;
+check.sh at 9765d1e ALL PASS (1103/1103). Engine unchanged
+(golden-stormblock-c1c8710a0e18); told on stormcos#470.
 
 ### A keep-data install laid with no room for the release's data (2026-10-09, #172, P0) — DONE (golden-stormblock-68c56e3016ff)
 
