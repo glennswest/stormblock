@@ -181,6 +181,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Pool admission under per-drive overcommit (2026-10-09, #152, P2) — WAITING ON THE OWNER
+
+stormdrive#13 pushes `PUT /api/v1/drives/{path}/overcommit {enabled, ratio,
+drive{uuid,wwn,serial,path}}` and reads `committed_bytes` per slab. Enforcing
+at ratio 1 everywhere would refuse system-half claims on most nodes (the
+release's thin clones count at their virtual size; role-less claims land
+there, #317). Asked on #152 (needs-owner): **A** enforce on the data half
+only, system half reported (recommended); **B** everywhere; **C** a node
+setting report|enforce, default report. Definitions stated there (committed
+= written + what unsealed volumes can still take × legs; pool = role;
+per-slab share pro rata to promisable). Nothing built yet; the setting and
+the reporting come first once answered.
+
 ### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — DONE (golden-stormblock-a22b89c02880)
 
 `Slab::format_with` zero-filled the whole slot table, growth room included
