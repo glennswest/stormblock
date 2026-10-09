@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Every remote call retries (2026-10-09, #359, P1 owner) — IN PROGRESS
+### Every remote call retries (2026-10-09, #359, P1 owner) — BACK IN LINE (P0 #364); code in golden-stormblock-02660bcdb1aa
 
 - [x] `src/retry.rs` (policies, classify io/status, attempts logged,
       infra vs real); tests
@@ -194,7 +194,9 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
       the rest commented (heartbeat, migration create) or kept (boot-claim,
       install report, replication queue)
 - [x] docs/retries.md (the inventory), CHANGELOG
-- [ ] build VM: tests; check.sh; golden
+- [x] check.sh at 52fee27 ALL PASS (1056/1056); in golden
+      golden-stormblock-02660bcdb1aa (staged for #364 at f7cffa1)
+- [ ] close when handed back
 
 ### Goldens lost extents at every restart (2026-10-08, #370, P0 data) — DONE (golden-stormblock-7318bc78894f)
 
@@ -230,7 +232,7 @@ system half. Not #362 (forge composes; the disk was laid by 11.98).
       (stormcos#467). The second finding (goldens' extents dropped at
       restore: a shared slot's owner/count lost) is #370
 
-### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — IN PROGRESS (part 1: golden-stormblock-e0c57de31892)
+### Lock management: the manager lock never across I/O (2026-10-08, #364, P0 owner) — DONE (golden-stormblock-e0c57de31892, golden-stormblock-02660bcdb1aa)
 
 The Dell: `GET /volumes` 10–58 s behind the manager mutex; a clone ~60 s.
 Codex review: cross-role clone holds the manager across `copy_volume`;
@@ -262,8 +264,12 @@ GEM+registry write guards across ref-count table I/O.
 - [x] nothing exits holding a lock: cancel mid-I/O and error tests; the
       slab's pending map recovers from a poisoned mutex
 - [x] health: RAID from the last reading when the table is busy
-- [ ] check.sh, golden, close. Not here: retier holds the manager for the
-      whole move (`/volumes/{id}/retier`), a job of its own
+- [x] tests: `a_sync_writes_its_table_with_no_registry_held_and_a_free_
+      meanwhile_wins`, `a_clones_ref_counts_wait_for_the_sync`,
+      `a_holder_cancelled_mid_io_or_failing_leaves_the_lock_free_and_unclaimed`
+- [x] check.sh at f7cffa1 ALL PASS (nextest 1059/1059); golden
+      golden-stormblock-02660bcdb1aa (stormcos#467; carries #359 too).
+      Retier holds the manager for the whole move: #373
 
 ### A worker panic left the engine alive and silent (2026-10-08, #368, P0) — DONE (golden-stormblock-501f2106e220)
 
