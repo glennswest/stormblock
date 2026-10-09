@@ -394,8 +394,6 @@ impl ClaimRecord {
     }
 }
 
-/// What reporting an install done did (#148).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// How far an install got (#220).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -437,6 +435,8 @@ impl InstallProgress {
     }
 }
 
+/// What reporting an install done did (#148).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallDone {
     /// The intent was `install` for this clone, and is now `local`.
     Reset,
