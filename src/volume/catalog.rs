@@ -58,7 +58,10 @@ pub async fn list_volumes(v: &impl VolumeView) -> Vec<(VolumeId, String, u64, u6
 }
 
 struct Entry {
-    handle: Arc<ThinVolumeHandle>,
+    /// Weak: a catalog is not a holder. A map is evicted only when nothing
+    /// outside the manager holds its volume (#155), and a published catalog
+    /// must not keep every volume resident.
+    handle: std::sync::Weak<ThinVolumeHandle>,
     parent: Option<VolumeId>,
     fs: Option<FsInfo>,
     owner: Option<Owner>,
@@ -86,7 +89,7 @@ impl Catalog {
                 Some((
                     id,
                     Entry {
-                        handle,
+                        handle: Arc::downgrade(&handle),
                         parent: m.parent(&id),
                         fs: m.fs_info(&id).cloned(),
                         owner: m.owner(&id).cloned(),
@@ -109,7 +112,7 @@ impl Catalog {
 
 impl VolumeView for Catalog {
     fn get_volume_handle(&self, id: &VolumeId) -> Option<Arc<ThinVolumeHandle>> {
-        self.entries.get(id).map(|e| e.handle.clone())
+        self.entries.get(id).and_then(|e| e.handle.upgrade())
     }
     fn owner(&self, id: &VolumeId) -> Option<&Owner> {
         self.entries.get(id).and_then(|e| e.owner.as_ref())
