@@ -276,6 +276,12 @@ enum SubCommand {
         /// Export each partition as /dev/ublkbN (requires Linux 6.0+ with ublk_drv loaded)
         #[arg(long)]
         ublk: bool,
+        /// Format the target even when it holds a slab or other data,
+        /// destroying it (#162). Without it, a slab already there is opened
+        /// and its volumes kept, and a target that is neither blank nor a
+        /// slab with records is refused.
+        #[arg(long)]
+        format: bool,
     },
     /// Take over the ublk devices an earlier server created, without the
     /// block devices ever disappearing
@@ -992,8 +998,8 @@ pub async fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
             #[cfg(feature = "iscsi")]
-            SubCommand::BootIscsi { portal, port, iqn, layout, ublk } => {
-                return handle_boot_iscsi(portal, *port, iqn, layout, *ublk).await;
+            SubCommand::BootIscsi { portal, port, iqn, layout, ublk, format } => {
+                return handle_boot_iscsi(portal, *port, iqn, layout, *ublk, *format).await;
             }
             #[cfg(feature = "iscsi")]
             SubCommand::MigrateBoot { source_portal, source_port, source_iqn, target_device, target_tier } => {
@@ -2700,6 +2706,7 @@ pub async fn run() -> anyhow::Result<()> {
         iqn: &str,
         layout_str: &str,
         ublk: bool,
+        format: bool,
     ) -> anyhow::Result<()> {
         let layout = BootDiskLayout::parse(layout_str)
             .map_err(|e| anyhow::anyhow!("layout parse error: {e}"))?;
@@ -2714,10 +2721,14 @@ pub async fn run() -> anyhow::Result<()> {
         }
 
         let mgr = IscsiBootManager::new();
-        let result = mgr.provision(portal, port, iqn, layout).await
+        let result = mgr.provision(portal, port, iqn, layout, format).await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        println!("\nBoot disk provisioned on slab {}", result.slab_id);
+        println!(
+            "\nBoot disk {} slab {}",
+            if result.opened { "opened, its volumes kept, on" } else { "provisioned on a new" },
+            result.slab_id
+        );
         println!("Backing: iSCSI {}:{}/{}", portal, port, iqn);
         println!("\nPartitions:");
         for part in &result.partitions {
@@ -2797,9 +2808,19 @@ pub async fn run() -> anyhow::Result<()> {
             println!("Shutting down...");
         }
 
+        // The volumes' records, written before the target is let go (#162):
+        // the next run opens them.
+        for p in &result.partitions {
+            let _ = p.handle.flush().await;
+        }
+        if let Err(e) = result.manager.persist_checked().await {
+            eprintln!("WARNING: the boot disk's volume records were not written: {e}");
+        }
         // Disconnect iSCSI
-        if let Err(e) = result.iscsi_device.disconnect().await {
-            tracing::warn!("iSCSI disconnect: {e}");
+        if let Some(dev) = &result.iscsi_device {
+            if let Err(e) = dev.disconnect().await {
+                tracing::warn!("iSCSI disconnect: {e}");
+            }
         }
 
         Ok(())

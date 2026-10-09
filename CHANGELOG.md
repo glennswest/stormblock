@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #366 (Codex review), durability:
+  - **FUA:** NVMe/TCP writes with FUA (CDW12 bit 30) and iSCSI WRITE(10/16) with FUA are flushed before they complete.
+  - **VWC:** NVMe Identify Controller now reports a volatile write cache. It reported none, so Linux hosts never sent a Flush or FUA, and an fsync over NVMe/TCP made nothing durable on the engine.
+  - **iSCSI initiator flush:** it is a SYNCHRONIZE CACHE, not a NOP-Out.
+  - **Restripe:** it releases the old placement only after a checked write of the new records. A failed write keeps the old slots and is reported.
+  - **Resync and rebuild:** they free the slots they replaced only after a checked persist.
+  - **Create and seal:** both fail, and are undone, when their records are not written.
+  - **boot-iscsi:** it opens the slab it made before and keeps its volumes. It formats only a blank target, or any target with `--format`, and records its volumes (#162).
+- **fix:** #367 (Codex review), correctness:
+  - **Extent size:** copy and restripe step by the volume's extent size, not the manager's slot.
+  - **Cold maps:** both load the map first, and a load failure is an error rather than a panic or an empty copy. `prefetch_volume` returns its load error, and a delete checks it before forgetting anything.
+  - **Snapshot vs in-place write:** a snapshot waits for writes and discards already looking at an extent (a per-volume gate), so it never changes after it is taken. Group snapshots hold every member's gate.
+  - **O_DIRECT:** a second short write in a row no longer panics.
 - **fix:** #369 reopened: 12.02 on the Dell is still diskless. The install still refused cilium, cilium-operator, hubble-relay and coredns (and their `.golden` copies) as data outside the data half.
   - **Cause:** their records in the data slab were written before volumes carried an origin (#349), so they read as unmarked, and only `origin = release` counted as the release's own.
   - **Fix:** an unmarked volume that the release being installed names, by its name or by its name without `.golden`, is the release's too. Its data-half record is dropped and it comes back with the release.

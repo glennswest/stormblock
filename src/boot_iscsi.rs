@@ -16,13 +16,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::drive::iscsi_dev::IscsiDevice;
-use crate::drive::slab::{Slab, SlabId, DEFAULT_SLOT_SIZE};
+use crate::drive::slab::{Slab, SlabFormat, SlabId, DEFAULT_SLOT_SIZE};
 use crate::drive::slab_registry::SlabRegistry;
 use crate::drive::BlockDevice;
 use crate::placement::topology::StorageTier;
 use crate::volume::extent::VolumeId;
 use crate::volume::gem::GlobalExtentMap;
-use crate::volume::thin::{ThinVolume, ThinVolumeHandle, PlacementPolicy, VolumePurpose};
+use crate::volume::thin::{ThinVolumeHandle, PlacementPolicy, VolumePurpose};
+use crate::volume::VolumeManager;
 
 /// A single boot partition definition.
 #[derive(Debug, Clone)]
@@ -167,10 +168,14 @@ pub struct ProvisionedPartition {
 
 /// Result of provisioning a boot disk.
 pub struct BootDiskResult {
-    /// The iSCSI device used as backing store.
-    pub iscsi_device: Arc<IscsiDevice>,
+    /// The iSCSI device used as backing store (`None` from `provision_on`).
+    pub iscsi_device: Option<Arc<IscsiDevice>>,
     /// The slab ID on the iSCSI device.
     pub slab_id: SlabId,
+    /// The slab was already there and its volumes were kept (#162).
+    pub opened: bool,
+    /// The volumes' manager: what records them (persist at a stop).
+    pub manager: VolumeManager,
     /// Provisioned partitions with their volumes.
     pub partitions: Vec<ProvisionedPartition>,
     /// Shared slab registry.
@@ -181,7 +186,10 @@ pub struct BootDiskResult {
 
 /// Orchestrates creating a multi-volume partitioned disk on an iSCSI backing device.
 pub struct IscsiBootManager {
+    // Kept for `with_state` callers; a provision builds its own manager (#162).
+    #[allow(dead_code)]
     registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+    #[allow(dead_code)]
     gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
 }
 
@@ -202,103 +210,131 @@ impl IscsiBootManager {
         IscsiBootManager { registry, gem }
     }
 
-    /// Provision a boot disk: connect to iSCSI, format slab, create volumes.
-    ///
-    /// Returns `BootDiskResult` containing the iSCSI device, slab ID, and
-    /// provisioned partition volumes ready for ublk export.
+    /// Provision a boot disk: connect to iSCSI, then [`Self::provision_on`].
     pub async fn provision(
         &self,
         portal: &str,
         port: u16,
         iqn: &str,
-        mut layout: BootDiskLayout,
+        layout: BootDiskLayout,
+        format: bool,
     ) -> Result<BootDiskResult, BootError> {
-        // 1. Connect to iSCSI target
         tracing::info!("Connecting to iSCSI target {portal}:{port} {iqn}");
         let iscsi = IscsiDevice::connect(portal, port, iqn)
             .await
             .map_err(|e| BootError::Connection(e.to_string()))?;
-
-        let capacity = iscsi.capacity_bytes();
         tracing::info!(
             "iSCSI device ready: {} ({:.1} GB)",
             iscsi.id(),
-            capacity as f64 / (1024.0 * 1024.0 * 1024.0)
+            iscsi.capacity_bytes() as f64 / (1024.0 * 1024.0 * 1024.0)
         );
-
         let iscsi = Arc::new(iscsi);
+        let mut r = self.provision_on(iscsi.clone() as Arc<dyn BlockDevice>, layout, format).await?;
+        r.iscsi_device = Some(iscsi);
+        Ok(r)
+    }
 
-        // 2. Resolve partition sizes
-        layout
-            .resolve_sizes(capacity)
-            .map_err(BootError::Layout)?;
+    /// The boot disk on `device` (#162, #366). A slab already there is
+    /// opened and its volumes kept, each partition the volume of its name
+    /// (one the layout adds is created). A blank device is formatted. Anything
+    /// else — a slab from before boot-iscsi kept records, a device holding
+    /// other data — is refused unless `format` is given: this ran on every
+    /// boot (stormblock-ublk.service, the initramfs iSCSI mode) and formatted
+    /// the disk each time.
+    pub async fn provision_on(
+        &self,
+        device: Arc<dyn BlockDevice>,
+        mut layout: BootDiskLayout,
+        format: bool,
+    ) -> Result<BootDiskResult, BootError> {
+        let capacity = device.capacity_bytes();
+        layout.resolve_sizes(capacity).map_err(BootError::Layout)?;
 
-        // 3. Format iSCSI device as a Slab (Cool tier — remote storage)
-        tracing::info!("Formatting iSCSI device as Cool-tier slab");
-        let slab = Slab::format(iscsi.clone() as Arc<dyn BlockDevice>, DEFAULT_SLOT_SIZE, StorageTier::Cool)
-            .await
-            .map_err(|e| BootError::SlabFormat(e.to_string()))?;
-        let slab_id = slab.slab_id();
-        tracing::info!(
-            "Slab {} formatted: {} slots ({:.1} GB usable)",
-            slab_id,
-            slab.total_slots(),
-            slab.total_slots() as f64 * DEFAULT_SLOT_SIZE as f64 / (1024.0 * 1024.0 * 1024.0)
-        );
-
-        // 4. Register slab
-        {
-            let mut reg = self.registry.write().await;
-            reg.add(slab);
+        let existing = if format { None } else { Slab::open(device.clone()).await.ok() };
+        let mut mgr;
+        let slab_id;
+        let mut opened = false;
+        match existing {
+            Some(slab) => {
+                if !slab.has_metadata_region() {
+                    return Err(BootError::Refused(
+                        "the target holds a slab from a boot-iscsi that kept no volume records: its volumes \
+                         cannot be told apart. Nothing was changed; pass --format to start it over (destroys it)"
+                            .into(),
+                    ));
+                }
+                slab_id = slab.slab_id();
+                mgr = VolumeManager::new(slab.slot_size());
+                mgr.adopt_slabs(vec![crate::drive::discover::FoundSlab { label: "iscsi".into(), slab }])
+                    .await
+                    .map_err(|e| BootError::Volume(format!("reading the slab's volumes: {e}")))?;
+                opened = true;
+                tracing::info!("Slab {slab_id} already on the target: its volumes are kept");
+            }
+            None => {
+                if !format && !blank(&device).await {
+                    return Err(BootError::Refused(
+                        "the target is not blank and holds no slab: nothing was changed; pass --format to \
+                         format it (destroys what it holds)"
+                            .into(),
+                    ));
+                }
+                tracing::info!("Formatting the iSCSI device as a Cool-tier slab");
+                let fmt = SlabFormat::new(DEFAULT_SLOT_SIZE, StorageTier::Cool).with_auto_metadata(capacity);
+                let slab = Slab::format_with(device.clone(), fmt)
+                    .await
+                    .map_err(|e| BootError::SlabFormat(e.to_string()))?;
+                slab_id = slab.slab_id();
+                mgr = VolumeManager::new(DEFAULT_SLOT_SIZE);
+                mgr.add_slab(slab).await;
+            }
         }
+        mgr.persist_to_slabs(vec![slab_id]);
 
-        // 5. Create ThinVolume for each partition
-        let mut partitions = Vec::new();
         let placement = PlacementPolicy {
             preferred_tier: StorageTier::Cool,
             tier_fallback: vec![StorageTier::Warm, StorageTier::Hot, StorageTier::Cold],
             ..Default::default()
         };
-
+        let mut partitions = Vec::new();
         for part in &layout.partitions {
-            tracing::info!(
-                "Creating volume '{}': {} ({}) at {}",
-                part.name,
-                human_size(part.size),
-                part.fs_type,
-                part.mount_point
-            );
-
-            let mut vol = ThinVolume::new(
-                part.name.clone(),
-                part.size,
-                DEFAULT_SLOT_SIZE,
-            );
-            vol.purpose = match part.name.as_str() {
-                "esp" | "boot" => VolumePurpose::Boot,
-                _ => VolumePurpose::Partition,
+            let id = match mgr.find_volume(&part.name).await {
+                Some(id) => id,
+                None => {
+                    tracing::info!("Creating volume '{}': {} ({}) at {}", part.name, human_size(part.size), part.fs_type, part.mount_point);
+                    let opts = crate::volume::CreateOptions { placement: placement.clone(), ..Default::default() };
+                    mgr.create_volume_with(&part.name, part.size, opts)
+                        .await
+                        .map_err(|e| BootError::Volume(format!("{}: {e}", part.name)))?
+                }
             };
-
-            let vol_id = vol.id();
-            let handle = Arc::new(ThinVolumeHandle::new(
-                vol,
-                self.gem.clone(),
-                self.registry.clone(),
-                placement.clone(),
-            ));
-
+            let handle = mgr
+                .get_volume_handle(&id)
+                .ok_or_else(|| BootError::Volume(format!("{}: not found after creating it", part.name)))?;
+            {
+                let mut v = handle.lock().await;
+                v.purpose = match part.name.as_str() {
+                    "esp" | "boot" => VolumePurpose::Boot,
+                    _ => VolumePurpose::Partition,
+                };
+            }
+            let size = handle.lock().await.virtual_size;
             partitions.push(ProvisionedPartition {
                 name: part.name.clone(),
-                volume_id: vol_id,
+                volume_id: id,
                 handle,
-                size: part.size,
+                size,
                 fs_type: part.fs_type.clone(),
                 mount_point: part.mount_point.clone(),
             });
         }
+        mgr.persist_checked()
+            .await
+            .map_err(|e| BootError::Volume(format!("the volume records were not written: {e}")))?;
 
         tracing::info!(
-            "Boot disk provisioned: {} partitions on slab {}",
+            "Boot disk {}: {} partitions on slab {}",
+            if opened { "opened" } else { "provisioned" },
             partitions.len(),
             slab_id
         );
@@ -314,13 +350,28 @@ impl IscsiBootManager {
         }
 
         Ok(BootDiskResult {
-            iscsi_device: iscsi,
+            iscsi_device: None,
             slab_id,
+            opened,
             partitions,
-            registry: self.registry.clone(),
-            gem: self.gem.clone(),
+            registry: mgr.registry().clone(),
+            gem: mgr.gem().clone(),
+            manager: mgr,
         })
     }
+}
+
+/// No bytes in the first and last MiB: nothing on it to keep.
+async fn blank(device: &Arc<dyn BlockDevice>) -> bool {
+    let cap = device.capacity_bytes();
+    let n = (1u64 << 20).min(cap);
+    let mut buf = vec![0u8; n as usize];
+    for off in [0, cap - n] {
+        if device.read(off, &mut buf).await.is_err() || buf.iter().any(|b| *b != 0) {
+            return false;
+        }
+    }
+    true
 }
 
 impl Default for IscsiBootManager {
@@ -336,6 +387,9 @@ pub enum BootError {
     SlabFormat(String),
     Layout(String),
     Volume(String),
+    /// Not done, nothing changed: the target holds something `--format`
+    /// would destroy.
+    Refused(String),
 }
 
 impl std::fmt::Display for BootError {
@@ -345,6 +399,7 @@ impl std::fmt::Display for BootError {
             BootError::SlabFormat(e) => write!(f, "slab format failed: {e}"),
             BootError::Layout(e) => write!(f, "layout error: {e}"),
             BootError::Volume(e) => write!(f, "volume error: {e}"),
+            BootError::Refused(e) => write!(f, "refused: {e}"),
         }
     }
 }

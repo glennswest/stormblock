@@ -449,8 +449,14 @@ impl Rebuilds {
                     let vm = vm.clone();
                     let h = h2.clone();
                     Box::pin(async move {
-                        crate::volume::VolumeManager::persist_detached(&vm).await;
-                        h.release_slots(&owed).await;
+                        // Freed only once the records are written (#366).
+                        match crate::volume::VolumeManager::persist_detached_checked(&vm).await {
+                            Ok(()) => h.release_slots(&owed).await,
+                            Err(e) => tracing::error!(
+                                "rebuild checkpoint: records not written ({e}); {} replaced slot(s) kept until a later record no longer names them",
+                                owed.len()
+                            ),
+                        }
                     })
                 });
                 let opts = ResyncOptions {
@@ -462,9 +468,15 @@ impl Rebuilds {
                     checkpoint_every: 4096,
                 };
                 let mut report = handle.resync_with(&opts).await;
-                crate::volume::VolumeManager::persist_detached(&self.volumes).await;
                 let owed = std::mem::take(&mut report.owed);
-                handle.release_slots(&owed).await;
+                match crate::volume::VolumeManager::persist_detached_checked(&self.volumes).await {
+                    Ok(()) => handle.release_slots(&owed).await,
+                    Err(e) => tracing::error!(
+                        volume = %vol,
+                        "rebuild: records not written ({e}); {} replaced slot(s) kept until a later record no longer names them",
+                        owed.len()
+                    ),
+                }
                 let health = handle.health().await;
                 tracing::info!(
                     volume = %vol, rebuilt = report.legs_rebuilt, added = report.legs_added,

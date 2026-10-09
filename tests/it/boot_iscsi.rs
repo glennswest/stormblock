@@ -318,3 +318,53 @@ async fn migrate_boot_volumes_between_slabs() {
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&dst_path);
 }
+
+/// #162, #366: boot-iscsi ran on every boot and formatted its target each
+/// time. A blank target is formatted; the next run opens the slab and keeps
+/// every partition's data; a target holding something else is refused
+/// unless --format, which starts it over.
+#[tokio::test]
+async fn a_second_run_keeps_the_boot_disk_and_a_foreign_target_is_refused() {
+    use stormblock::boot_iscsi::{BootError, IscsiBootManager};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("target.bin").display().to_string();
+    let dev = || {
+        let path = path.clone();
+        async move { Arc::new(FileDevice::open_with_capacity(&path, 64 << 20).await.unwrap()) as Arc<dyn BlockDevice> }
+    };
+    let layout = || BootDiskLayout::parse("esp:8M,root:24M,home:rest").unwrap();
+
+    let first = IscsiBootManager::new().provision_on(dev().await, layout(), false).await.unwrap();
+    assert!(!first.opened, "a blank target is formatted");
+    for (i, p) in first.partitions.iter().enumerate() {
+        p.handle.write(4096, &vec![0x30 + i as u8; 4096]).await.unwrap();
+        p.handle.flush().await.unwrap();
+    }
+    let ids: Vec<_> = first.partitions.iter().map(|p| p.volume_id).collect();
+    first.manager.persist_checked().await.unwrap();
+    drop(first);
+
+    let again = IscsiBootManager::new().provision_on(dev().await, layout(), false).await.unwrap();
+    assert!(again.opened, "the slab already there is opened");
+    assert_eq!(again.partitions.iter().map(|p| p.volume_id).collect::<Vec<_>>(), ids, "the same volumes");
+    for (i, p) in again.partitions.iter().enumerate() {
+        let mut b = vec![0u8; 4096];
+        p.handle.read(4096, &mut b).await.unwrap();
+        assert_eq!(b, vec![0x30 + i as u8; 4096], "{}: kept", p.name);
+    }
+    drop(again);
+
+    let other = dir.path().join("other.bin").display().to_string();
+    let foreign: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&other, 64 << 20).await.unwrap());
+    foreign.write(0, &[0xEEu8; 4096]).await.unwrap();
+    match IscsiBootManager::new().provision_on(foreign.clone(), layout(), false).await {
+        Err(BootError::Refused(_)) => {}
+        Err(e) => panic!("refused, not: {e}"),
+        Ok(_) => panic!("a target holding other data must be refused without --format"),
+    }
+    let mut b = vec![0u8; 4096];
+    foreign.read(0, &mut b).await.unwrap();
+    assert_eq!(b, vec![0xEEu8; 4096], "nothing changed");
+    let fresh = IscsiBootManager::new().provision_on(foreign, layout(), true).await.unwrap();
+    assert!(!fresh.opened, "--format starts it over");
+}

@@ -626,10 +626,20 @@ impl VolumeManager {
             return Err(VolumeError::AllocatorError(why));
         }
         handle.set_sealed(true);
+        let before = self.fs_info.get(&id).cloned();
         if let Some(fs) = fs {
             self.fs_info.insert(id, fs);
         }
-        self.persist().await;
+        // Sealed only once it is on disk (#366): a golden its clones are cut
+        // from must not read back unsealed after a restart.
+        if let Err(e) = self.persist_checked().await {
+            handle.set_sealed(false);
+            match before {
+                Some(f) => { self.fs_info.insert(id, f); }
+                None => { self.fs_info.remove(&id); }
+            }
+            return Err(persist_failed(id, "seal", e));
+        }
         Ok(())
     }
 
@@ -1284,7 +1294,12 @@ impl VolumeManager {
         self.volumes.insert(id, handle);
         self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
-        self.persist().await;
+        // A create whose record was not written is not reported made (#366):
+        // the volume is taken back (it holds nothing yet) and the error said.
+        if let Err(e) = self.persist_checked().await {
+            let _ = self.delete_volume(id).await;
+            return Err(persist_failed(id, "create", e));
+        }
         Ok(id)
     }
 
@@ -1689,8 +1704,8 @@ impl VolumeManager {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         let mut report = handle.resync_with(&ResyncOptions { verify, ..Default::default() }).await;
         // The replaced slots are freed only once the map that stopped naming
-        // them is on disk.
-        self.persist().await;
+        // them is on disk: written now, and checked (#366).
+        self.write_records_now().await.map_err(|e| persist_failed(id, "resync", e))?;
         let owed = std::mem::take(&mut report.owed);
         handle.release_slots(&owed).await;
         Ok(report)
@@ -1734,8 +1749,12 @@ impl VolumeManager {
     /// offline operation — the API refuses it while the volume is exported.
     pub async fn restripe(&mut self, id: VolumeId, policy: RedundancyPolicy) -> Result<RestripeReport, VolumeError> {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
-        let r = Self::restripe_work(handle, self.gem.clone(), self.registry.clone(), self.slot_size, id, policy).await?;
-        self.persist().await;
+        let (mut r, old) = Self::restripe_work(handle, self.gem.clone(), self.registry.clone(), self.slot_size, id, policy).await?;
+        // The old placement is freed only once the map that stopped naming
+        // it is on disk (#366); a failed write keeps it (GC reclaims it once
+        // a later record no longer names it).
+        self.write_records_now().await.map_err(|e| persist_failed(id, "restripe", e))?;
+        r.slots_released = release_legs(&self.registry, &old).await;
         Ok(r)
     }
 
@@ -1754,8 +1773,10 @@ impl VolumeManager {
             let op = m.begin_op(id, "restripe").map_err(|r| VolumeError::Busy(format!("volume {id} has a {r} running")))?;
             (h, m.gem.clone(), m.registry.clone(), m.slot_size, op)
         };
-        let r = Self::restripe_work(handle, gem, registry, slot, id, policy).await?;
-        Self::persist_detached(vm).await;
+        let (mut r, old) = Self::restripe_work(handle, gem, registry.clone(), slot, id, policy).await?;
+        // Freed only once the new map is on disk (#366).
+        Self::persist_detached_checked(vm).await.map_err(|e| persist_failed(id, "restripe", e))?;
+        r.slots_released = release_legs(&registry, &old).await;
         Ok(r)
     }
 
@@ -1775,7 +1796,9 @@ impl VolumeManager {
             (h, op)
         };
         let mut report = handle.resync_with(&ResyncOptions { verify, ..Default::default() }).await;
-        Self::persist_detached(vm).await;
+        // Only once the records are written (#366): a failed write keeps the
+        // replaced slots, and the resync answers the failure.
+        Self::persist_detached_checked(vm).await.map_err(|e| persist_failed(id, "resync", e))?;
         let owed = std::mem::take(&mut report.owed);
         handle.release_slots(&owed).await;
         Ok(report)
@@ -1790,7 +1813,7 @@ impl VolumeManager {
         slot_size: u64,
         id: VolumeId,
         policy: RedundancyPolicy,
-    ) -> Result<RestripeReport, VolumeError> {
+    ) -> Result<(RestripeReport, Vec<gem::Leg>), VolumeError> {
         let needed = policy.scheme.width();
         if needed > 1 {
             let available = registry
@@ -1851,26 +1874,14 @@ impl VolumeManager {
             let mut gem = gem_arc.write().await;
             gem.rename_volume(scratch_id, id)
         };
-        let mut released = 0usize;
-        if let Some(old) = old {
-            let mut reg = registry.write().await;
-            let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
-            for leg in old.all_legs() {
-                by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
-            }
-            for (slab_id, slots) in by_slab {
-                if let Some(slab) = reg.get_mut(&slab_id) {
-                    match slab.dec_ref_batch(&slots).await {
-                        Ok(o) => released += o.freed,
-                        Err(e) => tracing::warn!(volume = %id, slab = %slab_id, "restripe could not release old slots: {e}"),
-                    }
-                }
-            }
-        }
+        // The old placement is the caller's to release, once the map that no
+        // longer names it is on disk (#366): freed here, a crash before the
+        // persist left durable records naming discarded slots.
+        let old: Vec<gem::Leg> = old.map(|m| m.all_legs().collect()).unwrap_or_default();
         handle.force_redundancy(policy.clone());
         handle.set_failed_slabs(Vec::new());
         drop(_hold);
-        Ok(RestripeReport { extents_copied: copied, slots_released: released, redundancy: policy.spelling() })
+        Ok((RestripeReport { extents_copied: copied, slots_released: 0, redundancy: policy.spelling() }, old))
     }
 
     async fn discard_scratch_in(
@@ -3425,6 +3436,13 @@ impl VolumeManager {
         if self.shared.load(std::sync::atomic::Ordering::SeqCst) && crate::lockwatch::owe_persist() {
             return Ok(());
         }
+        self.write_records_now().await
+    }
+
+    /// The records written now, whatever deferral is in force, and checked:
+    /// what must be on disk before something it stopped naming is freed
+    /// (#366). A deferred persist answers `Ok` having written nothing.
+    pub async fn write_records_now(&self) -> anyhow::Result<()> {
         let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         match self.records(generation).await {
             None => Ok(()),
@@ -3782,6 +3800,35 @@ fn reconcile_record(
 /// leg on must match. An engine that addressed 1 MiB extents in 4 MiB slots
 /// once wrote every extent across its neighbours; a record and a slab that
 /// disagree are refused, not guessed between.
+/// A persist that failed where something was to be freed after it (#366).
+fn persist_failed(id: VolumeId, what: &str, e: anyhow::Error) -> VolumeError {
+    VolumeError::Drive(DriveError::Io(std::io::Error::other(format!(
+        "volume {}: {what} done in memory, but its records were not written ({e}); \
+         the slots it replaced are kept until a record that no longer names them is",
+        id.0
+    ))))
+}
+
+/// Release a replaced placement's slots, one reference each (a slot a clone
+/// still shares stays): what a restripe hands back once its map is durable.
+async fn release_legs(registry: &crate::lockwatch::TrackedRwLock<SlabRegistry>, legs: &[gem::Leg]) -> usize {
+    let mut by_slab: HashMap<SlabId, Vec<u64>> = HashMap::new();
+    for leg in legs {
+        by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
+    }
+    let mut released = 0usize;
+    let mut reg = registry.write().await;
+    for (slab_id, slots) in by_slab {
+        if let Some(slab) = reg.get_mut(&slab_id) {
+            match slab.dec_ref_batch(&slots).await {
+                Ok(o) => released += o.freed,
+                Err(e) => tracing::warn!(slab = %slab_id, "could not release replaced slots: {e}"),
+            }
+        }
+    }
+    released
+}
+
 /// The extents `id` maps, its map loaded first and every map kept in memory
 /// while the returned pin is held (#367): a copy or restripe of a volume
 /// whose map was evicted panicked, and a load that fails is an error, not a

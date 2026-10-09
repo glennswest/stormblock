@@ -298,7 +298,7 @@ Every other command logs to stderr as before.
 | `boot-local` | attach local slabs non-destructively, export the boot volume as `/dev/ublkb0` (plus `--image-store`, `--writable`), optionally flow over to `--local-disk`; `--check` validates and exits |
 | `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs. With an `[nvmeof]` section in `--config` (`listen_addr`, `nqn`, the #210 host policy) it also serves the shared NVMe/TCP target, so boot claims get an attach (forge mode, #206); without one, what the node was told (`forge.json`: the settings of a `PUT /api/v1/forge`, #272, or off after a `DELETE`); with nothing kept, forge mode **on with the node's defaults** (`0.0.0.0:4420`, `nqn.2026-08.lo.storm:<node name>`, the #210 closed policy, #287). Never the slab's drive raw |
 | `must-gather` | collect what is needed to debug a node into one directory, read-only |
-| `boot-iscsi` | provision a partitioned disk on a remote iSCSI target and export it over ublk. **It formats the target every run** (#162): a first-install tool, not a boot path |
+| `boot-iscsi` | a partitioned disk on a remote iSCSI target, exported over ublk. A blank target is formatted (a slab with volume records); a slab already there is opened and every partition's volume kept by name; anything else is refused unless `--format`, which destroys it (#162, #366). The records are written at creation and at a stop |
 | `migrate-boot` | copy boot volumes from an iSCSI slab onto a local disk |
 | `ublk`, `migrate` | stubs that print how to do it with a running engine |
 
@@ -703,8 +703,7 @@ the fedora golden, and every service golden is written by `stormblock golden`.
 For running it outside stormcos: `systemd/stormblock-target.service` (the
 daemon as a storage target) and `systemd/95-stormblock-iouring.conf`.
 `systemd/stormblock-ublk.service` runs `boot-iscsi --ublk` as an early-boot
-unit, and `boot-iscsi` formats its target on every run, so it is not a boot
-path (#162). The container images (`Dockerfile`, `Dockerfile.aarch64`) are
+unit; since #162 a run opens the slab it made before and keeps its volumes. The container images (`Dockerfile`, `Dockerfile.aarch64`) are
 stale: rust 1.75, no `--locked`, and not the RouterOS profile (#196).
 `Containerfile.iscsi-test` is an old external-iSCSI test image.
 `deploy/terragrunt/` makes test VMs on Proxmox and `deploy/m0/` is the M0
@@ -1684,7 +1683,7 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.bond=` | `off` | `active-backup` or `802.3ad` to bond the fastest uplinks |
 | `rd.stormblock.ntp=off` | on | skip the NTP step (the build-date floor still applies, #251) |
 | `rd.stormblock.ntp=always` | — | step from NTP even when stormbootx says it synced the clock (#253) |
-| `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`, which formats its target, #162) |
+| `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`: formats a blank target, reopens its own slab, #162) |
 | `ip=<addr>::<gw>:<mask>::<device>:none` | DHCP | a static address, on `<device>` when it is given and present (else the selected uplink); the mask a prefix or dotted. Wins over the node's declaration. `ip=dhcp` or none means DHCP unless the node declares a static boot-NIC address (#229, below) |
 | `rd.stormblock.declared-net=off` | on | ignore the node's declared `[network]` for the boot NIC (#229) |
 | `console=` | — | every one that exists gets the boot messages (#237) |
@@ -1897,7 +1896,6 @@ What earlier docs described and the code does not do, each with its issue:
 - **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with
   nothing starting it; `arm64`/`mikrotik` gate nothing (#169).
 - **Config the daemon ignores** — see *The config file* (#163, #164, #165).
-- **`boot-iscsi` as a boot path** — it formats every run (#162).
 - **The `ui` feature's pages are outside the token check** (#166).
 - **Scrub** of mirror legs and parity on a schedule (#160), **erasure coding
   beyond P+Q** (#159), metadata at 40 PB a node (#155–#158), drive affinity,

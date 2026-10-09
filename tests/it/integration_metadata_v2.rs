@@ -825,3 +825,62 @@ async fn copy_and_restripe_use_the_volumes_extent_size_and_load_a_cold_map() {
     vm.persist().await;
     assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
 }
+
+/// #366: a restripe whose records are not written frees nothing it
+/// replaced, and says so; a create whose record is not written is not
+/// reported made. Before, both answered success and the restripe had already
+/// freed the slots the durable records still named.
+#[tokio::test]
+async fn a_restripe_or_create_whose_records_fail_frees_nothing_and_says_so() {
+    use stormblock::volume::RedundancyPolicy;
+    let name = format!("mv2-witness-{}", uuid::Uuid::new_v4());
+    let witness = stormblock::drive::open_path(&format!("emulated://{name}?size=64M"), false).await.unwrap();
+    let d = device("256M").await;
+    let mk = |dev: Arc<dyn BlockDevice>, role: SlabRole| async move {
+        let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
+            .with_role(role)
+            .with_version(SLAB_VERSION_2)
+            .with_auto_metadata(dev.capacity_bytes());
+        Slab::format_with(dev, fmt).await.unwrap()
+    };
+    let (sd, sw) = (mk(d.clone(), SlabRole::Data).await, mk(witness.clone(), SlabRole::System).await);
+    let (idd, idw) = (sd.slab_id(), sw.slab_id());
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_slab(sd).await;
+    vm.add_slab(sw).await;
+    vm.persist_to_slabs(vec![idd, idw]);
+    let id = vm
+        .create_volume_with("v", VOL, stormblock::volume::CreateOptions::default().in_role(SlabRole::Data))
+        .await
+        .unwrap();
+    {
+        let v = vm.get_volume(&id).unwrap();
+        for e in 0..8u64 {
+            v.write(e * SLOT, &pattern(4, e, 0)).await.unwrap();
+        }
+        v.flush().await.unwrap();
+    }
+    vm.persist_checked().await.unwrap();
+    let free = |vm: &VolumeManager| {
+        let vm = vm.registry().clone();
+        async move { vm.read().await.get(&idd).unwrap().free_slots() }
+    };
+    let before = free(&vm).await;
+
+    assert!(stormblock::drive::emulated::set_failed(&name, true));
+    let e = vm.restripe(id, RedundancyPolicy::none()).await.expect_err("the records were not written");
+    assert!(e.to_string().contains("not written"), "{e}");
+    assert_eq!(free(&vm).await, before - 8, "the copy took 8 slots and the old 8 were kept");
+    let e = vm
+        .create_volume_with("w", VOL, stormblock::volume::CreateOptions::default().in_role(SlabRole::Data))
+        .await
+        .expect_err("a create whose record was not written");
+    assert!(e.to_string().contains("not written"), "{e}");
+    assert!(vm.find_volume("w").await.is_none(), "taken back");
+
+    assert!(stormblock::drive::emulated::set_failed(&name, false));
+    vm.persist_checked().await.unwrap();
+    for e in 0..8u64 {
+        assert_eq!(read_at(&vm, "v", e * SLOT).await, pattern(4, e, 0), "extent {e}");
+    }
+}
