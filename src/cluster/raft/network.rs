@@ -24,6 +24,8 @@ impl Default for HttpNetworkFactory {
         // Raft RPCs are guarded like any other call on a peer's API (#107):
         // present the cluster's shared token.
         let client = crate::http::Client::builder()
+            // A peer, by name: never sent elsewhere (#113).
+            .follow_redirects(false)
             .bearer(crate::mgmt::auth::fleet_token())
             .build()
             .unwrap_or_else(|_| crate::http::Client::new());

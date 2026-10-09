@@ -400,7 +400,13 @@ the image carries are written, so a 2 GB cloud image with 600 MB used
 costs 600 MB once and each VM pays what it writes. `vhd`/`vhdx` are
 recognised and refused; convert with `qemu-img convert -O qcow2`.
 
-**From a URL** (#125). The download resumes with a `Range` from the byte it
+**From a URL** (#113, #125). Redirects are followed: 301, 302, 303, 307
+and 308, up to 10 hops, never from https to http. That is how
+`download.fedoraproject.org`, `cloud.debian.org` and the Rocky and CentOS
+download hosts answer; they used to fail as "HTTP 302". A resume asks the
+mirror the download landed on, not the redirector, so it cannot switch
+mirrors partway through a file. A failure names where it happened
+(`<mirror>: HTTP 404 (redirected from <url>)`). The download resumes with a `Range` from the byte it
 reached, whether it is streamed (raw) or staged to a file (qcow2, VMDK, OVA).
 Each attempt that got further starts the retries over, so a 3 GiB image from
 a mirror that drops every few minutes arrives; one that stops making

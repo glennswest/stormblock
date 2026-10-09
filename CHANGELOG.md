@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #113: the HTTP client follows redirects, so `POST /api/v1/volumes/import {url}` imports Fedora, Debian, Rocky and CentOS cloud images from their canonical URLs. These used to fail with "HTTP 302".
+  - **Following:** 301/302/303/307/308, at most 10 hops (more is an error naming the chain), and a relative `Location` resolved. Every request path inherits it: send, HEAD, the streamed and staged downloads.
+  - **Guards:** an https→http redirect is refused, and the bearer is not carried to another host. 307/308 keep the method; 303, and 301/302 after a POST, become a GET.
+  - **Resumes:** a download resumes from the mirror it landed on, and an error names that URL and where it was redirected from.
+  - **Opt-out:** `ClientBuilder::follow_redirects(false)` is for clients that talk to one named peer. The cluster's clients use it.
 - **feat:** #151: a claim carries its StorageClass's redundancy, spread and tier.
   - **Fields:** `POST /v1/volumes` takes `redundancy`, `spread` and `tier`. `POST /api/v1/volumes` takes `spread` and `tier`, and `POST /api/v1/fstemplates` takes `spread`. The spelling is the same as `/api/v1`, where `spread` is the `@rung`.
   - **Refusal:** a policy the node cannot place is a 409 on `/v1`, as on `/api/v1`.

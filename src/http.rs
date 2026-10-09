@@ -116,6 +116,7 @@ pub struct ClientBuilder {
     timeout: Duration,
     root_pem: Vec<Vec<u8>>,
     bearer: Option<String>,
+    follow: bool,
 }
 
 impl ClientBuilder {
@@ -138,6 +139,14 @@ impl ClientBuilder {
     /// that only shows up under load.
     pub fn bearer(mut self, token: Option<String>) -> Self {
         self.bearer = token;
+        self
+    }
+
+    /// Follow redirects (the default, #113), or answer a 3xx as it came: for
+    /// a client that talks to one named peer, which has no business sending
+    /// it anywhere else.
+    pub fn follow_redirects(mut self, follow: bool) -> Self {
+        self.follow = follow;
         self
     }
 
@@ -167,7 +176,7 @@ impl ClientBuilder {
             .enable_http1()
             .build();
         let inner = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
-        Ok(Client { inner, timeout: self.timeout, bearer: self.bearer })
+        Ok(Client { inner, timeout: self.timeout, bearer: self.bearer, follow: self.follow })
     }
 }
 
@@ -177,6 +186,7 @@ pub struct Client {
     inner: Inner,
     timeout: Duration,
     bearer: Option<String>,
+    follow: bool,
 }
 
 impl Default for Client {
@@ -192,7 +202,7 @@ impl Client {
     }
 
     pub fn builder() -> ClientBuilder {
-        ClientBuilder { timeout: Duration::from_secs(30), root_pem: Vec::new(), bearer: None }
+        ClientBuilder { timeout: Duration::from_secs(30), root_pem: Vec::new(), bearer: None, follow: true }
     }
 
     pub fn post(&self, url: impl AsRef<str>) -> RequestBuilder {
@@ -342,19 +352,17 @@ impl RequestBuilder {
     }
 
     async fn send_once(&self, body: Bytes) -> Result<Response, Error> {
-        let uri: hyper::Uri = self.url.parse().map_err(|e| Error::Url(format!("{}: {e}", self.url)))?;
-        let mut req = hyper::Request::builder().method(self.method.clone()).uri(uri);
-        if let Some(ct) = self.content_type {
-            req = req.header(hyper::header::CONTENT_TYPE, ct);
-        }
-        req = req.header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")));
-        if let Some(t) = &self.bearer {
-            req = req.header(hyper::header::AUTHORIZATION, format!("Bearer {t}"));
-        }
-        let req = req.body(Full::new(body)).map_err(|e| Error::Request(e.to_string()))?;
         let deadline = self.timeout.unwrap_or(self.client.timeout);
         let fut = async {
-            let resp = self.client.inner.request(req).await.map_err(|e| Error::Request(e.to_string()))?;
+            let ask = Ask {
+                method: self.method.clone(),
+                url: &self.url,
+                body,
+                content_type: self.content_type,
+                bearer: self.bearer.as_deref(),
+                range_from: 0,
+            };
+            let (_, resp) = self.client.exchange(ask, deadline).await?;
             let status = StatusCode(resp.status().as_u16());
             let body = resp
                 .into_body()
@@ -379,18 +387,10 @@ impl Client {
     pub async fn content_length(&self, url: &str) -> Result<Option<u64>, Error> {
         let what = format!("HEAD {url}");
         crate::retry::with_backoff(&what, crate::retry::Policy::NETWORK, Error::class, |_| async {
-            let uri: hyper::Uri = url.parse().map_err(|e| Error::Url(format!("{url}: {e}")))?;
-            let req = hyper::Request::builder()
-                .method(hyper::Method::HEAD)
-                .uri(uri)
-                .header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")))
-                .body(Full::new(Bytes::new()))
-                .map_err(|e| Error::Request(e.to_string()))?;
-            // Bounded (#359): a HEAD that never answers held an import for ever.
-            let resp = tokio::time::timeout(self.timeout, self.inner.request(req))
-                .await
-                .map_err(|_| Error::Timeout(self.timeout))?
-                .map_err(|e| Error::Request(e.to_string()))?;
+            // Bounded (#359): a HEAD that never answers held an import for
+            // ever. Redirects followed (#113).
+            let ask = Ask { method: hyper::Method::HEAD, url, body: Bytes::new(), content_type: None, bearer: None, range_from: 0 };
+            let (_, resp) = self.exchange(ask, self.timeout).await?;
             let status = resp.status().as_u16();
             if crate::retry::classify_status(status) == crate::retry::Class::Transient {
                 return Err(Error::Request(format!("{url}: HTTP {status}")));
@@ -411,28 +411,85 @@ impl Client {
     /// A GET from byte `from` on (a `Range` request when `from > 0`), bounded
     /// to the headers by the client's timeout. Answers whether the server
     /// resumed (206) or started over (200), and the body.
-    async fn get_from(&self, url: &str, from: u64) -> Result<(bool, hyper::body::Incoming), Error> {
-        let uri: hyper::Uri = url.parse().map_err(|e| Error::Url(format!("{url}: {e}")))?;
-        let mut req = hyper::Request::builder()
-            .method(hyper::Method::GET)
-            .uri(uri)
-            .header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")));
-        if from > 0 {
-            req = req.header(hyper::header::RANGE, format!("bytes={from}-"));
-        }
-        let req = req.body(Full::new(Bytes::new())).map_err(|e| Error::Request(e.to_string()))?;
-        let resp = tokio::time::timeout(self.timeout, self.inner.request(req))
-            .await
-            .map_err(|_| Error::Timeout(self.timeout))?
-            .map_err(|e| Error::Request(e.to_string()))?;
+    async fn get_from(&self, url: &str, from: u64) -> Result<(String, bool, hyper::body::Incoming), Error> {
+        let ask = Ask { method: hyper::Method::GET, url, body: Bytes::new(), content_type: None, bearer: None, range_from: from };
+        let (landed, resp) = self.exchange(ask, self.timeout).await?;
         let status = resp.status().as_u16();
+        // Which URL in the chain answered (#113): a mirror's 404 is not the
+        // redirector's.
+        let at = if landed == url { url.to_string() } else { format!("{landed} (redirected from {url})") };
         if crate::retry::classify_status(status) == crate::retry::Class::Transient {
-            return Err(Error::Request(format!("{url}: HTTP {status}")));
+            return Err(Error::Request(format!("{at}: HTTP {status}")));
         }
         if !(200..300).contains(&status) {
-            return Err(Error::Url(format!("{url}: HTTP {status}")));
+            return Err(Error::Url(format!("{at}: HTTP {status}")));
         }
-        Ok((status == 206, resp.into_body()))
+        Ok((landed, status == 206, resp.into_body()))
+    }
+
+    /// One request, following redirects (#113): 301, 302, 303, 307 and 308,
+    /// at most [`MAX_REDIRECTS`] hops, a relative `Location` resolved against
+    /// the URL that sent it. Never from https to http; the bearer is dropped
+    /// once a hop leaves the first host; 307/308 keep the method and body,
+    /// 303 (and 301/302 after a POST) become a GET. The headers are bounded
+    /// by `deadline` per hop. Answers the URL that answered, and its answer.
+    async fn exchange(&self, ask: Ask<'_>, deadline: Duration) -> Result<(String, hyper::Response<hyper::body::Incoming>), Error> {
+        let mut url = ask.url.to_string();
+        let mut method = ask.method;
+        let mut body = ask.body;
+        let mut content_type = ask.content_type;
+        let first_origin = origin_of(&url);
+        let mut chain = vec![url.clone()];
+        loop {
+            let uri: hyper::Uri = url.parse().map_err(|e| Error::Url(format!("{url}: {e}")))?;
+            let mut req = hyper::Request::builder()
+                .method(method.clone())
+                .uri(uri)
+                .header(hyper::header::USER_AGENT, concat!("stormblock/", env!("CARGO_PKG_VERSION")));
+            if let Some(ct) = content_type {
+                req = req.header(hyper::header::CONTENT_TYPE, ct);
+            }
+            if ask.range_from > 0 {
+                req = req.header(hyper::header::RANGE, format!("bytes={}-", ask.range_from));
+            }
+            // A credential goes to the host it was meant for, not to wherever
+            // that host points.
+            if let Some(t) = ask.bearer.filter(|_| origin_of(&url) == first_origin) {
+                req = req.header(hyper::header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+            let req = req.body(Full::new(body.clone())).map_err(|e| Error::Request(e.to_string()))?;
+            let resp = tokio::time::timeout(deadline, self.inner.request(req))
+                .await
+                .map_err(|_| Error::Timeout(deadline))?
+                .map_err(|e| Error::Request(e.to_string()))?;
+            let status = resp.status().as_u16();
+            if !self.follow || !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                return Ok((url, resp));
+            }
+            let Some(location) = resp.headers().get(hyper::header::LOCATION).and_then(|v| v.to_str().ok()) else {
+                return Ok((url, resp));
+            };
+            let next = resolve(&url, location);
+            if url.starts_with("https://") && next.starts_with("http://") {
+                return Err(Error::Url(format!(
+                    "refused a redirect from https to http: {} -> {next}",
+                    chain.join(" -> ")
+                )));
+            }
+            chain.push(next.clone());
+            if chain.len() > MAX_REDIRECTS + 1 {
+                return Err(Error::Url(format!("more than {MAX_REDIRECTS} redirects: {}", chain.join(" -> "))));
+            }
+            if status == 303 || (matches!(status, 301 | 302) && method == hyper::Method::POST) {
+                if method != hyper::Method::HEAD {
+                    method = hyper::Method::GET;
+                }
+                body = Bytes::new();
+                content_type = None;
+            }
+            tracing::debug!("http: {status} {url} -> {next}");
+            url = next;
+        }
     }
 
     /// The next frame of a body, bounded by the client's timeout: an idle
@@ -486,9 +543,14 @@ impl Client {
         };
         // An attempt that got further starts the retries over (#125).
         let progress = || seen.load(std::sync::atomic::Ordering::SeqCst);
+        // Where the first request landed (#113): a resume asks the mirror it
+        // was reading, not the redirector, which may pick another.
+        let at = std::sync::Mutex::new(url.to_string());
         crate::retry::with_backoff_progress(&what, crate::retry::Policy::TRANSFER, classify, progress, |_| async {
             let from = seen.load(std::sync::atomic::Ordering::SeqCst);
-            let (resumed, mut body) = self.get_from(url, from).await?;
+            let target = at.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let (landed, resumed, mut body) = self.get_from(&target, from).await?;
+            *at.lock().unwrap_or_else(|e| e.into_inner()) = landed;
             if from > 0 && !resumed {
                 return Err(Error::Url(format!(
                     "stopped: {url} failed after {from} bytes and the server does not resume (no 206 to a Range)"
@@ -521,10 +583,13 @@ impl Client {
         // What the file holds: an attempt that grew it starts the retries
         // over (#125).
         let held = std::sync::atomic::AtomicU64::new(0);
+        let at = std::sync::Mutex::new(url.to_string());
         let progress = || held.load(std::sync::atomic::Ordering::SeqCst);
         let r = crate::retry::with_backoff_progress(&what, crate::retry::Policy::TRANSFER, Error::class, progress, |_| async {
             let have = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
-            let (resumed, mut body) = self.get_from(url, have).await?;
+            let target = at.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let (landed, resumed, mut body) = self.get_from(&target, have).await?;
+            *at.lock().unwrap_or_else(|e| e.into_inner()) = landed;
             let mut file = if resumed && have > 0 {
                 tokio::fs::OpenOptions::new().append(true).open(path).await
             } else {
@@ -549,6 +614,65 @@ impl Client {
             }
         }
     }
+}
+
+/// Redirects followed before giving up (#113): what browsers and reqwest
+/// allow.
+pub const MAX_REDIRECTS: usize = 10;
+
+/// What [`Client::exchange`] sends.
+struct Ask<'a> {
+    method: hyper::Method,
+    url: &'a str,
+    body: Bytes,
+    content_type: Option<&'static str>,
+    bearer: Option<&'a str>,
+    range_from: u64,
+}
+
+/// `scheme://authority` of a URL, for "is this the same host".
+fn origin_of(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return String::new() };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    format!("{}://{}", scheme.to_ascii_lowercase(), authority.to_ascii_lowercase())
+}
+
+/// A `Location` resolved against the URL that sent it (RFC 3986 §5, the
+/// cases servers send: absolute, scheme-relative, absolute path, relative
+/// path, query).
+fn resolve(base: &str, location: &str) -> String {
+    let location = location.trim();
+    if location.contains("://") {
+        return location.to_string();
+    }
+    let scheme = base.split_once("://").map(|(s, _)| s).unwrap_or("http");
+    if let Some(rest) = location.strip_prefix("//") {
+        return format!("{scheme}://{rest}");
+    }
+    let origin = origin_of(base);
+    if location.starts_with('/') {
+        return format!("{origin}{location}");
+    }
+    let path = base[origin.len().min(base.len())..].split(['?', '#']).next().unwrap_or("");
+    if location.starts_with('?') {
+        return format!("{origin}{path}{location}");
+    }
+    let dir = match path.rfind('/') {
+        Some(i) => &path[..=i],
+        None => "/",
+    };
+    // `./` and `../` segments, folded.
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for seg in location.split('/') {
+        match seg {
+            "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    format!("{origin}/{}", parts.join("/"))
 }
 
 /// A response, body already read.
@@ -645,6 +769,120 @@ mod tests {
         let r = client.get(format!("http://{addr}/flaky")).send().await.unwrap();
         assert_eq!(r.status().as_u16(), 200, "a 503 is tried again");
         assert_eq!(r.text().await.unwrap(), "fine");
+    }
+
+    /// A server that answers from a table of `path -> (status, headers,
+    /// body)`, and records each request's first line and whether it carried
+    /// an Authorization header.
+    async fn table_server(
+        routes: Vec<(&'static str, u16, Vec<(String, String)>, Vec<u8>)>,
+    ) -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let routes = std::sync::Arc::new(routes);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else { return };
+                let routes = routes.clone();
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let got = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..got]).to_string();
+                    let first = req.lines().next().unwrap_or("").to_string();
+                    let auth = req.to_ascii_lowercase().contains("\r\nauthorization:");
+                    log.lock().unwrap().push((first.clone(), auth));
+                    let path = first.split(' ').nth(1).unwrap_or("/").to_string();
+                    let head = first.starts_with("HEAD ");
+                    let (status, headers, body) = routes
+                        .iter()
+                        .find(|(p, ..)| *p == path)
+                        .map(|(_, s, h, b)| (*s, h.clone(), b.clone()))
+                        .unwrap_or((404, vec![], b"nope".to_vec()));
+                    let mut out = format!("HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n", body.len());
+                    for (k, v) in headers {
+                        out.push_str(&format!("{k}: {v}\r\n"));
+                    }
+                    out.push_str("\r\n");
+                    let _ = s.write_all(out.as_bytes()).await;
+                    if !head {
+                        let _ = s.write_all(&body).await;
+                    }
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    fn loc(to: &str) -> Vec<(String, String)> {
+        vec![("location".to_string(), to.to_string())]
+    }
+
+    /// #113: a redirector's chain is followed (relative and absolute
+    /// `Location`s, 302 then 301) for a GET, a HEAD and a download; 303 turns
+    /// a POST into a GET, 307 keeps it a POST; the bearer is not carried to
+    /// another host; a loop stops at the bound and names the chain; a client
+    /// told not to follow answers the 302 as it came.
+    #[tokio::test]
+    async fn redirects_are_followed_with_the_usual_guards() {
+        let image: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let (other, other_seen) = table_server(vec![("/mirror/img", 200, vec![], image.clone())]).await;
+        let mirror = format!("http://{other}/mirror/img");
+        let (addr, seen) = table_server(vec![
+            ("/pub/img", 302, loc("../hop/img"), vec![]),
+            ("/hop/img", 301, loc(&mirror), vec![]),
+            ("/post", 303, loc("/landed"), vec![]),
+            ("/landed", 200, vec![], b"got".to_vec()),
+            ("/keep", 307, loc("/echo"), vec![]),
+            ("/echo", 200, vec![], b"echo".to_vec()),
+            ("/loop", 302, loc("/loop"), vec![]),
+        ])
+        .await;
+        let c = Client::builder().timeout(Duration::from_secs(5)).bearer(Some("t0ken".into())).build().unwrap();
+        let start = format!("http://{addr}/pub/img");
+
+        let r = c.get(&start).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.bytes().to_vec(), image, "the mirror's bytes, two hops on");
+        assert_eq!(c.content_length(&start).await.unwrap(), Some(image.len() as u64), "a HEAD follows too");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img");
+        assert_eq!(c.get_to_file(&start, &path).await.unwrap(), image.len() as u64);
+        assert_eq!(std::fs::read(&path).unwrap(), image);
+        assert!(
+            other_seen.lock().unwrap().iter().all(|(_, auth)| !auth),
+            "the bearer never reached the other host"
+        );
+        assert!(seen.lock().unwrap().iter().any(|(l, auth)| l.starts_with("GET /pub/img") && *auth), "but it went to the first");
+
+        let r = c.post(format!("http://{addr}/post")).json(&serde_json::json!({"a": 1})).send().await.unwrap();
+        assert_eq!(r.text().await.unwrap(), "got");
+        assert!(seen.lock().unwrap().iter().any(|(l, _)| l.starts_with("GET /landed")), "303: a GET");
+        let r = c.post(format!("http://{addr}/keep")).json(&serde_json::json!({"a": 1})).send().await.unwrap();
+        assert_eq!(r.text().await.unwrap(), "echo");
+        assert!(seen.lock().unwrap().iter().any(|(l, _)| l.starts_with("POST /echo")), "307: still a POST");
+
+        let e = c.get(format!("http://{addr}/loop")).send().await.unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("more than 10 redirects") && msg.matches("/loop").count() >= 11, "{msg}");
+
+        let plain = Client::builder().timeout(Duration::from_secs(5)).follow_redirects(false).build().unwrap();
+        assert_eq!(plain.get(&start).send().await.unwrap().status().as_u16(), 302);
+    }
+
+    #[test]
+    fn a_location_resolves_against_the_url_that_sent_it() {
+        let b = "https://dl.example.org/pub/fedora/43/img.qcow2?x=1";
+        assert_eq!(resolve(b, "https://m.example.net/f/img"), "https://m.example.net/f/img");
+        assert_eq!(resolve(b, "//m.example.net/f/img"), "https://m.example.net/f/img");
+        assert_eq!(resolve(b, "/other/img"), "https://dl.example.org/other/img");
+        assert_eq!(resolve(b, "mirror/img"), "https://dl.example.org/pub/fedora/43/mirror/img");
+        assert_eq!(resolve(b, "../../42/img"), "https://dl.example.org/pub/42/img");
+        assert_eq!(resolve(b, "?y=2"), "https://dl.example.org/pub/fedora/43/img.qcow2?y=2");
+        assert_eq!(origin_of("HTTPS://A.example:443/x"), "https://a.example:443");
     }
 
     /// The client speaks to the server this binary runs, round trip.

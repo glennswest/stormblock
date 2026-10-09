@@ -71,6 +71,8 @@ pub async fn migrate_volume(
 ) -> Result<MigrationStatus, anyhow::Error> {
     // A peer's API needs a credential when the fleet was given one (#107).
     let client = crate::http::Client::builder()
+        // A peer, by name: never sent elsewhere (#113).
+        .follow_redirects(false)
         .timeout(std::time::Duration::from_secs(120))
         .bearer(crate::mgmt::auth::fleet_token())
         .build()?;

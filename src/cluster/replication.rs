@@ -88,6 +88,8 @@ impl ReplicatedVolume {
         // differently from the write it is retrying is a bug nobody would
         // find until a peer was slow.
         let client = crate::http::Client::builder()
+            // A peer, by name: never sent elsewhere (#113).
+            .follow_redirects(false)
             .timeout(Duration::from_secs(30))
             .bearer(crate::mgmt::auth::fleet_token())
             .build()

@@ -181,6 +181,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The HTTP client follows redirects (2026-10-09, #113) — IN PROGRESS
+
+- [x] `Client::exchange`: 301/302/303/307/308, ≤ 10 hops (chain in the
+      error), relative `Location` resolved, no https→http, bearer only to the
+      first origin, 303 (and 301/302 after POST) → GET; send, HEAD and the
+      ranged GET through it; a download resumes from where it landed;
+      `follow_redirects(false)` for the cluster's peer clients
+- [x] tests: `http::tests::redirects_are_followed_with_the_usual_guards`,
+      `a_location_resolves_against_the_url_that_sent_it`; docs, CHANGELOG
+- [ ] check.sh; golden; close
+
 ### Redundancy, spread and tier on every claim path (2026-10-09, #151, P2) — DONE (golden-stormblock-abcd60bee6e2)
 
 `/v1` create had no policy (every CSI PVC `none`); `spread` only as
