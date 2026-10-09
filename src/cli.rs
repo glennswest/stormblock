@@ -4948,6 +4948,62 @@ pub async fn run() -> anyhow::Result<()> {
             for d in &plan.dropped {
                 println!("Install: {d} — the old release's, not in this one: dropped with the system half (#349)");
             }
+            // Room for what the release brings into the data half (#172): the
+            // node's data stays and the release's data volumes flow in beside
+            // it. Laid without room, the flow-over stops on a full slab, and
+            // after a power cycle every new write on the node fails (pvetest2,
+            // 12.06 over 12.03: fastetcd read-only). Refused here, nothing
+            // written, the node running from the appliance.
+            {
+                // The distinct data-half slots of the release's volumes the
+                // node does not already hold (a reinstall of the same release
+                // shares ids with it, #244, and those do not flow).
+                let node_ids: std::collections::HashSet<crate::volume::VolumeId> =
+                    plan.volumes.iter().map(|(id, _, _)| *id).collect();
+                let data_slabs: std::collections::HashMap<crate::drive::slab::SlabId, u64> = mgr
+                    .registry()
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|(_, s)| s.is_data())
+                    .map(|(id, s)| (*id, s.slot_size()))
+                    .collect();
+                let ids: Vec<crate::volume::VolumeId> = mgr
+                    .list_volumes()
+                    .await
+                    .into_iter()
+                    .map(|(id, _, _, _)| id)
+                    .filter(|id| !node_ids.contains(id))
+                    .collect();
+                let _pin = crate::volume::gem::pin_resident(mgr.gem())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("not installing over {disk}: loading the release's extent maps: {e}"))?;
+                let mut slots: std::collections::HashSet<(crate::drive::slab::SlabId, u64)> = Default::default();
+                {
+                    let g = mgr.gem().read().await;
+                    for id in &ids {
+                        if let Some(m) = g.get_volume_map(id) {
+                            for leg in m.all_legs() {
+                                if data_slabs.contains_key(&leg.slab_id) {
+                                    slots.insert((leg.slab_id, leg.slot_idx));
+                                }
+                            }
+                        }
+                    }
+                }
+                drop(_pin);
+                let mut need: std::collections::BTreeMap<u64, u64> = Default::default();
+                for (slab, _) in &slots {
+                    *need.entry(data_slabs[slab]).or_default() += 1;
+                }
+                let free = crate::image::install::data_half_free(&dest_dev)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
+                if let Some(why) = crate::image::install::short_of_room(&need, &free) {
+                    println!("Install: REFUSED over {disk}: {why}");
+                    anyhow::bail!("not installing over {disk}, its data half untouched: {why}");
+                }
+            }
             let policy = match root {
                 Some(r) => crate::image::stage::read_policy(mgr, r).await.unwrap_or_else(|e| {
                     println!("Install: the release's {} not read ({e}); every data volume is kept", crate::image::stage::POLICY_FILE);
@@ -5422,6 +5478,31 @@ pub async fn run() -> anyhow::Result<()> {
     /// names are freed, after every extent. The sources are quarantined for new
     /// allocations, and stay so once empty. `None` when it gave up: more than 16
     /// extents that would not move (the quarantine is lifted).
+    /// Why a flow-over gave up (#172): its destination full — after a power
+    /// cycle the sources are quarantined again and every new write on the
+    /// node then fails (ENOSPC, then ext4 read-only) — or extents that would
+    /// not move.
+    async fn flow_stall_reason(
+        reg: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        dest: crate::drive::slab::SlabId,
+        half: &str,
+    ) -> String {
+        let r = reg.read().await;
+        match r.get(&dest) {
+            Some(s) if s.free_slots() == 0 => format!(
+                "the local {half} slab is full ({} slot(s), none free): what is left stays remote, and \
+                 once the node reboots nothing new can be written on this half (#172)",
+                s.total_slots()
+            ),
+            Some(s) => format!(
+                "extents that would not move ({} of {} slot(s) free on the local {half} slab)",
+                s.free_slots(),
+                s.total_slots()
+            ),
+            None => format!("the local {half} slab is gone"),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     /// Quarantine the slabs a flow-over empties: every system slab but the one
     /// it fills. Nothing new is placed on them, and a write to an extent still on
@@ -5952,6 +6033,7 @@ pub async fn run() -> anyhow::Result<()> {
         let gem_arc = state.gem.clone();
         let reg_arc = state.slab_registry.clone();
         let flow_remaining = state.flow_over_remaining.clone();
+        let flow_stalled = state.flow_over_stalled.clone();
         let data_dir = state.data_dir.clone();
         // Weak, so a migration in flight cannot keep the whole engine alive past
         // a shutdown that is trying to end.
@@ -6110,11 +6192,14 @@ pub async fn run() -> anyhow::Result<()> {
                 let Some((m, f)) =
                     flow_slabs(&gem_arc, &reg_arc, &sources, dest, persist, Some(&*flow_remaining), data_left).await
                 else {
+                    let why = flow_stall_reason(&reg_arc, dest, "system").await;
                     tracing::error!(
                         "flow-over: too many failures — abandoning {}; the node keeps running from \
-                         the appliance",
+                         the appliance: {why}",
                         flow.disk
                     );
+                    println!("WARNING: flow-over onto {} stopped: {why}", flow.disk);
+                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
                     return;
                 };
                 moved += m;
@@ -6125,11 +6210,14 @@ pub async fn run() -> anyhow::Result<()> {
                 let Some((m, f)) =
                     flow_slabs(&gem_arc, &reg_arc, &data_sources, data_dest, persist, Some(&*flow_remaining), 0).await
                 else {
+                    let why = flow_stall_reason(&reg_arc, data_dest, "data").await;
                     tracing::error!(
                         "flow-over: too many failures in the data half — abandoning {}; its writes \
-                         go on landing on it, and the rest stays on the appliance",
+                         go on landing on it, and the rest stays on the appliance: {why}",
                         flow.disk
                     );
+                    println!("WARNING: flow-over of the data half onto {} stopped: {why}", flow.disk);
+                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
                     return;
                 };
                 println!(
@@ -9048,6 +9136,54 @@ file = "{state}"
     /// #369 reopened (12.02): the Dell's records predate origins, so they
     /// read unmarked. An unmarked one the release being installed names (or
     /// its `.golden`) is the release's, and dropped the same way.
+    /// #172 (pvetest2, 12.06 over 12.03): a keep-data install over a data
+    /// half with no room for what the release brings in was laid anyway; the
+    /// flow-over stopped on a full slab, and after the power cycle every new
+    /// write failed (fastetcd read-only). Refused now, before anything is
+    /// written, naming the shortfall; the node's data is as it was.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_install_with_no_room_for_the_release_s_data_is_refused_and_writes_nothing() {
+        use crate::drive::slab::SlabRole;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
+        // The node fills its data half, leaving almost nothing free.
+        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (free, slot) = {
+            let reg = node.registry().read().await;
+            let s = reg.iter().find(|(_, s)| s.is_data()).map(|(_, s)| s).unwrap();
+            (s.free_slots(), s.slot_size())
+        };
+        let fill = (free.saturating_sub(4)) * slot;
+        let id = node
+            .create_volume_with("filler", fill, crate::volume::CreateOptions::default().in_role(SlabRole::Data))
+            .await
+            .unwrap();
+        let v = node.get_volume(&id).unwrap();
+        let block = vec![0x5Au8; slot as usize];
+        for e in 0..fill / slot {
+            v.write(e * slot, &block).await.unwrap();
+        }
+        v.flush().await.unwrap();
+        node.persist().await;
+        drop(v);
+        drop(node);
+        let before = std::fs::read(&disk).unwrap();
+
+        let claim = dir.path().join("claim-n1.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let e = match super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await {
+            Ok(_) => panic!("an install with no room for the release's data must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("data half untouched") && e.contains("#172") && e.contains("free"), "{e}");
+        assert!(std::fs::read(&disk).unwrap() == before, "nothing written to the disk");
+    }
+
     #[tokio::test]
     async fn a_release_volume_with_extents_outside_the_data_half_does_not_stop_an_install() {
         use crate::drive::slab::SlabRole;

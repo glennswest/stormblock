@@ -522,7 +522,12 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   of this node's volumes still on a remote slab (the appliance's), 0 once the
   flow-over has finished, left out when there is none. Kept by the flow-over
   as it goes, so it is never missing for being busy; an abandoned flow-over
-  leaves it above 0 (the node still runs from the appliance).
+  leaves it above 0 (the node still runs from the appliance), and
+  `"flow_over_stalled"` says why: the local slab full (after a power cycle
+  nothing new can then be written on that half), or extents that would not
+  move (#172). A keep-data install is refused before anything is written
+  when the data half has no room for the release's data volumes it does not
+  already hold, plus 5 % and 64 slots (#172).
   And `"slabs"` (#322): where the node runs from.
   - `diskless` is true when no volume has a leg on a local slab.
   - `system` and `data` are each `local`, `remote`, `mixed` (some of each,

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #172 (pvetest2, 12.06-flowsdn over 12.03-flowsdn): a keep-data install over a data half with no room for what the release brings in was laid anyway.
+  - **What happened:** the flow-over stopped on "destination slab is full" with 13589 extents still remote. After the install's power cycle, the remote half is quarantined again (#239), so every new allocation got ENOSPC. ublk returned EIO, and fastetcd's ext4 went read-only for good.
+  - **Install:** the plan now counts the release's data-half slots the node does not already hold, and refuses the install, before anything is written, when the data half lacks them plus 5 % and 64 slots of headroom. The refusal names the numbers; the data stays untouched and the node runs from the appliance.
+  - **Flow-over:** one that gives up says why on the console and in health (`flow_over_stalled`): the local slab full, or extents that would not move.
 - **feat:** #381 (stormcos#486): a node that boots from a forge is handed forge's trust for its enrolment.
   - **Set on forge:** forge's stormcert sets its CA, apiserver URL and a narrow bootstrap token with `PUT /api/v1/forge/trust` (admin; kept 0600 in the data directory).
   - **Handed out:** every boot claim's answer carries `forge_trust`, and `boot-claim` writes `/run/stormblock/forge/{ca.crt,url,bootstrap.token}` (0644, 0644, 0600) plus `from`.

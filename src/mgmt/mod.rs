@@ -318,6 +318,10 @@ pub struct AppState {
     /// runs no flow-over; 0 once it has finished. An atomic so the open probe
     /// never waits on the extent map the flow-over is holding.
     pub flow_over_remaining: Arc<std::sync::atomic::AtomicI64>,
+    /// Why the flow-over stopped short, when it did (#172): the destination
+    /// full, or extents that would not move. Said in health until the next
+    /// boot.
+    pub flow_over_stalled: Arc<std::sync::Mutex<Option<String>>>,
     /// The paths this engine opened its slabs from (`--slab`, or the
     /// handover record's): where a staged release's boot pallet goes is the
     /// one among them that carries a node layout (#122).
@@ -507,6 +511,7 @@ impl AppState {
             arrays: tokio::sync::RwLock::new(HashMap::new()),
             spares: crate::raid::spares::SparePool::new(),
             flow_over_remaining: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
+            flow_over_stalled: Arc::new(std::sync::Mutex::new(None)),
             slab_paths: Default::default(),
             boot_disks: tokio::sync::RwLock::new(Vec::new()),
             slab_report: std::sync::Mutex::new(None),

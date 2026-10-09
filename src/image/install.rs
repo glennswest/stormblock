@@ -265,6 +265,66 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
     })
 }
 
+/// Free slots in a node disk's data half, by slot size (data slab, bulk
+/// slab) (#172).
+pub async fn data_half_free(device: &Arc<dyn BlockDevice>) -> anyhow::Result<std::collections::BTreeMap<u64, u64>> {
+    let (data, bulk, _) = halves(device).await?;
+    let mut free: std::collections::BTreeMap<u64, u64> = Default::default();
+    for s in std::iter::once(&data).chain(bulk.as_ref()) {
+        *free.entry(s.slot_size()).or_default() += s.free_slots();
+    }
+    Ok(free)
+}
+
+/// Whether a data half with `free` slots (by slot size) can take `need`
+/// more, with headroom (5 % and 64 slots) for the writes that come while it
+/// moves (#172). `Some(why)` when it cannot.
+pub fn short_of_room(
+    need: &std::collections::BTreeMap<u64, u64>,
+    free: &std::collections::BTreeMap<u64, u64>,
+) -> Option<String> {
+    let mut short = Vec::new();
+    for (&size, &n) in need.iter().filter(|(_, n)| **n > 0) {
+        let want = n + n / 20 + 64;
+        let have = free.get(&size).copied().unwrap_or(0);
+        if have < want {
+            short.push(format!(
+                "the release brings {n} slot(s) of {} into the data half, which has {have} free \
+                 ({want} needed with headroom)",
+                crate::mgmt::config::human_size(size)
+            ));
+        }
+    }
+    (!short.is_empty()).then(|| {
+        format!(
+            "{}; installed anyway the flow-over would stop on a full slab and, after a power cycle, \
+             no new write on the node would land (#172). Free space on the data half or use a larger disk",
+            short.join("; ")
+        )
+    })
+}
+
+#[cfg(test)]
+mod room_tests {
+    use super::short_of_room;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn an_install_without_room_for_the_release_s_data_is_refused() {
+        const MIB: u64 = 1 << 20;
+        let m = |v: &[(u64, u64)]| v.iter().copied().collect::<BTreeMap<u64, u64>>();
+        assert_eq!(short_of_room(&m(&[(MIB, 1000)]), &m(&[(MIB, 2000)])), None);
+        // pvetest2: 13589 to bring, a full data half.
+        let why = short_of_room(&m(&[(MIB, 13589)]), &m(&[(MIB, 120)])).unwrap();
+        assert!(why.contains("13589") && why.contains("120 free"), "{why}");
+        // Headroom: exactly the need is not enough.
+        assert!(short_of_room(&m(&[(MIB, 1000)]), &m(&[(MIB, 1000)])).is_some());
+        // Bulk slots are counted apart.
+        assert!(short_of_room(&m(&[(MIB, 10), (8 * MIB, 500)]), &m(&[(MIB, 5000), (8 * MIB, 10)])).is_some());
+        assert_eq!(short_of_room(&m(&[]), &m(&[])), None);
+    }
+}
+
 /// A free name for the node's `name` set aside: `<name>@<previous>`, or with
 /// `.2`, `.3`… when an earlier install already used it.
 async fn aside_name(mgr: &VolumeManager, name: &str, previous: &str) -> String {

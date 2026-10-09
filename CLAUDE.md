@@ -960,6 +960,19 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
+### A keep-data install laid with no room for the release's data (2026-10-09, #172, P0) — IN PROGRESS
+
+pvetest2 (12.06-flowsdn over 12.03-flowsdn): 28 GB data half; flow-over
+stopped on "destination slab is full" (13589 left); after the power cycle the
+quarantined remote half took nothing → ENOSPC → ublk EIO → fastetcd ext4 ro.
+- [x] install: room check after the plan (distinct data-half slots of the
+      release's volumes the node lacks; +5 % +64) → refused before writing
+- [x] flow-over: `flow_over_stalled` (console + health) with the reason
+- [x] tests: `install_tests::an_install_with_no_room_for_the_release_s_data_
+      is_refused_and_writes_nothing`, `install::room_tests`
+- [ ] build VM: install tests; check.sh; golden; comment on #172 (the metal
+      acceptance stays stormcentral's)
+
 ### Forge acts on a machine's boot override from stormipmi (2026-10-09, #354, P1) — PAUSED for P0 #172 (WIP pushed)
 
 stormipmi#70's contract. Built (WIP): `mgmt/boot_override.rs` (fetch

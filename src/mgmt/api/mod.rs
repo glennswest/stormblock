@@ -90,6 +90,11 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// must not read as settled mid-move.
         #[serde(skip_serializing_if = "Option::is_none")]
         flow_over_remaining: Option<u64>,
+        /// Why the flow-over stopped with extents still remote (#172): its
+        /// destination full, or extents that would not move. Left out while
+        /// it runs or once it has finished.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_over_stalled: Option<String>,
         /// Where the node's slabs are (#322): whether it runs from its own
         /// disk or from a remote (forge) clone, per half. A remote slab is
         /// named by its transport only. Never waited for: left out until a
@@ -131,6 +136,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         auth: if state.auth_enforced() { "required" } else { "none" },
         raid,
         flow_over_remaining,
+        flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs: super::slab_report::for_health(&state),
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
     })
