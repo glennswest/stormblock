@@ -587,10 +587,11 @@ impl VolumeManager {
         }
         let legs: Vec<(u64, gem::Leg)> = {
             let gem = self.gem.read().await;
-            match gem.volume_extents(&id) {
+            let legs: Vec<(u64, gem::Leg)> = match gem.volume_extents(&id) {
                 Some(it) => it.flat_map(|(v, loc)| loc.legs().map(move |l| (v, l)).collect::<Vec<_>>()).collect(),
                 None => Vec::new(),
-            }
+            };
+            legs
         };
         let reg = self.registry.read().await;
         let mut bad = Vec::new();
