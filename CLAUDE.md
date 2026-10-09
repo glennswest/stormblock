@@ -960,24 +960,25 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
-### Forge's trust handed to a booting node (2026-10-09, #381, P0) — IN PROGRESS
+### Forge's trust handed to a booting node (2026-10-09, #381, P0) — DONE (golden-stormblock-70d74378fcc4)
 
 stormcos#486. `mgmt/forge_trust.rs`: forge's stormcert PUTs
 `/api/v1/forge/trust {ca, url?, bootstrap_token}` (admin; kept 0600 in the
 data dir); every boot claim answers `forge_trust`; boot-claim writes
 /run/stormblock/forge/{ca.crt,url,bootstrap.token,from}; the first node
 (forge on, no claim) writes its own on loopback at start and on set.
-[ ] build VM; check.sh; golden; stormcert issue (PUT the trust).
+Affected tests 137/137; check.sh at 9186e6e ALL PASS (1099/1099); golden
+golden-stormblock-70d74378fcc4; stormcert#81 (PUT the trust).
 
-### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — PAUSED for P0 #381 (built and pushed; affected tests were running)
+### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — DONE (golden-stormblock-70d74378fcc4)
 
 Built (A): `Host.host_secret` (SHA-256), minted per claim, `host_secret` in
 the reply; `serve::api::host_scoped` + `mgmt::auth` accept it on its own
 boothost's PUT / rollback / PUT intent (`HostCredential`), handlers narrow
 (sealed volume, no URI, intent local); boot-claim writes
 /run/stormblock/host-secret.json, adopt-ublk `carry_host_secret` via the data
-dir. Tests: integration_synonyms, handover, host_scoped. [ ] build VM;
-check.sh; golden; stormupdate issue. Earlier:
+dir. Tests: integration_synonyms, handover, host_scoped. 123/123 at 7b57ada;
+check.sh at 9186e6e ALL PASS. Earlier:
 
 The intent half is gone: #265 settled by #122's 2A, and stormupdate (b4cc7e0)
 sets no intent. Instead it re-points `boothost/<tag>` on forge itself (`PUT
