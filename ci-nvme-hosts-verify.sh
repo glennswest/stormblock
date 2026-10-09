@@ -66,6 +66,7 @@ truncate -s 512M "$W/d1.img" "$W/d2.img"
 cat > "$W/stormblock.toml" <<EOF
 [management]
 api_token = "$TOKEN"
+admin_token = "$TOKEN"
 listen_addr = "127.0.0.1:$MGMT"
 data_dir = "$W/data"
 node_name = "ci-nvme-hosts"
