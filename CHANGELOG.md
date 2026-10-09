@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #369 reopened: 12.02 on the Dell is still diskless. The install still refused cilium, cilium-operator, hubble-relay and coredns (and their `.golden` copies) as data outside the data half.
+  - **Cause:** their records in the data slab were written before volumes carried an origin (#349), so they read as unmarked, and only `origin = release` counted as the release's own.
+  - **Fix:** an unmarked volume that the release being installed names, by its name or by its name without `.golden`, is the release's too. Its data-half record is dropped and it comes back with the release.
+  - **Carried, not refused:** any other volume whose extents outside the data half all lie in this disk's own system half is carried into the data half before the system half is laid (#349's carry) and kept.
+  - **Still refused:** a volume with extents anywhere else.
 - **perf:** #134: an iSCSI LUN attach or detach no longer rewrites `luns.json` itself.
   - **Writer:** it marks the table changed, and one writer task writes it (compact, on the blocking pool). Changes made while a write is in progress become one more write. The daemon flushes it at a stop.
   - **Before:** every attach wrote the whole table and replaced it by rename, so 1000 attaches wrote O(N²) bytes and took 30–47 s on a loaded box.

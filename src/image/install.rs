@@ -165,6 +165,8 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
     let mut seen = HashSet::new();
     let mut outside: Vec<String> = Vec::new();
     let mut release_strays: Vec<(VolumeId, String)> = Vec::new();
+    let mut carry_from_data: Vec<(VolumeId, String)> = Vec::new();
+    let sys_id = system.as_ref().map(|s| s.slab_id());
     for slab in std::iter::once(&data).chain(bulk.as_ref()) {
         if !slab.has_metadata_region() {
             anyhow::bail!("slab {} keeps no volume records: what it holds cannot be told, so it is not installed over", slab.slab_id());
@@ -183,19 +185,33 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
                 .values()
                 .flat_map(|l| l.legs().collect::<Vec<_>>())
                 .chain(v.parity.values().flat_map(|g| g.legs.clone()));
-            let away = legs.filter(|l| !half.contains(&l.slab_id)).count();
+            let away: Vec<SlabId> = legs.map(|l| l.slab_id).filter(|s| !half.contains(s)).collect();
+            if away.is_empty() {
+                volumes.push((v.id, v.name, v.sealed));
+                continue;
+            }
             // The release's own (#369): cilium, coredns and the rest, laid
             // by an earlier install and recorded here too. System class:
             // the system half they live in is laid again, and they come
-            // back with the release. Only the node's and unmarked volumes
-            // are data that laying the system half would lose.
-            if away > 0 && v.origin == crate::volume::metadata::Origin::Release {
+            // back with the release. A record written before origins were
+            // (#349) says nothing: the release being installed naming it
+            // (or its `.golden`) is what tells then.
+            use crate::volume::metadata::Origin;
+            let named = release.contains(&v.name)
+                || v.name.strip_suffix(".golden").is_some_and(|b| release.contains(b));
+            if v.origin == Origin::Release || (v.origin == Origin::Unmarked && named) {
                 release_strays.push((v.id, v.name));
                 continue;
             }
-            if away > 0 {
-                outside.push(format!("{} ({away} extent(s))", v.name));
+            // Anything else whose stray extents are all in this disk's own
+            // system half loses nothing: it is carried into the data half
+            // first (#349's carry), and kept.
+            if sys_id.is_some_and(|sys| away.iter().all(|s| *s == sys)) {
+                carry_from_data.push((v.id, v.name.clone()));
+                volumes.push((v.id, v.name, v.sealed));
+                continue;
             }
+            outside.push(format!("{} ({} extent(s))", v.name, away.len()));
             volumes.push((v.id, v.name, v.sealed));
         }
     }
@@ -217,7 +233,7 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
         // goes with the system half; what the node made — or what says
         // nothing of where it came from, recorded before origins were — is
         // carried into the data half, sealed or not.
-        let mut carry = Vec::new();
+        let mut carry = carry_from_data;
         let mut dropped = Vec::new();
         for v in doc.map(|d| d.volumes).unwrap_or_default() {
             if seen.contains(&v.id) || release.contains(&v.name) || v.name.contains('@') {
@@ -243,7 +259,7 @@ pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> a
         data_slab: data.slab_id(),
         bulk_slab: bulk.as_ref().map(|b| b.slab_id()),
         volumes,
-        carry: Vec::new(),
+        carry: carry_from_data,
         dropped: Vec::new(),
         release_strays,
     })

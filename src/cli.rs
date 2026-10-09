@@ -8855,7 +8855,11 @@ file = "{state}"
     /// extents in the system half, and the install refused them as data it
     /// would lose. A release volume is system class: the install goes on and
     /// drops its data-half record (it comes back with the release). A volume
-    /// the node made in the same place is still refused, named.
+    /// the node made in the same place is carried into the data half and
+    /// kept (#349's carry), every byte.
+    /// #369 reopened (12.02): the Dell's records predate origins, so they
+    /// read unmarked. An unmarked one the release being installed names (or
+    /// its `.golden`) is the release's, and dropped the same way.
     #[tokio::test]
     async fn a_release_volume_with_extents_outside_the_data_half_does_not_stop_an_install() {
         use crate::drive::slab::SlabRole;
@@ -8864,7 +8868,12 @@ file = "{state}"
             eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
             return;
         };
-        for (name, origin, installs) in [("cilium-old", Origin::Release, true), ("vm-disk-stray", Origin::Node, false)] {
+        for (name, origin, dropped) in [
+            ("cilium-old", Origin::Release, true),
+            ("svc.golden", Origin::Unmarked, true),
+            ("vm-disk-stray", Origin::Node, false),
+            ("media-stray", Origin::Unmarked, false),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let (disk, _image_n, image_n1, ..) = release_fixture(mkfs.clone(), &dir).await;
             let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
@@ -8898,18 +8907,30 @@ file = "{state}"
             std::fs::copy(&image_n1, &claim).unwrap();
             let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
             let r = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await;
-            if installs {
-                let (flow, report) = r.unwrap_or_else(|e| panic!("{name}: the install refused a release volume: {e}"));
-                assert!(flow.is_some(), "{name}: laid");
-                let report = report.expect("an install report");
+            let (flow, report) = r.unwrap_or_else(|e| panic!("{name}: the install refused: {e}"));
+            assert!(flow.is_some(), "{name}: laid");
+            let report = report.expect("an install report");
+            if dropped {
                 assert_eq!(report.release_dropped, vec![name.to_string()], "{report:?}");
                 assert_eq!(mgr.find_volume(name).await, None, "{name}: dropped, it comes back with the release");
             } else {
-                let e = match r {
-                    Ok(_) => panic!("{name}: a volume the node made, outside the data half, must stop the install"),
-                    Err(e) => e.to_string(),
-                };
-                assert!(e.contains(name) && e.contains("outside the data half"), "{e}");
+                assert!(report.release_dropped.is_empty(), "{report:?}");
+                assert!(report.carried.contains(&name.to_string()), "{name}: carried: {report:?}");
+                assert_eq!(
+                    volume_bytes(&mgr, name).await.as_deref(),
+                    Some(&vec![0x69u8; 8 * MIB as usize][..]),
+                    "{name}: kept, every byte"
+                );
+                let id = mgr.find_volume(name).await.unwrap();
+                let _pin = crate::volume::gem::pin_resident(mgr.gem()).await.unwrap();
+                let reg = mgr.registry().read().await;
+                let gem = mgr.gem().read().await;
+                let m = gem.get_volume_map(&id).expect("its map");
+                for (_, loc) in m.extents.iter() {
+                    for l in loc.legs() {
+                        assert!(reg.get(&l.slab_id).is_some_and(|s| s.is_data()), "{name}: in the data half");
+                    }
+                }
             }
         }
     }
