@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — IN PROGRESS
+### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — DONE
 
 #359 made both downloads resume with a `Range`, under `TRANSFER` (8
 attempts, 30 min from the first): a 3 GiB image over a flaky mirror still
@@ -196,7 +196,8 @@ ran out. And a failed import gave only a message.
       `integration_fstemplates::an_import_from_a_dropping_mirror_resumes_
       and_a_failure_names_its_phase` (64 KiB per connection, 640 KiB, both
       paths; 404 → fetch; a broken qcow2 → verify); docs, CHANGELOG
-- [ ] check.sh; golden; close
+- [x] check.sh at ca6a9e7 ALL PASS (nextest 1070/1070; the mirror test 14 s,
+      ten GETs a path)
 
 ### Imported media presented at the block they were authored for (2026-10-09, #110) — DONE (golden-stormblock-f7a453e7835f)
 
