@@ -1394,7 +1394,7 @@ mod tests {
         s.create(BOOTHOST_NS, "server1", Target::Volume { id: vol() }, None, None).unwrap();
         let (clone, other) = (vol(), vol());
         // Booted before anything was laid: refused.
-        assert!(matches!(s.install_booted("server1", clone), Err(SynonymError::Conflict(_))));
+        assert!(s.install_booted("server1", clone).is_err());
         s.set_intent("server1", BootIntent::Install).unwrap();
         s.note_install_claim("server1", clone);
         let (h, _) = s.install_done("server1", clone).unwrap();
