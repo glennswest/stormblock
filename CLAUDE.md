@@ -181,26 +181,34 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — IN PROGRESS
+### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — DONE
 
 `Slab::format_with` zero-filled the whole slot table, growth room included
 (~1 TB of writes for a 15 PB drive at enrol); `Slab::open` scanned every
 entry and built a capacity-sized free map; `POST /api/v1/slabs` formatted
 inline in the request.
-- [ ] v2 slabs: the table is committed in steps (`COMMIT_STEP` entries,
+- [x] v2 slabs: the table is committed in steps (`COMMIT_STEP` entries,
       64 MiB): format zeroes the first step only; header v2 bytes 136..152
       carry the room and the span, and `total_slots`/`table_capacity` on
       disk stay the committed part (an older engine sees a smaller slab, and
       its `grow()` cannot reach unzeroed entries)
-- [ ] a step is zeroed and flushed before the header names it; ahead of
+- [x] a step is zeroed and flushed before the header names it; ahead of
       need from the sync path (no lock), under the registry only when an
       allocation finds nothing committed
-- [ ] open scans the committed part; the free map is committed-sized;
+- [x] open scans the committed part; the free map is committed-sized;
       `total_slots()`/`free_slots()` report the whole span
-- [ ] `POST /api/v1/slabs` formats on a task of its own (#141's shape)
-- [ ] review the other create/enrol/install paths for O(capacity) work
-- [ ] tests (format cost bounded, fill past several steps, reopen, an
-      older reader's view, grow), docs, CHANGELOG, check.sh, golden
+- [x] `POST /api/v1/slabs` formats on a task of its own (#141's shape)
+- [x] reviewed the other paths: the install's lay and re-lay are slab formats
+      (now bounded); MetaV2 format writes three pages; RAID create writes the
+      superblocks and bitmaps only (filed #374: its parity is never
+      initialised); compose, clone and template create are O(extents mapped)
+- [x] tests: 2 TiB format writes one step (15 ms), a used drive filled past
+      several steps reopens with exactly what was allocated, the sync path
+      commits ahead, v1 still zeroed whole; check.sh at 8b76bc9 ALL PASS
+      (nextest 1063/1063); docs (metadata-v2, metadata-scale, README),
+      CHANGELOG
+- Slabs formatted before this keep their whole table: open still reads all
+  of it until they are re-laid
 
 ### Every remote call retries (2026-10-09, #359, P1 owner) — BACK IN LINE (P0 #364); code in golden-stormblock-02660bcdb1aa
 
