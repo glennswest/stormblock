@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **feat:** #380 (stormcos#470): `/init` keeps a read-only root read-only.
+  - **`ro` / `rw`:** on the kernel command line, the last one given wins, as the kernel reads them. `ro` mounts the root read-only (ext4 `-o ro`: no mount count, no times); neither leaves the default.
+  - **Hostname and resolver:** always written to `/run/hostname` and `/run/resolv.conf` (the initramfs's `/run`, which becomes the root's), directly rather than through a link. Into `/sysroot/etc` only on a read-write root whose files are not links (older goldens).
+  - **Read-only root:** a container mount point the root does not have is named in the warning, and the legacy fstab registrations warn instead of failing.
+  - **Test:** `tests/initramfs-root-ro.sh`.
 - **feat:** #354: forge acts on a machine's boot override from stormipmi (stormipmi#70).
   - **Reading it:** with `[management] boot_override_url` (or `$STORMBLOCK_BOOT_OVERRIDE_URL`) set, every boot claim and intent read fetches `<url>/api/v1/machines/<tag>/override` and acts when `actor == "forge"`.
   - **`hold`:** the claim is refused (423) while it stands, and nothing is reported.

@@ -1684,6 +1684,7 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.meta=<dir>` | — | where the volume records are, for a slab that keeps none |
 | `stormblock.volume=<uuid\|name>` | `boot.toml`, else the slab's boot volume | the root volume |
 | `rd.stormblock.overlay=tmpfs[:SIZE]\|<blockdev>` | `tmpfs`, 512m | writable overlay over a read-only (erofs) root |
+| `ro` / `rw` | read-write | the root mounted read-only (ext4 `-o ro`) or read-write; the last one given wins, as the kernel reads them (#380, stormcos#470: a stormcos root stays equal to its golden) |
 | `rd.stormblock.image-store=<vol>` | — | export a second volume (`/dev/ublkb1`) as the image store |
 | `rd.stormblock.writable=<vol>:<path>,…` | — | writable volumes, written to fstab |
 | `rd.stormblock.mount=<vol>:<path>,…` | the root volume's `/etc/stormblock/mounts` | volumes `/init` exports and mounts itself, for a PID 1 that is not systemd. **Without it on the line, `/init` reads the list from the root volume** of the slab it boots: `/etc/stormblock/mounts`, one `<vol>:<path>` per line, `#` comments, read with `slab cat` before anything is exported (#262). A list on the line does not fit: x86 caps the line at 2048 bytes and the EFI stub truncates it and boots anyway (11.68 mounted nothing). The line still works, and wins, for older images. **An entry starting with `?`** (`?cilium:/p/cilium`) is optional (#288): mounted when the slab has the volume, left out when it does not (the console says `optional, not in this release`), never counted missing by the local-disk probe, so one list serves every flavor of a release. Whether the slab has it is read with `slab volumes`; a slab that cannot list its volumes leaves its optional entries out and says so. Plain entries stay required |
@@ -1832,7 +1833,11 @@ Each step that gives no name says why on the console:
 - `DNS has no name for <ip> (no PTR record from <dns>)`;
 - `DNS calls <ip> '<name>', which resolves to '…' - ignoring`.
 
-The short name is the kernel hostname, and `/etc/hostname` in the root. The
+The short name is the kernel hostname, and `/run/hostname`, which the root
+reads through its `/etc/hostname` link; the resolver goes to
+`/run/resolv.conf` the same way. Both are written to `/run` directly, never
+through the root; a read-write root whose `/etc` files are not links (an
+older golden) gets them there too (#380). The
 lease's domain (option 15, else the first of 119, else the name's own) becomes
 the kernel's `domainname`, and the console prints the FQDN.
 

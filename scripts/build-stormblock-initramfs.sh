@@ -3915,12 +3915,37 @@ echo "Root device ready: $ROOTDEV"
 
 # Mount filesystems (stormcos local root is erofs; fall back to ext4/auto)
 echo "Mounting filesystems..."
+# --- BEGIN root mode (covered by tests/initramfs-root-ro.sh)
+# `ro` / `rw` on the command line, as the kernel reads them: the last one
+# given wins, neither leaves the default (read-write). A stormcos node's root
+# is read-only (stormcos#470): the root clone stays equal to its golden, so a
+# running node can be verified against its supply chain. Mounted `ro`, ext4
+# writes nothing, not even the mount count or times.
+root_ro_from() { # cmdline -> "1" when the root is to be read-only
+    _rr=""
+    for _a in $1; do
+        case "$_a" in
+            ro) _rr=1 ;;
+            rw) _rr="" ;;
+        esac
+    done
+    echo "$_rr"
+}
+ROOT_RO=$(root_ro_from "$(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null)")
 mount_root() {
     # $1 = device, $2 = mountpoint
-    mount -t erofs -o ro "$1" "$2" 2>/dev/null \
-        || mount -t ext4 "$1" "$2" 2>/dev/null \
-        || mount "$1" "$2"
+    if [ -n "$ROOT_RO" ]; then
+        ${STORM_MOUNT:-mount} -t erofs -o ro "$1" "$2" 2>/dev/null \
+            || ${STORM_MOUNT:-mount} -t ext4 -o ro "$1" "$2" 2>/dev/null \
+            || ${STORM_MOUNT:-mount} -o ro "$1" "$2"
+    else
+        ${STORM_MOUNT:-mount} -t erofs -o ro "$1" "$2" 2>/dev/null \
+            || ${STORM_MOUNT:-mount} -t ext4 "$1" "$2" 2>/dev/null \
+            || ${STORM_MOUNT:-mount} "$1" "$2"
+    fi
 }
+[ -n "$ROOT_RO" ] && echo "  the root is mounted read-only (ro on the command line)"
+# --- END root mode
 
 if [ -n "$OVERLAY" ]; then
     # Immutable-OS mode (#14): read-only root as overlay lowerdir, writable
@@ -4057,8 +4082,12 @@ if [ -n "$MOUNT_MAP" ]; then
         | sort -n -k1,1 > "$_cm_dir/waves"
 
     cm_one() { # dev mountpoint
-        mkdir -p "$_cm_root$2"
-        if $_cm_mount -t ext4 "$1" "$_cm_root$2" 2>/dev/null \
+        # On a read-only root (stormcos#470) the mount point has to be in the
+        # image: a missing one cannot be made, and is named.
+        mkdir -p "$_cm_root$2" 2>/dev/null
+        if [ ! -d "$_cm_root$2" ]; then
+            echo "  WARNING: $1 would not mount at $2: no such mount point, and the root cannot make one"
+        elif $_cm_mount -t ext4 "$1" "$_cm_root$2" 2>/dev/null \
             || $_cm_mount "$1" "$_cm_root$2" 2>/dev/null; then
             echo "  mounted: $1 -> $2"
         else
@@ -4163,9 +4192,12 @@ if [ -n "$WRITABLE_MAP" ]; then
         n=0
         while [ ! -b "$wdev" ] && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
         if [ -b "$wdev" ]; then
-            echo "$wdev $wmnt xfs defaults,x-systemd.makefs,x-systemd.growfs,nofail 0 0" \
-                >> /sysroot/etc/fstab
-            echo "  writable: $wdev -> $wmnt"
+            if echo "$wdev $wmnt xfs defaults,x-systemd.makefs,x-systemd.growfs,nofail 0 0" \
+                >> /sysroot/etc/fstab 2>/dev/null; then
+                echo "  writable: $wdev -> $wmnt"
+            else
+                echo "  WARNING: $wdev -> $wmnt not registered: /sysroot/etc/fstab is not writable (a read-only root)"
+            fi
         else
             echo "  WARNING: $wdev never appeared; $wmnt falls back to overlay (ephemeral)"
         fi
@@ -4183,9 +4215,12 @@ if [ -n "$IMAGE_STORE" ]; then
     n=0
     while [ ! -b "$ISDEV" ] && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
     if [ -b "$ISDEV" ]; then
-        mkdir -p "/sysroot$ISMNT"
-        echo "$ISDEV $ISMNT erofs ro,nofail 0 0" >> /sysroot/etc/fstab
-        echo "  image-store: $ISDEV -> $ISMNT (ro)"
+        mkdir -p "/sysroot$ISMNT" 2>/dev/null
+        if echo "$ISDEV $ISMNT erofs ro,nofail 0 0" >> /sysroot/etc/fstab 2>/dev/null; then
+            echo "  image-store: $ISDEV -> $ISMNT (ro)"
+        else
+            echo "  WARNING: image-store $ISDEV not registered: /sysroot/etc/fstab is not writable (a read-only root)"
+        fi
     else
         echo "  WARNING: $ISDEV never appeared - preloaded images will NOT be available"
     fi
@@ -4273,15 +4308,36 @@ if [ -z "$(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ')" ] \
     stamp "network retried: $(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ' | awk '{print $2}')"
 fi
 
+# --- BEGIN network handoff (covered by tests/initramfs-root-ro.sh)
 # What the initramfs learned about the network, handed to the root that will
 # use it. Nothing after switch_root runs a DHCP client, so a node whose
 # resolver was configured here and not carried over resolves nothing.
-if [ -n "$NODE_NAME" ] && [ -d /sysroot/etc ]; then
-    echo "$NODE_NAME" > /sysroot/etc/hostname 2>/dev/null || true
+#
+# Into /run, never through the root (stormcos#470): /run becomes the root's
+# at switch_root, and a stormcos golden's /etc/hostname and /etc/resolv.conf
+# are links to /run/hostname and /run/resolv.conf. Written there directly: a
+# copy through a link that does not resolve yet writes nothing (busybox cp).
+# A read-write root whose files are not links (an older golden, the iSCSI
+# root) gets them in /etc as before.
+_nh_run="${STORM_RUN:-/run}"
+_nh_root="${STORM_SYSROOT:-/sysroot}"
+_nh_resolv="${STORM_RESOLV:-/etc/resolv.conf}"
+mkdir -p "$_nh_run" 2>/dev/null
+if [ -n "$NODE_NAME" ]; then
+    echo "$NODE_NAME" > "$_nh_run/hostname" 2>/dev/null || echo "  WARNING: $_nh_run/hostname not written"
 fi
-if [ -s /etc/resolv.conf ] && [ -d /sysroot/etc ]; then
-    cp /etc/resolv.conf /sysroot/etc/resolv.conf 2>/dev/null || true
+if [ -s "$_nh_resolv" ]; then
+    cat "$_nh_resolv" > "$_nh_run/resolv.conf" 2>/dev/null || echo "  WARNING: $_nh_run/resolv.conf not written"
 fi
+if [ -z "${ROOT_RO:-}" ] && [ -d "$_nh_root/etc" ]; then
+    if [ -n "$NODE_NAME" ] && [ ! -L "$_nh_root/etc/hostname" ]; then
+        echo "$NODE_NAME" > "$_nh_root/etc/hostname" 2>/dev/null || true
+    fi
+    if [ -s "$_nh_resolv" ] && [ ! -L "$_nh_root/etc/resolv.conf" ]; then
+        cat "$_nh_resolv" > "$_nh_root/etc/resolv.conf" 2>/dev/null || true
+    fi
+fi
+# --- END network handoff
 
 # Move virtual filesystems
 mount --move /proc /sysroot/proc

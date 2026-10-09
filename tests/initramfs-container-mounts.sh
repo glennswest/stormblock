@@ -58,7 +58,8 @@ now() { cut -d' ' -f1 /proc/uptime; }
 # run MAP [env...] -> output in $WORK/out, elapsed seconds in $ELAPSED
 run() {
     map=$1; shift
-    : > "$WORK/log"; : > "$WORK/conc"; rm -rf "$WORK/running" "$WORK/sysroot" "$WORK/run"
+    : > "$WORK/log"; : > "$WORK/conc"; rm -rf "$WORK/running" "$WORK/run"
+    [ -n "${KEEP_SYSROOT:-}" ] || rm -rf "$WORK/sysroot"
     mkdir -p "$WORK/run"
     t0=$(now)
     env STUB_LOG="$WORK/log" STUB_CONC="$WORK/conc" STUB_RUNNING="$WORK/running" \
@@ -125,6 +126,19 @@ $DEV/ublkb1 /c/b1
 " STUB_BAD=ublkb1
     check "a bad volume warned" 1 "$(grep -c 'WARNING: .*ublkb1 would not mount at /c/b1' "$WORK/out")"
     check "the others mounted" 1 "$(grep -c '  mounted: ' "$WORK/out")"
+
+    # A read-only root (stormcos#470): a mount point the image has is used;
+    # a missing one cannot be made, and is named.
+    if [ "$(id -u)" != 0 ]; then
+        rm -rf "$WORK/sysroot"; mkdir -p "$WORK/sysroot/c/have"; chmod 555 "$WORK/sysroot/c" "$WORK/sysroot"
+        KEEP_SYSROOT=1 run "$DEV/ublkb0 /c/have
+$DEV/ublkb1 /c/missing
+"
+        chmod -R u+w "$WORK/sysroot"
+        check "read-only root: a missing mount point is named" 1 \
+            "$(grep -c 'WARNING: .*ublkb1 would not mount at /c/missing: no such mount point' "$WORK/out")"
+        check "read-only root: an existing one is mounted" 1 "$(grep -c '  mounted: .*ublkb0' "$WORK/out")"
+    fi
 
     # Two missing devices: waited for once (2 s), not once each.
     SLEEP=0.1 run "$DEV/ublkb0 /c/m0
