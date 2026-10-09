@@ -574,8 +574,56 @@ impl VolumeManager {
 
     /// Seal a volume: from now on it takes no writes and is what clones are
     /// taken from. `fs`, when given, records what is on it.
+    /// Every slot a golden maps is counted for it in its slab's table (#370):
+    /// owned by the golden or one of its ancestors, or shared (a count of two
+    /// or more, as a composed disk's components are). A slot recorded as
+    /// someone else's with a count of one is a slot the table does not count
+    /// for the golden: the next restore would drop that mapping, and a clone
+    /// would read zeros there. `Err` names the extents.
+    pub async fn check_golden_slots(&self, id: VolumeId) -> Result<(), String> {
+        let lineage: HashSet<VolumeId> = self.lineage(&id).into_iter().collect();
+        if let Err(e) = gem::ensure_resident(&self.gem, id).await {
+            return Err(format!("volume {id}: its extent map does not load: {e}"));
+        }
+        let legs: Vec<(u64, gem::Leg)> = {
+            let gem = self.gem.read().await;
+            match gem.volume_extents(&id) {
+                Some(it) => it.flat_map(|(v, loc)| loc.legs().map(move |l| (v, l)).collect::<Vec<_>>()).collect(),
+                None => Vec::new(),
+            }
+        };
+        let reg = self.registry.read().await;
+        let mut bad = Vec::new();
+        for (vext, leg) in legs {
+            let Some(slab) = reg.get(&leg.slab_id) else { continue };
+            let ok = match slab.get_slot(leg.slot_idx).await {
+                Some(s) if s.state.is_owned() => lineage.contains(&s.volume_id) || s.ref_count >= 2,
+                _ => false,
+            };
+            if !ok {
+                bad.push(vext);
+            }
+        }
+        if bad.is_empty() {
+            return Ok(());
+        }
+        let shown: Vec<String> = bad.iter().take(8).map(|v| v.to_string()).collect();
+        Err(format!(
+            "volume {id}: {} extent(s) map slots its slab does not count for it ({}{}); a clone of it \
+             would read zeros there, so it is neither sealed nor cloned until the next start gives \
+             them back (#370)",
+            bad.len(),
+            shown.join(", "),
+            if bad.len() > 8 { ", …" } else { "" }
+        ))
+    }
+
     pub async fn seal_volume(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
+        if let Err(why) = self.check_golden_slots(id).await {
+            tracing::error!("{why}");
+            return Err(VolumeError::AllocatorError(why));
+        }
         handle.set_sealed(true);
         if let Some(fs) = fs {
             self.fs_info.insert(id, fs);
@@ -1366,6 +1414,7 @@ impl VolumeManager {
             set
         };
         let mut absorbed: HashSet<VolumeId> = HashSet::new();
+        let mut reclaim: Vec<Reclaim> = Vec::new();
 
         for (vrec, home) in records {
             if self.volumes.contains_key(&vrec.id) {
@@ -1377,7 +1426,7 @@ impl VolumeManager {
             // attached is dropped (and said so) by the reconciliation.
             {
                 let reg = self.registry.read().await;
-                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live);
+                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live, &parent_of, &mut reclaim);
                 for (stripe, g) in &vrec.parity {
                     rebuilt.insert_parity(vrec.id, *stripe, g.clone());
                 }
@@ -1437,6 +1486,7 @@ impl VolumeManager {
             let mut gem = self.gem.write().await;
             gem.absorb(rebuilt, &absorbed);
             let mut reg = self.registry.write().await;
+            reclaim_slots(&mut reg, &reclaim).await;
             raise_shares(&mut reg, &view, &mut gem).await;
         }
 
@@ -3418,6 +3468,7 @@ impl VolumeManager {
             gem::SlotView::read(sources).await?
         };
         let mut rebuilt = GlobalExtentMap::rebuild_from_view(&view);
+        let mut reclaim: Vec<Reclaim> = Vec::new();
 
         // Which volumes a record may legitimately share a slot with: its
         // ancestors (#171). Every live volume, to tell a slot another volume
@@ -3463,7 +3514,7 @@ impl VolumeManager {
             // snapshot's shared slots (#13).
             {
                 let reg = self.registry.read().await;
-                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live);
+                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live, &parent_of, &mut reclaim);
             }
 
             // Parity groups: the record is authoritative — it knows the
@@ -3530,6 +3581,7 @@ impl VolumeManager {
         // Share counts from the mappings restored (#171): see `raise_shares`.
         {
             let mut reg = self.registry.write().await;
+            reclaim_slots(&mut reg, &reclaim).await;
             raise_shares(&mut reg, &view, &mut rebuilt).await;
         }
 
@@ -3561,6 +3613,11 @@ impl VolumeManager {
 /// tables cannot express — a snapshot's shared slots (#13). Shared by
 /// `restore` and `adopt_slabs`, so a volume comes back the same way whichever
 /// door it comes through.
+/// A slot a sealed volume's record names, recorded in its slot table as one
+/// of that volume's own descendants' at the same extent (#370): handed back
+/// to the volume after the restore.
+type Reclaim = (gem::Leg, VolumeId, u64);
+
 fn reconcile_record(
     reg: &SlabRegistry,
     view: &gem::SlotView,
@@ -3568,7 +3625,24 @@ fn reconcile_record(
     vrec: &metadata::VolumeRecord,
     lineage: &HashSet<VolumeId>,
     live: &HashSet<VolumeId>,
+    parent_of: &HashMap<VolumeId, VolumeId>,
+    reclaim: &mut Vec<Reclaim>,
 ) {
+    // Does `v` descend from the volume being restored?
+    let descends = |mut v: VolumeId| -> bool {
+        let mut n = 0;
+        while let Some(p) = parent_of.get(&v) {
+            if *p == vrec.id {
+                return true;
+            }
+            v = *p;
+            n += 1;
+            if n > 256 {
+                break;
+            }
+        }
+        false
+    };
     let slot_gen = |leg: gem::Leg| -> Option<u64> {
         view.get(leg).filter(|s| s.state.is_owned()).map(|s| s.generation)
     };
@@ -3600,6 +3674,16 @@ fn reconcile_record(
                             (s.virtual_extent_idx != *vext).then(|| {
                                 format!("is the ancestor's extent {}", s.virtual_extent_idx)
                             })
+                        }
+                        // A sealed volume's slot recorded as one of its own
+                        // clones', at the same extent (#370): a move through
+                        // the clone's map recorded the clone as the owner,
+                        // and the clone has since written that extent away.
+                        // A sealed volume never frees a slot, so the bytes
+                        // are still its own: kept, and given back.
+                        Some(s) if vrec.sealed && s.virtual_extent_idx == *vext && descends(s.volume_id) => {
+                            reclaim.push((loc.primary(), vrec.id, *vext));
+                            None
                         }
                         // A share of a volume outside the lineage
                         // (a composed disk's golden) has a count
@@ -3678,6 +3762,30 @@ fn restored_extent_size(
 /// that replaced it not — and a count too low lets a write land in place in a
 /// slot another volume still reads. Only ever raised: one too high costs a
 /// needless copy, never data.
+/// Give each reclaimed slot back to the sealed volume its record names
+/// (#370). The bytes were always the golden's; only the slot entry's owner
+/// was wrong, and with it every restore dropped the golden's mapping.
+async fn reclaim_slots(reg: &mut SlabRegistry, reclaim: &[Reclaim]) {
+    if reclaim.is_empty() {
+        return;
+    }
+    let mut done = 0usize;
+    for (leg, vid, vext) in reclaim {
+        if let Some(slab) = reg.get_mut(&leg.slab_id) {
+            match slab.reassign_slot(leg.slot_idx, *vid, *vext).await {
+                Ok(()) => done += 1,
+                Err(e) => tracing::warn!(
+                    "volume {vid} extent {vext}: slot {}:{} could not be given back to it: {e}",
+                    leg.slab_id.0, leg.slot_idx
+                ),
+            }
+        }
+    }
+    tracing::warn!(
+        "{done} slot(s) recorded as a clone's were a sealed golden's own (#370): kept and given back to their golden"
+    );
+}
+
 async fn raise_shares(reg: &mut SlabRegistry, view: &gem::SlotView, rebuilt: &mut GlobalExtentMap) {
     let mut maps: HashMap<gem::Leg, u32> = HashMap::new();
     for vol in rebuilt.volume_ids() {
@@ -4387,6 +4495,103 @@ mod redundancy_tests {
         let mut back = vec![0u8; 4096];
         mgr.get_volume(&vol).unwrap().read(0, &mut back).await.unwrap();
         assert!(back.iter().all(|b| *b == 9), "the volume reads on");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #370: the Dell's goldens lost extents at every restart. A golden and
+    /// its clone share a slot; the slot is moved through the clone's map
+    /// (as a flow-over may) and the clone then writes that extent. The
+    /// golden must read its own bytes after a restart, its slot counted
+    /// for it.
+    #[tokio::test]
+    async fn a_shared_slot_moved_through_a_clone_stays_the_goldens() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let (g, c, paths) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let (a, pa) = file_slab(&d, "a", slot).await;
+            let (b, pb) = file_slab(&d, "b", slot).await;
+            let b_id = b.slab_id();
+            mgr.add_slab(a).await;
+            let g = mgr.create_volume_any("blank.golden", 16 * slot).await.unwrap();
+            let v = mgr.get_volume(&g).unwrap();
+            v.write(0, &vec![0x47u8; 4 * slot as usize]).await.unwrap();
+            v.flush().await.unwrap();
+            mgr.seal_volume(g, None).await.unwrap();
+            let c = mgr.create_snapshot(g, "blank").await.unwrap();
+            mgr.add_slab(b).await;
+            {
+                let mut gem = mgr.gem.write().await;
+                let mut reg = mgr.registry.write().await;
+                crate::placement::PlacementEngine::new()
+                    .migrate_extent(&mut gem, &mut reg, c, 0, Some(b_id))
+                    .await
+                    .unwrap();
+            }
+            let cv = mgr.get_volume(&c).unwrap();
+            cv.write(0, &vec![0x43u8; slot as usize]).await.unwrap();
+            cv.flush().await.unwrap();
+            mgr.persist().await;
+            assert!(mgr.check_golden_slots(g).await.is_ok(), "the moved slot is still the golden's");
+            (g, c, vec![pa, pb])
+        };
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        for p in &paths {
+            let dev = FileDevice::open(p).await.unwrap();
+            mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        }
+        mgr.restore().await.unwrap();
+        let mut buf = vec![0u8; slot as usize];
+        mgr.get_volume(&g).unwrap().read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|x| *x == 0x47), "the golden's extent 0 after a restart");
+        mgr.get_volume(&c).unwrap().read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|x| *x == 0x43), "the clone's own write");
+        assert!(mgr.check_golden_slots(g).await.is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #370, a node already in the state: a golden's slot recorded as its
+    /// clone's with a count of one. The golden is refused (sealing, serving)
+    /// until a restart, which keeps the mapping and gives the slot back.
+    #[tokio::test]
+    async fn a_golden_slot_recorded_as_its_clones_is_refused_then_given_back() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let (g, paths) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let (a, pa) = file_slab(&d, "a", slot).await;
+            let a_id = a.slab_id();
+            mgr.add_slab(a).await;
+            let g = mgr.create_volume_any("logs.golden", 8 * slot).await.unwrap();
+            let v = mgr.get_volume(&g).unwrap();
+            v.write(0, &vec![0x4Cu8; 2 * slot as usize]).await.unwrap();
+            v.flush().await.unwrap();
+            mgr.seal_volume(g, None).await.unwrap();
+            let c = mgr.create_snapshot(g, "logs").await.unwrap();
+            // What the old move did: the shared slot recorded as the clone's.
+            let leg = { mgr.gem.read().await.lookup(g, 0).unwrap().primary() };
+            mgr.registry.write().await.get_mut(&a_id).unwrap().reassign_slot(leg.slot_idx, c, 0).await.unwrap();
+            // The clone writes that extent: the count goes to one.
+            let cv = mgr.get_volume(&c).unwrap();
+            cv.write(0, &vec![0x6Cu8; slot as usize]).await.unwrap();
+            cv.flush().await.unwrap();
+            mgr.persist().await;
+            let why = mgr.check_golden_slots(g).await.expect_err("an uncounted slot is found");
+            assert!(why.contains("1 extent(s)") && why.contains("(0)"), "{why}");
+            (g, vec![pa])
+        };
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        for p in &paths {
+            let dev = FileDevice::open(p).await.unwrap();
+            mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        }
+        mgr.restore().await.unwrap();
+        let mut buf = vec![0u8; slot as usize];
+        mgr.get_volume(&g).unwrap().read(0, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|x| *x == 0x4C), "kept through the restart, not dropped");
+        assert!(mgr.check_golden_slots(g).await.is_ok(), "and given back: the golden is served again");
         let _ = std::fs::remove_dir_all(&d);
     }
 

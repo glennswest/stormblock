@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **fix:** #370 (P0, data): on the Dell's own disk goldens lost extents at every restart ("the record's slot … now belongs to volume …; mapping dropped": fastetcd-backup.golden ×159, registry-data.golden ×33 in one boot), so a new clone of them read zeros there.
+  - **Cause:** a move recorded the destination slot as owned by the volume whose map asked for the move. Through a clone's map, a shared slot became the clone's. Once the clone wrote that extent (copy-on-write, count down to one), every restore took the golden's mapping for a reused slot and dropped it.
+  - **Moves keep the owner:** both move paths record the moved slot as the source slot's owner.
+  - **Repair at restore:** a sealed volume's slot recorded as one of its own descendants' at the same extent is kept and given back (a sealed golden never frees a slot), so a node in this state heals at its next start.
+  - **Fails loudly meanwhile:** sealing, or cloning from, a golden with a slot its slab does not count for it is refused, naming the extents. It never hands out zeros.
+  - **Tests:** a shared slot moved through a clone, then written by the clone, stays the golden's across a restart; the Dell's state made directly is refused, then healed by a restart.
 - **fix:** #369 (P0, Dell 11.99 over 11.98): an install refused the node's disk because the data half's records held the old release's cilium, cilium-operator, hubble-relay and coredns (+ goldens) with extents in the system half, counted as data it would lose. A volume marked the release's (`origin = release`) is system class: the plan no longer refuses it, and `adopt` drops its data-half record after the data half is adopted (`Report.release_dropped`); it comes back with the release. Volumes the node made (or unmarked ones) in the same state are still refused, named. Not #362 (compose/slab is forge's; the Dell's disk was laid by 11.98's install).
 - **fix:** #364 (P0, owner): the volume manager's lock is held for bookkeeping, not across I/O, and the listing never waits on a writer.
   - **Persists after the lock:** inside an API request the shared manager's persists are owed, not made under its lock. The request's middleware makes them (`persist_detached_checked`: records taken under the lock, flushes and writes without it) once the handler has released everything, before it answers; a failure is the request's 500. Elsewhere `lock().persist()` became `persist_detached` (rebuild, drain, staging, StormFS), with the same ordering.

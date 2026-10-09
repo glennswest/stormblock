@@ -633,10 +633,19 @@ impl PlacementEngine {
 
         // Allocate slot in destination slab, recorded as the same extent so
         // the slot-table fallback agrees with the map, at the generation the
-        // caller worked out for it (`moved_generation`, #277).
+        // caller worked out for it (`moved_generation`, #277) — and as the
+        // source slot's own owner (#370). A shared slot belongs to the volume
+        // that wrote it (a golden); moved through a clone's map it used to be
+        // recorded as the clone's, and once the clone wrote that extent
+        // (copy-on-write, the count down to one) every restore took the
+        // golden's mapping for a stale one and dropped it.
+        let (own_vol, own_vext) = match registry.get(&source_slab_id) {
+            Some(s) => s.owner(source_slot_idx).await.unwrap_or((volume_id, vext_idx)),
+            None => (volume_id, vext_idx),
+        };
         let dest_slot = registry.get_mut(&dest_id)
             .ok_or(PlacementError::SlabNotFound(dest_id))?
-            .allocate_deferred(volume_id, vext_idx, generation)
+            .allocate_deferred(own_vol, own_vext, generation)
             .await
             .map_err(|_| PlacementError::SlabFull)?;
 
@@ -800,6 +809,17 @@ impl PlacementEngine {
             Err(e) => return Err(read_err(e.to_string())),
         }
 
+        // The source slot's owner (#370): the moved slot is recorded as the
+        // volume that wrote it, whichever map's extent asked for the move.
+        let owner = {
+            let r = registry.read().await;
+            match r.get(&old.slab_id) {
+                Some(s) => s.owner(old.slot_idx).await,
+                None => None,
+            }
+        }
+        .unwrap_or((volume_id, vext_idx));
+
         // 1. Allocate, briefly.
         let (dest_slot, dest_dev, dest_at) = {
             let mut r = registry.write().await;
@@ -817,7 +837,7 @@ impl PlacementEngine {
             }
             let slab = r.get_mut(&dest_id).ok_or(PlacementError::SlabNotFound(dest_id))?;
             let slot = slab
-                .allocate_deferred(volume_id, vext_idx, generation)
+                .allocate_deferred(owner.0, owner.1, generation)
                 .await
                 .map_err(|_| PlacementError::SlabFull)?;
             let at = slab.data_offset() + slot as u64 * slab.slot_size();

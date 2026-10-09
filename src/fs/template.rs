@@ -1229,6 +1229,15 @@ async fn clone_volume_impl(
             "volume {source} is not sealed — seal it before cloning"
         )));
     }
+    // A golden whose slots its slab does not count for it is not served
+    // (#370): a clone would read zeros where the table lost track. Loud,
+    // never a damaged filesystem handed out.
+    if sealed {
+        if let Err(why) = vm.lock().await.check_golden_slots(source).await {
+            tracing::error!("{why}");
+            return Err(TemplateError::Conflict(why));
+        }
+    }
 
     // Across the role boundary a clone cannot share slots — a slot is in
     // one partition — so it is a copy, made with no manager lock across it

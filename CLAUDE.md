@@ -181,6 +181,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Goldens lost extents at every restart (2026-10-08, #370, P0 data) — IN PROGRESS
+
+Found reading the Dell's consoles: restore dropped golden mappings whose
+slot the table recorded as the golden's own clone's with a count of one.
+Cause: a move allocated the destination as the moving map's volume (the
+clone), not the slot's owner; the clone's later copy-on-write left the
+count at one.
+- [x] `move_slot` and `migrate_leg_unlocked` allocate as the source slot's
+      owner
+- [x] restore: a sealed volume's slot owned by a descendant at the same
+      extent is kept and reassigned to it (`reclaim_slots`)
+- [x] `check_golden_slots`: seal and clone-from-sealed refuse a golden with
+      an uncounted slot (master's ask)
+- [x] tests: moved through a clone + clone writes + restart; the Dell's
+      state refused then healed
+- [ ] build VM; check.sh; golden; how the cilium volumes entered the data
+      slab's records (#369) may be the same move path
+
 ### An install refused the release's own volumes as data (2026-10-08, #369, P0) — DONE (golden-stormblock-e0c57de31892)
 
 Dell 11.99 over 11.98: plan refused cilium, cilium-operator, hubble-relay,
