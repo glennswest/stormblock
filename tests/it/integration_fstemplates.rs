@@ -1661,6 +1661,70 @@ async fn an_import_from_a_dropping_mirror_resumes_and_a_failure_names_its_phase(
     server.abort();
 }
 
+/// #112: a volume's `{id}` routes take its name as well as its id. An
+/// existing volume is never a 400, a missing one is a 404, and a name two
+/// volumes share is a 409 that names both.
+#[tokio::test]
+async fn a_volume_is_found_by_name_and_an_ambiguous_name_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let c = reqwest::Client::new();
+
+    let created: serde_json::Value = c
+        .post(format!("{url}/api/v1/volumes"))
+        .json(&serde_json::json!({"name": "golden-stormdrive", "size": "64M"}))
+        .send().await.unwrap().json().await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // By name, the routes the fleet polls and acts through.
+    let got: serde_json::Value =
+        c.get(format!("{url}/api/v1/volumes/golden-stormdrive")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(got["id"], id.as_str(), "{got}");
+    for path in ["health", "lineage", "access", "attach"] {
+        let r = c.get(format!("{url}/api/v1/volumes/golden-stormdrive/{path}")).send().await.unwrap();
+        assert_ne!(r.status(), 400, "{path} by name");
+        assert_ne!(r.status(), 404, "{path} by name");
+    }
+    let r = c.post(format!("{url}/api/v1/volumes/golden-stormdrive/seal")).json(&serde_json::json!({"force": true})).send().await.unwrap();
+    assert!(r.status().is_success(), "seal by name: {}", r.status());
+    let r = c.post(format!("{url}/api/v1/volumes/golden-stormdrive/clone")).json(&serde_json::json!({"name": "vm-1"})).send().await.unwrap();
+    assert!(r.status().is_success(), "clone by name: {}", r.status());
+
+    // Not there: 404, by name and by an unknown id alike.
+    let r = c.get(format!("{url}/api/v1/volumes/no-such-volume")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    let r = c.get(format!("{url}/api/v1/volumes/{}", Uuid::new_v4())).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    let r = c.delete(format!("{url}/api/v1/volumes/no-such-volume")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+
+    // Two volumes, one name: refused, both named, neither picked.
+    let (a, b) = {
+        let mut vm = state.volume_manager.lock().await;
+        (vm.create_volume_any("twin", 1 << 20).await.unwrap(), vm.create_volume_any("twin", 1 << 20).await.unwrap())
+    };
+    for r in [
+        c.get(format!("{url}/api/v1/volumes/twin")).send().await.unwrap(),
+        c.delete(format!("{url}/api/v1/volumes/twin")).send().await.unwrap(),
+        c.post(format!("{url}/api/v1/volumes/twin/clone")).json(&serde_json::json!({"name": "x"})).send().await.unwrap(),
+    ] {
+        assert_eq!(r.status(), 409);
+        let msg = r.text().await.unwrap();
+        assert!(msg.contains(&a.0.to_string()) && msg.contains(&b.0.to_string()), "{msg}");
+    }
+    // By id, each is its own.
+    let got: serde_json::Value = c.get(format!("{url}/api/v1/volumes/{}", a.0)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(got["id"], a.0.to_string().as_str());
+
+    // Delete by name, then it is gone.
+    let r = c.delete(format!("{url}/api/v1/volumes/vm-1")).send().await.unwrap();
+    assert!(r.status().is_success(), "delete by name: {}", r.status());
+    let r = c.get(format!("{url}/api/v1/volumes/vm-1")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    server.abort();
+}
+
 /// #281 (rustkube-node#140): a `ready` template whose sealed volume is gone
 /// is not ready. Its store outlives the volume (here the volume is deleted
 /// under it, as a delete cut short or a reclaim would); after a restart — the

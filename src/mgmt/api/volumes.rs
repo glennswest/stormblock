@@ -499,9 +499,10 @@ async fn get_volume(
     Path(id): Path<String>,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "get").increment(1);
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
 
     let vol_id = VolumeId(uuid);
@@ -615,9 +616,10 @@ async fn retier_volume(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "retier").increment(1);
 
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let vol_id = VolumeId(uuid);
 
@@ -973,9 +975,10 @@ async fn create_volume(
 
 /// `GET /api/v1/volumes/{id}/health` — the full health report.
 async fn volume_health(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let vm = state.volume_manager.lock().await;
     match vm.health(&VolumeId(uuid)).await {
@@ -992,9 +995,10 @@ async fn set_redundancy(
     Path(id): Path<String>,
     Json(req): Json<RedundancyRequest>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let policy = match crate::volume::RedundancyPolicy::parse(&req.redundancy) {
         Ok(p) => p,
@@ -1020,9 +1024,10 @@ async fn set_owner(
     Path(id): Path<String>,
     Json(req): Json<OwnerRequest>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     if let Some(o) = &req.owner {
         if o.kind.trim().is_empty() || o.name.trim().is_empty() {
@@ -1065,9 +1070,10 @@ async fn seal_volume(
     Path(id): Path<String>,
     body: Option<Json<SealRequest>>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let req = body.map(|b| b.0).unwrap_or_default();
     let vol_id = VolumeId(uuid);
@@ -1140,8 +1146,9 @@ async fn set_access(
             "invalid access '{}' (use rw or ro)", req.access
         ));
     };
-    let Some(vol_id) = resolve_volume(&state, &id).await else {
-        return ApiError::not_found(format!("no volume {id}"));
+    let vol_id = match resolve_volume(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let mut vm = state.volume_manager.lock().await;
     match vm.set_access(vol_id, access).await {
@@ -1161,8 +1168,9 @@ async fn set_access(
 
 /// `GET /api/v1/volumes/{id}/access` — the setting and whether writes land.
 async fn get_access(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let Some(vol_id) = resolve_volume(&state, &id).await else {
-        return ApiError::not_found(format!("no volume {id}"));
+    let vol_id = match resolve_volume(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let vm = state.volume_manager.lock().await;
     match vm.access(&vol_id) {
@@ -1178,9 +1186,10 @@ async fn get_access(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
 }
 
 async fn unseal_volume(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let mut vm = state.volume_manager.lock().await;
     match vm.unseal_volume(VolumeId(uuid)).await {
@@ -1238,8 +1247,8 @@ async fn clone_volume(
     // resolved either; this door did not, so cloning a golden by the only
     // handle its consumers have came back as "invalid UUID".
     let uuid = match resolve_volume(&state, &id).await {
-        Some(u) => u.0,
-        None => return ApiError::not_found(format!("no volume {id}")),
+        Ok(u) => u.0,
+        Err(r) => return r,
     };
     let size = match super::fstemplates::resolve_size(&req.size, None) {
         Ok(s) => s,
@@ -1361,9 +1370,10 @@ async fn attach_volume(
     Path(id): Path<String>,
     body: Option<Json<AttachRequest>>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let req = body.map(|b| b.0).unwrap_or_default();
     let vol_id = VolumeId(uuid);
@@ -1447,9 +1457,10 @@ async fn attach_volume(
 /// `GET /api/v1/volumes/{id}/attach` — how the volume is being served
 /// right now, if it is.
 async fn get_attach(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     if state.volume_manager.lock().await.get_volume(&VolumeId(uuid)).is_none() {
         return ApiError::not_found(format!("volume {uuid} not found"));
@@ -1508,9 +1519,10 @@ async fn detach_volume(
     Path(id): Path<String>,
     Query(q): Query<DetachQuery>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let key = uuid.to_string();
     // Never stop a device under a mounted filesystem: the device is
@@ -1580,8 +1592,9 @@ async fn write_cidata(
     Path(id): Path<String>,
     Json(req): Json<CidataRequest>,
 ) -> Response {
-    let Some(vol) = resolve_volume(&state, &id).await else {
-        return ApiError::not_found(format!("no volume {id}"));
+    let vol = match resolve_volume(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let files: Vec<(String, Vec<u8>)> = match req
         .files
@@ -1668,8 +1681,9 @@ async fn ana_view(state: &Arc<AppState>, id: Uuid) -> serde_json::Value {
 async fn get_ana(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     #[cfg(feature = "nvmeof")]
     {
-        let Some(vid) = resolve_volume(&state, &id).await else {
-            return ApiError::not_found(format!("volume {id} not found"));
+        let vid = match resolve_volume(&state, &id).await {
+            Ok(v) => v,
+            Err(r) => return r,
         };
         Json(ana_view(&state, vid.0).await).into_response()
     }
@@ -1701,8 +1715,9 @@ async fn set_ana(
                 req.state
             ));
         };
-        let Some(vid) = resolve_volume(&state, &id).await else {
-            return ApiError::not_found(format!("volume {id} not found"));
+        let vid = match resolve_volume(&state, &id).await {
+            Ok(v) => v,
+            Err(r) => return r,
         };
         if let Err(e) = crate::mgmt::ana::set(&state.config, vid.0, st) {
             return ApiError::internal(format!("ANA state for {} not kept, so not applied: {e}", vid.0));
@@ -1722,11 +1737,55 @@ async fn set_ana(
 /// The volume manager is asked first, so a synonym can never shadow a real
 /// volume: a name means what it has always meant, and a synonym is only
 /// consulted for names nothing else answers to.
-async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Option<VolumeId> {
-    if let Some(id) = state.volume_manager.lock().await.find_volume(key).await {
-        return Some(id);
+/// The volumes called `name`, from a view (#112).
+async fn volumes_named(vm: &impl VolumeView, name: &str) -> Vec<VolumeId> {
+    let mut out = Vec::new();
+    for id in vm.volume_ids() {
+        if let Some(h) = vm.get_volume_handle(&id) {
+            if h.name().await == name {
+                out.push(id);
+            }
+        }
     }
-    super::synonyms::volume_for(state, key).await
+    out.sort_by_key(|v| v.0);
+    out
+}
+
+/// What a `{id}` segment names (#112): a UUID as given; else the one
+/// volume of that name; else a synonym. A name nothing answers to is a 404
+/// (never a 400: "not there" is an ordinary answer), and a name two volumes
+/// share is a 409 naming them, never one picked at random.
+pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<VolumeId, Response> {
+    if let Ok(u) = key.parse::<Uuid>() {
+        return Ok(VolumeId(u));
+    }
+    // The published catalog when it is current (#364), else the manager.
+    let named = match state.volume_catalog.latest() {
+        Some(c) if crate::volume::catalog::is_current(&c, &state.volume_presence) => volumes_named(&c, key).await,
+        _ => volumes_named(&*state.volume_manager.lock().await, key).await,
+    };
+    match named.as_slice() {
+        [one] => Ok(*one),
+        [] => match super::synonyms::volume_for(state, key).await {
+            Some(id) => Ok(id),
+            None => Err(ApiError::not_found(format!("no volume {key}"))),
+        },
+        many => Err(ApiError::conflict(format!(
+            "{} volumes are called {key}: {}; name one by its id",
+            many.len(),
+            many.iter().map(|v| v.0.to_string()).collect::<Vec<_>>().join(", ")
+        ))),
+    }
+}
+
+/// [`volume_key`], and a 404 for a UUID no volume has.
+async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Result<VolumeId, Response> {
+    let id = volume_key(state, key).await?;
+    if state.volume_presence.contains(&id) {
+        Ok(id)
+    } else {
+        Err(ApiError::not_found(format!("no volume {key}")))
+    }
 }
 
 async fn start_import(
@@ -1763,9 +1822,10 @@ async fn get_import(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
 /// `GET /api/v1/volumes/{id}/lineage` — the volume, its parent, and so on up;
 /// and the volumes cloned directly from it.
 async fn volume_lineage(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let vm = state.volume_manager.lock().await;
     let vol_id = VolumeId(uuid);
@@ -1793,9 +1853,10 @@ async fn restripe_volume(
     Path(id): Path<String>,
     Json(req): Json<RedundancyRequest>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let policy = match crate::volume::RedundancyPolicy::parse(&req.redundancy) {
         Ok(p) => p,
@@ -1829,9 +1890,10 @@ async fn resync_volume(
     Path(id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<ResyncQuery>,
 ) -> Response {
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     // Two resyncs of one volume would each rebuild the same legs.
     if state.rebuilds.holds(&VolumeId(uuid)) {
@@ -1857,9 +1919,10 @@ async fn delete_volume(
     axum::extract::Query(q): axum::extract::Query<DeleteQuery>,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "delete").increment(1);
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
 
     let vol_id = VolumeId(uuid);
@@ -2016,9 +2079,10 @@ async fn resize_volume(
     Json(req): Json<ResizeVolumeRequest>,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "resize").increment(1);
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
 
     let new_size = match parse_size(&req.new_size) {
@@ -2102,9 +2166,10 @@ async fn clear_failed_legs(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "legs_clear")
         .increment(1);
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let mgr = state.volume_manager.lock().await;
     match mgr.clear_failed_legs(VolumeId(uuid)).await {
@@ -2133,9 +2198,10 @@ async fn fsck_volume(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "fsck")
         .increment(1);
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let repair = matches!(
         q.get("repair").map(|v| v.as_str()),
@@ -2256,9 +2322,10 @@ async fn write_volume_files(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "write_files")
         .increment(1);
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
 
     let mut files = Vec::with_capacity(req.files.len());
@@ -2305,9 +2372,10 @@ async fn read_volume_file(
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "read_files")
         .increment(1);
-    let uuid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) => return r,
     };
     let path = match q.get("path") {
         Some(p) => p.clone(),

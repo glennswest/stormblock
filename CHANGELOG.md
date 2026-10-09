@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #112: every `/api/v1/volumes/{id}` route takes the volume's name as well as its UUID (and a synonym, as clone already did). Before, `GET`, delete, attach, seal, resize and 14 others answered `400 invalid UUID` for an existing volume's name. A name nothing answers to is a `404`. A name two volumes share is a `409` naming both: the routes that already took names (clone, access, cidata, ana) picked one of them arbitrarily.
 - **fix:** #133: an installed node's system disk is a drive.
   - **Listed:** `/api/v1/drives` (and the kube `Drive` resources) list the disks the node's own slabs were opened from at boot, marked `"system": true`. `/drives/{id}/slabs` names the slabs on them, partitions included. Before, the list was empty while those slabs served root.
   - **Read-only:** close, drain, adopt, labels, a health report, an emulated fault and a second `POST /api/v1/drives` of its path answer 409 naming it. A failing report would have quarantined the node's only slabs and drained its root.

@@ -181,6 +181,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A volume's {id} routes take its name (2026-10-09, #112) — IN PROGRESS
+
+- [x] `volume_key` (UUID; else the one volume of that name, from the
+      current catalog or the manager; else a synonym; none = 404, several =
+      409 naming them) on all 19 UUID-only `/api/v1/volumes/{id}` routes;
+      `resolve_volume` (clone, access, cidata, ana) = it + 404 for an unknown
+      UUID. `get_import` stays a UUID (an import id)
+- [x] test `integration_fstemplates::a_volume_is_found_by_name_and_an_
+      ambiguous_name_is_refused`; README, CHANGELOG
+- [ ] check.sh; golden; close
+
 ### An installed node's system disk is a drive (2026-10-09, #133) — DONE (golden-stormblock-8171ea75733e)
 
 `state.drives` came only from `[[drives]]` and `POST /api/v1/drives`;
