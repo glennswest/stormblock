@@ -341,6 +341,20 @@ pub struct ManagementConfig {
     /// `tls_cert`/`tls_key`. The pair and this CA are re-read when their
     /// files change.
     pub tls_client_ca: Option<String>,
+    /// Forge's CA (PEM, #379, stormcentral#416). A client certificate it
+    /// issued to one of `tls_admin_names` (a SAN DNS name), not revoked by
+    /// `tls_admin_crl`, is the admin token's tier: what stormcentral uses on
+    /// a node it runs as a second forge, with nothing handed over by hand.
+    /// Any other certificate forge issued (every enrolled node has one) is no
+    /// credential here. Needs `tls_cert`/`tls_key`; re-read on change.
+    pub tls_admin_ca: Option<String>,
+    /// Forge's CRL (PEM or DER; several PEM blocks allowed, stormcert#61).
+    /// Re-read when it changes. Unset: a revoked certificate stays admin
+    /// (said at start).
+    pub tls_admin_crl: Option<String>,
+    /// The identities (SAN DNS names) a forge-issued certificate is admin
+    /// for. Empty (the default): none.
+    pub tls_admin_names: Vec<String>,
     pub data_dir: Option<String>,
     /// Bearer token required on **every** management request
     /// (`Authorization: Bearer <token>`), except the public probes listed in
@@ -474,6 +488,9 @@ impl Default for ManagementConfig {
             tls_cert: None,
             tls_key: None,
             tls_client_ca: None,
+            tls_admin_ca: None,
+            tls_admin_crl: None,
+            tls_admin_names: Vec::new(),
             data_dir: None,
             api_token: None,
             admin_token: None,
@@ -1028,12 +1045,18 @@ impl StormBlockConfig {
             (None, Some(_)) => anyhow::bail!("tls_key requires tls_cert to also be set"),
             (None, None) => {} // No TLS, fine
         }
-        if let Some(ca) = &self.management.tls_client_ca {
-            if self.management.tls_cert.is_none() {
-                anyhow::bail!("tls_client_ca needs tls_cert and tls_key: client certificates are asked for over TLS only");
-            }
-            if !Path::new(ca).exists() {
-                anyhow::bail!("TLS client CA file not found: {ca}");
+        for (key, file) in [
+            ("tls_client_ca", &self.management.tls_client_ca),
+            ("tls_admin_ca", &self.management.tls_admin_ca),
+            ("tls_admin_crl", &self.management.tls_admin_crl),
+        ] {
+            if let Some(f) = file {
+                if self.management.tls_cert.is_none() {
+                    anyhow::bail!("{key} needs tls_cert and tls_key: client certificates are asked for over TLS only");
+                }
+                if !Path::new(f).exists() {
+                    anyhow::bail!("{key}: file not found: {f}");
+                }
             }
         }
 

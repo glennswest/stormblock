@@ -616,7 +616,7 @@ pub async fn serve_tls(
 ) -> anyhow::Result<()> {
     loop {
         let (tcp_stream, peer) = listener.accept().await?;
-        let acceptor = reloader.acceptor();
+        let (acceptor, classifier) = reloader.acceptor();
         let app = router.clone();
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(tcp_stream).await {
@@ -626,7 +626,7 @@ pub async fn serve_tls(
                     return;
                 }
             };
-            let cert = tls::client_cert(&tls_stream);
+            let cert = tls::client_cert(&tls_stream, &classifier);
             let io = hyper_util::rt::TokioIo::new(tls_stream);
             let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let app = app.clone();
@@ -726,7 +726,17 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             cert: cert_path.into(),
             key: key_path.into(),
             client_ca: state.config.management.tls_client_ca.as_ref().map(Into::into),
+            admin_ca: state.config.management.tls_admin_ca.as_ref().map(Into::into),
+            admin_crl: state.config.management.tls_admin_crl.as_ref().map(Into::into),
+            admin_names: state.config.management.tls_admin_names.clone(),
         })?);
+        if state.config.management.tls_admin_ca.is_some() {
+            if state.config.management.tls_admin_names.is_empty() {
+                tracing::warn!("tls_admin_ca is set and tls_admin_names lists nobody: no certificate is admin (#379)");
+            } else if state.config.management.tls_admin_crl.is_none() {
+                tracing::warn!("tls_admin_ca is set with no tls_admin_crl: a certificate forge revokes stays admin here (#379)");
+            }
+        }
         match &state.config.management.tls_client_ca {
             Some(ca) => tracing::info!(
                 "Management API listening on {listen_addr} (HTTPS; a client certificate from {ca} is a credential)"

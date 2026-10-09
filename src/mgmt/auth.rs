@@ -450,11 +450,13 @@ pub async fn require_token(
         return next.run(req).await;
     };
     let class = crate::serve::api::classify(&method, &path, req.uri().query());
-    let is_admin = presented.is_some() && presented.as_deref() == auth.admin_token.as_deref();
     // A client certificate the node CA verified (#203) is the node token's
-    // tier: ordinary verbs, not destructive ones.
+    // tier: ordinary verbs, not destructive ones. One forge's CA issued to a
+    // listed admin identity (#379) is the admin token's.
     let cert = req.extensions().get::<super::tls::ClientCert>().cloned();
-    let is_node = presented.as_deref() == Some(api_token) || cert.is_some();
+    let cert_admin = cert.as_ref().and_then(|c| c.admin.clone());
+    let is_admin = (presented.is_some() && presented.as_deref() == auth.admin_token.as_deref()) || cert_admin.is_some();
+    let is_node = presented.as_deref() == Some(api_token) || cert.as_ref().is_some_and(|c| c.node);
     if let Some(s) = &slot {
         s.set(if is_admin {
             "admin"
@@ -562,7 +564,10 @@ pub async fn require_token(
     };
     let other_bearer = presented.is_some() && !is_admin && presented.as_deref() != Some(api_token);
     if is_admin {
-        rec.who = "admin-token".into();
+        rec.who = match (&cert_admin, &cert) {
+            (Some(name), Some(c)) => format!("client-cert-admin:{name}:{}", c.fingerprint),
+            _ => "admin-token".into(),
+        };
         rec.decision = "allowed".into();
     } else if is_node && !other_bearer {
         rec.who = node_who;

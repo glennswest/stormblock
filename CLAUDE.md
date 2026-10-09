@@ -960,6 +960,16 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
+### A forge-issued certificate as admin (2026-10-09, #379, P1) — IN PROGRESS
+
+Owner (stormcentral#416): no handed-over token; forge's CA signs stormcentral's
+cert. `tls::Classifier`: node = verifies vs the node CA alone; admin =
+verifies vs `tls_admin_ca` alone with `tls_admin_crl` (end-entity, unknown =
+deny) and is valid for a `tls_admin_names` SAN; else no credential (a forge
+cert for another node gets nothing). Test
+`integration_mgmt_tls::a_forge_issued_certificate_for_a_listed_identity_is_
+admin_and_revocable`. [ ] build VM; check.sh; golden; stormcos issue (config).
+
 ### /init: a read-only root stays read-only (2026-10-09, #380, P1) — DONE (initramfs at 9765d1e)
 
 stormcos#470. `# --- BEGIN root mode` (`ro`/`rw` from the cmdline, last

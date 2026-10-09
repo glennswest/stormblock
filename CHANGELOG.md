@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **feat:** #379 (owner's decision on stormcentral#416, replacing the handed-over token): the engine accepts a client certificate forge's CA issued as admin.
+  - **New settings:** `[management] tls_admin_ca`, `tls_admin_crl`, `tls_admin_names`.
+  - **What counts:** the certificate is verified against forge's CA alone, with forge's CRL, and must be valid for a listed identity (SAN DNS name). Any other certificate forge issued, which every enrolled node holds, is no credential here, and neither is a revoked one.
+  - **Unchanged:** a node-CA certificate is still checked against the node CA alone, at the node token's tier.
+  - **Audit:** `client-cert-admin:<name>:<fingerprint>`.
+  - **Dependency:** `rustls-webpki` named directly (already in the tree, through rustls).
 - **feat:** #380 (stormcos#470): `/init` keeps a read-only root read-only.
   - **`ro` / `rw`:** on the kernel command line, the last one given wins, as the kernel reads them. `ro` mounts the root read-only (ext4 `-o ro`: no mount count, no times); neither leaves the default.
   - **Hostname and resolver:** always written to `/run/hostname` and `/run/resolv.conf` (the initramfs's `/run`, which becomes the root's), directly rather than through a link. Into `/sysroot/etc` only on a read-write root whose files are not links (older goldens).

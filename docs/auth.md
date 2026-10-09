@@ -434,6 +434,8 @@ for a certificate and verifies it against that CA:
 | the client presents | result |
 |---|---|
 | a certificate the node CA issued | the **node token's tier**: every ordinary verb and attestation reads, with no token on the wire. A destructive verb still needs the admin token or a reviewed Kubernetes bearer (#274); with `admin_gate = audit` it is allowed and recorded. The audit log names it `client-cert:sha256:<16 hex>`. |
+| a certificate forge's CA (`tls_admin_ca`) issued, valid for a name in `tls_admin_names`, not revoked by `tls_admin_crl` (#379) | the **admin token's tier**: every verb, destructive ones included. The audit log names it `client-cert-admin:<name>:sha256:<16 hex>`. |
+| a certificate forge's CA issued to any other name, or one its CRL revokes | **no credential**: every enrolled node holds one, and none of them is anything here (401, as with no certificate) |
 | a certificate from any other CA | refused in the handshake; no HTTP answer at all |
 | no certificate | as before: the token, or a public probe (`/api/v1/health`) |
 
@@ -442,6 +444,21 @@ that has only the token still connect. A caller holding both a certificate and
 a bearer is judged by the bearer when the bearer is the admin token or a
 Kubernetes token (a destructive verb is reviewed as that bearer), and by the
 certificate otherwise.
+
+**Forge's certificates as admin (#379, stormcentral#416).** On a node
+stormcentral runs as a second forge, the engine's admin token cannot be read
+off the node and nothing is handed over by hand. Instead stormcentral enrols
+with forge, and forge's CA signs its certificate.
+- **Configuration:** `tls_admin_ca` names forge's CA, `tls_admin_names` the
+  identities (SAN DNS names) it is admin for, and `tls_admin_crl` forge's CRL
+  (PEM or DER, re-read when it changes).
+- **Verification:** a certificate is checked against forge's CA **alone**,
+  for client auth, with the CRL at the end-entity (an unknown status is a
+  refusal).
+- **Defaults:** no names listed means no certificate is admin. No CRL means a
+  revoked certificate stays admin; both are said at start.
+- **The node CA's certificates** are checked against the node CA alone, and
+  keep the node token's tier.
 
 **Renewal.** stormcert renews the pair. The listener looks at the pair's and
 the CA's modification times at most every 5 s, as connections arrive. A set
