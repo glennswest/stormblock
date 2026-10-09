@@ -1332,14 +1332,16 @@ stop releases them (never STOP/DEL) and a handover is unchanged.
   (7 steps, kernel 7.2.8); full nextest 985/985. Not on metal: stormpump's
   shutdown on a release with this engine (stormpump#50)
 
-### `installed` from the first boot off the local disk (2026-10-07, #220, P1) — IN PROGRESS (owner: A, 2026-10-09)
+### `installed` from the first boot off the local disk (2026-10-07, #220, P1) — DONE (golden-stormblock-a4f587e7088e)
 
 Built (A): `installed {volume, stage}`: laid (or no stage) = intent local +
 `Host.install` laid; booted (first local-only boot) = booted. Successor
 writes `<data_dir>/install-report.json` (laid) after an accepted laid report;
 adopt-ublk on a `local_only_boot` record reports booted, rewrites the file
 reported/refused (never removed: the state volume keeps files). Tests: store,
-HTTP, handover, node (stand-in appliance). [ ] build VM; check.sh; golden.
+HTTP, handover, node (stand-in appliance). Affected tests 84/84; check.sh
+at 2403610 ALL PASS (1093/1093); golden golden-stormblock-a4f587e7088e. Not
+on metal: an install and the first boot after it.
 Earlier analysis:
 
 Owner on #148: the install is proven by the host booting from its own disk;
