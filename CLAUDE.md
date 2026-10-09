@@ -181,6 +181,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A stopped VM's root disk becomes a named golden (2026-10-09, #143, P2) — WAITING ON THE OWNER
+
+buildbox2: seal `<ns>.<vm>-root`, digest it, name `golden-<name>-<sha12>`
+(never overwrite), record parent and provenance, copy to forge; called off
+the node (make-golden.sh on stormcentral), which has no engine token since
+#107. Asked on #143 (needs-owner): **auth** A a Kubernetes bearer + SAR
+(`goldens`/`create`, #274; recommended), B a stormvm VM action, C a scoped
+engine token; **to forge** A forge pulls a one-time read URL through its
+import (#125; recommended), B the node pushes with a forge token (#247's
+concern), C stormblock-registry#43 copies it. Nothing built yet; the local
+half (seal, digest, name, provenance) first once answered.
+
 ### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — DONE (golden-stormblock-b835c9f3b7dd)
 
 #359 made both downloads resume with a `Range`, under `TRANSFER` (8
