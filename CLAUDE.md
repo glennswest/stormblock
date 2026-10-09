@@ -181,6 +181,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The config file's [iscsi]/[nvmeof] take effect; CHAP is required when set (2026-10-09, #164) — IN PROGRESS
+
+`--iscsi-addr`, `--iscsi-target-name`, `--nvmeof-addr`, `--nvmeof-nqn` had
+clap defaults, so the file's values were always overwritten; CHAP came only
+from the flags; the targets were built from `cli.*`. Found reading: a target
+with CHAP configured accepted an initiator offering `AuthMethod=None`
+(`login.rs`), so CHAP from the flags protected nothing either.
+- [ ] flags are `Option`s; `merge_cli`: CLI > file > default, sections
+      always present for the daemon as before
+- [ ] targets, the advertised host and the serve binds from the merged
+      config; half a CHAP pair (user without secret) refused at validate
+- [ ] login: CHAP configured → only `AuthMethod=CHAP` accepted; a target
+      with no CHAP says so at start (WARN)
+- [ ] tests: merge precedence, half pair refused, a CHAP target refuses
+      `None` and admits a CHAP login (test initiator learns CHAP), wrong
+      secret refused; the daemon with a file-only `[iscsi]` CHAP refuses an
+      unauthenticated login (runtime test); docs, CHANGELOG, check.sh
+
 ### Pool admission under per-drive overcommit (2026-10-09, #152, P2) — WAITING ON THE OWNER
 
 stormdrive#13 pushes `PUT /api/v1/drives/{path}/overcommit {enabled, ratio,
