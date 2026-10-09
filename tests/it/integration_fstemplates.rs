@@ -1423,11 +1423,13 @@ async fn a_qcow2_disk_image_imports_into_a_sealed_golden_and_clones_with_its_own
     assert_eq!(st["virtual_size"], 4 * 4096);
     assert_eq!(st["written_bytes"], 2 * 4096, "only the two clusters with data");
     assert_eq!(st["fs"]["kind"], "mbr");
+    assert_eq!(st["lba"], 512, "an MBR disk is presented at the 512 it was laid in (#110)");
     let vol = st["volume_id"].as_str().unwrap().to_string();
 
     let v: serde_json::Value = client.get(format!("{url}/api/v1/volumes/{vol}")).send().await.unwrap().json().await.unwrap();
     assert_eq!(v["sealed"], true);
     assert_eq!(v["fs"]["kind"], "mbr");
+    assert_eq!(v["lba"], 512);
     let golden_sig = v["fs_uuid"].as_str().unwrap().to_string();
 
     let clone: serde_json::Value = client
@@ -1436,6 +1438,7 @@ async fn a_qcow2_disk_image_imports_into_a_sealed_golden_and_clones_with_its_own
         .send().await.unwrap().json().await.unwrap();
     assert_eq!(clone["parent"].as_str().unwrap(), vol);
     assert_ne!(clone["fs_uuid"].as_str().unwrap(), golden_sig, "a clone is its own disk");
+    assert_eq!(clone["lba"], 512, "and is presented as its golden is");
     // The clone's content is the image's: the compressed cluster came through.
     let clone_id: Uuid = clone["id"].as_str().unwrap().parse().unwrap();
     let dev = state.volume_manager.lock().await.get_volume(&VolumeId(clone_id)).unwrap();
@@ -1452,6 +1455,110 @@ async fn a_qcow2_disk_image_imports_into_a_sealed_golden_and_clones_with_its_own
         .send().await.unwrap();
     assert_eq!(bad.status(), 400);
 
+    server.abort();
+}
+
+/// Import `img` through the job API and wait for it; the final status.
+async fn import(client: &reqwest::Client, url: &str, body: serde_json::Value) -> serde_json::Value {
+    let job: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/import"))
+        .json(&body)
+        .send().await.unwrap().json().await.unwrap();
+    let id = job["id"].as_str().unwrap().to_string();
+    let mut st = job;
+    for _ in 0..400 {
+        if st["state"] == "done" || st["state"] == "failed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        st = client.get(format!("{url}/api/v1/volumes/import/{id}")).send().await.unwrap().json().await.unwrap();
+    }
+    st
+}
+
+/// #110: imported media are presented at the block they were authored for,
+/// and every byte of them is addressable. An ISO and a GPT image at 512
+/// come out at 512 (Linux's isofs refused 4096, and a 512 GPT read at 4096
+/// has no partitions); a 4Kn GPT stays 4096; anything else is 4096 with its
+/// size a whole number of blocks. A clone is presented as its golden is.
+#[tokio::test]
+async fn imported_media_are_presented_at_the_block_they_were_authored_for() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    // An ISO of 1649 sectors of 2048: 3,377,152 bytes, not a multiple of
+    // 4096, the size the issue lost the tail of.
+    let mut iso = vec![0u8; 1649 * 2048];
+    iso[0x8000] = 1;
+    iso[0x8001..0x8006].copy_from_slice(b"CD001");
+    iso[0x8000 + 40..0x8000 + 46].copy_from_slice(b"STORMI");
+    let tail: Vec<u8> = (0..2048).map(|i| (i % 251) as u8 | 1).collect();
+    let n = iso.len();
+    iso[n - 2048..].copy_from_slice(&tail);
+    // A GPT laid at 512 (header at byte 512), and one laid at 4096.
+    let gpt_image = |bs: u32| {
+        let g = stormblock::pallet::gpt::Gpt::create_for(bs, 4 << 20);
+        let (head, tail) = g.render();
+        let mut img = vec![0u8; 4 << 20];
+        img[..head.len()].copy_from_slice(&head);
+        let at = g.tail_offset() as usize;
+        img[at..at + tail.len()].copy_from_slice(&tail);
+        img
+    };
+    let gpt512 = gpt_image(512);
+    let gpt4k = gpt_image(4096);
+    // Raw bytes of no shape, of an odd size.
+    let raw: Vec<u8> = (0..10_000u32).map(|i| (i % 7) as u8 + 1).collect();
+
+    let mut cases = vec![];
+    for (name, bytes, ask, lba, size) in [
+        ("iso", &iso, None, 512u64, 1649 * 2048u64),
+        ("gpt512", &gpt512, None, 512, 4 << 20),
+        ("gpt4k", &gpt4k, None, 4096, 4 << 20),
+        ("raw", &raw, None, 4096, 12_288),
+        ("iso-as-4k", &iso, Some(4096u32), 4096, 3_379_200),
+    ] {
+        let path = dir.path().join(format!("{name}.bin"));
+        std::fs::write(&path, bytes).unwrap();
+        let mut body = serde_json::json!({ "name": name, "file": path.to_str().unwrap(), "format": "raw" });
+        if let Some(a) = ask {
+            body["lba"] = a.into();
+        }
+        let st = import(&client, &url, body).await;
+        assert_eq!(st["state"], "done", "{name}: {st}");
+        assert_eq!(st["lba"], lba, "{name}: {st}");
+        let vol: Uuid = st["volume_id"].as_str().unwrap().parse().unwrap();
+        let clone: serde_json::Value = client
+            .post(format!("{url}/api/v1/volumes/{vol}/clone"))
+            .json(&serde_json::json!({ "name": format!("{name}-clone") }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(clone["lba"], lba, "{name}: a clone is presented as its golden is: {clone}");
+        cases.push((name, vol, clone["id"].as_str().unwrap().parse::<Uuid>().unwrap(), lba, size));
+    }
+    for (name, vol, clone, lba, size) in cases {
+        let vm = state.volume_manager.lock().await;
+        for id in [vol, clone] {
+            let dev = vm.get_volume(&VolumeId(id)).unwrap();
+            assert_eq!(dev.block_size() as u64, lba, "{name}");
+            assert_eq!(dev.capacity_bytes(), size, "{name}: a whole number of blocks, nothing cut");
+            assert_eq!(dev.capacity_bytes() % lba, 0, "{name}");
+        }
+        if name == "iso" {
+            // The last sector, the one a 4096 export used to drop.
+            let dev = vm.get_volume(&VolumeId(clone)).unwrap();
+            let mut buf = vec![0u8; 2048];
+            dev.read(size - 2048, &mut buf).await.unwrap();
+            assert_eq!(buf, tail);
+        }
+    }
+
+    let bad = client
+        .post(format!("{url}/api/v1/volumes/import"))
+        .json(&serde_json::json!({ "name": "x", "file": "/nowhere", "lba": 1024 }))
+        .send().await.unwrap();
+    assert_eq!(bad.status(), 400);
     server.abort();
 }
 

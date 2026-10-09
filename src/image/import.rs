@@ -63,6 +63,54 @@ pub struct ImportSpec {
     /// true; `false` still finds and reports them, without walking.
     #[serde(default = "yes")]
     pub verify: bool,
+    /// The logical block the golden and its clones are presented at: 512 or
+    /// 4096 (#110). Absent means what the image was authored for: a GPT at
+    /// the LBA its header is at, an MBR disk or an ISO 9660 image at 512,
+    /// anything else 4096. Linux reads a disk image's partitions, and
+    /// `isofs` an ISO, only at the size they were laid in.
+    #[serde(default)]
+    pub lba: Option<u32>,
+}
+
+/// The logical block an imported image is presented at (#110): what it
+/// asked for, else what its shape was authored for.
+pub fn media_lba(asked: Option<u32>, fs: Option<&crate::volume::FsInfo>) -> u32 {
+    if let Some(bs) = asked {
+        return bs;
+    }
+    match fs.map(|f| f.kind.as_str()) {
+        Some("gpt") => match fs.and_then(|f| f.features.as_deref()) {
+            Some("lba=4096") => crate::volume::Lba::DEFAULT,
+            _ => crate::volume::Lba::BOOT,
+        },
+        Some("mbr") | Some("iso9660") => crate::volume::Lba::BOOT,
+        _ => crate::volume::Lba::DEFAULT,
+    }
+}
+
+/// Present the imported volume at `media_lba`, its size a whole number of
+/// those blocks so nothing at its tail is unaddressable (#110: an export
+/// rounded a 3,375,104-byte namespace out of a 3,377,152-byte ISO's volume).
+async fn settle_lba(
+    state: &Arc<AppState>,
+    spec: &ImportSpec,
+    st: &Arc<RwLock<ImportStatus>>,
+    vol_id: VolumeId,
+    fs: Option<&crate::volume::FsInfo>,
+) -> Result<(), String> {
+    let bs = media_lba(spec.lba, fs);
+    let mut vm = state.volume_manager.lock().await;
+    let size = vm.get_volume(&vol_id).map(|h| h.capacity_bytes()).ok_or("volume vanished")?;
+    let whole = size.div_ceil(bs as u64) * bs as u64;
+    if whole != size {
+        vm.resize_volume(vol_id, whole).await.map_err(|e| format!("rounding the size up to {bs}-byte blocks: {e}"))?;
+    }
+    if vm.lba(&vol_id) != Some(bs) {
+        vm.set_lba(vol_id, bs).await.map_err(|e| format!("lba: {e}"))?;
+    }
+    drop(vm);
+    st.write().await.lba = Some(bs);
+    Ok(())
 }
 
 fn yes() -> bool {
@@ -120,6 +168,9 @@ pub struct ImportStatus {
     pub volume_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fs: Option<serde_json::Value>,
+    /// The logical block the golden is presented at (#110), once known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lba: Option<u32>,
     /// The filesystems found inside it — the root, `/boot`, and so on — with
     /// what reading each found (#147).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -176,6 +227,11 @@ impl Imports {
             crate::drive::slab::SlabRole::parse(r)
                 .ok_or_else(|| format!("invalid role '{r}' (use system or data)"))?;
         }
+        if let Some(bs) = spec.lba {
+            if bs != crate::volume::Lba::BOOT && bs != crate::volume::Lba::DEFAULT {
+                return Err(format!("lba {bs}: a volume is presented at 512 or 4096 bytes per block"));
+            }
+        }
         if let Some(f) = &spec.format {
             match f.to_ascii_lowercase().as_str() {
                 "raw" | "qcow2" | "vmdk" | "ova" | "iso" => {}
@@ -195,6 +251,7 @@ impl Imports {
             downloaded_bytes: 0,
             volume_id: None,
             fs: None,
+            lba: None,
             filesystems: Vec::new(),
             error: None,
             started_at: now(),
@@ -523,6 +580,11 @@ async fn stream_raw(
         st.write().await.volume_id = None;
         return Err(e);
     }
+    if let Err(e) = settle_lba(state, spec, st, vol_id, fs.as_ref()).await {
+        let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
+        st.write().await.volume_id = None;
+        return Err(e);
+    }
     let mut vm = state.volume_manager.lock().await;
     if spec.seal {
         vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
@@ -617,6 +679,11 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
         s.filesystems = found.clone();
     }
     if let Err(e) = verdict(spec, &found) {
+        let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
+        st.write().await.volume_id = None;
+        return Err(e);
+    }
+    if let Err(e) = settle_lba(state, spec, st, vol_id, fs.as_ref()).await {
         let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
         st.write().await.volume_id = None;
         return Err(e);
