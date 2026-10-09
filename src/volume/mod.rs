@@ -357,9 +357,6 @@ pub struct VolumeManager {
     owners: HashMap<VolumeId, crate::volume::metadata::Owner>,
     /// Where each volume came from (#349). Absent = unmarked.
     origins: HashMap<VolumeId, crate::volume::metadata::Origin>,
-    /// The tier a volume's claim asked for, when not hot (#151): kept so a
-    /// restart and a clone place its new extents there too.
-    tiers: HashMap<VolumeId, StorageTier>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -442,7 +439,6 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             origins: HashMap::new(),
-            tiers: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -476,7 +472,6 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             origins: HashMap::new(),
-            tiers: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -1286,13 +1281,9 @@ impl VolumeManager {
         if let (Some(store), true) = (&self.metadata_store, parity) {
             handle.use_stripe_log(store.dir());
         }
-        let tier = handle.preferred_tier();
         self.volumes.insert(id, handle);
         self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
-        if tier != StorageTier::Hot {
-            self.tiers.insert(id, tier);
-        }
         self.persist().await;
         Ok(id)
     }
@@ -1469,9 +1460,6 @@ impl VolumeManager {
                 },
                 vrec.redundancy.clone(),
             ));
-            if let Some(t) = vrec.tier.filter(|t| *t != StorageTier::Hot) {
-                self.tiers.insert(vrec.id, t);
-            }
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
             handle.set_lba(vrec.lba);
@@ -1658,9 +1646,6 @@ impl VolumeManager {
         self.volumes.insert(id, handle);
         self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
-        if let Some(t) = placements.first().and_then(|(first, _)| self.tiers.get(first).copied()) {
-            self.tiers.insert(id, t);
-        }
         if let Some((first, _)) = placements.first() {
             self.record_lineage(id, *first);
         }
@@ -1944,12 +1929,6 @@ impl VolumeManager {
             self.volumes.insert(snap_id, handle);
             self.present.insert(snap_id);
             self.origins.insert(snap_id, crate::volume::metadata::Origin::Node);
-        if let Some(t) = self.tiers.get(&source_id).copied() {
-            self.tiers.insert(snap_id, t);
-        }
-            if let Some(t) = self.tiers.get(source_id).copied() {
-                self.tiers.insert(snap_id, t);
-            }
             self.record_lineage(snap_id, *source_id);
             ids.push(snap_id);
         }
@@ -1987,7 +1966,6 @@ impl VolumeManager {
         self.fs_info.remove(&id);
         self.owners.remove(&id);
         self.origins.remove(&id);
-        self.tiers.remove(&id);
         self.retentions.remove(&id);
 
         // Remove all extents from GEM and dec_ref on slabs: their table pages
@@ -3304,7 +3282,7 @@ impl VolumeManager {
                 fs: self.fs_info.get(id).cloned(),
                 owner: self.owners.get(id).cloned(),
                 origin: self.origins.get(id).copied().unwrap_or_default(),
-                tier: self.tiers.get(id).copied(),
+                tier: Some(handle.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -3367,7 +3345,7 @@ impl VolumeManager {
                 fs: self.fs_info.get(&id).cloned(),
                 owner: self.owners.get(&id).cloned(),
                 origin: self.origins.get(&id).copied().unwrap_or_default(),
-                tier: self.tiers.get(&id).copied(),
+                tier: self.volumes.get(&id).map(|h| h.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3575,9 +3553,6 @@ impl VolumeManager {
                 },
                 vrec.redundancy.clone(),
             ));
-            if let Some(t) = vrec.tier.filter(|t| *t != StorageTier::Hot) {
-                self.tiers.insert(vrec.id, t);
-            }
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
             handle.set_sealed(vrec.sealed);
             handle.set_lba(vrec.lba);
@@ -4999,22 +4974,14 @@ mod redundancy_tests {
             let clone = mgr.create_snapshot(cold, "cold-clone").await.unwrap();
             assert_eq!(mgr.get_volume_handle(&clone).unwrap().preferred_tier(), StorageTier::Cold, "inherited");
             mgr.persist().await;
-            eprintln!(
-                "DIAG v2 dir: {} files: {:?} records: {:?}",
-                meta.join(persist_v2::DIR_FILE).exists(),
-                std::fs::read_dir(&meta).map(|r| r.filter_map(|e| e.ok()).map(|e| e.file_name()).collect::<Vec<_>>()),
-                mgr.header_records().await.iter().map(|r| (r.name.clone(), r.tier)).collect::<Vec<_>>()
-            );
             (cold, clone, plain, p)
         };
-        let loaded = VolumeManager::load_data_dir(&meta).await.unwrap().unwrap();
-        eprintln!("DIAG loaded: {:?}", loaded.volumes.iter().map(|v| (v.name.clone(), v.origin, v.tier)).collect::<Vec<_>>());
         let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
         let dev = FileDevice::open(&path).await.unwrap();
         mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
         mgr.restore().await.unwrap();
         for (id, tier) in [(cold, StorageTier::Cold), (clone, StorageTier::Cold), (plain, StorageTier::Hot)] {
-            assert_eq!(mgr.get_volume_handle(&id).unwrap().preferred_tier(), tier, "after a restart");
+            assert_eq!(mgr.get_volume_handle(&id).unwrap().preferred_tier(), tier, "{id} after a restart");
         }
         let mut back = vec![0u8; 4096];
         mgr.get_volume(&clone).unwrap().read(0, &mut back).await.unwrap();

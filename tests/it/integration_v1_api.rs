@@ -1207,6 +1207,7 @@ async fn v1_create_takes_redundancy_spread_and_tier_and_blanks_carry_theirs() {
     )
     .await;
     assert!(s == 200 || s == 201, "{t}");
+    let t = t["template"].clone();
     let tid = t["id"].as_str().unwrap().to_string();
     let (s, cl) = post(&c, format!("{base}/api/v1/fstemplates/{tid}/clone"), json!({"name": "claim-1"})).await;
     assert!(s == 200 || s == 201, "{cl}");
