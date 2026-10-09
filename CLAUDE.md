@@ -193,7 +193,7 @@ data-slab records predate origins (#349), so they read unmarked.
       golden golden-stormblock-ac8207f40ae4 (stormcos#467); master told.
       Not on metal: the Dell's next install
 
-### Controllers left without a driver, found and named (2026-10-09, #89) — IN PROGRESS
+### Controllers left without a driver, found and named (2026-10-09, #89) — DONE (initramfs at 48e69fe)
 
 Root cause unknown (the walk + settle the issue proposed were already in);
 needs the SAS3008/BCM5720 host to reproduce. Done here: the issue's fix 1's
@@ -202,7 +202,11 @@ log line and fix 2; fix 3 (coldplug after switch_root) is stormpump's.
       driver: modalias module + drivers_probe, then named with the reason;
       the settle timeout said
 - [x] tests/initramfs-unbound.sh; README, CHANGELOG
-- [ ] every initramfs test under sh and busybox sh; /init parses; close
+- [x] every initramfs test under sh and busybox sh (unbound 9/9), /init
+      parses; check.sh at 48e69fe ALL PASS (1089/1089). Engine unchanged
+      (golden-stormblock-c13b97223a59 holds it); the initramfs ships with
+      the next stormcos release built from ≥ 48e69fe. Fix 3 is stormpump#53
+      (closed). Not on metal: the SAS3008/BCM5720 host
 
 ### One NVMe scheme per caller (2026-10-09, #98, step 3) — DONE (golden-stormblock-c13b97223a59)
 
