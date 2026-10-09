@@ -1271,12 +1271,13 @@ writes before it usually land elsewhere; on 8 they hit it first).
       nextest 985/986 (#333's port race); CHANGELOG, docs/redundancy.md
 - Not on stormcos#92's shelf yet: its pb-scale run on an engine with this
 
-### Units' first I/O waits on the engine handover (2026-10-07, #303, P1) — IN PROGRESS (owner: A, 2026-10-09)
+### Units' first I/O waits on the engine handover (2026-10-07, #303, P1) — DONE (golden-stormblock-62258c8471dd)
 
 A, rule 8 kept: `attach_slab_devices` (open/connect, nothing read) before the
 stand-down; `open_slabs_on` after the incumbent exits; a retry re-attaches.
-ci-adopt-retry-verify.sh's timing step checks the order. [ ] build VM:
-nextest, ci-adopt-retry-verify.sh; check.sh; golden. Earlier:
+ci-adopt-retry-verify.sh's timing step checks the order: ALL PASS at
+82bc5d3 (kernel 7.2.8); check.sh ALL PASS (1093/1093). Not on metal: the
+Dell's handover timing lines. Earlier:
 
 stormcos#300: stormcert-init's first write waits for `Adopted 65 device(s)`
 (5.4 s Dell, 5.7 s pve); on a reboot from the Dell's HDD the incumbent let go
