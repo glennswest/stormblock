@@ -11255,7 +11255,15 @@ mod system_disk_tests {
         {
             let dev = Arc::new(FileDevice::open_with_capacity(&disk, 1 << 30).await.unwrap()) as Arc<dyn BlockDevice>;
             let layout = crate::image::local::LocalLayout::for_drive(dev.capacity_bytes());
-            crate::image::local::lay_node_slabs(dev, &layout).await.unwrap();
+            let laid = crate::image::local::lay_node_slabs(dev, &layout).await.unwrap();
+            // An installed disk carries its record: a volume, persisted.
+            let ids = [laid.system.slab_id(), laid.data.slab_id()];
+            let mut mgr = VolumeManager::new(laid.system.slot_size());
+            mgr.add_slab(laid.system).await;
+            mgr.add_slab(laid.data).await;
+            mgr.keep_metadata_in_first(&ids);
+            mgr.create_volume_any("root", 16 * 1024 * 1024).await.unwrap();
+            mgr.persist().await;
         }
         // As adopt-ublk opens it: the slabs from the disk, the disk kept.
         let (vm, _, disks) = super::open_slabs_with_disks(&[disk.clone()], None, false).await.unwrap();
