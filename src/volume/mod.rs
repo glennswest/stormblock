@@ -4999,6 +4999,12 @@ mod redundancy_tests {
             let clone = mgr.create_snapshot(cold, "cold-clone").await.unwrap();
             assert_eq!(mgr.get_volume_handle(&clone).unwrap().preferred_tier(), StorageTier::Cold, "inherited");
             mgr.persist().await;
+            eprintln!(
+                "DIAG v2 dir: {} files: {:?} records: {:?}",
+                meta.join(persist_v2::DIR_FILE).exists(),
+                std::fs::read_dir(&meta).map(|r| r.filter_map(|e| e.ok()).map(|e| e.file_name()).collect::<Vec<_>>()),
+                mgr.header_records().await.iter().map(|r| (r.name.clone(), r.tier)).collect::<Vec<_>>()
+            );
             (cold, clone, plain, p)
         };
         let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
