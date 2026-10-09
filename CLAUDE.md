@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Imported media presented at the block they were authored for (2026-10-09, #110) — DONE
+### Imported media presented at the block they were authored for (2026-10-09, #110) — DONE (golden-stormblock-f7a453e7835f)
 
 The per-volume LBA landed in #228; the import never set it, so every ISO and
 disk image (and every clone of one) was 4096: isofs refuses it, a 512 GPT has
