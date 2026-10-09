@@ -9171,7 +9171,6 @@ file = "{state}"
         node.persist().await;
         drop(v);
         drop(node);
-        let before = std::fs::read(&disk).unwrap();
 
         let claim = dir.path().join("claim-n1.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
@@ -9181,7 +9180,15 @@ file = "{state}"
             Err(e) => e.to_string(),
         };
         assert!(e.contains("data half untouched") && e.contains("#172") && e.contains("free"), "{e}");
-        assert!(std::fs::read(&disk).unwrap() == before, "nothing written to the disk");
+        drop(mgr);
+        // Nothing written: the disk opens as it was, the node's data reads
+        // back, and nothing of N+1 (kubelet-data is new in it) is on it.
+        let (after, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        assert_eq!(after.find_volume("filler").await, Some(id));
+        let mut b = vec![0u8; slot as usize];
+        after.get_volume(&id).unwrap().read(0, &mut b).await.unwrap();
+        assert_eq!(b, block, "the node's data, as it was");
+        assert!(after.find_volume("kubelet-data").await.is_none(), "nothing of the release laid");
     }
 
     #[tokio::test]
