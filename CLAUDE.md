@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### The HTTP client follows redirects (2026-10-09, #113) — IN PROGRESS
+### The HTTP client follows redirects (2026-10-09, #113) — DONE
 
 - [x] `Client::exchange`: 301/302/303/307/308, ≤ 10 hops (chain in the
       error), relative `Location` resolved, no https→http, bearer only to the
@@ -190,7 +190,11 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
       `follow_redirects(false)` for the cluster's peer clients
 - [x] tests: `http::tests::redirects_are_followed_with_the_usual_guards`,
       `a_location_resolves_against_the_url_that_sent_it`; docs, CHANGELOG
-- [ ] check.sh; golden; close
+- [x] check.sh at cf1515f ALL PASS (nextest 1078/1078);
+      `ci-redirect-import-verify.sh` at ade936c ALL PASS: Debian 13's
+      genericcloud qcow2 from cloud.debian.org (302 to a mirror) imported,
+      341 MB, GPT, ext4 root walked (25,260 entries). Found: the ext4 survey
+      does not follow an `/etc/os-release` symlink (#375)
 
 ### Redundancy, spread and tier on every claim path (2026-10-09, #151, P2) — DONE (golden-stormblock-abcd60bee6e2)
 
