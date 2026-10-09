@@ -960,7 +960,7 @@ boot; **D** leave intact to a scrub (#160). Nothing built yet.
       origin/main; README, composed-disks, layering, images, presentation,
       test/ comments and this file corrected; CHANGELOG
 
-### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — IN PROGRESS (owner: A, 2026-10-09)
+### A node sets its own boothost without forge's token (2026-10-08, #247, P2) — PAUSED for P0 #381 (built and pushed; affected tests were running)
 
 Built (A): `Host.host_secret` (SHA-256), minted per claim, `host_secret` in
 the reply; `serve::api::host_scoped` + `mgmt::auth` accept it on its own
