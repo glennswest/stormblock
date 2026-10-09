@@ -1769,3 +1769,121 @@ async fn a_host_secret_re_points_only_its_own_boothost_to_a_sealed_volume() {
     assert!(!h.to_string().contains(&s1b) && h.get("host_secret").is_none(), "{h}");
     server.abort();
 }
+
+// ------------------------------------------------------------------ #354
+//
+// A machine's boot override, read from stormipmi (stand-in here) when forge
+// answers its claim: hold, install a release, local, recovery — acted on,
+// and its result reported back.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forge_acts_on_a_machines_boot_override_and_reports_the_result() {
+    use axum::routing::{get, post};
+    use std::sync::Mutex;
+    let current: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(serde_json::json!({"actor": "forge", "override": null})));
+    let results: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let (c2, r2) = (current.clone(), results.clone());
+    let ipmi = axum::Router::new()
+        .route("/api/v1/machines/{tag}/override", get(move || {
+            let c = c2.clone();
+            async move { axum::Json(c.lock().unwrap().clone()) }
+        }))
+        .route("/api/v1/machines/{tag}/override/result", post(move |axum::Json(v): axum::Json<serde_json::Value>| {
+            let r = r2.clone();
+            async move {
+                r.lock().unwrap().push(v);
+                axum::Json(serde_json::json!({"ok": true}))
+            }
+        }));
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ipmi_addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, ipmi).await.unwrap() });
+    std::env::set_var("STORMBLOCK_BOOT_OVERRIDE_URL", format!("http://{ipmi_addr}"));
+
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1, v2]).await;
+    client.post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "server1", "volume": v1.to_string(), "label": "11.90"}))
+        .send().await.unwrap();
+    let r = client.post(format!("{base}/api/v1/releases"))
+        .json(&serde_json::json!({"version": "11.91", "volume": v2.to_string()}))
+        .send().await.unwrap();
+    assert!(r.status().is_success(), "publish: {}", r.status());
+    let set = |o: serde_json::Value| *current.lock().unwrap() = serde_json::json!({"actor": "forge", "override": o});
+    let claim = |initramfs: bool| {
+        let c = client.clone();
+        let b = base.clone();
+        async move {
+            let body = if initramfs { serde_json::json!({"agent": {"name": "stormblock-initramfs"}}) } else { serde_json::json!({}) };
+            let r = c.post(format!("{b}/api/v1/synonyms/boothost/server1/claim")).json(&body).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let settle = || tokio::time::sleep(std::time::Duration::from_millis(300));
+
+    // No override: as before.
+    let (s, v) = claim(false).await;
+    assert_eq!((s, v["intent"].as_str()), (201, Some("auto")), "{v}");
+
+    // hold: refused while it stands, nothing reported.
+    set(serde_json::json!({"id": "h1", "action": "hold", "by": "op", "reason": "disk swap"}));
+    let (s, v) = claim(true).await;
+    assert_eq!(s, 423, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("disk swap"), "{v}");
+    settle().await;
+    assert!(results.lock().unwrap().is_empty(), "a hold is never reported (that would clear it)");
+
+    // local: the firmware reads local; its claim says local; the initramfs's
+    // claim reports it done.
+    set(serde_json::json!({"id": "l1", "action": "local", "by": "op"}));
+    let iv: serde_json::Value = client.get(format!("{base}/api/v1/synonyms/boothost/server1/intent")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(iv["intent"], "local", "{iv}");
+    assert_eq!(claim(false).await.1["intent"], "local");
+    settle().await;
+    assert!(results.lock().unwrap().is_empty(), "the firmware's claim does not report");
+    assert_eq!(claim(true).await.1["intent"], "local");
+    settle().await;
+    assert_eq!(results.lock().unwrap().last().unwrap()["id"], "l1");
+    assert_eq!(results.lock().unwrap().last().unwrap()["result"], "ok");
+
+    // recovery: the claim says so.
+    set(serde_json::json!({"id": "r1", "action": "recovery", "by": "op"}));
+    assert_eq!(claim(true).await.1["intent"], "recovery");
+    settle().await;
+    assert_eq!(results.lock().unwrap().last().unwrap()["id"], "r1");
+
+    // install a release this forge does not have: reported failed, the claim
+    // goes on as it would have.
+    set(serde_json::json!({"id": "i0", "action": "install", "release": "9.99", "by": "op"}));
+    let (s, v) = claim(true).await;
+    assert_eq!((s, v["intent"].as_str()), (201, Some("auto")), "{v}");
+    settle().await;
+    let last = results.lock().unwrap().last().unwrap().clone();
+    assert_eq!((last["id"].as_str(), last["result"].as_str()), (Some("i0"), Some("failed")), "{last}");
+    assert!(last["message"].as_str().unwrap().contains("9.99"));
+
+    // install 11.91: boothost pointed at it, intent install; reported ok once
+    // the installer's successor reports the disk laid (#220).
+    set(serde_json::json!({"id": "i1", "action": "install", "release": "11.91", "by": "stormcentral", "reason": "testhost install --force"}));
+    let (s, v) = claim(true).await;
+    assert_eq!((s, v["intent"].as_str()), (201, Some("install")), "{v}");
+    assert_eq!(v["claimed_from"]["release"].as_str(), Some(v2.to_string().as_str()), "the release asked for: {v}");
+    let h: serde_json::Value = client.get(format!("{base}/api/v1/boothost/server1")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["boot_override"]["id"], "i1", "shown on the host: {h}");
+    settle().await;
+    assert_ne!(results.lock().unwrap().last().unwrap()["id"], "i1", "not before the install is laid");
+    let r = client.post(format!("{base}/api/v1/synonyms/boothost/server1/installed"))
+        .json(&serde_json::json!({"volume": v["volume"]["id"], "stage": "laid"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    settle().await;
+    let last = results.lock().unwrap().last().unwrap().clone();
+    assert_eq!((last["id"].as_str(), last["result"].as_str()), (Some("i1"), Some("ok")), "{last}");
+    let h: serde_json::Value = client.get(format!("{base}/api/v1/boothost/server1")).send().await.unwrap().json().await.unwrap();
+    assert!(h["boot_override"].is_null(), "cleared once reported: {h}");
+    server.abort();
+}

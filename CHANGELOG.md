@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **feat:** #354: forge acts on a machine's boot override from stormipmi (stormipmi#70).
+  - **Reading it:** with `[management] boot_override_url` (or `$STORMBLOCK_BOOT_OVERRIDE_URL`) set, every boot claim and intent read fetches `<url>/api/v1/machines/<tag>/override` and acts when `actor == "forge"`.
+  - **`hold`:** the claim is refused (423) while it stands, and nothing is reported.
+  - **`install`** with a release: `boothost/<tag>` is pointed at that published release and the intent set to `install`. The result is reported `ok` when the disk is laid (#220), or `failed` when this forge has no such release.
+  - **`local`:** the intent and the claim say `local`, and the initramfs boots the disk, no install.
+  - **`recovery`:** the claim says `recovery`, and the initramfs boots the claimed image and touches no local drive.
+  - **Reporting `local` and `recovery`:** the initramfs's own claim (agent `stormblock-initramfs`) reports them done.
+  - **Results:** sent with `boot_override_token_file`. The applied override is shown on the host record (`boot_override`).
+  - **Initramfs:** `boot-claim` writes `/run/stormblock/override`.
 - **fix:** #172 (pvetest2, 12.06-flowsdn over 12.03-flowsdn): a keep-data install over a data half with no room for what the release brings in was laid anyway.
   - **What happened:** the flow-over stopped on "destination slab is full" with 13589 extents still remote. After the install's power cycle, the remote half is quarantined again (#239), so every new allocation got ENOSPC. ublk returned EIO, and fastetcd's ext4 went read-only for good.
   - **Install:** the plan now counts the release's data-half slots the node does not already hold, and refuses the install, before anything is written, when the data half lacks them plus 5 % and 64 slots of headroom. The refusal names the numbers; the data stays untouched and the node runs from the appliance.

@@ -261,6 +261,7 @@ probe() { # slab-path [VOLUME] [META] -> the SLAB the probe leaves behind
         BOOTTAG_FROM=""; TRUST_SMBIOS="${TRUST:-}"
         STORM_EFIVARS="$NOVARS"; STORM_DMI="$DMI"
         STORM_INSTALL_TICKET="${TICKET:-$WORK/no-ticket}"; export STORM_INSTALL_TICKET
+        STORM_BOOT_OVERRIDE="${OVR:-$WORK/no-override}"; export STORM_BOOT_OVERRIDE
         . "$WORK/identity.sh" >/dev/null 2>&1
         . "$WORK/claim.sh" >/dev/null 2>&1
         . "$WORK/probe.sh" >/dev/null 2>&1
@@ -356,6 +357,17 @@ check "a guessed name's install ticket: the disk boots" "$part" \
 TICKET=""
 check "rd.stormblock.trust-smbios=1: a guess installs as before" "$URI|$part" \
     "$(GUESS=1 TRUST=1 STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+# #354: a boot override (stormipmi's, read by forge, written by boot-claim).
+echo local > "$WORK/override"
+check "override local: a release the disk does not hold, and the disk boots" "$part" \
+    "$(OVR="$WORK/override" STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
+check "override local wins over an install ticket" "$part" \
+    "$(OVR="$WORK/override" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+TICKET=""
+echo recovery > "$WORK/override"
+check "override recovery: the claimed image boots, nothing installed over the disk" "$URI" \
+    "$(OVR="$WORK/override" STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
 
 # ---------------------------------------------------------------------------
 # The machine's name: handed down by the firmware, or guessed (#249).
@@ -490,6 +502,7 @@ survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behi
     (
         set +e
         STORM_INSTALL_TICKET="${TICKET:-$WORK/no-ticket}"; export STORM_INSTALL_TICKET
+        STORM_BOOT_OVERRIDE="${OVR:-$WORK/no-override}"; export STORM_BOOT_OVERRIDE
         sys="$WORK/sys"; rm -rf "$sys"; mkdir -p "$sys/sda" "$WORK/survey"
         echo 0 > "$sys/sda/removable"; echo 3907029168 > "$sys/sda/size"
         ASSIMILATE="$1"; shift
@@ -530,6 +543,16 @@ check "a lone data slab is an identity and is left" "" \
 check "'blank' leaves a drive that carries any slab" "" \
     "$(survey blank "$SYS_ONLY")"
 check "'off' takes nothing" "" "$(survey off "$SYS_ONLY")"
+# #354: override recovery - no local drive is touched, whatever it carries.
+echo recovery > "$WORK/override-s"
+check "override recovery: a takeable layout is left alone" "" \
+    "$(OVR="$WORK/override-s" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "override recovery: a blank drive is left alone" "" \
+    "$(OVR="$WORK/override-s" survey any "/dev/sda: not a slab (bad slab magic)")"
+TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
+check "override recovery wins over an install ticket" "" \
+    "$(OVR="$WORK/override-s" CLAIMED_T="$URI" BOOTING="$URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+TICKET=""
 check "'force' over a lone data slab: taken, never forced (#311; boot-local refuses it)" "/dev/sda" "$(survey force "$DATA_ONLY")"
 
 # An install the appliance asked for (#148) is `force` only over a drive with

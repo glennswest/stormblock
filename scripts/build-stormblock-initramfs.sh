@@ -2990,7 +2990,17 @@ if [ "$BOOT_MODE" = "local" ]; then
         *)
             echo "$SLAB can boot this node; asking $BOOTHOST whether it holds the release assigned here"
             if boothost_claim; then
-                if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
+                # A boot override (#354, stormipmi's, read by forge): local
+                # boots this disk whatever release it holds; recovery boots
+                # the claimed image and touches no local drive.
+                OVERRIDE=$(cat "${STORM_BOOT_OVERRIDE:-/run/stormblock/override}" 2>/dev/null)
+                if [ "$OVERRIDE" = local ]; then
+                    echo "  a boot override says local: booting $SLAB, no install"
+                    HELD_RC=0
+                elif [ "$OVERRIDE" = recovery ]; then
+                    echo "  RECOVERY: a boot override says boot the claimed image; $SLAB is not touched"
+                    HELD_RC=recovery
+                elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
                     echo "  $BOOTHOST asks for an install: booting the claimed image, installing over $SLAB"
                     HELD_RC=1
                 else
@@ -3019,6 +3029,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                     export STORMBLOCK_RESUME_SOURCE="$CLAIMED"
                     ;;
                 guess) ;;
+                recovery) SLAB="$CLAIMED" ;;
                 1)
                     echo "  INSTALL: a release $SLAB does not hold - booting the claimed image;"
                     echo "  the system half of its disk is laid again, its data half kept (#311)"
@@ -3247,7 +3258,12 @@ if [ "$BOOT_MODE" = "local" ]; then
     if identity_guessed 2>/dev/null; then
         GUESSED=1
     fi
-    if [ -n "$GUESSED" ] && [ "${ASSIMILATE:-}" != off ]; then
+    # A boot override's recovery (#354): every local drive left alone.
+    OVERRIDE=$(cat "${STORM_BOOT_OVERRIDE:-/run/stormblock/override}" 2>/dev/null)
+    if [ "$OVERRIDE" = recovery ]; then
+        echo "  RECOVERY: a boot override says boot the claimed image; every local drive is left alone"
+        ASSIMILATE=held
+    elif [ -n "$GUESSED" ] && [ "${ASSIMILATE:-}" != off ]; then
         echo "  $BOOTTAG is a guess from SMBIOS: only a blank drive is taken (#249)"
         ASSIMILATE=blank
     elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
@@ -3443,7 +3459,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     INSTALL_FRESH=""
     KEPT=""
     RELEASE_ON=""
-    if [ -n "$GUESSED" ]; then
+    if [ -n "$GUESSED" ] || [ "$OVERRIDE" = recovery ]; then
         :
     elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
        && [ "${ASSIMILATE:-}" = force ]; then

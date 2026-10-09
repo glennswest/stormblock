@@ -7135,7 +7135,12 @@ async fn claim_boot_uri(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut last = String::new();
     loop {
-        match client.post(&url).json(&serde_json::json!({})).send().await {
+        // Named, so forge knows this is the boot's last claim (#354): an
+        // override's `local` and `recovery` are reported done by it.
+        let body = serde_json::json!({
+            "agent": {"name": crate::mgmt::boot_override::INITRAMFS_AGENT, "version": env!("CARGO_PKG_VERSION")}
+        });
+        match client.post(&url).json(&body).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -7158,6 +7163,7 @@ async fn claim_boot_uri(
                     }
                     note_install_ticket(&base, &v);
                     note_host_secret(&base, &v);
+                    note_boot_override(&v);
                     // Forge's trust, for the node's enrolment (#381).
                     match crate::mgmt::forge_trust::from_claim(&crate::mgmt::forge_trust::node_dir(), &base, &v) {
                         Ok("written") => eprintln!("boot-claim: forge trust written to {}", crate::mgmt::forge_trust::node_dir().display()),
@@ -7212,6 +7218,29 @@ fn note_install_ticket(base: &str, reply: &serde_json::Value) {
             Err(e) => eprintln!("boot-claim: install requested, but {}: {e} - booting as auto", path.display()),
         },
         None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Where `boot-claim` leaves what a boot override made of this boot (#354):
+/// `local` (boot the disk, no installer) or `recovery` (boot the claimed
+/// image, touch no local drive), for `/init`. Absent otherwise.
+pub(crate) const BOOT_OVERRIDE_PATH: &str = "/run/stormblock/override";
+
+fn note_boot_override(reply: &serde_json::Value) {
+    let path = std::path::Path::new(BOOT_OVERRIDE_PATH);
+    match reply.get("intent").and_then(|i| i.as_str()) {
+        Some(a @ ("local" | "recovery")) => {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match std::fs::write(path, format!("{a}\n")) {
+                Ok(()) => eprintln!("boot-claim: a boot override says {a}"),
+                Err(e) => eprintln!("boot-claim: {}: {e}", path.display()),
+            }
+        }
+        _ => {
             let _ = std::fs::remove_file(path);
         }
     }
