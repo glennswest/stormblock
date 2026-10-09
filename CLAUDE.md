@@ -181,6 +181,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Imported media presented at the block they were authored for (2026-10-09, #110) — IN PROGRESS
+
+The per-volume LBA landed in #228; the import never set it, so every ISO and
+disk image (and every clone of one) was 4096: isofs refuses it, a 512 GPT has
+no partitions at 4096, and the tail past the last 4 KiB was dropped.
+- [x] `ImportSpec.lba`; `media_lba` (GPT by its header's LBA, MBR and ISO
+      512, else 4096); `settle_lba`: size rounded up to whole blocks, LBA
+      set before the seal; `lba` in the status (617ca42)
+- [x] tests: `integration_fstemplates::imported_media_are_presented_at_the_
+      block_they_were_authored_for` (ISO of 1649 × 2048, GPT 512 and 4096,
+      raw, explicit 4096, 1024 refused), the qcow2/MBR test asserts 512
+- [x] `ci-media-verify.sh` (QEMU, NVMe/TCP: ISO and GPT mount and read
+      back, the 4096 control refused); docs, CHANGELOG
+- [ ] run both on build VMs; golden; close
+
 ### The config file's [iscsi]/[nvmeof] take effect; CHAP is required when set (2026-10-09, #164) — DONE (golden-stormblock-2ec2e5085634)
 
 `--iscsi-addr`, `--iscsi-target-name`, `--nvmeof-addr`, `--nvmeof-nqn` had

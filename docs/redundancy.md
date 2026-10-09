@@ -400,6 +400,24 @@ the image carries are written, so a 2 GB cloud image with 600 MB used
 costs 600 MB once and each VM pays what it writes. `vhd`/`vhdx` are
 recognised and refused; convert with `qemu-img convert -O qcow2`.
 
+**Presented at the block it was authored for** (#110). A disk image is laid
+for a sector size, and Linux reads it only at that size: `isofs` refuses a
+4096-byte sector outright, and a GPT laid at 512 read at 4096 has its header
+at the wrong byte, so no partition appears. An import therefore sets the
+volume's LBA (#228) from what it recognised:
+- a GPT at the LBA its header is at (512, or 4096 for a 4Kn image);
+- an MBR disk or an ISO 9660 image at 512;
+- anything else at 4096.
+
+`"lba": 512|4096` on the import overrides it, and the status reports the
+`lba` given. The volume's size is rounded up to a whole number of those
+blocks, so the tail of an image whose size is not a multiple of 4096 is
+addressable; a 4096 export used to drop it. Clones are presented as their
+golden is. A medium imported before this is still 4096: import it again.
+`ci-media-verify.sh` checks this with the Linux kernel: a real ISO and a GPT
+disk image, imported and cloned, mount over NVMe/TCP and read back, and the
+ISO at 4096 is refused.
+
 **What is inside is found and read** (#147). After the bytes are written and
 before the golden is sealed, the import finds every XFS and ext2/3/4
 filesystem the image carries: the volume itself, or each GPT partition. It

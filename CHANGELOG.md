@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **fix:** #110: an imported ISO or disk image could not be read by Linux, because every import was presented at 4096-byte blocks.
+  - **LBA:** an import is now presented at the block its image was authored for: a GPT at the LBA its header is at, an MBR disk or an ISO 9660 image at 512, anything else 4096. `"lba"` on `POST /api/v1/volumes/import` overrides it, and the status reports it. Clones inherit it.
+  - **Size:** the volume's size is rounded up to whole blocks, so an image's tail is no longer cut off.
+  - **Checked:** `ci-media-verify.sh` runs the Linux kernel in QEMU over NVMe/TCP. A real ISO and GPT disk image are imported, cloned, mounted and read back, and the ISO forced to 4096 is refused.
 - **fix (security):** #164: a config file with `[iscsi] chap_user/chap_secret` ran an iSCSI target with no authentication.
   - **Precedence:** `--iscsi-addr`, `--iscsi-target-name`, `--nvmeof-addr` and `--nvmeof-nqn` have no defaults of their own now, so a flag left unset keeps the file's value (flag > file > default). The targets, the advertised host and the serve binds are built from the merged config.
   - **CHAP enforced:** a target with CHAP configured admitted an initiator offering `AuthMethod=None`, so CHAP from the flags protected nothing either. It now admits only a CHAP login.

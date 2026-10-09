@@ -109,7 +109,9 @@ volumes and read out of ext4 and XFS ones in userspace (`fio-ext4`,
 `fio-xfs`), with no mount.
 
 **Images and boot.** `import` turns a raw, qcow2, VMDK or OVA image (or an
-ISO) into a sealed golden and reads the filesystems inside it. `image build`
+ISO) into a sealed golden and reads the filesystems inside it. The golden is
+presented at the block its image was authored for: a GPT at its own LBA, an
+MBR disk or an ISO at 512, else 4096 (#110, `docs/redundancy.md`). `image build`
 lays GPT disks and ISOs out of **pallets** — sealed, versioned sets of boot
 members that stormuefi selects at boot (`docs/pallets.md`, `docs/images.md`).
 `compose` builds a bootable disk as a map over shared goldens with nothing
