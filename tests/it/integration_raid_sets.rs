@@ -227,3 +227,123 @@ async fn a_shelf_layout_that_does_not_fit_is_refused() {
     assert!(state.arrays.read().await.is_empty());
     server.abort();
 }
+
+/// A drive whose writes and flushes are slow, so a rebuild onto it runs long.
+struct Slow(Arc<dyn BlockDevice>);
+
+#[async_trait::async_trait]
+impl BlockDevice for Slow {
+    fn id(&self) -> &stormblock::drive::DeviceId {
+        self.0.id()
+    }
+    fn capacity_bytes(&self) -> u64 {
+        self.0.capacity_bytes()
+    }
+    fn block_size(&self) -> u32 {
+        self.0.block_size()
+    }
+    fn optimal_io_size(&self) -> u32 {
+        self.0.optimal_io_size()
+    }
+    fn device_type(&self) -> stormblock::drive::DriveType {
+        self.0.device_type()
+    }
+    async fn read(&self, offset: u64, buf: &mut [u8]) -> stormblock::drive::DriveResult<usize> {
+        self.0.read(offset, buf).await
+    }
+    async fn write(&self, offset: u64, buf: &[u8]) -> stormblock::drive::DriveResult<usize> {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        self.0.write(offset, buf).await
+    }
+    async fn flush(&self) -> stormblock::drive::DriveResult<()> {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        self.0.flush().await
+    }
+    async fn discard(&self, offset: u64, len: u64) -> stormblock::drive::DriveResult<()> {
+        self.0.discard(offset, len).await
+    }
+}
+
+/// #266: on a RAID-1 head (a dedicated array, a volume pinned to it), while
+/// a rebuild onto a slow new member runs, the management API keeps
+/// answering: `/v1/nodes/capacity` and `/api/v1/arrays` within 2 s each, and
+/// a DELETE of the pinned volume, then of the array, within 10 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_api_answers_and_a_pinned_volume_deletes_while_a_rebuild_runs() {
+    let dir = TempDir::new().unwrap();
+    let state = engine();
+    let drives = open_drives(&dir, &state).await;
+    // Bay 2 is slow: the rebuild onto it takes seconds.
+    {
+        let mut d = state.drives.write().await;
+        d[2].device = Arc::new(Slow(drives[2].clone()));
+    }
+    let (base, server) = serve(state.clone()).await;
+    let c = reqwest::Client::new();
+    let uuids: Vec<String> = drives.iter().map(|d| d.id().uuid.to_string()).collect();
+
+    let r = c
+        .post(format!("{base}/api/v1/arrays"))
+        .json(&json!({ "level": "raid1", "drive_uuids": [uuids[0], uuids[1]], "dedicated": true, "name": "head" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let array: Value = r.json().await.unwrap();
+    let aid = array["id"].as_str().unwrap().to_string();
+    let r = c
+        .post(format!("{base}/api/v1/volumes"))
+        .json(&json!({ "name": "leg-vol", "size": "32M", "array_id": aid }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let vol: Value = r.json().await.unwrap();
+    let vid = vol["id"].as_str().unwrap().to_string();
+    {
+        let vm = state.volume_manager.lock().await;
+        let id = vm.find_volume("leg-vol").await.unwrap();
+        let v = vm.get_volume(&id).unwrap();
+        drop(vm);
+        v.write(0, &pattern(9, 24 * 1024 * 1024)).await.unwrap();
+        v.flush().await.unwrap();
+    }
+
+    // A third member on the slow drive: the rebuild starts.
+    let r = c
+        .post(format!("{base}/api/v1/arrays/{aid}/members"))
+        .json(&json!({ "drive_uuid": uuids[2] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let rebuilding = |v: &Value| v["status"]["state"] == "rebuilding";
+    let st = wait_for(&c, &format!("{base}/api/v1/arrays/{aid}"), rebuilding).await;
+    assert!(rebuilding(&st));
+
+    let timed = |m: reqwest::Method, url: String| {
+        let c = c.clone();
+        async move {
+            let t = std::time::Instant::now();
+            let r = c.request(m, &url).send().await.unwrap();
+            (r.status().as_u16(), t.elapsed())
+        }
+    };
+    for _ in 0..5 {
+        for url in [format!("{base}/v1/nodes/capacity"), format!("{base}/api/v1/arrays"), format!("{base}/api/v1/arrays/{aid}")] {
+            let (s, took) = timed(reqwest::Method::GET, url.clone()).await;
+            assert!(s < 500, "{url}: {s}");
+            assert!(took < Duration::from_secs(2), "{url} took {took:?} while the rebuild runs");
+        }
+    }
+    let still: Value = c.get(format!("{base}/api/v1/arrays/{aid}")).send().await.unwrap().json().await.unwrap();
+    assert!(rebuilding(&still), "the rebuild was still running while the reads were timed: {still}");
+
+    let (s, took) = timed(reqwest::Method::DELETE, format!("{base}/api/v1/volumes/{vid}")).await;
+    assert!(s < 300, "the pinned volume's delete: {s}");
+    assert!(took < Duration::from_secs(10), "the pinned volume's delete took {took:?} during the rebuild");
+    let (s, took) = timed(reqwest::Method::DELETE, format!("{base}/api/v1/arrays/{aid}")).await;
+    assert!(s < 300, "the array's delete: {s}");
+    assert!(took < Duration::from_secs(10), "the array's delete took {took:?} during the rebuild");
+    server.abort();
+}
