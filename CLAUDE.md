@@ -202,14 +202,14 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### test/ moves to stormblock-test (2026-10-10, #371) — IN PROGRESS (stormblock-test#3 passed: run 35325a71aa, short 5/0/1 on C2NR0Q2)
+### test/ moves to stormblock-test (2026-10-10, #371) — DONE
 
-stormblock-test builds against main and passes `short` in its own sc-build;
-its first run on a test machine (stormblock-test#3) is still open. Once it
-passes, remove `test/` and the workspace member, `Cargo.lock` in its own
-commit; `check.sh` stage 1 runs stormblock-test's `test/check.sh` with
-`STORM_COMPONENT_DIR`; README and this file point there. Proposed after
-stormblock-test#3.
+stormblock-test#3 passed (run 35325a71aa, short 5/0/1 on C2NR0Q2). Removed
+`test/` and the workspace member (03a1318), `Cargo.lock` (2131380);
+`check.sh` stage 1 = musl build (+ stormblock-test's check with
+`STORMBLOCK_TEST_DIR`; it is private, so not cloned on a build VM); README,
+CLAUDE.md. check.sh at 2131380 ALL PASS (1121/1121). A test run after the
+removal waited on the blades' power-off window. No engine change: no golden.
 
 ### A slow fstemplate seal on 11.93 (2026-10-10, #336, P2) — DONE (golden-stormblock-322d3e7591a0)
 
