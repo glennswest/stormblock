@@ -496,6 +496,11 @@ used.
 **`[stormfs]`** — `enabled` (`false`), `metadata_url`, `heartbeat_secs`
 (`30`), `advertise_addr`: announce this node's volumes to
 `<metadata_url>/api/v1/storage/register` (served by stormstorage).
+`api_token` (or `token_file`, its first line) is sent as `Authorization:
+Bearer` on register and deregister, so stormstorage can require it
+(stormstorage#6, #214). Absent: sent with none, as before. A `token_file`
+that cannot be read leaves registration off, with an error, rather than
+registering without it.
 
 **Parsed and not acted on:** `[[arrays]]` and `[[volumes]]` (validated, so a
 bad value still stops startup — use `--raid`/`--volume`, or the API),

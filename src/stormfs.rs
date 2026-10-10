@@ -23,6 +23,35 @@ pub struct StormFsConfig {
     pub heartbeat_secs: u64,
     /// This node's advertised address for StormFS to reach back.
     pub advertise_addr: String,
+    /// Sent as `Authorization: Bearer` on register and deregister (#214),
+    /// so stormstorage can require a token on them (stormstorage#6). Absent:
+    /// sent with none, as before. Never shown or serialized.
+    #[serde(skip_serializing)]
+    pub api_token: Option<crate::mgmt::config::Secret>,
+    /// The token from a file instead (first line, trimmed); `api_token` wins.
+    pub token_file: Option<String>,
+}
+
+impl StormFsConfig {
+    /// The token to present, from `api_token` or `token_file`. A file that
+    /// cannot be read is an error, not "no token": a node configured to
+    /// authenticate must not quietly register without.
+    pub fn token(&self) -> anyhow::Result<Option<String>> {
+        if let Some(t) = self.api_token.as_ref().filter(|t| !t.0.trim().is_empty()) {
+            return Ok(Some(t.0.trim().to_string()));
+        }
+        match &self.token_file {
+            None => Ok(None),
+            Some(f) => {
+                let s = std::fs::read_to_string(f).map_err(|e| anyhow::anyhow!("[stormfs] token_file {f}: {e}"))?;
+                let t = s.lines().next().unwrap_or("").trim().to_string();
+                if t.is_empty() {
+                    anyhow::bail!("[stormfs] token_file {f} is empty");
+                }
+                Ok(Some(t))
+            }
+        }
+    }
 }
 
 impl Default for StormFsConfig {
@@ -32,6 +61,8 @@ impl Default for StormFsConfig {
             metadata_url: String::new(),
             heartbeat_secs: 30,
             advertise_addr: String::new(),
+            api_token: None,
+            token_file: None,
         }
     }
 }
@@ -72,11 +103,19 @@ pub struct StormFsRegistration {
 impl StormFsRegistration {
     /// Create a new StormFS registration client.
     pub fn new(config: StormFsConfig) -> Self {
+        Self::try_new(config).unwrap_or_else(|e| panic!("StormFS registration: {e}"))
+    }
+
+    /// [`new`](Self::new), with the token's file read here (#214): every
+    /// register and deregister presents it.
+    pub fn try_new(config: StormFsConfig) -> anyhow::Result<Self> {
+        let token = config.token()?;
         let client = crate::http::Client::builder()
             .timeout(Duration::from_secs(10))
+            .bearer(token)
             .build()
-            .expect("failed to build HTTP client");
-        StormFsRegistration { config, client }
+            .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
+        Ok(StormFsRegistration { config, client })
     }
 
     /// Start the periodic registration loop.
@@ -190,6 +229,70 @@ fn gethostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #214: with a token set, register and deregister carry it; without,
+    /// neither carries one; the file form works and an unreadable file is an
+    /// error, never a silent "no token".
+    #[tokio::test]
+    async fn register_and_deregister_present_the_token_when_one_is_set() {
+        use axum::{routing::post, Router};
+        use std::sync::Mutex;
+        let seen: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = seen.clone();
+        let app = Router::new().route(
+            "/api/v1/storage/{what}",
+            post(move |axum::extract::Path(what): axum::extract::Path<String>, headers: axum::http::HeaderMap| {
+                let rec = rec.clone();
+                async move {
+                    let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
+                    rec.lock().unwrap().push((what, auth));
+                    axum::Json(serde_json::json!({"accepted": true}))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+        let vm = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = Arc::new(AppState::new(crate::mgmt::config::StormBlockConfig::default(), vm, reg, gem));
+        let cfg = |token: Option<&str>, file: Option<String>| StormFsConfig {
+            enabled: true,
+            metadata_url: url.clone(),
+            advertise_addr: "10.0.0.5:9090".into(),
+            api_token: token.map(|t| crate::mgmt::config::Secret(t.into())),
+            token_file: file,
+            ..StormFsConfig::default()
+        };
+
+        let with = StormFsRegistration::new(cfg(Some("s3cret"), None));
+        with.register(&state).await.unwrap();
+        with.deregister().await.unwrap();
+        let without = StormFsRegistration::new(cfg(None, None));
+        without.register(&state).await.unwrap();
+        without.deregister().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("token");
+        std::fs::write(&f, "from-file\n").unwrap();
+        let filed = StormFsRegistration::new(cfg(None, Some(f.to_string_lossy().into())));
+        filed.register(&state).await.unwrap();
+
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                ("register".into(), Some("Bearer s3cret".into())),
+                ("deregister".into(), Some("Bearer s3cret".into())),
+                ("register".into(), None),
+                ("deregister".into(), None),
+                ("register".into(), Some("Bearer from-file".into())),
+            ]
+        );
+        let missing = cfg(None, Some(dir.path().join("nope").to_string_lossy().into()));
+        assert!(StormFsRegistration::try_new(missing).is_err(), "an unreadable token file is an error");
+        assert!(!format!("{:?}", cfg(Some("s3cret"), None)).contains("s3cret"), "never shown");
+    }
 
     #[test]
     fn default_config_disabled() {

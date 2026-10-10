@@ -1476,8 +1476,15 @@ pub async fn run() -> anyhow::Result<()> {
             config.stormfs.metadata_url,
             config.stormfs.heartbeat_secs,
         );
-        let reg = crate::stormfs::StormFsRegistration::new(config.stormfs.clone());
-        Some(reg.start(state.clone()))
+        match crate::stormfs::StormFsRegistration::try_new(config.stormfs.clone()) {
+            Ok(reg) => Some(reg.start(state.clone())),
+            // A token the config names and that cannot be read: not
+            // registered at all, rather than registered without it (#214).
+            Err(e) => {
+                tracing::error!("StormFS registration not started: {e}");
+                None
+            }
+        }
     } else {
         None
     };

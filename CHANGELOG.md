@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #214: `[stormfs] api_token` (or `token_file`) is sent as `Authorization: Bearer` on the StormFS register and deregister, so stormstorage can require a token on them (stormstorage#6).
+  - **No token configured:** the same as before, no header.
+  - **An unreadable token file:** registration stays off, with an error.
+  - **The token itself:** never shown or serialized.
 - **fix:** #197: messages and doc comments named `STORMBLOCKMK_*` environment variables that nothing reads. They now name the real keys:
   - `[serve] iscsi_enabled`: the iSCSI refusals in the API, the wiring status and the reconciler;
   - `[serve] portal_span`: an exhausted portal range;

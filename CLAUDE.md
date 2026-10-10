@@ -202,6 +202,14 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
+### StormFS heartbeat sends a bearer (2026-10-10, #214) — IN PROGRESS
+
+- [x] `[stormfs] api_token` (Secret) / `token_file`; the client presents it
+      on register and deregister; unreadable file = not started, logged
+- [x] test `stormfs::tests::register_and_deregister_present_the_token_when_
+      one_is_set` (stand-in stormstorage); README, CHANGELOG
+- [ ] build, check.sh, golden, close; tell stormstorage#6
+
 ### Stale STORMBLOCKMK_* names; an unset gauge (2026-10-10, #197) — DONE (golden-stormblock-8cda932880e4)
 
 - [x] every message and doc comment names the `[serve]` key (iscsi_enabled,
