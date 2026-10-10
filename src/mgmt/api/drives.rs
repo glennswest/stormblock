@@ -323,14 +323,15 @@ pub struct CloseQuery {
     pub force: bool,
 }
 
-/// Which slab, if any, lives on this device. Compared by pointer, because two
-/// `Arc`s to one device are the same device and two devices over one path are
-/// not the same thing at all.
-async fn slab_on(state: &AppState, dev: &Arc<dyn crate::drive::BlockDevice>) -> Option<String> {
+/// Which slab, if any, lives on this drive: on the same device, the same
+/// path, or the same disk ([`slab_is_on`]). By pointer alone it never saw a
+/// slab `POST /api/v1/slabs` had formatted, which opens a device of its own,
+/// so the guard never fired (#66).
+async fn slab_on(state: &AppState, dev: &Arc<dyn crate::drive::BlockDevice>, path: &str) -> Option<String> {
     let registry = state.slab_registry.read().await;
     let hit = registry
         .iter()
-        .find(|(_, slab)| Arc::ptr_eq(slab.device(), dev))
+        .find(|(_, slab)| slab_is_on(slab, dev, path))
         .map(|(id, _)| id.to_string());
     hit
 }
@@ -369,10 +370,10 @@ async fn close_drive(
         tracing::warn!("drive {index} ({path}) is closed while in use: {why}");
     }
 
-    if let Some(slab) = slab_on(&state, &dev).await {
+    if let Some(slab) = slab_on(&state, &dev, &path).await {
         if !q.force {
             return ApiError::conflict(format!(
-                "{path} carries slab {slab}; every volume on it lives there. Closing this drive                  would not move them, so it is refused"
+                "{path} carries slab {slab}; every volume on it lives there. Closing this drive would not move them, so it is refused"
             ));
         }
         tracing::warn!("drive {index} ({path}) carries slab {slab} and is being closed anyway");

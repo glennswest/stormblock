@@ -390,3 +390,30 @@ async fn a_stopped_vms_disk_becomes_a_named_golden_that_forge_pulls_with_a_ticke
     assert_eq!(bad["state"], "failed", "{bad}");
     assert_eq!(bad["phase"], "verify", "{bad}");
 }
+
+/// #66: a drive that carries a slab `POST /api/v1/slabs` formatted (which
+/// opens a device of its own) is not closed unless forced.
+#[tokio::test]
+async fn a_drive_carrying_an_api_formatted_slab_is_not_closed() {
+    let n = node(false, None).await;
+    let c = reqwest::Client::new();
+    let path = n.dir.path().join("disk.bin").to_string_lossy().to_string();
+    let r = c.post(format!("{}/drives", n.base)).bearer_auth(NODE).json(&json!({ "path": path, "size_bytes": 64 * MIB })).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let r = c.post(format!("{}/slabs", n.base)).bearer_auth(ADMIN).json(&json!({ "device_path": path, "slot_size": MIB })).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    for _ in 0..200 {
+        let on = n.state.slab_registry.read().await.iter().any(|(_, s)| s.device().id().path == path);
+        if on {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let enc: String = path.bytes().map(|b| format!("%{b:02X}")).collect();
+    let r = c.delete(format!("{}/drives/{enc}", n.base)).bearer_auth(ADMIN).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 409, "{}", r.text().await.unwrap());
+    let still: Value = c.get(format!("{}/drives", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    assert!(still.to_string().contains(&path), "the drive is still listed: {still}");
+    let r = c.delete(format!("{}/drives/{enc}?force=true", n.base)).bearer_auth(ADMIN).send().await.unwrap();
+    assert!(r.status().is_success(), "force closes it: {}", r.text().await.unwrap());
+}
