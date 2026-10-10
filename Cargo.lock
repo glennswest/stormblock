@@ -2497,7 +2497,6 @@ dependencies = [
  "clap",
  "crc32c",
  "crc32fast",
- "criterion",
  "fio-ext4",
  "fio-xfs",
  "flate2",
@@ -2540,6 +2539,15 @@ dependencies = [
  "uuid",
  "webpki-roots",
  "xxhash-rust",
+]
+
+[[package]]
+name = "stormblock-benches"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "stormblock",
+ "uuid",
 ]
 
 [[package]]

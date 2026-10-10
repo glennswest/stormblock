@@ -2061,6 +2061,7 @@ src/*.rs        10.3k  cli.rs (CLI, daemon, subcommands; main.rs wraps it), rebu
 crates/pallet-format   the no_std pallet reader stormuefi links
 tests/it/              the in-process integration tests, one binary (nextest)
 tests-runtime/         tests against the built binary, devices or privileges (#222)
+benches/               stormblock-benches: criterion benchmarks, `cargo bench -p stormblock-benches` (#211)
 ```
 
 ## Storm components it talks to

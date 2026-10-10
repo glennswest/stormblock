@@ -2,7 +2,7 @@
 # The pallet format's decode side is its own crate so firmware and the engine
 # can share one reader rather than maintaining two that must stay
 # bit-compatible forever (#53).
-members = ["crates/pallet-format", "tests-runtime"]
+members = ["crates/pallet-format", "tests-runtime", "benches"]
 
 [package]
 name = "stormblock"
@@ -180,7 +180,6 @@ mikrotik = []
 [dev-dependencies]
 # Integration tests read engine-written pallets through the firmware path.
 stormblock-pallet-format = { path = "crates/pallet-format" }
-criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 # Tests drive the HTTP surface with reqwest; the binary does not carry it.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -191,15 +190,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 name = "it"
 path = "tests/it/main.rs"
 
-[[bench]]
-name = "parity"
-harness = false
-[[bench]]
-name = "extent"
-harness = false
-[[bench]]
-name = "pdu_parsing"
-harness = false
 
 # Build settings (#209). The edit/test loop keeps file:line in backtraces but
 # not full debug info: a full-debug libstormblock was 575 MB, and every test

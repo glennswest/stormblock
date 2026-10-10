@@ -142,7 +142,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (opens its own slab, formats only a blank target or with `--format`, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
 - `src/cli.rs` — CLI, the daemon, and every subcommand (`open_slabs_resuming`: a flow-over cut short claims a fresh clone, #171); `src/main.rs` only calls `stormblock::cli::run` (#209)
 - the test container is glennswest/stormblock-test (#371; it was `test/`, #139)
-- `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222)
+- `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
 **v20.0.0** (2026-09-28): boot intent (#148), the build/test split (#209,
@@ -201,6 +201,14 @@ area; the superblock CRC covers it.
 - [x] crate 20/20 + no_std UEFI check; pallet/sign/compose 103/103;
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
+
+### Benches in their own crate (2026-10-10, #211) — IN PROGRESS
+
+- [x] `benches/Cargo.toml` (`stormblock-benches`, criterion, `publish =
+      false`), workspace member; criterion and `[[bench]]` out of the root;
+      Cargo.lock by hand; README, CHANGELOG
+- [ ] build: `cargo tree -e dev -p stormblock | grep -c criterion` = 0, the
+      benches compile (`cargo bench --no-run`), check.sh; close
 
 ### API stalls on a RAID1 head during a rebuild (2026-10-10, #266) — DONE (test)
 

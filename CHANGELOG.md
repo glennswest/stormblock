@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **build:** #211: the three criterion benches (`parity`, `extent`, `pdu_parsing`) moved to their own workspace member, `benches/` (`stormblock-benches`, `publish = false`). criterion, and plotters behind it, is no longer a dev-dependency of `stormblock`, so test builds don't compile it. `cargo bench -p stormblock-benches` runs them.
 - **test:** #266: `integration_raid_sets::the_api_answers_and_a_pinned_volume_deletes_while_a_rebuild_runs`. On a RAID-1 head (a dedicated array with a pinned volume), while a rebuild onto a slow new member runs, `/v1/nodes/capacity` and `/api/v1/arrays` answer within 2 s, and the pinned volume's and the array's DELETE each finish within 10 s. The stall seen on b64c3ee is not reproduced since #358, #364 and #252.
 - **feat:** #271: `GET /api/v1/volumes/{id}/digest` gives the sha256 of a sealed volume's every byte (its size), on the node token. A verifier (sectionsystems, the compliance checker) compares goldens without exporting them.
   - **Caching:** read once per seal and kept on the volume; any change of the sealed flag forgets it, and `?refresh=true` reads it again.

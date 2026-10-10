@@ -1,0 +1,30 @@
+[package]
+name = "stormblock-benches"
+version = "0.1.0"
+edition = "2021"
+license = "TBD"
+description = "stormblock's criterion benchmarks: parity, extent allocation, PDU parsing (#211)."
+publish = false
+
+# Its own crate so criterion (and plotters, behind html_reports) is not built
+# for every test build of stormblock, which never runs these (#211).
+# `cargo bench -p stormblock-benches` runs them.
+[dependencies]
+stormblock = { path = ".." }
+criterion = { version = "0.5", features = ["html_reports"] }
+uuid = { version = "1", features = ["v4"] }
+
+[[bench]]
+name = "parity"
+path = "parity.rs"
+harness = false
+
+[[bench]]
+name = "extent"
+path = "extent.rs"
+harness = false
+
+[[bench]]
+name = "pdu_parsing"
+path = "pdu_parsing.rs"
+harness = false
