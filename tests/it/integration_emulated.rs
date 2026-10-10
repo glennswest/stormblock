@@ -191,6 +191,8 @@ async fn an_ext4_template_of_a_petabyte_is_formatted_in_core() {
         .ok()
         .and_then(|s| emulated::parse_size(&s))
         .unwrap_or(PIB);
+    // the seal's line names its check and seal times (WARN past 5 s)
+    let _ = tracing_subscriber::fmt().with_env_filter("stormblock=warn").with_writer(std::io::stderr).try_init();
     let dir = TempDir::new().unwrap();
     let mut vm = VolumeManager::new(MIB);
     let mut drives = Vec::new();
