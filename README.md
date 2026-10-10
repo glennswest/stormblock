@@ -98,7 +98,9 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   `/api/v1/shelves`, `/api/v1/spares`; `docs/raid-sets.md`, #252). A shelf
   is laid out as several sets, each its own failure domain
   (`shelf=…/set=…`), with spares per shelf or global. A failed member takes
-  a spare and rebuilds in the background. The sets are reassembled from
+  a spare and rebuilds in the background. A `failing` one is replaced by a
+  spare while it still serves, and a `missing` one that comes back is
+  re-added from the bitmap (#256). The sets are reassembled from
   their members' superblocks at startup, and a write-intent bitmap limits
   the resync after a crash to the chunks being written. Volumes are
   allocated onto the sets' slabs. A RAID 1 across NVMe/TCP legs is how
@@ -1963,8 +1965,7 @@ What earlier docs described and the code does not do, each with its issue:
 - **NVMe userspace (VFIO) driver** — a stub; NVMe drives are served through
   the kernel, opened `O_DIRECT` (#167).
 - **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a
-  parity set; no proactive replacement of a `failing` drive; a returning
-  member is not re-added from the bitmap; Q has no SIMD path; bay LEDs are
+  parity set (#387); Q has no SIMD path; bay LEDs are
   stormdrive's (stormdrive#44); `[[arrays]]` in the config is not acted on
   (#165).
 - **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #256: RAID sets.
+  - **A `failing` drive is replaced by a spare while it still serves:** writes are teed to both drives, a copy runs under the stripe locks, then the spare takes the slot. The set keeps full redundancy throughout, and a read error mid-copy turns it into a rebuild. `…/members/{slot}/replace` on an active slot does the same.
+  - **A `missing` drive (or one gone at assembly) keeps the set's bitmap,** recorded in the slot table's padding. When it comes back it is re-added with only the chunks written meanwhile, not a full rebuild.
+  - **Reshape and grow** are #387.
 - **test:** #297: `a_flow_over_copy_holds_no_lock_the_node_needs` now checks that the other volume's write and flush finish while the move is still held, with a 60 s hang guard instead of a 2 s budget. That budget failed once on a loaded build box.
 - **test:** #385: `install_tests::an_install_back_to_the_older_release_keeps_every_claim`. Two claims (clones of a node-made blank, in the system half, #317) are made across installs of N, then N+1, then N again; both keep every byte. The claim pvetest1 reported lost was deleted by stormcentral's own survival check after its first read-back (stormcentral#689), not by the install.
 - **feat:** #219: `PATCH /api/v1/volumes/{id} {name, force?}` renames a volume. A PVC claimed from a pre-#137 standby clone no longer has to keep its `standby-…` name.

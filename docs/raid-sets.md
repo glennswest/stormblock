@@ -99,8 +99,43 @@ recovered: two data strips, data with P, data with Q, or P with Q.
    Progress is `status.rebuild` on the array. Its rate can be capped:
    `PUT /api/v1/arrays/{id}/rebuild {"max_bytes_per_sec": …}`.
 
+**A drive reported `failing`** (SMART predicting failure) is replaced by a
+spare **while it still serves** (#256), so the set never runs degraded for
+it:
+- The slot's device becomes a tee. Reads come from the failing drive, and
+  every write to member data goes to both drives.
+- A copy walks the member under the same stripe locks writes take, reading
+  the failing drive and writing the spare. Its progress is `status.rebuild`.
+- The spare then takes the slot under a member uuid of its own. The
+  superblocks are rewritten and the old drive's is wiped.
+- If the failing drive stops answering a read mid-copy, it is failed and the
+  spare takes the slot as an ordinary rebuild from where the copy was.
+- A write error on the spare abandons the replacement, and the slot stays as
+  it was.
+- Nothing below the member data (superblock, bitmap) is written to the spare
+  before the swap, so a stop mid-copy leaves it a spare again.
+- `POST …/members/{slot}/replace {"drive_uuid"}` on an **active** slot does
+  the same with a drive of the operator's choosing.
+
+**A drive reported `missing`**, or gone at assembly, is failed as
+**missing**, not as failed on I/O (#256):
+- While a member is missing the set **keeps its write-intent bitmap**. It is
+  not cleared when idle, and not zeroed at assembly, so it records every
+  chunk written while the drive was gone.
+- The slot record marks the member missing, with the set's `events` at the
+  time.
+- If the drive comes back, its superblock saw everything up to then, and no
+  spare took the slot meanwhile, assembly **re-adds** it: only the chunks the
+  bitmap names are rebuilt onto it from the others, and it serves again.
+  Then the bitmap clears as usual.
+- A drive that failed on I/O is not re-added. Neither is one whose
+  superblock is older than when it went missing: it stays failed, and a
+  spare or a replace rebuilds the slot in full.
+- An older engine writes these record bytes as zeros, which only ever means
+  a full rebuild.
+
 The response to a drive health report carries `raid_member: {array, slot,
-failed}`. The array's members carry the drive's identity (serial, WWN,
+failed, replacing_with}`. The array's members carry the drive's identity (serial, WWN,
 model, path) and its registration labels (`shelf=…/bay=…`), so the dead bay
 can be found. Lighting its LED (SES) is stormdrive's job (stormdrive#44).
 
@@ -135,7 +170,7 @@ reuses it.
 | `GET /api/v1/arrays[/{id}]` | `name`, `pool`, `status` (`clean` / `rebuilding` / `degraded` / `failed`, `failed`, `tolerated`, `dirty_chunks`, `rebuild`, `scrub`), `events`, `members` (slot, uuid, state, `drive`, `labels`, `rebuilt_bytes`), the slab and its `domain`, the volumes on it |
 | `POST /api/v1/arrays/assemble` | see Assembly |
 | `POST /api/v1/arrays/{id}/members/{slot}/fail` | fail a member (to pull its drive). 409 when it would lose data. |
-| `POST /api/v1/arrays/{id}/members/{slot}/replace` | `{"drive_uuid"}`: put a drive into a failed slot and rebuild onto it |
+| `POST /api/v1/arrays/{id}/members/{slot}/replace` | `{"drive_uuid"}`: put a drive into a failed slot and rebuild onto it, or replace an **active** slot while it serves (#256) |
 | `POST /api/v1/arrays/{id}/members`, `DELETE …/members/{uuid}` | grow or shrink a RAID-1 (stormstorage's leg moves, `migrate_to_local`) |
 | `POST / GET / DELETE /api/v1/arrays/{id}/scrub` | verify every stripe or mirror unit, and with `repair` (default) rewrite parity or the other legs where they disagree; `max_bytes_per_sec` caps it; progress and mismatch counts |
 | `PUT /api/v1/arrays/{id}/rebuild` | `{"max_bytes_per_sec"}` |
@@ -159,11 +194,12 @@ any. Metrics: `stormblock_raid_state{array,name}` (0 clean, 1 rebuilding,
   bay's LED, are stormdrive's. The engine shows the labels a drive was
   registered with.
 - **Growing or reshaping a set**, adding a member to a parity set, or changing
-  its level. A set's width is fixed at creation.
-- **Proactive replacement**: a drive reported `degraded` or `failing` is
-  reported, not failed out of its set.
-- **A returning member** (a drive pulled and put back) is not re-added from
-  the bitmap. It is stale, and it comes back as a spare with `force`.
+  its level (#387). A set's width is fixed at creation.
+- **`degraded`** on a drive is reported, not acted on (`failing` is replaced,
+  `failed` and `missing` are failed: see above).
+- **A member that comes back while the set is running** is re-added at the
+  next assembly (`POST /api/v1/arrays/assemble`, or a restart), not on its
+  own.
 - **Discard** is passed down by RAID-1 only.
 - **SIMD for Q**: P uses AVX2/NEON; Q and recovery are portable code (eight
   lanes at a time for g·x, log tables otherwise).
