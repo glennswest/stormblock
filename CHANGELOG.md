@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **test:** #266: `integration_raid_sets::the_api_answers_and_a_pinned_volume_deletes_while_a_rebuild_runs`. On a RAID-1 head (a dedicated array with a pinned volume), while a rebuild onto a slow new member runs, `/v1/nodes/capacity` and `/api/v1/arrays` answer within 2 s, and the pinned volume's and the array's DELETE each finish within 10 s. The stall seen on b64c3ee is not reproduced since #358, #364 and #252.
 - **feat:** #271: `GET /api/v1/volumes/{id}/digest` gives the sha256 of a sealed volume's every byte (its size), on the node token. A verifier (sectionsystems, the compliance checker) compares goldens without exporting them.
   - **Caching:** read once per seal and kept on the volume; any change of the sealed flag forgets it, and `?refresh=true` reads it again.
   - **An unsealed volume:** 409.

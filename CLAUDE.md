@@ -202,6 +202,15 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
+### API stalls on a RAID1 head during a rebuild (2026-10-10, #266) — DONE (test)
+
+Seen on b64c3ee (2026-09-27), before #252 (RAID rewrite), #358 (NVMe/TCP
+bounded) and #364 (manager lock never across I/O). Test
+`integration_raid_sets::the_api_answers_and_a_pinned_volume_deletes_while_a_
+rebuild_runs`: reads < 2 s and both DELETEs < 10 s while a slow rebuild runs;
+passes on current code (1.5 s). Test only, no golden; stormstorage#24 asked to
+rerun its e2e.
+
 ### A digest endpoint for a sealed volume (2026-10-10, #271) — DONE (golden-stormblock-274ac466c320)
 
 - [x] `GET /api/v1/volumes/{id}/digest` (ordinary): sealed only, sha256 of
