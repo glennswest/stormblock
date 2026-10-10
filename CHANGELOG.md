@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **perf:** #300: an emulated drive's directory backing now costs what is written, not the range it touches.
+  - **How:** each chunk file is opened once and its handle kept (`OPEN_CHUNKS`, 256; the least recently used is closed past that). Which chunks exist is known, so there are no `exists()` probes. Held bytes are counted per chunk from one `fstat` after each change, never by rescanning the directory. Zeros written where nothing is stored create nothing.
+  - **Fixed along the way:** the old count added every non-zero write again, so overwrites inflated `stored_bytes`.
+  - **Measured** through the daemon's API (`ci-emulated-format-verify.sh`, two 256T emulated slabs, `POST /api/v1/fstemplates`): 1T in 8.3 s on directory backing against 5.1 s in memory (stormcos#92 had seen more than 180 s); 16T in 66.9 s against 40.5 s. `/api/v1/health` answered within 1.5 ms throughout, and nothing stalled.
+- **build:** #300: mkfs-ext4 `v4.1.0` and fio-ext4 `v1.8.0`, moved together (was v3.0.0 / v1.7.0). v4's format streams, so 1 PiB formats in core (mkfs.ext4.rs#10), and `fsck` repair replays a dirty journal first. `FsckOptions` literals name `preen`. Test: `integration_emulated::an_ext4_template_of_a_petabyte_is_formatted_in_core` (ignored; minutes).
 - **perf:** #255: RAID-6's Q and GF(2^8) multiply now have AVX2 and NEON paths, as P already did.
   - **How:** P and Q are computed in one pass over the strips, held in registers (Horner's g·q ^ d; g·x is a shift plus a masked 0x1D). Multiplying by a constant (Q's read-modify-write, recovery) uses split-nibble table lookups (`pshufb` / `vqtbl1q`). Recovery and `q_update` use the level detected for the process.
   - **Measured** on a 9+2 stripe of 64 KiB strips (build VM, `cargo bench -p stormblock-benches --bench parity -- raid6_9`): P+Q 7.45 → 66.5 GiB/s; Q's read-modify-write 4.3 → 66.8 GiB/s.

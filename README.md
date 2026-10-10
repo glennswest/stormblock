@@ -1377,6 +1377,13 @@ reports the size it is given and stores only what is written:
 
 - **Where the data lives:** in memory, in 64 KiB pages, or under `backing`,
   in 1 GiB sparse chunk files that outlive the process.
+- **Directory backing costs what is written** (#300): each chunk file is
+  opened once and kept open (256 at most, then the least recently used is
+  closed). Which chunks exist is known, and the bytes held are counted per
+  chunk with one `fstat` after each change, never by rescanning the
+  directory. Through the API (`ci-emulated-format-verify.sh`), an ext4
+  template on two 256T drives took 8.3 s at 1T and 66.9 s at 16T, against
+  5.1 s and 40.5 s in memory.
 - **What it does not store:** a range never written, written with zeros, or
   discarded holds nothing and reads as zeros. So formatting a 1 PiB slab
   (64 GiB of slot table) takes 0.1 s and stores nothing.
