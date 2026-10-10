@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Pallet copy/move/install hazards (2026-10-10, #57) — IN PROGRESS
+### Pallet copy/move/install hazards (2026-10-10, #57) — DONE (golden-stormblock-eff7a69c10e0)
 
 - [x] 1. docs/pallets.md: a copy gets a new GUID, a move keeps it; GUIDs can
       still repeat across drives (dd, RAID legs)
@@ -191,7 +191,8 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 - [x] 4. image spec `successful`; `tries = 0` without it refused
 - [x] tests: integration_pallet (move keeps, boot refused/forced, copy
       unproven), build.rs spec test; docs, CHANGELOG
-- [ ] build, check.sh, golden, close
+- [x] targeted 117/117 at d12e68a; check.sh ALL PASS (1114/1114); golden
+      golden-stormblock-eff7a69c10e0
 
 ### Closing a drive with an API-formatted slab (2026-10-10, #66) — DONE (golden-stormblock-18d96b22dae0)
 
