@@ -347,7 +347,7 @@ adopt-ublk's own disks (`boot_disks`, #314) were nowhere in the drive API.
       directory, `/serve/v1` mounted)
 - [x] check.sh at ab97c9a ALL PASS (nextest 1071/1071, the runtime test)
 
-### A stopped VM's root disk becomes a named golden (2026-10-10, #143, P2) — IN PROGRESS
+### A stopped VM's root disk becomes a named golden (2026-10-10, #143, P2) — DONE (golden-stormblock-2b2d7914e68f)
 
 Owner: 1A (a Kubernetes bearer + SAR `goldens`/`create`), 2A (forge pulls a
 ticket URL through its import).
@@ -361,7 +361,9 @@ ticket URL through its import).
 - [x] import: `sha256` (verify), `parent`, `provenance` → recorded
 - [x] test `integration_destructive::a_stopped_vms_disk_becomes_a_named_
       golden_that_forge_pulls_with_a_ticket`; README, auth.md, CHANGELOG
-- [ ] build, check.sh, golden, close; tell buildbox2 / stormblock-registry#43
+- [x] targeted 95/95 at bc8957f; check.sh ALL PASS (1111/1111); golden
+      golden-stormblock-2b2d7914e68f; told buildbox2#2, stormblock-registry#43.
+      Not run: a real VM on a stormcos node (needs `[management.kubernetes]`)
 
 ### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — DONE (golden-stormblock-b835c9f3b7dd)
 
