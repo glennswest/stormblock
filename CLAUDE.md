@@ -884,8 +884,12 @@ sends no host NQN, so closing by default would break it: the owner's call.
       stormblock-registry#102 (send host_nqn)
 - [x] owner: A. Until registry#102 ships: the WARN at every start
       (`serve::ctx`, the count of exports open to any host) is the "warn"
-- [ ] once stormblock-registry#102 is in a release: `[serve] allow_any_host`
-      default false (serve/config.rs), docs, changelog, tests; proposed after it
+- [ ] the flip: `[serve] allow_any_host` default false (serve/config.rs),
+      docs, changelog, tests. Checked 2026-10-10: registry#102 closed but not
+      released (stormcos#453); consumers rustkube-node#236 and
+      vmcloud-image-operator#48 open; registry's standing clones are exported
+      with no host and would be refused: stormblock-registry#119. Proposed
+      after #119
 
 ### The listing generation moves on attach, detach and slab state (2026-10-08, #218) — DONE
 
