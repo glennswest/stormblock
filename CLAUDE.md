@@ -181,6 +181,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Ride through an HBA reset on the system slab's drive (2026-10-10, #391, P0) — IN PROGRESS
+
+Owner: "The problem is the 'reset' of the controller." The Dell's `sda` shares
+an mpt3sas HBA with the NetApp shelf; a host reset makes I/O fail for seconds.
+- [ ] a ride-through layer on every local block device: transport-class
+      errors (EIO, ENOLINK, ENXIO, ENODEV, ETIMEDOUT, EAGAIN, EBUSY,
+      EREMOTEIO) retried with backoff for a window (60 s,
+      `STORMBLOCK_TRANSPORT_WINDOW_SECS`); a medium/protection error
+      (ENODATA, EILSEQ) not; callers (ublk requests, persists) just wait
+- [ ] after the window: the error goes up, the drive is listed in health
+      (`drives_unreachable`), an ERROR line; recovery said with its duration
+- [ ] unit tests (a device that fails then answers; medium error at once;
+      the window running out); QEMU verify: a virtio-scsi slab disk taken
+      `offline` then `running`, and `host_reset`, under a write load: no EIO
+      in the writer, data verifies
+- [ ] docs, CHANGELOG, check.sh, golden, close
+
+
 ### Pallet signatures in the format (2026-10-10, #378, P2) — DONE (golden-stormblock-7b232505a559)
 
 stormuefi#18 decided (Ed25519 over the manifest digest, key in stormcentral,
