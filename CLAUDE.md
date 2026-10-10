@@ -181,6 +181,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — IN PROGRESS
+
+Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
+- [x] pins: mkfs-ext4 v4.1.0 + fio-ext4 v1.8.0, Cargo.lock by hand (same
+      dependency sets), `FsckOptions` literals name `preen`; builds
+- [x] `DirStore`: chunk handles kept (`OPEN_CHUNKS` 256, oldest closed),
+      existing chunks known (no `exists()`), held bytes per chunk by `fstat`
+      (no rescans; overwrites were counted again each time); zeros over
+      nothing create nothing; test `a_directory_backing_counts_what_it_holds_
+      without_rescanning`
+- [x] `ci-emulated-format-verify.sh` (the daemon's API: 2 × 256T emulated
+      slabs, templates 1T/16T, memory vs directory, health sampled, stall
+      lines); `integration_emulated::an_ext4_template_of_a_petabyte_is_
+      formatted_in_core` (ignored)
+- [ ] results on a build VM; then the runtime stall if it remains; docs,
+      CHANGELOG, check.sh, golden, close. Found: `--all-targets` fails on
+      benches/*.rs (autobenches), noted on #211
+
 ### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — DONE (golden-stormblock-041d379caced)
 
 - [x] `parity.rs`: AVX2 and NEON P+Q in one pass (Horner, g·x = shift +
@@ -1421,7 +1439,7 @@ netbooted install over NVMe/TCP to an in-process appliance, 1530 extents,
       `stormcentral shipped`. Not on metal: a blade or the Dell installing a
       release with it (`flow_over_remaining`, the breakdown lines)
 
-### Emulated directory backing, mkfs-ext4 off v3.0.0 (2026-10-07, #300, P2) — PARKED (master: #331 first)
+### Emulated directory backing, mkfs-ext4 off v3.0.0 (2026-10-07, #300, P2) — PARKED then; resumed 2026-10-10 (above)
 
 Part 2 (mkfs-ext4 v4.1.0 for 256 TiB / 1 PiB in core) is blocked on a
 fio-ext4 release that pins it (fio.ext4.rs#10, commented): one tag for both,
