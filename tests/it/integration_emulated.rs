@@ -217,3 +217,33 @@ async fn an_ext4_template_of_a_petabyte_is_formatted_in_core() {
     eprintln!("{size}-byte ext4 template ready in {took:?}; the drives hold {} MiB", held >> 20);
     assert!(matches!(tmpl.state, stormblock::fs::template::TemplateState::Ready), "{:?}", tmpl.state);
 }
+
+/// #300: the same format straight onto an emulated drive, no slab and no thin
+/// volume between, so the formatter's own time can be told from the engine's.
+/// `STORMBLOCK_PIB_TEST_SIZE` as above; `STORMBLOCK_PIB_TEST_BACKING=memory`
+/// for the memory store.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "minutes: run on its own (cargo test --release --test it ... -- --ignored)"]
+async fn an_ext4_format_straight_onto_an_emulated_drive() {
+    let size = std::env::var("STORMBLOCK_PIB_TEST_SIZE")
+        .ok()
+        .and_then(|s| emulated::parse_size(&s))
+        .unwrap_or(PIB);
+    let dir = TempDir::new().unwrap();
+    let backing = match std::env::var("STORMBLOCK_PIB_TEST_BACKING").as_deref() {
+        Ok("memory") => String::new(),
+        _ => format!("&backing={}/raw", dir.path().display()),
+    };
+    let uri = format!("emulated://{}?size={size}{backing}", uniq("raw"));
+    let dev = stormblock::drive::open_path(&uri, false).await.unwrap();
+    let t = std::time::Instant::now();
+    stormblock::fs::ext4::format(&dev, &stormblock::fs::ext4::Ext4Params::default()).await.unwrap();
+    let formatted = t.elapsed();
+    let report = stormblock::fs::ext4::check(&dev).await.unwrap();
+    eprintln!(
+        "{size}-byte ext4 straight onto {}: format {formatted:?}, check {:?} (clean: {})",
+        if backing.is_empty() { "memory" } else { "a directory" },
+        t.elapsed() - formatted,
+        report.is_clean()
+    );
+}
