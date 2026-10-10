@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — IN PROGRESS
+### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — WAITS ON fio.ext4.rs#13 (1 PiB seal)
 
 Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
 - [x] pins: mkfs-ext4 v4.1.0 + fio-ext4 v1.8.0, Cargo.lock by hand (same
@@ -206,7 +206,8 @@ Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
       for 32 GiB (mkfs.ext4.rs#11, fixed for v4.1.1: tag #20) → fio.ext4.rs#13
       (a release pinning v4.1.1). The ~10× format overhead in the engine: #403
 - [x] docs, CHANGELOG corrected (1 PiB not yet)
-- [ ] check.sh, golden; #300 proposed after fio.ext4.rs#13 (then: move both
+- [x] check.sh at 500ae70 ALL PASS (1137/1137)
+- [ ] golden; #300 proposed after fio.ext4.rs#13 (then: move both
       pins, run the 1P test). Found: `--all-targets` fails on benches/*.rs
       (autobenches), noted on #211
 
