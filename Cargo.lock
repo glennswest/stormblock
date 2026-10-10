@@ -739,8 +739,8 @@ checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
 
 [[package]]
 name = "fio-ext4"
-version = "1.7.0"
-source = "git+https://github.com/glennswest/fio.ext4.rs?tag=v1.7.0#2c8fa36410489a818affc79dad1eee9256063331"
+version = "1.8.0"
+source = "git+https://github.com/glennswest/fio.ext4.rs?tag=v1.8.0#d6b7d2eb39c8a40845a38a1eec32af3c2ed330dd"
 dependencies = [
  "async-trait",
  "mkfs-ext4",
@@ -1545,8 +1545,8 @@ dependencies = [
 
 [[package]]
 name = "mkfs-ext4"
-version = "3.0.0"
-source = "git+https://github.com/glennswest/mkfs.ext4.rs?tag=v3.0.0#c42268fa9f2fec8cd499472a777df235a8be4660"
+version = "4.1.0"
+source = "git+https://github.com/glennswest/mkfs.ext4.rs?tag=v4.1.0#a6e4519dbc6e21682055ed85f539f1f7f2dd70ba"
 dependencies = [
  "async-trait",
  "bitflags",

@@ -513,6 +513,7 @@ pub async fn seal_blockers(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<Vec<Sea
         &FsckOptions {
             repair: false,
             force: true,
+            preen: false,
         },
     )
     .await
@@ -534,6 +535,7 @@ pub async fn check(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<fsck::FsckRepor
         &FsckOptions {
             repair: false,
             force: true,
+            preen: false,
         },
     )
     .await
