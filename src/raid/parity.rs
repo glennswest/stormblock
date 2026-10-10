@@ -1,9 +1,19 @@
 //! SIMD parity computation — AVX2/AVX-512 (x86_64) and NEON (aarch64).
 //!
 //! Provides XOR parity for RAID 5, the RAID 6 Q syndrome, and recovery of any
-//! two lost strips of a RAID 6 stripe (`StripeStrips::recover`). XOR uses the
-//! best instruction set detected at runtime; GF(2^8) work is portable code
-//! (log tables, and eight lanes at a time for multiplying by g).
+//! two lost strips of a RAID 6 stripe (`StripeStrips::recover`). Everything
+//! uses the best instruction set detected at runtime (#255):
+//!
+//! * P and Q of a full stripe in one pass over the strips, 32 (AVX2) or 16
+//!   (NEON) bytes at a time held in registers: Horner's `q = g·q ^ d`, where
+//!   g·x is a shift and a conditional XOR of 0x1D per byte (as Linux's
+//!   `lib/raid6/avx2.c`).
+//! * Multiplying by a constant (Q's read-modify-write, recovery): two 16-entry
+//!   tables, c·low-nibble and c·high-nibble, looked up with `pshufb` /
+//!   `vqtbl1q` and XORed (the split-nibble method of ISA-L).
+//!
+//! The portable code (log tables; g·x eight lanes at a time in a u64) stays
+//! for other CPUs and is what the SIMD paths are tested against.
 
 /// Detected SIMD capability level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,17 +99,13 @@ impl ParityEngine {
             assert_eq!(strip.len(), len);
         }
 
-        // P is just XOR parity
-        self.compute_xor_parity(data_strips, p);
-
-        // Q = GF(2^8) weighted sum
-        compute_q_syndrome_generic(data_strips, q);
+        pq_at(self.level, data_strips, Some(p), q);
     }
 
     /// Fold a change to data strip `index` into a stripe's Q: `q ^= g^index * delta`,
     /// where `delta` is old data XOR new data — RAID-6's read-modify-write.
     pub fn q_update(&self, q: &mut [u8], delta: &[u8], index: usize) {
-        gf_mul_xor(q, delta, gf_pow2(index));
+        gf_mul_xor_at(self.level, q, delta, gf_pow2(index));
     }
 
     /// Reconstruct a missing data strip from surviving strips using XOR.
@@ -112,6 +118,28 @@ impl ParityEngine {
 }
 
 // --- SIMD detection ---
+
+/// The level detected once for this process: what the free GF(2^8)
+/// functions (recovery) use. A `ParityEngine` carries its own.
+fn simd() -> SimdLevel {
+    static LEVEL: std::sync::OnceLock<SimdLevel> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(detect_simd)
+}
+
+/// The levels this CPU can run, the portable one first (tests compare
+/// every one against it).
+#[cfg(test)]
+fn available_levels() -> Vec<SimdLevel> {
+    let mut v = vec![SimdLevel::Generic];
+    let d = detect_simd();
+    if d != SimdLevel::Generic {
+        v.push(d);
+    }
+    if d == SimdLevel::Avx512 {
+        v.push(SimdLevel::Avx2);
+    }
+    v
+}
 
 fn detect_simd() -> SimdLevel {
     #[cfg(target_arch = "x86_64")]
@@ -186,12 +214,43 @@ fn gf_mul2(x: u8) -> u8 {
 fn compute_q_syndrome_generic(data_strips: &[&[u8]], q: &mut [u8]) {
     q.iter_mut().for_each(|b| *b = 0);
     for strip in data_strips.iter().rev() {
-        q_step(q, strip);
+        q_step_generic(q, strip);
     }
 }
 
-/// `q = g*q ^ d`, byte-wise in GF(2^8).
+/// P (when asked for) and Q of a stripe, with the given level.
+fn pq_at(level: SimdLevel, data_strips: &[&[u8]], p: Option<&mut [u8]>, q: &mut [u8]) {
+    match level {
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx2 | SimdLevel::Avx512 => unsafe { pq_avx2(data_strips, p, q) },
+        #[cfg(target_arch = "aarch64")]
+        SimdLevel::Neon => unsafe { pq_neon(data_strips, p, q) },
+        _ => {
+            if let Some(p) = p {
+                xor_parity_generic(data_strips, p);
+            }
+            compute_q_syndrome_generic(data_strips, q);
+        }
+    }
+}
+
+/// `q = g*q ^ d`, byte-wise in GF(2^8), at the process's level.
 fn q_step(q: &mut [u8], d: &[u8]) {
+    q_step_at(simd(), q, d)
+}
+
+fn q_step_at(level: SimdLevel, q: &mut [u8], d: &[u8]) {
+    assert_eq!(q.len(), d.len());
+    match level {
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx2 | SimdLevel::Avx512 => unsafe { q_step_avx2(q, d) },
+        #[cfg(target_arch = "aarch64")]
+        SimdLevel::Neon => unsafe { q_step_neon(q, d) },
+        _ => q_step_generic(q, d),
+    }
+}
+
+fn q_step_generic(q: &mut [u8], d: &[u8]) {
     let len = q.len();
     let mut i = 0;
     while i + 8 <= len {
@@ -267,12 +326,50 @@ pub fn gf_inv(a: u8) -> u8 {
     GF.0[255 - GF.1[a as usize] as usize]
 }
 
+/// The split-nibble tables for multiplying by `c`: c·n and c·(n << 4) for
+/// every nibble n. c·b = lo[b & 15] ^ hi[b >> 4], since multiplying by c is
+/// linear over XOR.
+fn nibble_tables(c: u8) -> ([u8; 16], [u8; 16]) {
+    let (mut lo, mut hi) = ([0u8; 16], [0u8; 16]);
+    for n in 0..16u8 {
+        lo[n as usize] = gf_mul(c, n);
+        hi[n as usize] = gf_mul(c, n << 4);
+    }
+    (lo, hi)
+}
+
 /// `dst ^= c * src`, byte-wise.
 pub fn gf_mul_xor(dst: &mut [u8], src: &[u8], c: u8) {
+    gf_mul_xor_at(simd(), dst, src, c)
+}
+
+fn gf_mul_xor_at(level: SimdLevel, dst: &mut [u8], src: &[u8], c: u8) {
     assert_eq!(dst.len(), src.len());
     if c == 0 {
         return;
     }
+    match level {
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx2 | SimdLevel::Avx512 => {
+            if c == 1 {
+                return unsafe { xor_in_place_avx2(dst, src) };
+            }
+            let t = nibble_tables(c);
+            unsafe { gf_mul_avx2(dst, Some(src), &t) }
+        }
+        #[cfg(target_arch = "aarch64")]
+        SimdLevel::Neon => {
+            if c == 1 {
+                return unsafe { xor_in_place_neon(dst, src) };
+            }
+            let t = nibble_tables(c);
+            unsafe { gf_mul_neon(dst, Some(src), &t) }
+        }
+        _ => gf_mul_xor_generic(dst, src, c),
+    }
+}
+
+fn gf_mul_xor_generic(dst: &mut [u8], src: &[u8], c: u8) {
     if c == 1 {
         xor_in_place_generic(dst, src);
         return;
@@ -288,6 +385,20 @@ pub fn gf_mul_xor(dst: &mut [u8], src: &[u8], c: u8) {
 
 /// `buf = c * buf`, byte-wise.
 fn gf_scale(buf: &mut [u8], c: u8) {
+    gf_scale_at(simd(), buf, c)
+}
+
+fn gf_scale_at(level: SimdLevel, buf: &mut [u8], c: u8) {
+    match level {
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx2 | SimdLevel::Avx512 => unsafe { gf_mul_avx2(buf, None, &nibble_tables(c)) },
+        #[cfg(target_arch = "aarch64")]
+        SimdLevel::Neon => unsafe { gf_mul_neon(buf, None, &nibble_tables(c)) },
+        _ => gf_scale_generic(buf, c),
+    }
+}
+
+fn gf_scale_generic(buf: &mut [u8], c: u8) {
     let mut table = [0u8; 256];
     for (b, t) in table.iter_mut().enumerate() {
         *t = gf_mul(c, b as u8);
@@ -344,7 +455,7 @@ impl StripeStrips {
                 let mut out = self.p.clone().unwrap();
                 for (i, d) in self.data.iter().enumerate() {
                     if i != *x {
-                        xor_in_place_generic(&mut out, d.as_ref().unwrap());
+                        xor_in_place(&mut out, d.as_ref().unwrap());
                     }
                 }
                 self.data[*x] = Some(out);
@@ -357,7 +468,7 @@ impl StripeStrips {
                     q_step(&mut qx, d.as_deref().unwrap_or(&zero));
                 }
                 let q = self.q.as_ref().unwrap().as_ref().unwrap();
-                xor_in_place_generic(&mut qx, q);
+                xor_in_place(&mut qx, q);
                 gf_scale(&mut qx, gf_inv(gf_pow2(*x)));
                 self.data[*x] = Some(qx);
             }
@@ -367,15 +478,12 @@ impl StripeStrips {
                 let mut pxy = vec![0u8; len];
                 let mut qxy = vec![0u8; len];
                 let zero = vec![0u8; len];
-                for d in self.data.iter().rev() {
-                    let d = d.as_deref().unwrap_or(&zero);
-                    xor_in_place_generic(&mut pxy, d);
-                    q_step(&mut qxy, d);
-                }
+                let refs: Vec<&[u8]> = self.data.iter().map(|d| d.as_deref().unwrap_or(&zero)).collect();
+                pq_at(simd(), &refs, Some(&mut pxy), &mut qxy);
                 let p = self.p.as_ref().unwrap();
                 let q = self.q.as_ref().unwrap().as_ref().unwrap();
-                xor_in_place_generic(&mut pxy, p); // P + Pxy = Dx + Dy
-                xor_in_place_generic(&mut qxy, q); // Q + Qxy = g^x Dx + g^y Dy
+                xor_in_place(&mut pxy, p); // P + Pxy = Dx + Dy
+                xor_in_place(&mut qxy, q); // Q + Qxy = g^x Dx + g^y Dy
                 let gyx = gf_pow2(y - x);
                 let denom = gf_inv(gyx ^ 1);
                 let a = gf_mul(gyx, denom);
@@ -384,7 +492,7 @@ impl StripeStrips {
                 gf_mul_xor(&mut dx, &pxy, a);
                 gf_mul_xor(&mut dx, &qxy, b);
                 let mut dy = pxy;
-                xor_in_place_generic(&mut dy, &dx);
+                xor_in_place(&mut dy, &dx);
                 self.data[x] = Some(dx);
                 self.data[y] = Some(dy);
             }
@@ -396,12 +504,12 @@ impl StripeStrips {
             let refs: Vec<&[u8]> = self.data.iter().map(|d| d.as_deref().unwrap()).collect();
             if p_lost {
                 let mut p = vec![0u8; len];
-                xor_parity_generic(&refs, &mut p);
+                ParityEngine::with_level(simd()).compute_xor_parity(&refs, &mut p);
                 self.p = Some(p);
             }
             if q_lost {
                 let mut q = vec![0u8; len];
-                compute_q_syndrome_generic(&refs, &mut q);
+                pq_at(simd(), &refs, None, &mut q);
                 self.q = Some(Some(q));
             }
         }
@@ -409,7 +517,121 @@ impl StripeStrips {
     }
 }
 
+/// `dst ^= src` at the process's level.
+fn xor_in_place(dst: &mut [u8], src: &[u8]) {
+    ParityEngine::with_level(simd()).xor_in_place(dst, src)
+}
+
 // --- AVX2 implementations (x86_64) ---
+
+/// g·x on 32 bytes: shift each left, XOR 0x1D into those whose top bit was
+/// set (a signed compare against zero gives the mask).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn mul2_avx2(x: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let mask = _mm256_cmpgt_epi8(_mm256_setzero_si256(), x);
+    let red = _mm256_and_si256(mask, _mm256_set1_epi8(0x1D));
+    _mm256_xor_si256(_mm256_add_epi8(x, x), red)
+}
+
+/// P (if asked) and Q of a stripe in one pass: each 32-byte column of
+/// every strip is read once, P and Q kept in registers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pq_avx2(strips: &[&[u8]], mut p: Option<&mut [u8]>, q: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let len = q.len();
+    let last = strips.len() - 1;
+    let mut i = 0;
+    while i + 32 <= len {
+        let d = _mm256_loadu_si256(strips[last].as_ptr().add(i) as *const __m256i);
+        let (mut pa, mut qa) = (d, d);
+        for s in strips[..last].iter().rev() {
+            let d = _mm256_loadu_si256(s.as_ptr().add(i) as *const __m256i);
+            pa = _mm256_xor_si256(pa, d);
+            qa = _mm256_xor_si256(mul2_avx2(qa), d);
+        }
+        _mm256_storeu_si256(q.as_mut_ptr().add(i) as *mut __m256i, qa);
+        if let Some(p) = p.as_deref_mut() {
+            _mm256_storeu_si256(p.as_mut_ptr().add(i) as *mut __m256i, pa);
+        }
+        i += 32;
+    }
+    pq_tail(strips, p, q, i);
+}
+
+/// The bytes past the last whole vector, one at a time.
+fn pq_tail(strips: &[&[u8]], mut p: Option<&mut [u8]>, q: &mut [u8], from: usize) {
+    let last = strips.len() - 1;
+    for j in from..q.len() {
+        let (mut pa, mut qa) = (strips[last][j], strips[last][j]);
+        for s in strips[..last].iter().rev() {
+            pa ^= s[j];
+            qa = gf_mul2(qa) ^ s[j];
+        }
+        q[j] = qa;
+        if let Some(p) = p.as_deref_mut() {
+            p[j] = pa;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn q_step_avx2(q: &mut [u8], d: &[u8]) {
+    use std::arch::x86_64::*;
+    let len = q.len();
+    let mut i = 0;
+    while i + 32 <= len {
+        let x = _mm256_loadu_si256(q.as_ptr().add(i) as *const __m256i);
+        let s = _mm256_loadu_si256(d.as_ptr().add(i) as *const __m256i);
+        _mm256_storeu_si256(q.as_mut_ptr().add(i) as *mut __m256i, _mm256_xor_si256(mul2_avx2(x), s));
+        i += 32;
+    }
+    q_step_generic(&mut q[i..], &d[i..]);
+}
+
+/// `dst ^= c·src` (with `src`), or `dst = c·dst` (without): two `pshufb`
+/// lookups per 32 bytes, one per nibble.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn gf_mul_avx2(dst: &mut [u8], src: Option<&[u8]>, t: &([u8; 16], [u8; 16])) {
+    use std::arch::x86_64::*;
+    let lo = _mm256_broadcastsi128_si256(_mm_loadu_si128(t.0.as_ptr() as *const __m128i));
+    let hi = _mm256_broadcastsi128_si256(_mm_loadu_si128(t.1.as_ptr() as *const __m128i));
+    let nib = _mm256_set1_epi8(0x0F);
+    let len = dst.len();
+    let mut i = 0;
+    while i + 32 <= len {
+        let from = match src {
+            Some(s) => s.as_ptr().add(i),
+            None => dst.as_ptr().add(i),
+        };
+        let x = _mm256_loadu_si256(from as *const __m256i);
+        let l = _mm256_shuffle_epi8(lo, _mm256_and_si256(x, nib));
+        let h = _mm256_shuffle_epi8(hi, _mm256_and_si256(_mm256_srli_epi16(x, 4), nib));
+        let mut r = _mm256_xor_si256(l, h);
+        if src.is_some() {
+            r = _mm256_xor_si256(r, _mm256_loadu_si256(dst.as_ptr().add(i) as *const __m256i));
+        }
+        _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, r);
+        i += 32;
+    }
+    gf_mul_tail(dst, src, t, i);
+}
+
+/// The bytes past the last whole vector, through the same nibble tables.
+fn gf_mul_tail(dst: &mut [u8], src: Option<&[u8]>, t: &([u8; 16], [u8; 16]), from: usize) {
+    for j in from..dst.len() {
+        let x = match src {
+            Some(s) => s[j],
+            None => dst[j],
+        };
+        let r = t.0[(x & 15) as usize] ^ t.1[(x >> 4) as usize];
+        dst[j] = if src.is_some() { dst[j] ^ r } else { r };
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -495,6 +717,81 @@ unsafe fn xor_in_place_neon(dst: &mut [u8], src: &[u8]) {
         dst[i] ^= src[i];
         i += 1;
     }
+}
+
+// --- NEON GF(2^8) (aarch64) ---
+
+/// g·x on 16 bytes: an arithmetic shift right by 7 gives the mask of bytes
+/// whose top bit was set.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn mul2_neon(x: std::arch::aarch64::uint8x16_t) -> std::arch::aarch64::uint8x16_t {
+    use std::arch::aarch64::*;
+    let mask = vreinterpretq_u8_s8(vshrq_n_s8::<7>(vreinterpretq_s8_u8(x)));
+    veorq_u8(vshlq_n_u8::<1>(x), vandq_u8(mask, vdupq_n_u8(0x1D)))
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn pq_neon(strips: &[&[u8]], mut p: Option<&mut [u8]>, q: &mut [u8]) {
+    use std::arch::aarch64::*;
+    let len = q.len();
+    let last = strips.len() - 1;
+    let mut i = 0;
+    while i + 16 <= len {
+        let d = vld1q_u8(strips[last].as_ptr().add(i));
+        let (mut pa, mut qa) = (d, d);
+        for s in strips[..last].iter().rev() {
+            let d = vld1q_u8(s.as_ptr().add(i));
+            pa = veorq_u8(pa, d);
+            qa = veorq_u8(mul2_neon(qa), d);
+        }
+        vst1q_u8(q.as_mut_ptr().add(i), qa);
+        if let Some(p) = p.as_deref_mut() {
+            vst1q_u8(p.as_mut_ptr().add(i), pa);
+        }
+        i += 16;
+    }
+    pq_tail(strips, p, q, i);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn q_step_neon(q: &mut [u8], d: &[u8]) {
+    use std::arch::aarch64::*;
+    let len = q.len();
+    let mut i = 0;
+    while i + 16 <= len {
+        let x = vld1q_u8(q.as_ptr().add(i));
+        let s = vld1q_u8(d.as_ptr().add(i));
+        vst1q_u8(q.as_mut_ptr().add(i), veorq_u8(mul2_neon(x), s));
+        i += 16;
+    }
+    q_step_generic(&mut q[i..], &d[i..]);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn gf_mul_neon(dst: &mut [u8], src: Option<&[u8]>, t: &([u8; 16], [u8; 16])) {
+    use std::arch::aarch64::*;
+    let lo = vld1q_u8(t.0.as_ptr());
+    let hi = vld1q_u8(t.1.as_ptr());
+    let nib = vdupq_n_u8(0x0F);
+    let len = dst.len();
+    let mut i = 0;
+    while i + 16 <= len {
+        let from = match src {
+            Some(s) => s.as_ptr().add(i),
+            None => dst.as_ptr().add(i),
+        };
+        let x = vld1q_u8(from);
+        let l = vqtbl1q_u8(lo, vandq_u8(x, nib));
+        let h = vqtbl1q_u8(hi, vshrq_n_u8::<4>(x));
+        let mut r = veorq_u8(l, h);
+        if src.is_some() {
+            r = veorq_u8(r, vld1q_u8(dst.as_ptr().add(i)));
+        }
+        vst1q_u8(dst.as_mut_ptr().add(i), r);
+        i += 16;
+    }
+    gf_mul_tail(dst, src, t, i);
 }
 
 #[cfg(test)]
@@ -631,12 +928,60 @@ mod tests {
         let refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
         let mut q = vec![0u8; 37];
         compute_q_syndrome_generic(&refs, &mut q);
+        let (mut p2, mut q2) = (vec![0u8; 37], vec![0u8; 37]);
+        ParityEngine::detect().compute_raid6_parity(&refs, &mut p2, &mut q2);
+        assert_eq!(q2, q, "the detected level's Q");
         for i in 0..37 {
             let mut want = 0u8;
             for (k, s) in strips.iter().enumerate() {
                 want ^= gf_mul(gf_pow2(k), s[i]);
             }
             assert_eq!(q[i], want, "byte {i}");
+        }
+    }
+
+    /// Every level this CPU runs gives the portable code's bytes: P and Q
+    /// of stripes of 1..12 strips at lengths around the vector widths, one
+    /// Q step, and multiplying by every constant (#255).
+    #[test]
+    fn every_simd_level_matches_the_portable_code() {
+        let levels = available_levels();
+        eprintln!("levels checked: {levels:?}");
+        for &level in &levels {
+            for n in 1..=12usize {
+                for len in [0usize, 1, 15, 16, 17, 31, 32, 33, 63, 64, 100, 4096 + 7] {
+                    let strips: Vec<Vec<u8>> = (0..n as u32).map(|s| pattern(s * 7 + len as u32, len)).collect();
+                    let refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+                    let (mut p0, mut q0) = (vec![0u8; len], vec![0u8; len]);
+                    xor_parity_generic(&refs, &mut p0);
+                    compute_q_syndrome_generic(&refs, &mut q0);
+                    let (mut p, mut q) = (vec![0xAAu8; len], vec![0x55u8; len]);
+                    ParityEngine::with_level(level).compute_raid6_parity(&refs, &mut p, &mut q);
+                    assert_eq!(p, p0, "{level} P, {n} strips, {len} bytes");
+                    assert_eq!(q, q0, "{level} Q, {n} strips, {len} bytes");
+                    let mut q1 = vec![0x33u8; len];
+                    pq_at(level, &refs, None, &mut q1);
+                    assert_eq!(q1, q0, "{level} Q alone, {n} strips, {len} bytes");
+                }
+            }
+            for len in [0usize, 5, 16, 32, 47, 64, 1000] {
+                let a = pattern(3, len);
+                let d = pattern(4, len);
+                let (mut want, mut got) = (a.clone(), a.clone());
+                q_step_generic(&mut want, &d);
+                q_step_at(level, &mut got, &d);
+                assert_eq!(got, want, "{level} q_step, {len} bytes");
+                for c in 0..=255u8 {
+                    let (mut want, mut got) = (a.clone(), a.clone());
+                    gf_mul_xor_generic(&mut want, &d, c);
+                    gf_mul_xor_at(level, &mut got, &d, c);
+                    assert_eq!(got, want, "{level} mul_xor by {c:#x}, {len} bytes");
+                    let (mut want, mut got) = (a.clone(), a.clone());
+                    gf_scale_generic(&mut want, c);
+                    gf_scale_at(level, &mut got, c);
+                    assert_eq!(got, want, "{level} scale by {c:#x}, {len} bytes");
+                }
+            }
         }
     }
 

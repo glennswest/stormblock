@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use stormblock::raid::parity::ParityEngine;
+use stormblock::raid::parity::{ParityEngine, SimdLevel};
 
 fn bench_xor_parity(c: &mut Criterion) {
     let engine = ParityEngine::detect();
@@ -60,5 +60,28 @@ fn bench_raid6_parity(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_xor_parity, bench_xor_in_place, bench_raid6_parity);
+/// The portable code against the detected level on an 11-wide RAID-6 set
+/// (9 data strips): a full stripe's P+Q, and Q's read-modify-write (#255).
+fn bench_raid6_levels(c: &mut Criterion) {
+    let detected = ParityEngine::detect().level;
+    let mut group = c.benchmark_group("raid6_9+2");
+    let size = 65536;
+    let strips: Vec<Vec<u8>> = (0..9).map(|i| (0..size).map(|j| (j * 31 + i * 7) as u8).collect()).collect();
+    let refs: Vec<&[u8]> = strips.iter().map(|s| s.as_slice()).collect();
+    for level in [SimdLevel::Generic, detected] {
+        let engine = ParityEngine::with_level(level);
+        let (mut p, mut q) = (vec![0u8; size], vec![0u8; size]);
+        group.throughput(Throughput::Bytes(size as u64 * 9));
+        group.bench_function(BenchmarkId::new("pq", level.to_string()), |b| {
+            b.iter(|| engine.compute_raid6_parity(&refs, &mut p, &mut q));
+        });
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_function(BenchmarkId::new("q_update", level.to_string()), |b| {
+            b.iter(|| engine.q_update(&mut q, &strips[0], 5));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_xor_parity, bench_xor_in_place, bench_raid6_parity, bench_raid6_levels);
 criterion_main!(benches);
