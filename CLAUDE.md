@@ -181,6 +181,27 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Flow-over fast on SMR disks (2026-10-10, #401, P1) — IN PROGRESS
+
+X9 blades (ST2000DM008, drive-managed SMR): 16–21k extents left after Ready.
+Today each move: 1 MiB read from forge, 1 MiB write, 1 MiB read back; 8 at
+once completing in any order; a persist (slot table + metadata) per 64.
+- [ ] discard the partition before a fresh slab is laid (and the system
+      partition before it is re-laid): the disk knows every zone is empty
+- [ ] a window's copies coalesced: sources read in parallel (fences taken
+      with a bound, never waited on while holding others), destination
+      slots allocated together, written in slot order as runs of up to
+      32 MiB, read back per run, published per extent; one persist
+- [ ] an extent that reads all zeros is unmapped, not copied (single-leg,
+      non-parity volumes; the source owed as for a move)
+- [ ] health `flow_over`: bytes, extents moved, zero extents skipped, MB/s,
+      ETA, beside `flow_over_remaining`; the progress line too
+- [ ] tests: destination writes coalesced and ascending (a recording
+      device), zero extents unmapped and reading zeros, every byte after a
+      reopen; the existing flow-over and power-cut tests; the rate model
+      before/after; docs, CHANGELOG, check.sh, golden. Metal (an X9, the
+      Dell) is stormcentral's install
+
 ### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — WAITS ON fio.ext4.rs#13 (1 PiB seal)
 
 Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
