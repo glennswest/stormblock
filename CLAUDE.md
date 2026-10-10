@@ -201,8 +201,13 @@ Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
       format + check straight onto the drive took 70 s: the thin volume's
       discard/write-zeroes looked up every extent of the range. Now only the
       mapped ones (`ExtentTable::keys_in`, `GlobalExtentMap::mapped_in`)
-- [ ] the sweep 16T..1P after that fix; docs, CHANGELOG (the 1 PiB claim),
-      check.sh, golden, close. Found: `--all-targets` fails on benches/*.rs
+- [x] sweep after it: 16T 70 s, 64T 264 s, 256T 781 s; 1P: the format
+      completes (300 s straight onto a drive), mkfs-ext4 v4.1.0's check asks
+      for 32 GiB (mkfs.ext4.rs#11, fixed for v4.1.1: tag #20) → fio.ext4.rs#13
+      (a release pinning v4.1.1). The ~10× format overhead in the engine: #403
+- [x] docs, CHANGELOG corrected (1 PiB not yet)
+- [ ] check.sh, golden; #300 proposed after fio.ext4.rs#13 (then: move both
+      pins, run the 1P test). Found: `--all-targets` fails on benches/*.rs
       (autobenches), noted on #211
 
 ### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — DONE (golden-stormblock-041d379caced)
