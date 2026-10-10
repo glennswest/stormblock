@@ -195,9 +195,15 @@ Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
       slabs, templates 1T/16T, memory vs directory, health sampled, stall
       lines); `integration_emulated::an_ext4_template_of_a_petabyte_is_
       formatted_in_core` (ignored)
-- [ ] results on a build VM; then the runtime stall if it remains; docs,
-      CHANGELOG, check.sh, golden, close. Found: `--all-targets` fails on
-      benches/*.rs (autobenches), noted on #211
+- [x] through the API (build VM): dir/memory 1T 8.3/5.1 s, 16T 66.9/40.5 s,
+      health ≤ 1.5 ms, no stall lines
+- [x] 1 PiB: the template path took 348 s at 64T (≈ 1.5 h at 1P) while a
+      format + check straight onto the drive took 70 s: the thin volume's
+      discard/write-zeroes looked up every extent of the range. Now only the
+      mapped ones (`ExtentTable::keys_in`, `GlobalExtentMap::mapped_in`)
+- [ ] the sweep 16T..1P after that fix; docs, CHANGELOG (the 1 PiB claim),
+      check.sh, golden, close. Found: `--all-targets` fails on benches/*.rs
+      (autobenches), noted on #211
 
 ### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — DONE (golden-stormblock-041d379caced)
 
