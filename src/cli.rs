@@ -9921,9 +9921,14 @@ file = "{state}"
                 app.write(0, &vec![0xA5; SLOT as usize]).await.unwrap();
                 app.flush().await.unwrap();
             };
-            let done = tokio::time::timeout(std::time::Duration::from_secs(2), io).await;
+            // The move stays held until the I/O is done: what is measured is
+            // that it finishes *before* the gate opens, not within a wall
+            // clock (#297: 2 s failed once on a loaded build box). A lock the
+            // move held would keep it from finishing at all; the bound only
+            // stops a deadlock from hanging the suite.
+            let done = tokio::time::timeout(std::time::Duration::from_secs(60), io).await;
             gate.go.notify_one();
-            assert!(done.is_ok(), "a write and flush on another volume finish while a move is stuck");
+            assert!(done.is_ok(), "a write and flush on another volume finish while a move is stuck (gate still closed)");
         };
         let (flowed, ()) = tokio::join!(flow, check);
         let (moved, failed) = flowed.expect("the flow-over finished");
