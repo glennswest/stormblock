@@ -255,12 +255,15 @@ async fn stormcert_reads_an_attestation_with_its_own_bearer_and_only_that() {
     // The read: stormcert's bearer for server1, not server2, and nothing else.
     assert_eq!(call(&n, M::GET, "/boothost/server1/attestation", Some("stormcert-k8s"), None).await, 200);
     assert_eq!(call(&n, M::GET, "/boothost/server2/attestation", Some("stormcert-k8s"), None).await, 403);
-    assert_eq!(call(&n, M::GET, "/boothost/server1", Some("stormcert-k8s"), None).await, 401);
+    // Since #382 its bearer reads what its role allows (`get` boothost
+    // server1) and nothing else.
+    assert_eq!(call(&n, M::GET, "/boothost/server1", Some("stormcert-k8s"), None).await, 200);
+    assert_eq!(call(&n, M::GET, "/volumes", Some("stormcert-k8s"), None).await, 403);
     assert_eq!(call(&n, M::GET, "/boothost/server1/attestation", Some("nobody"), None).await, 401);
     assert_eq!(call(&n, M::GET, "/boothost/server1/attestation", None, None).await, 401);
     assert_eq!(call(&n, M::GET, "/boothost/server2/attestation", Some(NODE), None).await, 200);
     let sar: Vec<Value> = asked.lock().unwrap().iter().filter(|b| b["kind"] == "SubjectAccessReview").cloned().collect();
-    let attrs = &sar.last().unwrap()["spec"]["resourceAttributes"];
+    let attrs = &sar.iter().rev().find(|b| b["spec"]["resourceAttributes"]["name"] == "server2").unwrap()["spec"]["resourceAttributes"];
     assert_eq!((attrs["resource"].as_str(), attrs["verb"].as_str(), attrs["name"].as_str()), (Some("boothost"), Some("get"), Some("server2")));
 
     let v: Value = reqwest::Client::new()
