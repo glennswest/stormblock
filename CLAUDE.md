@@ -902,7 +902,9 @@ sends no host NQN, so closing by default would break it: the owner's call.
       released (stormcos#453); consumers rustkube-node#236 and
       vmcloud-image-operator#48 open; registry's standing clones are exported
       with no host and would be refused: stormblock-registry#119. Proposed
-      after #119
+      after #119. Rechecked 2026-10-10: #119 and rustkube-node#236 closed;
+      vmcloud-image-operator#48 open, stormcos#453 unpublished: proposed
+      after vmcloud-image-operator#48
 
 ### The listing generation moves on attach, detach and slab state (2026-10-08, #218) — DONE
 
