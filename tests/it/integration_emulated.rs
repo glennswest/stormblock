@@ -239,6 +239,7 @@ async fn an_ext4_format_straight_onto_an_emulated_drive() {
     let t = std::time::Instant::now();
     stormblock::fs::ext4::format(&dev, &stormblock::fs::ext4::Ext4Params::default()).await.unwrap();
     let formatted = t.elapsed();
+    eprintln!("{size}-byte ext4 formatted in {formatted:?}; checking");
     let report = stormblock::fs::ext4::check(&dev).await.unwrap();
     eprintln!(
         "{size}-byte ext4 straight onto {}: format {formatted:?}, check {:?} (clean: {})",
