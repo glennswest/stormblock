@@ -179,7 +179,7 @@ grep -E "riding through|answering again" /run/engine.log | sed 's/^/LOG /' | hea
 # --- give up: offline for 30 s, past the 20 s window ---
 echo offline > $STATE && echo "GUEST sda offline at $(now), for 30 s"
 t0=$(now)
-dd if=/tmp/pat of=$dev bs=4096 skip=9000 seek=9000 count=1 oflag=direct conv=fsync,notrunc 2>/tmp/dd.err &
+dd if=/tmp/pat of=$dev bs=4096 skip=100 seek=9000 count=1 oflag=direct conv=fsync,notrunc 2>/tmp/dd.err &
 f=$!
 sleep 26
 h=$(health); echo "LOG health past the window: $h"
@@ -188,9 +188,9 @@ case "$h" in *'"drives_unreachable"'*'"gave_up":true'*) r giveup-named PASS ;;
 grep -q "the drive is unreachable" /run/engine.log && r giveup-logged PASS || r giveup-logged FAIL
 sleep 4
 echo running > $STATE && echo "GUEST sda running at $(now)"
-if wait $f; then echo "LOG the write during the outage completed: $(cat /tmp/dd.err)"; fi
+if wait $f; then r giveup-write-failed "FAIL (the write during the outage succeeded)"; else r giveup-write-failed PASS; echo "LOG the write during the outage: $(cat /tmp/dd.err | tail -1)"; fi
 sleep 2
-if dd if=/tmp/pat of=$dev bs=4096 skip=9001 seek=9001 count=1 oflag=direct conv=fsync,notrunc 2>/dev/null; then
+if dd if=/tmp/pat of=$dev bs=4096 skip=101 seek=9001 count=1 oflag=direct conv=fsync,notrunc 2>/dev/null; then
     r giveup-recovered PASS
 else
     r giveup-recovered FAIL
@@ -219,7 +219,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG|STACK|WATCHDOG)|ERROR|panick'
 
 for m in ride-named ride-progress ride-no-eio ride-data ride-cleared \
-         giveup-named giveup-logged giveup-recovered giveup-cleared engine-alive; do
+         giveup-named giveup-logged giveup-write-failed giveup-recovered giveup-cleared engine-alive; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi
