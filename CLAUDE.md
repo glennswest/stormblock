@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — IN PROGRESS
+### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — DONE (golden-stormblock-041d379caced)
 
 - [x] `parity.rs`: AVX2 and NEON P+Q in one pass (Horner, g·x = shift +
       masked 0x1D), q_step, constant multiply by split-nibble pshufb/vqtbl1q;
@@ -189,8 +189,9 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 - [x] test `every_simd_level_matches_the_portable_code` (1–12 strips, odd
       lengths, every constant); bench `raid6_9+2` (generic vs detected);
       `ci-parity-aarch64.sh` (the module alone for aarch64 under qemu-user)
-- [ ] build VM: raid/parity tests, bench numbers, NEON run; docs
-      (raid-sets.md "Not here", README), CHANGELOG; check.sh; golden; close
+- [x] raid/parity/stripe 118/118; NEON 16/16 under qemu-aarch64-static;
+      bench 9+2 × 64 KiB: P+Q 7.45 → 66.5 GiB/s, q_update 4.3 → 66.8 GiB/s;
+      docs, CHANGELOG; check.sh at f58d445 ALL PASS (1135/1135); golden
 
 ### Ride through an HBA reset on the system slab's drive (2026-10-10, #391, P0) — DONE (golden-stormblock-049ae1a488af)
 
