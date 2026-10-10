@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Drive identity is stable (2026-10-10, #65) — IN PROGRESS
+### Drive identity is stable (2026-10-10, #65) — DONE (golden-stormblock-aa88009c1bc2)
 
 - [x] `identity::lasting_uuid` (block: wwn > model+serial(+nsid) > path, +
       `:part<n>`; file: canonical path), `uuid_of_key`; SasDevice,
@@ -188,7 +188,8 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
       crash test device and the VFIO stub keep random ids (no lasting identity)
 - [x] tests: identity units (fake sysfs, files), `integration_destructive::
       a_drive_keeps_its_id_across_opens_and_restarts`; README, CHANGELOG
-- [ ] build, check.sh, golden, close
+- [x] targeted 431/431 at efd328e; check.sh ALL PASS (1117/1117); golden
+      golden-stormblock-aa88009c1bc2
 
 ### Pallet copy/move/install hazards (2026-10-10, #57) — DONE (golden-stormblock-eff7a69c10e0)
 
