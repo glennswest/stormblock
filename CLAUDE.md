@@ -180,6 +180,15 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### test/ moves to stormblock-test (2026-10-10, #371) — WAITS ON stormblock-test#3
+
+stormblock-test builds against main and passes `short` in its own sc-build;
+its first run on a test machine (stormblock-test#3) is still open. Once it
+passes, remove `test/` and the workspace member, `Cargo.lock` in its own
+commit; `check.sh` stage 1 runs stormblock-test's `test/check.sh` with
+`STORM_COMPONENT_DIR`; README and this file point there. Proposed after
+stormblock-test#3.
+
 ### A slow fstemplate seal on 11.93 (2026-10-10, #336, P2) — DONE (golden-stormblock-322d3e7591a0)
 
 Not reproduced: 11.95, same engine, seals 8–11 ms. By reading: on 11.93 the
