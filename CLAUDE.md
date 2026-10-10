@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A slow fstemplate seal on 11.93 (2026-10-10, #336, P2) — IN PROGRESS
+### A slow fstemplate seal on 11.93 (2026-10-10, #336, P2) — DONE (golden-stormblock-322d3e7591a0)
 
 Not reproduced: 11.95, same engine, seals 8–11 ms. By reading: on 11.93 the
 volume seal's persist ran under the manager and flushed a flow-over's remote
@@ -193,7 +193,9 @@ slabs over NVMe/TCP with no timeout (#358; fixed there and by #364). Found:
 - [x] one timing line per seal (check, manager wait, seal; WARN > 5 s)
 - [x] test `template::tests::a_template_is_ready_only_once_its_volume_is_sealed`
       (fair-lock ordering, cancellation, the cut between); CHANGELOG
-- [ ] build, check.sh, golden, close
+- [x] template tests 69/69; the new test fails with the old order
+      (throwaway branch: `Ready` while the volume is unsealed); check.sh at
+      f83e840 ALL PASS (1118/1118); golden golden-stormblock-322d3e7591a0
 
 ### Drive identity is stable (2026-10-10, #65) — DONE (golden-stormblock-aa88009c1bc2)
 
