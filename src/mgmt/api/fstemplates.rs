@@ -498,7 +498,12 @@ async fn clone_template(
     };
 
     match template::clone_template(&state.volume_manager, &state.fstemplates, &id, &spec).await {
-        Ok(c) => (
+        Ok(c) => {
+            // Pool admission (#152).
+            if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
+                return r;
+            }
+            (
             axum::http::StatusCode::CREATED,
             Json(json!({
                 "volume_id": c.volume_id.0,
@@ -509,7 +514,8 @@ async fn clone_template(
                 "verified": c.verified,
             })),
         )
-            .into_response(),
+            .into_response()
+        }
         Err(e) => err(e),
     }
 }
@@ -589,6 +595,10 @@ async fn claim_clone(
     let spec = template::ClaimSpec { size_bytes: req.size_bytes, label: req.label };
     match template::claim(&state.volume_manager, &state.fstemplates, &id, &spec).await {
         Ok(c) => {
+            // Pool admission (#152).
+            if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
+                return r;
+            }
             metrics::counter!("stormblock_fstemplate_claims_total").increment(1);
             Json(json!({
                 "volume_id": c.volume_id.0,

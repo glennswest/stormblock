@@ -49,6 +49,19 @@ pub struct StormBlockConfig {
     /// The metadata format new slabs are written in (#158).
     #[serde(default)]
     pub metadata: MetadataSection,
+    /// Pool admission (#152).
+    #[serde(default)]
+    pub capacity: CapacitySection,
+}
+
+/// `[capacity]` (#152): what a claim past what the data half can promise
+/// meets. `report` (the default): admitted, and logged as one `enforce`
+/// would refuse. `enforce`: refused with the numbers. The system half is
+/// counted and never refuses. `$STORMBLOCK_ADMISSION` too.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CapacitySection {
+    pub admission: Option<String>,
 }
 
 /// `[metadata]` (#158): the format new slabs, and the data directory's
@@ -324,6 +337,7 @@ impl Default for StormBlockConfig {
             serve: ServeSection::default(),
             erase: EraseConfig::default(),
             metadata: MetadataSection::default(),
+            capacity: CapacitySection::default(),
         }
     }
 }

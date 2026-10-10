@@ -814,6 +814,10 @@ async fn create_volume(
                 Err(e) => return super::fstemplates::err(e),
             }
         };
+        // Pool admission (#152), before anyone is told it exists.
+        if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, vol_id).await {
+            return r;
+        }
         let mut vm = state.volume_manager.lock().await;
         // Before the volume is described, so it is never briefly an orphan.
         if req.owner.is_some() {
@@ -945,6 +949,12 @@ async fn create_volume(
     };
     match created {
         Ok(vol_id) => {
+            // Pool admission (#152): counted with the claim, no lock held.
+            drop(vm);
+            if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, vol_id).await {
+                return r;
+            }
+            let mut vm = state.volume_manager.lock().await;
             if req.owner.is_some() {
                 let _ = vm.set_owner(vol_id, req.owner.clone()).await;
             }
@@ -1289,6 +1299,9 @@ async fn clone_volume(
     spec.role = role;
     match crate::fs::template::clone_volume(&state.volume_manager, VolumeId(uuid), &spec).await {
         Ok(c) => {
+            if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
+                return r;
+            }
             let mut vm = state.volume_manager.lock().await;
             // Before the clone is described, so it is never briefly an orphan.
             if req.owner.is_some() {

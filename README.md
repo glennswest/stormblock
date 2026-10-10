@@ -1439,6 +1439,16 @@ data**, not reformatted, so a source claimed before a reboot comes back intact.
 curl -s http://node:9090/api/v1/slabs/pool
 ```
 
+The same answer carries **`capacity`** (#152): what each pool (`system`,
+`data`, a dedicated array) can promise — its capacity × each drive's
+**overcommit**, which stormdrive sets with `PUT
+/api/v1/drives/{path}/overcommit {enabled, ratio, drive}` and the engine
+keeps — and what it has promised: written + every unsealed volume's room to
+grow. Each slab in `GET /api/v1/slabs` carries its `committed_bytes`. A data
+claim past what its pool can promise is logged (`[capacity] admission =
+"report"`, the default) or refused with 507 (`"enforce"`); the system half is
+never refused. See docs/multi-drive.md §5.
+
 Pressure with every source claimed is logged at error and reported as
 `sources_exhausted` — the pool is under pressure and the engine is out of ways
 to answer it, which is not a state to discover late. `stormblock_pool_used_pct`,

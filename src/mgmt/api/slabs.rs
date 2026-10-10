@@ -45,6 +45,13 @@ pub struct SlabResponse {
     /// WWN, model — so a slab can be joined to a drive and a drive's free
     /// space read off its slabs (#136). For a slab in a partition, the disk.
     pub drive: DriveRef,
+    /// What is promised out of this slab (#152, stormdrive#13): what is
+    /// written on it plus its share of its pool's unwritten promise (thin
+    /// volumes' room to grow), in proportion to what it can promise.
+    pub committed_bytes: u64,
+    /// The pool it promises into: `system`, `data`, or `array:<slab>` (#152).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pool: String,
 }
 
 /// A drive, named the way stormdrive names it.
@@ -130,6 +137,7 @@ pub(crate) fn parse_tier(s: &str) -> Option<StorageTier> {
 
 async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "slabs", "method" => "list").increment(1);
+    let acc = crate::mgmt::capacity::account(&state).await;
     let reg = state.slab_registry.read().await;
     let items: Vec<SlabResponse> = reg.iter()
         .map(|(id, slab)| {
@@ -154,6 +162,8 @@ async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 total_bytes_human: human_size(total * slot_size),
                 free_bytes: free * slot_size,
                 free_bytes_human: human_size(free * slot_size),
+                committed_bytes: acc.slab_committed.get(id).copied().unwrap_or(allocated * slot_size),
+                pool: acc.slab_pool.get(id).cloned().unwrap_or_default(),
             }
         })
         .collect();
@@ -172,6 +182,7 @@ async fn get_slab(
     };
     let slab_id = SlabId(uuid);
 
+    let acc = crate::mgmt::capacity::account(&state).await;
     let reg = state.slab_registry.read().await;
     match reg.get(&slab_id) {
         Some(slab) => {
@@ -196,6 +207,8 @@ async fn get_slab(
                 total_bytes_human: human_size(total * slot_size),
                 free_bytes: free * slot_size,
                 free_bytes_human: human_size(free * slot_size),
+                committed_bytes: acc.slab_committed.get(&slab_id).copied().unwrap_or(allocated * slot_size),
+                pool: acc.slab_pool.get(&slab_id).cloned().unwrap_or_default(),
             }).into_response()
         }
         None => ApiError::not_found(format!("slab {uuid} not found")),
@@ -364,6 +377,8 @@ async fn format_and_register(
                 total_bytes_human: human_size(total * slot_size),
                 free_bytes: free * slot_size,
                 free_bytes_human: human_size(free * slot_size),
+                committed_bytes: allocated * slot_size,
+                pool: String::new(),
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
@@ -558,9 +573,14 @@ pub async fn pool_status(State(state): State<Arc<AppState>>) -> Response {
     // The watcher's own view when there is one — it carries the decision
     // history. Otherwise sample directly, so the accounting is available on a
     // node that never enabled growth.
+    let capacity = crate::mgmt::capacity::report(&state).await;
     if let Some(cell) = &state.pool_pressure {
         if let Some(status) = cell.read().await.clone() {
-            return Json(status).into_response();
+            let mut v = serde_json::to_value(status).unwrap_or_default();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("capacity".into(), capacity);
+            }
+            return Json(v).into_response();
         }
     }
 
@@ -573,6 +593,7 @@ pub async fn pool_status(State(state): State<Arc<AppState>>) -> Response {
         "usage": usage,
         "sources_remaining": 0,
         "slabs_added": 0,
+        "capacity": capacity,
     }))
     .into_response()
 }

@@ -237,30 +237,47 @@ automatic pass after a drive is added.
 
 ## 5. Capacity and overcommit
 
-**Status: design (#152), not implemented.**
+**Status: built (#152, owner: the master's A with C's switch).**
 
-Thin volumes promise more than the pool holds. That is their purpose, and
-nothing bounds it today. The only check is `/v1` create's `free_bytes >=
-size` against free space at that moment. A write that finds no slot fails
-back to the host (NVMe `CAPACITY_EXCEEDED`, SCSI `SPACE ALLOCATION FAILED`).
+Thin volumes promise more than the pool holds. That is their purpose; what
+bounds it is the pool's **promisable** capacity.
 
-**Proposed** (stormdrive#13 holds the per-drive half):
-
-* **Per drive:** `overcommit: false` (the default for data drives) or `true`
-  with a ratio, set through stormdrive and the console.
-* **Per pool:** *promisable* = Σ over its slabs of (capacity × the drive's
-  ratio, or × 1). *Committed* = Σ of the virtual size of the volumes placed
-  there, where a clone's shared extents count once, at the golden.
-* **Enforced when a claim binds** (a volume create, a template clone, a `/v1`
-  create). A claim that would pass *promisable* is refused **with the reason**,
-  and rustkube-node publishes the pool's headroom to the scheduler
-  (rustkube-node#62).
-* Reported on `GET /api/v1/slabs/pool`, per drive on `/api/v1/drives`, and on
-  `/metrics`: committed, written and free.
+* **Per drive:** overcommit off, or a ratio from 1 to 16, set by stormdrive
+  (stormdrive#13): `PUT /api/v1/drives/{path, URL-encoded}/overcommit
+  {"enabled", "ratio", "drive": {"uuid", "wwn", "serial", "path"}}`. The
+  engine keeps it (`<data_dir>/overcommit.json`) and matches it to slabs by
+  WWN, else serial, else path, so it applies to any drive with slabs (the
+  node's own disk too). `GET` on the same path reads it back.
+* **Per pool:** a pool is a role (`system`, `data`); a dedicated array slab
+  (#150) is its own pool (`array:<slab>`). *Promisable* = Σ over its slabs of
+  capacity × the drive's ratio (× 1 when off). *Written* = its allocated
+  slots. *Committed* = written + what each **unsealed** volume placed there
+  can still take: the extents it does not hold alone (unwritten, or shared
+  with a golden it may copy-on-write), times its redundancy overhead. Sealed
+  volumes (goldens, blanks, snapshots) take nothing more, and a shared extent
+  is written once, at its owner.
+* **Per slab:** `committed_bytes` on `GET /api/v1/slabs` = what is written on
+  it + its pool's unwritten promise in proportion to what it can promise
+  (what stormdrive reads per drive).
+* **Admission, when a claim binds** (`POST /api/v1/volumes`, with or without
+  `from_template`, a volume clone, a template clone or claim, a `/v1`
+  create): counted with the claim. **The system half never refuses**: it is
+  laid by the install and thin by design; it is counted and reported. **The
+  data half** (and a dedicated array) follows `[capacity] admission`
+  (`$STORMBLOCK_ADMISSION`): `report`, the default, admits the claim and logs
+  that `enforce` would refuse it; `enforce` takes the claim back and answers
+  507 `insufficient_capacity` (`/v1`: `out_of_space`), naming the pool's
+  numbers. Turning `enforce` on by default is the owner's call, once real
+  nodes publish their numbers.
+* Reported on `GET /api/v1/slabs/pool` (`capacity`: admission, and each
+  pool's promisable, written, committed, free, headroom, enforced) and on
+  `/metrics` (`stormblock_capacity_{promisable,committed,written,free}_bytes{pool}`,
+  `stormblock_slab_committed_bytes{slab}`). rustkube-node publishes the
+  headroom to the scheduler (rustkube-node#62).
 
 ## 6. What the console shows
 
-**Status:** the console reads the engine's placement (`GET /api/v1/volumes?placement=true`, stormconsole#29, closed). What follows is what it should show; overcommit and headroom wait on #152.
+**Status:** the console reads the engine's placement (`GET /api/v1/volumes?placement=true`, stormconsole#29, closed). What follows is what it should show; overcommit and headroom are served since #152 (§5).
 
 * **Drives:** identity (serial, WWN, model), where it is (shelf, bay, hba),
   health, its slabs and how full each is, overcommit setting, and a drain in

@@ -309,6 +309,11 @@ pub fn register_metrics() {
     // Slab capacity — sampled at scrape time so thin-allocation growth and
     // reclaim are both visible (#25).
     metrics::describe_gauge!("stormblock_slabs_total", "Number of formatted slabs");
+    metrics::describe_gauge!("stormblock_capacity_promisable_bytes", "What a pool's slabs can promise: capacity x each drive's overcommit (#152)");
+    metrics::describe_gauge!("stormblock_capacity_committed_bytes", "What a pool has promised: written + unsealed volumes' room to grow (#152)");
+    metrics::describe_gauge!("stormblock_capacity_written_bytes", "What a pool's slabs hold (#152)");
+    metrics::describe_gauge!("stormblock_capacity_free_bytes", "A pool's free slots, in bytes (#152)");
+    metrics::describe_gauge!("stormblock_slab_committed_bytes", "What is promised out of a slab: written + its share of its pool's promise (#152)");
     metrics::describe_gauge!(
         "stormblock_slab_capacity_bytes",
         "Slab capacity in bytes"
@@ -376,6 +381,20 @@ async fn refresh_capacity_gauges(state: &crate::mgmt::AppState) {
     metrics::gauge!("stormblock_slab_capacity_bytes_total").set(cap_total as f64);
     metrics::gauge!("stormblock_slab_allocated_bytes_total").set(alloc_total as f64);
     metrics::gauge!("stormblock_slab_free_bytes_total").set(free_total as f64);
+    drop(registry);
+
+    // What each pool can promise and what it has promised (#152).
+    let acc = crate::mgmt::capacity::account(state).await;
+    for p in &acc.pools {
+        let pool = p.pool.clone();
+        metrics::gauge!("stormblock_capacity_promisable_bytes", "pool" => pool.clone()).set(p.promisable_bytes as f64);
+        metrics::gauge!("stormblock_capacity_committed_bytes", "pool" => pool.clone()).set(p.committed_bytes as f64);
+        metrics::gauge!("stormblock_capacity_written_bytes", "pool" => pool.clone()).set(p.written_bytes as f64);
+        metrics::gauge!("stormblock_capacity_free_bytes", "pool" => pool).set(p.free_bytes as f64);
+    }
+    for (id, c) in &acc.slab_committed {
+        metrics::gauge!("stormblock_slab_committed_bytes", "slab" => id.0.to_string()).set(*c as f64);
+    }
 }
 
 /// Refresh per-drive gauges from the drives this node has open (#68).

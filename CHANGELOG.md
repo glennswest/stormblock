@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### 2026-10-10
+- **feat:** #152 (owner: the master's recommendation, A with C's switch): pool admission under per-drive overcommit.
+  - **Overcommit per drive:** `PUT /api/v1/drives/{path}/overcommit {enabled, ratio 1-16, drive{uuid,wwn,serial,path}}` (stormdrive#13). It is kept in `<data_dir>/overcommit.json` and matched to slabs by WWN, else serial, else path. `GET` reads it back.
+  - **Pools and their numbers:** a pool is a role, or a dedicated array slab.
+    - `promisable` = capacity × ratio;
+    - `committed` = written + what unsealed volumes can still take (extents not held alone × legs).
+  - **Where it is reported:**
+    - `committed_bytes` and `pool` on every `GET /api/v1/slabs` item;
+    - `capacity` on `GET /api/v1/slabs/pool`;
+    - `stormblock_capacity_*_bytes{pool}` and `stormblock_slab_committed_bytes` on `/metrics`.
+  - **Admission:** checked when a claim binds (volume create and clone, template clone and claim, `/v1` create).
+    - **System half:** never refuses.
+    - **Data half:** `[capacity] admission = "report"` (the default: admitted and logged) or `"enforce"` (taken back, 507).
 ### 2026-10-09
 - **feat:** #202 (owner's decision B): a `boothost/default` claim's `serial` finds the host it is an operator-set **alias** of, keeping that machine's image, and the MAC becomes an alias of it too.
   - **Not by name:** a host merely *named* by a serial is never claimed this way. That is what keeps the MicroCloud blades, which share a chassis serial naming server1's old host, apart.

@@ -401,6 +401,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/drain", get(drain_status).post(start_drain).delete(cancel_drain))
         .route("/{id}/health", axum::routing::post(drive_health))
         .route("/{id}/emulate", axum::routing::post(emulate))
+        .route("/{id}/overcommit", get(get_overcommit).put(set_overcommit))
         .with_state(state)
 }
 
@@ -540,6 +541,74 @@ async fn set_labels(
     };
     state.slab_registry.write().await.label_device(&path, labels.clone());
     Json(serde_json::json!({ "path": path, "labels": labels.to_string() })).into_response()
+}
+
+/// The body stormdrive sends (stormdrive#13).
+#[derive(Debug, Deserialize)]
+struct OvercommitRequest {
+    enabled: bool,
+    #[serde(default = "one")]
+    ratio: f64,
+    #[serde(default)]
+    drive: OvercommitDrive,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OvercommitDrive {
+    #[serde(default)]
+    uuid: String,
+    #[serde(default)]
+    wwn: String,
+    #[serde(default)]
+    serial: String,
+    #[serde(default)]
+    path: String,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// `PUT /api/v1/drives/{path}/overcommit` (#152, stormdrive#13): how far a
+/// drive's slabs may promise past what they hold. `{path}` is the drive's
+/// device path, URL-encoded; the drive is matched to slabs by its WWN, else
+/// its serial, else that path, so it need not be a drive this engine opened
+/// (a node's own disk, #133). Kept in `<data_dir>/overcommit.json`.
+async fn set_overcommit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<OvercommitRequest>,
+) -> Response {
+    let o = crate::mgmt::capacity::DriveOvercommit {
+        uuid: req.drive.uuid,
+        wwn: req.drive.wwn,
+        serial: req.drive.serial,
+        path: if req.drive.path.is_empty() { id } else { req.drive.path },
+        enabled: req.enabled,
+        ratio: if req.enabled { req.ratio } else { 1.0 },
+    };
+    if let Err(e) = crate::mgmt::capacity::set(&state, o.clone()) {
+        return ApiError::bad_request(e);
+    }
+    tracing::info!(
+        "drive {} (wwn {:?}, serial {:?}): overcommit {}",
+        o.path,
+        o.wwn,
+        o.serial,
+        if o.enabled { format!("{}x", o.ratio) } else { "off".into() }
+    );
+    Json(serde_json::json!({ "drive": o, "factor": o.factor() })).into_response()
+}
+
+/// `GET /api/v1/drives/{path}/overcommit`: what this node was told for the
+/// drive, or off.
+async fn get_overcommit(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let found = crate::mgmt::capacity::load(&state).into_iter().find(|o| o.path == id || o.wwn == id || o.serial == id);
+    match found {
+        Some(o) => Json(serde_json::json!({ "drive": o, "factor": o.factor() })).into_response(),
+        None => Json(serde_json::json!({ "drive": { "path": id, "enabled": false, "ratio": 1.0 }, "factor": 1.0 }))
+            .into_response(),
+    }
 }
 
 /// Resolve a drive by uuid or path to `(device, path)`.

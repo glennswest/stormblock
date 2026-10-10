@@ -418,18 +418,20 @@ with CHAP configured accepted an initiator offering `AuthMethod=None`
       daemon, CHAP only in the file); check.sh at d4b7576 ALL PASS (nextest
       1067/1067); README, CHANGELOG
 
-### Pool admission under per-drive overcommit (2026-10-09, #152, P2) — WAITING ON THE OWNER
+### Pool admission under per-drive overcommit (2026-10-10, #152, P2) — IN PROGRESS
 
-stormdrive#13 pushes `PUT /api/v1/drives/{path}/overcommit {enabled, ratio,
-drive{uuid,wwn,serial,path}}` and reads `committed_bytes` per slab. Enforcing
-at ratio 1 everywhere would refuse system-half claims on most nodes (the
-release's thin clones count at their virtual size; role-less claims land
-there, #317). Asked on #152 (needs-owner): **A** enforce on the data half
-only, system half reported (recommended); **B** everywhere; **C** a node
-setting report|enforce, default report. Definitions stated there (committed
-= written + what unsealed volumes can still take × legs; pool = role;
-per-slab share pro rata to promisable). Nothing built yet; the setting and
-the reporting come first once answered.
+Owner: the master's recommendation (A with C's switch): system half counted
+and reported, never refused; data half behind `[capacity] admission =
+report|enforce`, default report.
+- [x] `mgmt/capacity.rs`: overcommit store (`overcommit.json`, wwn > serial
+      > path), `account` (pools by role / dedicated slab; promisable,
+      written, committed = written + unsealed volumes' non-exclusive extents
+      × overhead; per-slab share), `admit`, `admit_or_undo` (507)
+- [x] `PUT/GET /api/v1/drives/{path}/overcommit`; `committed_bytes`/`pool`
+      on slabs; `capacity` on `/slabs/pool`; `stormblock_capacity_*` gauges
+- [x] admission at volume create/clone, template clone/claim, `/v1` create
+- [x] test `integration_capacity`; docs (multi-drive §5, README), CHANGELOG
+- [ ] build, check.sh, golden, close; tell stormdrive#13
 
 ### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — DONE (golden-stormblock-a22b89c02880)
 

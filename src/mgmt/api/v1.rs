@@ -1378,6 +1378,13 @@ async fn create_volume(
                         }
                     }
                 }
+                // Pool admission (#152): counted with the claim; a refused
+                // one is taken back and answered 507 out_of_space.
+                drop(vm);
+                if let Err(why) = crate::mgmt::capacity::admit(&state, id).await {
+                    let _ = state.volume_manager.lock().await.delete_volume(id).await;
+                    return Err(V1Error::OutOfSpace(why));
+                }
                 Some(id.0)
             }
             // Refused the way `/api/v1` refuses it (#151).

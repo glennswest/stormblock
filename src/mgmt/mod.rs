@@ -3,6 +3,7 @@
 pub mod api;
 pub mod auth;
 pub mod kubeauth;
+pub mod capacity;
 pub mod boot_override;
 pub mod config;
 pub mod metrics;
