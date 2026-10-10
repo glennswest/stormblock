@@ -23,6 +23,12 @@
 //! reading what survived. A `CrashDevice` does the same for a small device
 //! held whole in memory; an install disk is tens of GiB.
 //!
+//! **Directory backing** costs what is written, not the range touched (#300):
+//! each chunk file is opened once and its handle kept (up to
+//! [`OPEN_CHUNKS`]), which chunks exist is known without asking the
+//! filesystem, and the bytes held are counted per chunk from an `fstat` after
+//! each change, never by rescanning the directory.
+//!
 //! **Failing one on command** is the rebuild test: [`set_failed`] (or
 //! `POST /api/v1/drives/{id}/emulate {"failed": true}`) makes every I/O
 //! answer EIO until it is cleared, as a drive that died would.
@@ -43,6 +49,8 @@ const CHUNK: u64 = 1 << 30;
 /// Memory pages are spread over this many locks, so parallel I/O to one
 /// drive does not queue on one mutex.
 const SHARDS: usize = 64;
+/// Chunk files a directory-backed drive keeps open at once.
+pub const OPEN_CHUNKS: usize = 256;
 
 /// What an `emulated://` path names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +146,116 @@ impl EmulatedSpec {
 
 enum Store {
     Memory(Vec<Mutex<HashMap<u64, Box<[u8]>>>>),
-    Dir(PathBuf),
+    Dir(Arc<DirStore>),
+}
+
+/// A directory of chunk files and what is known about them.
+struct DirStore {
+    dir: PathBuf,
+    state: Mutex<DirState>,
+}
+
+#[derive(Default)]
+struct DirState {
+    /// Every chunk file there is, with the bytes it holds (`st_blocks`).
+    chunks: HashMap<u64, u64>,
+    /// Open handles and when each was last used.
+    open: HashMap<u64, (Arc<std::fs::File>, u64)>,
+    tick: u64,
+}
+
+impl DirStore {
+    /// Open `dir`, learning its chunk files and what they hold (once).
+    fn open(dir: &std::path::Path) -> std::io::Result<(DirStore, u64)> {
+        std::fs::create_dir_all(dir)?;
+        let mut st = DirState::default();
+        let mut total = 0;
+        for e in std::fs::read_dir(dir)?.flatten() {
+            let name = e.file_name();
+            let Some(chunk) = name.to_str().and_then(|n| n.strip_suffix(".chunk")).and_then(|h| u64::from_str_radix(h, 16).ok())
+            else {
+                continue;
+            };
+            let held = e.metadata().map(|m| held_bytes(&m)).unwrap_or(0);
+            st.chunks.insert(chunk, held);
+            total += held;
+        }
+        Ok((DirStore { dir: dir.to_path_buf(), state: Mutex::new(st) }, total))
+    }
+
+    fn path(&self, chunk: u64) -> PathBuf {
+        self.dir.join(format!("{chunk:012x}.chunk"))
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, DirState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The chunk's open file: `None` when it does not exist and `create` is
+    /// false. A handle is opened once and kept; past [`OPEN_CHUNKS`] the one
+    /// used longest ago is closed.
+    fn file(&self, chunk: u64, create: bool) -> std::io::Result<Option<Arc<std::fs::File>>> {
+        let mut st = self.state();
+        st.tick += 1;
+        let tick = st.tick;
+        if let Some((f, used)) = st.open.get_mut(&chunk) {
+            *used = tick;
+            return Ok(Some(Arc::clone(f)));
+        }
+        if !create && !st.chunks.contains_key(&chunk) {
+            return Ok(None);
+        }
+        let path = self.path(chunk);
+        let f = Arc::new(dtime(T_OPEN, || {
+            std::fs::OpenOptions::new().create(create).read(true).write(true).open(&path)
+        })?);
+        st.chunks.entry(chunk).or_insert(0);
+        if st.open.len() >= OPEN_CHUNKS {
+            if let Some(oldest) = st.open.iter().min_by_key(|(_, (_, u))| *u).map(|(c, _)| *c) {
+                st.open.remove(&oldest);
+                dir_stats::add(T_CLOSE, std::time::Duration::ZERO);
+            }
+        }
+        st.open.insert(chunk, (Arc::clone(&f), tick));
+        Ok(Some(f))
+    }
+
+    /// After a write or a punch: the chunk's held bytes from one `fstat`,
+    /// and the drive's total moved by the difference.
+    fn account(&self, chunk: u64, f: &std::fs::File, stored: &AtomicU64) {
+        let mut st = self.state();
+        let held = dtime(T_STAT, || f.metadata()).map(|m| held_bytes(&m)).unwrap_or(0);
+        let old = st.chunks.insert(chunk, held).unwrap_or(0);
+        if held >= old {
+            stored.fetch_add(held - old, Ordering::Relaxed);
+        } else {
+            stored.fetch_sub(old - held, Ordering::Relaxed);
+        }
+    }
+
+    /// A whole chunk zeroed: its file goes.
+    fn remove(&self, chunk: u64, stored: &AtomicU64) -> std::io::Result<()> {
+        let mut st = self.state();
+        st.open.remove(&chunk);
+        if let Some(old) = st.chunks.remove(&chunk) {
+            dtime(T_REMOVE, || std::fs::remove_file(self.path(chunk)))?;
+            stored.fetch_sub(old, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+/// Bytes a file holds on disk (its allocated blocks; holes hold none).
+fn held_bytes(m: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        m.blocks() * 512
+    }
+    #[cfg(not(unix))]
+    {
+        m.len()
+    }
 }
 
 struct Inner {
@@ -188,11 +305,11 @@ pub fn open(spec: &EmulatedSpec) -> DriveResult<EmulatedDevice> {
         }
         return Ok(d.clone());
     }
-    let store = match &spec.backing {
-        None => Store::Memory((0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect()),
+    let (store, stored) = match &spec.backing {
+        None => (Store::Memory((0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect()), 0),
         Some(dir) => {
-            std::fs::create_dir_all(dir).map_err(DriveError::Io)?;
-            Store::Dir(dir.clone())
+            let (d, held) = DirStore::open(dir).map_err(DriveError::Io)?;
+            (Store::Dir(Arc::new(d)), held)
         }
     };
     let id = DeviceId {
@@ -201,10 +318,6 @@ pub fn open(spec: &EmulatedSpec) -> DriveResult<EmulatedDevice> {
         model: format!("stormblock emulated {}", human(spec.size)),
         path: spec.uri(),
         wwn: String::new(),
-    };
-    let stored = match &store {
-        Store::Dir(dir) => dir_stored(dir),
-        Store::Memory(_) => 0,
     };
     let dev = EmulatedDevice {
         inner: Arc::new(Inner {
@@ -284,7 +397,7 @@ fn human(n: u64) -> String {
 pub mod dir_stats {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    pub const KINDS: [&str; 8] = ["task", "open", "read", "write", "punch", "remove", "rescan", "exists"];
+    pub const KINDS: [&str; 8] = ["task", "open", "read", "write", "punch", "remove", "stat", "close"];
     static CALLS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
     static NANOS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
@@ -320,30 +433,8 @@ const T_READ: usize = 2;
 const T_WRITE: usize = 3;
 const T_PUNCH: usize = 4;
 const T_REMOVE: usize = 5;
-const T_RESCAN: usize = 6;
-const T_EXISTS: usize = 7;
-
-fn dir_stored(dir: &std::path::Path) -> u64 {
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter_map(|e| e.metadata().ok())
-                .map(|m| {
-                    #[cfg(unix)]
-                    {
-                        m.blocks() * 512
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        m.len()
-                    }
-                })
-                .sum()
-        })
-        .unwrap_or(0)
-}
+const T_STAT: usize = 6;
+const T_CLOSE: usize = 7;
 
 fn eio(name: &str) -> DriveError {
     DriveError::Io(std::io::Error::new(
@@ -431,16 +522,13 @@ impl EmulatedDevice {
         }
     }
 
-    fn chunk_path(dir: &std::path::Path, chunk: u64) -> PathBuf {
-        dir.join(format!("{chunk:012x}.chunk"))
-    }
-
-    async fn dir_io(&self, dir: PathBuf, offset: u64, op: DirOp) -> DriveResult<Vec<u8>> {
-        let stored = Arc::clone(&self.inner);
+    async fn dir_io(&self, store: Arc<DirStore>, offset: u64, op: DirOp) -> DriveResult<Vec<u8>> {
+        let inner = Arc::clone(&self.inner);
         let queued = std::time::Instant::now();
         tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
             use std::os::unix::fs::FileExt;
             dir_stats::add(T_TASK, queued.elapsed()); // waiting for a blocking thread
+            let stored = &inner.stored;
             let mut out = Vec::new();
             let (len, data) = match &op {
                 DirOp::Read(n) => (*n as u64, None),
@@ -456,10 +544,9 @@ impl EmulatedDevice {
                 let chunk = at / CHUNK;
                 let off = at % CHUNK;
                 let n = (CHUNK - off).min(len - done);
-                let path = Self::chunk_path(&dir, chunk);
                 match &op {
                     DirOp::Read(_) => {
-                        if let Ok(f) = dtime(T_OPEN, || std::fs::File::open(&path)) {
+                        if let Some(f) = store.file(chunk, false)? {
                             let dst = &mut out[done as usize..(done + n) as usize];
                             let mut got = 0usize;
                             while got < dst.len() {
@@ -473,25 +560,23 @@ impl EmulatedDevice {
                     }
                     DirOp::Write(_) => {
                         let src = &data.unwrap()[done as usize..(done + n) as usize];
-                        let zero = src.iter().all(|&b| b == 0);
-                        if !(zero && !dtime(T_EXISTS, || path.exists())) {
-                            let f = dtime(T_OPEN, || {
-                                std::fs::OpenOptions::new().create(true).read(true).write(true).open(&path)
-                            })?;
-                            dtime(T_WRITE, || f.write_all_at(src, off))?;
-                            if !zero {
-                                stored.stored.fetch_add(n, Ordering::Relaxed);
+                        if src.iter().all(|&b| b == 0) {
+                            // Zeros where nothing is stored store nothing.
+                            if let Some(f) = store.file(chunk, false)? {
+                                dtime(T_PUNCH, || punch_hole(&f, off, n))?;
+                                store.account(chunk, &f, stored);
                             }
+                        } else if let Some(f) = store.file(chunk, true)? {
+                            dtime(T_WRITE, || f.write_all_at(src, off))?;
+                            store.account(chunk, &f, stored);
                         }
                     }
                     DirOp::Zero(_) => {
                         if off == 0 && n == CHUNK {
-                            if dtime(T_REMOVE, || std::fs::remove_file(&path)).is_ok() {
-                                stored.stored.store(dtime(T_RESCAN, || dir_stored(&dir)), Ordering::Relaxed);
-                            }
-                        } else if dtime(T_EXISTS, || path.exists()) {
-                            let f = dtime(T_OPEN, || std::fs::OpenOptions::new().write(true).open(&path))?;
+                            store.remove(chunk, stored)?;
+                        } else if let Some(f) = store.file(chunk, false)? {
                             dtime(T_PUNCH, || punch_hole(&f, off, n))?;
+                            store.account(chunk, &f, stored);
                         }
                     }
                 }
@@ -555,7 +640,7 @@ impl EmulatedDevice {
                 self.mem_write(shards, offset, None, len);
                 Ok(())
             }
-            Store::Dir(dir) => self.dir_io(dir.clone(), offset, DirOp::Zero(len)).await.map(|_| ()),
+            Store::Dir(d) => self.dir_io(Arc::clone(d), offset, DirOp::Zero(len)).await.map(|_| ()),
         }
     }
 }
@@ -632,8 +717,8 @@ impl BlockDevice for EmulatedDevice {
         }
         match &self.inner.store {
             Store::Memory(shards) => Self::mem_read(shards, offset, buf),
-            Store::Dir(dir) => {
-                let out = self.dir_io(dir.clone(), offset, DirOp::Read(buf.len())).await?;
+            Store::Dir(d) => {
+                let out = self.dir_io(Arc::clone(d), offset, DirOp::Read(buf.len())).await?;
                 buf.copy_from_slice(&out);
             }
         }
@@ -650,8 +735,8 @@ impl BlockDevice for EmulatedDevice {
         }
         match &self.inner.store {
             Store::Memory(shards) => self.mem_write(shards, offset, Some(buf), buf.len() as u64),
-            Store::Dir(dir) => {
-                self.dir_io(dir.clone(), offset, DirOp::Write(buf.to_vec())).await?;
+            Store::Dir(d) => {
+                self.dir_io(Arc::clone(d), offset, DirOp::Write(buf.to_vec())).await?;
             }
         }
         Ok(buf.len())
@@ -819,5 +904,59 @@ mod tests {
         // A whole chunk zeroed is a file removed.
         d2.write_zeroes((at / CHUNK + 1) * CHUNK, CHUNK).await.unwrap();
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// What the directory holds, the slow way (what the drive used to rescan).
+    fn held_in(dir: &std::path::Path) -> u64 {
+        std::fs::read_dir(dir).unwrap().flatten().map(|e| held_bytes(&e.metadata().unwrap())).sum()
+    }
+
+    /// #300: the running count is what the directory holds, after writes,
+    /// overwrites (counted once), zero writes, punches, a whole chunk
+    /// removed, more chunks than handles kept open, and a reopen; and a
+    /// zero write where nothing is stored creates no file.
+    #[tokio::test]
+    async fn a_directory_backing_counts_what_it_holds_without_rescanning() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("cnt-{}", uuid::Uuid::new_v4().simple());
+        let uri = format!("emulated://{name}?size=1P&backing={}", dir.path().display());
+        let d = open(&spec(&uri)).unwrap();
+        let block: Vec<u8> = (0..65536).map(|i| (i % 251) as u8 + 1).collect();
+        let check = |d: &EmulatedDevice, what: &str| {
+            assert_eq!(d.stored_bytes(), held_in(dir.path()), "{what}");
+        };
+        d.write(0, &block).await.unwrap();
+        check(&d, "one write");
+        for _ in 0..5 {
+            d.write(0, &block).await.unwrap();
+        }
+        check(&d, "the same range overwritten");
+        d.write(3 * CHUNK + 4096, &vec![0u8; 65536]).await.unwrap();
+        assert!(!dir.path().join(format!("{:012x}.chunk", 3)).exists(), "zeros create nothing");
+        d.write(1 << 20, &block).await.unwrap();
+        d.write(1 << 20, &vec![0u8; 65536]).await.unwrap();
+        check(&d, "a zero write over data");
+        d.write_zeroes(0, 32768).await.unwrap();
+        check(&d, "a punch");
+        // More chunks than handles kept open: every one still written and read.
+        let many = OPEN_CHUNKS as u64 + 40;
+        for c in 0..many {
+            d.write(c * CHUNK + 8192, &block[..4096]).await.unwrap();
+        }
+        check(&d, "many chunks");
+        let mut back = vec![0u8; 4096];
+        for c in [0, 1, many / 2, many - 1] {
+            d.read(c * CHUNK + 8192, &mut back).await.unwrap();
+            assert_eq!(back, block[..4096], "chunk {c}");
+        }
+        d.write_zeroes(5 * CHUNK, CHUNK).await.unwrap();
+        assert!(!dir.path().join(format!("{:012x}.chunk", 5)).exists());
+        check(&d, "a chunk removed");
+        let before = d.stored_bytes();
+        registry().lock().unwrap().remove(&name);
+        let d2 = open(&spec(&uri)).unwrap();
+        assert_eq!(d2.stored_bytes(), before, "the same count after a reopen");
+        d2.write(5 * CHUNK, &block).await.unwrap();
+        check(&d2, "a removed chunk written again");
     }
 }
