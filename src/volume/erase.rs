@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use rand::{RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
 use crate::drive::erase::{EraseLevel, Pass};
 use crate::drive::slab::EraseJob;

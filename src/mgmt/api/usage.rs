@@ -26,7 +26,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::mgmt::AppState;
-use crate::volume::{VolumeId, VolumeManager};
+use crate::volume::VolumeId;
 
 /// One way a volume is being served right now.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -315,6 +315,7 @@ pub fn matches(u: &Usage, owned: bool, kind: Option<&str>, in_use: Option<bool>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::volume::VolumeManager;
 
     fn usage(kind: &'static str, in_use: bool) -> Usage {
         Usage { kind: Some(kind), in_use: Some(in_use), attachments: Vec::new(), consumer: None }

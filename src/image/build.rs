@@ -964,8 +964,9 @@ enum GoldenSource {
         dev: std::sync::Arc<dyn crate::drive::BlockDevice>,
         len: u64,
         /// Withdrawn when the build finishes. An export left behind is a
-        /// volume served to the network that nobody is using.
-        export: Option<VolumeExport>,
+        /// volume served to the network that nobody is using. Held, never
+        /// read: its drop withdraws the export.
+        _export: Option<VolumeExport>,
     },
 }
 
@@ -1110,7 +1111,7 @@ impl GoldenSource {
         Ok(GoldenSource::Volume {
             dev: std::sync::Arc::new(dev),
             len,
-            export: Some(VolumeExport { engine: base, id: export_id }),
+            _export: Some(VolumeExport { engine: base, id: export_id }),
         })
     }
 

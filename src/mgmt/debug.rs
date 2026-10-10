@@ -515,7 +515,7 @@ pub async fn task_dump(limit: Duration) -> String {
 }
 
 /// Start the heartbeat and the watchdog thread (once per process).
-pub fn start(state: Arc<AppState>) {
+pub fn start(_state: Arc<AppState>) {
     static STARTED: OnceLock<()> = OnceLock::new();
     if STARTED.set(()).is_err() {
         return;

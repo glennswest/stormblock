@@ -275,7 +275,7 @@ impl WiringTable {
 
         // Next time, start after this one.
         self.next_portal = portal_base
-            .saturating_add((((u32::from(portal_port.saturating_sub(portal_base)) + 1) % span) as u16));
+            .saturating_add(((u32::from(portal_port.saturating_sub(portal_base)) + 1) % span) as u16);
 
         // Only iSCSI rows consume a LUN id; burning one for an NVMe export
         // would imply a shared-target LUN that is never created.

@@ -965,14 +965,6 @@ pub async fn ensure_volume_subsystem(
     Some((nqn, port))
 }
 
-pub(crate) async fn ensure_nvme_namespace(
-    state: &AppState,
-    volume_id: &str,
-    local_id: Option<Uuid>,
-) -> Option<u32> {
-    ensure_nvme_namespace_ro(state, volume_id, local_id, false).await
-}
-
 #[cfg(feature = "nvmeof")]
 pub(crate) async fn ensure_nvme_namespace_ro(
     state: &AppState,

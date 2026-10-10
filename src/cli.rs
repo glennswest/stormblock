@@ -1875,9 +1875,7 @@ pub async fn run() -> anyhow::Result<()> {
                         );
                     }
                 }
-                let dev = (
-                    open_storage(device).await?
-                );
+                let dev = open_storage(device).await?;
                 // Every slab carries its own volume records, whatever its role,
                 // and how much room that takes scales with the slots it can hand
                 // out — leave it at none and every write to it is acknowledged and
@@ -1988,9 +1986,7 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             }
             SlabAction::Info { device } => {
-                let dev = (
-                    inspect_storage(device).await?
-                );
+                let dev = inspect_storage(device).await?;
                 let slab = Slab::open(dev).await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("Slab {}", slab.slab_id());
@@ -4832,7 +4828,7 @@ pub async fn run() -> anyhow::Result<()> {
     /// calls it before exporting anything; a test drives it the same way (#239).
     ///
     /// `Ok(None)`: the disk already holds everything this boot would copy.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", test))]
     pub(crate) async fn take_local_disk(
         mgr: &mut crate::volume::VolumeManager,
         disk: &str,
@@ -5699,6 +5695,7 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn flow_system_half<P, F>(
         gem: &Arc<crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>>,
         registry: &Arc<crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>>,
@@ -7198,7 +7195,7 @@ async fn claim_boot_uri(
     // back from a power cut together, and whichever loses the race should
     // wait rather than drop someone to an initramfs shell.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let mut last = String::new();
+    let mut last: String;
     loop {
         // Named, so forge knows this is the boot's last claim (#354): an
         // override's `local` and `recovery` are reported done by it.
@@ -7927,9 +7924,7 @@ async fn handle_migrate_boot(
         source_slab.total_slots(), source_slab.allocated_slots());
 
     // 2. Open local target device
-    let local_dev = (
-        open_storage(target_device).await?
-    );
+    let local_dev = open_storage(target_device).await?;
 
     // 3. Build registry + GEM from source slab
     let mut registry = crate::drive::slab_registry::SlabRegistry::new();

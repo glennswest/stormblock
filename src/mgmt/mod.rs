@@ -705,6 +705,7 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
     });
 
     // `api::router` carries `/metrics` and the credential check over it.
+    #[cfg_attr(not(feature = "ui"), allow(unused_mut))]
     let mut router = api::router(state.clone());
 
     // Mount web UI at /ui when the ui feature is enabled

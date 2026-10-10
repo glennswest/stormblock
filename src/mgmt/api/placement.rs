@@ -22,7 +22,7 @@ use serde::Serialize;
 use super::slabs::DriveRef;
 use crate::drive::slab::SlabId;
 use crate::mgmt::AppState;
-use crate::volume::{VolumeId, VolumeManager};
+use crate::volume::VolumeId;
 
 /// A volume's placement.
 #[derive(Debug, Clone, Serialize)]
