@@ -180,6 +180,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Pallet copy/move/install hazards (2026-10-10, #57) — IN PROGRESS
+
+- [x] 1. docs/pallets.md: a copy gets a new GUID, a move keeps it; GUIDs can
+      still repeat across drives (dd, RAID legs)
+- [x] 2. `move_pallet` refuses a boot pallet unless `force`
+      (`move_pallet_with`, CLI `--force`, API `force`); convert forces
+- [x] 3. a copy is unproven (`successful` clear, DEFAULT_TRIES); move,
+      convert and whole-drive adopt keep the attributes (`copy_pallet_keeping`)
+- [x] 4. image spec `successful`; `tries = 0` without it refused
+- [x] tests: integration_pallet (move keeps, boot refused/forced, copy
+      unproven), build.rs spec test; docs, CHANGELOG
+- [ ] build, check.sh, golden, close
+
 ### Closing a drive with an API-formatted slab (2026-10-10, #66) — DONE (golden-stormblock-18d96b22dae0)
 
 `slab_on` (DELETE /api/v1/drives) matched by pointer; `POST /api/v1/slabs`

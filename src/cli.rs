@@ -724,6 +724,10 @@ enum PalletAction {
         id: String,
         #[arg(long)]
         to: String,
+        /// Move a boot pallet too. Its ESP does not move with it (#57); copy
+        /// it instead unless the machine boots from the destination already.
+        #[arg(long)]
+        force: bool,
     },
     /// Add members to a pallet, publishing it as a new version
     ///
@@ -2572,9 +2576,9 @@ pub async fn run() -> anyhow::Result<()> {
                 print!("copied: ");
                 print_pallet(&loc);
             }
-            PalletAction::Move { id, to } => {
+            PalletAction::Move { id, to, force } => {
                 let dest = pe(store.drive_index_of(to))?;
-                let loc = pe(mgr.move_pallet(id_of(id)?, dest).await)?;
+                let loc = pe(mgr.move_pallet_with(id_of(id)?, dest, *force).await)?;
                 print!("moved: ");
                 print_pallet(&loc);
             }

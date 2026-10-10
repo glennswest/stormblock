@@ -38,6 +38,14 @@ const COPY_CHUNK: usize = 4 * 1024 * 1024;
 /// Boot attempts a freshly published pallet gets before the ladder skips it.
 pub const DEFAULT_TRIES: u8 = 3;
 
+/// Whether a copy keeps the source's `successful` bit (a relocation) or must
+/// earn its own (a new leg, an install) (#57).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Proven {
+    Kept,
+    Earned,
+}
+
 /// The highest priority the 4-bit GPT field can hold — what activation sets.
 const TOP_PRIORITY: u8 = 15;
 
@@ -988,7 +996,7 @@ impl PalletManager {
                     self.store.drives()[src_drive].path
                 ))
             })?;
-        self.copy_pallet(src.id, dest_drive).await
+        self.copy_pallet_keeping(src.id, dest_drive).await
     }
 
     // -------------------------------------------------------------- convert
@@ -1072,10 +1080,13 @@ impl PalletManager {
             // identity to preserve, so it is always a copy; the source only
             // stops being a pallet when its drive is reinitialised.
             let moved = opts.remove_source && !loc.is_whole_drive();
+            // A conversion empties the whole drive, boot pallets included:
+            // the operator asked for all of it, so the boot guard does not
+            // apply, and the pallets keep their attributes (#57).
             let outcome = if moved {
-                self.move_pallet(loc.id, dest_drive).await
+                self.move_pallet_with(loc.id, dest_drive, true).await
             } else {
-                self.copy_pallet(loc.id, dest_drive).await
+                self.copy_pallet_keeping(loc.id, dest_drive).await
             };
             match outcome {
                 Ok(new_loc) => {
@@ -1131,7 +1142,23 @@ impl PalletManager {
     /// Nothing inside a pallet is absolute, so this is a copy and not a
     /// rewrite — the manifest, the extents and the signature all travel
     /// unchanged. The copy is verified at the destination before it counts.
+    ///
+    /// **The copy is unproven** (#57): it gets the source's priority, sealed
+    /// and read-only bits, but `successful` clear and [`DEFAULT_TRIES`]
+    /// attempts. A pallet that booted on one drive has not booted from this
+    /// one, and a copy claiming to be known-good would leave the first real
+    /// failure with no fallback. It earns the bit on its first good boot.
     pub async fn copy_pallet(&self, id: Uuid, dest_drive: usize) -> Result<PalletLocation> {
+        self.copy_pallet_as(id, dest_drive, Proven::Earned).await
+    }
+
+    /// The copy a relocation makes (`move`, `convert`, `adopt`): the same
+    /// pallet in a new place, its attributes kept as they were.
+    async fn copy_pallet_keeping(&self, id: Uuid, dest_drive: usize) -> Result<PalletLocation> {
+        self.copy_pallet_as(id, dest_drive, Proven::Kept).await
+    }
+
+    async fn copy_pallet_as(&self, id: Uuid, dest_drive: usize, proven: Proven) -> Result<PalletLocation> {
         let src = self.store.find(id).await?;
         if !src.is_readable() {
             return Err(PalletError::Refused(format!(
@@ -1198,7 +1225,12 @@ impl PalletManager {
         // Verified: now it is a candidate on the same terms as the source.
         let copy = self.store.find(new_id).await?;
         if !copy.is_whole_drive() {
-            self.apply_attributes(&[(copy.drive_index, copy.entry_index, src.attributes)]).await?;
+            let mut a = src.attributes;
+            if proven == Proven::Earned {
+                a.successful = false;
+                a.tries_left = DEFAULT_TRIES;
+            }
+            self.apply_attributes(&[(copy.drive_index, copy.entry_index, a)]).await?;
         }
         self.store.find(new_id).await
     }
@@ -1210,14 +1242,31 @@ impl PalletManager {
     /// interruption can leave two disks claiming to be the same pallet. An
     /// interruption between them leaves the pallet present under a new
     /// identity — recoverable, and the content is already verified.
+    ///
+    /// **A boot pallet is refused** (#57) unless `force`: the ESP it is paired
+    /// with is not a pallet and does not travel, so a moved boot pallet can
+    /// leave a machine that does not come back. Copy it instead (with an ESP
+    /// on the other drive) and each drive boots on its own.
     pub async fn move_pallet(&self, id: Uuid, dest_drive: usize) -> Result<PalletLocation> {
+        self.move_pallet_with(id, dest_drive, false).await
+    }
+
+    /// [`move_pallet`](Self::move_pallet), `force` taking a boot pallet too.
+    pub async fn move_pallet_with(&self, id: Uuid, dest_drive: usize, force: bool) -> Result<PalletLocation> {
         let src = self.store.find(id).await?;
         if src.drive_index == dest_drive {
             return Err(PalletError::Refused(
                 "source and destination are the same drive".into(),
             ));
         }
-        let copy = self.copy_pallet(id, dest_drive).await?;
+        if src.kind == PalletKind::Boot && !force {
+            return Err(PalletError::Refused(format!(
+                "pallet {id} is a boot pallet: its ESP does not move with it, and the machine may not \
+                 come back. Copy it to the other drive instead (each drive then boots on its own), \
+                 or move it with force"
+            )));
+        }
+        let copy = self.copy_pallet_keeping(id, dest_drive).await?;
 
         let src_dev = self.store.drive(src.drive_index)?.device.clone();
         let mut sg = Gpt::read(&src_dev).await?;

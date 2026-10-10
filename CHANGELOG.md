@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **fix:** #57: the hazards on the pallet copy/move/install path.
+  - **A copy is unproven:** a pallet copy (mirror leg, local-boot install, image `from_image`, `pallet copy`) lands with `successful` clear and 3 tries, and earns the bit on its first good boot. A relocation (`move`, `convert`, whole-drive `adopt`) keeps its attributes.
+  - **Moving a boot pallet is refused unless forced:** `pallet move --force`, or `"force": true` on the API. Its ESP stays behind.
+  - **The image spec:** it gains `successful = true` for the proven fallback, and refuses `tries = 0` without it, which used to build a pallet that never appears in the ladder.
+  - **`docs/pallets.md`:** a copy gets a new UniquePartitionGUID and a move keeps it; GUIDs can still repeat across drives (dd, RAID legs), so a lookup by id must expect several.
 - **fix:** #66: `DELETE /api/v1/drives/{id}` refuses (409, unless `force`) a drive that carries a slab `POST /api/v1/slabs` formatted. The guard compared devices by pointer, and the slab API opens a device of its own, so it never fired. It now matches by device, path or disk, as the drive's slab listing does.
 - **feat:** #143 (owner: 1A, 2A): a stopped VM's disk becomes a named golden.
   - **The verb:** `POST /api/v1/goldens {volume, name, provenance}` snapshots the volume (refused while in use unless `force`), seals the snapshot, digests every byte (sha256), and names it `golden-<name>-<sha12>`. It never overwrites; the same content again answers the existing golden.

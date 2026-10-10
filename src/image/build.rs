@@ -378,10 +378,25 @@ impl ImageBuilder {
             let mgr = PalletManager::new(store);
 
             for entry in &self.spec.pallets {
+                // `tries = 0` on a pallet nobody confirmed is a pallet that
+                // is never a candidate: it builds and verifies and simply
+                // never appears in the ladder (#57). Say so instead.
+                if entry.tries == Some(0) && entry.successful != Some(true) {
+                    return Err(ImageError::Spec(format!(
+                        "pallet '{}': tries = 0 without successful = true is never booted; \
+                         mark the proven fallback successful = true, or give it tries",
+                        entry.name.as_deref().unwrap_or("(from_image)")
+                    )));
+                }
                 let landed = match &entry.from_image {
                     Some(src) => self.copy_in(&mgr, entry, src).await?,
                     None => vec![self.publish_one(&mgr, entry).await?],
                 };
+                if entry.successful == Some(true) {
+                    for id in &landed {
+                        mgr.mark_successful(*id).await?;
+                    }
+                }
                 for id in landed {
                     let loc = mgr.get(id).await?;
                     let verdict = mgr.verify(id).await?;
@@ -1439,5 +1454,48 @@ mod out_kind_tests {
             }
         }
         eprintln!("no block device present; skipping");
+    }
+
+    /// #57: `tries = 0` without `successful` is refused; `successful = true`
+    /// is how a spec says "this is the proven fallback".
+    #[tokio::test]
+    async fn a_spec_marks_its_proven_fallback_and_refuses_a_pallet_that_never_boots() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let spec = |extra: &str| {
+            crate::image::ImageSpec::from_toml(&format!(
+                r#"
+size = "64M"
+[[pallet]]
+name = "stormcos-boot"
+kind = "boot"
+priority = 14
+{extra}
+members = [ {{ name = "cmdline", role = "cmdline", kind = "bootconfig", text = "root=ublk0 ro" }} ]
+"#
+            ))
+            .unwrap()
+        };
+        let out = dir.path().join("never.img");
+        let e = ImageBuilder::new(spec("tries = 0")).build(&out).await.unwrap_err().to_string();
+        assert!(e.contains("tries = 0"), "{e}");
+
+        let out = dir.path().join("proven.img");
+        let report = ImageBuilder::new(spec("tries = 0\nsuccessful = true")).build(&out).await.unwrap();
+        let id = report.partitions.iter().find_map(|p| p.pallet_id).unwrap();
+        let dev = crate::drive::open_path(out.to_str().unwrap(), true).await.unwrap();
+        let mut store = crate::pallet::PalletStore::new(Vec::new());
+        store.add_drive(out.display().to_string(), dev);
+        let mgr = crate::pallet::PalletManager::new(store);
+        let loc = mgr.get(id).await.unwrap();
+        assert!(loc.attributes.successful, "marked proven by the spec");
+
+        let out = dir.path().join("plain.img");
+        let report = ImageBuilder::new(spec("")).build(&out).await.unwrap();
+        let id = report.partitions.iter().find_map(|p| p.pallet_id).unwrap();
+        let dev = crate::drive::open_path(out.to_str().unwrap(), true).await.unwrap();
+        let mut store = crate::pallet::PalletStore::new(Vec::new());
+        store.add_drive(out.display().to_string(), dev);
+        let loc = crate::pallet::PalletManager::new(store).get(id).await.unwrap();
+        assert!(!loc.attributes.successful && loc.attributes.tries_left > 0, "earned, not given: {:?}", loc.attributes);
     }
 }

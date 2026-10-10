@@ -269,20 +269,52 @@ async fn a_pallet_moves_between_drives_keeping_its_identity() {
     let dir = TempDir::new().unwrap();
     let mgr = manager(&dir, &["disk0", "disk1"]).await;
 
-    let mut spec = boot_spec("stormcos-boot", b"kernel-payload", b"initramfs-payload");
+    let mut spec = PublishSpec::new("platform", PalletKind::App);
+    spec.members = vec![member("etcd", "container", MemberKind::Container, b"etcd-image-bytes")];
     spec.drive = Some(0);
     let src = mgr.publish(spec).await.unwrap();
+    let src = mgr.mark_successful(src.id).await.unwrap();
 
     let moved = mgr.move_pallet(src.id, 1).await.unwrap();
     assert_eq!(moved.id, src.id, "identity is stable across a move");
     assert_eq!(moved.drive, "disk1");
     assert_eq!(moved.version, src.version);
+    assert!(moved.attributes.successful, "a move is the same pallet: it keeps its proven bit (#57)");
 
     // Exactly one copy exists, and it verifies where it landed — nothing
     // inside a pallet is absolute, so the move rewrote nothing.
     let all = mgr.list().await;
     assert_eq!(all.len(), 1);
     assert!(mgr.verify(moved.id).await.unwrap().ok);
+}
+
+/// #57: a boot pallet's ESP does not travel, so moving one is refused unless
+/// forced; a copy is a new identity, and unproven until it boots.
+#[tokio::test]
+async fn a_boot_pallet_is_copied_not_moved_and_a_copy_earns_its_proven_bit() {
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0", "disk1"]).await;
+    let mut spec = boot_spec("stormcos-boot", b"kernel-payload", b"initramfs-payload");
+    spec.drive = Some(0);
+    let src = mgr.publish(spec).await.unwrap();
+    let src = mgr.mark_successful(src.id).await.unwrap();
+    assert!(src.attributes.successful);
+
+    let refused = mgr.move_pallet(src.id, 1).await.unwrap_err().to_string();
+    assert!(refused.contains("boot pallet"), "{refused}");
+    assert_eq!(mgr.list().await.len(), 1, "a refused move touches nothing");
+
+    let copy = mgr.copy_pallet(src.id, 1).await.unwrap();
+    assert_ne!(copy.id, src.id, "a copy is a new identity");
+    assert!(!copy.attributes.successful, "a copy has not booted from its drive");
+    assert_eq!(copy.attributes.tries_left, stormblock::pallet::manager::DEFAULT_TRIES);
+    assert_eq!(copy.attributes.priority, src.attributes.priority);
+    assert!(mgr.get(src.id).await.unwrap().attributes.successful, "the source keeps its own");
+    assert!(mgr.verify(copy.id).await.unwrap().ok);
+
+    let forced = mgr.move_pallet_with(src.id, 1, true).await.unwrap();
+    assert_eq!(forced.id, src.id);
+    assert!(forced.attributes.successful, "a forced move still keeps the attributes");
 }
 
 #[tokio::test]

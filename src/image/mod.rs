@@ -169,8 +169,15 @@ pub struct PalletEntry {
     /// Selection order. Higher wins; 0 never boots.
     #[serde(default)]
     pub priority: Option<u8>,
+    /// Boot attempts before it is passed over. `0` is refused unless
+    /// `successful` (#57): a pallet with no attempts that was never confirmed
+    /// is never a candidate, and would silently never appear in the ladder.
     #[serde(default)]
     pub tries: Option<u8>,
+    /// Mark it known-good: the proven fallback beside an upgrade (#57).
+    /// Default false: a pallet earns the bit on its first good boot.
+    #[serde(default)]
+    pub successful: Option<bool>,
     #[serde(default)]
     pub read_only: Option<bool>,
     #[serde(default)]

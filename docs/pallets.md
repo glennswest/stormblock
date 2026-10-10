@@ -70,7 +70,7 @@ way code does.
 | Field | Value |
 |---|---|
 | `PartitionTypeGUID` | `A324B90E-CED9-4019-B338-7A5B98E1B7D2` — a stormcos pallet |
-| `UniquePartitionGUID` | the pallet's identity; **stable across copies and moves**, and the handle every API call takes |
+| `UniquePartitionGUID` | the pallet's identity, and the handle every API call takes. **A copy gets a new one; a move keeps it** (#57). It is still **not unique across drives**: a whole-disk `dd`, a RAID leg or an image written to two disks carries byte-identical entries, so "find the pallet with this id" must expect several and treat each as a separate copy (stormuefi tracks which ones it has tried) |
 | `PartitionName` | the pallet name, e.g. `stormcos-boot`; must match the superblock |
 | `Attributes` | bit 0 required-partition; bits 48–63 below |
 
@@ -343,10 +343,13 @@ its GPT attributes, then pick the container by its descriptor — highest
 priority with tries left. The chosen container is what gets published, and what
 the kernel and command line are read out of.
 
-**Boot state travels with the copy today.** `copy_pallet` lands the copy at
-priority 0 and, once it verifies, applies the source's attributes unchanged
-(`src/pallet/manager.rs`, `copy_pallet`): tries and successful come across as
-they were. Resetting them per node is part of this design, not of the code.
+**A copy is unproven** (#57). `copy_pallet` lands the copy at priority 0 and,
+once it verifies, gives it the source's priority, sealed and read-only bits,
+**`successful` clear and 3 tries**: a pallet that booted from one drive has
+not booted from this one, and a copy claiming to be known-good would leave
+the first real failure with no fallback. It earns `successful` on its first
+good boot. A relocation (`move`, `convert`, whole-drive `adopt`) is the same
+pallet in a new place and keeps its attributes as they were.
 
 ### 2.9 Trust chain
 
@@ -425,9 +428,9 @@ would have to be right about all of them.
 - **A pallet can be on several drives at once** (#56): `copies` on publish
   (`POST /api/v1/pallets`; the CLI's `pallet publish` has no such flag)
   puts the same name and version on N drives, each leg a complete candidate.
-  The ladder sees N candidates with the same attributes and firmware's own
-  boot order is the failover; `status` groups them, `resync` refills a lost
-  one. A copy is at priority 0 until it has verified.
+  The ladder sees N candidates and firmware's own boot order is the
+  failover; `status` groups them, `resync` refills a lost one. A copy is at
+  priority 0 until it has verified, and a new leg is unproven (§2.8).
 
 ## 5. Two libraries, on purpose
 
@@ -543,6 +546,13 @@ stormblock pallet --drive /dev/nvme0n1 --drive /dev/nvme1n1 move <id> --to /dev/
 Copy, verify at the destination, adopt the source's identity, drop the source —
 in that order, so no interruption leaves two disks claiming to be the same
 pallet.
+
+**A boot pallet is refused** (#57) unless `--force` (`"force": true` on
+`POST /api/v1/pallets/{id}/move`). The ESP it is paired with is not a pallet
+and stays behind, so the move can leave a machine that does not come back.
+Copy it instead, onto a drive with an ESP of its own: each drive then boots
+on its own, and firmware's boot order is the failover. `convert` (§7) empties
+a whole drive and moves boot pallets too.
 
 **Move one member between pallets**
 

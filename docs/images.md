@@ -50,6 +50,8 @@ name          = "stormcos-boot"
 kind          = "boot"
 version_label = "6.12.0-200.fc41"
 priority      = 15              # selection order; higher wins
+# tries      = 3                # boot attempts (default 3); 0 needs successful
+# successful = true             # the proven fallback (#57); default: earned on its first good boot
 members = [
   { name = "kernel",    role = "kernel",    kind = "kernel",     file = "build/vmlinuz" },
   { name = "initramfs", role = "initramfs", kind = "initramfs",  file = "build/initramfs.img" },

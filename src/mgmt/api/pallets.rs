@@ -621,6 +621,9 @@ async fn set_sealed(
 pub struct DriveRequest {
     /// Destination drive, by path or index.
     pub drive: String,
+    /// `move` only: take a boot pallet too, whose ESP stays behind (#57).
+    #[serde(default)]
+    pub force: bool,
 }
 
 async fn move_pallet(
@@ -634,7 +637,7 @@ async fn move_pallet(
         Ok(i) => i,
         Err(e) => return err(e),
     };
-    match mgr.move_pallet(id, dest).await {
+    match mgr.move_pallet_with(id, dest, req.force).await {
         Ok(loc) => Json(PalletResponse::from(&loc)).into_response(),
         Err(e) => err(e),
     }
