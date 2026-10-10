@@ -5638,6 +5638,32 @@ pub async fn run() -> anyhow::Result<()> {
         std::env::var("STORMBLOCK_FLOW_BATCH").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(64)
     }
 
+    /// The largest write a flow-over makes on its destination (#401):
+    /// neighbouring slots merged into one, `STORMBLOCK_FLOW_RUN_MB`, 32.
+    fn flow_run_bytes() -> u64 {
+        let mb = std::env::var("STORMBLOCK_FLOW_RUN_MB").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(32u64);
+        mb << 20
+    }
+
+    /// A flow-over's window coalesced (#401); `STORMBLOCK_FLOW_COALESCE=0`
+    /// moves one extent at a time as before, for measuring.
+    fn flow_coalesce() -> bool {
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var("STORMBLOCK_FLOW_COALESCE").map(|v| v.trim() != "0").unwrap_or(true))
+    }
+
+    /// The most a flow-over window holds in memory at once (#401): its
+    /// sources are read before they are written.
+    const FLOW_WINDOW_BYTES: u64 = 64 << 20;
+
+    /// The size of the slot `leg` names (what a move of it copies).
+    async fn slot_bytes(
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        leg: crate::volume::gem::Leg,
+    ) -> u64 {
+        registry.read().await.get(&leg.slab_id).map(|s| s.slot_size()).unwrap_or(0)
+    }
+
     /// Moves a flow-over makes at once (#331): `STORMBLOCK_FLOW_PARALLEL`, 8.
     fn flow_parallel() -> usize {
         std::env::var("STORMBLOCK_FLOW_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(8)
@@ -5804,8 +5830,10 @@ pub async fn run() -> anyhow::Result<()> {
         // on a partition flushes its disk.
         let dest_disk = registry.read().await.get(&dest).map(|s| s.device().drive_id().path).unwrap_or_default();
         let mut pace = FlowPace::new(flow_batch(), flow_flush_bound());
+        crate::flowprogress::FLOW.begin();
         for (i, &source) in sources.iter().enumerate() {
             later[i] = 0;
+            let source_slot = registry.read().await.get(&source).map(|s| s.slot_size()).unwrap_or(1 << 20);
             let after: usize = later.iter().sum();
             // What is on the source, taken once per pass (#155: finding it walks
             // every map) and worked through; a pass that leaves anything behind
@@ -5852,8 +5880,9 @@ pub async fn run() -> anyhow::Result<()> {
                 // shares with its clones is listed once for each map, and one
                 // move rewrites all of them.
                 let mut seen = std::collections::HashSet::new();
-                let mut window = Vec::with_capacity(pace.window);
-                while window.len() < pace.window {
+                let cap = pace.window.min((FLOW_WINDOW_BYTES / source_slot.max(1)).max(1) as usize);
+                let mut window = Vec::with_capacity(cap);
+                while window.len() < cap {
                     let Some((vol, vext, leg)) = batch.pop_front() else { break };
                     if seen.insert(leg) {
                         window.push((vol, vext, leg));
@@ -5870,25 +5899,61 @@ pub async fn run() -> anyhow::Result<()> {
                 spent.yielded += t.elapsed();
                 foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
                 let started = std::time::Instant::now();
-                // Several moves at once (#331): each holds only the fence on its
-                // own slot for its copy; the map and the registry are taken to
-                // allocate and to publish (#269). One at a time, each waited for
-                // the network and both disks in turn.
+                // The window coalesced (#401): every source slot whose fence is
+                // free right now is read in parallel, its copy written with its
+                // neighbours in slot order and published in one sweep; one that
+                // reads all zeros is unmapped, not copied. A fence never waited
+                // on while others are held. The rest move one at a time as
+                // before (#331): each holds only the fence on its own slot.
                 let results: Vec<_> = {
                     use futures_util::StreamExt;
                     let engine = &engine;
-                    futures_util::stream::iter(window)
+                    let (mut held, mut rest) = (Vec::new(), Vec::new());
+                    for (vol, vext, leg) in window {
+                        match flow_coalesce().then(|| crate::volume::fence::try_exclusive(leg)).flatten() {
+                            Some(f) => held.push((vol, vext, leg, f)),
+                            None => rest.push((vol, vext, leg)),
+                        }
+                    }
+                    let mut results = Vec::with_capacity(held.len() + rest.len());
+                    if !held.is_empty() {
+                        let items: Vec<_> = held.iter().map(|(v, e, l, f)| (*v, *e, *l, f)).collect();
+                        let outs = engine
+                            .migrate_window_unlocked(gem, registry, &items, dest, flow_run_bytes(), flow_parallel())
+                            .await;
+                        for ((vol, vext, leg, f), res) in held.into_iter().zip(outs) {
+                            drop(f);
+                            let res = match res {
+                                Ok(crate::placement::WindowMove::Zeroed) => {
+                                    crate::flowprogress::FLOW.zeroed(1);
+                                    Ok(())
+                                }
+                                Ok(crate::placement::WindowMove::Moved { .. }) => {
+                                    crate::flowprogress::FLOW.moved(1, slot_bytes(registry, leg).await);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            };
+                            results.push((vol, vext, res, std::time::Duration::ZERO));
+                        }
+                    }
+                    let one: Vec<_> = futures_util::stream::iter(rest)
                         .map(|(vol, vext, leg)| async move {
                             let t = std::time::Instant::now();
                             let fence = crate::volume::fence::exclusive(leg).await;
                             let waited = t.elapsed();
                             let res = engine.migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence).await;
                             drop(fence);
-                            (vol, vext, res, waited)
+                            if res.is_ok() {
+                                crate::flowprogress::FLOW.moved(1, slot_bytes(registry, leg).await);
+                            }
+                            (vol, vext, res.map(|_| ()), waited)
                         })
-                        .buffer_unordered(flow_parallel().min(pace.window))
+                        .buffer_unordered(flow_parallel().max(1))
                         .collect()
-                        .await
+                        .await;
+                    results.extend(one);
+                    results
                 };
                 let copied = started.elapsed();
                 let mut window_moved = 0u64;
@@ -6043,8 +6108,9 @@ pub async fn run() -> anyhow::Result<()> {
         fn say(&mut self, moved: u64) {
             let began = *self.began.get_or_insert_with(std::time::Instant::now);
             let secs = began.elapsed().as_secs_f64().max(1e-9);
+            let (zeroed, mb) = crate::flowprogress::FLOW.snapshot().map(|p| (p.zeroed, p.mb_per_s)).unwrap_or((0, 0.0));
             let line = format!(
-                "flow-over: {moved} moved in {secs:.1}s ({:.0}/h): yield {:.1}s, fence {:.1}s, copy {:.1}s, persist {:.1}s, release {:.1}s, paced {:.1}s",
+                "flow-over: {moved} moved ({zeroed} all zeros, not copied) in {secs:.1}s ({:.0}/h, {mb:.1} MB/s): yield {:.1}s, fence {:.1}s, copy {:.1}s, persist {:.1}s, release {:.1}s, paced {:.1}s",
                 moved as f64 * 3600.0 / secs,
                 self.yielded.as_secs_f64(),
                 self.fence.as_secs_f64(),

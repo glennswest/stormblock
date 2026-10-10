@@ -64,7 +64,7 @@ pub use topology::{StorageTier, Locality, StorageDevice};
 pub use cold::{ColdCopy, ReplicationResult, ReplicationError};
 
 /// Errors during extent placement operations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PlacementError {
     SlabFull,
     ExtentNotFound { volume_id: VolumeId, vext_idx: u64 },
@@ -114,6 +114,15 @@ pub struct MigrateExtentResult {
     pub source_slab: SlabId,
     pub dest_slab: SlabId,
     pub dest_slot: u64,
+}
+
+/// What became of one item of [`PlacementEngine::migrate_window_unlocked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMove {
+    /// Copied to this slot of the destination.
+    Moved { dest_slot: u64 },
+    /// All zeros: unmapped everywhere instead of copied (#401).
+    Zeroed,
 }
 
 /// Result of evacuating all extents from a slab.
@@ -921,6 +930,262 @@ impl PlacementEngine {
             dest_slab: dest_id,
             dest_slot,
         })
+    }
+
+    /// Move a window of legs to `dest` the way a slow disk wants them (#401):
+    /// the sources read in parallel, the destination slots allocated
+    /// together and written in slot order as runs of up to `run_bytes`
+    /// (one write and one read-back each, not one per extent), and published
+    /// with one sweep of the maps. A source that reads as all zeros is not
+    /// copied: its slot is unmapped from every map naming it (an unmapped
+    /// extent reads as zeros), where every reference is that slot alone.
+    ///
+    /// Each item carries the exclusive fence on its source slot, held by the
+    /// caller until this returns (#239), as for [`migrate_leg_unlocked`].
+    /// The locks are taken as there: the registry to allocate, the map and
+    /// the registry to publish. Every source moved or unmapped is owed, freed
+    /// once the map that no longer names it is on disk.
+    ///
+    /// Returns one outcome per item, in the order given.
+    pub async fn migrate_window_unlocked(
+        &self,
+        gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>,
+        registry: &crate::lockwatch::TrackedRwLock<SlabRegistry>,
+        items: &[(VolumeId, u64, Leg, &crate::volume::fence::Exclusive)],
+        dest_id: SlabId,
+        run_bytes: u64,
+        reads_at_once: usize,
+    ) -> Vec<Result<WindowMove, PlacementError>> {
+        use futures_util::StreamExt;
+        let n = items.len();
+        let mut out: Vec<Option<Result<WindowMove, PlacementError>>> = (0..n).map(|_| None).collect();
+
+        // Which items still name their source, and the generation a move
+        // records.
+        let mut gens = vec![0u64; n];
+        {
+            let g = gem.read().await;
+            for (i, (vol, vext, old, fence)) in items.iter().enumerate() {
+                if !fence.covers(*old) {
+                    out[i] = Some(Err(PlacementError::Busy { slab_id: old.slab_id, slot_idx: old.slot_idx }));
+                    continue;
+                }
+                match g.lookup(*vol, *vext) {
+                    Some(loc) if loc.leg_on(old.slab_id) == Some(*old) => {
+                        gens[i] = Self::moved_generation(loc.generation, *old == loc.primary());
+                    }
+                    _ => out[i] = Some(Err(PlacementError::ExtentNotFound { volume_id: *vol, vext_idx: *vext })),
+                }
+            }
+        }
+
+        // The sources, in parallel (each is a round trip to the appliance),
+        // with no lock held.
+        let sources: Vec<Option<(Arc<dyn BlockDevice>, u64, u64)>> = {
+            let r = registry.read().await;
+            items
+                .iter()
+                .map(|(_, _, old, _)| {
+                    r.get(&old.slab_id).map(|s| {
+                        let size = s.slot_size();
+                        (s.device().clone(), s.data_offset() + old.slot_idx * size, size)
+                    })
+                })
+                .collect()
+        };
+        let todo: Vec<usize> = (0..n).filter(|i| out[*i].is_none()).collect();
+        let mut data: Vec<Option<Vec<u8>>> = (0..n).map(|_| None).collect();
+        let reads: Vec<(usize, Result<Vec<u8>, PlacementError>)> = futures_util::stream::iter(todo)
+            .map(|i| {
+                let src = sources[i].clone();
+                let old = items[i].2;
+                async move {
+                    let Some((dev, at, size)) = src else {
+                        return (i, Err(PlacementError::SlabNotFound(old.slab_id)));
+                    };
+                    let mut buf = vec![0u8; size as usize];
+                    let err = |e: String| PlacementError::ReadFailed { slab_id: old.slab_id, slot_idx: old.slot_idx, error: e };
+                    match dev.read(at, &mut buf).await {
+                        Ok(got) if got == buf.len() => (i, Ok(buf)),
+                        Ok(got) => (i, Err(err(format!("read {got} of {} bytes", buf.len())))),
+                        Err(e) => (i, Err(err(e.to_string()))),
+                    }
+                }
+            })
+            .buffer_unordered(reads_at_once.max(1))
+            .collect()
+            .await;
+        for (i, r) in reads {
+            match r {
+                Ok(b) => data[i] = Some(b),
+                Err(e) => out[i] = Some(Err(e)),
+            }
+        }
+
+        // All zeros: unmapped, not copied (tried first; a slot some
+        // reference keeps is copied like any other).
+        let zero: HashSet<Leg> = (0..n)
+            .filter(|i| data[*i].as_deref().is_some_and(|b| b.iter().all(|x| *x == 0)))
+            .map(|i| items[i].2)
+            .collect();
+        let unmapped = if zero.is_empty() {
+            HashSet::new()
+        } else {
+            let mut g = gem.write().await;
+            let done = g.unmap_legs_everywhere(&zero);
+            drop(g);
+            let mut owed = self.owed.lock().unwrap();
+            for leg in &done {
+                owed.push((leg.slab_id, leg.slot_idx));
+            }
+            done
+        };
+        for i in 0..n {
+            if data[i].is_some() && unmapped.contains(&items[i].2) {
+                data[i] = None;
+                out[i] = Some(Ok(WindowMove::Zeroed));
+            }
+        }
+
+        // The rest: destination slots, together, in the order the window
+        // gave them (first-fit: a fresh slab hands out a run).
+        let copy: Vec<usize> = (0..n).filter(|i| data[*i].is_some()).collect();
+        let mut dest: Vec<(usize, u64)> = Vec::with_capacity(copy.len());
+        let (dest_dev, data_offset, slot_size) = {
+            let mut r = registry.write().await;
+            let Some(slab) = r.get(&dest_id) else {
+                for i in copy {
+                    out[i] = Some(Err(PlacementError::SlabNotFound(dest_id)));
+                }
+                return out.into_iter().map(|o| o.unwrap_or(Err(PlacementError::NoDestination))).collect();
+            };
+            let (dev, off, size) = (slab.device().clone(), slab.data_offset(), slab.slot_size());
+            let quarantined = r.is_quarantined(&dest_id);
+            for &i in &copy {
+                let old = items[i].2;
+                let src_size = r.get(&old.slab_id).map(|s| s.slot_size()).unwrap_or(0);
+                if quarantined || !r.size_ok(&dest_id, src_size) {
+                    out[i] = Some(Err(PlacementError::NoDestination));
+                    continue;
+                }
+                let owner = match r.get(&old.slab_id) {
+                    Some(s) => s.owner(old.slot_idx).await,
+                    None => None,
+                }
+                .unwrap_or((items[i].0, items[i].1));
+                let Some(slab) = r.get_mut(&dest_id) else { break };
+                if slab.free_slots() == 0 {
+                    out[i] = Some(Err(PlacementError::SlabFull));
+                    continue;
+                }
+                match slab.allocate_deferred(owner.0, owner.1, gens[i]).await {
+                    Ok(slot) => {
+                        r.reserve(dest_id, slot);
+                        dest.push((i, slot));
+                    }
+                    Err(_) => out[i] = Some(Err(PlacementError::SlabFull)),
+                }
+            }
+            (dev, off, size)
+        };
+
+        // Written in slot order, neighbours merged into one write, each run
+        // read back before any map names it (#239).
+        dest.sort_by_key(|(_, slot)| *slot);
+        let per_run = (run_bytes / slot_size.max(1)).max(1) as usize;
+        let mut runs: Vec<Vec<(usize, u64)>> = Vec::new();
+        for d in dest {
+            match runs.last_mut() {
+                Some(run) if run.len() < per_run && run.last().is_some_and(|(_, s)| *s + 1 == d.1) => run.push(d),
+                _ => runs.push(vec![d]),
+            }
+        }
+        let mut written: Vec<(usize, u64)> = Vec::new();
+        let mut failed_slots: Vec<u64> = Vec::new();
+        for run in runs {
+            let first = run[0].1;
+            let mut buf = Vec::with_capacity(run.len() * slot_size as usize);
+            for (i, _) in &run {
+                buf.extend_from_slice(data[*i].as_deref().unwrap_or(&[]));
+            }
+            let at = data_offset + first * slot_size;
+            let err = |e: String| PlacementError::WriteFailed { slab_id: dest_id, slot_idx: first, error: e };
+            let res = match dest_dev.write(at, &buf).await {
+                Err(e) => Err(err(e.to_string())),
+                Ok(_) => {
+                    let mut check = vec![0u8; buf.len()];
+                    match dest_dev.read(at, &mut check).await {
+                        Ok(got) if got == buf.len() && check == buf => Ok(()),
+                        Ok(got) if got != buf.len() => Err(err(format!("the copy reads back {got} of {} bytes", buf.len()))),
+                        Ok(_) => Err(err("the copy reads back different from the source".into())),
+                        Err(e) => Err(err(format!("reading the copy back: {e}"))),
+                    }
+                }
+            };
+            match res {
+                Ok(()) => written.extend(run),
+                Err(e) => {
+                    for (i, slot) in run {
+                        out[i] = Some(Err(e.clone()));
+                        failed_slots.push(slot);
+                    }
+                }
+            }
+        }
+        drop(data);
+
+        // Publish, briefly: one sweep for the window. Table pages first, with
+        // no lock held (#155, #269).
+        let tables: Vec<_> = {
+            let r = registry.read().await;
+            written.iter().filter_map(|(i, _)| r.get(&items[*i].2.slab_id).map(|s| (s.table(), items[*i].2.slot_idx))).collect()
+        };
+        for (t, slot) in tables {
+            t.prefetch([slot]).await;
+        }
+        let mut g = gem.write().await;
+        let mut r = registry.write().await;
+        for slot in failed_slots {
+            r.commit(dest_id, slot);
+            if let Some(slab) = r.get_mut(&dest_id) {
+                let _ = slab.free(slot).await;
+            }
+        }
+        let mut moves = HashMap::new();
+        for (i, slot) in written {
+            let (vol, vext, old, _) = items[i];
+            r.commit(dest_id, slot);
+            let still = g.lookup(vol, vext).and_then(|l| l.leg_on(old.slab_id)) == Some(old);
+            let shares = match r.get(&old.slab_id) {
+                Some(s) => s.get_slot(old.slot_idx).await.filter(|s| s.state.is_owned()).map(|s| s.ref_count),
+                None => None,
+            };
+            let Some(slab) = r.get_mut(&dest_id) else {
+                out[i] = Some(Err(PlacementError::SlabNotFound(dest_id)));
+                continue;
+            };
+            let Some(shares) = shares.filter(|_| still) else {
+                let _ = slab.free(slot).await;
+                out[i] = Some(Err(PlacementError::ExtentNotFound { volume_id: vol, vext_idx: vext }));
+                continue;
+            };
+            // Its entry is published at the destination's next flush, after
+            // the data it names (#171).
+            slab.confirm(slot);
+            for _ in 1..shares.max(1) {
+                if let Err(e) = slab.inc_ref(slot).await {
+                    tracing::warn!(volume = %vol, slab = %dest_id, slot, "could not carry the share count to the moved slot: {e}");
+                    break;
+                }
+            }
+            moves.insert(old, Leg::new(dest_id, slot));
+            out[i] = Some(Ok(WindowMove::Moved { dest_slot: slot }));
+        }
+        g.rewrite_legs(&moves);
+        drop(r);
+        drop(g);
+        self.owed.lock().unwrap().extend(moves.keys().map(|l| (l.slab_id, l.slot_idx)));
+        out.into_iter().map(|o| o.unwrap_or(Err(PlacementError::NoDestination))).collect()
     }
 
     /// Evacuate all extents from a slab, moving them to other available slabs.

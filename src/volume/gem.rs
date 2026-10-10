@@ -15,7 +15,7 @@
 //! record of an extent map is still the volume metadata file — the slot
 //! tables are the fallback for when there is none.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -821,6 +821,47 @@ impl GlobalExtentMap {
             self.touch(v, e);
         }
         dropped
+    }
+
+    /// Unmap slots from every map that names them, for slots whose content
+    /// is all zeros (#401: an unmapped extent reads as zeros, so a flow-over
+    /// need not copy them). One sweep for all of `legs`. A slot is unmapped
+    /// only when every reference is that slot alone: one named by an extent
+    /// with another leg, or by a volume with parity, is left as it is.
+    /// Returns the slots unmapped (each named by at least one extent).
+    #[track_caller]
+    pub fn unmap_legs_everywhere(&mut self, legs: &HashSet<Leg>) -> HashSet<Leg> {
+        self.check_all();
+        if legs.is_empty() {
+            return HashSet::new();
+        }
+        let mut keep: HashSet<Leg> = HashSet::new();
+        let mut hits: Vec<(VolumeId, u64, Leg)> = Vec::new();
+        for (vid, vmap) in self.volumes.iter() {
+            let parity = !vmap.parity.is_empty();
+            for g in vmap.parity.values() {
+                keep.extend(g.legs.iter().filter(|l| legs.contains(l)));
+            }
+            for (vext, loc) in vmap.extents.iter() {
+                let p = loc.primary();
+                if legs.contains(&p) {
+                    if parity || !loc.mirrors.is_empty() {
+                        keep.insert(p);
+                    } else {
+                        hits.push((*vid, vext, p));
+                    }
+                }
+                keep.extend(loc.mirrors.iter().filter(|m| legs.contains(m)));
+            }
+        }
+        let mut done = HashSet::new();
+        for (v, e, leg) in hits {
+            if !keep.contains(&leg) {
+                self.remove(v, e);
+                done.insert(leg);
+            }
+        }
+        done
     }
 
     /// Remove an extent mapping.

@@ -91,6 +91,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// must not read as settled mid-move.
         #[serde(skip_serializing_if = "Option::is_none")]
         flow_over_remaining: Option<u64>,
+        /// How the flow-over is going (#401), when this engine runs one:
+        /// extents moved, extents found all zeros and unmapped instead of
+        /// copied, bytes copied, seconds since it began, MB/s, extents per
+        /// second, and the ETA for `flow_over_remaining` at that rate.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_over: Option<FlowOver>,
         /// Why the flow-over stopped with extents still remote (#172): its
         /// destination full, or extents that would not move. Left out while
         /// it runs or once it has finished.
@@ -119,8 +125,19 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         #[serde(skip_serializing_if = "Vec::is_empty")]
         drives_unreachable: Vec<crate::drive::ridethrough::Stall>,
     }
+    #[derive(Serialize)]
+    struct FlowOver {
+        #[serde(flatten)]
+        progress: crate::flowprogress::Snapshot,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eta_seconds: Option<f64>,
+    }
     let flow_over_remaining =
         u64::try_from(state.flow_over_remaining.load(std::sync::atomic::Ordering::Relaxed)).ok();
+    let flow_over = flow_over_remaining.and_then(|left| {
+        let progress = crate::flowprogress::FLOW.snapshot()?;
+        Some(FlowOver { progress, eta_seconds: crate::flowprogress::FLOW.eta_seconds(left) })
+    });
     // From the last reading (#364): read when the table is free, kept, and
     // answered from when it is busy, so a busy node does not drop the field.
     static RAID_SEEN: std::sync::Mutex<Option<Option<&'static str>>> = std::sync::Mutex::new(None);
@@ -145,6 +162,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         auth: if state.auth_enforced() { "required" } else { "none" },
         raid,
         flow_over_remaining,
+        flow_over,
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs: super::slab_report::for_health(&state),
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),

@@ -563,6 +563,10 @@ pub async fn update_system_slab(
     // it is the last install's goldens, and this boot is the next install.
     let system_part = part(system_i)?;
     let system_bytes = system_part.capacity_bytes();
+    // Discarded before it is formatted again (#401), as a fresh lay discards
+    // the drive: the last install's goldens are garbage to the disk too.
+    let dev: Arc<dyn BlockDevice> = system_part.clone();
+    discard_quietly(&dev, 0, system_bytes / lba as u64 * lba as u64, "the system partition").await;
     let meta = auto_metadata_bytes(system_bytes, opts.slot_size);
     let system = Slab::format_with(
         system_part,
@@ -586,6 +590,19 @@ pub async fn update_system_slab(
         None => (None, 0),
     };
     Ok(LocalSlabs { data, system, bulk, data_bytes, system_bytes, bulk_bytes, lba })
+}
+
+/// Discard a range before it is laid (#401), saying how long it took. A
+/// discard is a hint, and a disk that refuses one is laid all the same.
+async fn discard_quietly(device: &Arc<dyn BlockDevice>, offset: u64, len: u64, what: &str) {
+    if len == 0 {
+        return;
+    }
+    let t = std::time::Instant::now();
+    match device.discard(offset, len).await {
+        Ok(()) => tracing::info!("discarded {what} ({len} bytes) before laying it in {} ms", t.elapsed().as_millis()),
+        Err(e) => tracing::info!("{what} not discarded before laying it ({e}): laid all the same"),
+    }
 }
 
 /// Write a GPT with a data slab and a system slab, and format both.
@@ -674,6 +691,11 @@ pub async fn lay_node_slabs(
     // off-block is EINVAL on anything opened O_DIRECT, and the tail of a drive
     // is not a round number of megabytes.
     let bs = device.block_size().max(1) as u64;
+    // The whole drive discarded first (#401): a drive-managed SMR disk then
+    // knows every zone is empty, and what the install writes next lands
+    // sequentially instead of being shingled over what was there. A hint: a
+    // disk that takes no discard (a conventional HDD) is left as it is.
+    discard_quietly(&device, 0, capacity / bs * bs, "the drive").await;
     let wipe = (capacity / 16).min(8 * ALIGN) / bs * bs;
     if wipe > 0 {
         let zeros = vec![0u8; wipe as usize];

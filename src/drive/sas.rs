@@ -38,6 +38,11 @@ pub struct SasDevice {
     capacity: u64,
     block_size: u32,
     device_type: DriveType,
+    /// The kernel will pass a discard to this disk (`queue/discard_max_bytes`
+    /// above 0): every SSD that trims, and a drive-managed SMR HDD that
+    /// takes TRIM (#401), which then knows its zones are empty. A
+    /// conventional HDD advertises none.
+    discards: bool,
     /// Held across a read-modify-write, so two partial-block writes to the
     /// same block cannot each keep the other's bytes out.
     rmw: tokio::sync::Mutex<()>,
@@ -111,6 +116,7 @@ impl SasDevice {
             path: path.clone(),
         };
         let device_type = detect_drive_type(&path);
+        let discards = file_block.is_none() && queue_value(&path, "discard_max_bytes").is_some_and(|v| v > 0);
         // A zoned or drive-managed SMR disk is said once (#282).
         if file_block.is_none() && !read_only {
             super::identity::note_recording(&path);
@@ -125,6 +131,7 @@ impl SasDevice {
             capacity,
             block_size,
             device_type,
+            discards,
             rmw: tokio::sync::Mutex::new(()),
             flushes: Default::default(),
         })
@@ -228,10 +235,11 @@ impl BlockDevice for SasDevice {
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
-        if self.device_type == DriveType::SasHdd {
-            return Ok(()); // No-op for HDDs.
+        // A hint: nothing for a disk the kernel would not pass it to (a
+        // conventional HDD, a file). An SMR HDD that takes TRIM gets it.
+        if !self.discards {
+            return Ok(());
         }
-        // BLKDISCARD ioctl for SSDs.
         let fd = self.fd;
         tokio::task::spawn_blocking(move || {
             ioctl_blkdiscard(fd, offset, len)
@@ -348,6 +356,17 @@ fn read_hwmon_temp(devname: &str) -> Option<u16> {
         }
     }
     None
+}
+
+/// A number from the block queue of `path`'s disk (`/sys/class/block/<name>/
+/// queue/<what>`; a partition's is its disk's). `None` without one.
+fn queue_value(path: &str, what: &str) -> Option<u64> {
+    let real = std::fs::canonicalize(path).ok()?;
+    let name = real.file_name()?.to_str()?.to_string();
+    let base = std::path::Path::new("/sys/class/block").join(&name);
+    let at = |dir: &std::path::Path| std::fs::read_to_string(dir.join("queue").join(what)).ok();
+    let text = at(&base).or_else(|| at(&std::fs::canonicalize(&base).ok()?.parent()?.to_path_buf()))?;
+    text.trim().parse().ok()
 }
 
 /// Detect if a block device is SSD or HDD via the rotational flag.
