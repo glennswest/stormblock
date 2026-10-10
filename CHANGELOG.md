@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-09
+- **feat:** #202 (owner's decision B): a `boothost/default` claim's `serial` finds the host it is an operator-set **alias** of, keeping that machine's image, and the MAC becomes an alias of it too.
+  - **Not by name:** a host merely *named* by a serial is never claimed this way. That is what keeps the MicroCloud blades, which share a chassis serial naming server1's old host, apart.
+  - **Order:** a MAC a host already has still wins. Otherwise the MAC path runs as before (#200).
 - **feat:** #245, step 1 (owner's decision A): a format-2 metadata reader skips key kinds it does not know, instead of refusing the disk. This includes one left with no volume beside it by an older engine's delete. Nothing is written differently yet. Step 2 (a sealed volume's `digest` key, checked in the background, read by `slab holds` as "intact") writes such a key, and is safe only once every release a node could roll back to carries this reader.
 - **feat:** #379 (owner's decision on stormcentral#416, replacing the handed-over token): the engine accepts a client certificate forge's CA issued as admin.
   - **New settings:** `[management] tls_admin_ca`, `tls_admin_crl`, `tls_admin_names`.

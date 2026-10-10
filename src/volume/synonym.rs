@@ -877,6 +877,33 @@ impl SynonymStore {
         }
     }
 
+    /// The host a machine claiming `boothost/default` is, given its MAC and,
+    /// when it says one, its serial (#202, owner's decision B).
+    /// - Its MAC's host first (or its `mac-<hex>` one), as before (#200).
+    /// - Else the host its serial is an **alias** of: set by an operator, so
+    ///   the serial means that one machine. Never a host *named* by it: a
+    ///   chassis serial every blade of a MicroCloud reports
+    ///   (`S11075924402016`, #249) names server1's old host, and would hand
+    ///   all eight blades its image. The MAC becomes an alias of that host.
+    /// - Else a new provisional host, the MAC its alias (#200).
+    ///
+    /// Returns the host, whether it was made now, and `Some("serial")` when
+    /// the serial found it.
+    pub fn default_claim_host(&mut self, mac: &str, serial: Option<&str>) -> Result<(String, bool, Option<&'static str>), SynonymError> {
+        let name = provisional_host_name(mac)
+            .ok_or_else(|| SynonymError::InvalidName(format!("{mac:?} is not a NIC's MAC address")))?;
+        if self.host_of(mac).or_else(|| self.host_of(&name)).is_none() {
+            if let Some(h) = serial.filter(|s| !s.trim().is_empty()).and_then(|s| self.alias_owner(s)) {
+                let mut aliases = self.host(&h).map(|x| x.aliases).unwrap_or_default();
+                aliases.push(normalize_alias(mac));
+                self.set_aliases(&h, &aliases)?;
+                return Ok((h, false, Some("serial")));
+            }
+        }
+        let (h, made) = self.provisional_host(mac)?;
+        Ok((h, made, None))
+    }
+
     /// The host a machine claiming `boothost/default` with this MAC is (#200):
     /// the host the MAC is an alias of, or the one still (or once) called
     /// `mac-<hex>`, or else a new provisional host of that name with the MAC
@@ -1178,6 +1205,39 @@ mod tests {
         // A MAC that is no MAC is not used.
         let (_, how) = st.resolve_named_claim("server5", Some("not-a-mac"), None).unwrap();
         assert_eq!(how, NamedClaim::New { mac: None });
+    }
+
+    /// #202 (owner's decision B): a default claim's serial finds a host only
+    /// when an operator made it an alias, never because a host is named by
+    /// it; the blades of a MicroCloud, all reporting one chassis serial that
+    /// names server1's old host, stay apart.
+    #[test]
+    fn a_default_claims_serial_counts_only_as_an_alias() {
+        use super::*;
+        let mut st = SynonymStore::in_memory();
+        // The R230, renamed to its DNS name with its serial kept as an alias.
+        st.set_aliases("stormblock1", &["C2NR0Q2".to_string()]).unwrap();
+        let (h, made, by) = st.default_claim_host("aa:bb:cc:dd:ee:10", Some("c2nr0q2")).unwrap();
+        assert_eq!((h.as_str(), made, by), ("stormblock1", false, Some("serial")));
+        // Its MAC is now an alias too: found by it alone next time.
+        assert_eq!(st.default_claim_host("AA-BB-CC-DD-EE-10", None).unwrap(), ("stormblock1".to_string(), false, None));
+
+        // A host *named* by the chassis serial (server1's trial one, #249):
+        // not matched. Each blade gets a provisional host of its own.
+        st.create(BOOTHOST_NS, "S11075924402016", Target::Volume { id: VolumeId(uuid::Uuid::new_v4()) }, None, None).unwrap();
+        let (b1, made1, by1) = st.default_claim_host("aa:bb:cc:dd:ee:21", Some("S11075924402016")).unwrap();
+        let (b2, made2, _) = st.default_claim_host("aa:bb:cc:dd:ee:22", Some("S11075924402016")).unwrap();
+        assert_eq!((b1.as_str(), made1, by1), ("mac-aabbccddee21", true, None));
+        assert_eq!((b2.as_str(), made2), ("mac-aabbccddee22", true));
+
+        // A MAC a host already has wins over a serial alias of another.
+        st.set_aliases("server9", &["SERIAL-9".to_string()]).unwrap();
+        let (h, _, by) = st.default_claim_host("aa:bb:cc:dd:ee:21", Some("serial-9")).unwrap();
+        assert_eq!((h.as_str(), by), ("mac-aabbccddee21", None));
+
+        // A serial nobody set: the MAC path, as before.
+        let (h, made, by) = st.default_claim_host("aa:bb:cc:dd:ee:30", Some("NOBODY")).unwrap();
+        assert_eq!((h.as_str(), made, by), ("mac-aabbccddee30", true, None));
     }
 
     use super::*;

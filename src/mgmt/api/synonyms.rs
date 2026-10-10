@@ -990,11 +990,15 @@ async fn claim_boothost(
                 synonym::key(BOOTHOST_NS, DEFAULT_HOST)
             ));
         };
-        let made = state.synonyms.write().await.provisional_host(mac);
+        // A serial counts only when an operator made it an alias (#202, B).
+        let made = state.synonyms.write().await.default_claim_host(mac, serial);
         match made {
-            Ok((host, made)) => {
+            Ok((host, made, by)) => {
                 if made {
                     tracing::info!(mac, host, "a machine nobody has named booted the default");
+                }
+                if by == Some("serial") {
+                    tracing::info!(mac, host, "a default claim found its host by the serial alias; the MAC is now an alias too (#202)");
                 }
                 (host, Some(synonym::normalize_alias(mac)), made)
             }

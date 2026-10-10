@@ -962,8 +962,12 @@ curl -X POST http://forge:9090/api/v1/boothost/mac-0cc47a000001/rename -d '{"to"
 
 The same MAC again is the same machine and the same golden; once named, the MAC
 (and `mac-<hex>`) are aliases, so a claim of `boothost/server1` or of
-`boothost/default` with that MAC boots the same golden. SMBIOS serials are not
-used: seven MicroCloud blades share one. A default claim with no MAC, or with
+`boothost/default` with that MAC boots the same golden. A default claim's
+SMBIOS `serial` is used only when an operator made it an **alias** of a host
+(#202): that host is claimed, keeping its image, and the MAC becomes an alias
+of it too. A host merely *named* by a serial is never claimed by it: seven
+MicroCloud blades share one chassis serial, and it names server1's old host.
+A MAC a host already has wins. A default claim with no MAC, or with
 something that is not a unicast MAC, is a 400 and makes nothing.
 
 **A name from DNS (#204, stormbootx#23).** A machine whose media states no tag

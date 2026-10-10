@@ -850,7 +850,13 @@ regression test (#171/#172) among them.
       volumes.dat (6fe39a7), e2e token + host_nqn, the #259 refusal, #120
       (509b930). Last stage of `check.sh`; 32/32 at 6381f35
 
-### Default claim with a serial (2026-10-08, #202) — WAITING ON THE OWNER
+### Default claim with a serial (2026-10-08, #202) — IN PROGRESS (owner: B, 2026-10-09)
+
+`SynonymStore::default_claim_host(mac, serial)`: MAC's host; else the serial's
+`alias_owner` (never a host's name), MAC added as its alias; else provisional.
+Tests: `a_default_claims_serial_counts_only_as_an_alias`, HTTP
+`a_default_claim_finds_its_host_by_a_serial_alias_never_by_a_serial_name`.
+[ ] build VM; check.sh; golden. Earlier:
 
 Matching a host *named* by the serial (the issue's proposal) puts all eight
 MicroCloud blades on `boothost/S11075924402016` (#249). Asked on #202

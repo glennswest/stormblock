@@ -1887,3 +1887,56 @@ async fn forge_acts_on_a_machines_boot_override_and_reports_the_result() {
     assert!(h["boot_override"].is_null(), "cleared once reported: {h}");
     server.abort();
 }
+
+// ------------------------------------------------------------------ #202
+//
+// A default claim's serial counts only when it is an alias an operator set
+// (owner's decision B): the R230, renamed to its DNS name with its serial
+// kept as an alias, keeps its image when it boots the default; a host merely
+// named by a serial (the MicroCloud chassis one) is never claimed by it.
+
+#[tokio::test]
+async fn a_default_claim_finds_its_host_by_a_serial_alias_never_by_a_serial_name() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1, v2]).await;
+    for (name, vol) in [("default", v1), ("stormblock1", v2), ("S11075924402016", v2)] {
+        client.post(format!("{base}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": name, "volume": vol.to_string()}))
+            .send().await.unwrap();
+    }
+    let r = client.put(format!("{base}/api/v1/boothost/stormblock1"))
+        .json(&serde_json::json!({"aliases": ["C2NR0Q2"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let claim = |mac: &'static str, serial: &'static str| {
+        let c = client.clone();
+        let b = base.clone();
+        async move {
+            let r = c.post(format!("{b}/api/v1/synonyms/boothost/default/claim"))
+                .json(&serde_json::json!({"mac": mac, "serial": serial}))
+                .send().await.unwrap();
+            assert_eq!(r.status(), 201);
+            r.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+
+    // The R230, booting the default: its own host and image, its MAC aliased.
+    let v = claim("aa:bb:cc:dd:ee:10", "C2NR0Q2").await;
+    assert_eq!((v["host"]["name"].as_str(), v["host"]["provisional"].as_bool()), (Some("stormblock1"), Some(false)), "{v}");
+    assert_eq!(v["claimed_from"]["release"].as_str(), Some(v2.to_string().as_str()), "its own image: {v}");
+    let h: serde_json::Value = client.get(format!("{base}/api/v1/boothost/stormblock1")).send().await.unwrap().json().await.unwrap();
+    assert!(h["aliases"].to_string().contains("aa:bb:cc:dd:ee:10"), "the MAC is an alias now: {h}");
+
+    // Two blades with the chassis serial a host is merely named by: each a
+    // provisional host of its own, on the default image, never server1's.
+    let a = claim("aa:bb:cc:dd:ee:21", "S11075924402016").await;
+    let b = claim("aa:bb:cc:dd:ee:22", "S11075924402016").await;
+    assert_eq!(a["host"]["name"], "mac-aabbccddee21");
+    assert_eq!(b["host"]["name"], "mac-aabbccddee22");
+    assert_eq!(a["claimed_from"]["release"].as_str(), Some(v1.to_string().as_str()), "the default image: {a}");
+    server.abort();
+}
