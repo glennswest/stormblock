@@ -110,6 +110,14 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// every device does.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         ublk_stuck: Vec<crate::drive::ublk::Stuck>,
+        /// Local drives whose I/O fails with transport errors (a controller
+        /// reset, a dropped link) (#391): `path`, `since` (unix s),
+        /// `last_error`, `retries`, and `gave_up` once the ride-through
+        /// window ran out and errors go up. While `gave_up` is false the
+        /// node is riding it through and callers only wait. Left out when
+        /// every drive answers.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        drives_unreachable: Vec<crate::drive::ridethrough::Stall>,
     }
     let flow_over_remaining =
         u64::try_from(state.flow_over_remaining.load(std::sync::atomic::Ordering::Relaxed)).ok();
@@ -140,6 +148,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs: super::slab_report::for_health(&state),
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
+        drives_unreachable: crate::drive::ridethrough::stalls(),
     })
     .into_response()
 }

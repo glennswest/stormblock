@@ -18,6 +18,7 @@ pub mod identity;
 pub mod handover;
 pub mod httpdev;
 pub mod partition;
+pub mod ridethrough;
 pub mod discover;
 // The initiators reuse the *target's* PDU parsers rather than carrying a
 // second copy of RFC 7143 / the NVMe-TCP spec, so each exists exactly
@@ -421,7 +422,8 @@ pub async fn open_one_drive_with_secret(
     // A block device is a block device (#140): O_DIRECT, never a file.
     if is_block_device(path) {
         #[cfg(target_os = "linux")]
-        return Ok(Box::new(sas::SasDevice::open(path).await?));
+        // A controller reset on this drive's HBA is ridden through (#391).
+        return Ok(ridethrough::wrap_box(Box::new(sas::SasDevice::open(path).await?)));
     }
 
     // A regular file: tests and development only.
@@ -462,12 +464,14 @@ pub async fn open_path(path: &str, read_only: bool) -> DriveResult<std::sync::Ar
     if is_block_device(path) {
         #[cfg(target_os = "linux")]
         {
-            let dev = if read_only {
-                sas::SasDevice::open_read_only(path).await?
+            let dev: std::sync::Arc<dyn BlockDevice> = if read_only {
+                std::sync::Arc::new(sas::SasDevice::open_read_only(path).await?)
             } else {
-                sas::SasDevice::open(path).await?
+                std::sync::Arc::new(sas::SasDevice::open(path).await?)
             };
-            return Ok(std::sync::Arc::new(dev));
+            // A controller reset on this drive's HBA is ridden through, not
+            // passed up as EIO (#391).
+            return Ok(ridethrough::RideThrough::wrap(dev));
         }
     }
     if !std::path::Path::new(path).exists() {
