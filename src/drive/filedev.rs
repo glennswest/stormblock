@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 use super::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, SmartData};
 
@@ -148,14 +147,14 @@ impl FileDevice {
         let id = match known {
             Some(i) => DeviceId {
                 wwn: i.wwn,
-                uuid: Uuid::new_v4(),
+                uuid: super::identity::lasting_uuid(path),
                 serial: if i.serial.is_empty() { "file".to_string() } else { i.serial },
                 model: if i.model.is_empty() { "FileDevice".to_string() } else { i.model },
                 path: path.to_string(),
             },
             None => DeviceId {
                 wwn: String::new(),
-                uuid: Uuid::new_v4(),
+                uuid: super::identity::lasting_uuid(path),
                 serial: "file".to_string(),
                 model: "FileDevice".to_string(),
                 path: path.to_string(),

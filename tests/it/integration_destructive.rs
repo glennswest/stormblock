@@ -417,3 +417,33 @@ async fn a_drive_carrying_an_api_formatted_slab_is_not_closed() {
     let r = c.delete(format!("{}/drives/{enc}?force=true", n.base)).bearer_auth(ADMIN).send().await.unwrap();
     assert!(r.status().is_success(), "force closes it: {}", r.text().await.unwrap());
 }
+
+/// #65: a drive's id is who it is, not minted per open: the same after a
+/// close and reopen, and on another engine (a restart), and addressable by it.
+#[tokio::test]
+async fn a_drive_keeps_its_id_across_opens_and_restarts() {
+    let n = node(false, None).await;
+    let c = reqwest::Client::new();
+    let path = n.dir.path().join("disk.bin").to_string_lossy().to_string();
+    let open = |base: String| {
+        let (c, path) = (c.clone(), path.clone());
+        async move {
+            let r: Value = c.post(format!("{base}/drives")).bearer_auth(NODE).json(&json!({ "path": path, "size_bytes": 16 * MIB })).send().await.unwrap().json().await.unwrap();
+            r["uuid"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()
+        }
+    };
+    let first = open(n.base.clone()).await;
+    let r = c.delete(format!("{}/drives/{first}", n.base)).bearer_auth(ADMIN).send().await.unwrap();
+    assert!(r.status().is_success(), "closed by its id: {}", r.text().await.unwrap());
+    let again = open(n.base.clone()).await;
+    assert_eq!(again, first, "the same drive, the same id");
+
+    let other = node(false, None).await;
+    assert_eq!(open(other.base.clone()).await, first, "and on another engine: a restart keeps it");
+    let got = c.get(format!("{}/drives/{first}", other.base)).bearer_auth(NODE).send().await.unwrap();
+    assert_eq!(got.status().as_u16(), 200);
+
+    let elsewhere = n.dir.path().join("other.bin").to_string_lossy().to_string();
+    let r: Value = c.post(format!("{}/drives", n.base)).bearer_auth(NODE).json(&json!({ "path": elsewhere, "size_bytes": 16 * MIB })).send().await.unwrap().json().await.unwrap();
+    assert_ne!(r["uuid"].as_str().unwrap(), first, "another drive, another id");
+}

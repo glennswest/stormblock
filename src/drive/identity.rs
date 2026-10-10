@@ -75,6 +75,61 @@ pub fn of_in(sys: &Path, name: &str) -> Option<Identity> {
     (!id.is_empty()).then_some(id)
 }
 
+/// A device's lasting id (#65): a uuid5 of who it is, so a drive keeps its
+/// `DeviceId.uuid` across opens and restarts (the drives API addresses a
+/// drive by it). From most to least lasting:
+/// - a block device with a WWN: `wwn:<wwn>`;
+/// - else one with a serial: `serial:<model>:<serial>`, with the namespace
+///   id on NVMe (a controller's namespaces share its serial);
+/// - else a block device: `path:<canonical path>`;
+/// - a file: `file:<canonical path>`.
+///
+/// A partition opened on its own (`/dev/sda2`) adds `:part<n>`: it is not
+/// its disk, though its disk's identity is the one it reports (`drive_id`).
+pub fn lasting_uuid(path: &str) -> uuid::Uuid {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let name = canon.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    let is_block = {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::metadata(&canon).map(|m| m.file_type().is_block_device()).unwrap_or(false)
+    };
+    let key = if is_block {
+        lasting_key_in(Path::new("/sys"), &name, &canon.to_string_lossy())
+    } else {
+        format!("file:{}", canon.to_string_lossy())
+    };
+    uuid_of_key(&key)
+}
+
+/// The uuid a lasting key names.
+pub fn uuid_of_key(key: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, format!("stormblock-drive:{key}").as_bytes())
+}
+
+/// [`lasting_uuid`]'s key for block device `name` under a sysfs root.
+pub fn lasting_key_in(sys: &Path, name: &str, canon: &str) -> String {
+    let class = sys.join("class/block").join(name);
+    let node = std::fs::canonicalize(&class).unwrap_or(class);
+    let part = std::fs::read_to_string(node.join("partition")).map(|s| s.trim().to_string()).ok();
+    let disk = if part.is_some() { node.parent().map(PathBuf::from).unwrap_or(node.clone()) } else { node.clone() };
+    let base = match of_in(sys, name) {
+        Some(i) if !i.wwn.is_empty() => format!("wwn:{}", i.wwn),
+        Some(i) if !i.serial.is_empty() => {
+            let nsid = std::fs::read_to_string(disk.join("nsid")).map(|s| s.trim().to_string()).unwrap_or_default();
+            if nsid.is_empty() {
+                format!("serial:{}:{}", i.model, i.serial)
+            } else {
+                format!("serial:{}:{}:ns{nsid}", i.model, i.serial)
+            }
+        }
+        _ => return format!("path:{canon}"),
+    };
+    match part {
+        Some(n) => format!("{base}:part{n}"),
+        None => base,
+    }
+}
+
 /// How a disk records (#282): conventional, or shingled (SMR). A shingled
 /// disk takes sustained writes into a cache region and slows to seconds per
 /// write, and per flush, once that is full: a flow-over is exactly that load.
@@ -241,6 +296,45 @@ mod tests {
         ] {
             std::os::unix::fs::symlink(target, class.join(name)).unwrap();
         }
+    }
+
+    /// #65: a drive's id is who it is: WWN first, then model + serial (+ the
+    /// NVMe namespace), else its path; a partition is its own, not its disk's.
+    #[test]
+    fn a_drives_lasting_key_is_who_it_is_and_a_partition_is_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tree(root);
+        assert_eq!(lasting_key_in(root, "sda", "/dev/sda"), "wwn:naa.50014ee2b5d3a1f0");
+        assert_eq!(lasting_key_in(root, "sda2", "/dev/sda2"), "wwn:naa.50014ee2b5d3a1f0:part2");
+        assert_eq!(lasting_key_in(root, "nvme0n1", "/dev/nvme0n1"), "wwn:eui.0025385b71b0c2d4");
+        // No WWN: the serial, with the namespace id a controller's
+        // namespaces differ by.
+        let ns = root.join("devices/pci1/nvme/nvme0/nvme0n1");
+        std::fs::remove_file(ns.join("wwid")).unwrap();
+        std::fs::write(ns.join("nsid"), "1\n").unwrap();
+        assert_eq!(lasting_key_in(root, "nvme0n1", "/dev/nvme0n1"), "serial:Samsung SSD 970:S4EWNX0R123456:ns1");
+        assert_eq!(lasting_key_in(root, "nvme0n1p1", "/dev/nvme0n1p1"), "serial:Samsung SSD 970:S4EWNX0R123456:ns1:part1");
+        // Nothing sysfs can say: the path.
+        assert_eq!(lasting_key_in(root, "vda", "/dev/vda"), "path:/dev/vda");
+        assert_ne!(uuid_of_key("wwn:a"), uuid_of_key("wwn:b"));
+        assert_eq!(uuid_of_key("wwn:a"), uuid_of_key("wwn:a"));
+    }
+
+    /// A file's id is its canonical path: the same at every open, another
+    /// file's differs.
+    #[test]
+    fn a_files_id_is_the_same_at_every_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("b.bin");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"y").unwrap();
+        let a = a.to_str().unwrap();
+        assert_eq!(lasting_uuid(a), lasting_uuid(a));
+        assert_ne!(lasting_uuid(a), lasting_uuid(b.to_str().unwrap()));
+        let dotted = format!("{}/./a.bin", dir.path().display());
+        assert_eq!(lasting_uuid(&dotted), lasting_uuid(a), "by canonical path");
     }
 
     /// #282: a disk's recording from `queue/zoned`, else its model.

@@ -180,6 +180,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Drive identity is stable (2026-10-10, #65) — IN PROGRESS
+
+- [x] `identity::lasting_uuid` (block: wwn > model+serial(+nsid) > path, +
+      `:part<n>`; file: canonical path), `uuid_of_key`; SasDevice,
+      FileDevice, PartitionDevice (parent+offset), IscsiDevice (URI). The
+      crash test device and the VFIO stub keep random ids (no lasting identity)
+- [x] tests: identity units (fake sysfs, files), `integration_destructive::
+      a_drive_keeps_its_id_across_opens_and_restarts`; README, CHANGELOG
+- [ ] build, check.sh, golden, close
+
 ### Pallet copy/move/install hazards (2026-10-10, #57) — DONE (golden-stormblock-eff7a69c10e0)
 
 - [x] 1. docs/pallets.md: a copy gets a new GUID, a move keeps it; GUIDs can

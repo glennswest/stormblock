@@ -695,12 +695,16 @@ impl IscsiDevice {
             "Disk".to_string()
         };
 
+        // The target's URI names it: the same id at every open (#65), as an
+        // nvme-tcp:// drive's.
+        let path = format!("iscsi://{}:{}/{}", portal, port, iqn);
+        let uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, path.as_bytes());
         let id = DeviceId {
             wwn: String::new(),
-            uuid: Uuid::new_v4(),
-            serial: format!("iscsi-{}", &Uuid::new_v4().simple().to_string()[..8]),
+            uuid,
+            serial: format!("iscsi-{}", &uuid.simple().to_string()[..8]),
             model: format!("{} {}", vendor, product),
-            path: format!("iscsi://{}:{}/{}", portal, port, iqn),
+            path,
         };
 
         Ok(IscsiDevice {

@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **fix:** #65: a drive's `DeviceId.uuid` is derived from who it is, not minted at every open, so the drives API's id for a drive survives a close, a reopen and a restart.
+  - **How it is derived:** a block device uses its WWN, else model + serial (+ NVMe nsid), else its path; a partition opened on its own adds `:part<n>`.
+  - **Other kinds:** a file uses its canonical path; a `PartitionDevice` uses its parent and offset; an `iscsi://` drive uses its URI, as `nvme-tcp://` already did.
 - **fix:** #57: the hazards on the pallet copy/move/install path.
   - **A copy is unproven:** a pallet copy (mirror leg, local-boot install, image `from_image`, `pallet copy`) lands with `successful` clear and 3 tries, and earns the bit on its first good boot. A relocation (`move`, `convert`, whole-drive `adopt`) keeps its attributes.
   - **Moving a boot pallet is refused unless forced:** `pallet move --force`, or `"force": true` on the API. Its ESP stays behind.

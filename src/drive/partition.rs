@@ -77,7 +77,8 @@ impl PartitionDevice {
         let parent = inner.id().clone();
         let id = DeviceId {
             wwn: String::new(),
-            uuid: uuid::Uuid::new_v4(),
+            // Its disk and where on it: the same every open (#65).
+            uuid: super::identity::uuid_of_key(&format!("{}@{start}", parent.uuid)),
             serial: format!("{}+{}", parent.serial, start),
             model: parent.model.clone(),
             path: format!("{}@{}", parent.path, start),

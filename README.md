@@ -73,7 +73,12 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   persist flushes them again (#358). Drives open and close at runtime
   (`POST /api/v1/drives`), carry their identity (serial, WWN) and labels
   (`shelf`, `bay`, `hba` from stormdrive), and can be drained and reported
-  failing over HTTP.
+  failing over HTTP. A drive's `uuid` is derived from who it is, so it is the
+  same at every open and after a restart (#65). In order of preference:
+  - its WWN;
+  - else its model and serial, plus the namespace id on NVMe;
+  - else its path. A file's is its canonical path, an `nvme-tcp://` or
+    `iscsi://` drive's is its URI, and a partition adds its number or offset.
 - **Slabs** are the unit of storage: 1 MiB slots, a slot table (committed a
   64 MiB step at a time, so formatting and opening a slab cost what it holds,
   not what the drive could hold, #363), and optionally

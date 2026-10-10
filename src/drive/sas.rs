@@ -25,7 +25,6 @@
 use std::os::unix::io::RawFd;
 
 use async_trait::async_trait;
-use uuid::Uuid;
 
 use super::direct::DirectIo;
 use super::dma::DmaBuf;
@@ -101,7 +100,8 @@ impl SasDevice {
         let known = super::identity::of(&path);
         let id = DeviceId {
             wwn: known.as_ref().map(|i| i.wwn.clone()).unwrap_or_default(),
-            uuid: Uuid::new_v4(),
+            // The same drive, the same id, at every open (#65).
+            uuid: super::identity::lasting_uuid(&path),
             serial: known
                 .as_ref()
                 .map(|i| i.serial.clone())
