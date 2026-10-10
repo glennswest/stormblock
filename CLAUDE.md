@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Pallet signatures in the format (2026-10-10, #378, P2) — IN PROGRESS
+### Pallet signatures in the format (2026-10-10, #378, P2) — DONE (golden-stormblock-7b232505a559)
 
 stormuefi#18 decided (Ed25519 over the manifest digest, key in stormcentral,
 signed at compose). Format: superblock 180 `sig_alg`, 184 key id (SHA-256 of
@@ -197,7 +197,9 @@ area; the superblock CRC covers it.
 - [x] tests: crate units, `pallet::sign`, integration_pallet in-place sign,
       integration_compose_disk composed sign; docs/pallets.md §2.3, §2.9;
       CHANGELOG
-- [ ] build, check.sh, golden, close; tell stormuefi#59, stormcentral#634
+- [x] crate 20/20 + no_std UEFI check; pallet/sign/compose 103/103;
+      check.sh at 15a0a30 ALL PASS (1121/1121); golden
+      golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
 ### test/ moves to stormblock-test (2026-10-10, #371) — WAITS ON stormblock-test#3
 
