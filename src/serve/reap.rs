@@ -348,12 +348,11 @@ pub async fn sweep_failed_clone(
 
 /// The background sweep.
 ///
-/// Off with `STORMBLOCKMK_REAP_SECS=0`; report-only with
-/// `STORMBLOCKMK_REAP_REPORT_ONLY=1`, which logs what it would remove and
-/// removes nothing.
+/// Off with `[serve] reap_secs = 0`; report-only with `[serve] reap_apply =
+/// false`, which logs what it would remove and removes nothing.
 pub async fn run(ctx: Arc<ServeContext>) {
     if ctx.cfg.reap_secs == 0 {
-        tracing::info!("template reaper disabled (STORMBLOCKMK_REAP_SECS=0)");
+        tracing::info!("template reaper disabled ([serve] reap_secs = 0)");
         return;
     }
     tracing::info!(

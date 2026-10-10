@@ -62,7 +62,7 @@ pub struct ServeContext {
     pub state: Arc<AppState>,
     pub status: Arc<MkStatus>,
     /// The shared multi-LUN iSCSI target — `None` unless
-    /// `STORMBLOCKMK_ENABLE_ISCSI` is set, because the legacy stack is not
+    /// `[serve] iscsi_enabled` is true, because the legacy stack is not
     /// brought up at all by default.
     #[cfg(feature = "iscsi")]
     pub shared_iscsi: Option<Arc<IscsiTarget>>,
@@ -298,7 +298,7 @@ impl ServeContext {
                 obj.insert(
                     "blocked_reason".into(),
                     serde_json::json!(
-                        "iSCSI is not served — set STORMBLOCKMK_ENABLE_ISCSI=1 to wire this \
+                        "iSCSI is not served — set `[serve] iscsi_enabled = true` to wire this \
                          export, or withdraw it and recreate it with protocol \"nvme-tcp\""
                     ),
                 );

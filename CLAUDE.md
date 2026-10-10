@@ -202,6 +202,16 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
+### Stale STORMBLOCKMK_* names; an unset gauge (2026-10-10, #197) — IN PROGRESS
+
+- [x] every message and doc comment names the `[serve]` key (iscsi_enabled,
+      portal_span, reap_secs, reap_apply) or `[management] require_auth`;
+      the api.rs test asserts the key
+- [x] `stormblock_allocated_bytes` set from the catalog (sum of
+      `allocated_bytes`); test `integration_mgmt_api::the_allocated_bytes_
+      gauge_is_the_volumes_allocation`; CHANGELOG
+- [ ] build, check.sh, golden, close
+
 ### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — WAITING ON THE OWNER
 
 stormcos#276 (A: only when asked). The engine half (copy a sealed golden

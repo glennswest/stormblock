@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **fix:** #197: messages and doc comments named `STORMBLOCKMK_*` environment variables that nothing reads. They now name the real keys:
+  - `[serve] iscsi_enabled`: the iSCSI refusals in the API, the wiring status and the reconciler;
+  - `[serve] portal_span`: an exhausted portal range;
+  - `[serve] reap_secs` and `reap_apply`: the template reaper;
+  - `[management] require_auth = false`: an open node.
+- **fix:** #197: `stormblock_allocated_bytes` was described but never set. It is now the sum of the volumes' `allocated_bytes` (what they hold alone), read from the published catalog on each scrape.
 - **feat:** #382 (owner's (A) on stormcos#241): a Kubernetes bearer is accepted for ordinary verbs too, after a TokenReview and SubjectAccessReview on `storage.storm.io`.
   - **Ordinary verbs:** `get`, `list`, `watch`, `create`, `delete` and `update`, mapped from the method and path (also `/apis/storage.storm.io/v1/`).
   - **BREAKING (for roles):** destructive verbs are now reviewed as **`destroy`**, which only a role granted all of `storage.storm.io` holds. Making a golden and its ticket stay `create` on `goldens` (#143).

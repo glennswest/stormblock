@@ -97,7 +97,7 @@ fn ok(v: Value) -> MkResult {
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     /// Accepted for everything. `None` means authentication is disabled
-    /// (`STORMBLOCKMK_INSECURE=1`).
+    /// (`[management] require_auth = false`).
     pub api_token: Option<String>,
     /// When set, destructive verbs require THIS token; the api token is not
     /// enough. When unset, the api token covers them.
@@ -720,7 +720,7 @@ async fn get_export(State(ctx): State<Arc<ServeContext>>, Path(id): Path<String>
 ///
 /// **The default is NVMe-TCP**: attach is sub-second where iSCSI measures in
 /// seconds, and it is the only transport this profile serves unless
-/// `STORMBLOCKMK_ENABLE_ISCSI` is set. `nvme-tcp` is the canonical name (what
+/// `[serve] iscsi_enabled` is true. `nvme-tcp` is the canonical name (what
 /// mkube sends and what attach blocks report); `nvmeof` is accepted as an
 /// alias because wiring.json and the engine's export table persist that
 /// spelling.
@@ -734,7 +734,7 @@ fn parse_protocol(p: Option<&str>, iscsi_enabled: bool) -> Result<WireProto, MkE
         Some("iscsi") if iscsi_enabled => Ok(WireProto::Iscsi),
         Some("iscsi") => Err(MkError::bad(
             "iSCSI is not served by this instance — use protocol \"nvme-tcp\" (the default), \
-             or start stormblockmk with STORMBLOCKMK_ENABLE_ISCSI=1",
+             or turn the legacy stack on with `[serve] iscsi_enabled = true`",
         )),
         Some(other) => Err(MkError::bad(format!(
             "unknown protocol \"{other}\" — expected \"nvme-tcp\" or \"iscsi\""
@@ -1719,7 +1719,7 @@ mod tests {
     fn iscsi_is_refused_unless_the_stack_is_enabled() {
         let err = parse_protocol(Some("iscsi"), false).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("STORMBLOCKMK_ENABLE_ISCSI"), "{}", err.1);
+        assert!(err.1.contains("[serve] iscsi_enabled"), "{}", err.1);
         assert_eq!(parse_protocol(Some("iscsi"), true).unwrap(), WireProto::Iscsi);
     }
 

@@ -266,7 +266,7 @@ impl WiringTable {
         }
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "per-export portal range {}..{} is exhausted ({} live) — raise STORMBLOCKMK_PORTAL_SPAN",
+                    "per-export portal range {}..{} is exhausted ({} live) — raise [serve] portal_span",
                     portal_base,
                     portal_base.saturating_add(portal_span),
                     used.len()

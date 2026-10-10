@@ -14,7 +14,7 @@
 //!   would discover every namespace on it, so one target per volume is what
 //!   makes "attach this volume" expressible in either transport.
 //! * **No wiring for a transport that is not served.** An iSCSI row while
-//!   `STORMBLOCKMK_ENABLE_ISCSI` is unset is reported blocked and left alone —
+//!   `[serve] iscsi_enabled` is off is reported blocked and left alone —
 //!   never half-wired, never silently converted to NVMe (its initiator is
 //!   looking for an IQN, not an NQN).
 //! * **Ordered teardown** (issue #7). A withdrawn export goes
@@ -191,7 +191,7 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
                 match row.protocol {
                     WireProto::Iscsi => tracing::warn!(
                         "export {} (volume {}) is iSCSI, but iSCSI is not served — left unwired. \
-                         Set STORMBLOCKMK_ENABLE_ISCSI=1 to bring the legacy stack up, or \
+                         Set `[serve] iscsi_enabled = true` to bring the legacy stack up, or \
                          withdraw the export and recreate it with protocol \"nvme-tcp\"",
                         row.export_id,
                         row.volume_id

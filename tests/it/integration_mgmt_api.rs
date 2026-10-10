@@ -455,6 +455,33 @@ async fn mgmt_get_metrics() {
     server.abort();
 }
 
+/// #197: `stormblock_allocated_bytes` has a sample: the bytes the volumes
+/// hold alone, the sum of their `allocated_bytes`.
+#[tokio::test]
+async fn the_allocated_bytes_gauge_is_the_volumes_allocation() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state_with_array(&dir).await;
+    let (base_url, server) = start_mgmt_server(state.clone()).await;
+    stormblock::mgmt::metrics::init_metrics();
+    stormblock::mgmt::metrics::register_metrics();
+
+    let want = {
+        let vm = state.volume_manager.lock().await;
+        let id = vm.list_volumes().await[0].0;
+        let h = vm.get_volume_handle(&id).unwrap();
+        h.write(0, &vec![7u8; 8192]).await.unwrap();
+        h.flush().await.unwrap();
+        vm.persist().await;
+        vm.list_volumes().await.iter().map(|v| v.3).sum::<u64>()
+    };
+    assert!(want > 0);
+    let text = reqwest::get(format!("{base_url}/metrics")).await.unwrap().text().await.unwrap();
+    let line = text.lines().find(|l| l.starts_with("stormblock_allocated_bytes ")).unwrap_or_else(|| panic!("no sample: {text}"));
+    let got: f64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    assert_eq!(got as u64, want, "{line}");
+    server.abort();
+}
+
 /// The access setting over HTTP: both ways, and sealed on top of it.
 #[tokio::test]
 async fn mgmt_volume_access_is_a_setting_sealing_overrides() {

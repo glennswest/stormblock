@@ -16,7 +16,7 @@ pub struct MkStatus {
     pub slab_open: AtomicBool,
     /// `VolumeManager::restore()` completed without error.
     pub volumes_restored: AtomicBool,
-    /// Is the legacy iSCSI stack served at all (`STORMBLOCKMK_ENABLE_ISCSI`)?
+    /// Is the legacy iSCSI stack served at all (`[serve] iscsi_enabled`)?
     /// Readiness only asks about the iSCSI listener when it is.
     pub iscsi_enabled: AtomicBool,
     /// The shared iSCSI portal is bound and accepting.
@@ -37,7 +37,7 @@ pub struct MkStatus {
     pub exports_pending: AtomicU64,
     pub exports_draining: AtomicU64,
     /// Rows that cannot be wired because their transport is turned off (an
-    /// iSCSI export while `STORMBLOCKMK_ENABLE_ISCSI` is unset). Counted apart
+    /// iSCSI export while `[serve] iscsi_enabled` is off). Counted apart
     /// from `exports_pending` on purpose: they are not waiting on anything mk
     /// is doing, so they must not hold readiness down forever.
     pub exports_blocked: AtomicU64,

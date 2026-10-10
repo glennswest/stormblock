@@ -257,7 +257,7 @@ pub fn register_metrics() {
     );
     metrics::describe_gauge!(
         "stormblock_allocated_bytes",
-        "Total allocated volume storage in bytes"
+        "Bytes the volumes hold alone: the sum of every volume's allocated_bytes, what deleting them would free (shared extents are counted at their owner) (#197)"
     );
     metrics::describe_counter!(
         "stormblock_api_requests_total",
@@ -382,6 +382,14 @@ async fn refresh_capacity_gauges(state: &crate::mgmt::AppState) {
     metrics::gauge!("stormblock_slab_allocated_bytes_total").set(alloc_total as f64);
     metrics::gauge!("stormblock_slab_free_bytes_total").set(free_total as f64);
     drop(registry);
+
+    // What the volumes hold alone (#197): the sum of `allocated_bytes` as
+    // the listing reports it, read from the published catalog (#364) so a
+    // scrape never waits on the volume manager. No catalog yet: no sample.
+    if let Some(c) = state.volume_catalog.latest() {
+        let total: u64 = crate::volume::catalog::list_volumes(&*c).await.iter().map(|v| v.3).sum();
+        metrics::gauge!("stormblock_allocated_bytes").set(total as f64);
+    }
 
     // What each pool can promise and what it has promised (#152).
     let acc = crate::mgmt::capacity::account(state).await;
