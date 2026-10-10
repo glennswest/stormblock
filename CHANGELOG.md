@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #382 (owner's (A) on stormcos#241): a Kubernetes bearer is accepted for ordinary verbs too, after a TokenReview and SubjectAccessReview on `storage.storm.io`.
+  - **Ordinary verbs:** `get`, `list`, `watch`, `create`, `delete` and `update`, mapped from the method and path (also `/apis/storage.storm.io/v1/`).
+  - **BREAKING (for roles):** destructive verbs are now reviewed as **`destroy`**, which only a role granted all of `storage.storm.io` holds. Making a golden and its ticket stay `create` on `goldens` (#143).
+  - **Unchanged:** the node token, the admin token, and a node with no `[management.kubernetes]`.
 - **chore:** #371: the test container moved to glennswest/stormblock-test (stormcentral#601). Its `short` suite passed on C2NR0Q2 from there, in run 35325a71aa (stormblock-test#3).
   - **Removed here:** `test/` and its workspace member; `Cargo.lock` loses `stormblock-test` in its own commit.
   - **`check.sh` stage 1:** now the musl release build of `stormblock`, plus that repo's own check when `STORMBLOCK_TEST_DIR` names a checkout. It is private, so a build VM does not clone it.

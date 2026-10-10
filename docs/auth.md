@@ -108,10 +108,15 @@ may create `tokenreviews` and `subjectaccessreviews`, as
 
 1. **TokenReview:** who is it?
 2. **SubjectAccessReview** for that user. The group is `storage.storm.io`;
-   the resource is the path's first segment after `api/v1/` (`volumes`,
-   `slabs`, `arrays`, `forge`, …); the verb is `delete` for DELETE, `create`
-   for a POST to a collection, `update` otherwise; and the name is the next
-   segment.
+   the resource is the path's first segment after `api/v1/` (or `/v1/`,
+   `/serve/v1/`, `apis/storage.storm.io/v1/`: `volumes`, `slabs`, `arrays`,
+   `forge`, …); and the name is the next segment. The verb is **`destroy`**
+   for every destructive call (#382), a verb no role holds but one granted
+   all of `storage.storm.io`. So a role that may create, update, delete its
+   own volumes or clone can never format a slab, delete a golden or switch
+   forge. One exception, from #143: making a golden from a VM's disk and a
+   ticket for it (`POST /api/v1/goldens`, `…/{name}/ticket`) are `create` on
+   `goldens`, the one permission a golden builder's ServiceAccount holds.
 
 The release's `storage-admin` ClusterRole allows these; `storage-viewer`
 does not. The outcomes:
@@ -120,9 +125,32 @@ does not. The outcomes:
 - the apiserver unreachable: **503**;
 - no apiserver configured: **401**.
 
-Answers are cached for a minute per bearer, resource, verb and name. A
-Kubernetes bearer is not an ordinary credential: reads stay the node token's,
-with one exception, a machine's boot-chain attestation (below).
+Answers are cached for a minute per bearer, resource, verb and name.
+
+**Ordinary verbs take a reviewed bearer too** (#382, owner's (A) on
+stormcos#241). A caller from another node (vmimages placing an image,
+stormcentral's test Jobs) presents its own ServiceAccount's token instead of
+a shared secret. The review is the same, with the ordinary verb:
+
+| request | verb |
+|---|---|
+| GET or HEAD of an item | `get` |
+| GET or HEAD of a collection | `list` (`watch` with `?watch`) |
+| POST to a collection | `create` |
+| an ordinary DELETE (a detach, an export, a volume that is no golden) | `delete` |
+| anything else (clone, attach, seal of nothing, …) | `update` |
+
+stormcos's roles, then:
+- **`storage-admin`** (`*`): everything, `destroy` included.
+- **`storage-user`** (`get`, `list`, `watch`, `create`, `update`): reads,
+  creates, clones and attaches, and is refused every destructive call. It
+  needs `delete` too to detach or delete its own volumes.
+- **`storage-viewer`** (`get`, `list`, `watch`): reads.
+
+A bearer that does not review is 401, a denied one 403. With no
+`[management.kubernetes]` a bearer that is not a node or admin token is no
+credential at all, as before. The node token and the admin token are
+unchanged.
 
 **`admin_gate = "audit"`** (or `$STORMBLOCK_ADMIN_GATE=audit`) is for rolling
 this out. The node token still gets through destructive verbs, and each such

@@ -33,6 +33,8 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                         Some("alice-k8s") => Some(("alice", vec!["storage-admins", "system:authenticated"])),
                         Some("bob-k8s") => Some(("bob", vec!["system:authenticated"])),
                         Some("stormcert-k8s") => Some(("system:serviceaccount:stormcert:stormcert", vec!["system:serviceaccounts"])),
+                        Some("user-k8s") => Some(("system:serviceaccount:vmimages:vmimages", vec!["storage-users"])),
+                        Some("viewer-k8s") => Some(("carol", vec!["storage-viewers"])),
                         _ => None,
                     };
                     Json(match user {
@@ -55,8 +57,14 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                         && ra["resource"] == "boothost"
                         && ra["verb"] == "get"
                         && ra["name"] == "server1";
-                    let ok = (spec["groups"].as_array().is_some_and(|g| g.iter().any(|x| x == "storage-admins")) || stormcert)
-                        && ra["group"] == "storage.storm.io";
+                    let in_group = |n: &str| spec["groups"].as_array().is_some_and(|g| g.iter().any(|x| x == n));
+                    let verb = ra["verb"].as_str().unwrap_or("");
+                    // stormcos's roles (#382): storage-admin `*`;
+                    // storage-user get/list/watch/create/update;
+                    // storage-viewer get/list/watch.
+                    let user = in_group("storage-users") && matches!(verb, "get" | "list" | "watch" | "create" | "update");
+                    let viewer = in_group("storage-viewers") && matches!(verb, "get" | "list" | "watch");
+                    let ok = (in_group("storage-admins") || stormcert || user || viewer) && ra["group"] == "storage.storm.io";
                     Json(json!({ "status": { "allowed": ok, "reason": if ok { "storage-admin" } else { "no RBAC policy matched" } } }))
                 }
             }),
@@ -163,7 +171,7 @@ async fn the_node_token_keeps_the_ordinary_verbs_and_only_those() {
     let log = audit(&n);
     assert!(log.iter().any(|r| r["who"] == "node-token" && r["decision"] == "refused" && r["path"] == format!("/api/v1/volumes/{golden}")));
     let del = log.iter().find(|r| r["who"] == "admin-token" && r["path"] == format!("/api/v1/volumes/{golden}")).unwrap();
-    assert_eq!((del["decision"].as_str(), del["status"].as_u64(), del["resource"].as_str(), del["verb"].as_str()), (Some("allowed"), Some(204), Some("volumes"), Some("delete")));
+    assert_eq!((del["decision"].as_str(), del["status"].as_u64(), del["resource"].as_str(), del["verb"].as_str()), (Some("allowed"), Some(204), Some("volumes"), Some("destroy")));
     assert_eq!(del["target"], golden.as_str());
     assert!(!log.iter().any(|r| r["path"] == format!("/api/v1/volumes/{plain}")), "an ordinary delete is not audited");
 }
@@ -196,12 +204,12 @@ async fn a_kubernetes_bearer_is_reviewed_and_named_in_the_audit_log() {
     assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g1}"), Some("bob-k8s"), None).await, 403);
     assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g1}"), Some("nobody"), None).await, 401);
     assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g1}"), Some("alice-k8s"), None).await, 204);
-    // A bearer is no ordinary credential: reads stay the node token's.
-    assert_eq!(call(&n, M::GET, "/volumes", Some("alice-k8s"), None).await, 401);
+    // A reviewed bearer reads too (#382): `list` on volumes.
+    assert_eq!(call(&n, M::GET, "/volumes", Some("alice-k8s"), None).await, 200);
 
     let sar: Vec<Value> = asked.lock().unwrap().iter().filter(|b| b["kind"] == "SubjectAccessReview").cloned().collect();
-    let attrs = &sar.last().unwrap()["spec"]["resourceAttributes"];
-    assert_eq!((attrs["group"].as_str(), attrs["resource"].as_str(), attrs["verb"].as_str()), (Some("storage.storm.io"), Some("volumes"), Some("delete")));
+    let attrs = &sar.iter().rev().find(|b| b["spec"]["resourceAttributes"]["verb"] == "destroy").unwrap()["spec"]["resourceAttributes"];
+    assert_eq!((attrs["group"].as_str(), attrs["resource"].as_str(), attrs["verb"].as_str()), (Some("storage.storm.io"), Some("volumes"), Some("destroy")));
     assert_eq!(attrs["name"], g1.as_str());
 
     let log = audit(&n);
@@ -446,4 +454,65 @@ async fn a_drive_keeps_its_id_across_opens_and_restarts() {
     let elsewhere = n.dir.path().join("other.bin").to_string_lossy().to_string();
     let r: Value = c.post(format!("{}/drives", n.base)).bearer_auth(NODE).json(&json!({ "path": elsewhere, "size_bytes": 16 * MIB })).send().await.unwrap().json().await.unwrap();
     assert_ne!(r["uuid"].as_str().unwrap(), first, "another drive, another id");
+}
+
+
+/// #382 (owner's (A) on stormcos#241): a Kubernetes bearer is reviewed for
+/// ordinary verbs too; destructive verbs are reviewed as `destroy`, which
+/// only storage-admin holds. storage-user clones and attaches and is refused
+/// a destructive verb; storage-viewer only reads; no bearer is the node
+/// token's rules.
+#[tokio::test]
+async fn a_storage_user_bearer_clones_and_attaches_and_never_destroys() {
+    use reqwest::Method as M;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let n = node(false, Some(api)).await;
+    let golden = volume(&n, "base.golden", true).await;
+
+    // storage-user: reads, creates, clones, attaches.
+    assert_eq!(call(&n, M::GET, "/volumes", Some("user-k8s"), None).await, 200);
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{golden}"), Some("user-k8s"), None).await, 200);
+    assert_eq!(call(&n, M::POST, "/volumes", Some("user-k8s"), Some(json!({"name": "scratch", "size": "4M"}))).await, 201);
+    let clone = reqwest::Client::new()
+        .post(format!("{}/volumes/{golden}/clone", n.base))
+        .bearer_auth("user-k8s")
+        .json(&json!({"name": "vm1-root"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clone.status().as_u16(), 201, "{}", clone.text().await.unwrap());
+    let attach = call(&n, M::POST, "/volumes/vm1-root/attach", Some("user-k8s"), Some(json!({}))).await;
+    assert!(attach != 401 && attach != 403, "attach is the user's to ask: {attach}");
+    // …and never a destructive verb.
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{golden}"), Some("user-k8s"), None).await, 403, "a golden's delete");
+    assert_eq!(call(&n, M::POST, "/slabs", Some("user-k8s"), Some(json!({"device_path": "/nope"}))).await, 403, "a format");
+    assert_eq!(call(&n, M::PUT, "/forge", Some("user-k8s"), Some(json!({}))).await, 403, "forge on");
+
+    // storage-viewer: reads only.
+    assert_eq!(call(&n, M::GET, "/volumes", Some("viewer-k8s"), None).await, 200);
+    assert_eq!(call(&n, M::POST, "/volumes", Some("viewer-k8s"), Some(json!({"name": "v", "size": "4M"}))).await, 403);
+
+    // What was asked: list, get, create, update (the clone), and destroy.
+    let sar: Vec<(String, String)> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b["kind"] == "SubjectAccessReview" && b["spec"]["user"] == "system:serviceaccount:vmimages:vmimages")
+        .map(|b| {
+            let ra = &b["spec"]["resourceAttributes"];
+            (ra["resource"].as_str().unwrap().to_string(), ra["verb"].as_str().unwrap().to_string())
+        })
+        .collect();
+    for want in [("volumes", "list"), ("volumes", "get"), ("volumes", "create"), ("volumes", "update"), ("volumes", "destroy"), ("slabs", "destroy")] {
+        assert!(sar.iter().any(|(r, v)| r == want.0 && v == want.1), "{want:?} not asked: {sar:?}");
+    }
+
+    // No bearer, a bad one: the node token's rules, as before.
+    assert_eq!(call(&n, M::GET, "/volumes", None, None).await, 401);
+    assert_eq!(call(&n, M::GET, "/volumes", Some("nobody"), None).await, 401);
+    assert_eq!(call(&n, M::GET, "/volumes", Some(NODE), None).await, 200);
+    // A node with no apiserver named reviews nothing: a bearer is no credential.
+    let m = node(false, None).await;
+    assert_eq!(call(&m, M::GET, "/volumes", Some("user-k8s"), None).await, 401);
 }

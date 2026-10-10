@@ -535,6 +535,38 @@ pub async fn require_token(
         if is_admin || is_node {
             return next.run(req).await;
         }
+        // A Kubernetes bearer for an ordinary verb (#382, owner's (A) on
+        // stormcos#241): a caller from another node presents its own
+        // ServiceAccount's token, reviewed like a destructive one but with
+        // the ordinary verb (`get`, `list`, `create`, `update`, `delete`).
+        if let (Some(bearer), Some(kube)) = (presented.as_deref(), state.kube_auth.as_ref()) {
+            let (resource, verb, target) =
+                crate::serve::api::ordinary_review_attributes(&method, &path, req.uri().query());
+            use super::kubeauth::Review;
+            return match kube.review(bearer, &resource, &verb, target.as_deref()).await {
+                Review::Allowed(u) => {
+                    if let Some(s) = &slot {
+                        s.set("kubernetes");
+                    }
+                    let mut req = req;
+                    req.extensions_mut().insert(Caller(format!("kubernetes:{}", u.username)));
+                    next.run(req).await
+                }
+                Review::Denied(u, why) => {
+                    tracing::warn!("refused {method} {path}: {} may not {verb} storage.storm.io {resource}: {why}", u.username);
+                    refused(&path, StatusCode::FORBIDDEN, &format!("{} may not {verb} storage.storm.io {resource}: {why}", u.username))
+                }
+                Review::Unauthenticated(why) => {
+                    crate::serve::api::note_unauthorized(&format!("{method} {path}"));
+                    refused(&path, StatusCode::UNAUTHORIZED, &format!("the bearer is not a valid token: {why}"))
+                }
+                Review::Unavailable(why) => refused(
+                    &path,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("cannot review the bearer with {}: {why}", kube.api_url()),
+                ),
+            };
+        }
         crate::serve::api::note_unauthorized(&format!("{method} {path}"));
         return unauthorized(&path, crate::serve::api::MISSING_TOKEN);
     }

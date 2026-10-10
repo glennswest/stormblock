@@ -414,27 +414,57 @@ fn is_golden_content(method: &Method, path: &str) -> bool {
     matches!(seg.as_slice(), ["", "api", "v1", "goldens", n, "content"] if !n.is_empty())
 }
 
-/// The `storage.storm.io` resource and verb a SubjectAccessReview asks about,
-/// as the console asks its own (stormconsole#82): the first path segment after
-/// `api/v1/` (or the serving surface's), `delete` for DELETE, `create` for a
-/// POST to a collection, `update` otherwise.
-pub fn review_attributes(method: &Method, path: &str) -> (String, String, Option<String>) {
+/// The `storage.storm.io` resource and name a SubjectAccessReview asks about:
+/// the first path segment after `api/v1/` (or the serving surface's, `/v1/`,
+/// or the kube surface's `apis/storage.storm.io/v1/`), and the next one.
+fn review_target(path: &str) -> (String, Option<String>) {
     let p = path.trim_end_matches('/');
     let rest = p
         .strip_prefix("/api/v1/")
+        .or_else(|| p.strip_prefix("/apis/storage.storm.io/v1/"))
         .or_else(|| p.strip_prefix("/serve/v1/"))
         .or_else(|| p.strip_prefix("/mk/v1/"))
         .or_else(|| p.strip_prefix("/v1/"))
         .unwrap_or(p.trim_start_matches('/'));
     let mut parts = rest.split('/');
     let resource = parts.next().unwrap_or("").to_string();
-    let name = parts.next().map(str::to_string);
-    let verb = if *method == Method::DELETE {
-        "delete"
-    } else if *method == Method::POST && name.is_none() {
-        "create"
-    } else {
-        "update"
+    let name = parts.next().filter(|n| !n.is_empty()).map(str::to_string);
+    (resource, name)
+}
+
+/// The verb a **destructive** call is reviewed with (#382): `destroy`, which
+/// no role holds but one granted all of `storage.storm.io` (stormcos's
+/// `storage-admin`, `*`). So a role that may create, update, delete its own
+/// volumes or clone can never reach a format, a sealed golden's delete or a
+/// forge switch. One exception, owner's #143: making a golden from a VM's
+/// disk and a ticket for it are reviewed as `create` on `goldens`, the one
+/// permission a golden builder's ServiceAccount holds; neither destroys
+/// anything.
+pub const DESTROY: &str = "destroy";
+
+/// The resource, verb and name a destructive call is reviewed with (#274,
+/// #382).
+pub fn review_attributes(method: &Method, path: &str) -> (String, String, Option<String>) {
+    let (resource, name) = review_target(path);
+    let verb = if resource == "goldens" && *method == Method::POST { "create" } else { DESTROY };
+    (resource, verb.to_string(), name)
+}
+
+/// The resource, verb and name an **ordinary** call is reviewed with, for a
+/// Kubernetes bearer (#382): `get` for a read of an item, `list` of a
+/// collection, `watch` with `?watch`; `create` for a POST to a collection,
+/// `delete` for a DELETE (a detach, a volume that is no golden), `update`
+/// otherwise.
+pub fn ordinary_review_attributes(method: &Method, path: &str, query: Option<&str>) -> (String, String, Option<String>) {
+    let (resource, name) = review_target(path);
+    let watch = query.is_some_and(|q| q.split('&').any(|kv| matches!(kv, "watch" | "watch=1" | "watch=true")));
+    let verb = match *method {
+        Method::GET | Method::HEAD if watch => "watch",
+        Method::GET | Method::HEAD if name.is_some() => "get",
+        Method::GET | Method::HEAD => "list",
+        Method::POST if name.is_none() => "create",
+        Method::DELETE => "delete",
+        _ => "update",
     };
     (resource, verb.to_string(), name)
 }
