@@ -221,7 +221,7 @@ format change (#354, #380, #379 only).
       every_claim` (N → N+1 → N, two claims as PVCs are made): passes
 - [x] filed stormcentral#689 (P0); told master
 
-### Volumes can be renamed (2026-10-10, #219) — PAUSED for P0 #385 (back in line)
+### Volumes can be renamed (2026-10-10, #219) — DONE (golden-stormblock-c5eb2b1164a1)
 
 - [x] `PATCH /api/v1/volumes/{id} {name, force?}` (destructive): sealed
       refused without force, taken name 409, persisted (catalog republished)
@@ -230,8 +230,7 @@ format change (#354, #380, #379 only).
       of owned `standby-…` volumes is not done (the PVC name rule is
       rustkube-node's)
 - [x] targeted 348/348 at f6f0c5d
-- [ ] check.sh at f6f0c5d (started when paused; read it or run again), golden,
-      close
+- [x] check.sh at f6f0c5d ALL PASS (1125/1125); golden golden-stormblock-c5eb2b1164a1
 
 ### StormFS heartbeat sends a bearer (2026-10-10, #214) — DONE (golden-stormblock-b8014211fe11)
 
