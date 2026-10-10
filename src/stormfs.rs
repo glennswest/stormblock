@@ -309,6 +309,7 @@ mod tests {
             metadata_url: "http://stormfs:8500".to_string(),
             heartbeat_secs: 60,
             advertise_addr: "10.0.0.1:9090".to_string(),
+            ..StormFsConfig::default()
         };
         let toml_str = toml::to_string(&cfg).unwrap();
         let parsed: StormFsConfig = toml::from_str(&toml_str).unwrap();
