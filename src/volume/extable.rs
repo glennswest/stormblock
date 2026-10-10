@@ -260,6 +260,19 @@ impl ExtentTable {
         })
     }
 
+    /// The mapped extents in `range`, in order: the chunks outside it are
+    /// never visited (#300: a format zeroing terabytes of unmapped inode
+    /// tables must not cost a lookup per extent).
+    pub fn keys_in(&self, range: std::ops::Range<u64>) -> impl Iterator<Item = u64> + '_ {
+        let (lo, hi) = (range.start, range.end);
+        let first = lo >> CHUNK_SHIFT;
+        let last = if hi == 0 { 0 } else { ((hi - 1) >> CHUNK_SHIFT) + 1 };
+        self.chunks
+            .range(first..last.max(first))
+            .flat_map(|(c, chunk)| chunk.iter().map(move |p| (c << CHUNK_SHIFT) | p.off as u64))
+            .filter(move |v| (lo..hi).contains(v))
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = u64> + '_ {
         self.chunks.iter().flat_map(|(c, chunk)| chunk.iter().map(move |p| (c << CHUNK_SHIFT) | p.off as u64))
     }
@@ -312,6 +325,22 @@ mod tests {
 
     fn sid() -> SlabId {
         SlabId(Uuid::new_v4())
+    }
+
+    #[test]
+    fn keys_in_a_range_are_the_mapped_ones_there_only() {
+        let s = sid();
+        let mut t = ExtentTable::new();
+        for v in [0u64, 5, 63, 64, 65, 200, 1 << 40, (1 << 40) + 1] {
+            t.insert(v, ExtentLocation::new(s, v));
+        }
+        let got = |r: std::ops::Range<u64>| t.keys_in(r).collect::<Vec<_>>();
+        assert_eq!(got(0..u64::MAX), t.keys().collect::<Vec<_>>());
+        assert_eq!(got(5..65), vec![5, 63, 64]);
+        assert_eq!(got(64..65), vec![64]);
+        assert_eq!(got(66..200), Vec::<u64>::new());
+        assert_eq!(got(1..(1 << 41)), vec![5, 63, 64, 65, 200, 1 << 40, (1 << 40) + 1]);
+        assert_eq!(got(7..7), Vec::<u64>::new());
     }
 
     #[test]

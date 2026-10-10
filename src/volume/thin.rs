@@ -3185,35 +3185,33 @@ impl BlockDevice for ThinVolumeHandle {
         // which the write path takes *before* the volume lock — so taking
         // the volume lock here would invert the order.
         let _vol = if policy.is_none() { Some(self.inner.lock().await) } else { None };
-        let mut pos = offset;
-        let end = offset + len;
-
-        while pos < end {
-            let vext_idx = pos / self.slot_size;
-            let off_in_slot = pos % self.slot_size;
-
-            // Only discard full slots, and only ones this volume holds alone.
-            // Unmapping a shared extent is not durable until the volume record
-            // is rewritten, so after a power cut the record would map it again
-            // and the discarded range would read the blank's data (#171). A
-            // discard is a hint; keeping a shared extent costs nothing, since
-            // the slot is held by the other sharer anyway.
+        // Only discard full slots, and only ones this volume holds alone.
+        // Unmapping a shared extent is not durable until the volume record
+        // is rewritten, so after a power cut the record would map it again
+        // and the discarded range would read the blank's data (#171). A
+        // discard is a hint; keeping a shared extent costs nothing, since
+        // the slot is held by the other sharer anyway. Only mapped extents
+        // are visited: an unmapped one has nothing to release (#300).
+        let first = offset.div_ceil(self.slot_size);
+        let last = (offset + len) / self.slot_size;
+        if last <= first {
+            return Ok(());
+        }
+        let mapped = self.gem.read().await.mapped_in(self.id, first..last);
+        for vext_idx in mapped {
             let shared = {
                 let gem = self.gem.read().await;
                 gem.lookup(self.id, vext_idx).is_some_and(|l| l.ref_count > 1)
             };
-            if off_in_slot == 0 && (end - pos) >= self.slot_size && !shared {
-                let _shard = if policy.is_none() || policy.scheme.is_parity() {
-                    None
-                } else {
-                    Some(self.shard(vext_idx).lock().await)
-                };
-                self.release_extent(vext_idx).await?;
-                drop(_shard);
+            if shared {
+                continue;
             }
-
-            let remaining = self.slot_size - off_in_slot;
-            pos += remaining;
+            let _shard = if policy.is_none() || policy.scheme.is_parity() {
+                None
+            } else {
+                Some(self.shard(vext_idx).lock().await)
+            };
+            self.release_extent(vext_idx).await?;
         }
 
         Ok(())
@@ -3228,21 +3226,17 @@ impl BlockDevice for ThinVolumeHandle {
         self.resident().await?;
         self.refuse_if_sealed()?;
         let _finished = Finished(&self.completed);
-        let zeros = vec![0u8; self.slot_size as usize];
-        let mut pos = offset;
+        if len == 0 {
+            return Ok(());
+        }
         let end = offset + len;
-        while pos < end {
-            let vext_idx = pos / self.slot_size;
-            let off_in_slot = pos % self.slot_size;
-            let n = (self.slot_size - off_in_slot).min(end - pos);
-            let mapped = {
-                let gem = self.gem.read().await;
-                gem.lookup(self.id, vext_idx).is_some()
-            };
-            if mapped {
-                self.write(pos, &zeros[..n as usize]).await?;
-            }
-            pos += n;
+        // Only the mapped extents are visited (#300): the rest read as zero.
+        let mapped = self.gem.read().await.mapped_in(self.id, offset / self.slot_size..(end - 1) / self.slot_size + 1);
+        let zeros = vec![0u8; self.slot_size as usize];
+        for vext_idx in mapped {
+            let pos = (vext_idx * self.slot_size).max(offset);
+            let n = ((vext_idx + 1) * self.slot_size).min(end) - pos;
+            self.write(pos, &zeros[..n as usize]).await?;
         }
         Ok(())
     }

@@ -603,6 +603,14 @@ impl GlobalExtentMap {
         self.volumes.get(&volume_id)?.extents.get(&vext_idx)
     }
 
+    /// A volume's mapped extents in `range` (virtual extent indexes), in
+    /// order. O(what is mapped there), not O(the range) (#300).
+    #[track_caller]
+    pub fn mapped_in(&self, volume_id: VolumeId, range: std::ops::Range<u64>) -> Vec<u64> {
+        self.check(&volume_id);
+        self.volumes.get(&volume_id).map(|m| m.extents.keys_in(range).collect()).unwrap_or_default()
+    }
+
     /// Replace one leg of an extent with another slot (a leg moved or
     /// rebuilt), keeping the rest of the location as it is.
     #[track_caller]
