@@ -558,6 +558,14 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   `write`, …) and `secs`. A `flush` there is a consumer's fsync that has not
   returned. Left out when there is none; `status` stays `ok`. The watchdog
   logs the same list (WARN) every 30 s while it lasts.
+  And `"drives_unreachable"` (#391): every local drive whose I/O is failing
+  with transport errors (a controller reset, a link down), with `path`,
+  `since` (unix s), `last_error`, `retries` and `gave_up`. While `gave_up`
+  is false the engine is riding it through: the I/O is retried with backoff
+  and the ublk requests wait, for up to `STORMBLOCK_TRANSPORT_WINDOW_SECS`
+  (60; 0 turns it off). `gave_up: true` means it did not come back in the
+  window and its I/O now fails (ERROR in the log). Gone once an I/O goes
+  through (`docs/durability.md` rule 14).
   A booting node asks this of every candidate address before it has a token.
 - `GET /debug/stalls` and `/debug/locks` — public, read-only, no volume data
   (#269, #365): what the engine is doing when its API stops answering.

@@ -215,6 +215,23 @@ tests run on.
    A write still in flight when a flush starts is not owed by it, and it
    bumps the count when it lands, so the next flush is a full one. A
    handle's first flush is always full.
+14. **A controller reset is waited out, not passed up** (#391). A local
+   block device (a slab's drive, opened by path) is read and written
+   through `drive::ridethrough`: an I/O that fails with a transport error
+   (EIO, ENXIO, ENODEV, ENOLINK, ETIMEDOUT, EAGAIN, EBUSY, EREMOTEIO,
+   ESHUTDOWN, ECONNRESET, or not ready) is tried again with backoff (100 ms
+   doubling to 2 s) for a window, 60 s by default
+   (`STORMBLOCK_TRANSPORT_WINDOW_SECS`, 0 = off). That is what an HBA host
+   reset looks like from above: the disk answers nothing for seconds, then
+   answers. Meanwhile the ublk request waits (privileged ublk has no
+   per-request timeout), so the root filesystem and etcd see a slow I/O,
+   not EIO, and nothing is marked failed. A medium error (ENODATA, EILSEQ)
+   or a bad request (EINVAL) is not retried. Past the window the drive is
+   given up: ERROR in the log, `gave_up` in health's `drives_unreachable`,
+   and each I/O then tries once and fails, so the node is loudly degraded
+   rather than silently hung or diskless. The first I/O that goes through
+   clears it. Nothing acknowledged is acknowledged before the device took
+   it, so the retry changes no ordering rule above.
 
 ## How it is checked
 
