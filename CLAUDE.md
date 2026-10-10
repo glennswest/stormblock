@@ -418,7 +418,7 @@ with CHAP configured accepted an initiator offering `AuthMethod=None`
       daemon, CHAP only in the file); check.sh at d4b7576 ALL PASS (nextest
       1067/1067); README, CHANGELOG
 
-### Pool admission under per-drive overcommit (2026-10-10, #152, P2) — IN PROGRESS
+### Pool admission under per-drive overcommit (2026-10-10, #152, P2) — DONE (golden-stormblock-8d9078bf967a)
 
 Owner: the master's recommendation (A with C's switch): system half counted
 and reported, never refused; data half behind `[capacity] admission =
@@ -431,7 +431,9 @@ report|enforce`, default report.
       on slabs; `capacity` on `/slabs/pool`; `stormblock_capacity_*` gauges
 - [x] admission at volume create/clone, template clone/claim, `/v1` create
 - [x] test `integration_capacity`; docs (multi-drive §5, README), CHANGELOG
-- [ ] build, check.sh, golden, close; tell stormdrive#13
+- [x] check.sh at ac854aa ALL PASS (1109/1109); golden
+      golden-stormblock-8d9078bf967a; stormdrive#13 told. Enforce by
+      default is the owner's later call
 
 ### Nothing on create/enrol/install costs O(capacity) (2026-10-09, #363, owner) — DONE (golden-stormblock-a22b89c02880)
 
