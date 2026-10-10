@@ -519,3 +519,46 @@ async fn a_storage_user_bearer_clones_and_attaches_and_never_destroys() {
     let m = node(false, None).await;
     assert_eq!(call(&m, M::GET, "/volumes", Some("user-k8s"), None).await, 401);
 }
+
+/// #219: a volume is renamed by `PATCH /api/v1/volumes/{id} {name}`: the
+/// admin's (destructive), refused for a name another volume has, and for a
+/// sealed one unless forced. The listing (the catalog a persist publishes)
+/// shows the new name; lookups by the old name no longer find it.
+#[tokio::test]
+async fn a_volume_is_renamed_by_the_admin_and_a_golden_only_with_force() {
+    use reqwest::Method as M;
+    let n = node(false, None).await;
+    let c = reqwest::Client::new();
+    let pvc = volume(&n, "standby-pvc-ext4j-64m-1a2b", false).await;
+    let _other = volume(&n, "taken", false).await;
+    let golden = volume(&n, "base.golden", true).await;
+
+    let rename = |id: String, body: Value, tok: &'static str| {
+        let (c, base) = (c.clone(), n.base.clone());
+        async move {
+            let r = c.patch(format!("{base}/volumes/{id}")).bearer_auth(tok).json(&body).send().await.unwrap();
+            let s = r.status().as_u16();
+            (s, r.json::<Value>().await.unwrap_or_default())
+        }
+    };
+    assert_eq!(rename(pvc.clone(), json!({"name": "default.data-web-0"}), NODE).await.0, 401, "the node token does not rename");
+    let (s, body) = rename(pvc.clone(), json!({"name": "default.data-web-0"}), ADMIN).await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!((body["previous"].as_str(), body["renamed"].as_bool()), (Some("standby-pvc-ext4j-64m-1a2b"), Some(true)));
+
+    let list: Value = c.get(format!("{}/volumes", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    let names: Vec<&str> = list["items"].as_array().or(list.as_array()).unwrap().iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(names.contains(&"default.data-web-0") && !names.contains(&"standby-pvc-ext4j-64m-1a2b"), "{names:?}");
+    assert_eq!(call(&n, M::GET, "/volumes/default.data-web-0", Some(NODE), None).await, 200, "found by its new name");
+    assert_eq!(call(&n, M::GET, "/volumes/standby-pvc-ext4j-64m-1a2b", Some(NODE), None).await, 404);
+
+    assert_eq!(rename(pvc.clone(), json!({"name": "taken"}), ADMIN).await.0, 409, "another volume's name");
+    assert_eq!(rename(pvc.clone(), json!({"name": "a/b"}), ADMIN).await.0, 400);
+    assert_eq!(rename(pvc.clone(), json!({"name": "default.data-web-0"}), ADMIN).await.1["renamed"], false, "the same name: nothing to do");
+
+    let (s, body) = rename(golden.clone(), json!({"name": "base-v2.golden"}), ADMIN).await;
+    assert_eq!(s, 409, "a golden goes by its name: {body}");
+    let (s, body) = rename(golden.clone(), json!({"name": "base-v2.golden", "force": true}), ADMIN).await;
+    assert_eq!(s, 200, "{body}");
+    assert!(audit(&n).iter().any(|r| r["method"] == "PATCH" && r["who"] == "admin-token"), "a rename is audited");
+}

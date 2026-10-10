@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #219: `PATCH /api/v1/volumes/{id} {name, force?}` renames a volume. A PVC claimed from a pre-#137 standby clone no longer has to keep its `standby-…` name.
+  - **Who:** it is destructive, so the admin token or a reviewed bearer.
+  - **Refused:** a name another volume has, and a sealed volume unless `force` (goldens are found by name).
+  - **What follows the volume:** attachments, synonyms and templates, which go by id.
 - **feat:** #214: `[stormfs] api_token` (or `token_file`) is sent as `Authorization: Bearer` on the StormFS register and deregister, so stormstorage can require a token on them (stormstorage#6).
   - **No token configured:** the same as before, no header.
   - **An unreadable token file:** registration stays off, with an error.

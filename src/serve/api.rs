@@ -356,6 +356,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
             return true;
         }
     }
+    // A volume's rename (#219): tools that go by name follow it or break.
+    if *method == Method::PATCH && seg.len() == 5 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "volumes" {
+        return true;
+    }
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
         return true;
     }

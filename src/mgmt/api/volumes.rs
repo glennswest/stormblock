@@ -1149,6 +1149,60 @@ async fn seal_volume(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RenameRequest {
+    /// The new name.
+    pub name: String,
+    /// Rename a sealed volume too: a golden is found by its name (clones of
+    /// it, `from_template`, compose members, a release's reuse), so this is
+    /// refused without it.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `PATCH /api/v1/volumes/{id} {name, force?}` (#219): rename a volume.
+///
+/// A volume's identity is its id: attachments, exports, synonyms, templates
+/// and lineage name it by id, so they follow. What goes by name is a person
+/// or a tool, which is the point (a PVC still called `standby-…` from before
+/// #137). Destructive (#274): the admin token, or a reviewed bearer. A name
+/// another volume has is refused (409), and so is a sealed volume unless
+/// `force`.
+async fn rename_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RenameRequest>,
+) -> Response {
+    let vol_id = match volume_key(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let name = req.name.trim().to_string();
+    if name.is_empty() || name.contains('/') || name.chars().any(|c| c.is_control()) || name.len() > 255 {
+        return ApiError::bad_request("a volume's name is 1–255 characters, with no '/' or control characters");
+    }
+    let mut vm = state.volume_manager.lock().await;
+    let Some(h) = vm.get_volume_handle(&vol_id) else {
+        return ApiError::not_found(format!("volume {} not found", vol_id.0));
+    };
+    let previous = h.name().await;
+    if previous == name {
+        return Json(serde_json::json!({ "id": vol_id.0, "name": name, "previous": previous, "renamed": false })).into_response();
+    }
+    if h.is_sealed() && !req.force {
+        return ApiError::conflict(format!(
+            "{previous} is sealed: a golden is found by its name (its clones, from_template, compose, a \
+             release), so renaming it is refused without force"
+        ));
+    }
+    if let Err(e) = vm.rename_volume(vol_id, &name).await {
+        return ApiError::conflict(format!("rename {previous} to {name}: {e}"));
+    }
+    vm.persist().await;
+    tracing::info!("volume {} renamed: {previous} -> {name}", vol_id.0);
+    Json(serde_json::json!({ "id": vol_id.0, "name": name, "previous": previous, "renamed": true })).into_response()
+}
+
 /// A pallet volume's superblock (a composed pallet, #378).
 async fn pallet_header(state: &Arc<AppState>, id: VolumeId) -> Result<(Arc<dyn crate::drive::BlockDevice>, Vec<u8>), Response> {
     let Some(dev) = state.volume_manager.lock().await.get_volume(&id) else {
@@ -2994,7 +3048,7 @@ async fn compose_slab(
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_volumes).post(create_volume))
-        .route("/{id}", get(get_volume).delete(delete_volume))
+        .route("/{id}", get(get_volume).delete(delete_volume).patch(rename_volume))
         .route("/{id}/resize", axum::routing::patch(resize_volume))
         .route("/{id}/health", get(volume_health))
         .route("/{id}/redundancy", axum::routing::put(set_redundancy))
