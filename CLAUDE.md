@@ -202,6 +202,18 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
+### An install back to an older release "dropped" a claim (2026-10-10, #385, P0) — DONE: not stormblock's (stormcentral#689)
+
+pvetest1 12.07 → 12.09 → 12.07: the swap's marker claim gone after the
+downgrade. Found: stormcentral's `perf::data_gate_read` deletes the claim
+after reading it, and the swap read it on 12.09 first (then deleted it). The
+downgrade kept the data half: its own data gate (`gate-1791612527`, written
+on 12.09) read back byte-identical after it. Between 84ac6a1 and 7911dd9 no
+format change (#354, #380, #379 only).
+- [x] test `install_tests::an_install_back_to_the_older_release_keeps_
+      every_claim` (N → N+1 → N, two claims as PVCs are made): passes
+- [x] filed stormcentral#689 (P0); told master
+
 ### Volumes can be renamed (2026-10-10, #219) — PAUSED for P0 #385 (back in line)
 
 - [x] `PATCH /api/v1/volumes/{id} {name, force?}` (destructive): sealed

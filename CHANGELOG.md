@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **test:** #385: `install_tests::an_install_back_to_the_older_release_keeps_every_claim`. Two claims (clones of a node-made blank, in the system half, #317) are made across installs of N, then N+1, then N again; both keep every byte. The claim pvetest1 reported lost was deleted by stormcentral's own survival check after its first read-back (stormcentral#689), not by the install.
 - **feat:** #219: `PATCH /api/v1/volumes/{id} {name, force?}` renames a volume. A PVC claimed from a pre-#137 standby clone no longer has to keep its `standby-…` name.
   - **Who:** it is destructive, so the admin token or a reviewed bearer.
   - **Refused:** a name another volume has, and a sealed volume unless `force` (goldens are found by name).
