@@ -448,6 +448,13 @@ pub struct ThinVolumeHandle {
     stripe_log: std::sync::RwLock<super::stripelog::StripeLog>,
     /// Sealed: refuses writes, discards and shrinks (#76).
     sealed: std::sync::atomic::AtomicBool,
+    /// The sha256 of every byte, once computed for this seal (#271): a
+    /// sealed volume takes no writes, so it cannot go stale; a change of the
+    /// sealed flag either way forgets it, and a deleted volume's handle goes.
+    digest: std::sync::Mutex<Option<(String, u64)>>,
+    /// Moves on every change of the sealed flag: a digest is kept only for
+    /// the seal it was read under.
+    seal_epoch: std::sync::atomic::AtomicU64,
     /// Read-only: the same refusal, from a setting rather than from what the
     /// volume is. A sealed volume is read-only whatever this says; a clone
     /// moves between the two over its life.
@@ -548,6 +555,8 @@ impl ThinVolumeHandle {
             shards: (0..SHARDS).map(|_| tokio::sync::Mutex::new(())).collect(),
             stripe_log: std::sync::RwLock::new(super::stripelog::StripeLog::none()),
             sealed: std::sync::atomic::AtomicBool::new(false),
+            digest: std::sync::Mutex::new(None),
+            seal_epoch: std::sync::atomic::AtomicU64::new(0),
             read_only: std::sync::atomic::AtomicBool::new(false),
             lba: std::sync::atomic::AtomicU32::new(Lba::DEFAULT),
             last_use: AtomicU64::new(next_use()),
@@ -597,7 +606,33 @@ impl ThinVolumeHandle {
     /// Seal (or unseal) the volume. Sealing is a state, not a snapshot: the
     /// volume itself becomes what clones are taken from.
     pub fn set_sealed(&self, sealed: bool) {
+        let mut d = self.digest.lock().unwrap_or_else(|e| e.into_inner());
         self.sealed.store(sealed, Ordering::Relaxed);
+        self.seal_epoch.fetch_add(1, Ordering::SeqCst);
+        *d = None;
+    }
+
+    /// Which seal this is: read before a digest, handed back to
+    /// [`cache_digest`](Self::cache_digest).
+    pub fn seal_epoch(&self) -> u64 {
+        self.seal_epoch.load(Ordering::SeqCst)
+    }
+
+    /// The digest computed for this seal, if one was (#271): `(sha256 hex,
+    /// bytes)`.
+    pub fn cached_digest(&self) -> Option<(String, u64)> {
+        self.digest.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Keep a digest read under seal `epoch`; refused (`false`) unless the
+    /// volume is sealed now and has not been unsealed and resealed since.
+    pub fn cache_digest(&self, sha256: String, bytes: u64, epoch: u64) -> bool {
+        let mut d = self.digest.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.is_sealed() || self.seal_epoch() != epoch {
+            return false;
+        }
+        *d = Some((sha256, bytes));
+        true
     }
 
     /// The access setting, which is not the whole answer: ask [`writable`]

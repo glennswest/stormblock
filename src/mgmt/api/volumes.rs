@@ -1149,6 +1149,62 @@ async fn seal_volume(
     }
 }
 
+/// `GET /api/v1/volumes/{id}/digest` (#271): the sha256 of a **sealed**
+/// volume's every byte (its size, slot padding excluded): what a release
+/// manifest records for a golden. A verifier compares it without exporting
+/// the volume or reading it through a device of its own.
+///
+/// Read once per seal and kept on the volume (a sealed volume takes no
+/// writes); `?refresh=true` reads it again. On a task of its own, so a
+/// caller that gives up does not waste the read. An unsealed volume is 409:
+/// its bytes may change under the answer.
+async fn volume_digest(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let vol_id = match volume_key(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let (h, dev) = {
+        let vm = state.volume_manager.lock().await;
+        match (vm.get_volume_handle(&vol_id), vm.get_volume(&vol_id)) {
+            (Some(h), Some(d)) => (h, d),
+            _ => return ApiError::not_found(format!("volume {} not found", vol_id.0)),
+        }
+    };
+    if !h.is_sealed() {
+        return ApiError::conflict(format!(
+            "volume {} is not sealed: its bytes may change, so it has no digest to give",
+            vol_id.0
+        ));
+    }
+    let refresh = q.get("refresh").is_some_and(|v| v == "true" || v == "1");
+    let name = h.name().await;
+    if !refresh {
+        if let Some((sha, bytes)) = h.cached_digest() {
+            return Json(serde_json::json!({ "id": vol_id.0, "name": name, "sha256": sha, "size_bytes": bytes, "cached": true }))
+                .into_response();
+        }
+    }
+    let task = tokio::spawn(async move {
+        let epoch = h.seal_epoch();
+        let bytes = dev.capacity_bytes();
+        let sha = crate::mgmt::goldens::digest(dev).await?;
+        h.cache_digest(sha.clone(), bytes, epoch);
+        Ok::<_, String>((sha, bytes))
+    });
+    match task.await {
+        Ok(Ok((sha, bytes))) => {
+            Json(serde_json::json!({ "id": vol_id.0, "name": name, "sha256": sha, "size_bytes": bytes, "cached": false }))
+                .into_response()
+        }
+        Ok(Err(e)) => ApiError::internal(format!("reading volume {}: {e}", vol_id.0)),
+        Err(e) => ApiError::internal(format!("digest task: {e}")),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RenameRequest {
     /// The new name.
@@ -3058,6 +3114,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/restripe", axum::routing::post(restripe_volume))
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
         .route("/{id}/pallet-signature", get(pallet_signature).post(sign_pallet_volume))
+        .route("/{id}/digest", get(volume_digest))
         .route("/{id}/access", get(get_access).put(set_access))
         .route("/{id}/clone", axum::routing::post(clone_volume))
         .route("/{id}/lineage", get(volume_lineage))

@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #271: `GET /api/v1/volumes/{id}/digest` gives the sha256 of a sealed volume's every byte (its size), on the node token. A verifier (sectionsystems, the compliance checker) compares goldens without exporting them.
+  - **Caching:** read once per seal and kept on the volume; any change of the sealed flag forgets it, and `?refresh=true` reads it again.
+  - **An unsealed volume:** 409.
 - **feat:** #256: RAID sets.
   - **A `failing` drive is replaced by a spare while it still serves:** writes are teed to both drives, a copy runs under the stripe locks, then the spare takes the slot. The set keeps full redundancy throughout, and a read error mid-copy turns it into a rebuild. `…/members/{slot}/replace` on an active slot does the same.
   - **A `missing` drive (or one gone at assembly) keeps the set's bitmap,** recorded in the slot table's padding. When it comes back it is re-added with only the chunks written meanwhile, not a full rebuild.

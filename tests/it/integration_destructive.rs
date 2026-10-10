@@ -562,3 +562,49 @@ async fn a_volume_is_renamed_by_the_admin_and_a_golden_only_with_force() {
     assert_eq!(s, 200, "{body}");
     assert!(audit(&n).iter().any(|r| r["method"] == "PATCH" && r["who"] == "admin-token"), "a rename is audited");
 }
+
+/// #271: a sealed volume's digest is the sha256 of every byte, on the node
+/// token; read once per seal and kept; an unsealed volume has none (409);
+/// unsealed, written and sealed again, it is read afresh.
+#[tokio::test]
+async fn a_sealed_volumes_digest_is_every_byte_and_kept_for_its_seal() {
+    use sha2::{Digest, Sha256};
+    let n = node(false, None).await;
+    let c = reqwest::Client::new();
+    let id = volume(&n, "golden-x", false).await;
+    let vid = stormblock::volume::VolumeId(id.parse().unwrap());
+    let bytes = |fill: u8| vec![fill; (4 * MIB) as usize];
+    let dev = n.state.volume_manager.lock().await.get_volume(&vid).unwrap();
+    dev.write(0, &bytes(0x3C)).await.unwrap();
+    dev.flush().await.unwrap();
+    let digest = |q: &'static str| {
+        let (c, base, id) = (c.clone(), n.base.clone(), id.clone());
+        async move {
+            let r = c.get(format!("{base}/volumes/{id}/digest{q}")).bearer_auth(NODE).send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap_or_default())
+        }
+    };
+    assert_eq!(digest("").await.0, 409, "unsealed: no digest");
+    n.state.volume_manager.lock().await.seal_volume(vid, None).await.unwrap();
+
+    let (s, first) = digest("").await;
+    assert_eq!(s, 200, "{first}");
+    assert_eq!(first["sha256"], hex::encode(Sha256::digest(bytes(0x3C))), "every byte");
+    assert_eq!(first["size_bytes"], 4 * MIB);
+    assert_eq!(first["cached"], false);
+    let (_, again) = digest("").await;
+    assert_eq!((again["sha256"].clone(), again["cached"].clone()), (first["sha256"].clone(), json!(true)), "kept for the seal");
+    let (_, refreshed) = digest("?refresh=true").await;
+    assert_eq!((refreshed["sha256"].clone(), refreshed["cached"].clone()), (first["sha256"].clone(), json!(false)));
+    assert_eq!(call(&n, reqwest::Method::GET, &format!("/volumes/golden-x/digest"), Some(NODE), None).await, 200, "by name too");
+
+    // Unsealed, written, sealed again: the old digest is not the answer.
+    assert_eq!(call(&n, reqwest::Method::DELETE, &format!("/volumes/{id}/seal"), Some(ADMIN), None).await, 200);
+    assert_eq!(digest("").await.0, 409);
+    dev.write(0, &bytes(0x7E)).await.unwrap();
+    dev.flush().await.unwrap();
+    n.state.volume_manager.lock().await.seal_volume(vid, None).await.unwrap();
+    let (_, resealed) = digest("").await;
+    assert_eq!(resealed["sha256"], hex::encode(Sha256::digest(bytes(0x7E))));
+    assert_eq!(resealed["cached"], false);
+}
