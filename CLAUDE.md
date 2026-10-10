@@ -202,7 +202,7 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### Stale STORMBLOCKMK_* names; an unset gauge (2026-10-10, #197) — IN PROGRESS
+### Stale STORMBLOCKMK_* names; an unset gauge (2026-10-10, #197) — DONE (golden-stormblock-8cda932880e4)
 
 - [x] every message and doc comment names the `[serve]` key (iscsi_enabled,
       portal_span, reap_secs, reap_apply) or `[management] require_auth`;
@@ -210,7 +210,8 @@ area; the superblock CRC covers it.
 - [x] `stormblock_allocated_bytes` set from the catalog (sum of
       `allocated_bytes`); test `integration_mgmt_api::the_allocated_bytes_
       gauge_is_the_volumes_allocation`; CHANGELOG
-- [ ] build, check.sh, golden, close
+- [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
+      golden golden-stormblock-8cda932880e4
 
 ### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — WAITING ON THE OWNER
 
