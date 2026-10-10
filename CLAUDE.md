@@ -201,7 +201,7 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### test/ moves to stormblock-test (2026-10-10, #371) — WAITS ON stormblock-test#3
+### test/ moves to stormblock-test (2026-10-10, #371) — IN PROGRESS (stormblock-test#3 passed: run 35325a71aa, short 5/0/1 on C2NR0Q2)
 
 stormblock-test builds against main and passes `short` in its own sc-build;
 its first run on a test machine (stormblock-test#3) is still open. Once it
