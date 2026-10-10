@@ -202,6 +202,18 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
+### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — WAITING ON THE OWNER
+
+stormcos#276 (A: only when asked). The engine half (copy a sealed golden
+into the system slab, mountable clone, idempotent, progress, forge
+unreachable refused) is clear; two questions asked on #383 (needs-owner):
+**1** which golden is gpu for the running kernel (A: a forge synonym
+`kernelopt/<kernel release>/<image>` stormcentral keeps, recommended; B the
+release manifest's optional rows; C the caller names it); **2** what lets a
+node pull from forge (A: its #247 host secret reads a sealed golden's content
+by Range, recommended; B kernel-set goldens readable openly; C stormcentral
+pushes). Nothing built yet.
+
 ### A reviewed Kubernetes bearer for ordinary verbs (2026-10-10, #382, P2) — DONE (golden-stormblock-d56a8225b161)
 
 Owner's (A) on stormcos#241. Ordinary verbs: get/list/watch/create/delete/
