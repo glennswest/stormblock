@@ -942,14 +942,16 @@ name hint had the same gap).
 - Not on metal: a node with a static `[network]` in its stormcos-state on a
   stormcos release with this initramfs
 
-### `slab holds` = intact: goldens verified (2026-10-08, #245) — IN PROGRESS (owner: A, 2026-10-09)
+### `slab holds` = intact: goldens verified (2026-10-08, #245) — STEP 1 DONE (golden-stormblock-47e88a267077); step 2 is https://github.com/glennswest/stormblock/issues/384
 
 - [x] step 1: `metav2::document_of` skips unknown key kinds (before the
       volume bookkeeping, so an orphan key is no volume); `map_of` already did.
       Test `a_key_kind_this_engine_does_not_know_is_skipped`
-- [ ] step 1 shipped (golden), then step 2 only once every release a node
-      could roll back to reads it: digest key at seal, background verify
-      after flow-over/stage, `slab holds` reads the verdicts. Earlier:
+- [x] check.sh at 2db0da5 ALL PASS (1105/1105); golden
+      golden-stormblock-47e88a267077
+- step 2 (digest key at seal, background verify, `slab holds` reads the
+      verdicts) is https://github.com/glennswest/stormblock/issues/384: only once every release a node could roll back to
+      carries step 1. Earlier:
 
 "Complete" is done (#239, 2ceec10). "Intact" needs a reference digest per
 golden, and storing one on the slab breaks older readers: a VolumeRecord
