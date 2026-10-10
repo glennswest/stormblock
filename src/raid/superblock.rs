@@ -27,7 +27,7 @@
 //! | 120..128 | bytes of member data per bitmap bit |
 //! | 128..192 | set name, UTF-8, NUL-padded |
 //! | 192..256 | spare pool, UTF-8, NUL-padded (empty = global) |
-//! | 256.. | slot table, 32 bytes a slot: member uuid, state, 7 pad, rebuilt-to |
+//! | 256.. | slot table, 32 bytes a slot: member uuid (16), state (1), flags (1: bit 0 missing), the events when it went missing (6, low 48 bits), rebuilt-to (8) |
 //! | 4092..4096 | CRC32C of bytes 0..4092 |
 //!
 //! Version 1 (the first format, no slot table, never reassembled) is not
@@ -54,6 +54,14 @@ pub struct SlotRecord {
     pub state: RaidMemberState,
     /// For a `Rebuilding` slot: member data bytes already rebuilt.
     pub rebuilt_to: u64,
+    /// A `Failed` slot whose drive went **missing** (not one that failed on
+    /// I/O) while the set kept its write-intent bitmap (#256): its drive, if
+    /// it comes back, is re-added by resyncing only the chunks the bitmap
+    /// names. Bytes the format padded before; an older engine writes them
+    /// as zeros, which is a full rebuild, never a wrong re-add.
+    pub missing: bool,
+    /// The set's `events` when the slot went missing (low 48 bits).
+    pub missing_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +168,8 @@ impl Superblock {
             let at = SLOT_TABLE + i * SLOT_BYTES;
             b[at..at + 16].copy_from_slice(s.member_uuid.as_bytes());
             b[at + 16] = state_byte(s.state);
+            b[at + 17] = s.missing as u8;
+            b[at + 18..at + 24].copy_from_slice(&(s.missing_at & 0xFFFF_FFFF_FFFF).to_le_bytes()[..6]);
             b[at + 24..at + 32].copy_from_slice(&s.rebuilt_to.to_le_bytes());
         }
         let crc = crc32c::crc32c(&b[..CRC_AT]);
@@ -199,6 +209,12 @@ impl Superblock {
                 member_uuid: Uuid::from_slice(&b[at..at + 16]).unwrap(),
                 state: state_of(b[at + 16])?,
                 rebuilt_to: u64_at(b, at + 24),
+                missing: b[at + 17] & 1 != 0,
+                missing_at: {
+                    let mut e = [0u8; 8];
+                    e[..6].copy_from_slice(&b[at + 18..at + 24]);
+                    u64::from_le_bytes(e)
+                },
             });
         }
         let slot = u32_at(b, 44);
@@ -280,6 +296,8 @@ mod tests {
                     member_uuid: Uuid::new_v4(),
                     state: if i == 4 { RaidMemberState::Rebuilding } else { RaidMemberState::Active },
                     rebuilt_to: if i == 4 { 12345 } else { 0 },
+                    missing: i == 2,
+                    missing_at: if i == 2 { 77 } else { 0 },
                 })
                 .collect(),
         }

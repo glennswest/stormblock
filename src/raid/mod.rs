@@ -257,6 +257,11 @@ pub(crate) struct Member {
     pub(crate) uuid: Uuid,
     /// For a `Rebuilding` member: member data bytes that hold the data.
     pub(crate) rebuilt_to: u64,
+    /// Failed because its drive went missing, not on I/O (#256): the set
+    /// keeps its bitmap, and the drive, if it comes back, is re-added from it.
+    pub(crate) missing: bool,
+    /// The set's `events` when it went missing.
+    pub(crate) missing_at: u64,
 }
 
 impl Member {
@@ -341,6 +346,8 @@ pub struct RaidArray {
     failures: Arc<tokio::sync::Notify>,
     spares: std::sync::RwLock<Option<Arc<SparePool>>>,
     rebuild_running: AtomicBool,
+    /// The slot being replaced proactively (#256), if one is.
+    replacing: std::sync::Mutex<Option<usize>>,
     rebuild_progress: std::sync::Mutex<Option<Arc<RebuildProgress>>>,
     scrub_progress: std::sync::Mutex<Option<Arc<ScrubProgress>>>,
     rebuild_config: std::sync::Mutex<RebuildConfig>,
@@ -410,7 +417,7 @@ impl RaidArray {
         let id = RaidArrayId(Uuid::new_v4());
         let members: Vec<Member> = members
             .into_iter()
-            .map(|d| Member { device: Some(d), state: RaidMemberState::Active, uuid: Uuid::new_v4(), rebuilt_to: 0 })
+            .map(|d| Member { device: Some(d), state: RaidMemberState::Active, uuid: Uuid::new_v4(), rebuilt_to: 0, missing: false, missing_at: 0 })
             .collect();
         let array = Self::build(id, level, stripe_size, data_size, now_secs(), name, pool, members, 1);
         // A clear bitmap first, then the superblocks that point at it.
@@ -457,6 +464,7 @@ impl RaidArray {
             failures: Arc::new(tokio::sync::Notify::new()),
             spares: std::sync::RwLock::new(None),
             rebuild_running: AtomicBool::new(false),
+            replacing: std::sync::Mutex::new(None),
             rebuild_progress: std::sync::Mutex::new(None),
             scrub_progress: std::sync::Mutex::new(None),
             rebuild_config: std::sync::Mutex::new(RebuildConfig::default()),
@@ -494,16 +502,34 @@ impl RaidArray {
         }
         let mut changed = false;
         let mut members = Vec::with_capacity(newest.slots.len());
+        // Slots whose drive went missing and is back, seen everything up to
+        // then: re-added from the bitmap below (#256).
+        let mut readd = Vec::new();
         for (slot, rec) in newest.slots.iter().enumerate() {
-            let dev = found.iter().find(|(_, sb)| sb.member_uuid == rec.member_uuid).map(|(d, _)| d.clone());
+            let own = found.iter().find(|(_, sb)| sb.member_uuid == rec.member_uuid);
+            let dev = own.map(|(d, _)| d.clone());
             let mut state = rec.state;
+            let (mut missing, mut missing_at) = (rec.missing, rec.missing_at);
             if dev.is_none() && state != RaidMemberState::Failed {
                 tracing::warn!(
-                    "array {} ({}): slot {slot}'s drive (member {}) is not here — failed",
+                    "array {} ({}): slot {slot}'s drive (member {}) is not here — failed; the bitmap is \
+                     kept, so if it comes back only what was written meanwhile is resynced",
                     newest.array_uuid, newest.name, rec.member_uuid
                 );
                 state = RaidMemberState::Failed;
+                (missing, missing_at) = (true, newest.events + 1);
                 changed = true;
+            }
+            if let (Some((_, sb)), RaidMemberState::Failed, true) = (own, state, missing) {
+                if sb.events + 1 >= missing_at {
+                    readd.push(slot);
+                } else {
+                    tracing::warn!(
+                        "array {} ({}): slot {slot}'s drive is back, but its superblock (events {}) is \
+                         older than when it went missing ({missing_at}): not re-added, it is rebuilt",
+                        newest.array_uuid, newest.name, sb.events
+                    );
+                }
             }
             if let Some(d) = &dev {
                 if d.capacity_bytes() < DATA_OFFSET + newest.data_size {
@@ -512,7 +538,7 @@ impl RaidArray {
                     changed = true;
                 }
             }
-            members.push(Member { device: dev, state, uuid: rec.member_uuid, rebuilt_to: rec.rebuilt_to });
+            members.push(Member { device: dev, state, uuid: rec.member_uuid, rebuilt_to: rec.rebuilt_to, missing, missing_at });
         }
         let events = newest.events + changed as u64;
         let array = Self::build(
@@ -552,6 +578,44 @@ impl RaidArray {
                 let end = (start + array.bitmap.chunk).min(array.data_size);
                 array.resync_range(start, end, true, None).await?;
             }
+        }
+        // A drive that went missing and is back (#256): only the chunks the
+        // bitmap names were written while it was gone, so only those are
+        // rebuilt onto it, from the others, before it serves again.
+        for slot in readd {
+            {
+                let mut m = array.members.write().unwrap();
+                m[slot].state = RaidMemberState::Rebuilding;
+                m[slot].rebuilt_to = 0;
+            }
+            let lu = array.lock_unit();
+            for c in &dirty {
+                let start = c * array.bitmap.chunk;
+                let end = (start + array.bitmap.chunk).min(array.data_size);
+                for key in start / lu..end.div_ceil(lu) {
+                    array.rebuild_unit(key, &[slot]).await?;
+                }
+            }
+            let back = {
+                let mut m = array.members.write().unwrap();
+                if m[slot].state == RaidMemberState::Rebuilding {
+                    m[slot].state = RaidMemberState::Active;
+                    m[slot].missing = false;
+                    m[slot].missing_at = 0;
+                    true
+                } else {
+                    false
+                }
+            };
+            if back {
+                array.events.fetch_add(1, Ordering::SeqCst);
+                tracing::warn!(
+                    "array {} ({}): slot {slot}'s drive is back — re-added, {} chunk(s) resynced from the bitmap",
+                    array.id, newest.name, dirty.len()
+                );
+            }
+        }
+        if !dirty.is_empty() && !array.keeps_bitmap() {
             array.zero_bitmaps(None).await?;
         }
         array.sb_dirty.store(true, Ordering::SeqCst);
@@ -769,6 +833,19 @@ impl RaidArray {
     /// marked to be rewritten (`persist_if_dirty`, which every I/O path calls
     /// before it answers), and the supervisor is woken to take a spare.
     pub fn fail_member(&self, idx: usize, why: &str) -> bool {
+        self.fail_member_as(idx, why, false)
+    }
+
+    /// [`fail_member`](Self::fail_member) for a drive that went **missing**
+    /// (stormdrive's `missing`, or a drive gone at assembly), not one that
+    /// failed on I/O (#256). The set then keeps its write-intent bitmap, and
+    /// the drive, if it comes back, is re-added by resyncing only the chunks
+    /// written while it was gone.
+    pub fn fail_member_missing(&self, idx: usize, why: &str) -> bool {
+        self.fail_member_as(idx, why, true)
+    }
+
+    fn fail_member_as(&self, idx: usize, why: &str, missing: bool) -> bool {
         let (uuid, path) = {
             let mut members = self.members.write().unwrap();
             if idx >= members.len() || members[idx].state == RaidMemberState::Failed {
@@ -784,6 +861,8 @@ impl RaidArray {
                 return false;
             }
             members[idx].state = RaidMemberState::Failed;
+            members[idx].missing = missing && !was_rebuilding;
+            members[idx].missing_at = self.events.load(Ordering::SeqCst) + 1;
             let path = members[idx].device.as_ref().map(|d| d.drive_id().path).unwrap_or_default();
             (members[idx].uuid, path)
         };
@@ -809,6 +888,13 @@ impl RaidArray {
         }
     }
 
+    /// Whether the write-intent bitmap is kept rather than cleared (#256): a
+    /// member is out because its drive went missing, so the bitmap is the
+    /// record of what that drive missed. Cleared again once it is back.
+    pub fn keeps_bitmap(&self) -> bool {
+        self.members.read().unwrap().iter().any(|m| m.state == RaidMemberState::Failed && m.missing)
+    }
+
     // --- superblocks and the bitmap on disk ---
 
     fn superblock_for(&self, members: &[Member], slot: usize, events: u64) -> Superblock {
@@ -831,7 +917,13 @@ impl RaidArray {
             pool,
             slots: members
                 .iter()
-                .map(|m| SlotRecord { member_uuid: m.uuid, state: m.state, rebuilt_to: m.rebuilt_to })
+                .map(|m| SlotRecord {
+                    member_uuid: m.uuid,
+                    state: m.state,
+                    rebuilt_to: m.rebuilt_to,
+                    missing: m.missing,
+                    missing_at: m.missing_at,
+                })
                 .collect(),
         }
     }
@@ -1555,7 +1647,7 @@ impl RaidArray {
             if m.state != RaidMemberState::Failed {
                 return Err(RaidError::InvalidStripe(format!("slot {slot} is {}, not failed", m.state)));
             }
-            *m = Member { device: Some(device), state: RaidMemberState::Rebuilding, uuid, rebuilt_to: 0 };
+            *m = Member { device: Some(device), state: RaidMemberState::Rebuilding, uuid, rebuilt_to: 0, missing: false, missing_at: 0 };
         }
         self.events.fetch_add(1, Ordering::SeqCst);
         self.zero_bitmaps(Some(slot)).await?;
@@ -1563,6 +1655,195 @@ impl RaidArray {
         tracing::info!("{} {} ({}): slot {slot} rebuilding onto a new drive (member {uuid})", self.level, self.id, self.name());
         self.spawn_rebuild();
         Ok(uuid)
+    }
+
+    /// Replace a member that still serves, before it fails (#256): a drive
+    /// reported `failing`, or one an operator wants out.
+    ///
+    /// The slot keeps serving from its drive while `device` is filled: every
+    /// data write goes to both (a [`TeeDevice`]), and a copy walks the member
+    /// under the same stripe locks the writes take, reading the old drive and
+    /// writing the new one. The set keeps full redundancy the whole time,
+    /// where failing the drive first would run it degraded through a rebuild.
+    /// Then the new drive takes the slot under a member uuid of its own, the
+    /// superblocks are rewritten and the old drive's is wiped.
+    ///
+    /// If the old drive stops answering a read mid-copy, it is failed, and the
+    /// new drive takes the slot as an ordinary rebuild from where the copy
+    /// was. A write error on the new drive abandons the replacement; the slot
+    /// stays as it was. Nothing on the new drive below the data (superblock,
+    /// bitmap) is written until the swap, so a stop mid-copy leaves it the
+    /// spare it was.
+    pub async fn replace_proactively(self: &Arc<Self>, slot: usize, device: Arc<dyn BlockDevice>) -> Result<Uuid, RaidError> {
+        if device.capacity_bytes() < self.member_bytes_needed() {
+            return Err(RaidError::InvalidStripe(format!(
+                "{} holds {} bytes; a slot of this array needs {}",
+                device.id().path,
+                device.capacity_bytes(),
+                self.member_bytes_needed()
+            )));
+        }
+        let tee;
+        {
+            let mut r = self.replacing.lock().unwrap();
+            if let Some(other) = *r {
+                return Err(RaidError::InvalidStripe(format!("slot {other} is being replaced already")));
+            }
+            if self.rebuilding_count() > 0 {
+                return Err(RaidError::InvalidStripe("a rebuild is running; replace once it is done".into()));
+            }
+            let mut members = self.members.write().unwrap();
+            let Some(m) = members.get_mut(slot) else {
+                return Err(RaidError::InvalidStripe(format!("no slot {slot}")));
+            };
+            if m.state != RaidMemberState::Active {
+                return Err(RaidError::InvalidStripe(format!("slot {slot} is {}, not active: replace a failed slot instead", m.state)));
+            }
+            let Some(old) = m.device.clone() else {
+                return Err(RaidError::InvalidStripe(format!("slot {slot} has no drive")));
+            };
+            tee = Arc::new(TeeDevice { old, new: device.clone(), broken: AtomicBool::new(false) });
+            m.device = Some(tee.clone() as Arc<dyn BlockDevice>);
+            *r = Some(slot);
+        }
+        let uuid = Uuid::new_v4();
+        tracing::warn!(
+            "{} {} ({}): slot {slot} is being replaced while it still serves, onto {} (member {uuid})",
+            self.level, self.id, self.name(), device.id().path
+        );
+        let array = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(e) = array.run_replacement(slot, uuid, tee).await {
+                tracing::error!("{} {} slot {slot}: proactive replacement stopped: {e}", array.level, array.id);
+            }
+            *array.replacing.lock().unwrap() = None;
+            array.failures.notify_one();
+        });
+        Ok(uuid)
+    }
+
+    /// For a drive reported `failing` (#256): a spare from the set's pool (or
+    /// the global one) replaces the slot while it still serves. `Ok(None)`:
+    /// no spare fits, or a replacement or rebuild is already under way.
+    pub async fn replace_failing(self: &Arc<Self>, slot: usize) -> Result<Option<Uuid>, RaidError> {
+        if self.replacing.lock().unwrap().is_some() || self.rebuilding_count() > 0 {
+            return Ok(None);
+        }
+        let Some(pool) = self.spares.read().unwrap().clone() else { return Ok(None) };
+        let Some(spare) = pool.take(&self.pool(), self.member_bytes_needed()) else {
+            tracing::warn!(
+                "{} {} ({}): slot {slot} is failing and no spare fits (pool '{}' or global): it keeps serving",
+                self.level, self.id, self.name(), self.pool()
+            );
+            return Ok(None);
+        };
+        match self.replace_proactively(slot, spare.device.clone()).await {
+            Ok(u) => Ok(Some(u)),
+            Err(e) => {
+                // Back in the pool: it was never written to.
+                pool.adopt(spare.device.clone(), &superblock::Superblock::spare(spare.uuid, &spare.pool));
+                Err(e)
+            }
+        }
+    }
+
+    async fn run_replacement(self: &Arc<Self>, slot: usize, uuid: Uuid, tee: Arc<TeeDevice>) -> Result<(), RaidError> {
+        let (old, new) = (tee.old.clone(), tee.new.clone());
+        let broken = || tee.broken.load(Ordering::SeqCst);
+        let lu = self.lock_unit();
+        let last = self.data_size.div_ceil(lu);
+        let progress = RebuildProgress::new(vec![slot], self.data_size, 0);
+        *self.rebuild_progress.lock().unwrap() = Some(progress.clone());
+        let mut key = 0;
+        while key < last {
+            if self.stopped.load(Ordering::SeqCst) || progress.is_cancelled() || broken() {
+                self.abandon_replacement(slot, &old, "stopped, cancelled or the new drive failed a write");
+                progress.finish(Some("abandoned".into()));
+                return Ok(());
+            }
+            if self.members.read().unwrap()[slot].state == RaidMemberState::Failed {
+                // The old drive failed under normal I/O meanwhile.
+                return self.replacement_becomes_rebuild(slot, new, uuid, key * lu, &progress).await;
+            }
+            let end_key = (key + 64).min(last);
+            {
+                let _g = self.locks.lock_many(key..end_key).await;
+                for k in key..end_key {
+                    let moff = k * lu;
+                    let len = lu.min(self.data_size - moff) as usize;
+                    let mut b = vec![0u8; len];
+                    if old.read(DATA_OFFSET + moff, &mut b).await.is_err() {
+                        drop(_g);
+                        if !self.fail_member(slot, &format!("read error at {moff} while it was being replaced")) {
+                            // Failing it would lose data: the set is already at
+                            // its tolerance. The slot stays as it was.
+                            self.abandon_replacement(slot, &old, &format!("read error at {moff}, and the set cannot lose the drive"));
+                            progress.finish(Some(format!("read error at {moff}")));
+                            return Ok(());
+                        }
+                        return self.replacement_becomes_rebuild(slot, new, uuid, moff, &progress).await;
+                    }
+                    if let Err(e) = new.write(DATA_OFFSET + moff, &b).await {
+                        drop(_g);
+                        self.abandon_replacement(slot, &old, &format!("the new drive failed a write at {moff}: {e}"));
+                        progress.finish(Some(e.to_string()));
+                        return Ok(());
+                    }
+                }
+                progress.set_done((end_key * lu).min(self.data_size));
+            }
+            key = end_key;
+        }
+        new.flush().await.map_err(RaidError::Drive)?;
+        {
+            let _all = self.locks.lock_many(0..last).await;
+            let mut m = self.members.write().unwrap();
+            m[slot] = Member { device: Some(new.clone()), state: RaidMemberState::Active, uuid, rebuilt_to: 0, missing: false, missing_at: 0 };
+        }
+        self.events.fetch_add(1, Ordering::SeqCst);
+        self.zero_bitmaps(Some(slot)).await?;
+        self.write_superblocks().await?;
+        let _ = old.write(0, &vec![0u8; superblock::SUPERBLOCK_BYTES]).await;
+        let _ = old.flush().await;
+        progress.finish(None);
+        tracing::warn!(
+            "{} {} ({}): slot {slot} replaced while serving — now {} (member {uuid}); {} retired",
+            self.level, self.id, self.name(), new.id().path, old.id().path
+        );
+        Ok(())
+    }
+
+    /// The old drive back in the slot, untouched; the replacement is dropped.
+    fn abandon_replacement(&self, slot: usize, old: &Arc<dyn BlockDevice>, why: &str) {
+        let mut m = self.members.write().unwrap();
+        if m[slot].state == RaidMemberState::Active {
+            m[slot].device = Some(old.clone());
+        }
+        tracing::error!("{} {} slot {slot}: proactive replacement abandoned: {why}", self.level, self.id);
+    }
+
+    /// The old drive failed mid-copy: the new one takes the slot as a rebuild
+    /// from where the copy was.
+    async fn replacement_becomes_rebuild(
+        self: &Arc<Self>,
+        slot: usize,
+        new: Arc<dyn BlockDevice>,
+        uuid: Uuid,
+        from: u64,
+        progress: &Arc<RebuildProgress>,
+    ) -> Result<(), RaidError> {
+        {
+            let mut m = self.members.write().unwrap();
+            m[slot] = Member { device: Some(new), state: RaidMemberState::Rebuilding, uuid, rebuilt_to: from, missing: false, missing_at: 0 };
+        }
+        self.events.fetch_add(1, Ordering::SeqCst);
+        self.zero_bitmaps(Some(slot)).await?;
+        self.write_superblocks().await?;
+        progress.finish(Some("the old drive failed: rebuilding the rest".into()));
+        tracing::warn!("{} {} slot {slot}: the old drive failed mid-copy; rebuilding onto the new one from {from}", self.level, self.id);
+        *self.replacing.lock().unwrap() = None;
+        self.spawn_rebuild();
+        Ok(())
     }
 
     /// Add a member to a RAID-1 (it rebuilds in the background). Returns
@@ -1586,7 +1867,7 @@ impl RaidArray {
             if members.len() >= MAX_SLOTS {
                 return Err(RaidError::InvalidStripe(format!("at most {MAX_SLOTS} members")));
             }
-            members.push(Member { device: Some(device), state: RaidMemberState::Rebuilding, uuid, rebuilt_to: 0 });
+            members.push(Member { device: Some(device), state: RaidMemberState::Rebuilding, uuid, rebuilt_to: 0, missing: false, missing_at: 0 });
             members.len() - 1
         };
         self.events.fetch_add(1, Ordering::SeqCst);
@@ -1882,7 +2163,8 @@ impl RaidArray {
                 .read()
                 .unwrap()
                 .iter()
-                .position(|m| m.state == RaidMemberState::Failed);
+                .enumerate()
+                .position(|(i, m)| m.state == RaidMemberState::Failed && Some(i) != *self.replacing.lock().unwrap());
             let Some(slot) = slot else { return };
             let Some(spare) = pool.take(&self.pool(), self.member_bytes_needed()) else {
                 tracing::warn!(
@@ -1914,7 +2196,9 @@ impl RaidArray {
     /// Clear every idle bit and rewrite the superblocks — a clean stop.
     pub async fn close(&self) -> DriveResult<()> {
         self.flush_members().await?;
-        self.bitmap.clear_idle(Instant::now() + Duration::from_secs(1));
+        if !self.keeps_bitmap() {
+            self.bitmap.clear_idle(Instant::now() + Duration::from_secs(1));
+        }
         self.write_bitmap_pages().await?;
         self.sb_dirty.store(true, Ordering::SeqCst);
         self.persist_if_dirty().await;
@@ -2092,7 +2376,7 @@ impl BlockDevice for RaidArray {
         let started = Instant::now();
         let res = self.flush_members().await;
         // What was idle before this flush began is durable now: its bits can go.
-        if let (Ok(()), Some(before)) = (&res, started.checked_sub(CLEAR_DELAY)) {
+        if let (Ok(()), Some(before), false) = (&res, started.checked_sub(CLEAR_DELAY), self.keeps_bitmap()) {
             if self.bitmap.clear_idle(before) > 0 {
                 let _ = self.write_bitmap_pages().await;
             }
@@ -2126,5 +2410,62 @@ impl BlockDevice for RaidArray {
 
     fn media_errors(&self) -> u64 {
         self.members.read().unwrap().iter().filter_map(|m| m.device.as_ref().map(|d| d.media_errors())).sum()
+    }
+}
+
+
+/// A slot's drive while it is replaced proactively (#256): reads come from the
+/// drive being replaced; every write to member data goes to both. Writes below
+/// the data (the superblock, the bitmap) go to the old drive only, so the new
+/// one stays a spare on disk until the swap.
+pub(crate) struct TeeDevice {
+    pub(crate) old: Arc<dyn BlockDevice>,
+    pub(crate) new: Arc<dyn BlockDevice>,
+    /// The new drive failed a write: the replacement is abandoned.
+    pub(crate) broken: AtomicBool,
+}
+
+#[async_trait]
+impl BlockDevice for TeeDevice {
+    fn id(&self) -> &DeviceId {
+        self.old.id()
+    }
+    fn drive_id(&self) -> DeviceId {
+        self.old.drive_id()
+    }
+    fn capacity_bytes(&self) -> u64 {
+        self.old.capacity_bytes()
+    }
+    fn block_size(&self) -> u32 {
+        self.old.block_size()
+    }
+    fn optimal_io_size(&self) -> u32 {
+        self.old.optimal_io_size()
+    }
+    fn device_type(&self) -> DriveType {
+        self.old.device_type()
+    }
+    async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        self.old.read(offset, buf).await
+    }
+    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        let n = self.old.write(offset, buf).await?;
+        if offset >= DATA_OFFSET && !self.broken.load(Ordering::SeqCst) && self.new.write(offset, buf).await.is_err() {
+            self.broken.store(true, Ordering::SeqCst);
+        }
+        Ok(n)
+    }
+    async fn flush(&self) -> DriveResult<()> {
+        self.old.flush().await?;
+        if !self.broken.load(Ordering::SeqCst) && self.new.flush().await.is_err() {
+            self.broken.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+    async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.old.discard(offset, len).await
+    }
+    fn smart_status(&self) -> DriveResult<SmartData> {
+        self.old.smart_status()
     }
 }

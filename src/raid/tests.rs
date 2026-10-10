@@ -632,3 +632,90 @@ async fn create_refuses_bad_shapes() {
     let (_, d) = devs(3);
     assert!(RaidArray::create(RaidLevel::Raid5, d, Some(1000)).await.is_err());
 }
+
+async fn wait_replaced(a: &RaidArray) {
+    for _ in 0..1000 {
+        if a.replacing.lock().unwrap().is_none() && a.status().state == "clean" && !a.rebuild_running.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the replacement never finished: {:?}", a.status());
+}
+
+/// #256: a member replaced while it serves (a `failing` drive): writes keep
+/// landing during the copy, the new drive takes the slot with every byte,
+/// the set never runs degraded, and the old drive is no longer a member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_member_is_replaced_while_it_serves() {
+    for (level, n) in [(RaidLevel::Raid1, 2), (RaidLevel::Raid5, 4), (RaidLevel::Raid6, 5), (RaidLevel::Raid10, 4)] {
+        let (a, mems) = make(level, n).await;
+        let mut model = fill(&a, 91).await;
+        let spare = MemDev::new(SIZE);
+        let old: Arc<dyn BlockDevice> = mems[1].clone();
+        a.replace_proactively(1, spare.clone()).await.unwrap();
+        assert_eq!(a.status().failed, 0, "{level}: never degraded");
+        // Writes while the copy runs.
+        scribble(&a, &mut model, 92, 40).await;
+        wait_replaced(&a).await;
+        assert_eq!(a.failed_count(), 0, "{level}");
+        let drives = a.member_drives();
+        assert_eq!(drives[1].2.path, spare.id.path, "{level}: the new drive holds slot 1");
+        assert_eq!(read_all(&a).await, model, "{level}");
+        // Slot 1 holds the data itself: lose another member, read it all.
+        let other = 0;
+        a.set_member_state(other, RaidMemberState::Failed);
+        assert_eq!(read_all(&a).await, model, "{level}: with slot {other} gone, slot 1 is read");
+        a.set_member_state(other, RaidMemberState::Active);
+        assert!(read_superblock(&old).await.unwrap().is_none(), "{level}: the old drive is no member now");
+    }
+}
+
+/// #256: the old drive stops answering reads mid-copy: it is failed, and the
+/// new drive takes the slot as a rebuild from where the copy was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_whose_old_drive_dies_becomes_a_rebuild() {
+    let (a, mems) = make(RaidLevel::Raid5, 4).await;
+    let model = fill(&a, 93).await;
+    let spare = MemDev::new(SIZE);
+    mems[2].fail_reads.store(true, Ordering::SeqCst);
+    a.replace_proactively(2, spare.clone()).await.unwrap();
+    wait_replaced(&a).await;
+    assert_eq!(a.member_drives()[2].2.path, spare.id.path);
+    assert_eq!(read_all(&a).await, model);
+    a.set_member_state(0, RaidMemberState::Failed);
+    assert_eq!(read_all(&a).await, model, "slot 2 rebuilt onto the new drive");
+}
+
+/// #256: a drive that went missing and comes back is re-added from the
+/// bitmap: what was written while it was gone is resynced onto it, and it
+/// serves again without a rebuild. A drive that failed on I/O is not.
+#[tokio::test]
+async fn a_returned_member_is_re_added_from_the_bitmap() {
+    for (level, n) in [(RaidLevel::Raid1, 2), (RaidLevel::Raid5, 4), (RaidLevel::Raid6, 5), (RaidLevel::Raid10, 4)] {
+        let (_mems, dyns) = devs(n);
+        let a = RaidArray::create(level, dyns.clone(), Some(UNIT)).await.unwrap();
+        let mut model = fill(&a, 95).await;
+        a.close().await.unwrap();
+        drop(a);
+        // Assembled without drive 0 (a cable pulled): written meanwhile.
+        let without: Vec<Arc<dyn BlockDevice>> = dyns.iter().skip(1).cloned().collect();
+        let b = RaidArray::assemble(scan_of(&without).await).await.unwrap();
+        assert_eq!(b.member_states()[0].1, RaidMemberState::Failed);
+        assert!(b.keeps_bitmap(), "{level}: the bitmap is kept while a member is missing");
+        scribble(&b, &mut model, 96, 30).await;
+        b.flush().await.unwrap();
+        b.close().await.unwrap();
+        assert!(b.dirty_chunks() > 0, "{level}: what was written is still marked");
+        drop(b);
+        // Drive 0 is back.
+        let c = RaidArray::assemble(scan_of(&dyns).await).await.unwrap();
+        assert_eq!(c.member_states()[0].1, RaidMemberState::Active, "{level}: re-added, not rebuilding");
+        assert!(!c.keeps_bitmap());
+        assert_eq!(read_all(&c).await, model, "{level}");
+        // Drive 0 has the writes made while it was gone: lose its partner.
+        let partner = 1;
+        c.set_member_state(partner, RaidMemberState::Failed);
+        assert_eq!(read_all(&c).await, model, "{level}: drive 0 serves what it missed");
+    }
+}

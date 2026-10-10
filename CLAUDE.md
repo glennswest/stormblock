@@ -202,6 +202,24 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
+### RAID sets: proactive replacement, bitmap re-add (2026-10-10, #256, P3) — IN PROGRESS
+
+The issue's order: (2) first, (3) next, (1) reshape/grow last, split into
+its own issue.
+- [x] (2) `replace_proactively` (a `TeeDevice`: reads from the old drive,
+      data writes to both, nothing below DATA_OFFSET to the new one until the
+      swap), the copy under the stripe locks, swap with a new member uuid,
+      old superblock wiped; old read error → rebuild from the watermark;
+      `replace_failing` (a spare from the pool) on a `failing` health
+      report; `…/members/{slot}/replace` on an active slot
+- [x] (3) `missing` + `missing_at` in the slot record's padding; a member
+      failed as missing (health `missing`, gone at assembly) keeps the
+      bitmap (no idle clear, no zero at assembly); a returning drive whose
+      superblock saw up to `missing_at` is re-added with only the dirty chunks
+- [x] tests in `src/raid/tests.rs`
+- [ ] build, check.sh, docs (raid-sets.md, README), CHANGELOG, file (1),
+      golden, close
+
 ### Flaky: a_flow_over_copy_holds_no_lock_the_node_needs (2026-10-10, #297) — DONE
 
 - [x] what is checked: the I/O finishes while the gate holds the move (a

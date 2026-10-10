@@ -542,7 +542,8 @@ pub struct ReplaceRequest {
 }
 
 /// `POST /api/v1/arrays/{id}/members/{slot}/replace` — put a drive into a
-/// failed slot; it rebuilds in the background.
+/// failed slot (it rebuilds in the background), or replace an active one
+/// while it serves: the drive is filled from it and takes the slot (#256).
 async fn replace_member(
     State(state): State<Arc<AppState>>,
     Path((id, slot)): Path<(String, usize)>,
@@ -559,7 +560,11 @@ async fn replace_member(
     if let Err(r) = check_free(&state, std::slice::from_ref(&device), req.force).await {
         return r;
     }
-    match info.array.replace(slot, device).await {
+    // An active slot is replaced while it serves (#256); a failed one is
+    // rebuilt onto the drive.
+    let active = info.array.member_states().get(slot).map(|(_, st)| *st) == Some(crate::raid::RaidMemberState::Active);
+    let res = if active { info.array.replace_proactively(slot, device).await } else { info.array.replace(slot, device).await };
+    match res {
         Ok(_) => (axum::http::StatusCode::ACCEPTED, Json(full_response(&state, array_id, &info).await)).into_response(),
         Err(e) => ApiError::bad_request(format!("cannot replace slot {slot}: {e}")),
     }

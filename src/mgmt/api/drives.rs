@@ -781,26 +781,30 @@ async fn drive_health(
     }
     volumes_touched.sort_by_key(|v| v.0);
     volumes_touched.dedup();
-    // A drive that is a RAID set's member (#252): a drive reported failed or
-    // missing is failed out of its set, and the set takes a spare. Degraded
-    // or failing is reported, not acted on — the set still has it.
+    // A drive that is a RAID set's member (#252): a drive reported failed is
+    // failed out of its set, and the set takes a spare. One reported missing
+    // is failed as missing (#256): the set keeps its bitmap, so the drive, if
+    // it comes back, is re-added with only what it missed. One reported
+    // failing is replaced by a spare while it still serves (#256), so the set
+    // keeps full redundancy through it. Degraded is reported, not acted on.
     let mut raid_member = None;
     if let Some((array_id, slot)) = crate::mgmt::raid_sets::member_of(&state, &dev).await {
-        let failed = if matches!(state_lc.as_str(), "failed" | "missing") {
-            let array = state.arrays.read().await.get(&array_id).map(|i| i.array.clone());
-            match array {
-                Some(a) => {
-                    let why = format!("drive reported {state_lc}: {}", report.reason.as_deref().unwrap_or("-"));
-                    let f = a.fail_member(slot, &why);
-                    a.persist_if_dirty().await;
-                    f
-                }
-                None => false,
+        let array = state.arrays.read().await.get(&array_id).map(|i| i.array.clone());
+        let why = format!("drive reported {state_lc}: {}", report.reason.as_deref().unwrap_or("-"));
+        let (mut failed, mut replacing) = (false, None);
+        if let Some(a) = array {
+            match state_lc.as_str() {
+                "failed" => failed = a.fail_member(slot, &why),
+                "missing" => failed = a.fail_member_missing(slot, &why),
+                "failing" => match a.replace_failing(slot).await {
+                    Ok(u) => replacing = u,
+                    Err(e) => tracing::warn!("{path}: failing, and its slot could not be replaced: {e}"),
+                },
+                _ => {}
             }
-        } else {
-            false
-        };
-        raid_member = Some(serde_json::json!({ "array": array_id.0, "slot": slot, "failed": failed }));
+            a.persist_if_dirty().await;
+        }
+        raid_member = Some(serde_json::json!({ "array": array_id.0, "slot": slot, "failed": failed, "replacing_with": replacing }));
     }
     // Rebuild every redundant volume with a member here, most endangered
     // first, onto drives of its own choosing (#146).
