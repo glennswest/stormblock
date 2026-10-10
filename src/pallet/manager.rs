@@ -854,6 +854,36 @@ impl PalletManager {
         self.store.find(id).await
     }
 
+    /// What signing pallet `id` takes (#378): its signature state and the
+    /// message a signer signs.
+    pub async fn signing_report(&self, id: Uuid) -> Result<serde_json::Value> {
+        let loc = self.store.find(id).await?;
+        let p = self.store.open(&loc).await?;
+        Ok(super::sign::report(&p.sb))
+    }
+
+    /// Attach `public_key`'s Ed25519 signature to pallet `id` (#378): checked
+    /// against the pallet's message first, then only its superblock is
+    /// rewritten (the signature, the key id, the CRC). Nothing is rebuilt; a
+    /// pallet already signed is signed again (a key rotated).
+    pub async fn attach_signature(&self, id: Uuid, public_key: &[u8; 32], signature: &[u8; 64]) -> Result<PalletLocation> {
+        let loc = self.store.find(id).await?;
+        if !loc.is_readable() {
+            return Err(PalletError::Refused(format!("pallet {id} does not parse; it is not signed")));
+        }
+        let view = self.store.view(&loc)?;
+        let mut header = vec![0u8; super::format::SUPERBLOCK_LEN];
+        view.read_at(0, &mut header).await?;
+        super::sign::attach(&mut header, public_key, signature).map_err(PalletError::Refused)?;
+        view.write_at(0, &header).await?;
+        view.flush().await?;
+        let after = self.store.find(id).await?;
+        if !self.verify(id).await?.ok {
+            return Err(PalletError::Refused(format!("pallet {id} does not verify after signing")));
+        }
+        Ok(after)
+    }
+
     /// Select the pallet below the active one, and take the active one out of
     /// the running.
     ///

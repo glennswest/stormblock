@@ -679,6 +679,33 @@ enum PalletAction {
         /// Pallet UUID, or `all`
         id: String,
     },
+    /// What signing a pallet takes (#378): its signature state and the
+    /// message (hex) a signer signs with Ed25519
+    SigningMessage {
+        /// Pallet UUID
+        id: String,
+    },
+    /// Attach an Ed25519 signature made elsewhere (#378): checked against
+    /// the public key first, then only the superblock is rewritten
+    AttachSignature {
+        /// Pallet UUID
+        id: String,
+        /// The signer's 32-byte public key, hex
+        #[arg(long)]
+        public_key: String,
+        /// The 64-byte signature over the pallet's signing message, hex
+        #[arg(long)]
+        signature: String,
+    },
+    /// Sign a pallet with an Ed25519 key's 32-byte seed in a file (raw, or
+    /// 64 hex characters) (#378). A signer that keeps its key elsewhere uses
+    /// signing-message and attach-signature instead
+    Sign {
+        /// Pallet UUID
+        id: String,
+        #[arg(long)]
+        key: std::path::PathBuf,
+    },
     /// Publish a new pallet from files on disk
     Publish {
         /// Pallet name (max 40 bytes; must match the partition name)
@@ -2188,7 +2215,7 @@ pub async fn run() -> anyhow::Result<()> {
         };
         let state = if p.is_readable() { "" } else { " UNREADABLE" };
         println!(
-            "{}  {} v{} [{}] {:<10} pri={} tries={} {}{}{}{}",
+            "{}  {} v{} [{}] {:<10} pri={} tries={} {}{}{}{}{}",
             p.id,
             p.name,
             p.version,
@@ -2199,6 +2226,7 @@ pub async fn run() -> anyhow::Result<()> {
             if p.attributes.successful { "good " } else { "" },
             if p.attributes.sealed { "sealed " } else { "" },
             if p.attributes.read_only { "ro" } else { "rw" },
+            if p.signature.is_empty() { String::new() } else { format!(" {}", p.signature) },
             state,
         );
     }
@@ -2499,6 +2527,32 @@ pub async fn run() -> anyhow::Result<()> {
                     print!("{}. ", i + 1);
                     print_pallet(p);
                 }
+            }
+            PalletAction::SigningMessage { id } => {
+                let r = pe(mgr.signing_report(id_of(id)?).await)?;
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+            PalletAction::AttachSignature { id, public_key, signature } => {
+                let pk = crate::pallet::sign::hex32(public_key).map_err(|e| anyhow::anyhow!("public key: {e}"))?;
+                let sig = crate::pallet::sign::hex64(signature).map_err(|e| anyhow::anyhow!("signature: {e}"))?;
+                let loc = pe(mgr.attach_signature(id_of(id)?, &pk, &sig).await)?;
+                print!("signed: ");
+                print_pallet(&loc);
+            }
+            PalletAction::Sign { id, key } => {
+                let raw = std::fs::read(key).map_err(|e| anyhow::anyhow!("{}: {e}", key.display()))?;
+                let seed: [u8; 32] = match raw.len() {
+                    32 => raw.as_slice().try_into().unwrap(),
+                    _ => crate::pallet::sign::hex32(&String::from_utf8_lossy(&raw))
+                        .map_err(|e| anyhow::anyhow!("{}: an Ed25519 seed, 32 bytes raw or 64 hex: {e}", key.display()))?,
+                };
+                let id = id_of(id)?;
+                let report = pe(mgr.signing_report(id).await)?;
+                let message = hex::decode(report["message"].as_str().unwrap_or_default())?;
+                let (pk, sig) = crate::pallet::sign::sign(&seed, &message).map_err(|e| anyhow::anyhow!(e))?;
+                let loc = pe(mgr.attach_signature(id, &pk, &sig).await)?;
+                print!("signed: ");
+                print_pallet(&loc);
             }
             PalletAction::Verify { id } => {
                 let targets = if id == "all" {

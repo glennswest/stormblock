@@ -1149,6 +1149,125 @@ async fn seal_volume(
     }
 }
 
+/// A pallet volume's superblock (a composed pallet, #378).
+async fn pallet_header(state: &Arc<AppState>, id: VolumeId) -> Result<(Arc<dyn crate::drive::BlockDevice>, Vec<u8>), Response> {
+    let Some(dev) = state.volume_manager.lock().await.get_volume(&id) else {
+        return Err(ApiError::not_found(format!("volume {} not found", id.0)));
+    };
+    let mut header = vec![0u8; stormblock_pallet_format::SUPERBLOCK_LEN];
+    if let Err(e) = dev.read(0, &mut header).await {
+        return Err(ApiError::internal(format!("reading its superblock: {e}")));
+    }
+    if let Err(e) = stormblock_pallet_format::Superblock::parse(&header) {
+        return Err(ApiError::conflict(format!("volume {} is not a pallet: {e:?}", id.0)));
+    }
+    Ok((dev, header))
+}
+
+/// `GET /api/v1/volumes/{id}/pallet-signature` (#378): a pallet volume's
+/// signature state and the message (hex) a signer signs with Ed25519.
+async fn pallet_signature(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let id = match resolve_volume(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let (_, header) = match pallet_header(&state, id).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let sb = stormblock_pallet_format::Superblock::parse(&header).expect("parsed above");
+    let mut body = crate::pallet::sign::report(&sb);
+    body["volume"] = serde_json::json!(id.0);
+    Json(body).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SignPalletRequest {
+    /// The signer's 32-byte Ed25519 public key, hex.
+    pub public_key: String,
+    /// The 64-byte signature over the pallet's signing message, hex.
+    pub signature: String,
+    /// The signed pallet's name; default `<source>.signed`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `POST /api/v1/volumes/{id}/pallet-signature {public_key, signature, name?}`
+/// (#378): the pallet signed, as a new sealed volume.
+///
+/// The signature is checked against the public key and the pallet's message
+/// before anything is made. The source is a sealed golden that composed disks
+/// share, so it is not changed: the signed pallet is a copy-on-write clone of
+/// it whose only own slot is the one holding the superblock (signature, key
+/// id, CRC), sealed. Everything else is the source's extents.
+async fn sign_pallet_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SignPalletRequest>,
+) -> Response {
+    let src = match resolve_volume(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let pk = match crate::pallet::sign::hex32(&req.public_key) {
+        Ok(k) => k,
+        Err(e) => return ApiError::bad_request(format!("public_key: {e}")),
+    };
+    let sig = match crate::pallet::sign::hex64(&req.signature) {
+        Ok(s) => s,
+        Err(e) => return ApiError::bad_request(format!("signature: {e}")),
+    };
+    let (_, mut header) = match pallet_header(&state, src).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    if let Err(e) = crate::pallet::sign::attach(&mut header, &pk, &sig) {
+        return ApiError::bad_request(e);
+    }
+    let (src_name, fs) = {
+        let vm = state.volume_manager.lock().await;
+        let name = match vm.get_volume_handle(&src) {
+            Some(h) => h.name().await,
+            None => return ApiError::not_found(format!("volume {} not found", src.0)),
+        };
+        (name, vm.fs_info(&src).cloned())
+    };
+    let name = req.name.clone().unwrap_or_else(|| format!("{src_name}.signed"));
+    if state.volume_manager.lock().await.find_volume(&name).await.is_some() {
+        return ApiError::conflict(format!("a volume named {name} is already here"));
+    }
+    let new = match state.volume_manager.lock().await.create_snapshot(src, &name).await {
+        Ok(v) => v,
+        Err(e) => return ApiError::internal(format!("clone of the pallet: {e}")),
+    };
+    let undo = |why: Response| {
+        let state = state.clone();
+        async move {
+            let _ = state.volume_manager.lock().await.delete_volume(new).await;
+            why
+        }
+    };
+    let Some(dev) = state.volume_manager.lock().await.get_volume(&new) else {
+        return undo(ApiError::internal("the clone vanished")).await;
+    };
+    if let Err(e) = dev.write(0, &header).await {
+        return undo(ApiError::internal(format!("writing the signed superblock: {e}"))).await;
+    }
+    if let Err(e) = dev.flush().await {
+        return undo(ApiError::internal(format!("flushing the signed superblock: {e}"))).await;
+    }
+    drop(dev);
+    if let Err(e) = state.volume_manager.lock().await.seal_volume(new, fs).await {
+        return undo(ApiError::internal(format!("sealing the signed pallet: {e}"))).await;
+    }
+    let sb = stormblock_pallet_format::Superblock::parse(&header).expect("signed above");
+    let mut body = crate::pallet::sign::report(&sb);
+    body["volume"] = serde_json::json!(new.0);
+    body["name"] = serde_json::json!(name);
+    body["source"] = serde_json::json!(src.0);
+    (axum::http::StatusCode::CREATED, Json(body)).into_response()
+}
+
 /// `DELETE /api/v1/volumes/{id}/seal` — reopen for writes.
 #[derive(Debug, Deserialize)]
 pub struct AccessRequest {
@@ -2884,6 +3003,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/tier", axum::routing::post(retier_volume))
         .route("/{id}/restripe", axum::routing::post(restripe_volume))
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
+        .route("/{id}/pallet-signature", get(pallet_signature).post(sign_pallet_volume))
         .route("/{id}/access", get(get_access).put(set_access))
         .route("/{id}/clone", axum::routing::post(clone_volume))
         .route("/{id}/lineage", get(volume_lineage))

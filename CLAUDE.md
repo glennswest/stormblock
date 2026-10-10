@@ -180,6 +180,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Pallet signatures in the format (2026-10-10, #378, P2) — IN PROGRESS
+
+stormuefi#18 decided (Ed25519 over the manifest digest, key in stormcentral,
+signed at compose). Format: superblock 180 `sig_alg`, 184 key id (SHA-256 of
+the public key, 16 B), 200 signature (64 B); message = prefix ‖ manifest
+digest ‖ version ‖ kind (anti-relabel). Readers never checked the reserved
+area; the superblock CRC covers it.
+- [x] crate: `Signature`, `signing_message`, `key_id_of`; hand-built tests
+- [x] `pallet::sign` (ring, now direct, already compiled): sign, verify,
+      attach (verify first, rewrite superblock + CRC); manager
+      `signing_report`/`attach_signature`; CLI `signing-message`,
+      `attach-signature`, `sign --key`; API `/api/v1/pallets/{id}/signature`,
+      `/api/v1/volumes/{id}/pallet-signature` (composed: sealed CoW clone);
+      `signature` on listings
+- [x] tests: crate units, `pallet::sign`, integration_pallet in-place sign,
+      integration_compose_disk composed sign; docs/pallets.md §2.3, §2.9;
+      CHANGELOG
+- [ ] build, check.sh, golden, close; tell stormuefi#59, stormcentral#634
+
 ### test/ moves to stormblock-test (2026-10-10, #371) — WAITS ON stormblock-test#3
 
 stormblock-test builds against main and passes `short` in its own sc-build;

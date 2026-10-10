@@ -121,7 +121,10 @@ the reserved area:
 | 136 | 8 | `flags` — mirrors GPT bits 57–58 |
 | **144** | **4** | **`kind`** — stormblock extension, see §2.5 |
 | **148** | **32** | **`version_label`** — stormblock extension, UTF-8 |
-| 180 | 3916 | reserved, zero |
+| **180** | **4** | **`sig_alg`** — 0 unsigned, 1 Ed25519 (#378) |
+| **184** | **16** | **`sig_key_id`** — the first 16 bytes of SHA-256 of the signer's 32-byte Ed25519 public key |
+| **200** | **64** | **`signature`** — Ed25519 over the signing message (§2.9) |
+| 264 | 3832 | reserved, zero |
 
 Both extension fields are defined so that **zero means "unspecified"**: a pallet
 written before they existed reads back as `PalletKind::Unspecified` with an
@@ -366,8 +369,44 @@ other index. Checking against an unsigned map would pass for whoever rewrote
 that map to point at other content. A member failing fails the whole pallet:
 partial acceptance would defeat combination signing.
 
-Signing itself is not implemented here. The format reserves `manifest_digest`
-as the quantity a signature covers, so adding it changes no layout.
+**Signatures** (#378, decided on stormuefi#18): one Ed25519 signature,
+carried in the superblock (offsets 180–263 above) with the key's id, so the
+pre-kernel reader finds it without a filesystem and a reader with several
+trusted keys (rotation, one per release line) picks the right one.
+
+- **What it covers**, the 60-byte signing message:
+  `"STORMPAL-SIG-V1\0"` (16 bytes) ‖ `manifest_digest` (32) ‖
+  `pallet_version` (u64 LE) ‖ `kind` (u32 LE). Through the manifest digest
+  that is the whole member set. The version and kind are in it, so a signed
+  pallet cannot be relabelled as another version (an old one dressed as an
+  upgrade). The name, label, flags and GPT attributes are not: they choose
+  among pallets, they do not vouch for content.
+- **Readers:** `stormblock-pallet-format` gives
+  `Superblock::signature()` → `Unsigned`, `Ed25519 { key_id, signature }`,
+  or `Malformed(…)` (an unknown algorithm, bytes with no algorithm, an
+  all-zero signature), and `Superblock::signing_message()`, with no
+  allocation. `key_id_of(public_key)` comes with the `verify` feature. The
+  crate does not check the signature itself: stormuefi does, with its
+  compiled-in keys (stormuefi#59). A pallet from before signatures reads as
+  `Unsigned`, and a reader that ignores these bytes is still right: they are
+  covered by `superblock_crc`, not by `manifest_digest`, and no reader ever
+  checked the reserved area.
+- **Signing a built pallet, without rebuilding it,** in two steps, so the key
+  stays with the signer (stormcentral, after its gates, stormcentral#634):
+  1. read the message;
+  2. sign it, and attach the signature with the public key. The engine checks
+     it before writing anything, then rewrites only the superblock.
+
+  | where the pallet is | read | attach |
+  |---|---|---|
+  | on a drive or image | `stormblock pallet signing-message <id>`, `GET /api/v1/pallets/{id}/signature` | `pallet attach-signature <id> --public-key --signature`, `POST /api/v1/pallets/{id}/signature`; `pallet sign <id> --key <seed file>` does both with a key in a file |
+  | a composed pallet volume (forge's `compose/pallet`) | `GET /api/v1/volumes/{id}/pallet-signature` | `POST /api/v1/volumes/{id}/pallet-signature {public_key, signature, name?}` |
+
+  A composed pallet is a sealed golden that composed disks share, so it is
+  not changed: the signed pallet is a new sealed volume (default
+  `<name>.signed`), a copy-on-write clone whose only own slot is the header.
+- Pallet listings carry `signature`: `unsigned`, `ed25519:<key id>` or
+  `malformed: …`.
 
 ---
 

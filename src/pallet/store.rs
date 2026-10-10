@@ -66,8 +66,7 @@ pub const WHOLE_DRIVE: usize = usize::MAX;
 /// One pallet, and where it is.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PalletLocation {
-    /// The GPT `UniquePartitionGUID` — stable across byte-for-byte copies, so
-    /// it survives a move to another drive.
+    /// The GPT `UniquePartitionGUID`: kept by a move, new for a copy (#57).
     pub id: Uuid,
     pub drive: String,
     pub drive_index: usize,
@@ -85,6 +84,10 @@ pub struct PalletLocation {
     pub used_bytes: u64,
     pub member_count: usize,
     pub state: PalletState,
+    /// `unsigned`, `ed25519:<key id>` or `malformed: …` (#378). Empty for a
+    /// pallet that did not parse.
+    #[serde(default)]
+    pub signature: String,
 }
 
 impl PalletLocation {
@@ -200,6 +203,7 @@ impl PalletStore {
                     used_bytes: used_bytes(&p),
                     member_count: p.member_count(),
                     state: PalletState::Readable,
+                    signature: super::sign::describe(p.sb.signature()),
                 },
                 Err(err) => PalletLocation {
                     id: e.uuid(),
@@ -217,6 +221,7 @@ impl PalletStore {
                     used_bytes: 0,
                     member_count: 0,
                     state: PalletState::Unreadable { reason: err.to_string() },
+                    signature: String::new(),
                 },
             };
             out.push(loc);
@@ -261,6 +266,7 @@ impl PalletStore {
             used_bytes: used_bytes(&p),
             member_count: p.member_count(),
             state: PalletState::Readable,
+            signature: super::sign::describe(p.sb.signature()),
         })
     }
 

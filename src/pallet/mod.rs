@@ -46,6 +46,7 @@ pub mod format;
 pub mod gpt;
 pub mod manager;
 pub mod select;
+pub mod sign;
 pub mod store;
 
 use std::fmt;

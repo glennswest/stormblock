@@ -208,6 +208,7 @@ mod tests {
             used_bytes: 0,
             member_count: 0,
             state: super::super::store::PalletState::Readable,
+            signature: String::new(),
         }
     }
 

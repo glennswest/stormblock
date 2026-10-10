@@ -125,8 +125,19 @@ pub mod layout {
         pub const KIND: usize = 144;
         /// Extension field, same rule.
         pub const VERSION_LABEL: usize = 148;
+        /// The signature (#378): algorithm, `SIG_ALG_NONE` or
+        /// `SIG_ALG_ED25519`. Zero means unsigned, so every pallet written
+        /// before signatures reads as unsigned, and a reader that ignores
+        /// these bytes is still right (it has never checked the reserved area;
+        /// they are covered by `superblock_crc`, not by `manifest_digest`).
+        pub const SIG_ALG: usize = 180;
+        /// The signing key's id: the first 16 bytes of SHA-256 of its 32-byte
+        /// Ed25519 public key, so a reader with several trusted keys picks one.
+        pub const SIG_KEY_ID: usize = 184;
+        /// The 64-byte Ed25519 signature over [`super::super::signing_message`].
+        pub const SIGNATURE: usize = 200;
         /// First byte of the reserved area that must stay zero.
-        pub const RESERVED: usize = 180;
+        pub const RESERVED: usize = 264;
     }
 
     /// Member table entry field offsets.
@@ -148,6 +159,67 @@ pub mod layout {
         pub const BLOCK_COUNT: usize = 16;
         pub const FLAGS: usize = 24;
     }
+}
+
+// ---------------------------------------------------------------- signature
+
+/// No signature.
+pub const SIG_ALG_NONE: u32 = 0;
+/// One Ed25519 signature over [`signing_message`] (#378, stormuefi#18).
+pub const SIG_ALG_ED25519: u32 = 1;
+pub const KEY_ID_LEN: usize = 16;
+pub const SIGNATURE_LEN: usize = 64;
+/// Domain separation: these bytes start every signed message, so a pallet
+/// signature can never be taken for a signature over anything else.
+pub const SIGNING_PREFIX: [u8; 16] = *b"STORMPAL-SIG-V1\0";
+/// `SIGNING_PREFIX` ‖ `manifest_digest` (32) ‖ `pallet_version` (u64 LE) ‖
+/// `kind` (u32 LE).
+pub const SIGNING_MESSAGE_LEN: usize = 16 + 32 + 8 + 4;
+
+/// What a pallet says about its signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signature {
+    /// No signature: `sig_alg` 0 and its fields zero.
+    Unsigned,
+    /// One Ed25519 signature by the key `key_id` names. Not yet checked:
+    /// that is the reader's, with its trusted keys, over [`signing_message`].
+    Ed25519 { key_id: [u8; KEY_ID_LEN], signature: [u8; SIGNATURE_LEN] },
+    /// Signature bytes that are neither: refuse, as a bad signature.
+    Malformed(SignatureFault),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureFault {
+    /// An algorithm this reader does not know.
+    UnknownAlgorithm(u32),
+    /// `sig_alg` 0 with key id or signature bytes set.
+    StrayBytes,
+    /// `sig_alg` Ed25519 with an all-zero signature.
+    EmptySignature,
+}
+
+/// The message a pallet's signature covers: the domain prefix, the manifest
+/// digest (so the whole member set), and the version and kind, so a signed
+/// pallet cannot be relabelled as another version or kind (a downgrade made
+/// to look like an upgrade). The name, label, flags and GPT attributes are
+/// not covered: they choose among pallets, they do not vouch for content.
+pub fn signing_message(manifest_digest: &[u8; 32], pallet_version: u64, kind: u32) -> [u8; SIGNING_MESSAGE_LEN] {
+    let mut m = [0u8; SIGNING_MESSAGE_LEN];
+    m[..16].copy_from_slice(&SIGNING_PREFIX);
+    m[16..48].copy_from_slice(manifest_digest);
+    m[48..56].copy_from_slice(&pallet_version.to_le_bytes());
+    m[56..60].copy_from_slice(&kind.to_le_bytes());
+    m
+}
+
+/// A public key's id: the first 16 bytes of SHA-256 of its 32 bytes.
+#[cfg(feature = "verify")]
+pub fn key_id_of(public_key: &[u8; 32]) -> [u8; KEY_ID_LEN] {
+    use sha2::{Digest, Sha256};
+    let d: [u8; 32] = Sha256::digest(public_key).into();
+    let mut id = [0u8; KEY_ID_LEN];
+    id.copy_from_slice(&d[..KEY_ID_LEN]);
+    id
 }
 
 // ------------------------------------------------------------------- errors
@@ -502,9 +574,32 @@ pub struct Superblock {
     pub flags: u64,
     name: [u8; NAME_LEN],
     version_label: [u8; VERSION_LABEL_LEN],
+    kind_raw: u32,
+    sig_alg: u32,
+    sig_key_id: [u8; KEY_ID_LEN],
+    sig: [u8; SIGNATURE_LEN],
 }
 
 impl Superblock {
+    /// The pallet's signature, as written (#378). Parsing never fails on it:
+    /// an unsigned pallet is still a pallet, and a malformed signature is the
+    /// reader's to refuse, the way it refuses a bad one.
+    pub fn signature(&self) -> Signature {
+        let zero_rest = self.sig_key_id.iter().all(|b| *b == 0) && self.sig.iter().all(|b| *b == 0);
+        match self.sig_alg {
+            SIG_ALG_NONE if zero_rest => Signature::Unsigned,
+            SIG_ALG_NONE => Signature::Malformed(SignatureFault::StrayBytes),
+            SIG_ALG_ED25519 if self.sig.iter().all(|b| *b == 0) => Signature::Malformed(SignatureFault::EmptySignature),
+            SIG_ALG_ED25519 => Signature::Ed25519 { key_id: self.sig_key_id, signature: self.sig },
+            other => Signature::Malformed(SignatureFault::UnknownAlgorithm(other)),
+        }
+    }
+
+    /// The message this pallet's signature covers ([`signing_message`]).
+    pub fn signing_message(&self) -> [u8; SIGNING_MESSAGE_LEN] {
+        signing_message(&self.manifest_digest, self.pallet_version, self.kind_raw)
+    }
+
     pub fn parse(b: &[u8]) -> Result<Superblock> {
         use layout::sb as o;
         if b.len() < SUPERBLOCK_LEN {
@@ -553,6 +648,18 @@ impl Superblock {
             flags: rd_u64(b, o::FLAGS),
             name,
             version_label,
+            kind_raw: rd_u32(b, o::KIND),
+            sig_alg: rd_u32(b, o::SIG_ALG),
+            sig_key_id: {
+                let mut k = [0u8; KEY_ID_LEN];
+                k.copy_from_slice(&b[o::SIG_KEY_ID..o::SIG_KEY_ID + KEY_ID_LEN]);
+                k
+            },
+            sig: {
+                let mut g = [0u8; SIGNATURE_LEN];
+                g.copy_from_slice(&b[o::SIGNATURE..o::SIGNATURE + SIGNATURE_LEN]);
+                g
+            },
         })
     }
 
@@ -978,6 +1085,67 @@ mod tests {
         let crc = superblock_crc(&b);
         b[o::SUPERBLOCK_CRC..o::SUPERBLOCK_CRC + 4].copy_from_slice(&crc.to_le_bytes());
         b
+    }
+
+    /// Re-seal a hand-edited superblock's CRC.
+    fn recrc(b: &mut [u8; SUPERBLOCK_LEN]) {
+        use layout::sb as o;
+        let crc = superblock_crc(b);
+        b[o::SUPERBLOCK_CRC..o::SUPERBLOCK_CRC + 4].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    /// #378: the signature bytes, at fixed offsets, from hand-built bytes.
+    #[test]
+    fn a_signature_is_read_as_unsigned_signed_or_malformed() {
+        use layout::sb as o;
+        let base = superblock(&[], &[], PalletKind::Boot, "6.12");
+        let sb = Superblock::parse(&base).unwrap();
+        assert_eq!(sb.signature(), Signature::Unsigned, "a pallet from before signatures");
+
+        let mut signed = base;
+        signed[o::SIG_ALG..o::SIG_ALG + 4].copy_from_slice(&SIG_ALG_ED25519.to_le_bytes());
+        signed[o::SIG_KEY_ID..o::SIG_KEY_ID + KEY_ID_LEN].copy_from_slice(&[0xAB; KEY_ID_LEN]);
+        signed[o::SIGNATURE..o::SIGNATURE + SIGNATURE_LEN].copy_from_slice(&[0x5C; SIGNATURE_LEN]);
+        recrc(&mut signed);
+        let sb = Superblock::parse(&signed).unwrap();
+        assert_eq!(sb.signature(), Signature::Ed25519 { key_id: [0xAB; KEY_ID_LEN], signature: [0x5C; SIGNATURE_LEN] });
+
+        // Unsigned is not malformed; these are.
+        let mut odd = base;
+        odd[o::SIG_ALG..o::SIG_ALG + 4].copy_from_slice(&9u32.to_le_bytes());
+        recrc(&mut odd);
+        assert_eq!(Superblock::parse(&odd).unwrap().signature(), Signature::Malformed(SignatureFault::UnknownAlgorithm(9)));
+        let mut stray = base;
+        stray[o::SIGNATURE] = 1;
+        recrc(&mut stray);
+        assert_eq!(Superblock::parse(&stray).unwrap().signature(), Signature::Malformed(SignatureFault::StrayBytes));
+        let mut empty = base;
+        empty[o::SIG_ALG..o::SIG_ALG + 4].copy_from_slice(&SIG_ALG_ED25519.to_le_bytes());
+        recrc(&mut empty);
+        assert_eq!(Superblock::parse(&empty).unwrap().signature(), Signature::Malformed(SignatureFault::EmptySignature));
+
+        // The signature is covered by the superblock CRC: changed without it,
+        // the pallet is refused as damaged, like any other header byte.
+        let mut torn = signed;
+        torn[o::SIGNATURE] ^= 1;
+        assert!(matches!(Superblock::parse(&torn), Err(Error::BadHeaderCrc)));
+
+        // The message: prefix, manifest digest, version, kind — byte by byte.
+        let m = sb.signing_message();
+        assert_eq!(&m[..16], b"STORMPAL-SIG-V1\0");
+        assert_eq!(&m[16..48], &sb.manifest_digest);
+        assert_eq!(&m[48..56], &7u64.to_le_bytes());
+        assert_eq!(&m[56..60], &PalletKind::Boot.to_u32().to_le_bytes());
+        let other = signing_message(&sb.manifest_digest, 8, PalletKind::Boot.to_u32());
+        assert_ne!(m, other, "another version is another message");
+    }
+
+    #[cfg(feature = "verify")]
+    #[test]
+    fn a_key_id_is_the_head_of_the_keys_sha256() {
+        // SHA-256 of 32 zero bytes is 66687aad…; the id is its first 16 bytes.
+        let id = key_id_of(&[0u8; 32]);
+        assert_eq!(id, [0x66, 0x68, 0x7a, 0xad, 0xf8, 0x62, 0xbd, 0x77, 0x6c, 0x8f, 0xc1, 0x8b, 0x8e, 0x9f, 0x8e, 0x20]);
     }
 
     fn member(name: &str, role: &str, kind: MemberKind, len: u64, first: u32, count: u32) -> [u8; MEMBER_LEN] {

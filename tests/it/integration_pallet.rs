@@ -821,3 +821,45 @@ async fn a_mirrored_pallet_is_one_pallet_on_two_drives_and_resyncs() {
     let again = mgr.resync().await;
     assert!(again.legs_added.is_empty());
 }
+
+/// #378: a pallet on a drive is signed in place without rebuilding it. Its
+/// message is read, the signature is made where the key lives and attached;
+/// a signature by another key is refused and changes nothing; a new key
+/// signs it again (rotation); members still verify.
+#[tokio::test]
+async fn a_built_pallet_is_signed_in_place_and_a_wrong_signature_changes_nothing() {
+    use stormblock::pallet::sign;
+    let dir = TempDir::new().unwrap();
+    let mgr = manager(&dir, &["disk0"]).await;
+    let mut spec = boot_spec("stormcos-boot", b"kernel-payload", b"initramfs-payload");
+    spec.drive = Some(0);
+    let loc = mgr.publish(spec).await.unwrap();
+    assert_eq!(loc.signature, "unsigned");
+
+    let report = mgr.signing_report(loc.id).await.unwrap();
+    let message = hex::decode(report["message"].as_str().unwrap()).unwrap();
+    let (pk, sig) = sign::sign(&[1u8; 32], &message).unwrap();
+    let (pk2, sig2) = sign::sign(&[2u8; 32], &message).unwrap();
+
+    let refused = mgr.attach_signature(loc.id, &pk2, &sig).await.unwrap_err().to_string();
+    assert!(refused.contains("not key"), "{refused}");
+    assert_eq!(mgr.get(loc.id).await.unwrap().signature, "unsigned", "nothing was written");
+
+    let signed = mgr.attach_signature(loc.id, &pk, &sig).await.unwrap();
+    assert_eq!(signed.signature, format!("ed25519:{}", hex::encode(sign::key_id(&pk))));
+    assert_eq!(signed.id, loc.id);
+    assert_eq!(signed.version, loc.version);
+    assert!(mgr.verify(loc.id).await.unwrap().ok, "members untouched");
+    let p = mgr.store().open(&signed).await.unwrap();
+    match p.sb.signature() {
+        stormblock_pallet_format::Signature::Ed25519 { signature, .. } => {
+            assert!(sign::verifies(&pk, &p.sb.signing_message(), &signature));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(hex::encode(p.sb.manifest_digest), report["manifest_digest"].as_str().unwrap(), "not rebuilt");
+
+    // Rotation: the next key signs it again.
+    let rotated = mgr.attach_signature(loc.id, &pk2, &sig2).await.unwrap();
+    assert_eq!(rotated.signature, format!("ed25519:{}", hex::encode(sign::key_id(&pk2))));
+}

@@ -140,6 +140,9 @@ pub struct PalletResponse {
     pub readable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreadable_reason: Option<String>,
+    /// `unsigned`, `ed25519:<key id>` or `malformed: …` (#378).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub signature: String,
 }
 
 impl From<&PalletLocation> for PalletResponse {
@@ -169,6 +172,7 @@ impl From<&PalletLocation> for PalletResponse {
             read_only: l.attributes.read_only,
             readable: l.is_readable(),
             unreadable_reason: reason,
+            signature: l.signature.clone(),
         }
     }
 }
@@ -342,6 +346,18 @@ async fn verify(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> R
         return ApiError::bad_request("pallet id must be a UUID");
     };
     match read_manager(&state).await.verify(id).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+/// `GET /api/v1/pallets/{id}/signature` (#378): the pallet's signature state
+/// and the message (hex) a signer signs with Ed25519.
+async fn signing_report(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Ok(id) = Uuid::parse_str(&id) else {
+        return ApiError::bad_request("pallet id must be a UUID");
+    };
+    match read_manager(&state).await.signing_report(id).await {
         Ok(r) => Json(r).into_response(),
         Err(e) => err(e),
     }
@@ -643,6 +659,36 @@ async fn move_pallet(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SignatureRequest {
+    /// The signer's 32-byte Ed25519 public key, hex.
+    pub public_key: String,
+    /// The 64-byte signature over the pallet's signing message, hex.
+    pub signature: String,
+}
+
+/// `POST /api/v1/pallets/{id}/signature {public_key, signature}` (#378):
+/// checked against the pallet's message, then written into its superblock.
+async fn attach_signature(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SignatureRequest>,
+) -> Response {
+    let id = with_id!(id);
+    let pk = match crate::pallet::sign::hex32(&req.public_key) {
+        Ok(k) => k,
+        Err(e) => return ApiError::bad_request(format!("public_key: {e}")),
+    };
+    let sig = match crate::pallet::sign::hex64(&req.signature) {
+        Ok(s) => s,
+        Err(e) => return ApiError::bad_request(format!("signature: {e}")),
+    };
+    match manager(&state).await.attach_signature(id, &pk, &sig).await {
+        Ok(loc) => Json(PalletResponse::from(&loc)).into_response(),
+        Err(e) => err(e),
+    }
+}
+
 async fn copy_pallet(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -867,6 +913,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/convert", post(convert))
         .route("/{id}", get(get_one).delete(delete))
         .route("/{id}/verify", post(verify))
+        .route("/{id}/signature", get(signing_report).post(attach_signature))
         .route("/{id}/activate", post(activate))
         .route("/{id}/successful", post(mark_successful))
         .route("/{id}/read-only", post(set_read_only))

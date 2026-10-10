@@ -44,6 +44,9 @@ axum = "0.8"
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 sha2 = "0.10"
+# Ed25519 pallet signatures, signed and verified on the host (#378). Already
+# compiled for rustls; a direct dependency adds no crate.
+ring = "0.17"
 hex = "0.4"
 hyper = "1"
 tower = "0.5"

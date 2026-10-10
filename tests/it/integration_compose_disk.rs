@@ -316,3 +316,75 @@ async fn a_disk_composed_at_512_is_presented_at_512_and_its_clones_too() {
 
     server.abort();
 }
+
+/// #378: a composed pallet is signed without rebuilding it: its message is
+/// read, signed with a key that stays with the signer, and attached. The
+/// signed pallet is a sealed copy-on-write clone (one new slot, the header);
+/// the source, which composed disks share, is unchanged.
+#[tokio::test]
+async fn a_composed_pallet_is_signed_into_a_sealed_clone_and_the_source_is_left_alone() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    golden(&state, "kernel.golden", 2 * SLOT, 0x4B).await;
+    let (status, pallet) = post(
+        &client,
+        &format!("{base}/api/v1/volumes/compose/pallet"),
+        serde_json::json!({
+            "name": "boot-v1", "pallet": "boot", "kind": "boot", "version_label": "6.12.0",
+            "members": [
+                {"name": "kernel", "role": "kernel", "kind": "kernel", "volume": "kernel.golden"},
+                {"name": "cmdline", "role": "cmdline", "kind": "bootconfig", "text": "root=/dev/nvme0n1p2 ro"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{pallet}");
+    let src = pallet["id"].as_str().unwrap().to_string();
+
+    let rep: serde_json::Value = client.get(format!("{base}/api/v1/volumes/{src}/pallet-signature")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(rep["signature"], "unsigned", "{rep}");
+    let message = hex::decode(rep["message"].as_str().unwrap()).unwrap();
+    assert_eq!(message.len(), stormblock_pallet_format::SIGNING_MESSAGE_LEN);
+
+    // The signer's side: a key that never reaches the engine.
+    let (pk, sig) = stormblock::pallet::sign::sign(&[42u8; 32], &message).unwrap();
+    let (other_pk, _) = stormblock::pallet::sign::sign(&[43u8; 32], &message).unwrap();
+    let url = format!("{base}/api/v1/volumes/{src}/pallet-signature");
+    let (status, refused) = post(&client, &url, serde_json::json!({ "public_key": hex::encode(other_pk), "signature": hex::encode(sig) })).await;
+    assert_eq!(status, 400, "another key's: {refused}");
+
+    let before = free_slots(&state).await;
+    let (status, signed) = post(&client, &url, serde_json::json!({ "public_key": hex::encode(pk), "signature": hex::encode(sig) })).await;
+    assert_eq!(status, 201, "{signed}");
+    let key_id = hex::encode(stormblock::pallet::sign::key_id(&pk));
+    assert_eq!(signed["signature"], format!("ed25519:{key_id}"));
+    assert_eq!(signed["name"], "boot-v1.signed");
+    assert_eq!(before - free_slots(&state).await, 1, "one new slot: the header");
+    let new = Uuid::parse_str(signed["volume"].as_str().unwrap()).unwrap();
+
+    // The signed pallet: sealed, parses, verifies with the key, and every
+    // member still checks against the unchanged manifest digest.
+    let dev = {
+        let vm = state.volume_manager.lock().await;
+        assert!(vm.is_sealed(&stormblock::volume::VolumeId(new)));
+        vm.get_volume(&stormblock::volume::VolumeId(new)).unwrap()
+    };
+    let mut head = vec![0u8; 64 * 1024];
+    dev.read(0, &mut head).await.unwrap();
+    let p = stormblock_pallet_format::Pallet::parse(&head).unwrap();
+    match p.sb.signature() {
+        stormblock_pallet_format::Signature::Ed25519 { key_id: k, signature } => {
+            assert_eq!(hex::encode(k), key_id);
+            assert!(stormblock::pallet::sign::verifies(&pk, &p.sb.signing_message(), &signature));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(hex::encode(p.sb.manifest_digest), rep["manifest_digest"].as_str().unwrap());
+
+    // The source is unchanged.
+    let after: serde_json::Value = client.get(format!("{base}/api/v1/volumes/{src}/pallet-signature")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(after["signature"], "unsigned");
+    server.abort();
+}

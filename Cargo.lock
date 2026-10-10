@@ -2520,6 +2520,7 @@ dependencies = [
  "pin-project-lite",
  "rand 0.8.8",
  "reqwest",
+ "ring",
  "rust-embed",
  "rustls",
  "rustls-pemfile",

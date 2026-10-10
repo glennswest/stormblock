@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #378 (stormuefi#18 decided): pallet signatures in the format.
+  - **Where it sits:** one Ed25519 signature with a 16-byte key id (SHA-256 of the public key), in the superblock's reserved area (180–263). It is covered by the superblock CRC and invisible to older readers.
+  - **What it covers:** `"STORMPAL-SIG-V1\0"` ‖ manifest digest ‖ pallet version ‖ kind.
+  - **The reader crate:** `stormblock-pallet-format` gives `Superblock::signature()` (unsigned / Ed25519 / malformed), `signing_message()`, and `key_id_of` (with `verify`), with no allocation.
+  - **Signing a built pallet without rebuilding it,** checked against the public key before anything is written:
+    - on a drive or image: `pallet signing-message`, `attach-signature`, `sign --key`, and `GET/POST /api/v1/pallets/{id}/signature`;
+    - a composed pallet volume: `GET/POST /api/v1/volumes/{id}/pallet-signature`, which makes a sealed copy-on-write clone (one new slot) and leaves the shared source alone.
+  - **Listings:** pallet listings show the signature.
 - **fix:** #336: an fstemplate seal records the template `Ready` only once its volume is sealed. Before, it persisted `Ready` first, so a failure or a cancelled request in between left a ready template whose volume was not sealed, which every clone refused (#281).
   - **Its own task:** `POST /api/v1/fstemplates/{id}/seal` runs on a task, so a caller that gives up (the registry's 30 s) no longer cancels it halfway.
   - **A cut between the two:** a start after one finishes the record instead of reformatting.
