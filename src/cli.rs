@@ -9452,6 +9452,94 @@ file = "{state}"
         assert_eq!(alone.origin(&made[1].3), Origin::Node, "the origin travels with the volume");
     }
 
+    /// One install of `image` over `disk`, as a boot and its successor do it:
+    /// claim, take the disk (the plan and the adopt), flow both halves over,
+    /// persist. The install's report.
+    async fn install_over(dir: &tempfile::TempDir, disk: &str, image: &str, tag: &str) -> crate::image::install::Report {
+        let claim = dir.path().join(format!("claim-{tag}.raw")).display().to_string();
+        std::fs::copy(image, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (flow, report) = super::take_local_disk_for(&mut mgr, disk, "hot", false, Some("stormpump"))
+            .await
+            .unwrap_or_else(|e| panic!("install {tag}: {e}"));
+        let flow = flow.expect("laid");
+        let report = report.expect("an install report");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+        let (succ, _) = super::open_slabs_resuming(&[claim.clone(), flow.disk.clone()], None, true).await.unwrap();
+        let sys_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
+        let data_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+        report
+    }
+
+    /// A claim as a PVC is made (#385): a clone of the node's sealed blank,
+    /// both role-less (the system half, #317), with its own bytes.
+    async fn make_claim(disk: &str, blank: &str, claim: &str, mark: u8) -> crate::volume::VolumeId {
+        use crate::drive::slab::SlabRole;
+        let (mut node, _) = super::open_slabs_resuming(&[disk.to_string()], None, false).await.unwrap();
+        let b = match node.find_volume(blank).await {
+            Some(b) => b,
+            None => {
+                let b = node.create_volume_with(blank, 8 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::System)).await.unwrap();
+                let v = node.get_volume(&b).unwrap();
+                v.write(0, &vec![0xB0u8; 8 * MIB as usize]).await.unwrap();
+                v.flush().await.unwrap();
+                node.seal_volume(b, None).await.unwrap();
+                b
+            }
+        };
+        let c = node.create_snapshot(b, claim).await.unwrap();
+        let v = node.get_volume(&c).unwrap();
+        v.write(MIB, &vec![mark; 2 * MIB as usize]).await.unwrap();
+        v.flush().await.unwrap();
+        node.persist().await;
+        c
+    }
+
+    fn claim_bytes(mark: u8) -> Vec<u8> {
+        let mut want = vec![0xB0u8; 8 * MIB as usize];
+        want[MIB as usize..3 * MIB as usize].fill(mark);
+        want
+    }
+
+    /// #385: N installed, a claim made; N+1 over it (the claim carried into
+    /// the data half); a second claim made; N again over that. Both claims
+    /// survive, every byte, after each install and from the disk alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_install_back_to_the_older_release_keeps_every_claim() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
+
+        let first = make_claim(&disk, "pvc-ext4j-8m", "gate-1", 0xC1).await;
+        let up = install_over(&dir, &disk, &image_n1, "up").await;
+        {
+            let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+            assert_eq!(alone.find_volume("gate-1").await, Some(first), "after N+1: {up:?}");
+            assert_eq!(volume_bytes(&alone, "gate-1").await.unwrap(), claim_bytes(0xC1), "after N+1");
+        }
+        let second = make_claim(&disk, "pvc-ext4j-8m", "gate-2", 0xC2).await;
+        let down = install_over(&dir, &disk, &image_n, "down").await;
+        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        for (name, id, mark) in [("gate-1", first, 0xC1u8), ("gate-2", second, 0xC2)] {
+            assert_eq!(alone.find_volume(name).await, Some(id), "{name} after going back to N: {down:?}");
+            assert_eq!(volume_bytes(&alone, name).await.unwrap(), claim_bytes(mark), "{name} after going back to N");
+        }
+    }
+
     /// #122: release N installed, the node running from its disk and writing
     /// its data volumes; release N+1 staged over HTTP from its published
     /// image, activated, the disk reopened alone, rolled back. N+1's policy
