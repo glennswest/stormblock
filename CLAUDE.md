@@ -180,6 +180,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A slow fstemplate seal on 11.93 (2026-10-10, #336, P2) — IN PROGRESS
+
+Not reproduced: 11.95, same engine, seals 8–11 ms. By reading: on 11.93 the
+volume seal's persist ran under the manager and flushed a flow-over's remote
+slabs over NVMe/TCP with no timeout (#358; fixed there and by #364). Found:
+- [x] `seal` recorded `Ready` before sealing the volume; the API ran it in
+      the request, so the registry's 30 s timeout could cancel it in between
+      (#281's shape). Now: volume sealed, then template; on a task
+- [x] `resume_formats`: a sealed volume under an `AwaitingFormat` template is
+      recorded ready, never reformatted
+- [x] one timing line per seal (check, manager wait, seal; WARN > 5 s)
+- [x] test `template::tests::a_template_is_ready_only_once_its_volume_is_sealed`
+      (fair-lock ordering, cancellation, the cut between); CHANGELOG
+- [ ] build, check.sh, golden, close
+
 ### Drive identity is stable (2026-10-10, #65) — DONE (golden-stormblock-aa88009c1bc2)
 
 - [x] `identity::lasting_uuid` (block: wwn > model+serial(+nsid) > path, +

@@ -935,6 +935,15 @@ pub async fn resume_formats(
     let mut out = Vec::new();
     for t in candidates {
         let Some(raw) = t.raw_volume_id.map(VolumeId) else { continue };
+        // A seal that sealed the volume and stopped before recording the
+        // template (#336: the volume first, then the template): finish it,
+        // never format over a sealed volume.
+        if vm.lock().await.is_sealed(&raw) {
+            tracing::info!(template = %t.name, "its volume is sealed: recording the template ready (#336)");
+            let r = seal(vm, store, &t.id, false).await;
+            out.push((t.name.clone(), r.map(|_| ()).map_err(|e| e.to_string())));
+            continue;
+        }
         let Some(dev) = vm.lock().await.get_volume(&raw) else { continue };
         let ours = t.formatting
             || (!in_use.contains(&raw.0) && read_fs_uuid(t.fs.as_str(), &dev).await.is_err());
@@ -988,6 +997,7 @@ pub async fn resume_formats(
 /// cannot replay a journal (RouterOS) mounts every one of them read-only.
 /// `force` skips the check for an operator who knows better; nothing else does.
 pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Result<FsTemplate> {
+    let started = std::time::Instant::now();
     let template = store
         .lock()
         .await
@@ -1021,34 +1031,20 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
     if template.fs.is_xfs() {
         let checked = seal_check_xfs(&dev, &template.name, force).await?;
         drop(dev);
-        let mut s = store.lock().await;
-        let t = s
-            .get_mut(id)
-            .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {id} not found")))?;
-        t.sealed_volume_id = Some(raw.0);
-        t.raw_volume_id = None;
-        t.state = TemplateState::Ready;
-        t.formatting = false;
-        t.journal = true;
-        if let Some(l) = &checked {
-            t.fs_uuid = Some(l.uuid);
-            t.metadata_csum = l.version == 5;
-            t.csum_seed = l.meta_uuid_feature;
-            t.sixty_four_bit = true;
-            if t.label.is_empty() {
-                t.label = l.label.clone();
+        let checked_at = started.elapsed();
+        let apply = move |t: &mut FsTemplate| {
+            t.journal = true;
+            if let Some(l) = &checked {
+                t.fs_uuid = Some(l.uuid);
+                t.metadata_csum = l.version == 5;
+                t.csum_seed = l.meta_uuid_feature;
+                t.sixty_four_bit = true;
+                if t.label.is_empty() {
+                    t.label = l.label.clone();
+                }
             }
-        }
-        let out = t.clone();
-        s.persist();
-        drop(s);
-        vm.lock()
-            .await
-            .seal_volume(raw, Some(out.fs_info()))
-            .await
-            .map_err(|e| TemplateError::Internal(format!("sealing volume {raw}: {e}")))?;
-        tracing::info!("fstemplate {} (xfs) sealed as volume {}", out.name, raw);
-        return Ok(out);
+        };
+        return finish_seal(vm, store, id, template, raw, apply, started, checked_at).await;
     }
     let layout = match ext4::read_layout(&dev).await {
         Ok(l) => Some(l),
@@ -1085,40 +1081,89 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
         }
     }
     drop(dev);
+    let checked_at = started.elapsed();
+    let apply = move |t: &mut FsTemplate| {
+        if let Some(l) = &layout {
+            t.fs_uuid = Some(l.uuid);
+            t.journal = l.has_journal;
+            t.sixty_four_bit = l.sixty_four_bit;
+            t.metadata_csum = l.metadata_csum;
+            t.csum_seed = l.csum_seed;
+            if t.label.is_empty() {
+                t.label = l.label.clone();
+            }
+        }
+    };
+    finish_seal(vm, store, id, template, raw, apply, started, checked_at).await
+}
 
-    // Sealing is a state the volume enters, not a snapshot into a second
-    // object (#76): the volume that was formatted *is* the template, it just
-    // takes no more writes. One template, one volume — there is no `-raw`
-    // half left to leak (#47).
+/// The end of a seal, once the filesystem checked out.
+///
+/// Sealing is a state the volume enters, not a snapshot into a second object
+/// (#76): the volume that was formatted *is* the template, it just takes no
+/// more writes. **The volume is sealed first, and only then is the template
+/// recorded `Ready`** (#336): the other order, on a failure or a caller that
+/// went away in between, left a ready template whose volume was not sealed,
+/// which every clone then refused (#281).
+///
+/// Each phase is timed and said in one line, a slow one as a WARN, so a seal
+/// that takes long names what it waited on: the check (I/O over the volume),
+/// the volume manager, or the seal itself (a durable metadata persist).
+#[allow(clippy::too_many_arguments)]
+async fn finish_seal(
+    vm: &VmLock,
+    store: &StoreLock,
+    id: &Uuid,
+    template: FsTemplate,
+    raw: VolumeId,
+    apply: impl Fn(&mut FsTemplate),
+    started: std::time::Instant,
+    checked_at: std::time::Duration,
+) -> Result<FsTemplate> {
+    let mut out = template;
+    out.sealed_volume_id = Some(raw.0);
+    out.raw_volume_id = None;
+    out.state = TemplateState::Ready;
+    out.formatting = false;
+    apply(&mut out);
+
+    let wait = std::time::Instant::now();
+    let mut m = vm.lock().await;
+    let waited = wait.elapsed();
+    let seal = std::time::Instant::now();
+    m.seal_volume(raw, Some(out.fs_info()))
+        .await
+        .map_err(|e| TemplateError::Internal(format!("sealing volume {raw}: {e}")))?;
+    drop(m);
+    let sealed_in = seal.elapsed();
+
     let mut s = store.lock().await;
     let t = s
         .get_mut(id)
-        .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {id} not found")))?;
+        .ok_or_else(|| TemplateError::NotFound(format!("fstemplate {id} was deleted while it was sealed")))?;
     t.sealed_volume_id = Some(raw.0);
     t.raw_volume_id = None;
     t.state = TemplateState::Ready;
     t.formatting = false;
-    if let Some(l) = &layout {
-        t.fs_uuid = Some(l.uuid);
-        t.journal = l.has_journal;
-        t.sixty_four_bit = l.sixty_four_bit;
-        t.metadata_csum = l.metadata_csum;
-        t.csum_seed = l.csum_seed;
-        if t.label.is_empty() {
-            t.label = l.label.clone();
-        }
-    }
+    apply(t);
     let out = t.clone();
     s.persist();
     drop(s);
 
-    vm.lock()
-        .await
-        .seal_volume(raw, Some(out.fs_info()))
-        .await
-        .map_err(|e| TemplateError::Internal(format!("sealing volume {raw}: {e}")))?;
-
-    tracing::info!("fstemplate {} sealed as volume {}", out.name, raw);
+    let total = started.elapsed();
+    let line = format!(
+        "fstemplate {} sealed as volume {raw} in {} ms: check {} ms, waiting for the volume manager {} ms, sealing {} ms",
+        out.name,
+        total.as_millis(),
+        checked_at.as_millis(),
+        waited.as_millis(),
+        sealed_in.as_millis()
+    );
+    if total > std::time::Duration::from_secs(5) {
+        tracing::warn!("{line}");
+    } else {
+        tracing::info!("{line}");
+    }
     Ok(out)
 }
 
@@ -2735,6 +2780,76 @@ mod tests {
         // force is the operator's escape hatch, and only that.
         let sealed = seal(&vm, &store, &t.id, true).await.unwrap();
         assert_eq!(sealed.state, TemplateState::Ready);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #336: a template is recorded `Ready` only once its volume is sealed.
+    /// While the seal waits on the volume manager, the template still reads
+    /// as it was; a seal cancelled there leaves template and volume unsealed
+    /// alike, and a later seal finishes both.
+    #[tokio::test]
+    async fn a_template_is_ready_only_once_its_volume_is_sealed() {
+        let (vm, store, path) = node(1024 * 1024 * 1024).await;
+        let spec = TemplateSpec {
+            format_in_core: false,
+            ..TemplateSpec::new("sealed-in-order", 64 * 1024 * 1024)
+        };
+        let t = create(&vm, &store, &spec).await.unwrap();
+        let raw = VolumeId(t.raw_volume_id.expect("awaiting format"));
+        let dev = volume(&vm, raw).await;
+        ext4::format(&dev, &ext4::Ext4Params::default()).await.unwrap();
+        drop(dev);
+
+        // The seal takes the manager twice: to fetch its volume, then to
+        // seal it. The lock is fair (FIFO): held, the seal queues; released
+        // and taken again at once, the seal has it first (its fetch) and we
+        // have it next, while the seal checks the filesystem and then
+        // queues for its second take. That is where the old order had
+        // already recorded the template `Ready`.
+        let held = vm.lock().await;
+        let task = {
+            let (vm, store, id) = (vm.clone(), store.clone(), t.id);
+            tokio::spawn(async move { seal(&vm, &store, &id, false).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(held);
+        let held = vm.lock().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        assert!(!task.is_finished(), "the seal waits for the volume manager");
+        assert_eq!(
+            store.lock().await.get(&t.id).unwrap().state,
+            TemplateState::AwaitingFormat,
+            "not Ready while its volume is not sealed"
+        );
+        // Cancelled there (a caller that went away, before #336's task).
+        task.abort();
+        let _ = task.await;
+        assert!(!held.is_sealed(&raw));
+        drop(held);
+        assert_eq!(store.lock().await.get(&t.id).unwrap().state, TemplateState::AwaitingFormat);
+        assert!(!vm.lock().await.is_sealed(&raw), "template and volume agree");
+
+        let sealed = seal(&vm, &store, &t.id, false).await.unwrap();
+        assert_eq!(sealed.state, TemplateState::Ready);
+        assert!(vm.lock().await.is_sealed(&raw));
+
+        // A stop between the two (the volume sealed, the template not yet
+        // recorded): the start after finishes the record, never reformats.
+        let u = create(&vm, &store, &TemplateSpec { format_in_core: false, ..TemplateSpec::new("cut-between", 64 * 1024 * 1024) })
+            .await
+            .unwrap();
+        let uraw = VolumeId(u.raw_volume_id.unwrap());
+        let dev = volume(&vm, uraw).await;
+        ext4::format(&dev, &ext4::Ext4Params::default()).await.unwrap();
+        let fs_uuid = ext4::read_layout(&dev).await.unwrap().uuid;
+        drop(dev);
+        vm.lock().await.seal_volume(uraw, None).await.unwrap();
+        let resumed = resume_formats(&vm, &store, &std::collections::HashSet::new()).await;
+        assert!(resumed.iter().any(|(n, r)| n == "cut-between" && r.is_ok()), "{resumed:?}");
+        let rec = store.lock().await.get(&u.id).unwrap().clone();
+        assert_eq!(rec.state, TemplateState::Ready);
+        assert_eq!(rec.fs_uuid, Some(fs_uuid), "the filesystem it had, not a new format");
 
         let _ = std::fs::remove_file(path);
     }

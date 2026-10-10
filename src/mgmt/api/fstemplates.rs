@@ -465,7 +465,14 @@ async fn seal_template(
         }
     }
 
-    let sealed = template::seal(&state.volume_manager, &state.fstemplates, &template_id, force).await;
+    // On a task of its own (#336): a caller that stops waiting must not
+    // cancel a seal halfway. It finishes whether anyone is still listening.
+    let sealed = {
+        let state = state.clone();
+        tokio::spawn(async move { template::seal(&state.volume_manager, &state.fstemplates, &template_id, force).await })
+            .await
+            .unwrap_or_else(|e| Err(template::TemplateError::Internal(format!("template seal task: {e}"))))
+    };
     match sealed {
         Ok(t) => Json(t.json()).into_response(),
         Err(e) => err(e),

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **fix:** #336: an fstemplate seal records the template `Ready` only once its volume is sealed. Before, it persisted `Ready` first, so a failure or a cancelled request in between left a ready template whose volume was not sealed, which every clone refused (#281).
+  - **Its own task:** `POST /api/v1/fstemplates/{id}/seal` runs on a task, so a caller that gives up (the registry's 30 s) no longer cancels it halfway.
+  - **A cut between the two:** a start after one finishes the record instead of reformatting.
+  - **One timing line per seal:** the check, the wait for the volume manager, and the seal; a WARN above 5 s.
 - **fix:** #65: a drive's `DeviceId.uuid` is derived from who it is, not minted at every open, so the drives API's id for a drive survives a close, a reopen and a restart.
   - **How it is derived:** a block device uses its WWN, else model + serial (+ NVMe nsid), else its path; a partition opened on its own adds `:part<n>`.
   - **Other kinds:** a file uses its canonical path; a `PartitionDevice` uses its parent and offset; an `iscsi://` drive uses its URI, as `nvme-tcp://` already did.
