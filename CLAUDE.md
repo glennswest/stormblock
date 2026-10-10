@@ -202,7 +202,7 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### A reviewed Kubernetes bearer for ordinary verbs (2026-10-10, #382, P2) — IN PROGRESS
+### A reviewed Kubernetes bearer for ordinary verbs (2026-10-10, #382, P2) — DONE (golden-stormblock-d56a8225b161)
 
 Owner's (A) on stormcos#241. Ordinary verbs: get/list/watch/create/delete/
 update by method and path (`serve::api::ordinary_review_attributes`);
@@ -213,7 +213,8 @@ destructive: `destroy` (only `*` holds it), goldens make/ticket stay `create`
 - [x] test `integration_destructive::a_storage_user_bearer_clones_and_attaches_
       and_never_destroys` (stand-in apiserver: user, viewer); docs/auth.md,
       CHANGELOG
-- [ ] build, check.sh, golden, close; tell stormcos#241 (storage-user needs
+- [x] auth tests 135/135; check.sh at 7f02727 ALL PASS (1122/1122); golden
+      golden-stormblock-d56a8225b161; stormcos#241 told (storage-user needs
       `delete` to detach)
 
 ### test/ moves to stormblock-test (2026-10-10, #371) — DONE
