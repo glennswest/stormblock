@@ -54,6 +54,17 @@ pub struct ImportSpec {
     /// Seal when done (default true). `false` leaves it writable.
     #[serde(default = "yes")]
     pub seal: bool,
+    /// The content's sha256 (every byte of its virtual size), as a node's
+    /// `POST /api/v1/goldens` reported it (#143): the import fails (`verify`)
+    /// when what arrived is not that content, and is recorded as a golden.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// The golden it was made from, by name, for the record (#143).
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// What its builder said about it, for the record (#143).
+    #[serde(default)]
+    pub provenance: std::collections::BTreeMap<String, String>,
     /// Keep a downloaded file after the import.
     #[serde(default)]
     pub keep_download: bool,
@@ -631,13 +642,78 @@ async fn stream_raw(
         st.write().await.volume_id = None;
         return Err(e.into());
     }
-    let mut vm = state.volume_manager.lock().await;
-    if spec.seal {
-        vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
-    } else if fs.is_some() {
-        vm.set_fs_info(vol_id, fs).await.map_err(|e| e.to_string())?;
+    let digest = match check_digest(state, spec, vol_id).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
+            st.write().await.volume_id = None;
+            return Err(e);
+        }
+    };
+    {
+        let mut vm = state.volume_manager.lock().await;
+        if spec.seal {
+            vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
+        } else if fs.is_some() {
+            vm.set_fs_info(vol_id, fs).await.map_err(|e| e.to_string())?;
+        }
     }
+    record_golden(state, spec, vol_id, digest).await;
     Ok(())
+}
+
+/// With `sha256` given (#143): the imported volume's digest, refused as a
+/// `verify` failure when it is not the content the node made.
+async fn check_digest(state: &Arc<AppState>, spec: &ImportSpec, vol_id: VolumeId) -> Result<Option<String>, Fail> {
+    let Some(want) = spec.sha256.as_deref() else { return Ok(None) };
+    let Some(dev) = state.volume_manager.lock().await.get_volume(&vol_id) else {
+        return Err(Fail::new(Phase::Write, "the imported volume vanished"));
+    };
+    let got = crate::mgmt::goldens::digest(dev).await.map_err(|e| Fail::new(Phase::Write, e))?;
+    if !got.eq_ignore_ascii_case(want.trim()) {
+        return Err(Fail::new(
+            Phase::Verify,
+            format!("the content's sha256 is {got}, not the {want} it was imported as"),
+        ));
+    }
+    Ok(Some(got))
+}
+
+/// An import that names its digest or provenance is a golden pulled from a
+/// node (#143): kept in this node's goldens record.
+async fn record_golden(state: &Arc<AppState>, spec: &ImportSpec, vol_id: VolumeId, digest: Option<String>) {
+    if spec.sha256.is_none() && spec.provenance.is_empty() && spec.parent.is_none() {
+        return;
+    }
+    let Some(dev) = state.volume_manager.lock().await.get_volume(&vol_id) else { return };
+    let size = dev.capacity_bytes();
+    let sha = match digest {
+        Some(d) => d,
+        None => match crate::mgmt::goldens::digest(dev).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("import {}: not recorded as a golden: {e}", spec.name);
+                return;
+            }
+        },
+    };
+    let from = spec.url.as_deref().map(|u| u.split('?').next().unwrap_or(u).to_string());
+    let r = crate::mgmt::goldens::GoldenRecord {
+        name: spec.name.clone(),
+        volume_id: vol_id.0,
+        sha256: sha,
+        size_bytes: size,
+        made_at: now(),
+        how: "imported".into(),
+        source: None,
+        parent: spec.parent.clone(),
+        provenance: spec.provenance.clone(),
+        made_by: None,
+        from,
+    };
+    if let Err(e) = crate::mgmt::goldens::record(state, r).await {
+        tracing::warn!("import {}: not recorded as a golden: {e}", spec.name);
+    }
 }
 
 async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>, path: &Path) -> Result<(), Fail> {
@@ -736,11 +812,22 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
         st.write().await.volume_id = None;
         return Err(e.into());
     }
-    let mut vm = state.volume_manager.lock().await;
-    if spec.seal {
-        vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
-    } else if fs.is_some() {
-        vm.set_fs_info(vol_id, fs).await.map_err(|e| e.to_string())?;
+    let digest = match check_digest(state, spec, vol_id).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = state.volume_manager.lock().await.delete_volume(vol_id).await;
+            st.write().await.volume_id = None;
+            return Err(e);
+        }
+    };
+    {
+        let mut vm = state.volume_manager.lock().await;
+        if spec.seal {
+            vm.seal_volume(vol_id, fs).await.map_err(|e| format!("seal: {e}"))?;
+        } else if fs.is_some() {
+            vm.set_fs_info(vol_id, fs).await.map_err(|e| e.to_string())?;
+        }
     }
+    record_golden(state, spec, vol_id, digest).await;
     Ok(())
 }

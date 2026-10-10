@@ -23,6 +23,7 @@ pub mod synonyms;
 pub mod boothost;
 pub mod release_stage;
 pub mod releases;
+pub mod goldens;
 #[cfg(feature = "nvmeof")]
 pub mod forge;
 #[cfg(feature = "iscsi")]
@@ -163,6 +164,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/synonyms", synonyms::router(state.clone()))
         .nest("/api/v1/boothost", boothost::router(state.clone()))
         .nest("/api/v1/releases", releases::router(state.clone()))
+        .nest("/api/v1/goldens", goldens::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
         .nest("/v1", v1::router(state.clone()))

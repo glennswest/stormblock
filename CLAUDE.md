@@ -347,17 +347,21 @@ adopt-ublk's own disks (`boot_disks`, #314) were nowhere in the drive API.
       directory, `/serve/v1` mounted)
 - [x] check.sh at ab97c9a ALL PASS (nextest 1071/1071, the runtime test)
 
-### A stopped VM's root disk becomes a named golden (2026-10-09, #143, P2) — WAITING ON THE OWNER
+### A stopped VM's root disk becomes a named golden (2026-10-10, #143, P2) — IN PROGRESS
 
-buildbox2: seal `<ns>.<vm>-root`, digest it, name `golden-<name>-<sha12>`
-(never overwrite), record parent and provenance, copy to forge; called off
-the node (make-golden.sh on stormcentral), which has no engine token since
-#107. Asked on #143 (needs-owner): **auth** A a Kubernetes bearer + SAR
-(`goldens`/`create`, #274; recommended), B a stormvm VM action, C a scoped
-engine token; **to forge** A forge pulls a one-time read URL through its
-import (#125; recommended), B the node pushes with a forge token (#247's
-concern), C stormblock-registry#43 copies it. Nothing built yet; the local
-half (seal, digest, name, provenance) first once answered.
+Owner: 1A (a Kubernetes bearer + SAR `goldens`/`create`), 2A (forge pulls a
+ticket URL through its import).
+- [x] `mgmt/goldens.rs`: make (in-use refusal, CoW snapshot, seal, sha256 of
+      every byte, `golden-<name>-<sha12>` never overwriting, same content =
+      existing), `goldens.json` (source, parent, provenance, made_by via the
+      auth layer's `Caller`), tickets (in memory by hash, ≤ 1 day)
+- [x] `api/goldens.rs`: POST/GET `/api/v1/goldens`, `/{name}`, `/{name}/ticket`,
+      `/{name}/content` (ticket only, Range via `releases::serve_device`);
+      auth: make and ticket destructive, content open to the ticket
+- [x] import: `sha256` (verify), `parent`, `provenance` → recorded
+- [x] test `integration_destructive::a_stopped_vms_disk_becomes_a_named_
+      golden_that_forge_pulls_with_a_ticket`; README, auth.md, CHANGELOG
+- [ ] build, check.sh, golden, close; tell buildbox2 / stormblock-registry#43
 
 ### An import from a URL resumes; a failure names its phase (2026-10-09, #125) — DONE (golden-stormblock-b835c9f3b7dd)
 

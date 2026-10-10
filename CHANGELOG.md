@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #143 (owner: 1A, 2A): a stopped VM's disk becomes a named golden.
+  - **The verb:** `POST /api/v1/goldens {volume, name, provenance}` snapshots the volume (refused while in use unless `force`), seals the snapshot, digests every byte (sha256), and names it `golden-<name>-<sha12>`. It never overwrites; the same content again answers the existing golden.
+  - **The record:** source, parent, provenance and caller, in `goldens.json`.
+  - **Who may call it:** it is destructive, so the admin token or a Kubernetes bearer allowed `create` on `goldens`.
+  - **The reply:** an expiring ticket URL (`GET /api/v1/goldens/{name}/content?ticket=…`, Range, open to the ticket alone) and the body for forge's `POST /api/v1/volumes/import`.
+  - **The import:** it gains `sha256` (a mismatch fails `verify`), `parent` and `provenance` (recorded as an imported golden).
+  - **Also added:** `GET /api/v1/goldens[/{name}]` and `POST /api/v1/goldens/{name}/ticket`.
 - **feat:** #152 (owner: the master's recommendation, A with C's switch): pool admission under per-drive overcommit.
   - **Overcommit per drive:** `PUT /api/v1/drives/{path}/overcommit {enabled, ratio 1-16, drive{uuid,wwn,serial,path}}` (stormdrive#13). It is kept in `<data_dir>/overcommit.json` and matched to slabs by WWN, else serial, else path. `GET` reads it back.
   - **Pools and their numbers:** a pool is a role, or a dedicated array slab.

@@ -334,6 +334,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         return true;
     }
     if *method == Method::POST {
+        // A golden from a VM's disk, and a ticket to pull it (#143).
+        if p == "/api/v1/goldens" || (seg.len() == 6 && seg[3] == "goldens" && seg[5] == "ticket") {
+            return true;
+        }
         if matches!(p, "/api/v1/slabs" | "/api/v1/arrays" | "/api/v1/spares") {
             return true;
         }
@@ -378,7 +382,7 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
 
 /// Classify a request (#274). See [`Class`].
 pub fn classify(method: &Method, path: &str, query: Option<&str>) -> Class {
-    if is_public(path) || is_boot_claim(method, path) {
+    if is_public(path) || is_boot_claim(method, path) || is_golden_content(method, path) {
         return Class::Public;
     }
     if *method == Method::DELETE {
@@ -396,6 +400,18 @@ pub fn classify(method: &Method, path: &str, query: Option<&str>) -> Class {
         return Class::Attestation(host);
     }
     Class::Ordinary
+}
+
+/// `GET /api/v1/goldens/{name}/content`: open to the request, guarded by the
+/// ticket its handler checks (#143). Forge pulls a golden with it and holds
+/// no credential for this node; a ticket reads one sealed golden, until it
+/// expires.
+fn is_golden_content(method: &Method, path: &str) -> bool {
+    if *method != Method::GET && *method != Method::HEAD {
+        return false;
+    }
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    matches!(seg.as_slice(), ["", "api", "v1", "goldens", n, "content"] if !n.is_empty())
 }
 
 /// The `storage.storm.io` resource and verb a SubjectAccessReview asks about,

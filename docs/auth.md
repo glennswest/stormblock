@@ -80,7 +80,18 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
 - `?repair=true` on an fsck and `?apply` on a trim;
 - a boot intent;
 - a machine's TPM mark (`PUT`/`DELETE /api/v1/boothost/{name}/tpm`, #216);
+- a golden from a VM's disk (`POST /api/v1/goldens`, resource `goldens`, verb
+  `create`) and a ticket for one (`POST /api/v1/goldens/{name}/ticket`,
+  `update`) (#143): an off-node builder calls these with its own
+  ServiceAccount's bearer;
 - every other `DELETE`.
+
+**Open to a ticket** (#143): `GET /api/v1/goldens/{name}/content?ticket=…`
+answers with no credential and checks the ticket itself. A ticket comes from
+the two golden verbs above; it reads that one sealed golden (Range included)
+until it expires (an hour by default, a day at most), and the engine keeps
+only its hash, in memory. It is how forge pulls a golden without holding a
+credential for the node.
 
 **The admin token** is never under `/run/stormblock`, which every service
 mounts. It comes from `management.admin_token` or `$STORMBLOCK_ADMIN_TOKEN`.

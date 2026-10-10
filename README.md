@@ -1473,6 +1473,40 @@ with nothing to undo it. `VolumeManager::shrink_volume` exists for a caller
 that means it. Moving a volume onto a smaller one, with its data, is a copy —
 a different operation.
 
+### A golden from a stopped VM's disk (#143)
+
+`POST /api/v1/goldens {volume, name, provenance?, force?, ticket_secs?}` makes
+a stopped VM's root volume (`<namespace>.<vm>-root`, after the guest powered
+itself off) a named golden:
+1. **In use:** it is refused while anything serves the volume, unless `force`.
+2. **Snapshot:** a copy-on-write snapshot is taken (the VM's own volume is
+   left alone) and sealed.
+3. **Digest:** sha256 over every byte of the snapshot.
+4. **Name:** `golden-<name>-<sha12>`, never over another volume. The same
+   content made again answers `200` with the golden already there; a new one
+   answers `201`.
+5. **Record:** kept in `<data_dir>/goldens.json`: digest, size, the source
+   volume, the golden it was cloned from (`parent`), the caller's
+   `provenance`, and who made it.
+
+The verb is destructive: the admin token, or a Kubernetes bearer allowed
+`create` on `storage.storm.io` `goldens`. An off-node builder holds no
+engine token. `GET /api/v1/goldens` and `GET /api/v1/goldens/{name}` read
+the records.
+
+**The reply** carries what forge needs:
+- a **ticket** URL, `GET /api/v1/goldens/{name}/content?ticket=…`: the
+  golden's bytes, Range-capable, open to the ticket alone (see docs/auth.md);
+- an **`import`** body to send as is to forge's
+  `POST /api/v1/volumes/import`. **Forge pulls**: the import resumes on
+  drops (#125); with `sha256` it refuses content that is not that digest
+  (`phase: verify`); and with `sha256`, `parent` or `provenance` it records
+  the golden in its own `goldens.json` (`how: imported`). No node holds a
+  forge credential.
+
+A new ticket for an existing golden: `POST /api/v1/goldens/{name}/ticket
+{ticket_secs?}`. The registry catalog entry is stormblock-registry#43's.
+
 ### Releases: available, or archived
 
 A release names a volume; it never copies one, so the download streams out of

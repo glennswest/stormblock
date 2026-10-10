@@ -673,6 +673,18 @@ async fn download(
             .into_response();
     };
 
+    serve_device(device, &headers, release.version.clone(), format!("stormcos-{version}.img"))
+}
+
+/// Stream a volume's bytes, honouring one `Range` (a release image, #106; a
+/// golden's content to forge, #143). `label` names it in a read error's log
+/// line; `filename` is the attachment's name.
+pub(crate) fn serve_device(
+    device: Arc<dyn crate::drive::BlockDevice>,
+    headers: &axum::http::HeaderMap,
+    label: String,
+    filename: String,
+) -> Response {
     let capacity = device.capacity_bytes();
 
     // A 32 GB download that cannot resume is one dropped connection away from
@@ -699,7 +711,6 @@ async fn download(
     let partial = (start, end) != (0, capacity.saturating_sub(1));
     let length = end.saturating_sub(start) + 1;
 
-    let label = release.version.clone();
     let stream = futures_util::stream::unfold((device, start), move |(dev, offset)| {
         let label = label.clone();
         async move {
@@ -730,8 +741,8 @@ async fn download(
                     // mid-stream; say why on the way out so it is not a silent
                     // truncation.
                     tracing::error!(
-                        version = %label, offset,
-                        "release download failed while reading the volume: {e}"
+                        what = %label, offset,
+                        "download failed while reading the volume: {e}"
                     );
                     Some((Err(std::io::Error::other(e.to_string())), (dev, end + 1)))
                 }
@@ -751,7 +762,7 @@ async fn download(
     set(
         &mut hdrs,
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"stormcos-{version}.img\""),
+        format!("attachment; filename=\"{filename}\""),
     );
     let status = if partial {
         set(

@@ -405,6 +405,12 @@ fn admin_note(r: &Resolved) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct FullView;
 
+/// Who a destructive call was allowed for, as the audit log names them
+/// (`admin-token`, `kubernetes:<user>`, …), for a handler that records it
+/// (#143: a golden's `made_by`).
+#[derive(Debug, Clone)]
+pub struct Caller(pub String);
+
 /// A request made with a machine's own host secret (#247): the host it
 /// covers. The handlers it may reach (re-point, rollback, intent) narrow it
 /// further: a sealed volume and no URI, intent `local` only.
@@ -613,6 +619,8 @@ pub async fn require_token(
         return refuse(rec, StatusCode::UNAUTHORIZED, crate::serve::api::MISSING_TOKEN.to_string());
     }
 
+    let mut req = req;
+    req.extensions_mut().insert(Caller(rec.who.clone()));
     let resp = next.run(req).await;
     rec.status = Some(resp.status().as_u16());
     super::kubeauth::audit(state.audit_log.as_deref(), &rec);

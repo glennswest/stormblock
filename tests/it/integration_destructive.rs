@@ -283,3 +283,110 @@ fn an_admin_token_is_minted_apart_from_the_node_token() {
     m.admin_gate = Some("audit".into());
     assert!(stormblock::mgmt::auth::resolve(&m).unwrap().auth.audit_only);
 }
+
+/// #143: a builder off the node (a Kubernetes bearer allowed `create` on
+/// `goldens`) makes a named golden from a stopped VM's disk; forge pulls it
+/// with the reply's ticket and import body, checks the digest and records it.
+#[tokio::test]
+async fn a_stopped_vms_disk_becomes_a_named_golden_that_forge_pulls_with_a_ticket() {
+    use sha2::{Digest, Sha256};
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let n = node(false, Some(api)).await;
+    let forge = node(false, None).await;
+    let c = reqwest::Client::new();
+
+    // The VM's root: a clone of a base golden, written by the guest.
+    let (root, base) = {
+        let mut vm = n.state.volume_manager.lock().await;
+        let base = vm.create_volume_any("golden-base", 4 * MIB).await.unwrap();
+        vm.seal_volume(base, None).await.unwrap();
+        let root = vm.create_snapshot(base, "default.vm1-root").await.unwrap();
+        (root, base)
+    };
+    let dev = n.state.volume_manager.lock().await.get_volume(&root).unwrap();
+    dev.write(MIB, &vec![0x5au8; 4096]).await.unwrap();
+    dev.flush().await.unwrap();
+    let mut all = vec![0u8; (4 * MIB) as usize];
+    dev.read(0, &mut all).await.unwrap();
+    let want = hex::encode(Sha256::digest(&all));
+    drop(dev);
+
+    let body = json!({ "volume": "default.vm1-root", "name": "bb", "provenance": { "commit": "abc123", "builder": "make-golden.sh" } });
+    assert_eq!(call(&n, reqwest::Method::POST, "/goldens", Some(NODE), Some(body.clone())).await, 401, "the node token does not make goldens");
+    assert_eq!(call(&n, reqwest::Method::POST, "/goldens", Some("bob-k8s"), Some(body.clone())).await, 403);
+    let r = c.post(format!("{}/goldens", n.base)).bearer_auth("alice-k8s").json(&body).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 201);
+    let made: Value = r.json().await.unwrap();
+    let g = &made["golden"];
+    let name = format!("golden-bb-{}", &want[..12]);
+    assert_eq!(g["name"], name.as_str(), "{made}");
+    assert_eq!(g["sha256"], want.as_str(), "the digest is every byte of the disk");
+    assert_eq!(g["parent"], "golden-base");
+    assert_eq!(g["source"]["name"], "default.vm1-root");
+    assert_eq!(g["provenance"]["commit"], "abc123");
+    assert_eq!(g["made_by"], "kubernetes:alice");
+    let sar: Vec<Value> = asked.lock().unwrap().iter().filter(|b| b["kind"] == "SubjectAccessReview").cloned().collect();
+    assert!(sar.iter().any(|b| b["spec"]["resourceAttributes"]["resource"] == "goldens" && b["spec"]["resourceAttributes"]["verb"] == "create"), "{sar:?}");
+    {
+        let vm = n.state.volume_manager.lock().await;
+        let gid = stormblock::volume::VolumeId(g["volume_id"].as_str().unwrap().parse().unwrap());
+        assert!(vm.is_sealed(&gid), "the golden is sealed");
+        assert!(!vm.is_sealed(&root), "the VM's own volume is left as it was");
+        assert_eq!(vm.parent(&gid), Some(root));
+        let _ = base;
+    }
+
+    // The same content again is the golden already here; nothing new.
+    let again: Value = c.post(format!("{}/goldens", n.base)).bearer_auth("alice-k8s").json(&body).send().await.unwrap().json().await.unwrap();
+    assert_eq!(again["existing"], true);
+    assert_eq!(again["golden"]["volume_id"], g["volume_id"]);
+    let goldens = n.state.volume_manager.lock().await.list_volumes().await.into_iter().filter(|v| v.1.starts_with("golden-bb-")).count();
+    assert_eq!(goldens, 1, "no pending snapshot left behind");
+
+    // The ticket: the golden's bytes, by range, to the ticket alone.
+    let url = made["ticket"]["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://"), "{url}");
+    let r = c.get(&url).header("Range", format!("bytes={}-{}", MIB, MIB + 9)).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 206);
+    assert_eq!(r.bytes().await.unwrap().to_vec(), vec![0x5au8; 10]);
+    let bare = url.split('?').next().unwrap();
+    assert_eq!(c.get(bare).send().await.unwrap().status().as_u16(), 401, "no ticket, no content");
+    assert_eq!(c.get(format!("{bare}?ticket=nope")).send().await.unwrap().status().as_u16(), 401);
+    let other = url.replace(&format!("/goldens/{name}/"), "/goldens/golden-base/");
+    assert_eq!(c.get(other).send().await.unwrap().status().as_u16(), 401, "a ticket reads its own golden only");
+
+    // Forge pulls with the reply's import body, as is.
+    let import = |b: Value| {
+        let (c, base) = (c.clone(), forge.base.clone());
+        async move {
+            let st: Value = c.post(format!("{base}/volumes/import")).bearer_auth(ADMIN).json(&b).send().await.unwrap().json().await.unwrap();
+            let id = st["id"].as_str().unwrap().to_string();
+            for _ in 0..400 {
+                let s: Value = c.get(format!("{base}/volumes/import/{id}")).bearer_auth(ADMIN).send().await.unwrap().json().await.unwrap();
+                if s["state"] == "done" || s["state"] == "failed" {
+                    return s;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("import {id} never finished");
+        }
+    };
+    let mut ib = made["import"].clone();
+    ib["verify"] = json!(false);
+    let done = import(ib.clone()).await;
+    assert_eq!(done["state"], "done", "{done}");
+    let rec: Value = c.get(format!("{}/goldens/{name}", forge.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    assert_eq!(rec["how"], "imported");
+    assert_eq!(rec["sha256"], want.as_str());
+    assert_eq!(rec["parent"], "golden-base");
+    assert_eq!(rec["provenance"]["commit"], "abc123");
+    assert!(!rec["from"].as_str().unwrap().contains("ticket"), "the ticket is not kept: {rec}");
+
+    // Content that is not the digest it claims is refused.
+    ib["name"] = json!("golden-bb-wrong");
+    ib["sha256"] = json!("0".repeat(64));
+    let bad = import(ib).await;
+    assert_eq!(bad["state"], "failed", "{bad}");
+    assert_eq!(bad["phase"], "verify", "{bad}");
+}
