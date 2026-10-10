@@ -202,11 +202,12 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### Flaky: a_flow_over_copy_holds_no_lock_the_node_needs (2026-10-10, #297) — IN PROGRESS
+### Flaky: a_flow_over_copy_holds_no_lock_the_node_needs (2026-10-10, #297) — DONE
 
 - [x] what is checked: the I/O finishes while the gate holds the move (a
       60 s hang guard, not a 2 s budget); CHANGELOG
-- [ ] the test 20× on a build VM, check.sh, close (test only, no golden)
+- [x] 20/20 on a build VM at a638f70; check.sh ALL PASS (1126/1126); test
+      only, no golden
 
 ### An install back to an older release "dropped" a claim (2026-10-10, #385, P0) — DONE: not stormblock's (stormcentral#689)
 
